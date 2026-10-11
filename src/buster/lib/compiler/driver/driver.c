@@ -25,6 +25,7 @@
 // compiler_driver_pe_library_exports on Windows and
 // compiler_driver_elf_library_exports on Linux, and compiler_driver_mach_dylib_identity
 // / compiler_driver_mach_tbd_identity plus compiler_driver_mach_library_locate
+// and compiler_driver_mach_framework_locate
 // on macOS/iOS — and
 // compiler_driver_execute_gpu isolates the external shader-toolchain
 // orchestration in gpu.h. compiler_prewarm at the top fills every lazily
@@ -46,9 +47,9 @@
 // resource failure with its required size. Opt-in native C link batches publish
 // in input order only after the gang returns; assembly and archive selection
 // remain serial boundaries.
-// Dependency output follows successful C object publication: the preprocessor
-// contributes identity-deduplicated prerequisites and this driver renders and
-// atomically publishes their Makefile after the object writer succeeds.
+// Dependency output follows successful C object or bounded -Wp assembly
+// publication: the preprocessor contributes identity-deduplicated prerequisites
+// and this driver renders their Makefile after the artifact writer succeeds.
 // Every unit enters through compiler_driver_execute_unit. With
 // collect_input_metrics, compiler_driver_prime_arenas and the prewarm run
 // first, CompilerDriverUnitMetrics (compiler_driver_phase_begin marks the
@@ -1045,6 +1046,26 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_request(Arena* arena, Compiler
 
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_request(Arena* arena, CompilerDriverInvocation* invocation)
 {
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE && invocation->dependency_passthrough)
+    {
+        bool valid_path = invocation->dependency_path.pointer && invocation->dependency_path.length &&
+                          !string_equal(invocation->dependency_path, S8("-"));
+        for (u64 index = 0; valid_path && index < invocation->dependency_path.length; index += 1)
+        {
+            char8 byte = invocation->dependency_path.pointer[index];
+            valid_path = byte != ',' && byte != '\n' && byte != '\r' && byte != 0;
+        }
+        bool native_target = invocation->target.cpu_arch == CPU_ARCH_X86_64 || invocation->target.cpu_arch == CPU_ARCH_AARCH64;
+        bool named_assembly = invocation->action != COMPILER_DRIVER_ACTION_ASSEMBLY ||
+                              (invocation->output_path.length && !string_equal(invocation->output_path, S8("-")) && native_target);
+        if (!invocation->dependency_file || !valid_path || !native_target || invocation->input_count != 1 || !named_assembly ||
+            invocation->dependency_targets.pointer || invocation->dependency_targets.length || invocation->dependency_phony_targets ||
+            invocation->library_count || invocation->framework_count || invocation->retain_object)
+        {
+            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation->diagnostic = S8("-Wp dependency files require one C input, one depfile path, no direct dependency modifiers, and named native -S output");
+        }
+    }
     bool details_set = invocation->dependency_path.pointer || invocation->dependency_path.length ||
                        invocation->dependency_targets.pointer || invocation->dependency_targets.length ||
                        invocation->dependency_phony_targets;
@@ -1057,8 +1078,9 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_request(Arena* aren
     }
     if (invocation->error == COMPILER_DRIVER_ERROR_NONE && invocation->dependency_file)
     {
-        bool valid_request = invocation->action == COMPILER_DRIVER_ACTION_OBJECT && !invocation->has_gpu_target &&
-                             !invocation->emit_llvm_bitcode;
+        bool valid_action = invocation->action == COMPILER_DRIVER_ACTION_OBJECT ||
+                            (invocation->dependency_passthrough && invocation->action == COMPILER_DRIVER_ACTION_ASSEMBLY);
+        bool valid_request = valid_action && !invocation->has_gpu_target && !invocation->emit_llvm_bitcode;
         for (u32 index = 0; valid_request && index < invocation->input_count; index += 1)
         {
             CompilerDriverLanguage language = compiler_driver_input_language(*invocation, index);
@@ -1068,7 +1090,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_request(Arena* aren
         if (!valid_request)
         {
             invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
-            invocation->diagnostic = S8("dependency files (-MD/-MMD) require -c with C source inputs");
+            invocation->diagnostic = S8("dependency files (-MD/-MMD) require C -c or bounded -Wp native -S output");
         }
         else if (invocation->input_count > 1 &&
                  (invocation->dependency_path.pointer || invocation->dependency_path.length ||
@@ -1981,6 +2003,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     u32 fast_override_mask = 0;
     String8 runtime_omission_option = {0};
     String8 dependency_option_without_mode = {0};
+    bool direct_dependency_options = false;
     u32 dependency_target_count = 0;
     for (u64 argument_index = 0; argument_index < arguments.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; argument_index += 1)
     {
@@ -2004,12 +2027,14 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         if (string_equal(argument, S8("-MD")) || string_equal(argument, S8("-MMD")))
         {
+            direct_dependency_options = true;
             invocation.dependency_file = true;
             invocation.dependency_exclude_system = string_equal(argument, S8("-MMD"));
             continue;
         }
         if (string_equal(argument, S8("-MP")))
         {
+            direct_dependency_options = true;
             invocation.dependency_phony_targets = true;
             if (!dependency_option_without_mode.length)
             {
@@ -2036,6 +2061,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         if (dependency_option.length)
         {
+            direct_dependency_options = true;
             if (!dependency_option_without_mode.length)
             {
                 dependency_option_without_mode = dependency_option;
@@ -2915,7 +2941,28 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         if (string_starts_with_sequence(argument, S8("-Wp,")) || string_starts_with_sequence(argument, S8("-Wa,")))
         {
-            compiler_driver_argument_error(arena, &invocation, S8("unsupported pass-through option: {S8}"), argument);
+            String8 passthrough_prefix = string_starts_with_sequence(argument, S8("-Wp,-MMD,")) ? S8("-Wp,-MMD,")
+                                        : string_starts_with_sequence(argument, S8("-Wp,-MD,")) ? S8("-Wp,-MD,")
+                                                                                             : (String8){0};
+            String8 path = string_slice(argument, passthrough_prefix.length, argument.length);
+            bool supported = passthrough_prefix.length && path.length && !invocation.dependency_passthrough &&
+                             !string_equal(path, S8("-"));
+            for (u64 index = 0; supported && index < path.length; index += 1)
+            {
+                char8 byte = path.pointer[index];
+                supported = byte != ',' && byte != '\n' && byte != '\r' && byte != 0;
+            }
+            if (supported)
+            {
+                invocation.dependency_passthrough = true;
+                invocation.dependency_file = true;
+                invocation.dependency_exclude_system = string_equal(passthrough_prefix, S8("-Wp,-MMD,"));
+                invocation.dependency_path = path;
+            }
+            else
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("unsupported pass-through option: {S8}"), argument);
+            }
             continue;
         }
         String8 prefix = {
@@ -3112,6 +3159,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     {
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} (dependency options require -MD or -MMD)"),
                                        dependency_option_without_mode);
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.dependency_passthrough && direct_dependency_options)
+    {
+        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation.diagnostic = S8("-Wp dependency requests cannot be mixed with direct -MD/-MMD/-MF/-MT/-MQ/-MP options");
     }
     compiler_driver_validate_dependency_request(arena, &invocation);
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE)
@@ -3393,6 +3445,7 @@ struct CompilerDriverDynamicLibraries
     // loader, and a configure script reads the successful link as the
     // library existing.  Empty when every requested library was found.
     String8 missing_request;
+    String8 missing_framework;
     String8 unsupported_script_path;
     String8 missing_runtime_symbol;
     String8 runtime_failure_library;
@@ -4337,18 +4390,21 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_tbd_arch_list(ByteSlice bytes, u64
                         }
                         String8 architecture = {.pointer = unquoted.pointer, .length = architecture_length};
                         String8 expected = target.cpu_arch == CPU_ARCH_AARCH64 ? S8("arm64") : S8("x86_64");
+                        // A dylib stub's ARM64 subtype shares the consumer CPU ABI; keep the platform check exact.
+                        bool architecture_matches = string_equal(architecture, expected) ||
+                                                    (target.cpu_arch == CPU_ARCH_AARCH64 && string_equal(architecture, S8("arm64e")));
                         if (targets && platform_start < unquoted.length)
                         {
                             String8 platform = {.pointer = unquoted.pointer + platform_start, .length = unquoted.length - platform_start};
                             String8 expected_platform = target.os == OPERATING_SYSTEM_MACOS ? S8("macos")
                                                         : target.os == OPERATING_SYSTEM_IOS ? S8("ios")
                                                                                            : (String8){0};
-                            *compatible |= string_equal(architecture, expected) && expected_platform.length &&
+                            *compatible |= architecture_matches && expected_platform.length &&
                                           string_equal(platform, expected_platform);
                         }
                         else if (!targets)
                         {
-                            *compatible |= string_equal(architecture, expected);
+                            *compatible |= architecture_matches;
                         }
                     }
                     else
@@ -5088,6 +5144,41 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_library_locate(Arena* arena, Compi
                                                            : exact || candidate_index == 0
                                                                  ? compiler_driver_mach_tbd_identity(arena, map.bytes, invocation.target, &candidate)
                                                                  : compiler_driver_mach_dylib_identity(map.bytes, invocation.target, &candidate);
+                if (status == COMPILER_DRIVER_MACH_DYLIB_USABLE)
+                {
+                    *identity = candidate;
+                    identity->install_name = string_duplicate_arena(arena, candidate.install_name, true);
+                    result = true;
+                }
+                file_map_unmap(map);
+            }
+        }
+    }
+    return result;
+}
+
+// Frameworks require a real compatible identity, including SDK-less cross links.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_framework_locate(Arena* arena, CompilerDriverInvocation invocation, String8 framework,
+                                                                CompilerDriverMachDylibIdentity* identity)
+{
+    bool result = false;
+    String8 system_root = invocation.sysroot.length
+                              ? string_format(arena, S8("{S8}/System/Library/Frameworks"), invocation.sysroot)
+                              : S8("/System/Library/Frameworks");
+    for (u32 path_index = 0; path_index <= invocation.framework_path_count && !result; path_index += 1)
+    {
+        String8 root = path_index < invocation.framework_path_count ? invocation.framework_paths[path_index] : system_root;
+        for (u32 candidate_index = 0; candidate_index < 2 && !result; candidate_index += 1)
+        {
+            String8 suffix = candidate_index == 0 ? S8(".tbd") : S8("");
+            String8 path = string_format_z(arena, S8("{S8}/{S8}.framework/{S8}{S8}"), root, framework, framework, suffix);
+            FileMapRead map = file_map_read(arena, path, (FileReadOptions){0});
+            if (map.bytes.pointer)
+            {
+                CompilerDriverMachDylibIdentity candidate = {0};
+                CompilerDriverMachDylibStatus status = candidate_index == 0
+                                                           ? compiler_driver_mach_tbd_identity(arena, map.bytes, invocation.target, &candidate)
+                                                           : compiler_driver_mach_dylib_identity(map.bytes, invocation.target, &candidate);
                 if (status == COMPILER_DRIVER_MACH_DYLIB_USABLE)
                 {
                     *identity = candidate;
@@ -6045,8 +6136,16 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
             {
                 continue;
             }
-            String8 root = invocation.framework_path_count ? invocation.framework_paths[0] : S8("/System/Library/Frameworks");
-            String8 name = string_format(arena, S8("{S8}/{S8}.framework/{S8}"), root, framework, framework);
+            CompilerDriverMachDylibIdentity identity = {0};
+            if (!compiler_driver_mach_framework_locate(arena, invocation, framework, &identity))
+            {
+                if (!result.missing_framework.length)
+                {
+                    result.missing_framework = framework;
+                }
+                continue;
+            }
+            String8 name = identity.install_name;
             bool duplicate = false;
             for (u32 previous = 0; previous < count; previous += 1)
             {
@@ -6056,6 +6155,9 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
             {
                 libraries[count++] = (NativeDynamicLibrary){
                     .name = name,
+                    .mach_current_version = identity.current_version,
+                    .mach_compatibility_version = identity.compatibility_version,
+                    .mach_versions_present = true,
                 };
             }
         }
@@ -7147,10 +7249,12 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
     {
         String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
         CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, 0, &linked.object);
-        if (dynamic_libraries.missing_request.length)
+        if (dynamic_libraries.missing_request.length || dynamic_libraries.missing_framework.length)
         {
             result->error = COMPILER_DRIVER_ERROR_LINK;
-            result->diagnostic = dynamic_libraries.unsupported_script_path.length
+            result->diagnostic = !dynamic_libraries.missing_request.length
+                                     ? string_format(arena, S8("framework not found: {S8}"), dynamic_libraries.missing_framework)
+                                     : dynamic_libraries.unsupported_script_path.length
                                      ? string_format(arena, S8("unsupported GNU linker script {S8} requested by -l{S8}"),
                                                      dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_request)
                                      : string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
@@ -8277,7 +8381,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         compiler_driver_finish_investigation(arena, invocation, investigation, &object, &result);
     }
 end:
-    if (invocation.dependency_file && invocation.action == COMPILER_DRIVER_ACTION_OBJECT && !suppress_object_write &&
+    if (invocation.dependency_file && !suppress_object_write &&
+        (invocation.action == COMPILER_DRIVER_ACTION_OBJECT ||
+         (invocation.dependency_passthrough && invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY && invocation.output_path.length)) &&
         result.error == COMPILER_DRIVER_ERROR_NONE && result.has_object)
     {
         String8 object_path = invocation.output_path.length
@@ -9207,6 +9313,36 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_fail_input(CompilerDriverResult* result
     }
 }
 
+// Resolve the parent of a new destination: realpath requires the leaf to exist.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_dependency_destination(Arena* arena, String8 path)
+{
+    String8 absolute = os_path_absolute(arena, path, false);
+    if (!absolute.length)
+    {
+        u64 leaf = path.length;
+        while (leaf && !compiler_driver_path_separator(path.pointer[leaf - 1]))
+        {
+            leaf -= 1;
+        }
+        String8 parent = leaf ? (String8){.pointer = path.pointer, .length = leaf} : S8(".");
+        String8 resolved = os_path_absolute(arena, parent, false);
+        if (resolved.length)
+        {
+            String8 name = {.pointer = path.pointer + leaf, .length = path.length - leaf};
+            String8 separator = compiler_driver_path_separator(resolved.pointer[resolved.length - 1]) ? S8("") : S8("/");
+            absolute = string_format(arena, S8("{S8}{S8}{S8}"), resolved, separator, name);
+        }
+    }
+#if BUSTER_WINDOWS
+    for (u64 index = 0; index < absolute.length; index += 1)
+    {
+        char8 byte = absolute.pointer[index];
+        absolute.pointer[index] = byte == '\\' ? '/' : byte >= 'A' && byte <= 'Z' ? (char8)(byte + ('a' - 'A')) : byte;
+    }
+#endif
+    return absolute;
+}
+
 CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation)
 {
     CompilerDriverDiagnosticCollector warnings = {
@@ -9277,6 +9413,24 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     {
         result.output = compiler_driver_query_text(arena, &invocation);
         goto finish;
+    }
+    if (invocation.dependency_passthrough)
+    {
+        String8 output = invocation.output_path.length ? invocation.output_path
+                                                       : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
+        String8 dependency_absolute = compiler_driver_dependency_destination(arena, invocation.dependency_path);
+        String8 output_absolute = compiler_driver_dependency_destination(arena, output);
+        String8 input_absolute = compiler_driver_dependency_destination(arena, invocation.input_paths[0]);
+        bool aliases = string_equal(invocation.dependency_path, output) ||
+                       string_equal(invocation.dependency_path, invocation.input_paths[0]) ||
+                       (dependency_absolute.length &&
+                        (string_equal(dependency_absolute, output_absolute) || string_equal(dependency_absolute, input_absolute)));
+        if (aliases)
+        {
+            result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            result.diagnostic = S8("-Wp dependency path aliases its source or output");
+            goto finish;
+        }
     }
     // Count both explicit entries and the target's defaults before any source
     // read, fast-path allocation or lookup; export maps also reserve libc.
@@ -10257,10 +10411,12 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     }
     String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
     CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, static_libraries, &linked.object);
-    if (dynamic_libraries.missing_request.length)
+    if (dynamic_libraries.missing_request.length || dynamic_libraries.missing_framework.length)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic = dynamic_libraries.unsupported_script_path.length
+        result.diagnostic = !dynamic_libraries.missing_request.length
+                                ? string_format(arena, S8("framework not found: {S8}"), dynamic_libraries.missing_framework)
+                                : dynamic_libraries.unsupported_script_path.length
                                 ? string_format(arena, S8("unsupported GNU linker script {S8} requested by -l{S8}"),
                                                 dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_request)
                                 : string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);

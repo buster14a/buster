@@ -2569,6 +2569,45 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbol_interning(UnitTestA
     return result;
 }
 
+// Sections are bounded by the statement count, not a fixed table: 100
+// sections each take a `.` relocation against their own private base symbol,
+// a second `.` in the same section reuses it, and returning to an earlier
+// section by name selects the same section.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_many_sections(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    u32 section_count = 100;
+    u64 capacity = 64 + (u64)section_count * 64;
+    char8* text = arena_allocate(arguments->arena, char8, capacity);
+    u64 length = 0;
+    for (u32 index = 0; index < section_count; index += 1)
+    {
+        String8 line = string_format(arguments->arena, S8(".section .rodata.s{u32},\"a\"\n.quad .\n.quad .\n"), index);
+        memcpy(text + length, line.pointer, line.length);
+        length += line.length;
+    }
+    String8 tail = S8(".section .rodata.s0,\"a\"\n.byte 1\n");
+    memcpy(text + length, tail.pointer, tail.length);
+    length += tail.length;
+    AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, (String8){.pointer = text, .length = length}, (AssemblyEncodeOptions){.target = target});
+    BUSTER_TEST(arguments, unit.diagnostic_count == 0 && unit.section_count == section_count && unit.symbol_count == section_count &&
+                               unit.relocation_count == section_count * 2);
+    if (!unit.diagnostic_count && unit.section_count == section_count && unit.symbol_count == section_count && unit.relocation_count == section_count * 2)
+    {
+        BUSTER_TEST(arguments, unit.sections[0].data.length == 17 && unit.sections[1].data.length == 16);
+        for (u32 index = 0; index < unit.relocation_count; index += 1)
+        {
+            AssemblyUnitRelocation relocation = unit.relocations[index];
+            u32 section = index / 2;
+            BUSTER_TEST(arguments, relocation.section == section && relocation.offset == (index % 2) * 8 && relocation.addend == (s64)((index % 2) * 8) &&
+                                   relocation.symbol < unit.symbol_count && unit.symbols[relocation.symbol].section == section &&
+                                   string_equal(unit.symbols[relocation.symbol].name, unit.sections[section].name));
+        }
+    }
+    return result;
+}
+
 // Independently specified relocation algebra: GNU as and llvm-mc produce
 // PC32/PREL32 with addend 5 at offset 8, PC64/PREL64 with addend -7 at 16,
 // and section-base absolute addresses for each separate `.` field. The
@@ -5649,6 +5688,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_section_flags_and_types);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_location_counter);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_interning);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_many_sections);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_statement_retention);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_statements);

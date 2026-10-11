@@ -4329,7 +4329,16 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_member_write(MachineA64Selector* sel
     bool selected;
     u32 value_register = selector->value_virtual_registers[operand.value];
     u32 value_slot = selector->value_stack_slots[operand.value];
-    if (value_register != UINT32_MAX || value_slot == UINT32_MAX)
+    if (!member_size)
+    {
+        IrType* value_type = ir_type_from_id(&selector->program->types, selector->function->values[operand.value].canonical_type);
+        // Resolved empty members capture their value but write no bytes.
+        // This includes the omitted flexible-array tail of a local struct.
+        selected = value_type && value_type->layout.resolved && !value_type->layout.size &&
+                   (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_ARRAY) &&
+                   value_slot != UINT32_MAX;
+    }
+    else if (value_register != UINT32_MAX || value_slot == UINT32_MAX)
     {
         u16 store_opcode = member_size == 1   ? MACHINE_A64_STORE_FRAME8
                            : member_size == 2 ? MACHINE_A64_STORE_FRAME16
@@ -4571,7 +4580,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_aggregate(MachineA64Selector* select
                 // left no room for a declared-type unit of carries a narrower
                 // one, and every other field reads its own size back.
                 u64 field_size = ir_field_access_size(&program->types, type->fields + field_index);
-                if (!field_size || field_offset > INT32_MAX)
+                if (field_offset > INT32_MAX || (!field_size && type->fields[field_index].is_bit_field))
                 {
                     selected = false;
                 }
