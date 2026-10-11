@@ -2018,13 +2018,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         return PROCESS_RESULT_FAILED;
     }
     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, compiler_state.cc_arguments);
-    // --version, -dumpversion and -dumpmachine answer without compiling.
+    // Compiler and native-linker identity queries answer without reading inputs.
     bool query = invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.query != COMPILER_DRIVER_QUERY_NONE;
     if (query)
     {
         string_print(S8("{S8}"), compiler_driver_query_text(arena, &invocation));
     }
-    for (u32 input_index = 0; invocation.error == COMPILER_DRIVER_ERROR_NONE && input_index < invocation.input_count; input_index += 1)
+    for (u32 input_index = 0; !query && invocation.error == COMPILER_DRIVER_ERROR_NONE && input_index < invocation.input_count; input_index += 1)
     {
         if (string_equal(invocation.input_paths[input_index], S8("-")))
         {
@@ -2151,9 +2151,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          tree.walk_nanoseconds, tree.walk_steps, tree.scan_nanoseconds, tree.children_nanoseconds, tree.child_entries, tree.scan_calls);
             // Counts, not times: what the tree expression typer did for the unit's function bodies and file-scope initializers.
             string_print(S8("C_AST_TYPES bodies={u64} initializers={u64} nodes_typed={u64} nodes_accepted={u64} answers={u64} declines={u64} misses={u64} "
-                            "gated={u64}\n"),
+                            "gated={u64} lookups_settled={u64} lookups_walked={u64}\n"),
                          tree.types.bodies, tree.types.initializers, tree.types.nodes_typed, tree.types.nodes_accepted, tree.types.answers,
-                         tree.types.declines, tree.types.misses, tree.types.gated);
+                         tree.types.declines, tree.types.misses, tree.types.gated, tree.types.lookups_settled, tree.types.lookups_walked);
             // Counts: the declaration split read from the tree, and the units handed to the token walker.
             string_print(S8("C_AST_SPLIT units={u64} records={u64} assertions={u64} fallbacks={u64} reason={S8} fallback_token={u32}\n"),
                          tree.split.units, tree.split.records, tree.split.assertions, tree.split.fallbacks,
@@ -2173,7 +2173,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             string_print(S8("C_AST_LOWER bodies={u64} conditionals={u64} steps={u64} answers={u64} negatives={u64} fallbacks={u64}\n"),
                          tree.lower.bodies, tree.lower.conditionals, tree.lower.steps, tree.lower.answers, tree.lower.negatives, tree.lower.fallbacks);
         }
-        if (invocation.fast_passes)
+        // Also report disabled passes: -O0 must expose its selected policy.
         {
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
             {
@@ -2188,6 +2188,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          measurement.functions, measurement.validation_skips, measurement.budget_skips, measurement.provenance_skips, measurement.parameter_budget_hits,
                          measurement.scratch_peak_bytes, measurement.retained_bytes, measurement.compact_nanoseconds,
                          measurement.instructions_before, measurement.instructions_after);
+        }
+        IrInlineStatistics inlining = compile.inlining;
+        if (invocation.inline_options.tiny || inlining.candidates || inlining.always_inlined)
+        {
+            string_print(S8("IR_INLINE tiny={u32} candidates={u64} inlined={u64} always_inlined={u64} copied_instructions={u64} growth={u64} "
+                            "budget_skips={u64} shape_skips={u64} linkage_skips={u64} recursion_skips={u64} visits={u64}\n"),
+                         (u32)invocation.inline_options.tiny, inlining.candidates, inlining.inlined, inlining.always_inlined,
+                         inlining.copied_instructions, inlining.growth, inlining.budget_skips, inlining.shape_skips,
+                         inlining.linkage_skips, inlining.recursion_skips, inlining.visits);
         }
         IrLocalPromotionStatistics p = compile.local_promotion;
         string_print(S8("IR_LOCAL_PROMOTION candidates={u64} promoted={u64} loads_removed={u64} stores_removed={u64} "

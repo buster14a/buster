@@ -38,6 +38,7 @@
 //   native_retirement_census_main                frozen native coverage inventory
 //   gpu_tools_main                               real GPU toolchain acceptance
 //   uefi_boot_*                                 pinned firmware boot gate
+//   tools/external_projects.c                   main-only project routing and records
 //   tools/ci_no_code.c                          conservative no-code admission plan
 //   tools/source_size.c                         source-size report and ratchet
 //   tools/ci_unit_tests.c                       isolated test-module partitions
@@ -157,6 +158,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_UEFI,
     BUILD_COMMAND_SOURCE_SIZE,
     BUILD_COMMAND_CI_NO_CODE,
+    BUILD_COMMAND_EXTERNAL_PROJECTS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST,
@@ -11408,9 +11410,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_stb_action(Arena* arena, void* data)
             goto stb_action_done;
         }
     }
+    String8 vorbis_source = path_join(arena, source_directory, S8("stb_vorbis.c"));
     String8 image_write_test_source = path_join(arena, source_directory, S8("tests/image_write_test.c"));
     String8 ds_test_source = path_join(arena, source_directory, S8("tests/test_ds.c"));
-    if (!path_exists(arena, image_write_test_source) || !path_exists(arena, ds_test_source) || !stb_git_verify(arena, source_directory))
+    if (!path_exists(arena, vorbis_source) || !path_exists(arena, image_write_test_source) || !path_exists(arena, ds_test_source) ||
+        !stb_git_verify(arena, source_directory))
     {
         string_print(S8("error: test_stb checkout is missing applicable tests or is not pristine\n"));
         goto stb_action_done;
@@ -11451,6 +11455,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_stb_action(Arena* arena, void* data)
         {
             goto stb_action_done;
         }
+    }
+
+
+    // Compile-only coverage for the pristine Vorbis implementation (#3616).
+    String8 vorbis_clang_object = path_join(arena, output_directory, S8("stb_vorbis-clang.o"));
+    if (!stb_compile_clang(arena, clang, source_directory, vorbis_source, vorbis_clang_object, (SliceString8){0}))
+    {
+        goto stb_action_done;
     }
 
     String8 ds_churn_wrapper = path_join(arena, wrappers_directory, S8("stb_ds_churn_test.c"));
@@ -11504,6 +11516,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_stb_action(Arena* arena, void* data)
             mode_ok = mode_ok && stb_compile_buster(arena, ide, source_directory, path_join(arena, wrappers_directory, wrapper_names[unit_index]), object,
                                                      metric, mode, (SliceString8){0}, &elapsed_us, mode_index == 0) &&
                       stb_metrics_report(arena, mode, wrapper_names[unit_index], metric, elapsed_us);
+        }
+
+
+        String8 vorbis_frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        for (u64 form = 0; form < BUSTER_ARRAY_LENGTH(vorbis_frontends); form += 1)
+        {
+            String8 object = path_join(arena, mode_directory, string_format(arena, S8("stb_vorbis-{u64}.o"), form));
+            String8 metric = path_join(arena, mode_metrics, string_format(arena, S8("stb_vorbis-{u64}.metrics"), form));
+            String8 extra[] = {vorbis_frontends[form]};
+            u64 elapsed_us = 0;
+            bool vorbis_ok = stb_compile_buster(arena, ide, source_directory, vorbis_source, object, metric, mode,
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(extra), &elapsed_us, false) &&
+                stb_metrics_report(arena, mode, S8("stb_vorbis.c"), metric, elapsed_us);
+            string_print(S8("STB_COMPILE unit=stb_vorbis.c allocator={S8} frontend={S8} status={S8}\n"),
+                mode, vorbis_frontends[form], vorbis_ok ? S8("pass") : S8("fail"));
+            mode_ok = mode_ok && vorbis_ok;
         }
 
         String8 probe_object = path_join(arena, mode_directory, S8("probe.o"));
@@ -25476,6 +25504,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_TEST_UEFI:
         case BUILD_COMMAND_SOURCE_SIZE:
         case BUILD_COMMAND_CI_NO_CODE:
+        case BUILD_COMMAND_EXTERNAL_PROJECTS:
         case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY:
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
         {
@@ -39432,6 +39461,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 #include "tools/compiler_closure.c"
 #include "tools/source_size.c"
 #include "tools/ci_no_code.c"
+#include "tools/external_projects.c"
 #include "tools/ci_unit_tests.c"
 #include "tools/clang_suite.c"
 #include "tools/compiler_profile_qualification.c"
@@ -39502,6 +39532,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_UEFI] = S8_INITIALIZER("test_uefi"),
         [BUILD_COMMAND_SOURCE_SIZE] = S8_INITIALIZER("source_size"),
         [BUILD_COMMAND_CI_NO_CODE] = S8_INITIALIZER("ci_no_code"),
+        [BUILD_COMMAND_EXTERNAL_PROJECTS] = S8_INITIALIZER("external_projects"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
         [BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST] = S8_INITIALIZER("coverage_manifest_self_test"),
@@ -39611,6 +39642,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_TEST_UEFI: result = uefi_boot_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_SOURCE_SIZE: result = source_size_main(arena, owned_arguments); break;
             case BUILD_COMMAND_CI_NO_CODE: result = ci_no_code_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_EXTERNAL_PROJECTS: result = external_projects_main(arena, owned_arguments); break;
             case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY: result = binary_coverage_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_GPU_TOOLCHAINS: result = gpu_tools_main(arena, owned_arguments); break;
             default: BUSTER_UNREACHABLE(); break;
@@ -40840,6 +40872,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_TEST_UEFI:
         case BUILD_COMMAND_SOURCE_SIZE:
         case BUILD_COMMAND_CI_NO_CODE:
+        case BUILD_COMMAND_EXTERNAL_PROJECTS:
         {
             // Executed before the ordinary build-option parser.
         }
