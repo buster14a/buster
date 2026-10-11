@@ -66,8 +66,10 @@
 // compiler_driver_elf_compiler_runtime adds existing libgcc_s on demand for
 // unresolved half/quad helper calls after explicit library exports are known.
 // compiler_driver_elf_cpu_runtime selects libgcc.a's CPU-feature members
-// (__cpu_indicator_init, __cpu_model) before link_objects only when a strong
-// reference to them remains; compiler_driver_elf_libgcc_path finds the archive.
+// (x86-64 __cpu_indicator_init/__cpu_model; AArch64 FMV, outline atomics)
+// before link_objects only when a strong reference to them remains;
+// compiler_driver_elf_cpu_runtime_symbol keys the names by target and
+// compiler_driver_elf_libgcc_path finds the archive.
 // compiler_driver_publish_slices preserves atomic artifacts and write failures;
 // execute_invocation normalizes textual -o - before choosing a pipeline.
 // A lone `-` input is admitted by the parser only as C source; execute_c_single
@@ -3764,23 +3766,89 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_compiler_runtime_symbol(String8 nam
     return result;
 }
 
-// GCC's x86 __builtin_cpu_* and target_clones resolvers call and read these.
-// They live only in the static libgcc.a (cpuinfo.o: hidden definitions and an
-// .init_array constructor); see compiler_driver_elf_cpu_runtime (#3399).
-BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_cpu_runtime_symbol(String8 name)
+// GCC's AArch64 -moutline-atomics helpers (on by default since GCC 10, and in
+// Clang for Linux): __aarch64_<operation><bytes>_<order>, with 16-byte forms
+// only for cas. libgcc.a defines each one hidden in its own lse member.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_outline_atomic_symbol(String8 name)
 {
-    static String8 const names[] = {
+    static String8 const operations[] = {
+        S8_INITIALIZER("cas"), S8_INITIALIZER("swp"), S8_INITIALIZER("ldadd"),
+        S8_INITIALIZER("ldclr"), S8_INITIALIZER("ldeor"), S8_INITIALIZER("ldset"),
+    };
+    static String8 const sizes[] = {
+        S8_INITIALIZER("1_"), S8_INITIALIZER("2_"), S8_INITIALIZER("4_"), S8_INITIALIZER("8_"), S8_INITIALIZER("16_"),
+    };
+    static String8 const orders[] = {
+        S8_INITIALIZER("relax"), S8_INITIALIZER("acq"), S8_INITIALIZER("rel"), S8_INITIALIZER("acq_rel"), S8_INITIALIZER("sync"),
+    };
+    String8 prefix = S8("__aarch64_");
+    bool result = false;
+    if (string_starts_with_sequence(name, prefix))
+    {
+        String8 rest = string_slice(name, prefix.length, name.length);
+        for (u32 operation = 0; !result && operation < BUSTER_ARRAY_LENGTH(operations); operation += 1)
+        {
+            if (string_starts_with_sequence(rest, operations[operation]))
+            {
+                String8 sized = string_slice(rest, operations[operation].length, rest.length);
+                // Only cas has a 16-byte (pair) form.
+                u32 size_count = operation == 0 ? BUSTER_ARRAY_LENGTH(sizes) : BUSTER_ARRAY_LENGTH(sizes) - 1;
+                for (u32 size = 0; !result && size < size_count; size += 1)
+                {
+                    if (string_starts_with_sequence(sized, sizes[size]))
+                    {
+                        String8 order = string_slice(sized, sizes[size].length, sized.length);
+                        for (u32 index = 0; !result && index < BUSTER_ARRAY_LENGTH(orders); index += 1)
+                        {
+                            result = string_equal(order, orders[index]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}
+
+// GCC's CPU-feature runtime, keyed by target. Every name lives only in the
+// static libgcc.a as a hidden definition; libgcc_s exports none of them, so
+// the #1272 helper policy cannot supply them. See
+// compiler_driver_elf_cpu_runtime (#3399, #3508).
+// - x86-64: __builtin_cpu_* and target_clones resolvers call and read these
+//   (cpuinfo.o, with an .init_array constructor).
+// - AArch64: GCC 14+ and compiler-rt FMV resolvers (cpuinfo.o, constructor
+//   and getauxval), the outline-atomic helpers and their LSE probe
+//   (lse-init.o, constructor and __getauxval), and __builtin___clear_cache's
+//   __aarch64_sync_cache_range (sync-cache.o).
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_cpu_runtime_symbol(CpuArch cpu_arch, String8 name)
+{
+    static String8 const x86_64_names[] = {
         S8_INITIALIZER("__cpu_indicator_init"),
         S8_INITIALIZER("__cpu_model"),
         S8_INITIALIZER("__cpu_features2"),
     };
+    static String8 const aarch64_names[] = {
+        S8_INITIALIZER("__aarch64_cpu_features"),
+        S8_INITIALIZER("__init_cpu_features_resolver"),
+        S8_INITIALIZER("__init_cpu_features"),
+        S8_INITIALIZER("__aarch64_have_lse_atomics"),
+        S8_INITIALIZER("__aarch64_sync_cache_range"),
+    };
     bool result = false;
-    if (string_starts_with_sequence(name, S8("__cpu_")))
+    if (cpu_arch == CPU_ARCH_X86_64 && string_starts_with_sequence(name, S8("__cpu_")))
     {
-        for (u32 index = 0; !result && index < BUSTER_ARRAY_LENGTH(names); index += 1)
+        for (u32 index = 0; !result && index < BUSTER_ARRAY_LENGTH(x86_64_names); index += 1)
         {
-            result = string_equal(name, names[index]);
+            result = string_equal(name, x86_64_names[index]);
         }
+    }
+    else if (cpu_arch == CPU_ARCH_AARCH64 && name.length > 2 && name.pointer[0] == '_' && name.pointer[1] == '_')
+    {
+        for (u32 index = 0; !result && index < BUSTER_ARRAY_LENGTH(aarch64_names); index += 1)
+        {
+            result = string_equal(name, aarch64_names[index]);
+        }
+        result = result || compiler_driver_elf_outline_atomic_symbol(name);
     }
     return result;
 }
@@ -3807,7 +3875,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_cpu_runtime_needed(ObjectFile const
     return referenced && !defined;
 }
 
-BUSTER_GLOBAL_LOCAL String8 compiler_driver_elf_cpu_runtime_missing(ObjectFile const* objects, u32 object_count)
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_elf_cpu_runtime_missing(CpuArch cpu_arch, ObjectFile const* objects, u32 object_count)
 {
     String8 result = {0};
     for (u32 object_index = 0; !result.length && object_index < object_count; object_index += 1)
@@ -3816,7 +3884,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_elf_cpu_runtime_missing(ObjectFile c
         for (u32 symbol_index = 0; !result.length && symbol_index < object->symbol_count; symbol_index += 1)
         {
             ObjectSymbol const* symbol = object->symbols + symbol_index;
-            if (symbol->global && !symbol->weak && symbol->section == OBJECT_SECTION_UNDEFINED && compiler_driver_elf_cpu_runtime_symbol(symbol->name) &&
+            if (symbol->global && !symbol->weak && symbol->section == OBJECT_SECTION_UNDEFINED && compiler_driver_elf_cpu_runtime_symbol(cpu_arch, symbol->name) &&
                 compiler_driver_elf_cpu_runtime_needed(objects, object_count, symbol->name))
             {
                 result = symbol->name;
@@ -3886,13 +3954,22 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_elf_libgcc_path(Arena* arena, Compil
         S8_INITIALIZER("usr/lib64/gcc"),
         S8_INITIALIZER("usr/lib/gcc-cross"),
     };
-    static String8 const triples[] = {
+    static String8 const x86_64_triples[] = {
         S8_INITIALIZER("x86_64-linux-gnu"),
         S8_INITIALIZER("x86_64-pc-linux-gnu"),
         S8_INITIALIZER("x86_64-unknown-linux-gnu"),
         S8_INITIALIZER("x86_64-redhat-linux"),
         S8_INITIALIZER("x86_64-suse-linux"),
     };
+    static String8 const aarch64_triples[] = {
+        S8_INITIALIZER("aarch64-linux-gnu"),
+        S8_INITIALIZER("aarch64-unknown-linux-gnu"),
+        S8_INITIALIZER("aarch64-redhat-linux"),
+        S8_INITIALIZER("aarch64-suse-linux"),
+    };
+    bool aarch64 = invocation.target.cpu_arch == CPU_ARCH_AARCH64;
+    String8 const* triples = aarch64 ? aarch64_triples : x86_64_triples;
+    u32 triple_count = aarch64 ? BUSTER_ARRAY_LENGTH(aarch64_triples) : BUSTER_ARRAY_LENGTH(x86_64_triples);
     String8 result = {0};
     for (u32 index = 0; !result.length && index < invocation.library_path_count; index += 1)
     {
@@ -3905,7 +3982,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_elf_libgcc_path(Arena* arena, Compil
     String8 root = invocation.sysroot.length ? invocation.sysroot : S8("");
     for (u32 installation = 0; !result.length && installation < BUSTER_ARRAY_LENGTH(installations); installation += 1)
     {
-        for (u32 triple = 0; !result.length && triple < BUSTER_ARRAY_LENGTH(triples); triple += 1)
+        for (u32 triple = 0; !result.length && triple < triple_count; triple += 1)
         {
             String8 directory = string_format_z(arena, S8("{S8}/{S8}/{S8}"), root, installations[installation], triples[triple]);
             u32 version_count = 0;
@@ -3925,6 +4002,13 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_elf_libgcc_path(Arena* arena, Compil
     return result;
 }
 
+// A retained (`ide run`) object would borrow the libgcc.a mapping past the
+// link, and cpuinfo.o's .init_array constructor has no JIT protocol.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_retained_cpu_runtime_diagnostic(void)
+{
+    return S8("the GCC CPU-feature runtime (libgcc.a) needs an .init_array constructor, which in-memory execution cannot run");
+}
+
 typedef struct CompilerDriverCpuRuntime CompilerDriverCpuRuntime;
 struct CompilerDriverCpuRuntime
 {
@@ -3938,9 +4022,9 @@ struct CompilerDriverCpuRuntime
 };
 
 // Like `-lgcc` at the end of GCC's link line, but narrower: only a remaining
-// strong reference to the CPU-feature runtime reads libgcc.a, and only the
-// members defining those names are selected, so every other link and the
-// on-demand libgcc_s helper policy stay unchanged. A missing runtime fails
+// strong reference to the target's CPU-feature runtime reads libgcc.a, and
+// only the members defining those names are selected, so every other link and
+// the on-demand libgcc_s helper policy stay unchanged. A missing runtime fails
 // the link with the archive and symbol named.
 BUSTER_GLOBAL_LOCAL CompilerDriverCpuRuntime compiler_driver_elf_cpu_runtime(Arena* arena, CompilerDriverInvocation invocation, ObjectFile* objects,
                                                                             u32 object_count)
@@ -3949,8 +4033,9 @@ BUSTER_GLOBAL_LOCAL CompilerDriverCpuRuntime compiler_driver_elf_cpu_runtime(Are
         .objects = objects,
         .object_count = object_count,
     };
-    bool applies = invocation.target.os == OPERATING_SYSTEM_LINUX && invocation.target.cpu_arch == CPU_ARCH_X86_64;
-    String8 missing = applies ? compiler_driver_elf_cpu_runtime_missing(objects, object_count) : (String8){0};
+    CpuArch cpu_arch = invocation.target.cpu_arch;
+    bool applies = invocation.target.os == OPERATING_SYSTEM_LINUX && (cpu_arch == CPU_ARCH_X86_64 || cpu_arch == CPU_ARCH_AARCH64);
+    String8 missing = applies ? compiler_driver_elf_cpu_runtime_missing(cpu_arch, objects, object_count) : (String8){0};
     if (missing.length)
     {
         String8 path = compiler_driver_elf_libgcc_path(arena, invocation);
@@ -3987,7 +4072,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverCpuRuntime compiler_driver_elf_cpu_runtime(Are
                     for (u32 index = 0; !needed && index < candidate->symbol_count; index += 1)
                     {
                         ObjectSymbol const* symbol = candidate->symbols + index;
-                        needed = symbol->global && symbol->section != OBJECT_SECTION_UNDEFINED && compiler_driver_elf_cpu_runtime_symbol(symbol->name) &&
+                        needed = symbol->global && symbol->section != OBJECT_SECTION_UNDEFINED && compiler_driver_elf_cpu_runtime_symbol(cpu_arch, symbol->name) &&
                                  compiler_driver_elf_cpu_runtime_needed(selected, selected_count, symbol->name);
                     }
                     if (needed && compiler_driver_archive_admit(arena, &archive, member))
@@ -3997,7 +4082,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverCpuRuntime compiler_driver_elf_cpu_runtime(Are
                     }
                 }
             }
-            missing = archive.error == OBJECT_ERROR_NONE ? compiler_driver_elf_cpu_runtime_missing(selected, selected_count) : missing;
+            missing = archive.error == OBJECT_ERROR_NONE ? compiler_driver_elf_cpu_runtime_missing(cpu_arch, selected, selected_count) : missing;
             if (archive.error != OBJECT_ERROR_NONE)
             {
                 result.symbol = missing;
@@ -5251,6 +5336,13 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
         result->diagnostic = cpu_runtime.diagnostic;
         return;
     }
+    if (invocation.retain_linked_object && cpu_runtime.map.bytes.pointer)
+    {
+        file_map_unmap(cpu_runtime.map);
+        result->error = COMPILER_DRIVER_ERROR_LINK;
+        result->diagnostic = compiler_driver_retained_cpu_runtime_diagnostic();
+        return;
+    }
     LinkObjectResult linked = link_objects(arena, cpu_runtime.objects, cpu_runtime.object_count,
                                            (LinkOptions){
                                                .allow_undefined_symbols = true,
@@ -5266,63 +5358,72 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
                                                  : string_format(arena, S8("C object linking failed with {S8}"), link_error_name(linked.error));
         return;
     }
-    String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
-    CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, 0, &linked.object);
-    if (dynamic_libraries.missing_request.length)
+    if (invocation.retain_linked_object)
     {
-        result->error = COMPILER_DRIVER_ERROR_LINK;
-        result->diagnostic = dynamic_libraries.unsupported_script_path.length
-                                 ? string_format(arena, S8("unsupported GNU linker script {S8} requested by -l{S8}"),
-                                                 dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_request)
-                                 : string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
+        result->object = linked.object;
+        result->has_object = true;
+        file_map_unmap(cpu_runtime.map);
+    }
+    else
+    {
+        String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
+        CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, 0, &linked.object);
+        if (dynamic_libraries.missing_request.length)
+        {
+            result->error = COMPILER_DRIVER_ERROR_LINK;
+            result->diagnostic = dynamic_libraries.unsupported_script_path.length
+                                     ? string_format(arena, S8("unsupported GNU linker script {S8} requested by -l{S8}"),
+                                                     dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_request)
+                                     : string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
+            compiler_driver_dynamic_libraries_release(&dynamic_libraries);
+            file_map_unmap(cpu_runtime.map);
+            return;
+        }
+        if (dynamic_libraries.missing_runtime_symbol.length)
+        {
+            result->error = COMPILER_DRIVER_ERROR_LINK;
+            result->native_link.error = LINK_ERROR_UNRESOLVED_SYMBOL;
+            result->native_link.symbol = dynamic_libraries.missing_runtime_symbol;
+            result->diagnostic = string_format(arena, S8("target library {S8} does not provide callable compiler helper: {S8}"),
+                                              dynamic_libraries.runtime_failure_library, dynamic_libraries.missing_runtime_symbol);
+            compiler_driver_dynamic_libraries_release(&dynamic_libraries);
+            file_map_unmap(cpu_runtime.map);
+            return;
+        }
+        result->native_link = link_native_executable(arena, &linked.object,
+                                                    (NativeExecutableLinkOptions){
+                                                        .output_path = output,
+                                                        .entry_symbol = invocation.entry_symbol.length ? invocation.entry_symbol
+                                                                                                       : compiler_driver_default_entry_symbol(invocation.target),
+                                                        .sysroot = invocation.sysroot,
+                                                        .library_paths = invocation.library_paths,
+                                                        .framework_paths = invocation.framework_paths,
+                                                        .frameworks = invocation.frameworks,
+                                                        .linker_arguments = invocation.linker_arguments,
+                                                        .library_path_count = invocation.library_path_count,
+                                                        .framework_path_count = invocation.framework_path_count,
+                                                        .framework_count = invocation.framework_count,
+                                                        .linker_argument_count = invocation.linker_argument_count,
+                                                        .dynamic_libraries = dynamic_libraries.pointer,
+                                                        .dynamic_library_count = dynamic_libraries.count,
+                                                        .runtime_exported_symbols = dynamic_libraries.runtime.exported_symbols,
+                                                        .runtime_data_symbols = dynamic_libraries.runtime.exported_data_symbols,
+                                                        .runtime_versioned_symbols = dynamic_libraries.runtime.versioned_symbols,
+                                                        .runtime_exported_symbol_count = dynamic_libraries.runtime.exported_symbol_count,
+                                                        .runtime_data_symbol_count = dynamic_libraries.runtime.exported_data_symbol_count,
+                                                        .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
+                                                        .runtime_exports_known = dynamic_libraries.runtime.exports_known,
+                                                        .debug_info = invocation.debug_info,
+                                                        .image_kind = (u8)invocation.image_kind,
+                                                    });
         compiler_driver_dynamic_libraries_release(&dynamic_libraries);
         file_map_unmap(cpu_runtime.map);
-        return;
-    }
-    if (dynamic_libraries.missing_runtime_symbol.length)
-    {
-        result->error = COMPILER_DRIVER_ERROR_LINK;
-        result->native_link.error = LINK_ERROR_UNRESOLVED_SYMBOL;
-        result->native_link.symbol = dynamic_libraries.missing_runtime_symbol;
-        result->diagnostic = string_format(arena, S8("target library {S8} does not provide callable compiler helper: {S8}"),
-                                          dynamic_libraries.runtime_failure_library, dynamic_libraries.missing_runtime_symbol);
-        compiler_driver_dynamic_libraries_release(&dynamic_libraries);
-        file_map_unmap(cpu_runtime.map);
-        return;
-    }
-    result->native_link = link_native_executable(arena, &linked.object,
-                                                (NativeExecutableLinkOptions){
-                                                    .output_path = output,
-                                                    .entry_symbol = invocation.entry_symbol.length ? invocation.entry_symbol
-                                                                                                   : compiler_driver_default_entry_symbol(invocation.target),
-                                                    .sysroot = invocation.sysroot,
-                                                    .library_paths = invocation.library_paths,
-                                                    .framework_paths = invocation.framework_paths,
-                                                    .frameworks = invocation.frameworks,
-                                                    .linker_arguments = invocation.linker_arguments,
-                                                    .library_path_count = invocation.library_path_count,
-                                                    .framework_path_count = invocation.framework_path_count,
-                                                    .framework_count = invocation.framework_count,
-                                                    .linker_argument_count = invocation.linker_argument_count,
-                                                    .dynamic_libraries = dynamic_libraries.pointer,
-                                                    .dynamic_library_count = dynamic_libraries.count,
-                                                    .runtime_exported_symbols = dynamic_libraries.runtime.exported_symbols,
-                                                    .runtime_data_symbols = dynamic_libraries.runtime.exported_data_symbols,
-                                                    .runtime_versioned_symbols = dynamic_libraries.runtime.versioned_symbols,
-                                                    .runtime_exported_symbol_count = dynamic_libraries.runtime.exported_symbol_count,
-                                                    .runtime_data_symbol_count = dynamic_libraries.runtime.exported_data_symbol_count,
-                                                    .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
-                                                    .runtime_exports_known = dynamic_libraries.runtime.exports_known,
-                                                    .debug_info = invocation.debug_info,
-                                                    .image_kind = (u8)invocation.image_kind,
-                                                });
-    compiler_driver_dynamic_libraries_release(&dynamic_libraries);
-    file_map_unmap(cpu_runtime.map);
-    WORK_LEDGER_RECORD(OUTPUT_LINK_IMAGE_BYTES, result->native_link.executable.length);
-    if (result->native_link.error != LINK_ERROR_NONE)
-    {
-        result->error = COMPILER_DRIVER_ERROR_LINK;
-        result->diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result->native_link);
+        WORK_LEDGER_RECORD(OUTPUT_LINK_IMAGE_BYTES, result->native_link.executable.length);
+        if (result->native_link.error != LINK_ERROR_NONE)
+        {
+            result->error = COMPILER_DRIVER_ERROR_LINK;
+            result->diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result->native_link);
+        }
     }
 }
 
@@ -5401,6 +5502,15 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_relocation_kind(Target target,
                        : coff ? OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L
                               : (ObjectRelocationKind)(OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12 +
                                                        (kind - ASSEMBLY_RELOCATION_AARCH64_LDST8_LO12));
+        break;
+    // GOT spellings exist on ELF only (#3192); Mach-O and COFF have no kind.
+    case ASSEMBLY_RELOCATION_AARCH64_GOT_PAGE21:
+        *object_kind = OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21;
+        valid = !macho && !coff;
+        break;
+    case ASSEMBLY_RELOCATION_AARCH64_GOT_LD64_LO12:
+        *object_kind = OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12;
+        valid = !macho && !coff;
         break;
     default: valid = false; break;
     }
@@ -5843,8 +5953,12 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         result.diagnostic = S8("the C frontend currently requires exactly one C input");
         goto end;
     }
-    // The `-` input arrives already read; it has no file identity.
-    if (string_equal(invocation.input_paths[0], S8("-")))
+    // The in-memory API input and `-` have no file identity.
+    if (invocation.input_source.pointer)
+    {
+        source_file.bytes = (ByteSlice){.pointer = (u8*)invocation.input_source.pointer, .length = invocation.input_source.length};
+    }
+    else if (string_equal(invocation.input_paths[0], S8("-")))
     {
         source_file.bytes = (ByteSlice){.pointer = (u8*)invocation.standard_input.pointer, .length = invocation.standard_input.length};
     }
@@ -7585,7 +7699,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             watch = compiler_driver_arena_watch_begin(arena);
         }
-        result = compiler_driver_execute_unit(arena, invocation, false, &warnings, inputs && measure ? &single_metrics : 0);
+        result = compiler_driver_execute_unit(arena, invocation, invocation.retain_object, &warnings, inputs && measure ? &single_metrics : 0);
         if (inputs)
         {
             if (measure)
@@ -8247,6 +8361,12 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.diagnostic = cpu_runtime.diagnostic;
         goto finish;
     }
+    if (invocation.retain_linked_object && cpu_runtime.map.bytes.pointer)
+    {
+        result.error = COMPILER_DRIVER_ERROR_LINK;
+        result.diagnostic = compiler_driver_retained_cpu_runtime_diagnostic();
+        goto finish;
+    }
     objects = cpu_runtime.objects;
     object_count = cpu_runtime.object_count;
     LinkObjectResult linked = link_objects(arena, objects, object_count,
@@ -8265,6 +8385,10 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     }
     result.object = linked.object;
     result.has_object = true;
+    if (invocation.retain_linked_object)
+    {
+        goto finish;
+    }
     String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
     CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, static_libraries, &linked.object);
     if (dynamic_libraries.missing_request.length)

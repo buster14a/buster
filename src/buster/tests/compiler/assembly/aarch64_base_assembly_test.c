@@ -150,6 +150,142 @@ BUSTER_GLOBAL_LOCAL void aarch64_base_assembly_test_complex_simd_lane(UnitTestAr
     *test_result = result;
 }
 
+BUSTER_GLOBAL_LOCAL bool aarch64_base_assembly_test_contains(String8 text, String8 needle)
+{
+    bool found = needle.length == 0;
+    if (needle.length <= text.length)
+    {
+        for (u64 start = 0; !found && start <= text.length - needle.length; start += 1)
+        {
+            bool equal = true;
+            for (u64 index = 0; equal && index < needle.length; index += 1)
+            {
+                equal = text.pointer[start + index] == needle.pointer[index];
+            }
+            found = equal;
+        }
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL void aarch64_base_assembly_test_ptrue(UnitTestArguments* arguments, UnitTestResult* test_result,
+                                                          Target baseline, Target apple)
+{
+    UnitTestResult result = *test_result;
+    Target sve = baseline;
+    sve.cpu_features_explicit = true;
+    sve.cpu_features = target_cpu_features_add(target_cpu_features_effective(baseline), TARGET_CPU_FEATURE_AARCH64_SVE);
+    Target sme = baseline;
+    sme.cpu_features_explicit = true;
+    sme.cpu_features = target_cpu_features_add(target_cpu_features_effective(baseline), TARGET_CPU_FEATURE_AARCH64_SME);
+    Target extension_targets[] = {sve, sme};
+    BUSTER_TEST(arguments, target_cpu_features_contains(sve.cpu_features, TARGET_CPU_FEATURE_AARCH64_SVE) &&
+                               !target_cpu_features_contains(sve.cpu_features, TARGET_CPU_FEATURE_AARCH64_SME));
+    BUSTER_TEST(arguments, target_cpu_features_contains(sme.cpu_features, TARGET_CPU_FEATURE_AARCH64_SME) &&
+                               !target_cpu_features_contains(sme.cpu_features, TARGET_CPU_FEATURE_AARCH64_SVE));
+
+    static Aarch64BaseAssemblyCase const cases[] = {
+        {S8_INITIALIZER("ptrue p0.s, pow2"), UINT32_C(0x2598e000)},
+        {S8_INITIALIZER("ptrue p0.b, pow2"), UINT32_C(0x2518e000)},
+        {S8_INITIALIZER("ptrue p0.h, pow2"), UINT32_C(0x2558e000)},
+        {S8_INITIALIZER("ptrue p0.d, pow2"), UINT32_C(0x25d8e000)},
+        {S8_INITIALIZER("ptrue p15.s, all"), UINT32_C(0x2598e3ef)},
+        {S8_INITIALIZER("ptrue p7.d, vl1"), UINT32_C(0x25d8e027)},
+        {S8_INITIALIZER("ptrue p1.b, vl8"), UINT32_C(0x2518e101)},
+        {S8_INITIALIZER("ptrue p2.h, vl16"), UINT32_C(0x2558e122)},
+        {S8_INITIALIZER("ptrue p3.s, vl256"), UINT32_C(0x2598e1a3)},
+        {S8_INITIALIZER("ptrue p4.b, mul4"), UINT32_C(0x2518e3a4)},
+        {S8_INITIALIZER("ptrue p5.b, mul3"), UINT32_C(0x2518e3c5)},
+        {S8_INITIALIZER("ptrue p6.b, #14"), UINT32_C(0x2518e1c6)},
+        {S8_INITIALIZER("ptrue p0.b"), UINT32_C(0x2518e3e0)},
+        {S8_INITIALIZER("ptrues p0.s, pow2"), UINT32_C(0x2599e000)},
+        {S8_INITIALIZER("ptrues p15.d"), UINT32_C(0x25d9e3ef)},
+        {S8_INITIALIZER("ptrues p3.b, #28"), UINT32_C(0x2519e383)},
+        {S8_INITIALIZER("PTRUE P9.S, VL7"), UINT32_C(0x2598e0e9)},
+        {S8_INITIALIZER("ptrue p0.s, vl32"), UINT32_C(0x2598e140)},
+        {S8_INITIALIZER("ptrue p0.s, vl64"), UINT32_C(0x2598e160)},
+        {S8_INITIALIZER("ptrue p0.s, vl128"), UINT32_C(0x2598e180)},
+        {S8_INITIALIZER("ptrue p0.s, #31"), UINT32_C(0x2598e3e0)},
+        {S8_INITIALIZER("ptrue p0.s, vl2"), UINT32_C(0x2598e040)},
+        {S8_INITIALIZER("ptrue p0.s, vl3"), UINT32_C(0x2598e060)},
+        {S8_INITIALIZER("ptrue p0.s, vl4"), UINT32_C(0x2598e080)},
+        {S8_INITIALIZER("ptrue p0.s, vl5"), UINT32_C(0x2598e0a0)},
+        {S8_INITIALIZER("ptrue p0.s, vl6"), UINT32_C(0x2598e0c0)},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(extension_targets); target_index += 1)
+    {
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+        {
+            aarch64_base_assembly_test_case(arguments, &result, extension_targets[target_index], cases[case_index]);
+        }
+    }
+
+    Target sve_only = baseline;
+    sve_only.cpu_features_explicit = true;
+    sve_only.cpu_features = target_cpu_features_singleton(TARGET_CPU_FEATURE_AARCH64_SVE);
+    u32 word = 0;
+    BUSTER_TEST(arguments, a64_base_assemble(sve_only, S8("ptrue"), S8("p0.s, pow2"), &word) == A64_BASE_ASSEMBLY_OK &&
+                               word == UINT32_C(0x2598e000));
+    Target sme_only = baseline;
+    sme_only.cpu_features_explicit = true;
+    sme_only.cpu_features = target_cpu_features_singleton(TARGET_CPU_FEATURE_AARCH64_SME);
+    BUSTER_TEST(arguments, a64_base_assemble(sme_only, S8("ptrues"), S8("p0.b"), &word) == A64_BASE_ASSEMBLY_OK &&
+                               word == UINT32_C(0x2519e3e0));
+
+    Target refusal_targets[] = {baseline, apple};
+    static String8 const feature_refusal_sources[] = {
+        S8_INITIALIZER("ptrue p0.s, pow2"),
+        S8_INITIALIZER("ptrues p0.b"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(refusal_targets); target_index += 1)
+    {
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(feature_refusal_sources); source_index += 1)
+        {
+            String8 source = feature_refusal_sources[source_index];
+            AssemblyEncodeResult refused = assembly_encode(arguments->arena, source,
+                (AssemblyEncodeOptions){.target = refusal_targets[target_index]});
+            BUSTER_TEST_RAW(arguments, refused.diagnostic_count == 1 && refused.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                aarch64_base_assembly_test_contains(refused.diagnostics[0].message, S8("sve or sme")) && !refused.bytes.length, source);
+        }
+    }
+
+    static String8 const malformed_sources[] = {
+        S8_INITIALIZER("ptrue p16.s"),
+        S8_INITIALIZER("ptrue p0.q"),
+        S8_INITIALIZER("ptrue p0.s, #32"),
+        S8_INITIALIZER("ptrue p0.s, #-1"),
+        S8_INITIALIZER("ptrue p0.s, vl512"),
+        S8_INITIALIZER("ptrue p0.s, vl9"),
+        S8_INITIALIZER("ptrue z0.s"),
+        S8_INITIALIZER("ptrue p0"),
+        S8_INITIALIZER("ptrue p0.s, all, all"),
+        S8_INITIALIZER("ptrue p0/z.s"),
+        S8_INITIALIZER("ptrue pn8.s"),
+        S8_INITIALIZER("ptrue"),
+        S8_INITIALIZER("ptrue p0.s, x0"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(malformed_sources); index += 1)
+    {
+        AssemblyEncodeResult refused = assembly_encode(arguments->arena, malformed_sources[index], (AssemblyEncodeOptions){.target = sve});
+        BUSTER_TEST_RAW(arguments, refused.diagnostic_count == 1 && refused.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+            !refused.bytes.length, malformed_sources[index]);
+    }
+
+    String8 unit_source = S8(".text\nptrue p0.s, pow2\nret\n");
+    AssemblyUnitResult unit_refused = assembly_unit_encode(arguments->arena, unit_source, (AssemblyEncodeOptions){.target = baseline});
+    bool no_section_bytes = true;
+    for (u32 section_index = 0; section_index < unit_refused.section_count; section_index += 1)
+    {
+        no_section_bytes = no_section_bytes && unit_refused.sections[section_index].data.length == 0;
+    }
+    BUSTER_TEST_RAW(arguments, unit_refused.diagnostic_count == 1 &&
+        unit_refused.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+        aarch64_base_assembly_test_contains(unit_refused.diagnostics[0].message, S8("sve or sme")) &&
+        unit_refused.section_count == 1 && no_section_bytes && !unit_refused.symbol_count && !unit_refused.relocation_count,
+        unit_source);
+    *test_result = result;
+}
+
 
 UnitTestResult aarch64_base_assembly_tests(UnitTestArguments* arguments)
 {
@@ -157,6 +293,7 @@ UnitTestResult aarch64_base_assembly_tests(UnitTestArguments* arguments)
     Target baseline = {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
     Target apple = {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_A64_APPLE_M1, .os = OPERATING_SYSTEM_MACOS};
     aarch64_base_assembly_test_complex_simd_lane(arguments, &result, apple);
+    aarch64_base_assembly_test_ptrue(arguments, &result, baseline, apple);
     static Aarch64BaseAssemblyCase const cases[] = {
         {S8_INITIALIZER("stp x29, x30, [sp, #-16]!"), UINT32_C(0xa9bf7bfd)},
         {S8_INITIALIZER("stp x29, x30, [sp, #16]"), UINT32_C(0xa9017bfd)},
