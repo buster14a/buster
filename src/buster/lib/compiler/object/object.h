@@ -220,6 +220,10 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12,
     OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12,
     OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL,
+    // IMAGE_REL_ARM64_SECREL_LOW12L: TLS offset bits 0..11 in the scaled imm12
+    // of an unsigned-immediate load or store, which Clang and MSVC emit for the
+    // access that follows SECREL_HIGH12A.
+    OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
@@ -268,6 +272,9 @@ BUSTER_F_DECL bool object_aarch64_pe_tls_offset_relocate(ObjectRelocationKind ki
 // link.exe and lld-link resolve COFF index loads against this spelling, so
 // the COFF writer, reader and PE linker agree on it for x86-64 and ARM64.
 #define OBJECT_COFF_TLS_INDEX_NAME S8("_tls_index")
+// The COFF section name MSVC and Clang give thread-local data; platform
+// linkers merge it between the CRT's .tls and .tls$ZZZ bounds.
+#define OBJECT_COFF_TLS_SECTION_NAME S8(".tls$")
 
 typedef struct ObjectSection ObjectSection;
 struct ObjectSection

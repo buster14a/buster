@@ -799,32 +799,58 @@ bool object_aarch64_pe_page_relocate(ObjectRelocationKind kind, u32 word, u64 pl
 // SECREL_HIGH12A uses a shifted ADD, but COFF stores its inline byte addend
 // unscaled in imm12. Both halves add that byte addend before splitting the
 // final section offset; a carry across 4 KiB must reach the high half.
+// SECREL_LOW12L instead patches a scaled unsigned-immediate load or store, as
+// Clang and MSVC emit for the access that follows SECREL_HIGH12A; its inline
+// imm12 counts access-size units, exactly like PAGEOFFSET_12L.
 BUSTER_GLOBAL_LOCAL bool object_aarch64_pe_tls_offset_addend_decode(ObjectRelocationKind kind, u32 word, s64* addend, u32* canonical)
 {
-    bool high = kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12;
-    u32 shift_bit = UINT32_C(1) << 22;
-    u32 immediate = 0;
-    u32 unshifted = 0;
-    bool valid = addend && canonical && (high || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12) &&
-                 ((word & shift_bit) != 0) == high && a64_add_lo12_read(word & ~shift_bit, &immediate) &&
-                 a64_add_lo12_patch(word & ~shift_bit, 0, &unshifted);
-    if (valid)
+    bool valid = addend && canonical;
+    if (valid && kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L)
     {
-        *addend = immediate;
-        *canonical = unshifted | (high ? shift_bit : 0);
+        u32 scale = 0;
+        valid = object_aarch64_pe_pageoffset_12l_scale(word, &scale);
+        if (valid)
+        {
+            *addend = (s64)((word >> 10) & A64_IMM12_MAX) << scale;
+            *canonical = word & ~(A64_IMM12_MAX << 10);
+        }
+    }
+    else if (valid)
+    {
+        bool high = kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12;
+        u32 shift_bit = UINT32_C(1) << 22;
+        u32 immediate = 0;
+        u32 unshifted = 0;
+        valid = (high || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12) && ((word & shift_bit) != 0) == high &&
+                a64_add_lo12_read(word & ~shift_bit, &immediate) && a64_add_lo12_patch(word & ~shift_bit, 0, &unshifted);
+        if (valid)
+        {
+            *addend = immediate;
+            *canonical = unshifted | (high ? shift_bit : 0);
+        }
     }
     return valid;
+}
+
+// Largest canonical byte addend each TLS offset form can store inline.
+BUSTER_GLOBAL_LOCAL s64 object_aarch64_pe_tls_offset_addend_limit(ObjectRelocationKind kind, u32 canonical, u32* scale)
+{
+    *scale = 0;
+    bool scaled = kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L && object_aarch64_pe_pageoffset_12l_scale(canonical, scale);
+    return scaled ? (s64)A64_IMM12_MAX << *scale : (s64)A64_IMM12_MAX;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_aarch64_pe_tls_offset_addend_encode(ObjectRelocationKind kind, u32 word, s64 addend, u32* patched)
 {
     s64 inline_addend = 0;
     u32 canonical = 0;
-    bool valid = patched && object_aarch64_pe_tls_offset_addend_decode(kind, word, &inline_addend, &canonical) &&
-                 inline_addend == 0 && addend >= 0 && addend <= A64_IMM12_MAX;
+    u32 scale = 0;
+    bool valid = patched && object_aarch64_pe_tls_offset_addend_decode(kind, word, &inline_addend, &canonical) && inline_addend == 0 &&
+                 addend >= 0 && addend <= object_aarch64_pe_tls_offset_addend_limit(kind, canonical, &scale) &&
+                 !(addend & (((s64)1 << scale) - 1));
     if (valid)
     {
-        *patched = canonical | ((u32)addend << 10);
+        *patched = canonical | ((u32)(addend >> scale) << 10);
     }
     return valid;
 }
@@ -834,12 +860,13 @@ bool object_aarch64_pe_tls_offset_relocate(ObjectRelocationKind kind, u32 word, 
     u32 canonical = 0;
     s64 inline_addend = 0;
     u64 value = 0;
-    bool valid = patched && object_aarch64_pe_tls_offset_addend_decode(kind, word, &inline_addend, &canonical) &&
-                 inline_addend == 0 && addend >= 0 && addend <= A64_IMM12_MAX &&
-                 object_address_addend(offset, addend, &value) && value <= UINT32_C(0xffffff);
+    u32 scale = 0;
+    bool valid = patched && object_aarch64_pe_tls_offset_addend_decode(kind, word, &inline_addend, &canonical) && inline_addend == 0 &&
+                 addend >= 0 && addend <= object_aarch64_pe_tls_offset_addend_limit(kind, canonical, &scale) &&
+                 object_address_addend(offset, addend, &value) && value <= UINT32_C(0xffffff) && !(value & (((u64)1 << scale) - 1));
     if (valid)
     {
-        u32 immediate = kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 ? (u32)(value >> 12) : (u32)(value & A64_IMM12_MAX);
+        u32 immediate = kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 ? (u32)(value >> 12) : (u32)((value & A64_IMM12_MAX) >> scale);
         *patched = canonical | (immediate << 10);
     }
     return valid;
@@ -1509,11 +1536,15 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
             result = target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .bss\n")
                                                                                                : S8("\t.section .bss,\"aw\",@nobits\n");
             break;
+        // PE thread-local storage is one initialized template, so both kinds
+        // print as .tls$ there; `.zero` materializes the zero-fill part, as
+        // object_coff_place_tls does for written objects.
         case OBJECT_SECTION_THREAD_LOCAL_DATA:
-            result = S8("\t.section .tdata\n");
+            result = target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .tls$\n")
+                                                                                               : S8("\t.section .tdata\n");
             break;
         case OBJECT_SECTION_THREAD_LOCAL_ZERO:
-            result = target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .tbss\n")
+            result = target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .tls$\n")
                                                                                                : S8("\t.section .tbss,\"awT\",@nobits\n");
             break;
         // PE spells these arrays in the `.CRT$X*` group its C runtime walks, not
@@ -1901,6 +1932,15 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_aarch64_immediate_relocation(Objec
             return false;
         }
     }
+    if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L)
+    {
+        s64 addend = 0;
+        u32 canonical = 0;
+        if (!object_aarch64_pe_tls_offset_addend_decode(relocation->kind, word, &addend, &canonical))
+        {
+            return false;
+        }
+    }
     if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
     {
         u32 shift = 0;
@@ -2153,11 +2193,13 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
         case OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L:
         case OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12:
         case OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12:
+        case OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L:
         case OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A:
         {
             String8 modifier = relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 ? S8("@TLVPPAGEOFF")
                                : relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12      ? S8("@PAGEOFF")
-                               : relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12          ? S8(":secrel_lo12:")
+                               : relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+                                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L ? S8(":secrel_lo12:")
                                : relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12        ? S8(":got_lo12:")
                                : relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12 ? S8(":gottprel_lo12:")
                                : object_relocation_kind_is_aarch64_elf_tls_desc(relocation->kind)       ? S8(":tlsdesc_lo12:")
@@ -7615,11 +7657,13 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                                : relocation_type == 7 && tls_index_symbol
                                    ? OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12
                                : relocation_type == 7   ? (tls_index_name ? OBJECT_RELOCATION_COUNT : OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L)
-                               : (relocation_type == 9 || relocation_type == 10) && referenced->section < result.section_count &&
-                                     (result.sections[referenced->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
-                                      result.sections[referenced->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO)
-                                   ? (relocation_type == 10 ? OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12
-                                                            : OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12)
+                               : (relocation_type == 9 || relocation_type == 10 || relocation_type == 0xb) &&
+                                         referenced->section < result.section_count &&
+                                         (result.sections[referenced->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                                          result.sections[referenced->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO)
+                                   ? (relocation_type == 10  ? OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12
+                                      : relocation_type == 9 ? OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12
+                                                             : OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L)
                                : relocation_type == 0xe ? OBJECT_RELOCATION_ABSOLUTE64
                                                         : OBJECT_RELOCATION_COUNT;
                         if (relocation_type == 0xe)
@@ -7654,7 +7698,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                             kind = decoded.opcode == A64_OPCODE_B ? OBJECT_RELOCATION_AARCH64_JUMP26 : OBJECT_RELOCATION_AARCH64_CALL26;
                             referenced->kind = OBJECT_SYMBOL_FUNCTION;
                         }
-                        else if (relocation_type == 4 || relocation_type == 6 || relocation_type == 9 || relocation_type == 10)
+                        else if (relocation_type == 4 || relocation_type == 6 || relocation_type == 9 || relocation_type == 10 ||
+                                 relocation_type == 0xb)
                         {
                             ObjectRelocationKind page_kind = relocation_type == 4 ? OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21
                                                                : OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A;
@@ -7663,7 +7708,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                             if (((section_bases[section_index] + source_offset) & 3) ||
                                 result.sections[section_kinds[section_index]].alignment < 4 ||
                                 !object_read_u32(bytes, (u64)raw_offset + source_offset, &stored) ||
-                                (relocation_type == 9 || relocation_type == 10
+                                (relocation_type == 9 || relocation_type == 10 || relocation_type == 0xb
                                      ? !object_aarch64_pe_tls_offset_addend_decode(kind, stored, &addend, &canonical)
                                      : !object_aarch64_pe_page_addend_decode(page_kind, stored, &addend, &canonical)))
                             {
@@ -11144,6 +11189,7 @@ static ObjectRelocationProperties const object_relocation_properties[] = {
     {4, true}, // OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12
     {4, true}, // OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12
     {4, true}, // OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL
+    {4, true}, // OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L
 };
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(object_relocation_properties) == OBJECT_RELOCATION_COUNT);
 
@@ -14278,6 +14324,7 @@ BUSTER_GLOBAL_LOCAL u16 object_coff_relocation_type(CpuArch arch, ObjectRelocati
            : kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 || kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L ? 0x0007
            : kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12   ? 0x0009
            : kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 ? 0x000a
+           : kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L  ? 0x000b
            : kind == OBJECT_RELOCATION_ABSOLUTE64                ? 0x000e
            : kind == OBJECT_RELOCATION_ABSOLUTE32                ? 0x0001
            : kind == OBJECT_RELOCATION_COFF_SECREL32             ? 0x0008
@@ -14368,6 +14415,51 @@ BUSTER_GLOBAL_LOCAL bool object_coff_bind_tls_index(Arena* arena, ObjectFile* ob
         object->relocations = relocations;
     }
     return !needed || valid;
+}
+
+// The PE loader copies one .tls template and zero-fills only its tail;
+// link.exe and lld-link build that template from the .tls$ input sections the
+// MSVC CRT brackets with .tls and .tls$ZZZ. Serialize every TLS section as
+// initialized .tls$, materializing zero-fill TLS as zeros as MSVC and Clang
+// do, so a platform linker places it inside the TLS directory. Section and
+// symbol indices are unchanged; the reader maps .tls$ back to
+// OBJECT_SECTION_THREAD_LOCAL_DATA.
+BUSTER_GLOBAL_LOCAL bool object_coff_place_tls(Arena* arena, ObjectFile* object, ObjectWriteStatistics* statistics)
+{
+    bool needed = false;
+    for (u32 index = 0; index < object->section_count; index += 1)
+    {
+        ObjectSectionKind kind = object->sections[index].kind;
+        statistics->section_visits += 1;
+        needed = needed || kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+    }
+    bool valid = true;
+    if (needed)
+    {
+        ObjectSection* sections = arena_allocate(arena, ObjectSection, object->section_count);
+        memcpy(sections, object->sections, (u64)object->section_count * sizeof(*sections));
+        for (u32 index = 0; valid && index < object->section_count; index += 1)
+        {
+            ObjectSection* section = sections + index;
+            statistics->section_visits += 1;
+            if (section->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO)
+            {
+                valid = section->virtual_size <= UINT32_MAX;
+                if (valid)
+                {
+                    u8* zeros = section->virtual_size ? arena_allocate_zeroed(arena, u8, section->virtual_size) : 0;
+                    section->data = (ByteSlice){.pointer = zeros, .length = section->virtual_size};
+                    section->kind = OBJECT_SECTION_THREAD_LOCAL_DATA;
+                }
+            }
+            if (section->kind == OBJECT_SECTION_THREAD_LOCAL_DATA)
+            {
+                section->name = OBJECT_COFF_TLS_SECTION_NAME;
+            }
+        }
+        object->sections = sections;
+    }
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_coff_section_alignment_characteristics(ObjectSection* section, u32* characteristics)
@@ -14464,6 +14556,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
                      source->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ||
                      source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
                      source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+                     source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L ||
                      source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12)
             {
                 ObjectRelocationKind page_kind = source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP
@@ -14475,6 +14568,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
                 u32 patched = 0;
                 memcpy(&word, buffer.bytes + raw_offsets[section] + source->offset, sizeof(word));
                 bool tls_offset = source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+                                  source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L ||
                                   source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12;
                 if (tls_offset ? !object_aarch64_pe_tls_offset_addend_encode(source->kind, word, addend, &patched)
                                : !object_aarch64_pe_page_addend_encode(page_kind, word, addend, &patched))
@@ -14662,7 +14756,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
         if (split && object_writer_32_capacity(&split_object, OBJECT_FORMAT_COFF, &capacity, statistics) &&
             object_writer_32_arena_fits(arena, &split_object, OBJECT_FORMAT_COFF, capacity))
         {
-            bool tls_bound = object_coff_bind_tls_index(arena, &split_object, statistics);
+            bool tls_bound = object_coff_bind_tls_index(arena, &split_object, statistics) &&
+                             object_coff_place_tls(arena, &split_object, statistics);
             if (!tls_bound)
             {
                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
@@ -15194,6 +15289,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
             source->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ||
             source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
             source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+            source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L ||
             source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12)
         {
             ObjectRelocationKind page_kind = source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP
@@ -15205,6 +15301,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
             u32 encoded = 0;
             memcpy(&word, object->sections[source->section].data.pointer + source->offset, sizeof(word));
             bool tls_offset = source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+                              source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L ||
                               source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12;
             if (format != OBJECT_FORMAT_COFF || object->target.cpu_arch != CPU_ARCH_AARCH64 || (source->offset & 3) ||
                 (source->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 &&

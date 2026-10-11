@@ -11543,6 +11543,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                     }
                 }
                 else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L ||
                          relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12)
                 {
                     if (symbol->section != OBJECT_SECTION_THREAD_LOCAL_DATA && symbol->section != OBJECT_SECTION_THREAD_LOCAL_ZERO)

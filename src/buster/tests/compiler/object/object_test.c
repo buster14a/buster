@@ -4485,6 +4485,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_relocation_properties(UnitTestArg
         {OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12, 4, true},
         {OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12, 4, true},
         {OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL, 4, true},
+        {OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L, 4, true},
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(expected) == OBJECT_RELOCATION_COUNT);
     bool seen[OBJECT_RELOCATION_COUNT] = {0};
@@ -6061,6 +6062,101 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         }
         ByteSlice ordinary_high = object_test_coff_arm64_page_object(arguments->arena, S8("target"), UINT32_C(0x90000008), UINT32_C(0x91400100), 10);
         BUSTER_TEST(arguments, object_read(arguments->arena, ordinary_high, arm64_coff_target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+
+        // SECREL_LOW12L (type 11) patches the scaled imm12 of the load or store
+        // Clang and MSVC emit after SECREL_HIGH12A (GitHub #1323). Its inline
+        // field counts access-size units; the canonical addend counts bytes.
+        typedef struct ObjectTestTlsLoad ObjectTestTlsLoad;
+        struct ObjectTestTlsLoad
+        {
+            u32 word;
+            u32 scale;
+        };
+        ObjectTestTlsLoad tls_loads[] = {
+            {UINT32_C(0x39400100), 0}, // ldrb w0, [x8]
+            {UINT32_C(0x79400100), 1}, // ldrh w0, [x8]
+            {UINT32_C(0xb9400100), 2}, // ldr w0, [x8]
+            {UINT32_C(0xb9000100), 2}, // str w0, [x8]
+            {UINT32_C(0xf9400100), 3}, // ldr x0, [x8]
+            {UINT32_C(0x3dc00100), 4}, // ldr q0, [x8]
+        };
+        u32 tls_load_immediates[] = {0, 1, 4095};
+        for (u32 load_index = 0; load_index < BUSTER_ARRAY_LENGTH(tls_loads); load_index += 1)
+        {
+            for (u32 immediate_index = 0; immediate_index < BUSTER_ARRAY_LENGTH(tls_load_immediates); immediate_index += 1)
+            {
+                u32 immediate = tls_load_immediates[immediate_index];
+                u32 load_word = tls_loads[load_index].word | (immediate << 10);
+                s64 byte_addend = (s64)immediate << tls_loads[load_index].scale;
+                ByteSlice raw = object_test_coff_arm64_page_object(arguments->arena, S8("target"), UINT32_C(0x90000008), load_word, 11);
+                object_test_coff_write_name(raw.pointer, 60, S8(".tls$"));
+                u8 snapshot[158];
+                BUSTER_TEST(arguments, raw.length == sizeof(snapshot));
+                memcpy(snapshot, raw.pointer, sizeof(snapshot));
+                ObjectFile low = object_read(arguments->arena, raw, arm64_coff_target);
+                if (BUSTER_REQUIRE(arguments, low.error == OBJECT_ERROR_NONE && low.relocation_count == 2))
+                {
+                    BUSTER_TEST(arguments, low.relocations[1].kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L &&
+                                               low.relocations[1].addend == byte_addend);
+                    u32 canonical = 0;
+                    memcpy(&canonical, low.sections[OBJECT_SECTION_TEXT].data.pointer + 4, 4);
+                    BUSTER_TEST(arguments, canonical == tls_loads[load_index].word);
+                    ObjectArtifact rewritten = object_write(arguments->arena, &low, OBJECT_FORMAT_COFF);
+                    if (BUSTER_REQUIRE(arguments, rewritten.error == OBJECT_ERROR_NONE && rewritten.bytes.length >= 60))
+                    {
+                        u32 text_offset = 0;
+                        u32 relocation_offset = 0;
+                        memcpy(&text_offset, rewritten.bytes.pointer + 40, 4);
+                        memcpy(&relocation_offset, rewritten.bytes.pointer + 44, 4);
+                        if (BUSTER_REQUIRE(arguments, text_offset <= rewritten.bytes.length && 8 <= rewritten.bytes.length - text_offset &&
+                                                      relocation_offset <= rewritten.bytes.length && 20 <= rewritten.bytes.length - relocation_offset))
+                        {
+                            u32 inline_word = 0;
+                            u16 low_type = 0;
+                            memcpy(&inline_word, rewritten.bytes.pointer + text_offset + 4, 4);
+                            memcpy(&low_type, rewritten.bytes.pointer + relocation_offset + 18, 2);
+                            BUSTER_TEST(arguments, inline_word == load_word && low_type == 11);
+                        }
+                        ObjectFile reread = object_read(arguments->arena, rewritten.bytes, arm64_coff_target);
+                        BUSTER_TEST(arguments, reread.error == OBJECT_ERROR_NONE && reread.relocation_count == 2 &&
+                                                   reread.relocations[1].kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L &&
+                                                   reread.relocations[1].addend == byte_addend);
+                    }
+                    BUSTER_TEST(arguments, memcmp(raw.pointer, snapshot, sizeof(snapshot)) == 0);
+                }
+            }
+        }
+        // An ADD, a register-offset load, and an ordinary-section target are
+        // not SECREL_LOW12L sites.
+        u32 invalid_low_words[] = {UINT32_C(0x91000100), UINT32_C(0xb8606900), UINT32_C(0xd65f03c0)};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_low_words); index += 1)
+        {
+            ByteSlice raw = object_test_coff_arm64_page_object(arguments->arena, S8("target"), UINT32_C(0x90000008), invalid_low_words[index], 11);
+            object_test_coff_write_name(raw.pointer, 60, S8(".tls$"));
+            BUSTER_TEST(arguments, object_read(arguments->arena, raw, arm64_coff_target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+        }
+        ByteSlice ordinary_low = object_test_coff_arm64_page_object(arguments->arena, S8("target"), UINT32_C(0x90000008), UINT32_C(0xb9400100), 11);
+        BUSTER_TEST(arguments, object_read(arguments->arena, ordinary_low, arm64_coff_target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+        // Final patching splits offset plus byte addend, scales the low half
+        // by the access size and refuses a misaligned or 24-bit-overflowing one.
+        u32 relocated = UINT32_C(0x12345678);
+        BUSTER_TEST(arguments, object_aarch64_pe_tls_offset_relocate(OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L, UINT32_C(0xb9400100),
+                                                                      0x2004, 0, &relocated) &&
+                                   relocated == (UINT32_C(0xb9400100) | (1u << 10)));
+        BUSTER_TEST(arguments, object_aarch64_pe_tls_offset_relocate(OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L, UINT32_C(0xf9400100),
+                                                                      0x1ff8, 8, &relocated) &&
+                                   relocated == UINT32_C(0xf9400100));
+        BUSTER_TEST(arguments, object_aarch64_pe_tls_offset_relocate(OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L, UINT32_C(0x39400100),
+                                                                      0x1fff, 0, &relocated) &&
+                                   relocated == (UINT32_C(0x39400100) | (4095u << 10)));
+        relocated = UINT32_C(0x12345678);
+        BUSTER_TEST(arguments, !object_aarch64_pe_tls_offset_relocate(OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L, UINT32_C(0xb9400100),
+                                                                       0x2002, 0, &relocated) &&
+                                   !object_aarch64_pe_tls_offset_relocate(OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L, UINT32_C(0xb9400100),
+                                                                          0x1000000, 0, &relocated) &&
+                                   !object_aarch64_pe_tls_offset_relocate(OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L, UINT32_C(0x91000100),
+                                                                          0x2000, 0, &relocated) &&
+                                   relocated == UINT32_C(0x12345678));
 
         u64 tls_offsets[] = {0, 4095, 4096, 8191, 8192, 65535, UINT64_C(0xffffff)};
         for (u32 offset_index = 0; offset_index < BUSTER_ARRAY_LENGTH(tls_offsets); offset_index += 1)
