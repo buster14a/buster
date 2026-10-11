@@ -383,14 +383,31 @@ left baseline code generation and no hint that the request was ignored.
 `-fno-strict-overflow` is accepted as `-fwrapv` (signed overflow already wraps;
 there is no `-fno-wrapv`, so `-fstrict-overflow` stays unsupported). `-w` is
 accepted and publishes no warning text or records and outranks every other
-warning option. `--version`, `-dumpversion` and
-`-dumpmachine` need no input and exit 0 (`compiler_driver_query_text`):
+warning option. `--version`, `-dumpversion`, `-dumpmachine` and
+`-print-target-triple`/`-print-effective-triple` need no input and exit 0
+(`compiler_driver_query_text`):
 `-dumpversion` prints `18.0.0`, the `__clang_major__`/`__clang_minor__`/
 `__clang_patchlevel__` triple (`__clang_version__` is `18.0.0 (buster)`);
 `-dumpmachine` prints the effective target as `arch-os[-environment]` with the
 `gnu` environment on Linux and `msvc` on Windows (for example
 `x86_64-linux-gnu`); `--version` prints `Buster clang version 18.0.0 (buster)`,
-`Target: <that triple>` and `Thread model: posix`.
+`Target: <that triple>` and `Thread model: posix`. `-print-target-triple` and
+`-print-effective-triple` print Clang's normalized `arch-vendor-os[-environment]`
+form, with the vendor `apple` on macOS/iOS and `unknown` elsewhere (for example
+`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-android`,
+`x86_64-unknown-windows-msvc`).
+`-trigraphs` and `-ftrigraphs` enable trigraph replacement and `-fno-trigraphs`
+disables it. A later `-std=` restores that dialect's default (on in strict C99
+to C17, off in GNU modes and C23), so the last of these options wins, as in
+Clang. `-nostdlibinc` drops the system include directories but keeps the
+compiler resource directory (`stddef.h` and the other freestanding headers);
+`-nostdinc` drops both. `-working-directory=DIR` and `-working-directory DIR`
+resolve relative input paths against `DIR` with host path rules (on POSIX only
+a leading `/` is absolute and `\` and `:` are ordinary filename bytes; on
+Windows `\x.c` takes the root name of `DIR` (`C:` or UNC `\\server`) and
+`C:x.c` its root-relative directory, as in LLVM's `make_absolute`). Output paths and `-I` directories stay relative to the process
+directory, and a `DIR` that is not a directory is rejected with
+`unable to set working directory: DIR`.
 Windows targets implement the MSVC ABI only, so the MinGW spellings
 (`*-mingw32`, and a `gnu`/`gnullvm` environment on Windows) are rejected with
 `unsupported target environment` instead of being aliased to MSVC (#1492);
