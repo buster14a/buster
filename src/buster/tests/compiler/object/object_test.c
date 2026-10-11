@@ -4788,6 +4788,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_arm64_tls_external(UnitTestArgume
     return result;
 }
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
 // Reports the RVA and the in-file raw span of a PE image's nth section; false
 // past the last section or for a truncated image.
 BUSTER_GLOBAL_LOCAL bool object_test_pe_section(ByteSlice image, u32 index, u32* virtual_address, u64* raw_offset, u64* span)
@@ -4864,6 +4865,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_test_coff_x64_tls_object(Arena* arena, Byt
         .relocation_count = relocation_count,
     };
 }
+#endif
 
 // #1323 W1/W3 oracle: lld-link must bind Buster's x86-64 index load to the
 // _tls_index that the platform CRT defines. A stub object stands in for the
