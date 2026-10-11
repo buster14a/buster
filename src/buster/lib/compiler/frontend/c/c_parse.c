@@ -8367,6 +8367,32 @@ BUSTER_C_INTERNAL void c_parse_expression_tree_replay(CTypeParseMachine* machine
     }
 }
 
+// The machine's two calls for a member access over a const or volatile
+// aggregate (c_parse_direct_expression_postfix): c_parse_member_type on the
+// aggregate's row, `tree.type`, then c_parse_add_qualified_type, which
+// appends the member's qualified copy. That row is the answer. The member's
+// name ends the access. A member that is not found appends nothing, and the
+// query goes to the machine. Its scratch is the machine's, rewound as the
+// string replay rewinds it. Kept out of line: inlined into
+// c_parse_expression_type_query, it changed that function's code on every
+// query, the default path's included.
+BUSTER_GLOBAL_LOCAL C_AST_TYPES_NOINLINE CTypeId c_parse_expression_tree_member(CTypeParseMachine* machine, CPreprocessResult const* preprocess,
+                                                                                CParseResult* result, CAstTypeAnswer tree)
+{
+    CToken name = preprocess->tokens[tree.replay_end - 1];
+    CType const* aggregate = result->types + tree.type.value;
+    CType qualifiers = {.is_const = aggregate->is_const, .is_volatile = aggregate->is_volatile};
+    Arena* scratch = machine->scratch_arena;
+    u64 scratch_mark = scratch->position;
+    CTypeId member = c_parse_member_type(scratch, result, tree.type, name.symbol, c_token_spelling(preprocess->spelling_base, name), 0, 0, 0);
+    CTypeId type = member.value < result->type_count ? c_parse_add_qualified_type(result, member, qualifiers) : C_TYPE_ID_INVALID;
+    if (scratch->position != scratch_mark)
+    {
+        arena_set_position(scratch, scratch_mark);
+    }
+    return type;
+}
+
 // The answer to a query of one string-literal token alone, perhaps
 // parenthesized (C_AST_TYPE_STRING from c_ast_types_answer): the machine's
 // root SIZEOF task strips the parentheses, consults the per-body memo for the
@@ -8378,7 +8404,9 @@ BUSTER_C_INTERNAL void c_parse_expression_tree_replay(CTypeParseMachine* machine
 // rewound as the frame's completion rewinds it, so the query function keeps
 // its signature. A leaf that fails is undone, as the machine's rollback undoes
 // it, and the invalid type returned leaves the query to the machine, which
-// fails the same way.
+// fails the same way. When the answer's node is a member access over a const
+// or volatile aggregate, the same memo probe covers the access's tokens, and
+// on a miss c_parse_expression_tree_member makes the machine's calls instead.
 BUSTER_C_INTERNAL CTypeId c_parse_expression_tree_string(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result,
                                                           CScopeId scope, u32 flags, CAstTypeAnswer tree)
 {
@@ -8392,6 +8420,10 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_tree_string(CTypeParseMachine* mach
     if (c_parse_expression_query_lookup(machine, result, slot, tree.replay_end, scope, flags) && machine->expression_queries)
     {
         type = machine->expression_queries[slot].type;
+    }
+    else if (tree.node_kind == C_AST_MEMBER || tree.node_kind == C_AST_MEMBER_ARROW)
+    {
+        type = c_parse_expression_tree_member(machine, preprocess, result, tree);
     }
     else
     {
@@ -40121,7 +40153,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     }
     result.position_index = arena_allocate(arena, CTokenPositionIndex, 1);
     *result.position_index = (CTokenPositionIndex){0};
-    result.string_literals = c_string_literal_memo_create(arena, preprocess.tokens);
+    result.string_literals = c_string_literal_memo_create(arena, preprocess.tokens, syntax.string_literal_lengths_only);
     result.type_layout_statistics = arena_allocate(arena, CTypeLayoutStatistics, 1);
     *result.type_layout_statistics = (CTypeLayoutStatistics){0};
     result.object_size_facts = arena_allocate(arena, CObjectSizeFacts, 1);

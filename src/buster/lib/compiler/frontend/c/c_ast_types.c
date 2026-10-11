@@ -31,6 +31,10 @@
 // that token (CAstTypeAnswer.replay_*), and c_parse_expression_tree_query makes
 // exactly the machine's task: the memo probe and, on a miss, the string leaf.
 // For the token alone the replay's row is the answer (C_AST_TYPE_STRING).
+// A query of a `.` or `->` alone over an accepted base and a const or
+// volatile aggregate is the other replay: the machine's member search and
+// its append of the member's qualified copy, whose row is the answer
+// (c_ast_types_decline).
 //
 // Ownership and lifetime. A caller that built the tree (the driver's
 // -fc-ast-pilot) passes it in CParserResult.ast; c_analyze_semantics_core puts
@@ -129,7 +133,8 @@
 //                does, over a base of a kind listed here before CALL (the
 //                machine types any other base in its leaf); declined when the
 //                aggregate is qualified, because the machine then appends a
-//                qualified copy of the member type.
+//                qualified copy of the member type. A query of that node
+//                alone replays the append (c_ast_types_decline).
 //   INDEX        an array or pointer base with an integer index, as the
 //                machine's subscript operation; declined for a qualified array
 //                (a qualified element row), a vector base and the reversed
@@ -212,6 +217,8 @@
 //   c_ast_types_compound_literal,
 //   c_ast_types_address
 //   c_ast_types_locate, c_ast_types_answer       query lookup and the decision
+//   c_ast_types_decline                          declines, and the qualified
+//                                                member replay, out of line
 //   c_ast_types_lookups_agree                    query-scope name checks
 //   c_ast_types_locals_build,                    the settled name checks
 //   c_ast_types_mark_resolves_at_file,
@@ -2118,6 +2125,64 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_settled(CAstTypeBodyIndex* index, C
     return settled && scope.value < index->rooted_count && index->rooted[scope.value];
 }
 
+// A `.` or `->` that the member rule declines only because its aggregate is
+// const or volatile, over a base it accepts.
+// The machine types that base as the tree does, then makes two calls,
+// c_parse_member_type on the qualified aggregate and
+// c_parse_add_qualified_type on the member it finds
+// (c_parse_direct_expression_postfix). The second appends the member's
+// qualified copy, and that row is its answer. c_parse_expression_tree_query
+// makes the same two calls. A checked query needs a safe base, as the member
+// rule does. The answer is C_AST_TYPE_STRING's replay with this node's kind.
+// Every other node the answer path does not vouch for declines here. Out of
+// line and returning its own answer, so the path that ordinary answers take
+// keeps its code (#3381, #3384).
+BUSTER_GLOBAL_LOCAL C_AST_TYPES_NOINLINE CAstTypeAnswer c_ast_types_decline(CAstTypeBody const* body, CPreprocessResult const* preprocess, CParseResult* result,
+                                                                    CScopeId scope, u32 node, bool checked)
+{
+    CAst const* ast = body->ast;
+    u32 kind = ast->kinds[node];
+    bool arrow = kind == C_AST_MEMBER_ARROW;
+    u32 relative = node - body->begin;
+    u32 member_token = ast->tokens[node];
+    u32 base_flags = relative ? body->flags[relative - 1] : 0;
+    CTypeId aggregate = C_TYPE_ID_INVALID;
+    if ((kind == C_AST_MEMBER || arrow) && (base_flags & C_AST_TYPE_FLAG_ACCEPTED) && (!checked || (base_flags & C_AST_TYPE_FLAG_SAFE)) &&
+        c_ast_types_member_base_kind(ast->kinds[node - 1]) && member_token >= 1 && member_token < body->token_total &&
+        body->tokens[member_token].kind == C_TOKEN_IDENTIFIER && body->end[relative] == member_token + 1 &&
+        c_ast_types_punctuator_at(body, member_token - 1, arrow ? C_PUNCTUATOR_ARROW : C_PUNCTUATOR_DOT))
+    {
+        CTypeId base = body->types[relative - 1];
+        CType const* value = result->types + base.value;
+        aggregate = !arrow ? base : value->kind == C_TYPE_POINTER && value->element_type.value < result->type_count ? value->element_type : C_TYPE_ID_INVALID;
+        value = aggregate.value < result->type_count ? result->types + aggregate.value : 0;
+        bool qualified = value && (value->kind == C_TYPE_STRUCT || value->kind == C_TYPE_UNION) && (value->is_const || value->is_volatile) &&
+                         !value->is_restrict && !value->is_atomic;
+        aggregate = qualified ? aggregate : C_TYPE_ID_INVALID;
+    }
+    bool replayed = aggregate.value != C_ID_UNDERLYING_INVALID && !c_parse_pending_enum_possible(result) &&
+                    c_parse_type_identity_sites_absent(result, body->first[relative], body->end[relative]) &&
+                    (!(base_flags & C_AST_TYPE_FLAG_LOOKUP_BELOW) || c_ast_types_lookups_agree(body, preprocess, result, scope, node - 1));
+    CAstTypeAnswer answer = {
+        .type = replayed ? aggregate : C_TYPE_ID_INVALID,
+        .status = replayed ? C_AST_TYPE_STRING : C_AST_TYPE_DECLINE,
+        .node_kind = kind,
+        .replay_start = replayed ? body->first[relative] : 0,
+        .replay_end = replayed ? body->end[relative] : 0,
+    };
+    if (replayed)
+    {
+        body->statistics->answers += 1;
+        WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_ANSWERS, 1);
+    }
+    else
+    {
+        body->statistics->declines += 1;
+        WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_DECLINES, 1);
+    }
+    return answer;
+}
+
 BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                   u32 start, u32 end)
 {
@@ -2187,9 +2252,7 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
             }
             else
             {
-                body->statistics->declines += 1;
-                answer.status = C_AST_TYPE_DECLINE;
-                WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_DECLINES, 1);
+                answer = c_ast_types_decline(body, preprocess, result, scope, node, checked);
             }
         }
     }
@@ -2210,10 +2273,16 @@ BUSTER_C_SHARED void c_ast_types_publish(CTypeParseMachine* machine, CParseResul
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_ast_types_verify_enabled;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestAstTypeVerify c_ast_types_verify_state;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_ast_types_verify_perturb_alignments;
 
 void c_test_ast_type_verify_set(bool enabled)
 {
     c_ast_types_verify_enabled = enabled;
+}
+
+void c_test_ast_type_verify_perturb_alignments(bool enabled)
+{
+    c_ast_types_verify_perturb_alignments = enabled;
 }
 
 CTestAstTypeVerify c_test_ast_type_verify_take(void)
@@ -2234,6 +2303,7 @@ BUSTER_C_SHARED CAstTypeVerifyMark c_ast_types_verify_begin(CParseResult const* 
         .types = result->type_count,
         .diagnostics = result->diagnostic_count,
         .array_bounds = result->array_bound_count,
+        .type_alignments = result->type_alignment_count,
         .members = result->member_count,
         .enum_members = result->enum_member_count,
         .entities = result->entity_count,
@@ -2342,6 +2412,11 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_rows_equal(CType const* x, CType const* y)
            x->is_unprototyped == y->is_unprototyped && x->has_fixed_underlying_type == y->has_fixed_underlying_type;
 }
 
+BUSTER_GLOBAL_LOCAL bool c_ast_types_alignments_equal(CTypeAlignment const* x, CTypeAlignment const* y)
+{
+    return x->type_index == y->type_index && x->alignment_start == y->alignment_start && x->alignment_count == y->alignment_count;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_ast_types_bounds_equal(CArrayBound const* x, CArrayBound const* y)
 {
     return x->inferred_count == y->inferred_count && x->token_start == y->token_start && x->token_count == y->token_count &&
@@ -2356,6 +2431,7 @@ BUSTER_C_SHARED void c_ast_types_verify_hold_replay(CParseResult* result, CAstTy
     CAstTypeVerifyMark mark = pending->mark;
     pending->replay_types = result->type_count - mark.types;
     pending->replay_bounds = result->array_bound_count - mark.array_bounds;
+    pending->replay_alignments = result->type_alignment_count - mark.type_alignments;
     for (u32 row = 0; row < pending->replay_types && row < C_AST_TYPE_REPLAY_ROWS; row += 1)
     {
         pending->replay_type_rows[row] = result->types[mark.types + row];
@@ -2364,8 +2440,14 @@ BUSTER_C_SHARED void c_ast_types_verify_hold_replay(CParseResult* result, CAstTy
     {
         pending->replay_bound_rows[row] = result->array_bounds[mark.array_bounds + row];
     }
+    for (u32 row = 0; row < pending->replay_alignments && row < C_AST_TYPE_REPLAY_ROWS; row += 1)
+    {
+        pending->replay_alignment_rows[row] = result->type_alignments[mark.type_alignments + row];
+        pending->replay_alignment_rows[row].alignment_start += c_ast_types_verify_perturb_alignments ? 1 : 0;
+    }
     result->type_count = mark.types;
     result->array_bound_count = mark.array_bounds;
+    result->type_alignment_count = mark.type_alignments;
 }
 
 BUSTER_C_SHARED void c_ast_types_verify_end(CTypeParseMachine* machine, CParseResult* result, CAstTypePending const* pending, u32 start, u32 end,
@@ -2401,7 +2483,8 @@ BUSTER_C_SHARED void c_ast_types_verify_end(CTypeParseMachine* machine, CParseRe
     // nothing else.
     bool tables = result->type_count == mark.types + pending->replay_types && result->array_bound_count == mark.array_bounds + pending->replay_bounds &&
                   result->member_count == mark.members && result->enum_member_count == mark.enum_members && result->entity_count == mark.entities &&
-                  result->scope_count == mark.scopes && result->parameter_count == mark.parameters;
+                  result->scope_count == mark.scopes && result->parameter_count == mark.parameters &&
+                  result->type_alignment_count == mark.type_alignments + pending->replay_alignments;
     for (u32 row = 0; tables && row < pending->replay_types; row += 1)
     {
         tables = row < C_AST_TYPE_REPLAY_ROWS && c_ast_types_rows_equal(result->types + mark.types + row, pending->replay_type_rows + row);
@@ -2409,6 +2492,11 @@ BUSTER_C_SHARED void c_ast_types_verify_end(CTypeParseMachine* machine, CParseRe
     for (u32 row = 0; tables && row < pending->replay_bounds; row += 1)
     {
         tables = row < C_AST_TYPE_REPLAY_ROWS && c_ast_types_bounds_equal(result->array_bounds + mark.array_bounds + row, pending->replay_bound_rows + row);
+    }
+    for (u32 row = 0; tables && row < pending->replay_alignments; row += 1)
+    {
+        tables = row < C_AST_TYPE_REPLAY_ROWS &&
+                 c_ast_types_alignments_equal(result->type_alignments + mark.type_alignments + row, pending->replay_alignment_rows + row);
     }
     if (!tables)
     {
@@ -2517,13 +2605,15 @@ CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult prepro
             CAstTypeAnswer answer = c_ast_types_answer(&machine, &preprocess, result, scope, start, end);
             probe.nodes_typed = machine.ast_types->local_statistics.nodes_typed;
             probe.nodes_accepted = machine.ast_types->local_statistics.nodes_accepted;
-            probe.status = answer.status == C_AST_TYPE_STRING ? (u32)C_AST_TYPE_ANSWER : (u32)answer.status;
+            // A replayed answer's row exists only once the replay runs.
+            bool replayed = answer.status == C_AST_TYPE_STRING;
+            probe.status = replayed ? (u32)C_AST_TYPE_ANSWER : (u32)answer.status;
             probe.node_kind = answer.node_kind;
-            probe.type = answer.type;
-            probe.kind = answer.type.value < result->type_count ? result->types[answer.type.value].kind : C_TYPE_INVALID;
+            probe.type = replayed ? C_TYPE_ID_INVALID : answer.type;
+            probe.kind = probe.type.value < result->type_count ? result->types[probe.type.value].kind : C_TYPE_INVALID;
             probe.nonplace_projection = answer.nonplace_projection;
             probe.replay = answer.replay_end > answer.replay_start;
-            probe.replay_answer = answer.status == C_AST_TYPE_STRING;
+            probe.replay_answer = replayed;
         }
         c_ast_types_body_end(&machine);
         result->expression_scalar_types = previous_scalars;

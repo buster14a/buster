@@ -6954,6 +6954,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         syntax.ast_statement_statistics = &result.c_ast.statements;
         syntax.type_interning = true;
     }
+    // Nothing lowers a -fsyntax-only unit, so its string literals are counted,
+    // not decoded (CParserResult.string_literal_lengths_only).
+    syntax.string_literal_lengths_only = invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY;
     result.parser_diagnostic_count = syntax.diagnostic_count;
     if (syntax.diagnostic_count)
     {

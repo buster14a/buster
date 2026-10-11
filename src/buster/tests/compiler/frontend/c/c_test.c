@@ -5868,6 +5868,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestA
     // The successor fixture preserves wide negative declaration types, which
     // GCC 14 narrows to int. Clang covers that rule in both requested dialects.
     // GCC covers the >64-bit extension: Clang 17 does not support its successors.
+    // GCC 13 implemented C23 enumerator types and fixed underlying types
+    // (N3029, N3030); GCC 11.5 and 12.4 reject every GCC row below. An
+    // identified older GCC release is a documented profile, so its rows are
+    // NOT_RUN; any other GCC, including an unidentified one, stays required.
+    TestProcessEnvironment oracle_environment =
+        buster_test_process_environment_with_override(arguments->arena, S8("LC_ALL"), S8("C"));
+    String8 gcc = executable_resolve_in_path(arguments->arena, S8("gcc"));
+    TestReferenceIdentity gcc_identity = gcc.length && oracle_environment.keys.pointer
+        ? buster_test_reference_identity(arguments->arena, gcc, &oracle_environment) : (TestReferenceIdentity){0};
+    bool gcc_predates_c23_enums = gcc_identity.gcc_major && gcc_identity.gcc_major < 13;
+    arguments->show(arguments, S8("TEST_ORACLE_IDENTITY suite=c-frontend fixture=enumerator-type-differential tool={S8} version={S8} "
+        "target={S8} observed={u32} gcc_major={u32}\n"), gcc, gcc_identity.version, gcc_identity.target, (u32)gcc_identity.observed,
+        gcc_identity.gcc_major);
     for (u32 test_case = 0; test_case < 2 * BUSTER_ARRAY_LENGTH(fixtures); test_case += 1)
     {
         u32 c23 = test_case & 1;
@@ -5888,7 +5901,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestA
             BUSTER_TEST(arguments, source_written);
             BUSTER_TEST(arguments, reference_written);
             BUSTER_TEST(arguments, compiler.length != 0);
-            if (compiler.length && reference_written)
+            bool reference_not_run = reference == 1 && gcc_predates_c23_enums;
+            if (reference_not_run)
+            {
+                arguments->show(arguments, S8("TEST_ORACLE_V1 suite=c-frontend fixture=enumerator-type-differential "
+                    "case=gcc/{S8}/{S8}/fixture-{u32} status=NOT_RUN required=0 tool={S8} version={S8} "
+                    "reason=GCC {u32} predates C23 enumerator types (GCC 13)\n"),
+                    reference_dialects[c23], optimizations[form], fixture, compiler, gcc_identity.version, gcc_identity.gcc_major);
+            }
+            if (compiler.length && reference_written && !reference_not_run)
             {
                 String8 command[] = {compiler, reference_dialects[c23], optimizations[form], reference_path, S8("-o"), output_path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
@@ -21114,6 +21135,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_fact_census(UnitTestArguments* 
         BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_MEMO_HITS) == 3);
         BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_LOWER, C_CENSUS_PHASE_STRING_MEMO_HITS) == 1);
         BUSTER_TEST(arguments, lower_decodes == 0);
+        // A unit nothing will lower (the driver's -fsyntax-only) counts the
+        // literal at its first sight instead of decoding it, and the other
+        // three consumers read the recorded length as before.
+        CParserResult unlowered = c_parse_ast(arguments->arena, preprocess);
+        unlowered.string_literal_lengths_only = true;
+        CCensusCounters unlowered_before = c_census_counters();
+        CAnalysisResult semantic = c_analyze_semantics_only(arguments->arena, preprocess, unlowered);
+        CCensusCounters unlowered_after = c_census_counters();
+        BUSTER_TEST(arguments, semantic.analysis_complete && semantic.diagnostic_count == 0 && !unlowered_after.overflowed);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&unlowered_before, &unlowered_after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_DECODES) == 0);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&unlowered_before, &unlowered_after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_COUNTS) ==
+                                   C_TEST_CENSUS_SEMANTIC_STRING_COUNTS + 1);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&unlowered_before, &unlowered_after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_MEMO_HITS) == 3);
     }
     return result;
 }
@@ -34088,7 +34122,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
         process_admission &= oracle_environment_ready;
         String8 reference_versions[BUSTER_ARRAY_LENGTH(references)] = {0};
         String8 reference_targets[BUSTER_ARRAY_LENGTH(references)] = {0};
-        bool gcc13_native_profiles[BUSTER_ARRAY_LENGTH(references)] = {0};
+        bool gcc_pre_gnu23_native_profiles[BUSTER_ARRAY_LENGTH(references)] = {0};
         bool healthy_gnu17[BUSTER_ARRAY_LENGTH(references)][BUSTER_ARRAY_LENGTH(optimizations)] = {0};
         u64 diagnostic_limit = BUSTER_KB(64);
         for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
@@ -34136,32 +34170,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                 String8 target_line = target_newline == BUSTER_STRING_NO_MATCH ? target_output : string_slice(target_output, 0, target_newline);
                 reference_versions[reference] = string_format(arguments->arena, S8("{S8}"), version_line);
                 reference_targets[reference] = string_format(arguments->arena, S8("{S8}"), target_line);
-                bool host_target = false;
-#if BUSTER_CPU_ARCH_X86_64
-                host_target = target_line.length && string_first_sequence(target_line, S8("x86_64")) == 0 &&
-                              string_first_sequence(target_line, S8("linux")) != BUSTER_STRING_NO_MATCH;
-#elif BUSTER_CPU_ARCH_AARCH64
-                host_target = target_line.length && string_first_sequence(target_line, S8("aarch64")) == 0 &&
-                              string_first_sequence(target_line, S8("linux")) != BUSTER_STRING_NO_MATCH;
-#endif
-                bool gcc13_macro = string_first_sequence(profile_output, S8("#define __GNUC__ 13\n")) != BUSTER_STRING_NO_MATCH;
-                bool non_clang_macro = string_first_sequence(profile_output, S8("#define __clang__")) == BUSTER_STRING_NO_MATCH;
-                bool linux_macro = string_first_sequence(profile_output, S8("#define __linux__ 1\n")) != BUSTER_STRING_NO_MATCH;
-#if BUSTER_CPU_ARCH_X86_64
-                bool native_architecture_macro = string_first_sequence(profile_output, S8("#define __x86_64__ 1\n")) != BUSTER_STRING_NO_MATCH;
-#elif BUSTER_CPU_ARCH_AARCH64
-                bool native_architecture_macro = string_first_sequence(profile_output, S8("#define __aarch64__ 1\n")) != BUSTER_STRING_NO_MATCH;
-#else
-                bool native_architecture_macro = false;
-#endif
-                bool macro_profile = profile_observed && gcc13_macro && non_clang_macro && linux_macro && native_architecture_macro;
-                gcc13_native_profiles[reference] = reference == 0 && version_observed && target_observed && version_line.length &&
-                    string_first_sequence(version_line, S8("gcc ")) == 0 &&
-                    string_first_sequence(version_line, S8(" 13.")) != BUSTER_STRING_NO_MATCH && host_target && macro_profile;
+                // GCC 14 added the -std=gnu23 spelling; GCC 11 through 13 refuse it with the same
+                // diagnostic (observed on 11.5, 12.4 and 13.3).
+                u32 gcc_major = reference == 0 && version_observed && target_observed && profile_observed
+                    ? buster_test_reference_gcc_major(identity_temporary.arena, version_line, target_line, profile_output) : 0;
+                gcc_pre_gnu23_native_profiles[reference] = gcc_major >= 11 && gcc_major <= 13;
                 arguments->show(arguments, S8("TEST_ORACLE_IDENTITY suite=compiler-driver fixture=function-parameter-compatibility "
-                    "tool={S8} version={S8} target={S8} predefined_macros_observed={u32} gcc13_non_clang_native_profile={u32}\n"),
+                    "tool={S8} version={S8} target={S8} predefined_macros_observed={u32} gcc11_to_13_non_clang_native_profile={u32}\n"),
                     identity_compiler, reference_versions[reference], reference_targets[reference], (u32)profile_observed,
-                    (u32)gcc13_native_profiles[reference]);
+                    (u32)gcc_pre_gnu23_native_profiles[reference]);
             }
             scratch_end(identity_temporary);
         }
@@ -34340,8 +34357,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                 .search_path = false,
                             };
                             bool healthy_control = dialect == 0 || healthy_gnu17[reference][optimization];
-                            bool profile_authenticated = dialect == 1 && reference == 0 && gcc13_native_profiles[reference];
-                            // GCC 13 lacks only the -std=gnu23 spelling (GCC 14 added it). That exact,
+                            bool profile_authenticated = dialect == 1 && reference == 0 && gcc_pre_gnu23_native_profiles[reference];
+                            // GCC 11-13 lack only the -std=gnu23 spelling (GCC 14 added it). That exact,
                             // authenticated refusal is a reference-version limit, so it stays NOT_RUN even
                             // under --ci=1 (#2579); every other probe outcome is still a failure.
                             TestOracleProbeDisposition probe_disposition = buster_test_oracle_probe_disposition(
