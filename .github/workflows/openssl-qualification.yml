@@ -52,6 +52,10 @@ jobs:
       - name: Input and compiler provenance controls
         run: |
           "$RUNNER_TEMP/openssl-driver" test_openssl --self-test
+      - name: Documentation and whitespace checks
+        run: |
+          python3 tools/check_markdown_links.py
+          git diff --check abb1c5afbcf55e120d83283ffbad402fc75bd80a HEAD
       - name: Configure trusted candidate
         run: |
           "$RUNNER_TEMP/openssl-driver" generate --cc clang --ci --linker DEFAULT

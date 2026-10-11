@@ -45,6 +45,8 @@ submodules are refused by this intake. Their upstream tests remain explicitly
 unsupported/skipped where upstream reports them; this is not an all-integration
 qualification. The controls' isolated Git fixture covers
 wrong pin, dirty tracked source, ignored/untracked inputs and hidden index flags.
+Additional native controls reject wrong gitlink commits, unknown paths and
+populated optional integrations, while accepting absent and empty directories.
 
 The bounded cells are `linux-x86_64 --debug shared`, first with `no-asm` and
 then with ordinary architecture assembly enabled. Both Clang cells run before
@@ -52,7 +54,8 @@ Buster attempts. Perl Configure and configdata generation remain upstream.
 There is no source patch, compiler-flag removal, disabled failing feature,
 replacement C object, or fabricated successful compiler probe.
 
-The native compiler proxy preserves arguments. Reference C actions use Clang;
+The native compiler proxy preserves upstream arguments and explicitly pins
+both C compilers to Linux x86-64 with the baseline instruction set. Reference C actions use Clang;
 candidate C actions and compiler identity/preprocessor queries use `ide cc`.
 Assembly-only actions and object-only links use external Clang, explicitly
 attributed in per-action provenance. Mixed C/assembly input is refused.

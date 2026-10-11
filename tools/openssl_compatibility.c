@@ -249,6 +249,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult openssl_proxy(Arena* arena, SliceString8 argum
             OsArgumentBuilder builder = os_argument_builder_start(arena);
             os_argument_builder_append(&builder, compiler);
             if (!external) { os_argument_builder_append(&builder, S8("cc")); }
+            os_argument_builder_append(&builder, S8("-target"));
+            os_argument_builder_append(&builder, external ? S8("x86_64-linux-gnu") : S8("x86_64-linux"));
+            os_argument_builder_append(&builder, external ? S8("-march=x86-64") : S8("-march=baseline"));
             for (u64 i = 0; i < forwarded.length; i += 1)
             {
                 os_argument_builder_append(&builder, forwarded.pointer[i]);
@@ -306,6 +309,8 @@ BUSTER_GLOBAL_LOCAL bool openssl_step(Arena* arena, String8 directory, String8 n
     return result;
 }
 
+#include "openssl_compatibility_test.c"
+
 BUSTER_GLOBAL_LOCAL ProcessResult openssl_main(Arena* arena, SliceString8 arguments, String8 driver)
 {
     bool proxy = arguments.length && string_equal(arguments.pointer[0], S8("--cc-proxy"));
@@ -318,18 +323,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult openssl_main(Arena* arena, SliceString8 argume
     }
     else if (self_test)
     {
-        String8 c[] = {S8("-c"), S8("x.c"), S8("-o"), S8("result.S")};
-        String8 assembly[] = {S8("-c"), S8("x.S"), S8("-o"), S8("result.c")};
-        String8 link[] = {S8("x.o"), S8("libcrypto.a"), S8("-o"), S8("result.c")};
-        String8 mixed[] = {S8("x.c"), S8("x.S")};
-        String8 probe[] = {S8("--version")};
-        valid = openssl_route((SliceString8)BUSTER_ARRAY_TO_SLICE(c)) == OPENSSL_ROUTE_C &&
-                openssl_route((SliceString8)BUSTER_ARRAY_TO_SLICE(assembly)) == OPENSSL_ROUTE_ASSEMBLY &&
-                openssl_route((SliceString8)BUSTER_ARRAY_TO_SLICE(link)) == OPENSSL_ROUTE_LINK &&
-                openssl_route((SliceString8)BUSTER_ARRAY_TO_SLICE(mixed)) == OPENSSL_ROUTE_INVALID &&
-                openssl_route((SliceString8)BUSTER_ARRAY_TO_SLICE(probe)) == OPENSSL_ROUTE_PROBE &&
-                raddebugger_self_test(arena) == PROCESS_RESULT_SUCCESS;
-        string_print(S8("OPENSSL_SELF_TEST status={S8}\n"), valid ? S8("pass") : S8("fail"));
+        valid = openssl_self_test(arena);
     }
     else if (arguments.length == 4)
     {
