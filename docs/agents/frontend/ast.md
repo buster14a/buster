@@ -1577,4 +1577,18 @@ The base is main `4e5d563f`, which the candidate branches from. The budgets:
   acceptance remain with the Zen 5 route (#2761), and no 9700X comparison is
   requested.
 
+The declaration specifier read's hosted census is
+[`2026-10-11T105317Z`](../../performance-audits/2026-10-11T105317Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. The model matches field by field over the corpus,
+  the frontend sources and the self-host unity input. The objects of all four
+  arms are identical.
+- On the self-host the read answers 79,095 runs: 13,470 primitive and 65,625
+  typedef. It hands 2,113 back, 2,045 of them `specifiers` and 68 `input`. The
+  machine's root runs fall by exactly 79,095.
+- The pilot's compile falls by 147.3 M Ir (−1.59%), with the 11.8 M index
+  charged.
+- The default path is +0.029%.
+- Zen 5 validation stays incomplete (#2761), so the hook stays opt-in.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
