@@ -10712,6 +10712,115 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_contract_carry
     return result;
 }
 
+// A free pick for a reload prefers the register its value was first bound to
+// (`MachineFastState.preferred_registers`). Each function keeps a pointer
+// parameter live through a loop that reloads it. Before the rule the reload
+// took the first free register (RAX on x86-64), and the loop's address
+// arithmetic then shuffled it through extra copies; now it returns to its
+// argument register. Every target
+// must select without fallback and the host runs the program under both
+// allocators and frontend forms (expected values cross-checked with host GCC
+// and Clang). FAST on x86-64 Linux made 61 register copies before the rule
+// and 51 with it under both frontend forms.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preferred_reload_registers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static volatile int opaque = 3;\n"
+        "static __attribute__((noinline)) unsigned long text_length(const char* text)\n"
+        "{\n"
+        "    unsigned long length = 0;\n"
+        "    while (text[length])\n"
+        "    {\n"
+        "        length += 1;\n"
+        "    }\n"
+        "    return length;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long weighted(const long long* values, long long count, long long scale)\n"
+        "{\n"
+        "    long long total = 0;\n"
+        "    for (long long i = 0; i < count; i += 1)\n"
+        "    {\n"
+        "        total += values[i] * scale + (values[i] >> 2);\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n"
+        "static __attribute__((noinline)) int matches(const char* left, const char* right, int limit)\n"
+        "{\n"
+        "    int same = 0;\n"
+        "    for (int i = 0; i < limit && left[i] && right[i]; i += 1)\n"
+        "    {\n"
+        "        same += left[i] == right[i];\n"
+        "    }\n"
+        "    return same;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    long long values[6] = {opaque, 5, 7, 11, 13, 17};\n"
+        "    int bad = text_length(\"preferred registers\") != 19;\n"
+        "    bad |= weighted(values, 6, opaque + 1) != 235;\n"
+        "    bad |= matches(\"register\", \"regional\", 8) != 4;\n"
+        "    return bad;\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-preferred-reload-registers"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
+        String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-preferred-reload-registers-object"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[target], frontends[frontend],
+                                         allocators[allocator], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), object, input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 description = string_format(temporary.arena, S8("preferred reload registers object {S8} {S8} {S8}: {S8} copies {u64}"),
+                        targets[target], allocators[allocator], frontends[frontend], compiled.diagnostic,
+                        compiled.codegen_statistics.allocator_copy_count);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == 0, description);
+                    if (target == 0 && allocator == 0)
+                    {
+                        BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.allocator_copy_count <= 51, description);
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-preferred-reload-registers-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), allocators[allocator], frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), executable, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("preferred reload registers native {S8} {S8}: {S8}"),
+                    allocators[allocator], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description);
+                }
+                scratch_end(temporary);
+            }
+        }
+#endif
+    }
+    return result;
+}
+
 // A general-only edge with several parameter assignments publishes as a
 // register parallel move (`machine_fast_publish_edge_parallel`) instead of
 // staging every resident source through the edge-copy tile. The program
@@ -32102,6 +32211,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_liveness_dead_stores);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_deferred_edge_stores);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_parameter_contract_carry_lanes);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preferred_reload_registers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_parallel_edge_moves);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_recreated_edge_sources);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_return_address);
