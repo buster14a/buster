@@ -4254,6 +4254,30 @@ class FrontendSelectorTest(unittest.TestCase):
                 conclusion, unused_title, reasons = self.publish(record, changed)
                 self.assertEqual(conclusion, "failure", reasons)
 
+    def test_out_of_range_numbers_fail_closed_through_publication(self) -> None:
+        record, bundle = frontend_selector_evidence()
+        huge = 10 ** 309
+        line = bundle["bench"]["runs"][0]["line"]
+        cases = {
+            "frontend wall sample": lambda changed: changed["results"][0]["compilers"]["candidate"]["wall_seconds"]
+            .__setitem__(0, huge),
+            "frontend cpu sample": lambda changed: changed["results"][5]["compilers"]["baseline"]["cpu_seconds"]
+            .__setitem__(1, huge),
+            "selection median": lambda changed: changed["report"]["workloads"][0]["samples"]["baseline"][0]["selection"]
+            .update(median_ns=huge),
+            "selection compile time": lambda changed: changed["report"]["workloads"][1]["samples"]["candidate"][0]["objects"]
+            ["quality"].update(wall_ns=huge),
+            "ide bench median": lambda changed: [run.update(line=line.replace("median_ns=1000", "median_ns=" + "9" * 330))
+                                                 for run in changed["bench"]["runs"][:2]],
+        }
+        for name, mutate in cases.items():
+            changed = copy.deepcopy(bundle)
+            mutate(changed)
+            with self.subTest(case=name):
+                self.assertTrue(self.validate(changed), name)
+                conclusion, unused_title, reasons = self.publish(record, changed)
+                self.assertEqual(conclusion, "failure", reasons)
+
     def test_any_wrongly_typed_field_fails_closed_without_raising(self) -> None:
         unused_record, bundle = frontend_selector_evidence()
         def paths(value: object, prefix: tuple = ()):
@@ -4261,7 +4285,8 @@ class FrontendSelectorTest(unittest.TestCase):
             children = value.items() if isinstance(value, dict) else enumerate(value[:1]) if isinstance(value, list) else ()
             for key, child in children:
                 yield from paths(child, (*prefix, key))
-        replacements = (None, [], {}, "x", -1, 1.5, True, [[]], {"": {}})
+        replacements = (None, [], {}, "x", -1, 1.5, True, [[]], {"": {}}, 10 ** 309, -(10 ** 309),
+                        float("nan"), float("inf"))
         checked = 0
         for key in bundle:
             for path in paths(bundle[key]):

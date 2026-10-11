@@ -555,8 +555,19 @@ def ast_pilot_budget_verdict(cells: dict, retained_bytes: int, correctness: dict
     return {"outcome": outcome, "checks": checks, "budget": dict(AST_PILOT_BUDGET), "report_only": True}
 
 
+# A JSON integer is unbounded; math.isfinite and float arithmetic raise OverflowError past
+# the float range, so evidence numbers are bounded before any of them.
+EVIDENCE_INTEGER_LIMIT = 1 << 63
+
+
+def _number(value: object) -> bool:
+    """A finite float or an integer inside EVIDENCE_INTEGER_LIMIT; never raises, booleans excluded."""
+    return (type(value) is int and -EVIDENCE_INTEGER_LIMIT < value < EVIDENCE_INTEGER_LIMIT) or \
+        (type(value) is float and math.isfinite(value))
+
+
 def _finite_positive(value: object) -> bool:
-    return type(value) in (int, float) and math.isfinite(value) and value > 0
+    return _number(value) and value > 0
 
 
 def validate_throughput_real_source(status: object, summary: object, metadata: object, staging: object,
@@ -740,19 +751,20 @@ def ide_bench_fields(line: object) -> dict | None:
     if match:
         fields = {"path": match.group(1), **{key: int(match.group(index)) for index, key in
                                             enumerate(("iterations", "bytes", "min_ns", "median_ns", "throughput_mb_s"), 2)}}
+        if not all(_number(value) for key, value in fields.items() if key != "path"):
+            fields = None
     return fields
 
 
 def _samples(values: object, count: int, positive: bool) -> bool:
     return isinstance(values, list) and len(values) == count and \
-        all(type(value) in (int, float) and math.isfinite(value) and (value > 0 if positive else value >= 0)
-            for value in values)
+        all(_number(value) and (value > 0 if positive else value >= 0) for value in values)
 
 
 def _median(values: object) -> float | None:
     """The median of a non-empty list of finite numbers, else None; reported medians are re-derived with it."""
     usable = isinstance(values, list) and values and \
-        all(type(value) in (int, float) and math.isfinite(value) for value in values)
+        all(_number(value) for value in values)
     return statistics.median(values) if usable else None
 
 
@@ -761,11 +773,12 @@ def _selection_sample(sample: object, allocators: list) -> bool:
     metrics = sample.get("selection") if isinstance(sample, dict) and isinstance(sample.get("selection"), dict) else {}
     built = sample.get("objects") if isinstance(sample, dict) and isinstance(sample.get("objects"), dict) else {}
     return isinstance(sample, dict) and isinstance(sample.get("target"), str) and bool(sample["target"]) and \
-        all(type(metrics.get(key)) is int and metrics[key] >= 0 for key in (*SELECTION_WORK_FIELDS, "median_ns")) and \
+        all(type(metrics.get(key)) is int and _number(metrics[key]) and metrics[key] >= 0
+            for key in (*SELECTION_WORK_FIELDS, "median_ns")) and \
         metrics["fallback_functions"] == 0 and \
         all(metrics[key] > 0 for key in ("functions", "mir_instructions", "median_ns")) and \
         sorted(built) == sorted(allocators) and \
-        all(isinstance(item, dict) and type(item.get("wall_ns")) is int and item["wall_ns"] > 0 and
+        all(isinstance(item, dict) and type(item.get("wall_ns")) is int and _finite_positive(item["wall_ns"]) and
             isinstance(item.get("sha256"), str) and SHA256.fullmatch(item["sha256"]) is not None
             for item in built.values())
 
