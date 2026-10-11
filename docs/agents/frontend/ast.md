@@ -1409,4 +1409,21 @@ The budgets:
   comparison is requested, so Zen 5 validation stays incomplete (#2761) and
   the hook stays opt-in.
 
+The block-declaration split's hosted census is
+[`2026-10-11T104857Z`](../../performance-audits/2026-10-11T104857Z.md),
+diagnostic only:
+- **Correctness.** 0 model differences over the corpus. A one-off run on the
+  unity self-host compared 832,384 more rows, also with 0 differences.
+  Objects are byte-identical at `-g0` and `-g` across the four arms.
+- **Coverage.** The self-host tree-splits all 41,586 of its block
+  declarations, with no fallback.
+- **Ship.** C against B is −19.95 M Ir (−0.21%): `c_parse_local_declarations`
+  falls by 26.2 M, and the index costs 6.2 M. The first candidate gave
+  −4.01 M and failed the 5 M budget, because its masked window loads took
+  `simd.h`'s per-lane fallback on the v3 build. Loading whole windows
+  unmasked fixed that, and the budgets were left as declared.
+- **Default path.** +0.018% on `-fsyntax-only` and +0.0085% on `-c`.
+- **Acceptance.** Zen 5 validation is incomplete (#2761), and the default
+  stays off.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
