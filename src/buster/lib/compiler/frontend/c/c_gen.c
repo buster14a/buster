@@ -6169,6 +6169,13 @@ BUSTER_C_INTERNAL IrTypeId c_ir_group_type_name(CIntegerIrBuilder* builder, u32 
             *slot = c_ir_group_type_name_encode(result);
         }
     }
+    if (open + 2 < close &&
+        string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[open + 1]), S8("struct")) &&
+        string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[open + 2]), S8("item")))
+    {
+        string_print(S8("TYPE_NAME_TRACE path=GROUP type={u32} memo={u32} frame_count={u32} request={u32}\n"),
+                     result.value, slot ? *slot : 0, builder->queries->frame_count, builder->queries->has_request ? 1u : 0u);
+    }
     return result;
 }
 
@@ -6201,6 +6208,13 @@ BUSTER_C_INTERNAL bool c_ir_query_group_type_name(CIntegerIrBuilder* builder, u3
         {
             *slot = c_ir_group_type_name_encode(*type_out);
         }
+    }
+    if (open + 2 < close &&
+        string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[open + 1]), S8("struct")) &&
+        string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[open + 2]), S8("item")))
+    {
+        string_print(S8("TYPE_NAME_TRACE path=QUERY_GROUP type={u32} memo={u32} frame_count={u32} request={u32}\n"),
+                     type_out->value, slot ? *slot : 0, builder->queries->frame_count, builder->queries->has_request ? 1u : 0u);
     }
     return resolved;
 }

@@ -2,17 +2,19 @@
 #define CASE 0
 #endif
 #if CASE & 1
-#define item if_nameindex
+#define factory item
+#else
+#define factory make_items
 #endif
 struct item { unsigned index; char *name; };
 struct context { unsigned num, allocated, str_bytes; unsigned hash[64]; };
 #if CASE & 2
-struct item *item(struct context *);
+struct item *factory(struct context *);
 #endif
 static unsigned long observed;
 static void *allocate(unsigned long n) { observed = n; return (void *)0; }
 static void escape(struct context *ctx) { ctx->num = 3; ctx->str_bytes = 5; }
-struct item *item(struct context *incoming) {
+struct item *factory(struct context *incoming) {
     struct context local, *ctx = &local;
     struct item *result = (void *)0, *d;
     ctx->num = incoming->num;
@@ -30,6 +32,6 @@ out:
 }
 int main(void) {
     struct context ctx = { .num = 3, .str_bytes = 5 };
-    item(&ctx);
+    factory(&ctx);
     return observed != sizeof(struct item) * 4 + 5;
 }
