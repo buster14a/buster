@@ -88,7 +88,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-26.04, macos-15]
+        os: [ubuntu-26.04, macos-26]
     runs-on: ${{ matrix.os }}
     # Keep pipe-stall controls out of the full lifecycle lane's fixed cap.
     timeout-minutes: 5
@@ -125,6 +125,16 @@ jobs:
             fi
           fi
           python3 ios/gnu_timeout.py
+      - name: Record monitor tool versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            python3 --version
+            /bin/bash --version
+            bash --version
+            python3 ios/gnu_timeout.py
+          } 2>&1 | tee "$RUNNER_TEMP/mobile-monitor-tool-versions.log"
       - name: Exercise native traces and stalled console transport
         shell: bash
         run: |
@@ -146,6 +156,7 @@ jobs:
           name: ios-launch-trace-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/ios-launch-trace-monitor.log
+            ${{ runner.temp }}/mobile-monitor-tool-versions.log
             ${{ runner.temp }}/machine-specifications/
           if-no-files-found: error
           retention-days: 7
@@ -195,6 +206,16 @@ jobs:
             fi
           fi
           python3 ios/gnu_timeout.py
+      - name: Record monitor tool versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            python3 --version
+            /bin/bash --version
+            bash --version
+            python3 ios/gnu_timeout.py
+          } 2>&1 | tee "$RUNNER_TEMP/mobile-monitor-tool-versions.log"
       - name: Verify timer and mobile workflow contracts
         shell: bash
         run: |
@@ -261,6 +282,7 @@ jobs:
           path: |
             ${{ runner.temp }}/machine-specifications/
             ${{ runner.temp }}/mobile-lifecycle.log
+            ${{ runner.temp }}/mobile-monitor-tool-versions.log
             ${{ runner.temp }}/ios-signing-budget.log
             ${{ runner.temp }}/ios-install-lifecycle.log
             ${{ runner.temp }}/ios-launch-diagnostics.log
