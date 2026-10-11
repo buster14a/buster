@@ -486,6 +486,9 @@ struct IrSymbol
     // has_owner_function is set; the link name does not depend on it.
     bool has_owner_function;
     IrSymbolId owner_function;
+    // Optimizer directives merged from compatible function declarations.
+    bool always_inline;
+    bool noinline;
 };
 
 // One symbol that is a second name for another: __attribute__((alias("t"))).
@@ -495,11 +498,18 @@ struct IrSymbol
 // two, and it is kept as a module-level list of the pairs.  A module's
 // aliases must name definitions in that same module, which is what
 // ir_validate_canonical_module checks.
+//
+// An indirect alias is __attribute__((ifunc("resolver"))): `target` is the
+// resolver, and the symbol is a GNU indirect function whose value is the
+// resolver's address, so a reference wants the function the resolver returns.
+// Its target must be a function body, and only ELF can carry it
+// (ObjectSymbol.indirect, STT_GNU_IFUNC).
 typedef struct IrSymbolAlias IrSymbolAlias;
 struct IrSymbolAlias
 {
     IrSymbolId symbol;
     IrSymbolId target;
+    bool is_indirect;
 };
 
 typedef struct IrSymbolTable IrSymbolTable;

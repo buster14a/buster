@@ -302,9 +302,14 @@ struct CDeclarationBinding
     // the declaration is a local name for a weak reference to `weakref_target`
     // rather than a definition or an alias of one.
     bool is_weakref;
-    // __attribute__((ifunc("resolver"))), which has no lowering yet.
+    // __attribute__((ifunc("resolver"))): the declaration defines the name as
+    // a GNU indirect function whose value is `ifunc_resolver`, a function this
+    // translation unit defines. It lowers to an indirect IrSymbolAlias; a
+    // missing resolver string leaves `ifunc_resolver` empty for
+    // c_parse_validate_alias_targets to refuse.
     bool is_ifunc;
     String8 weakref_target;
+    String8 ifunc_resolver;
 };
 
 BUSTER_C_EXTERN bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out);
@@ -490,6 +495,8 @@ BUSTER_C_EXTERN bool c_number_convert_at(CNumberFacts const* facts, char8 const*
 typedef struct CStringLiteralMemoSlot CStringLiteralMemoSlot;
 struct CStringLiteralMemoSlot
 {
+    // Null for a length-only slot (CStringLiteralMemo.lengths_only); a
+    // recorded decode always has a buffer, even for an empty literal.
     u8* bytes;
     // Decoded byte count, which is the element count of a narrow fragment.
     u32 length;
@@ -504,8 +511,11 @@ struct CStringLiteralMemo
     CStringLiteralMemoSlot* slots;
     u32 capacity;
     u32 count;
+    // First sights are counted and record no bytes: set when nothing will
+    // lower the unit (CParserResult.string_literal_lengths_only).
+    bool lengths_only;
 };
-BUSTER_C_EXTERN CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens);
+BUSTER_C_EXTERN CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens, bool lengths_only);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
 // Per-body validation scratch (#1256). While c_parse_validate_lowering_constraints
@@ -650,6 +660,8 @@ BUSTER_C_EXTERN CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
 // attribute on the definition -- is final.
 BUSTER_C_EXTERN u64 c_record_layout_size(CRecordLayoutCursor const* cursor, u32 alignment);
 BUSTER_C_EXTERN CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId base, CType qualifiers);
+BUSTER_C_EXTERN CTypeId c_parse_intern_qualified_type(CParseResult* result, CTypeId base, CType qualifiers);
+BUSTER_C_EXTERN CTypeId c_parse_interned_qualified_type(CParseResult const* result, CTypeId base, CType qualifiers);
 BUSTER_C_EXTERN bool c_parse_atomic_drops_type_alignment(CParseResult const* result, CTypeId base, bool adds_atomic);
 BUSTER_C_EXTERN bool c_parse_type_qualifier_word(String8 spelling, CType* type);
 BUSTER_C_EXTERN u32 c_preprocess_token_source(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor);
@@ -1406,6 +1418,24 @@ typedef enum CConstantEvaluationMode
 // mismatching entries until an empty slot, so it finds the one live entry of
 // a key exactly, whatever was rolled back before. A lookup
 // (c_parse_interned_type) works whether or not the window is open.
+//
+// Qualified member copies (GitHub #3102). The machine's member step on a const
+// or volatile struct or union appends a qualified copy of the member's row
+// (c_parse_add_qualified_type), and nearly all of those copies repeat an
+// earlier one. While the window is open, c_parse_intern_qualified_type shares
+// them through a second log and slot table, `qualified_*`, whose live prefix
+// is CParseResult.interned_qualified_count. It is kept apart because
+// c_parse_interned_row_matches compares only kind, element and qualifiers and
+// would take a qualified pointer copy for a plain pointer row; a shared copy
+// matches only a row equal in every CType field. The window keeps such a copy
+// unobservable but for the table's size, as above: it is never mutated in
+// place; lowering maps every row with an unqualified link through that row
+// (const to the same IR type, volatile through c_ir_add_qualified_type, which
+// returns an existing type), so it has no IR type or `-g` entry of its own;
+// and it only ever replaces a later copy of itself. A copy that would inherit
+// an alignment record is never shared, because lowering builds an aligned IR
+// type per record, and neither is a restrict or atomic one. A lookup
+// (c_parse_interned_qualified_type) works whether or not the window is open.
 struct CTypeInterning
 {
     u32* rows;
@@ -1415,6 +1445,11 @@ struct CTypeInterning
     u32 slot_count;
     // Slots written since the table was last built, stale ones included.
     u32 slot_used;
+    u32* qualified_rows;
+    u32* qualified_slots;
+    u32 qualified_row_capacity;
+    u32 qualified_slot_count;
+    u32 qualified_slot_used;
     // Aggregate member segments in flight (c_type_parse_aggregate_range_step);
     // the machine's failure path takes back those it discards.
     u32 suspended;
@@ -1511,6 +1546,15 @@ struct CTypeParseMachine
     // the tree does not cover), and `ast_type_statistics` the optional counts.
     CAst const* syntax_tree;
     CAstTypeStatistics* ast_type_statistics;
+    // The body binder's statement plan (c_parse_statement_plan_build) reads
+    // the same tree: `ast_statement_bodies` holds the `{` of every top-level
+    // function definition, ascending, and its COMPOUND_STATEMENT node, built
+    // once before the declarations are bound (count in
+    // `ast_statement_body_count`); `ast_statement_statistics` the optional
+    // counts.
+    CAstStatementStatistics* ast_statement_statistics;
+    u32* ast_statement_bodies;
+    u32 ast_statement_body_count;
     CAstTypeBodyIndex* ast_bodies;
     CAstTypeBody* ast_types;
     CParseExpressionQuery* expression_queries;
@@ -1555,6 +1599,14 @@ struct CTypeParseMachine
     // inside one is reported there, because neither path has a later fallback
     // that names it.
     u32 member_declarator_depth;
+    // Active aggregate-member frames; replaces per-core ancestor rescans.
+    u32 aggregate_segment_depth;
+    // The `(` and `)` of the identifier list of the old-style definition
+    // whose parenthesized declarator is being parsed, `(a)` in
+    // `int (k(a)) int a; {...}`, else both zero: its names are parameters,
+    // not declarations (GitHub #3368).
+    u32 identifier_list_open;
+    u32 identifier_list_close;
     u32 expression_task_count;
     u32 expression_task_capacity;
     CConstantEvaluationMode constant_evaluation_mode;
@@ -1594,6 +1646,15 @@ struct CParsePromotedMemberWork
 };
 
 // ---- tree expression typer (c_ast_types.c) ----------------------------------
+
+// The typer's rarely taken answers stay out of line: inlined into
+// c_parse_expression_type_query, which every query runs, they change that
+// function's code on the default path too.
+#if BUSTER_COMPILER_MSVC
+#define C_AST_TYPES_NOINLINE __declspec(noinline)
+#else
+#define C_AST_TYPES_NOINLINE __attribute__((noinline))
+#endif
 //
 // What the typer made of one type query. ANSWER carries the type and the
 // nonplace-projection fact exactly as a valid, constraint-free machine answer
@@ -1606,8 +1667,13 @@ typedef enum CAstTypeStatus
     C_AST_TYPE_MISS,
     C_AST_TYPE_DECLINE,
     C_AST_TYPE_ANSWER,
-    // An answer that is the row a replay of the queried string literal
-    // appends; `type` is invalid until c_parse_expression_tree_query replays it.
+    // An answer that is the row a replay of the queried node appends: a
+    // string literal, whose `type` is invalid until
+    // c_parse_expression_tree_query replays it, or, when `node_kind` is
+    // MEMBER or MEMBER_ARROW, a member access over a const or volatile
+    // aggregate, whose `type` is that aggregate's row until the replay
+    // appends the member's qualified copy. One status keeps the query
+    // function's code as it was.
     C_AST_TYPE_STRING,
 } CAstTypeStatus;
 
@@ -1621,7 +1687,8 @@ struct CAstTypeAnswer
     // [replay_start, replay_end), when not empty, is a string-literal token
     // whose typing the answer must replay exactly as the machine's task would
     // (c_parse_expression_tree_query): a checked cast's operand, or under
-    // C_AST_TYPE_STRING the queried literal itself.
+    // C_AST_TYPE_STRING the queried literal itself, or the queried member
+    // access's tokens, which end at the member's name.
     u32 replay_start;
     u32 replay_end;
     bool nonplace_projection;
@@ -1695,6 +1762,10 @@ struct CAstTypeVerifyMark
     u32 types;
     u32 diagnostics;
     u32 array_bounds;
+    u32 type_alignments;
+    // The live shared qualified copies (CTypeInterning), which a replay may
+    // log and the hold takes back with its rows.
+    u32 interned_qualified;
     u32 members;
     u32 enum_members;
     u32 entities;
@@ -1702,6 +1773,8 @@ struct CAstTypeVerifyMark
     u32 parameters;
 };
 BUSTER_C_EXTERN bool c_ast_types_verifying(void);
+// Whether `row` is a live shared qualified member copy (CTypeInterning).
+BUSTER_C_EXTERN bool c_parse_qualified_copy_shared(CParseResult const* result, u32 row);
 BUSTER_C_EXTERN CAstTypeVerifyMark c_ast_types_verify_begin(CParseResult const* result);
 BUSTER_C_EXTERN void c_ast_types_verify_hold_replay(CParseResult* result, CAstTypePending* pending);
 BUSTER_C_EXTERN void c_ast_types_verify_end(CTypeParseMachine* machine, CParseResult* result, CAstTypePending const* pending, u32 start, u32 end,
@@ -1725,10 +1798,13 @@ struct CAstTypePending
     CAstTypeVerifyMark mark;
     u32 replay_types;
     u32 replay_bounds;
+    u32 replay_alignments;
     // More rows than C_AST_TYPE_REPLAY_ROWS are counted but not kept, which
     // the comparison reports as a mismatch.
     CType replay_type_rows[C_AST_TYPE_REPLAY_ROWS];
     CArrayBound replay_bound_rows[C_AST_TYPE_REPLAY_ROWS];
+    // The alignment records a replayed row inherited (c_parse_add_qualified_type).
+    CTypeAlignment replay_alignment_rows[C_AST_TYPE_REPLAY_ROWS];
 };
 #endif
 

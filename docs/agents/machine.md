@@ -30,6 +30,17 @@ returns, partial eightbytes and tail fields with both frontend forms and
 both allocators; desktop lanes execute the native
 fixture as well as compiling both architectures.
 
+
+Zero-byte array members in an aggregate constructor require a resolved empty
+layout and a frame-backed captured value. Both native member writers accept
+that image without emitting a store, as they do for empty struct/union members.
+This includes omitted flexible-array tails; only the fixed header belongs to
+the local object's initialization or copy. The registered
+`compiler_driver_test_flexible_initializers` checks zero and designated local
+initializers, nested array fields, one evaluation and untouched tail storage
+on six native targets, both allocators, both frontend forms and O0/O2. Matching desktop
+hosts execute its independent expected-value fixture.
+
 ## Machine instruction selection and scheduling
 
 - Debug-location seed storage starts with a small arena-backed array and grows
@@ -109,6 +120,18 @@ fixture as well as compiling both architectures.
   symbol rows own TLS/GOT/relocations, and offset folding never modifies them.
   These facts authorize no memory reordering or dereference. No `MachineAddress`
   MIR side table is produced; keep `MACHINE_REF_ADDRESS` stable.
+- A symbol row's `MachineSymbolReference` is chosen per symbol by
+  `machine_x64_symbol_reference` / `machine_a64_symbol_reference`, and the
+  object layer spells it per format. Mach-O relocation types name the
+  instruction, and ld64/lld resolve them with that meaning (#1454). An x86-64
+  direct call takes the PLT form, which the writer emits as
+  `X86_64_RELOC_BRANCH`. The address of a symbol the module does not define
+  takes the GOT form on both architectures: `GOT_LOAD`, or `GOT_LOAD_PAGE21`
+  and `GOT_LOAD_PAGEOFF12` on `adrp`+`ldr`. Every other rip-relative field is
+  `SIGNED`, or `SIGNED_1/2/4` when immediate bytes follow the field.
+  Inline/global assembly keeps a direct branch's identity through
+  `assembly_x86_relocation_is_branch`. `tools/test_mach_o_dylib_data_lld.sh`
+  is the independent-linker oracle for this contract.
 - `MachineFunction` owns CFG edges, block parameters, and incoming edge
   parallel-copy sources. Edge source `i` maps to destination block parameter
   `i`; keep these copies parallel through allocation so cycles are resolved as
@@ -357,6 +380,30 @@ fixture as well as compiling both architectures.
   the defining row's slot address (`machine_x64_emit_exact_frame_address`,
   `machine_a64_emit_frame_address`). This is sound because a slot whose address
   a row takes keeps its own storage for the whole function.
+- x86-64 selection gives a register-copy cast of an integer constant a constant
+  definition, so the recipe above covers it. A C null pointer is
+  `CAST(INTEGER_TO_POINTER)` of zero. `machine_x64_cast_copies_constant` follows
+  up to four integer-to-pointer, pointer-reinterpret or integer-reinterpret
+  casts between general-register scalars back to a `CONSTANT_INTEGER`, and such
+  a cast is selected as `MOV_RI` of that immediate instead of `MOV_RR`. A
+  constant or cast whose every use is such a cast is marked `fused_dead` and
+  selects into nothing. Edge arguments count as uses, so a value reaching a
+  block parameter keeps its row. AArch64 selection applies the same rule
+  through `machine_a64_cast_copies_constant` and `MACHINE_A64_MOV_RI`; its
+  classification pass counts the copy-cast reads and the marking runs after
+  branch fusion against the same use counts, edge arguments included.
+- x86-64 selection folds a constant `INDEX` index into its base address
+  offset (`machine_x64_index_constant_offset`). When the index is a
+  `CONSTANT_INTEGER` whose value, read at the index's width and signedness, is
+  non-negative and whose scaled offset fits a 32-bit displacement, the element
+  address is selected through `machine_x64_select_place_address_offset`. A
+  direct frame array then gets one `LEA_FRAME`, which the frame-address recipe
+  above rematerializes; a pointer gets one `LEA_OFFSET`, or a copy at offset
+  zero. Otherwise the result is a mutable copy of the base plus a scaled index,
+  which no recipe covers. A constant that only such rows and constant-copying
+  casts read is `fused_dead`. A `GLOBAL` base folds like a pointer, so its
+  element address is not rematerialized. Negative indices keep the computed
+  form. AArch64 selection does not fold `INDEX` indices yet.
 - FAST/QUALITY start a join's or loop header's general block parameters in
   registers. `machine_fast_parameter_contract` gives each non-pinned,
   non-mutable general parameter a caller-saved (or already-saved) register
@@ -374,9 +421,27 @@ fixture as well as compiling both architectures.
   register (`machine_fast_free_edge_register`: not a source, target, carried
   value, pinned register or unsaved callee-saved register; the first slot
   scratch is preferred) stages memory sources bound for homes and saves one
-  value to break each copy cycle. An edge with a vector or mask assignment,
-  or with no free register, still stages its resident sources through the
-  tile. Either way a source with a rematerialization recipe (constant or
+  value to break each copy cycle. A parameter home can also be another
+  copy's memory source (a loop back edge rotating homed parameters), so an
+  edge that writes any home, including a pinned non-contract target's, reads
+  every memory source before its first home store: straight into its
+  register target when no resident source occupies that register, otherwise
+  through the free register into its tile cell. On unity `ide.c` (x86-64
+  `-march=native -g0`) this kept 45 FAST edges off the staged form and
+  removed about 680 stack-referencing instructions per mode. When no
+  register is free across the whole edge, which happens on wide edges when
+  the targets, sources and unsaved callee-saved registers cover the register
+  file, a target that no copy reads and that is not loaded early stages
+  instead (`machine_fast_edge_staging_register`): its value is dead until
+  its own copy. That register is overwritten by the copies, so a copy cycle
+  instead saves one value in its first copy's tile cell and reloads it at
+  the end of the cycle. On unity `ide.c` every no-free-register edge had
+  such a target and cycles were rare (none in FAST, two in the QUALITY
+  scan); 52 of 53 FAST edges left the staged form, removing 5.1 KB of
+  `.text` and about 780 stack-referencing instructions per mode. An edge
+  with a vector or mask assignment, or with neither register, still stages
+  its resident sources through the tile; the same input has no vector or
+  mask edge. Either way a source with a rematerialization recipe (constant or
   frame address) reads no register and rematerializes straight into its
   destination (`MACHINE_FAST_EDGE_SOURCE_RECREATED`). On unity `ide.c` the
   parallel move removed about 46 k stack-referencing instructions and 2% of
@@ -441,6 +506,17 @@ fixture as well as compiling both architectures.
   row has read yet (`physical_live_mask`: staged call arguments). A value
   crossing the next call moves only into a paid callee-saved register. Dead,
   rematerializable, or unplaceable occupants keep the eviction.
+- FAST/QUALITY remember the register each value was first bound to
+  (`MachineFastState.preferred_registers`). A free pick for a reload
+  (`machine_fast_ensure` with no fixed target) takes that register while it is
+  free, through the same advisory path as consumer hints: it never evicts and
+  never overrides fixed, tied, pinned, forbidden or callee-saved preferences.
+  A value reloaded on two paths then usually meets the join in one register,
+  so fewer copies repair the disagreement. On unity `ide.c` (x86-64
+  `-march=native -g0`) this removed about 4.3k FAST and 2.8k QUALITY copies
+  and 0.08% / 0.06% of `.text`. Boundary spills and reloads barely move,
+  because they come from a value missing on some path, not from disagreement
+  ([#56 census](https://github.com/buster14a/buster/issues/56#issuecomment-6108071761)).
 - A FAST/QUALITY fixed physical destination evicts its current owner without a
   store when that owner's last use is the same row and it does not escape its
   block (or that use lies below the loop floor): a dying value staged into an argument or return register is consumed
@@ -785,12 +861,21 @@ fixture as well as compiling both architectures.
   Smaller vectors and model-dependent register splitting retain their MIR
   representation and admission rules;
   unsupported shapes are refused without a direct fallback.
+- MIR prologue unwind actions are frame events the target encoder appends
+  right after emitting each frame instruction, at its real cursor
+  (`MachineEncodeResult.frame_events`, `prologue_size`). The shared Windows
+  probes publish their own event span through the same descriptor append.
+  Module codegen copies the finished stream into the function descriptor and
+  never re-derives instruction lengths, save masks or frame chunks; DWARF CFI
+  and PE serializers keep their format checks. A new prologue instruction
+  that changes SP, saves a register or establishes the frame pointer must
+  publish its event where it is emitted. The Windows AArch64 unwind format
+  needs an event for every prologue word, including no-effect ones (#1918).
 - Windows/UEFI x86-64 MIR frames larger than one page reuse
   `codegen_x64_emit_windows_stack_allocate`, the retained shared bounded
   R10/R11 probe loop. RSP stays unchanged until the final allocation, so a
-  large frame requires one allocation unwind action and a bounded prologue.
-  `MachineEncodeResult.frame_allocation_offset` supplies its actual byte offset
-  to unwind construction without widening the result on 64-bit hosts.
+  large frame requires one allocation unwind action and a bounded prologue;
+  the probe publishes that action at its actual end offset.
   Keep object creation and native Windows execution of
   `tests/basic_c_win64_large_frame.c` covered in every allocator mode; page
   probing must preserve all incoming argument registers and private copies.
@@ -888,8 +973,7 @@ fixture as well as compiling both architectures.
 - ELF/Mach-O AArch64 fixed frames are not limited by the scaled callee-save offset.
   Above that offset's reach, the prologue and each epilogue derive the compact
   save-area base from X29 in reserved X16, then use small unsigned offsets.
-  Module unwind construction counts both setup words and retains the actual
-  SP-relative save locations. Capacity planning includes large-offset body
+  Each save's frame event still names its SP-relative location. Capacity planning includes large-offset body
   transfers and aggregate-copy pieces; frame-size sums are checked before
   narrowing. Keep strict large-frame and packed-layout tests in all MIR modes.
 - AArch64 calls in functions containing dynamic stack allocations reserve
@@ -943,7 +1027,9 @@ fixture as well as compiling both architectures.
   natural alignment, and places anonymous arguments in aligned stack slots.
   Both platforms use public eight-byte pointer lists. `va_copy` copies eight
   bytes; `va_arg` selects ordinary MIR loads, alignment, cursor stores and
-  exact aggregate copies for the supported values through sixteen bytes.
+  exact aggregate copies. Values through sixteen bytes are read inline. Larger
+  indirect aggregates consume one pointer and copy the pointee; Darwin also
+  reads larger by-value HFAs/HVAs from aligned inline stack slots.
   `compiler_driver_test_aarch64_platform_variadic` requires zero fallback
   for every MIR allocator and frontend form, then executes native standalone
   and mixed-compiler callers, callees and public-list consumers on matching
@@ -1127,6 +1213,17 @@ fixture as well as compiling both architectures.
   length-preserving replacement and its field descriptor. The relaxable kinds
   authorize conversion; plain `GOTPCREL` retains a GOT reference. An
   unrecognized site fails by name rather than guessing replacement bytes.
+  A GOT reference to an absent weak name (one that resolves to zero) is never
+  relaxed: GCC and Clang's default PIE `cmpq $0, name@GOTPCREL(%rip)` has no
+  direct form. The static writer points every such site at one shared zero
+  slot after `.eh_frame`. The dynamic writer gives each name a
+  `function_got_indices` slot that no loader relocation fills. The
+  position-independent planner uses `LINK_ELF_PIC_GOT_ADDRESS_ZERO`. AArch64
+  `ADR_GOT_PAGE`/`LD64_GOT_LO12_NC` already become `MOVZ #0`/`ADD #0` in
+  `object_aarch64_elf_page_relocate`. `compiler_driver_elf_weak_got_tests`
+  links host `-fPIE` objects against a host-linker oracle (#3414): as PIE and
+  `-no-pie` on x86-64, and `-no-pie` only on AArch64 Linux, which writes only
+  fixed-address executables.
   It relaxes the two indirect
   thread-local models back to local-exec for the same reason
   (`link_elf_relax_thread_local`), and a foreign object's local-dynamic
@@ -1169,6 +1266,25 @@ pinned to the same register.
 `machine_test_x64_inline_port_environment` and
 `c_test_inline_assembly_constraint_unions` hold the byte oracles (GNU as 2.47)
 and the neighbouring refusals; only unprivileged MXCSR/x87 round trips execute.
+
+## Narrow x86-64 call results
+
+Ordinary Boolean and 8/16-bit integer results are captured from RAX with
+zero/sign extension at their ABI width, before their canonical value reaches a
+branch, conversion or spill. Foreign callees may leave the upper RAX bits
+unspecified. `machine_x64_receive_call_result` uses the existing scalar shape's
+extension opcode for direct and indirect calls; aggregate parts and floating,
+vector and full-width scalar capture retain their own paths.
+
+`machine_test_x64_narrow_call_results` checks selected RAX capture widths on all
+five x86-64 OS targets, both frontend forms and both allocators.
+`compiler_driver_test_x64_narrow_call_results` uses independently assembled
+foreign callees with dirty upper bits and literal C expectations. Matching
+Linux/macOS x86-64 hosts first run a host-compiled client, then Buster clients
+against the same foreign object, covering direct/indirect Boolean branches,
+signed/unsigned byte and word boundaries, and 32/64-bit controls. Other hosts
+retain selection and object-generation coverage; cross-generation is not native
+execution.
 
 ## Wide integer conversion rounding
 

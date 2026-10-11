@@ -120,7 +120,9 @@ captures (#2741).
   passing oracle after parsed closure verification, separate object and
   compile-link operations, and an exact runtime transcript. That receipt covers
   only its one direct-SSA/non-PIC/fast cell; it is not timing, dedicated-host,
-  A/A or A/B performance admission.
+  A/A or A/B performance admission. Timed real-source runs use
+  `run --real-source DESCRIPTOR ROOT`, and their Zen 5 route is the fixed
+  `throughput-real-source-v1` profile on `compare-pull` (below).
   This does not replace the canonical self-host/correctness gates below.
   The same optional allocation observer can emit a [per-site census](../allocation-census.md)
   with separate zeroing, alignment and OS request totals for offline analysis.
@@ -530,12 +532,30 @@ captures (#2741).
   that can claim performance validation has a row in
   [`docs/performance-validation-v1.json`](../performance-validation-v1.json),
   either a 9700X route with the consumer that checks its evidence, or an
-  explicit `NOT VALIDATED` with a resolution. `tools/bench_direct/performance_inventory_test.py`
+  explicit `NOT VALIDATED` with a resolution and a `claim_route`: the existing
+  9700X route a claim about it must use instead, or `none` for a visible gap
+  with no Zen 5 route yet. A tool that includes `<buster/...>` headers cannot
+  claim the direct-workload route, because each workload is compiled alone
+  against system headers. `tools/bench_direct/performance_inventory_test.py`
   (part of the required benchmark policy check) discovers entry points from
   `build.c`, `uarch_lab.py`, `ide`, `tools/` and the workflows, and fails on an
   unregistered or stale one. Each published 9700X compiler receipt must name
   the observed CPU, the Ryzen 7 9700X; a runner label, target flag or other
-  host is refused. The direct workload harness reads the same observed CPU
+  host is refused. The `compare` and `compare-pull` jobs also keep their #2758
+  startup record (`machine-specifications/report.json`, through the pinned
+  action's `mode: retain`) in the evidence artifact they already upload, and
+  `compiler_publish.machine_record` fails publication when that record is
+  missing or malformed, when a required fact (schema, run, attempt, job, CPU
+  model, architecture) is not `available`, when it names another CPU or
+  architecture than the 9700X's x86-64, when its model differs from the
+  receipt's observed CPU, or when its run, attempt or job is not the attempt
+  being published. Optional facts keep the collector's own `unknown` or
+  `unavailable` status in the published check and are never filled in. Only
+  publication-only recovery may lack it, and only when the bench workflow at
+  the original run's authenticated revision has no record retention step
+  (`machine_record_required`); an unreadable workflow still requires it. The record is collected by the same job, so it corroborates the
+  receipt rather than proving the host independently. The direct workload
+  harness, which uploads no artifact, reads the same observed CPU
   model, prints it in its report, and on any other host compiles and runs
   nothing and fails. The inventory test also refuses a `covered` row whose
   evidence consumer never checks the observed host against `APPROVED_HOST`.
@@ -669,8 +689,8 @@ captures (#2741).
     same checkout path, one after the other: an `-O3` unity compile of `ide.c`
     takes about 5 GiB, and parallel builds can be OOM-killed. Run each workload
     with the same command line and working directory, and pin `ide cc`'s own
-    output target (for example `-march=znver3`), since it defaults to the host
-    CPU. A stage-1 self-compile takes about 10 minutes per profile;
+    output target (for example `-march=znver3`), since it defaults to the
+    portable baseline. A stage-1 self-compile takes about 10 minutes per profile;
     `--cache-sim=yes --branch-sim=yes` roughly doubles that.
   - **Read the numbers as diagnostics, never as acceptance evidence.**
     `-march=x86-64-v3` compiles out `BUSTER_SIMD_512` kernels such as
@@ -800,13 +820,88 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    the same candidate-HEAD unity source. Stage 1 uses the exact same candidate
    compiler binary for A and B, with A omitting `-fcanonical-inline` and B
    passing it. Stage 2 uses those two stage-1 outputs as compilers with the
-   same respective modes. Each stage is 12 ABBA pairs after one warmup. The
-   report records wall time, retired instructions when perf can count them,
+   same respective modes. Saved stage-1 references retain the produced
+   compiler's bytes and permissions; missing execute permission or a failed
+   permission copy remains a failure. Each stage is 12 ABBA pairs after one
+   warmup. The report records wall time, retired instructions when perf can
+   count them,
    peak RSS and executable-section code bytes; unavailable hardware counters
    remain NA. Each mode must reproduce its own stage-1 compiler byte-for-byte
    in stage 2; off/on outputs do not need to match one another. A failed or
    incomplete profile makes the requested evidence incomplete, while a
    slower result remains report-only.
+
+   **Issue #3397 opt-in `-fc-ast-pilot` adoption profile.** The same route
+   accepts one fresh exact line `profile: ast-pilot-acceptance-v1` in
+   `benchmarks/9700x/compiler-compare.request`. Like the analyzer selectors,
+   it is selected only when the head adds it exactly once against every
+   parent; a historical occurrence does not replay it, and it cannot be
+   combined with an analyzer profile. `ast_pilot_acceptance.py` runs it after
+   the tests-off candidate build, on the same frozen candidate-HEAD tree
+   (`src/` and `build/generated` hashed before and after). It times the one
+   candidate binary as both A (default) and B (`-fc-ast-pilot`) with
+   `uarch_lab.py compare --ast-pilot-pair CELL` on the unity source at `-g0`
+   without linking: a `-fsyntax-only` cell, then a `-c` cell, each 20 ABBA
+   pairs after one warmup on CPU 2 with fresh copies. It records wall time with
+   its 95% CI, retired instructions when perf can count them (NA needs a
+   recorded reason), peak RSS, and the tree's `retained_bytes` from an untimed
+   `-v` syntax-only run of B, which also proves A built no tree. Every run's
+   stdout and stderr must match its variant's reference, and A's and B's
+   diagnostics and `-c` objects must be identical. The verdict is the
+   `docs/agents/frontend/ast.md` stage-1 adoption budget
+   (`AST_PILOT_BUDGET`): `-fsyntax-only` B/A at most 0.99 in instructions and
+   in the median paired wall ratio, whose CI must also exclude 1; `-c` wall not
+   detectably slower (CI low bound at most 1); and in each cell B's median
+   peak RSS above A's by at most 1.05 times the retained bytes. It is
+   report-only. Request flags, pair counts and other compiler arguments are
+   not accepted; a different flag pair needs its own versioned profile.
+   `compiler_publish.py` re-validates every raw cell document, the tree probe
+   and the recomputed verdict on the 9700X evidence.
+
+   **Issue #2761 opt-in real-source throughput profile.** The same route
+   accepts one fresh exact line `profile: throughput-real-source-v1`, selected
+   by the same every-parent freshness rule; it cannot be combined with an
+   analyzer profile. After the corpus leg,
+   `tools/bench_direct/throughput_real_source.py` stages one fresh root per
+   pinned input outside timing (`THROUGHPUT_REAL_SOURCE_INPUTS`): the cJSON
+   sources from raw GitHub URLs at commit `c859b25d`, the Lua 5.4.8 tarball's
+   `src/` and the SQLite 3.53.4 amalgamation zip, each checked against its
+   pinned SHA-256, plus `tests/basic_cjson_roundtrip.c` from the merge base.
+   Each merge-base descriptor must match its pinned SHA-256. Then the merge
+   base's `./build.sh bench_throughput run --real-source` times each
+   descriptor's own `compile_link_argv` (source to linked executable, `-O2`,
+   direct-SSA, non-PIC) on the matched baseline and candidate binaries, so
+   the merge base must contain the `--real-source` option.
+   The harness re-verifies every staged tree against its descriptor's
+   inventory and tree hash before and after timing.
+
+   Sampling is declared up front: FAST and QUALITY, two warmups per variant,
+   then two fixed rounds of 20 adjacent A/B pairs for each of the six
+   descriptor/mode cells, on CPU 2 with a 120-second per-sample timeout.
+   ABBA blocks and job order follow the recorded seed. Every pair runs: there
+   is no early stop, rerun, trimming or best-of-N. The guard is off, so each
+   cell is `diagnostic (guard disabled)`: medians and per-round sign tests are
+   reported and never gate. The receipt's `throughput_real_source` record and
+   the evidence under `throughput_real_source/` (`summary.json`,
+   `metadata.json`, `staging.json`, the run's own `cpuinfo.txt` and raw
+   samples) are re-validated by `compiler_publish.py`
+   (`validate_throughput_real_source`). It refuses a harness exit other than
+   0, a missing or extra cell, a round with fewer than 20 pairs, a descriptor,
+   tree, archive or file hash other than its pin, compiler hashes other than
+   the measured binaries, and a `cpuinfo.txt` that does not name only the
+   Ryzen 7 9700X. Missing, partial, failed or cancelled evidence therefore
+   fails the check.
+
+   Cost: on a 4-vCPU hosted 2.8 GHz Xeon (diagnostic, not Zen 5), the full
+   profile (two warmups plus 40 timed pairs, so 42 passes over the six cells
+   and both variants) took 508 s, about 12 s per pass, partly alongside other
+   test runs. The slowest cell, SQLite QUALITY, had a 1.96 s median. That
+   fits inside the unchanged 90-minute `compare-pull` job, next to the roughly
+   14-minute ordinary comparison. The leg has its own 30-minute timeout; no
+   job timeout changed. The host needs the
+   descriptors' native dependencies (for Lua, the readline headers and
+   library) and outbound HTTPS to `raw.githubusercontent.com`, `www.lua.org`
+   and `www.sqlite.org`.
 
    **Without perf (#2768).** Before the first timed run the lab runs
    `perf stat -- true` once (`probe_counters`). If perf is missing, exits

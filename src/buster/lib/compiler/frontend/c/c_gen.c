@@ -6,20 +6,31 @@
 // the program arena is touched. c_ir_constant_initializer_bytes owns the
 // checked fixed context array while its dynamic work remains in task scratch.
 // c_lower_to_ir_run owns the private, checked CIrQueryMachine buffer arena
-// and releases it after every core result. c_ir_scratch_reservation_size and
+// and releases it after every core result; it maps that arena whenever the
+// unit-lifetime query stack would leave function lowering less than half of
+// the thread scratch. Per-initializer scratch is sized by the work and
+// released by its user: c_ir_emit_zero_value grows its task stack on demand,
+// c_ir_zero_storage_compatible rewinds its type marks, and the nested
+// compound-literal cursors follow c_ir_initializer_nesting_depth, never the
+// unit's type count. c_ir_scratch_reservation_size and
 // c_ir_function_scratch_tail_reservation size large lowering workspaces before
 // their first allocation; c_ir_ssa_grow_slots, c_ir_ssa_parameter and the
 // c_ir_ssa_finish_cfg / c_ir_ssa_finish_reserve_publish steps of c_ir_ssa_finish
 // check the direct-SSA rows whose size only the body decides (c_ir_ssa_refuse
 // records the refusal). The remaining phase/state graph is in
 // docs/agents/compiler-phase-state.md.
-// There is no AST — lowering re-walks token ranges directly, resolving
-// identifiers through the parse result's scopes and answering structure
-// questions from a prebuilt matching-delimiter index
-// (c_ir_build_delimiter_index). The prepared control expressions of a function
-// are answered by token-indexed tables, not scans of their list:
-// c_ir_prepared_control_expression_find, _contains and _contains_range, kept
-// current by _begin, _end and _rollback (a typeof replay).
+// By default lowering has no syntax tree: it re-walks token ranges directly,
+// resolving identifiers through the parse result's scopes and answering
+// structure questions from a prebuilt matching-delimiter index
+// (c_ir_build_delimiter_index). Under -fc-ast-pilot the caller also passes the
+// implicit postorder tree (CIRLowerOptions.syntax_tree, GitHub #3102), and
+// c_ir_root_conditional answers from its conditional nodes through
+// c_ir_tree_conditionals_build / c_ir_tree_root_conditional; every other
+// question still reads tokens. No node id reaches the IR. The prepared control
+// expressions of a function are answered by token-indexed tables, not scans of
+// their list: c_ir_prepared_control_expression_find, _contains and
+// _contains_range, kept current by _begin, _end and _rollback (a typeof
+// replay).
 // c_ir_parameter_value_type and c_ir_emit_parameter keep callable values
 // separate from the declared qualification of parameter objects.
 // c_ir_windows_va_start_cursor_place bridges an addressed Windows CRT cursor
@@ -127,7 +138,10 @@
 //   c_ir_lower_compound_literal_step              ordered evaluation and final
 //                                                 per-subobject initializer values
 //   c_ir_lower_expression_core_step               the expression evaluator
+//   c_ir_lower_condition_step                     depth-zero logical splits
 //   c_ir_lower_dispatch                           lowering-machine dispatch
+//   c_ir_tree_conditionals_build,                 root `?:` splits from the
+//   c_ir_tree_root_conditional                    tree's CONDITIONAL nodes
 //   c_ir_cleanup_*                                __attribute__((cleanup))
 //   c_ir_inline_assembly_*                        GNU inline assembly
 //   c_ir_statement_end, c_ir_statement_end_find   memoized statement extents
@@ -159,6 +173,7 @@
 //   c_lower_to_ir                                 the driver
 
 #include "c_internal.h"
+#include <buster/lib/compiler/frontend/c/c_ast.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 
 BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out);
@@ -441,6 +456,16 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
                 bool is_weakref_word = string_equal(attribute_name, S8("weakref")) || string_equal(attribute_name, S8("__weakref__"));
                 bool is_ifunc_word = string_equal(attribute_name, S8("ifunc")) || string_equal(attribute_name, S8("__ifunc__"));
                 binding->is_ifunc |= is_ifunc_word;
+                if (is_ifunc_word && item + 3 < end && c_token_is_punctuator(&preprocess.tokens[item + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                    preprocess.tokens[item + 2].kind == C_TOKEN_STRING_LITERAL &&
+                    c_token_is_punctuator(&preprocess.tokens[item + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                    c_ir_decode_quoted(arena, c_token_spelling(preprocess.spelling_base, preprocess.tokens[item + 2]), '"', &decoded) && decoded.length)
+                {
+                    binding->ifunc_resolver = (String8){
+                        .pointer = (char8*)decoded.pointer,
+                        .length = decoded.length,
+                    };
+                }
                 if (is_weakref_word)
                 {
                     binding->is_weakref = true;
@@ -1759,6 +1784,8 @@ typedef enum CIrAttributeMarker
     // the canonical IR is diagnosed with the message. See
     // c_ir_check_error_attribute_calls.
     C_IR_ATTRIBUTE_MARKER_ERROR,
+    C_IR_ATTRIBUTE_MARKER_ALWAYS_INLINE,
+    C_IR_ATTRIBUTE_MARKER_NOINLINE,
 } CIrAttributeMarker;
 
 BUSTER_C_INTERNAL bool c_ir_attribute_marker_spelling(String8 spelling, CIrAttributeMarker marker)
@@ -1769,21 +1796,32 @@ BUSTER_C_INTERNAL bool c_ir_attribute_marker_spelling(String8 spelling, CIrAttri
         case C_IR_ATTRIBUTE_MARKER_NORETURN: result = c_ir_noreturn_spelling(spelling); break;
         case C_IR_ATTRIBUTE_MARKER_GNU_INLINE: result = string_equal(spelling, S8("gnu_inline")) || string_equal(spelling, S8("__gnu_inline__")); break;
         case C_IR_ATTRIBUTE_MARKER_ERROR: result = string_equal(spelling, S8("error")) || string_equal(spelling, S8("__error__")); break;
+        case C_IR_ATTRIBUTE_MARKER_ALWAYS_INLINE:
+            result = string_equal(spelling, S8("always_inline")) || string_equal(spelling, S8("__always_inline__"));
+            break;
+        case C_IR_ATTRIBUTE_MARKER_NOINLINE:
+            result = string_equal(spelling, S8("noinline")) || string_equal(spelling, S8("__noinline__"));
+            break;
     }
     return result;
 }
 
+/* C23 GNU attributes require an explicit GNU namespace. The scope token is
+   three slots before the name because `::` is two colon tokens. */
+BUSTER_C_INTERNAL bool c_ir_attribute_gnu_namespace_at(CPreprocessResult preprocess, u32 index)
+{
+    CToken const* tokens = preprocess.tokens;
+    String8 scope = index >= 3 && tokens[index - 3].kind == C_TOKEN_IDENTIFIER
+                        ? c_token_spelling(preprocess.spelling_base, tokens[index - 3])
+                        : (String8){0};
+    return index >= 3 && c_token_is_punctuator(&tokens[index - 1], C_PUNCTUATOR_COLON) &&
+           c_token_is_punctuator(&tokens[index - 2], C_PUNCTUATOR_COLON) &&
+           (string_equal(scope, S8("gnu")) || string_equal(scope, S8("__gnu__")));
+}
+
 /* `error` is an ordinary identifier even inside an attribute list -- the
-   operand of `cleanup(error)` is one -- so the marker counts only where an
-   attribute name stands and only with the string-literal argument the
-   attribute requires. c_ir_attribute_marker_find offers only the list's own
-   entries, never a token inside another attribute's balanced argument
-   payload, so neither `[[vendor::tag(gnu::error("m"))]]` nor
-   `__attribute__((tag(error("m"))))` names it. In a GNU `__attribute__` list the name follows the
-   list's '(' or a ','. In a C23 `[[...]]` list only the GNU namespace means
-   it: `gnu::error` or `__gnu__::error`, whose `::` lexes as two ':' tokens.
-   An unscoped `[[error(...)]]` or another vendor's `vendor::error` is an
-   attribute GCC does not know and ignores, so it is not this one. */
+   operand of `cleanup(error)` is one -- so it counts only as a top-level
+   attribute name with the required string-literal argument. */
 BUSTER_C_INTERNAL bool c_ir_attribute_error_marker_at(CPreprocessResult preprocess, u32 index, u32 end, bool bracketed)
 {
     CToken const* tokens = preprocess.tokens;
@@ -1882,8 +1920,18 @@ BUSTER_C_INTERNAL u32 c_ir_attribute_marker_find(CPreprocessResult preprocess, u
             CToken const* candidate = &preprocess.tokens[marker_index];
             bool matches = candidate->kind == C_TOKEN_IDENTIFIER &&
                            c_ir_attribute_marker_spelling(c_token_spelling(preprocess.spelling_base, *candidate), marker) &&
+                           nesting == entry_depth &&
+                           (!bracketed ||
+                            (marker == C_IR_ATTRIBUTE_MARKER_NORETURN
+                                 ? (marker_index < 3 ||
+                                    !c_token_is_punctuator(&preprocess.tokens[marker_index - 1], C_PUNCTUATOR_COLON) ||
+                                    !c_token_is_punctuator(&preprocess.tokens[marker_index - 2], C_PUNCTUATOR_COLON) ||
+                                    c_ir_attribute_gnu_namespace_at(preprocess, marker_index))
+                                 : ((marker != C_IR_ATTRIBUTE_MARKER_ERROR && marker != C_IR_ATTRIBUTE_MARKER_GNU_INLINE &&
+                                     marker != C_IR_ATTRIBUTE_MARKER_ALWAYS_INLINE && marker != C_IR_ATTRIBUTE_MARKER_NOINLINE) ||
+                                    c_ir_attribute_gnu_namespace_at(preprocess, marker_index)))) &&
                            (marker != C_IR_ATTRIBUTE_MARKER_ERROR ||
-                            (nesting == entry_depth && c_ir_attribute_error_marker_at(preprocess, marker_index, list_end, bracketed)));
+                            c_ir_attribute_error_marker_at(preprocess, marker_index, list_end, bracketed));
             result = matches ? marker_index : UINT32_MAX;
             bool opens = c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_BRACKET) ||
                          c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_BRACE);
@@ -2091,6 +2139,20 @@ BUSTER_C_INTERNAL u32 c_ir_declaration_attribute_marker(CPreprocessResult prepro
 BUSTER_C_SHARED bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, CDeclaration declaration)
 {
     return c_ir_declaration_attribute_marker(preprocess, declaration, C_IR_ATTRIBUTE_MARKER_NORETURN) != UINT32_MAX;
+}
+
+BUSTER_C_SHARED u32 c_ir_declaration_always_inline_attribute(CPreprocessResult preprocess, CDeclaration declaration)
+{
+    return declaration.kind == C_DECLARATION_FUNCTION
+               ? c_ir_declaration_attribute_marker(preprocess, declaration, C_IR_ATTRIBUTE_MARKER_ALWAYS_INLINE)
+               : UINT32_MAX;
+}
+
+BUSTER_C_SHARED u32 c_ir_declaration_noinline_attribute(CPreprocessResult preprocess, CDeclaration declaration)
+{
+    return declaration.kind == C_DECLARATION_FUNCTION
+               ? c_ir_declaration_attribute_marker(preprocess, declaration, C_IR_ATTRIBUTE_MARKER_NOINLINE)
+               : UINT32_MAX;
 }
 
 BUSTER_C_INTERNAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram* program, CIrPointerTypeCache* pointer_types,
@@ -3365,6 +3427,41 @@ struct CIrErrorAttributeCall
     u32 attribute_token;
 };
 
+// One CONDITIONAL or CONDITIONAL_OMITTED node of a function body, by the three
+// tokens c_ir_root_conditional reports for it: the condition's first token,
+// the `?` and the `:` (c_ir_tree_conditionals_build, GitHub #3102).
+typedef struct CIrTreeConditional CIrTreeConditional;
+struct CIrTreeConditional
+{
+    u32 start;
+    u32 question;
+    u32 colon;
+};
+
+// The conditional nodes of one top-level function body: every `?` among them
+// in ascending order, and the records whose three tokens were all found, in
+// ascending start order. Two records never share a start; when two would,
+// neither is kept.
+typedef struct CIrTreeConditionals CIrTreeConditionals;
+struct CIrTreeConditionals
+{
+    u32 const* questions;
+    CIrTreeConditional const* records;
+    u32 question_count;
+    u32 record_count;
+};
+
+// Every top-level function body's CIrTreeConditionals, in body order, keyed by
+// the token of the body's `{`. Built once per lowering from the syntax tree
+// and read-only afterwards.
+typedef struct CIrTreeConditionalIndex CIrTreeConditionalIndex;
+struct CIrTreeConditionalIndex
+{
+    u32 const* braces;
+    CIrTreeConditionals const* bodies;
+    u32 body_count;
+};
+
 struct CIntegerIrBuilder
 {
     CIrDirectSsa* direct_ssa;
@@ -3514,6 +3611,12 @@ struct CIntegerIrBuilder
     // every brace-less nested `if` re-walked the rest of its chain.
     u32* statement_ends_plus_one;
     bool statement_ends_cleared;
+    // The conditional nodes of the body being lowered, read from the syntax
+    // tree (c_ir_tree_conditionals_build): c_ir_root_conditional answers from
+    // them where they decide the scan's answer. Null without a tree, and for
+    // a body the tree index does not hold (a nested function's).
+    CIrTreeConditionals const* tree_conditionals;
+    CAstLowerStatistics* ast_lower_statistics;
     CIrSignature* signatures;
     IrTypeId* c_type_ir_map;
     IrTypeId* scalar_types;
@@ -16164,7 +16267,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_string_literal_range_shape(CPreprocess
     return result;
 }
 
-CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens)
+CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens, bool lengths_only)
 {
     u32 capacity = 1024;
     CStringLiteralMemo* memo = arena_allocate(arena, CStringLiteralMemo, 1);
@@ -16174,6 +16277,7 @@ CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tok
         // Reused arena bytes can be dirty; empty slots must be zeroed.
         .slots = arena_allocate_zeroed(arena, CStringLiteralMemoSlot, capacity),
         .capacity = capacity,
+        .lengths_only = lengths_only,
     };
     return memo;
 }
@@ -16204,7 +16308,8 @@ BUSTER_C_INTERNAL CStringLiteralMemoSlot const* c_string_literal_memo_find(CStri
     return result;
 }
 
-// Records a narrow fragment's decoded bytes. The table stays at most half
+// Records a narrow fragment's decoded bytes, or only its length when
+// `bytes.pointer` is null (a length-only memo). The table stays at most half
 // full, and a rebuild re-places every entry at the doubled capacity in the
 // same arena.
 BUSTER_C_INTERNAL void c_string_literal_memo_insert(CStringLiteralMemo* memo, u32 token_index, ByteSlice bytes)
@@ -16267,9 +16372,10 @@ BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
         {
             // A fragment semantic analysis recorded is read, not decoded again;
             // readers copy what they keep, so the shared buffer stays intact.
+            // A length-only record has no bytes to read and is decoded here.
             CStringLiteralMemoSlot const* recorded =
                 width == 1 ? c_string_literal_memo_find(memo, preprocess.tokens, start + fragment_index) : 0;
-            if (recorded)
+            if (recorded && recorded->bytes)
             {
                 C_CENSUS_PHASE_RECORD(STRING_MEMO_HITS, 1);
                 fragments[fragment_index] = (ByteSlice){
@@ -16349,7 +16455,10 @@ BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
 // (wide fragments, whose element width is the target's, are always decoded
 // and never recorded). On the stage-1 unity build semantic analysis sized,
 // typed and validated each literal four times and lowering then decoded it;
-// with the memo each narrow fragment is walked once, by this decode.
+// with the memo each narrow fragment is walked once, by this decode. When
+// nothing will lower the unit (CStringLiteralMemo.lengths_only) the bytes have
+// no reader, so that one walk is c_ir_count_quoted's and records the length
+// alone.
 BUSTER_C_SHARED bool c_ir_count_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target, u32 start, u32 end,
                                                                     CStringLiteralMemo* memo, CIrDecodedString* decoded_out)
 {
@@ -16374,8 +16483,16 @@ BUSTER_C_SHARED bool c_ir_count_string_literal_range_for_target(Arena* arena, CP
             ByteSlice fragment = {0};
             if (memoized)
             {
-                result = c_ir_decode_quoted(memo->arena, spelling, '"', &fragment);
-                fragment_elements = fragment.length;
+                if (memo->lengths_only)
+                {
+                    result = c_ir_count_quoted(spelling, '"', &fragment_elements);
+                    fragment.length = fragment_elements;
+                }
+                else
+                {
+                    result = c_ir_decode_quoted(memo->arena, spelling, '"', &fragment);
+                    fragment_elements = fragment.length;
+                }
                 if (result)
                 {
                     c_string_literal_memo_insert(memo, token_index, fragment);
@@ -24116,6 +24233,49 @@ BUSTER_C_INTERNAL u32 c_ir_va_arg_type_separator(CIntegerIrBuilder* builder, u32
     return separator;
 }
 
+// A callback can be selected by several adjacent subscripts. Consume the
+// complete suffix before requiring its named base; the member walk then
+// includes that base's owning object. The same rule applies to a subscripted
+// record before a callback member, such as slots[i][j].callback.
+BUSTER_C_INTERNAL u32 c_ir_subscript_callee_base(CIntegerIrBuilder* builder, u32 start, u32 last)
+{
+    u32 base = last;
+    bool valid = true;
+    while (valid && c_token_is_punctuator(&builder->preprocess.tokens[base], C_PUNCTUATOR_RIGHT_BRACKET))
+    {
+        u32 depth = 0;
+        u32 open = UINT32_MAX;
+        for (u32 cursor = base + 1; cursor > start;)
+        {
+            cursor -= 1;
+            CToken current = builder->preprocess.tokens[cursor];
+            if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET))
+            {
+                depth += 1;
+            }
+            else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                if (!depth)
+                {
+                    break;
+                }
+                depth -= 1;
+                if (!depth)
+                {
+                    open = cursor;
+                    break;
+                }
+            }
+        }
+        valid = open != UINT32_MAX && open > start;
+        if (valid)
+        {
+            base = open - 1;
+        }
+    }
+    return valid && builder->preprocess.tokens[base].kind == C_TOKEN_IDENTIFIER ? base : UINT32_MAX;
+}
+
 BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u32 start, u32 end, u32** emission_order_out,
                                                      u32* emission_count_out)
 {
@@ -24306,33 +24466,10 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         }
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
         {
-            u32 depth = 0;
-            u32 open = UINT32_MAX;
-            for (u32 cursor = index + 1; cursor > start;)
+            u32 base = c_ir_subscript_callee_base(builder, start, index);
+            if (base != UINT32_MAX)
             {
-                cursor -= 1;
-                CToken current = builder->preprocess.tokens[cursor];
-                if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET))
-                {
-                    depth += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    if (!depth)
-                    {
-                        break;
-                    }
-                    depth -= 1;
-                    if (!depth)
-                    {
-                        open = cursor;
-                        break;
-                    }
-                }
-            }
-            if (open != UINT32_MAX && open > start && builder->preprocess.tokens[open - 1].kind == C_TOKEN_IDENTIFIER)
-            {
-                callee_start = open - 1;
+                callee_start = base;
                 indexed_callee = true;
             }
         }
@@ -24396,38 +24533,12 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             {
                 break;
             }
-            u32 bracket_depth = 0;
-            u32 bracket_open = UINT32_MAX;
-            for (u32 cursor = base_last + 1; cursor > start;)
-            {
-                cursor -= 1;
-                CToken current = builder->preprocess.tokens[cursor];
-                if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET))
-                {
-                    bracket_depth += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    if (!bracket_depth)
-                    {
-                        break;
-                    }
-                    bracket_depth -= 1;
-                    if (!bracket_depth)
-                    {
-                        bracket_open = cursor;
-                        break;
-                    }
-                }
-            }
-            // The subscripted base has to be a name for the walk to continue;
-            // anything else (a call result, a parenthesized expression) keeps
-            // the callee where it is, as it does today.
-            if (bracket_open == UINT32_MAX || bracket_open <= start || builder->preprocess.tokens[bracket_open - 1].kind != C_TOKEN_IDENTIFIER)
+            u32 base = c_ir_subscript_callee_base(builder, start, base_last);
+            if (base == UINT32_MAX)
             {
                 break;
             }
-            callee_start = bracket_open - 1;
+            callee_start = base;
         }
         indirect |= callee_start != index || indexed_callee || parenthesized_callee;
         if ((!indexed_callee && !parenthesized_callee && token.kind != C_TOKEN_IDENTIFIER) ||
@@ -31208,6 +31319,11 @@ BUSTER_C_INTERNAL bool c_ir_zero_storage_compatible(CIntegerIrBuilder* builder, 
                       (root_type->kind == IR_TYPE_ARRAY || root_type->kind == IR_TYPE_STRUCT || root_type->kind == IR_TYPE_UNION);
     if (compatible)
     {
+        // The walk visits each reachable type once; its marks are indexed by
+        // type id. Release them on return, as each nested initializer asks
+        // this per subobject and a large unit has hundreds of thousands of
+        // types.
+        TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
         u32 capacity = builder->program->types.count;
         IrTypeId* pending = arena_allocate(builder->temporary_arena, IrTypeId, capacity);
         u8* seen = arena_allocate(builder->temporary_arena, u8, capacity);
@@ -31238,6 +31354,7 @@ BUSTER_C_INTERNAL bool c_ir_zero_storage_compatible(CIntegerIrBuilder* builder, 
                 }
             }
         }
+        scratch_end(temporary);
     }
     return compatible;
 }
@@ -31284,6 +31401,21 @@ BUSTER_C_INTERNAL bool c_ir_emit_zero_storage(CIntegerIrBuilder* builder, IrValu
     return valid;
 }
 
+BUSTER_C_INTERNAL bool c_ir_initializer_nesting_depth(CIntegerIrBuilder* builder, Arena* arena, IrTypeId root_type, u64* depth_out);
+
+// The first task stack holds this many rows; it doubles from there.
+#define C_IR_ZERO_TASK_INITIAL_CAPACITY 64u
+
+// Depth-first expansion of an aggregate's zero value. The task stack holds,
+// for each level of the current path, the siblings still to visit plus one
+// completion row, so it grows with the widest path through the type and not
+// with its byte size: zeroing one 40-byte record of four members, as every
+// element of a local table does, needs about 20 rows, where sizing it from
+// `layout.size * 8 + 64` asked for 384 per element and kept them. It grows
+// by doubling on demand, checked against the scratch reservation first, and
+// the whole stack is released on return: nothing it holds outlives the call
+// (outputs and operand arrays live in builder->arena, and the emitters it
+// calls bracket their own temporary-arena use).
 BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrTypeId root_type, CToken token)
 {
     typedef enum CIrZeroTaskKind
@@ -31301,126 +31433,161 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrT
         u32 operand_count;
         CIrZeroTaskKind kind;
     };
+    IrValueId result = IR_VALUE_ID_INVALID;
     IrType* root = ir_type_from_id(&builder->program->types, root_type);
     if (!root || !root->layout.resolved || root->layout.size > (UINT32_MAX - 64) / 8)
     {
         builder->failure_message = !root                    ? S8("cannot zero-initialize an unresolved IR type")
                                    : !root->layout.resolved ? S8("cannot zero-initialize an aggregate with unresolved layout")
                                                             : S8("aggregate is too large to zero-initialize");
-        return IR_VALUE_ID_INVALID;
     }
-    u32 capacity = (u32)(root->layout.size * 8 + 64);
-    CIrZeroTask* tasks = arena_allocate(builder->temporary_arena, CIrZeroTask, capacity);
-    IrValueId result = IR_VALUE_ID_INVALID;
-    u32 task_count = 1;
-    tasks[0] = (CIrZeroTask){
-        .output = &result,
-        .type = root_type,
-    };
-    while (task_count)
+    else
     {
-        CIrZeroTask task = tasks[--task_count];
-        IrType* type = ir_type_from_id(&builder->program->types, task.type);
-        if (!type)
+        TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
+        u32 capacity = C_IR_ZERO_TASK_INITIAL_CAPACITY;
+        CIrZeroTask* tasks = arena_allocate(builder->temporary_arena, CIrZeroTask, capacity);
+        u32 task_count = 1;
+        bool failed = false;
+        tasks[0] = (CIrZeroTask){
+            .output = &result,
+            .type = root_type,
+        };
+        while (task_count && !failed)
         {
-            builder->failure_message = S8("cannot zero-initialize an unresolved type");
-            return IR_VALUE_ID_INVALID;
-        }
-        if (task.kind == C_IR_ZERO_TASK_COMPLETE)
-        {
-            if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && task.operand_count > UINT16_MAX)
+            CIrZeroTask task = tasks[--task_count];
+            IrType* type = ir_type_from_id(&builder->program->types, task.type);
+            bool aggregate = type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT ||
+                                      type->kind == IR_TYPE_UNION);
+            if (!type)
             {
-                builder->failure_message = string_format(builder->arena, S8("aggregate has too many fields to lower ({u32})"), task.operand_count);
-                return IR_VALUE_ID_INVALID;
+                builder->failure_message = S8("cannot zero-initialize an unresolved type");
+                failed = true;
             }
-            IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
-            IrValueId aggregate = c_ir_emit_initializer_capture(builder, task.type, task.operands, task.fields, task.operand_count, instruction_source);
-            if (aggregate.value == IR_ID_UNDERLYING_INVALID)
+            else if (task.kind == C_IR_ZERO_TASK_COMPLETE)
             {
-                return IR_VALUE_ID_INVALID;
-            }
-            *task.output = aggregate;
-            continue;
-        }
-        bool aggregate = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION;
-        if (!aggregate)
-        {
-            IrValueId zero = IR_VALUE_ID_INVALID;
-            if (type->kind == IR_TYPE_FLOAT)
-            {
-                if (type->bit_width == 80)
+                if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && task.operand_count > UINT16_MAX)
                 {
-                    // The f80 constant carries the semantic ten bytes as two
-                    // integer immediates; do not route synthetic zero through
-                    // a host f64 literal or a generic floating conversion.
-                    zero = c_ir_emit_f80_constant_bits(builder, c_ir_token_source_range(builder, token), S8("0.0L"), 0, 0);
+                    builder->failure_message = string_format(builder->arena, S8("aggregate has too many fields to lower ({u32})"), task.operand_count);
+                    failed = true;
                 }
                 else
                 {
-                    CToken zero_token = {
-                        .offset = C_SPELLING_FLOAT_ZERO,
-                        .length = type->bit_width == 32 ? 4u : 3u,
-                        .kind = C_TOKEN_PREPROCESSING_NUMBER,
-                    };
-                    zero = c_ir_emit_float(builder, zero_token);
-                    zero = c_ir_emit_cast(builder, zero, task.type, c_ir_token_source_range(builder, token));
+                    IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
+                    IrValueId captured = c_ir_emit_initializer_capture(builder, task.type, task.operands, task.fields, task.operand_count, instruction_source);
+                    failed = captured.value == IR_ID_UNDERLYING_INVALID;
+                    *task.output = captured;
                 }
             }
-            else if (type->kind == IR_TYPE_INTEGER)
+            else if (!aggregate)
             {
-                zero = c_ir_emit_integer_value_typed(builder, 0, false, token, task.type);
+                IrValueId zero = IR_VALUE_ID_INVALID;
+                if (type->kind == IR_TYPE_FLOAT)
+                {
+                    if (type->bit_width == 80)
+                    {
+                        // The f80 constant carries the semantic ten bytes as two
+                        // integer immediates; do not route synthetic zero through
+                        // a host f64 literal or a generic floating conversion.
+                        zero = c_ir_emit_f80_constant_bits(builder, c_ir_token_source_range(builder, token), S8("0.0L"), 0, 0);
+                    }
+                    else
+                    {
+                        CToken zero_token = {
+                            .offset = C_SPELLING_FLOAT_ZERO,
+                            .length = type->bit_width == 32 ? 4u : 3u,
+                            .kind = C_TOKEN_PREPROCESSING_NUMBER,
+                        };
+                        zero = c_ir_emit_float(builder, zero_token);
+                        zero = c_ir_emit_cast(builder, zero, task.type, c_ir_token_source_range(builder, token));
+                    }
+                }
+                else if (type->kind == IR_TYPE_INTEGER)
+                {
+                    zero = c_ir_emit_integer_value_typed(builder, 0, false, token, task.type);
+                }
+                else if (type->kind == IR_TYPE_POINTER)
+                {
+                    zero = c_ir_emit_integer_value(builder, 0, false, token);
+                    zero = c_ir_emit_cast(builder, zero, task.type, c_ir_token_source_range(builder, token));
+                }
+                else if (type->kind == IR_TYPE_BOOLEAN)
+                {
+                    zero = c_ir_emit_integer_value(builder, 0, false, token);
+                    zero = c_ir_truth_value(builder, zero, c_ir_token_source_range(builder, token));
+                }
+                if (zero.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    builder->failure_message =
+                        string_format(builder->arena, S8("cannot zero-initialize type '{S8}'"), c_ir_diagnostic_type_name(builder->arena, type));
+                    failed = true;
+                }
+                *task.output = zero;
             }
-            else if (type->kind == IR_TYPE_POINTER)
+            else
             {
-                zero = c_ir_emit_integer_value(builder, 0, false, token);
-                zero = c_ir_emit_cast(builder, zero, task.type, c_ir_token_source_range(builder, token));
+                u64 child_count_u64 = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_count
+                                      : type->kind == IR_TYPE_UNION                                 ? (type->field_count ? 1 : 0)
+                                                                                                    : type->field_count;
+                // The completion row and every child go on the stack at once.
+                u64 needed = (u64)task_count + 1 + child_count_u64;
+                if (needed > capacity)
+                {
+                    u64 grown = BUSTER_MAX((u64)capacity * 2, needed);
+                    u64 position = builder->temporary_arena->position;
+                    if (grown > UINT32_MAX ||
+                        !c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(CIrZeroTask), grown,
+                                                       BUSTER_ALIGN_OF(CIrZeroTask)))
+                    {
+                        builder->failure_message = string_format(
+                            builder->arena, S8("aggregate zero-initializer exceeds the lowering scratch reservation ({u64} children)"), child_count_u64);
+                        failed = true;
+                    }
+                    else
+                    {
+                        CIrZeroTask* grown_tasks = arena_allocate(builder->temporary_arena, CIrZeroTask, grown);
+                        memcpy(grown_tasks, tasks, (u64)task_count * sizeof(*tasks));
+                        tasks = grown_tasks;
+                        capacity = (u32)grown;
+                    }
+                }
+                if (!failed)
+                {
+                    u32 child_count = (u32)child_count_u64;
+                    IrValueId* operands = arena_allocate(builder->arena, IrValueId, child_count);
+                    u64* fields = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? 0 : arena_allocate(builder->arena, u64, child_count);
+                    tasks[task_count++] = (CIrZeroTask){
+                        .output = task.output,
+                        .operands = operands,
+                        .fields = fields,
+                        .type = task.type,
+                        .operand_count = child_count,
+                        .kind = C_IR_ZERO_TASK_COMPLETE,
+                    };
+                    for (u32 child_index = child_count; child_index; child_index -= 1)
+                    {
+                        u32 index = child_index - 1;
+                        IrTypeId child_type = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_type : type->fields[index].type;
+                        if (fields)
+                        {
+                            fields[index] = index;
+                        }
+                        tasks[task_count++] = (CIrZeroTask){
+                            .output = &operands[index],
+                            .type = child_type,
+                        };
+                    }
+                }
             }
-            else if (type->kind == IR_TYPE_BOOLEAN)
-            {
-                zero = c_ir_emit_integer_value(builder, 0, false, token);
-                zero = c_ir_truth_value(builder, zero, c_ir_token_source_range(builder, token));
-            }
-            if (zero.value == IR_ID_UNDERLYING_INVALID)
-            {
-                builder->failure_message =
-                    string_format(builder->arena, S8("cannot zero-initialize type '{S8}'"), c_ir_diagnostic_type_name(builder->arena, type));
-                return zero;
-            }
-            *task.output = zero;
-            continue;
         }
-        u64 child_count_u64 = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_count
-                              : type->kind == IR_TYPE_UNION                                 ? (type->field_count ? 1 : 0)
-                                                                                            : type->field_count;
-        if (child_count_u64 > UINT32_MAX || child_count_u64 > capacity - task_count - 1)
+        // Some test and constant-evaluation builders alias the temporary
+        // arena with the output arena; rewinding there would drop operands.
+        if (builder->temporary_arena != builder->arena)
         {
-            builder->failure_message =
-                string_format(builder->arena, S8("aggregate zero-initializer exceeds its task capacity ({u64} children)"), child_count_u64);
-            return IR_VALUE_ID_INVALID;
+            scratch_end(temporary);
         }
-        u32 child_count = (u32)child_count_u64;
-        IrValueId* operands = arena_allocate(builder->arena, IrValueId, child_count);
-        u64* fields = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? 0 : arena_allocate(builder->arena, u64, child_count);
-        tasks[task_count++] = (CIrZeroTask){
-            .output = task.output,
-            .operands = operands,
-            .fields = fields,
-            .type = task.type,
-            .operand_count = child_count,
-            .kind = C_IR_ZERO_TASK_COMPLETE,
-        };
-        for (u32 child_index = child_count; child_index; child_index -= 1)
+        if (failed)
         {
-            u32 index = child_index - 1;
-            IrTypeId child_type = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_type : type->fields[index].type;
-            if (fields)
-            {
-                fields[index] = index;
-            }
-            tasks[task_count++] = (CIrZeroTask){
-                .output = &operands[index],
-                .type = child_type,
-            };
+            result = IR_VALUE_ID_INVALID;
         }
     }
     return result;
@@ -31636,7 +31803,20 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
         }
         u32 capacity = root_close - root_open + 1;
         frame->as.nested_compound_literal.state->tasks = arena_allocate(builder->temporary_arena, CIrNestedInitializerTask, capacity);
-        u32 cursor_capacity = builder->program->types.count ? builder->program->types.count : 1;
+        // The cursors are one path of by-value containers below a brace
+        // group, including anonymous members a designator crosses, so the
+        // root type's nesting depth bounds them. Sizing them from the unit's
+        // type count instead cost every nested literal megabytes of scratch
+        // in a large unit, which the function only released at its end. The
+        // capacity checks at each push stay the guard.
+        u64 cursor_depth = 0;
+        if (!c_ir_initializer_nesting_depth(builder, builder->temporary_arena, root_type, &cursor_depth) || cursor_depth > UINT32_MAX - 2)
+        {
+            builder->failure_message = S8("initializer working storage exceeds the scratch reservation");
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        u32 cursor_capacity = (u32)cursor_depth + 2;
         frame->as.nested_compound_literal.state->cursors =
             arena_allocate(builder->temporary_arena, CIrNestedInitializerCursor, cursor_capacity);
         frame->as.nested_compound_literal.state->tasks[0] = (CIrNestedInitializerTask){
@@ -33362,7 +33542,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     // and string forms answer their standard prototype's result.
     CSymbolBuiltin library_builtin = c_ir_token_builtin_kind(builder, token);
     CIrMemoryBuiltin memory_builtin = library_builtin == C_SYMBOL_BUILTIN_MEMORY ? c_ir_memory_builtin(name) : C_IR_MEMORY_BUILTIN_COUNT;
-    if (library_builtin == C_SYMBOL_BUILTIN_OVERFLOW || memory_builtin != C_IR_MEMORY_BUILTIN_COUNT)
+    if (library_builtin == C_SYMBOL_BUILTIN_OVERFLOW || library_builtin == C_SYMBOL_BUILTIN_ALLOCA ||
+        memory_builtin != C_IR_MEMORY_BUILTIN_COUNT)
     {
         if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
@@ -33373,9 +33554,13 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
         {
             return false;
         }
-        *type_out = memory_builtin != C_IR_MEMORY_BUILTIN_COUNT
-                        ? c_ir_library_value_type(builder, (CIrLibraryValue)c_ir_memory_builtin_signatures[memory_builtin].return_value)
-                        : builder->bool_type;
+        // alloca has no function entity and may be queried before its call
+        // is emitted. Match the void-pointer result of STACK_ALLOCATE.
+        *type_out = library_builtin == C_SYMBOL_BUILTIN_ALLOCA
+                        ? c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type)
+                        : memory_builtin != C_IR_MEMORY_BUILTIN_COUNT
+                            ? c_ir_library_value_type(builder, (CIrLibraryValue)c_ir_memory_builtin_signatures[memory_builtin].return_value)
+                            : builder->bool_type;
         return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
     }
 
@@ -37157,8 +37342,21 @@ BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValue
 
 BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
 
-BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
-                                               u32* expression_end);
+BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+                                                    u32* expression_end);
+BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+                                                    u32* expression_end);
+
+// Whether [start, end) is a `?:` at the root, and its tokens: from the syntax
+// tree when lowering has one for this body (c_ir_tree_root_conditional), else
+// by the token scan. Inline, so the default path calls the scan directly.
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question,
+                                                             u32* colon, u32* expression_end)
+{
+    bool result = builder->tree_conditionals ? c_ir_tree_root_conditional(builder, start, end, expression_start, question, colon, expression_end)
+                                             : c_ir_root_conditional_scan(builder, start, end, expression_start, question, colon, expression_end);
+    return result;
+}
 
 struct CIrConditionTask
 {
@@ -37777,65 +37975,134 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
         }
         u32 logical_or = UINT32_MAX;
         u32 logical_and = UINT32_MAX;
-        u32 parentheses = 0;
-        u32 brackets = 0;
-        u32 braces = 0;
-        for (u32 index = task.start; index < task.end; index += 1)
+        if (builder->group_facts_exact)
         {
-            CToken token = builder->preprocess.tokens[index];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            for (u32 index = task.start; index < task.end; index += 1)
             {
-                parentheses += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-            {
-                if (!parentheses)
+                CToken token = builder->preprocess.tokens[index];
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    u32 close = c_ir_matching_delimiter_cached(builder, index, task.end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                               C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                    if (close == UINT32_MAX)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    index = close;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                parentheses -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                brackets += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
-            {
-                if (!brackets)
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+                {
+                    u32 close = c_ir_matching_delimiter_cached(builder, index, task.end, C_PUNCTUATOR_LEFT_BRACKET,
+                                                               C_PUNCTUATOR_RIGHT_BRACKET);
+                    if (close == UINT32_MAX)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    index = close;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                brackets -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-            {
-                braces += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-            {
-                if (!braces)
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+                {
+                    u32 close = c_ir_matching_delimiter_cached(builder, index, task.end, C_PUNCTUATOR_LEFT_BRACE,
+                                                               C_PUNCTUATOR_RIGHT_BRACE);
+                    if (close == UINT32_MAX)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    index = close;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                braces -= 1;
-            }
-            else if (!parentheses && !brackets && !braces && logical_or == UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE))
-            {
-                logical_or = index;
-            }
-            else if (!parentheses && !brackets && !braces && logical_and == UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
-                     !c_ir_label_address_prefix(builder, task.start, index))
-            {
-                logical_and = index;
+                else if (logical_or == UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE))
+                {
+                    logical_or = index;
+                }
+                else if (logical_and == UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+                         !c_ir_label_address_prefix(builder, task.start, index))
+                {
+                    logical_and = index;
+                }
             }
         }
-        if (parentheses || brackets || braces)
+        else
         {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            u32 parentheses = 0;
+            u32 brackets = 0;
+            u32 braces = 0;
+            for (u32 index = task.start; index < task.end; index += 1)
+            {
+                CToken token = builder->preprocess.tokens[index];
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    parentheses += 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                {
+                    if (!parentheses)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    parentheses -= 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+                {
+                    brackets += 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+                {
+                    if (!brackets)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    brackets -= 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+                {
+                    braces += 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+                {
+                    if (!braces)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    braces -= 1;
+                }
+                else if (!parentheses && !brackets && !braces && logical_or == UINT32_MAX &&
+                         c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE))
+                {
+                    logical_or = index;
+                }
+                else if (!parentheses && !brackets && !braces && logical_and == UINT32_MAX &&
+                         c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+                         !c_ir_label_address_prefix(builder, task.start, index))
+                {
+                    logical_and = index;
+                }
+            }
+            if (parentheses || brackets || braces)
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
         }
         u32 operation = logical_or != UINT32_MAX ? logical_or : logical_and;
         if (operation != UINT32_MAX)
@@ -39157,8 +39424,8 @@ BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
     c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
 }
 
-BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
-                                               u32* expression_end)
+BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+                                                    u32* expression_end)
 {
     while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
            !c_ir_group_is_statement_expression(builder, start, end))
@@ -39236,6 +39503,480 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 sta
         }
     }
     return false;
+}
+
+// Root conditionals from the syntax tree (GitHub #3102; docs/agents/frontend/
+// ast.md, "Lowering from the tree"). c_ir_tree_conditionals_build indexes the
+// CONDITIONAL and CONDITIONAL_OMITTED nodes of every top-level function body
+// once per lowering, and c_ir_tree_root_conditional answers
+// c_ir_root_conditional from them where they decide the scan's answer:
+//   - no `?` in the range: false, because every `?` of a body is the anchor of
+//     one of its conditional nodes, so the scan finds none;
+//   - a record that starts at the range's start, with its `:` before the
+//     range's last token: true, with the record's `?` and `:`. A condition
+//     holds no unparenthesized `?` or assignment, so from that start the
+//     record's `?` is the scan's first root `?`, and its `:` the one the scan
+//     pairs with it.
+// Everything else runs the scan. Debug and sanitized builds check every answer
+// against it.
+typedef enum CIrTreeRootVerdict
+{
+    C_IR_TREE_ROOT_UNKNOWN,
+    C_IR_TREE_ROOT_FALSE,
+    C_IR_TREE_ROOT_TRUE,
+} CIrTreeRootVerdict;
+
+// The bodies at or below this many conditionals sort by insertion; larger
+// ones take four stable radix passes over the key's high 32 bits.
+#define C_IR_TREE_SORT_INSERTION_LIMIT 32u
+
+// Sorts keys ascending by their high 32 bits, keeping the order of equal ones.
+// `scratch` holds `count` keys.
+BUSTER_C_INTERNAL void c_ir_tree_sort_keys(u64* keys, u64* scratch, u32 count)
+{
+    if (count <= C_IR_TREE_SORT_INSERTION_LIMIT)
+    {
+        for (u32 index = 1; index < count; index += 1)
+        {
+            u64 key = keys[index];
+            u32 slot = index;
+            while (slot && (keys[slot - 1] >> 32) > (key >> 32))
+            {
+                keys[slot] = keys[slot - 1];
+                slot -= 1;
+            }
+            keys[slot] = key;
+        }
+    }
+    else
+    {
+        u64* source = keys;
+        u64* destination = scratch;
+        for (u32 shift = 32; shift < 64; shift += 8)
+        {
+            u32 offsets[256] = {0};
+            for (u32 index = 0; index < count; index += 1)
+            {
+                offsets[(source[index] >> shift) & 0xff] += 1;
+            }
+            u32 total = 0;
+            for (u32 digit = 0; digit < 256; digit += 1)
+            {
+                u32 digit_count = offsets[digit];
+                offsets[digit] = total;
+                total += digit_count;
+            }
+            for (u32 index = 0; index < count; index += 1)
+            {
+                destination[offsets[(source[index] >> shift) & 0xff]++] = source[index];
+            }
+            u64* swap = source;
+            source = destination;
+            destination = swap;
+        }
+        // Four passes leave the result where it began, in `keys`.
+    }
+}
+
+// The conditional nodes of one body already indexed, ascending by node: each
+// one's first token (its condition's) and its start widened over parentheses.
+// Postorder indexes every conditional on another's leftmost path before that
+// one, so c_ir_tree_first_token can stop at it.
+typedef struct CIrTreeFirstMemo CIrTreeFirstMemo;
+struct CIrTreeFirstMemo
+{
+    u32* nodes;
+    u32* firsts;
+    u32* starts;
+    u32 count;
+};
+
+// The first token of the subtree at `node`. Each node's first token is either
+// its anchor or its first child's first token, and the anchor of a node whose
+// first token lies in its first child comes after that token, so the first
+// token is the smallest anchor on the leftmost path. A label address `&&l` is
+// anchored at its label. The walk ends at an indexed conditional, which brings
+// its own first token, so a chain of conditionals on each other's leftmost
+// paths is walked once in all; finding it is a binary search over the body's
+// indexed conditionals, which `*steps` does not count. Parentheses have no node: `*widen_from` gets
+// the token the caller's widening resumes at, the conditional's widened start
+// when its first token was taken, else the first token. `*steps` counts the
+// nodes the walk visits, siblings included.
+BUSTER_C_INTERNAL u32 c_ir_tree_first_token(CAst const* ast, u32 node, CIrTreeFirstMemo const* memo, u32* widen_from, u64* steps)
+{
+    u32 first = ast->tokens[node];
+    CAstKind first_kind = (CAstKind)ast->kinds[node];
+    u32 resume = UINT32_MAX;
+    u32 cursor = node;
+    bool descending = ast->extents[cursor] > 1;
+    while (descending)
+    {
+        u32 begin = c_ast_subtree_begin(ast, cursor);
+        u32 child = cursor - 1;
+        *steps += 1;
+        while (child + 1 - ast->extents[child] > begin)
+        {
+            child -= ast->extents[child];
+            *steps += 1;
+        }
+        cursor = child;
+        u32 slot = UINT32_MAX;
+        if ((u8)(ast->kinds[cursor] - C_AST_CONDITIONAL) < 2)
+        {
+            u32 low = 0;
+            u32 high = memo->count;
+            while (low < high)
+            {
+                u32 middle = low + (high - low) / 2;
+                low = memo->nodes[middle] < cursor ? middle + 1 : low;
+                high = memo->nodes[middle] < cursor ? high : middle;
+            }
+            slot = low < memo->count && memo->nodes[low] == cursor ? low : UINT32_MAX;
+        }
+        if (slot != UINT32_MAX)
+        {
+            if (memo->firsts[slot] < first)
+            {
+                first = memo->firsts[slot];
+                first_kind = C_AST_CONDITIONAL;
+                resume = memo->starts[slot];
+            }
+            descending = false;
+        }
+        else
+        {
+            if (ast->tokens[cursor] < first)
+            {
+                first = ast->tokens[cursor];
+                first_kind = (CAstKind)ast->kinds[cursor];
+            }
+            descending = ast->extents[cursor] > 1;
+        }
+    }
+    first = first_kind == C_AST_LABEL_ADDRESS && first ? first - 1 : first;
+    *widen_from = resume != UINT32_MAX ? resume : first;
+    return first;
+}
+
+// The record of the conditional node `node` (CONDITIONAL or
+// CONDITIONAL_OMITTED), or false when one of its tokens cannot be found. It
+// also fills `node`'s memo entry, the next slot of `memo`. The start widens
+// over each `(` whose `)` closes before the `?`, read from the stream's
+// delimiter array, which the index requires. A memo entry's widened start
+// counts for any later conditional whose condition holds it on its leftmost
+// path: those parentheses close before the earlier `?`, so before the later
+// one too.
+BUSTER_C_INTERNAL bool c_ir_tree_conditional_record(CAst const* ast, CPreprocessResult const* preprocess, u32 const* stream_matching_delimiters_plus_one,
+                                                     u32 body_start, u32 node, CIrTreeFirstMemo* memo, CIrTreeConditional* record_out,
+                                                     u64* steps)
+{
+    CToken const* tokens = preprocess->tokens;
+    u32 question = ast->tokens[node];
+    u32 otherwise = node - 1;
+    u32 condition = otherwise - ast->extents[otherwise];
+    u32 colon = question + 1;
+    if (ast->kinds[node] == C_AST_CONDITIONAL)
+    {
+        u32 then = condition;
+        condition = then - ast->extents[then];
+        u32 else_first = 0;
+        c_ir_tree_first_token(ast, otherwise, memo, &else_first, steps);
+        while (else_first > question + 1 && c_token_is_punctuator(&tokens[else_first - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            else_first -= 1;
+            *steps += 1;
+        }
+        colon = else_first - 1;
+    }
+    bool valid = colon > question && colon < preprocess->token_count && c_token_is_punctuator(&tokens[colon], C_PUNCTUATOR_COLON);
+    u32 start = 0;
+    u32 first = c_ir_tree_first_token(ast, condition, memo, &start, steps);
+    bool widening = true;
+    while (widening)
+    {
+        u32 close = start > body_start ? stream_matching_delimiters_plus_one[start - 1] - 1 : UINT32_MAX;
+        widening = start > body_start && c_token_is_punctuator(&tokens[start - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) && close < question &&
+                   c_token_is_punctuator(&tokens[close], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        start -= widening;
+        *steps += widening;
+    }
+    memo->nodes[memo->count] = node;
+    memo->firsts[memo->count] = first;
+    memo->starts[memo->count] = start;
+    memo->count += 1;
+    valid = valid && start < question;
+    *record_out = (CIrTreeConditional){
+        .start = start,
+        .question = question,
+        .colon = colon,
+    };
+    return valid;
+}
+
+// The CONDITIONAL and CONDITIONAL_OMITTED nodes in [begin, end): one compare
+// per kind byte and no branch, so the loop vectorizes, and the build skips a
+// body without any before it walks a node.
+BUSTER_C_INTERNAL u32 c_ir_tree_conditional_count(u8 const* kinds, u32 begin, u32 end)
+{
+    BUSTER_CT_CHECK(C_AST_CONDITIONAL_OMITTED == C_AST_CONDITIONAL + 1);
+    u32 count = 0;
+    for (u32 node = begin; node < end; node += 1)
+    {
+        count += (u8)(kinds[node] - C_AST_CONDITIONAL) < 2;
+    }
+    return count;
+}
+
+// The bytes c_ir_tree_conditionals_build carves for `ast`, with the counts it
+// needs. A tree that is not a complete translation unit counts nothing, and its
+// index is empty, so lowering runs every scan.
+BUSTER_C_INTERNAL u64 c_ir_tree_conditionals_size(CAst const* ast, u32* body_count_out, u32* conditional_count_out)
+{
+    u32 body_count = 0;
+    u32 conditional_count = 0;
+    bool complete = ast && ast->node_count && ast->root < ast->node_count && ast->kinds[ast->root] == C_AST_TRANSLATION_UNIT;
+    if (complete)
+    {
+        u32 floor = c_ast_subtree_begin(ast, ast->root);
+        u32 cursor = ast->root;
+        while (cursor > floor)
+        {
+            u32 child = cursor - 1;
+            body_count += ast->kinds[child] == C_AST_FUNCTION_DEFINITION && child && ast->kinds[child - 1] == C_AST_COMPOUND_STATEMENT;
+            cursor = c_ast_subtree_begin(ast, child);
+        }
+        conditional_count = c_ir_tree_conditional_count(ast->kinds, 0, ast->node_count);
+    }
+    *body_count_out = body_count;
+    *conditional_count_out = conditional_count;
+    // Braces and bodies per body; per conditional, its question, its kept and
+    // found records, three sort keys and three memo words; one spare element
+    // and alignment slack for each of the eleven arrays.
+    return (u64)(body_count + 1) * (sizeof(u32) + sizeof(CIrTreeConditionals)) +
+           (u64)(conditional_count + 1) * (4 * sizeof(u32) + 2 * sizeof(CIrTreeConditional) + 3 * sizeof(u64)) + 11 * 16;
+}
+
+// Indexes the conditional nodes of every top-level function body of `ast`
+// (see above) in `arena`, sized by c_ir_tree_conditionals_size. A body nested
+// in another (a GNU nested function) is not indexed: its queries run the scan.
+// The walks and widening are linear in the bodies' nodes: each leftmost-path
+// walk stops at a conditional already indexed (CIrTreeFirstMemo), and each `(`
+// is widened over once; CAstLowerStatistics.steps counts them. Each memo
+// lookup is a binary search over the body's indexed conditionals, so the
+// whole build is O(n log n) in the worst case.
+BUSTER_C_INTERNAL CIrTreeConditionalIndex c_ir_tree_conditionals_build(Arena* arena, CAst const* ast, CPreprocessResult const* preprocess,
+                                                                        u32 const* stream_matching_delimiters_plus_one, u32 body_count,
+                                                                        u32 conditional_count, CAstLowerStatistics* statistics)
+{
+    u32* braces = arena_allocate(arena, u32, body_count + 1);
+    CIrTreeConditionals* bodies = arena_allocate(arena, CIrTreeConditionals, body_count + 1);
+    u32* questions = arena_allocate(arena, u32, conditional_count + 1);
+    CIrTreeConditional* records = arena_allocate(arena, CIrTreeConditional, conditional_count + 1);
+    u64* keys = arena_allocate(arena, u64, conditional_count + 1);
+    u64* question_keys = arena_allocate(arena, u64, conditional_count + 1);
+    u64* scratch = arena_allocate(arena, u64, conditional_count + 1);
+    CIrTreeConditional* found = arena_allocate(arena, CIrTreeConditional, conditional_count + 1);
+    CIrTreeFirstMemo memo = {
+        .nodes = arena_allocate(arena, u32, conditional_count + 1),
+        .firsts = arena_allocate(arena, u32, conditional_count + 1),
+        .starts = arena_allocate(arena, u32, conditional_count + 1),
+    };
+    u64 steps = 0;
+    u32 slot = body_count;
+    u32 question_end = conditional_count;
+    u32 record_end = conditional_count;
+    u32 floor = body_count ? c_ast_subtree_begin(ast, ast->root) : 0;
+    u32 cursor = body_count ? ast->root : 0;
+    // The children are visited last to first, so each body's arrays are
+    // filled from the end of the shared ones down.
+    while (slot && cursor > floor)
+    {
+        u32 child = cursor - 1;
+        cursor = c_ast_subtree_begin(ast, child);
+        if (ast->kinds[child] != C_AST_FUNCTION_DEFINITION || !child || ast->kinds[child - 1] != C_AST_COMPOUND_STATEMENT)
+        {
+            continue;
+        }
+        u32 body = child - 1;
+        u32 body_start = ast->tokens[body] + 1;
+        u32 body_record_count = 0;
+        u32 node_begin = c_ast_subtree_begin(ast, body);
+        u32 body_question_count = c_ir_tree_conditional_count(ast->kinds, node_begin, body);
+        question_end -= body_question_count;
+        // One walk records each conditional's `?` and, when its tokens are
+        // found, its record keyed by (start, position found).
+        u32 question_count = 0;
+        u32 found_count = 0;
+        memo.count = 0;
+        for (u32 node = node_begin; node < body && question_count < body_question_count; node += 1)
+        {
+            if ((u8)(ast->kinds[node] - C_AST_CONDITIONAL) < 2)
+            {
+                question_keys[question_count] = (u64)ast->tokens[node] << 32;
+                question_count += 1;
+                CIrTreeConditional record;
+                if (c_ir_tree_conditional_record(ast, preprocess, stream_matching_delimiters_plus_one, body_start, node, &memo, &record, &steps))
+                {
+                    found[found_count] = record;
+                    keys[found_count] = ((u64)record.start << 32) | found_count;
+                    found_count += 1;
+                }
+            }
+        }
+        c_ir_tree_sort_keys(question_keys, scratch, body_question_count);
+        for (u32 key = 0; key < body_question_count; key += 1)
+        {
+            questions[question_end + key] = (u32)(question_keys[key] >> 32);
+        }
+        c_ir_tree_sort_keys(keys, scratch, found_count);
+        for (u32 pass = 0; pass < 2; pass += 1)
+        {
+            // The first pass counts the records whose start no other record
+            // shares; the second writes them, ending at record_end.
+            u32 kept = 0;
+            for (u32 key = 0; key < found_count; key += 1)
+            {
+                u32 start = (u32)(keys[key] >> 32);
+                bool shared = (key && (u32)(keys[key - 1] >> 32) == start) || (key + 1 < found_count && (u32)(keys[key + 1] >> 32) == start);
+                if (!shared && pass)
+                {
+                    records[record_end - body_record_count + kept] = found[(u32)keys[key]];
+                }
+                kept += !shared;
+            }
+            body_record_count = kept;
+        }
+        CIrTreeConditional* body_records = records + (record_end - body_record_count);
+        record_end -= body_record_count;
+        slot -= 1;
+        braces[slot] = body_start - 1;
+        bodies[slot] = (CIrTreeConditionals){
+            .questions = questions + question_end,
+            .records = body_records,
+            .question_count = body_question_count,
+            .record_count = body_record_count,
+        };
+        if (statistics)
+        {
+            statistics->bodies += 1;
+            statistics->conditionals += body_question_count;
+        }
+    }
+    BUSTER_CHECK(!slot);
+    if (statistics)
+    {
+        statistics->steps += steps;
+    }
+    CIrTreeConditionalIndex index = {
+        .braces = braces,
+        .bodies = bodies,
+        .body_count = body_count,
+    };
+    return index;
+}
+
+// The index entry of the top-level body whose `{` is `brace`, or null.
+BUSTER_C_INTERNAL CIrTreeConditionals const* c_ir_tree_conditionals_find(CIrTreeConditionalIndex const* index, u32 brace)
+{
+    u32 low = 0;
+    u32 high = index->body_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (index->braces[middle] < brace)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low < index->body_count && index->braces[low] == brace ? index->bodies + low : 0;
+}
+
+BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+                                                    u32* expression_end)
+{
+    CIrTreeConditionals const* tree = builder->tree_conditionals;
+    CIrTreeRootVerdict verdict = C_IR_TREE_ROOT_UNKNOWN;
+    CIrTreeConditional record = {0};
+    u32 stripped_start = start;
+    u32 stripped_end = end;
+    bool in_body = start < end && start >= builder->body_token_start && end - builder->body_token_start <= builder->body_token_count;
+    if (in_body)
+    {
+        // Stripping parentheses only narrows the range, so a range with no
+        // `?` is decided before the strip.
+        u32 low = 0;
+        u32 high = tree->question_count;
+        while (low < high)
+        {
+            u32 middle = low + (high - low) / 2;
+            low = tree->questions[middle] < start ? middle + 1 : low;
+            high = tree->questions[middle] < start ? high : middle;
+        }
+        verdict = low == tree->question_count || tree->questions[low] >= end ? C_IR_TREE_ROOT_FALSE : C_IR_TREE_ROOT_UNKNOWN;
+    }
+    if (in_body && verdict == C_IR_TREE_ROOT_UNKNOWN)
+    {
+        while (stripped_start < stripped_end && c_token_is_punctuator(&builder->preprocess.tokens[stripped_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+               !c_ir_group_is_statement_expression(builder, stripped_start, stripped_end) &&
+               c_ir_matching_delimiter_cached(builder, stripped_start, stripped_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) ==
+                   stripped_end - 1)
+        {
+            stripped_start += 1;
+            stripped_end -= 1;
+        }
+        u32 low = 0;
+        u32 high = tree->record_count;
+        while (low < high)
+        {
+            u32 middle = low + (high - low) / 2;
+            low = tree->records[middle].start < stripped_start ? middle + 1 : low;
+            high = tree->records[middle].start < stripped_start ? high : middle;
+        }
+        if (stripped_start < stripped_end && low < tree->record_count && tree->records[low].start == stripped_start)
+        {
+            record = tree->records[low];
+            bool refused = record.colon == record.question + 1 && !c_preprocess_dialect_is_gnu(builder->preprocess.dialect);
+            verdict = record.colon + 1 < stripped_end && !refused ? C_IR_TREE_ROOT_TRUE : C_IR_TREE_ROOT_UNKNOWN;
+        }
+    }
+    bool result;
+    if (verdict == C_IR_TREE_ROOT_UNKNOWN)
+    {
+        result = c_ir_root_conditional_scan(builder, start, end, expression_start, question, colon, expression_end);
+    }
+    else
+    {
+        result = verdict == C_IR_TREE_ROOT_TRUE;
+        if (result)
+        {
+            *expression_start = stripped_start;
+            *question = record.question;
+            *colon = record.colon;
+            *expression_end = stripped_end;
+        }
+#if BUSTER_REFERENCE_CHECKS
+        // The scan the tree replaces, kept as the reference.
+        u32 reference_start = 0;
+        u32 reference_question = 0;
+        u32 reference_colon = 0;
+        u32 reference_end = 0;
+        bool reference = c_ir_root_conditional_scan(builder, start, end, &reference_start, &reference_question, &reference_colon, &reference_end);
+        BUSTER_CHECK(reference == result);
+        BUSTER_CHECK(!result || (reference_start == stripped_start && reference_question == record.question && reference_colon == record.colon &&
+                                 reference_end == stripped_end));
+#endif
+    }
+    if (builder->ast_lower_statistics)
+    {
+        builder->ast_lower_statistics->answers += verdict == C_IR_TREE_ROOT_TRUE;
+        builder->ast_lower_statistics->negatives += verdict == C_IR_TREE_ROOT_FALSE;
+        builder->ast_lower_statistics->fallbacks += verdict == C_IR_TREE_ROOT_UNKNOWN;
+    }
+    return result;
 }
 
 BUSTER_C_INTERNAL void c_ir_expression_core_range(CIntegerIrBuilder* builder, u32* start_in_out, u32* end_in_out)
@@ -41737,6 +42478,8 @@ BUSTER_C_INTERNAL bool c_ir_cleanup_function_target(CIntegerIrBuilder* builder, 
                                                                .type = canonical_type,
                                                                .kind = IR_SYMBOL_FUNCTION,
                                                                .linkage = IR_LINKAGE_EXTERNAL,
+                                                               .always_inline = (entity->inline_hints & C_ENTITY_INLINE_HINT_ALWAYS) != 0,
+                                                               .noinline = (entity->inline_hints & C_ENTITY_INLINE_HINT_NOINLINE) != 0,
                                                            });
     }
     if (symbol.value == IR_ID_UNDERLYING_INVALID)
@@ -50738,14 +51481,22 @@ BUSTER_C_INTERNAL bool c_test_decoded_string_equal(CIrDecodedString left, CIrDec
 // grow past its initial capacity without losing a record, answer the second
 // pass entirely from records, and agree with the unmemoized walk each time --
 // counts and decoded bytes alike. A memo created for another token array must
-// record nothing.
+// record nothing. A length-only memo records the same fragments with no bytes,
+// and a decode through it still reproduces the walk's bytes.
 bool c_test_string_literal_memo_growth(Arena* arena, CPreprocessResult preprocess, u32* recorded_out)
 {
-    CStringLiteralMemo* memo = c_string_literal_memo_create(arena, preprocess.tokens);
-    CStringLiteralMemo* foreign = c_string_literal_memo_create(arena, preprocess.tokens + 1);
+    CStringLiteralMemo* memo = c_string_literal_memo_create(arena, preprocess.tokens, false);
+    CStringLiteralMemo* foreign = c_string_literal_memo_create(arena, preprocess.tokens + 1, false);
     bool result = preprocess.token_count <= UINT32_MAX;
-    for (u32 pass = 0; result && pass < 2; pass += 1)
+    u32 recorded_with_bytes = 0;
+    for (u32 pass = 0; result && pass < 4; pass += 1)
     {
+        if (pass == 2)
+        {
+            recorded_with_bytes = memo->count;
+            memo = c_string_literal_memo_create(arena, preprocess.tokens, true);
+            foreign = c_string_literal_memo_create(arena, preprocess.tokens + 1, true);
+        }
         u32 recorded = memo->count;
         for (u32 index = 0; result && index < preprocess.token_count; index += 1)
         {
@@ -50765,10 +51516,13 @@ bool c_test_string_literal_memo_growth(Arena* arena, CPreprocessResult preproces
                          c_test_decoded_string_equal(walked, memoized) && c_test_decoded_string_equal(walked, bypassed) &&
                          walked_bytes.bytes.length == memo_bytes.bytes.length &&
                          (!walked_bytes.bytes.length || !memcmp(walked_bytes.bytes.pointer, memo_bytes.bytes.pointer, walked_bytes.bytes.length));
+                CStringLiteralMemoSlot const* slot = c_string_literal_memo_find(memo, preprocess.tokens, index);
+                result = result && (!slot || (slot->bytes == 0) == memo->lengths_only);
             }
         }
-        result = result && (pass == 0 || memo->count == recorded) && memo->count <= memo->capacity / 2 && !foreign->count;
+        result = result && (pass % 2 == 0 || memo->count == recorded) && memo->count <= memo->capacity / 2 && !foreign->count;
     }
+    result = result && memo->count == recorded_with_bytes;
     *recorded_out = memo->count;
     return result;
 }
@@ -50792,7 +51546,7 @@ bool c_test_string_literal_range_paths_agree(Arena* arena, CPreprocessResult pre
     // The memoized count must agree with the walk both when it records a
     // fragment and when it answers from the record, and must record nothing
     // for a range the walk rejects.
-    CStringLiteralMemo* memo = c_string_literal_memo_create(arena, preprocess.tokens);
+    CStringLiteralMemo* memo = c_string_literal_memo_create(arena, preprocess.tokens, false);
     CIrDecodedString first_memoized = sentinel;
     CIrDecodedString second_memoized = sentinel;
     bool first_memoized_accepts = c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, memo, &first_memoized);
@@ -50802,9 +51556,32 @@ bool c_test_string_literal_range_paths_agree(Arena* arena, CPreprocessResult pre
     // that walked the spellings, byte for byte.
     CIrDecodedString memo_decoded = sentinel;
     bool memo_decoded_accepts = c_ir_decode_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, memo, &memo_decoded);
+    // The same through a length-only memo: identical counts, the same
+    // fragments recorded, and a decode that meets those records still walks
+    // the spellings to the same bytes.
+    CStringLiteralMemo* lengths = c_string_literal_memo_create(arena, preprocess.tokens, true);
+    CIrDecodedString first_length = sentinel;
+    CIrDecodedString second_length = sentinel;
+    bool first_length_accepts = c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, lengths, &first_length);
+    bool second_length_accepts = c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, lengths, &second_length);
+    CIrDecodedString length_decoded = sentinel;
+    bool length_decoded_accepts = c_ir_decode_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, lengths, &length_decoded);
     bool result = decoded_accepts == counted_accepts && first_memoized_accepts == counted_accepts && second_memoized_accepts == counted_accepts &&
                   memo_decoded_accepts == decoded_accepts && memo->count == recorded && (counted_accepts || !recorded) &&
-                  c_test_decoded_string_equal(first_memoized, counted) && c_test_decoded_string_equal(second_memoized, counted);
+                  c_test_decoded_string_equal(first_memoized, counted) && c_test_decoded_string_equal(second_memoized, counted) &&
+                  first_length_accepts == counted_accepts && second_length_accepts == counted_accepts && length_decoded_accepts == decoded_accepts &&
+                  lengths->count == recorded && c_test_decoded_string_equal(first_length, counted) && c_test_decoded_string_equal(second_length, counted);
+    if (result && decoded_accepts)
+    {
+        result = length_decoded.bytes.length == decoded.bytes.length && length_decoded.element_count == decoded.element_count &&
+                 length_decoded.element_width == decoded.element_width && length_decoded.element_kind == decoded.element_kind &&
+                 length_decoded.encoding == decoded.encoding &&
+                 (!decoded.bytes.length || !memcmp(length_decoded.bytes.pointer, decoded.bytes.pointer, decoded.bytes.length));
+    }
+    else if (result)
+    {
+        result = c_test_decoded_string_equal(length_decoded, sentinel);
+    }
     if (result && decoded_accepts)
     {
         result = memo_decoded.bytes.length == decoded.bytes.length && memo_decoded.element_count == decoded.element_count &&
@@ -60645,7 +61422,8 @@ BUSTER_C_INTERNAL bool c_ir_function_scratch_tail_reservation(u64* position, u64
 
 BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
                                                              CIRLowerOptions options, CIrLowerCapacityPlan plan, Arena* temporary_arena,
-                                                             u64 function_reservation_limit)
+                                                             u64 function_reservation_limit, Arena* tree_arena, u32 tree_body_count,
+                                                             u32 tree_conditional_count)
 {
     CIRLowerResult result = {0};
     u32 type_capacity = plan.type_capacity;
@@ -60664,6 +61442,15 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     u32 label_candidate_count = label_candidates_valid ? parse.position_index->label_candidate_count : 0;
     u32 const* stream_matching_delimiters_plus_one =
         label_candidates_valid && parse.position_index->delimiter_mismatch_count == 0 ? parse.position_index->matching_delimiters_plus_one : 0;
+    CIrTreeConditionalIndex tree_conditionals = {0};
+    // The index reads parenthesis matches from the stream's delimiter array,
+    // so a stream with mismatched delimiters, which has none, lowers by the
+    // scans alone.
+    if (tree_arena && stream_matching_delimiters_plus_one)
+    {
+        tree_conditionals = c_ir_tree_conditionals_build(tree_arena, options.syntax_tree, &preprocess, stream_matching_delimiters_plus_one,
+                                                         tree_body_count, tree_conditional_count, options.ast_lower_statistics);
+    }
     CIrQueryMachine queries = {
         .frame_capacity = (u32)query_frame_capacity,
         .completed_capacity = (u32)query_frame_capacity,
@@ -60712,6 +61499,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     IrProgram* program = arena_allocate(arena, IrProgram, 1);
     u32 source_capacity = preprocess.file_count ? preprocess.file_count : 1;
     *program = ir_program_initialize(arena, 1, (u32)type_capacity, (u32)symbol_capacity, source_capacity);
+    program->external_function_definitions_interposable = target.os != OPERATING_SYSTEM_WINDOWS;
     if (options.sysv_unnamed_bitfields_integer)
     {
         IrAbiContext* context = program->abi_contexts + IR_ABI_CONVENTION_SYSTEMV_X86_64;
@@ -61995,6 +62783,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     // body and no initializer, and its target has to survive to be aliased,
     // which for a static target nothing else names it would not.
     CEntityId* entity_alias_targets = arena_allocate(arena, CEntityId, parse.entity_count);
+    // __attribute__((ifunc("resolver"))) is an alias of the resolver whose
+    // symbol is indirect: a reference wants the function the resolver
+    // returns, not the resolver (IrSymbolAlias.is_indirect).
+    bool* entity_alias_indirect = arena_allocate_zeroed(arena, bool, parse.entity_count);
     bool* entity_weak = arena_allocate(arena, bool, parse.entity_count);
     // The visibility an entity's declarations state, as CSymbolVisibility. A
     // declaration states its attribute's, else the #pragma GCC visibility
@@ -62061,7 +62853,11 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             entity_weakref_targets[declaration.entity.value] = weakref_name;
             continue;
         }
-        if (!binding.alias_target.length)
+        // c_parse_validate_alias_targets has refused an ifunc without a
+        // defined function resolver, and one on an output with no indirect
+        // symbol.
+        String8 alias_name = binding.is_ifunc ? binding.ifunc_resolver : binding.alias_target;
+        if (!alias_name.length)
         {
             continue;
         }
@@ -62069,18 +62865,21 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                            (CScopeId){
                                                                                .value = 0,
                                                                            },
-                                                                           binding.alias_target)
+                                                                           alias_name)
                                                    : C_ENTITY_ID_INVALID;
         if (alias_target.value >= parse.entity_count || alias_target.value == declaration.entity.value)
         {
             *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
-                .message = string_format(arena, S8("alias target '{S8}' is not declared in this translation unit"), binding.alias_target),
+                .message = string_format(arena, binding.is_ifunc ? S8("ifunc resolver '{S8}' is not declared in this translation unit")
+                                                                  : S8("alias target '{S8}' is not declared in this translation unit"),
+                                         alias_name),
                 .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
             continue;
         }
         entity_alias_targets[declaration.entity.value] = alias_target;
+        entity_alias_indirect[declaration.entity.value] |= binding.is_ifunc;
         // The target is named by an attribute, not by an identifier use, so
         // nothing else marks it live. A static one would otherwise be dropped
         // and the alias would point at an address the module never places.
@@ -62256,6 +63055,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                           .is_definition = definition != 0 || aliases_target,
                                                                           .is_thread_local = is_thread_local,
                                                                           .is_weak = entity_weak[entity_index],
+                                                                          .always_inline = (entity->inline_hints & C_ENTITY_INLINE_HINT_ALWAYS) != 0,
+                                                                          .noinline = (entity->inline_hints & C_ENTITY_INLINE_HINT_NOINLINE) != 0,
                                                                           .is_hidden = c_entity_symbol_hidden(entity_visibility[entity_index], options.default_visibility,
                                                                                                               definition != 0 || aliases_target, internal),
                                                                       });
@@ -62434,6 +63235,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                                                               definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
                                                                                                               internal),
                                                                           .is_returns_twice = entity_returns_twice[entity_index],
+                                                                          .always_inline = (entity->inline_hints & C_ENTITY_INLINE_HINT_ALWAYS) != 0,
+                                                                          .noinline = (entity->inline_hints & C_ENTITY_INLINE_HINT_NOINLINE) != 0,
                                                                       });
     }
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
@@ -62487,6 +63290,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                                                               definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
                                                                                                               internal),
                                                                           .is_returns_twice = entity_returns_twice[entity_index],
+                                                                          .always_inline = (entity->inline_hints & C_ENTITY_INLINE_HINT_ALWAYS) != 0,
+                                                                          .noinline = (entity->inline_hints & C_ENTITY_INLINE_HINT_NOINLINE) != 0,
                                                                       });
     }
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
@@ -63053,6 +63858,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                      c_entity_symbol_hidden(entity_visibility[declaration.entity.value], options.default_visibility,
                                                                                             declaration.is_definition, internal),
                                                         .is_returns_twice = declaration.entity.value < parse.entity_count && entity_returns_twice[declaration.entity.value],
+                                                        .always_inline = declaration.entity.value < parse.entity_count &&
+                                                                         (parse.entities[declaration.entity.value].inline_hints & C_ENTITY_INLINE_HINT_ALWAYS) != 0,
+                                                        .noinline = declaration.entity.value < parse.entity_count &&
+                                                                    (parse.entities[declaration.entity.value].inline_hints & C_ENTITY_INLINE_HINT_NOINLINE) != 0,
                                                     });
             if (declaration.entity.value < parse.entity_count)
             {
@@ -63425,6 +64234,11 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .returns_void = signatures[declaration_index].returns_void,
             .returns_zero_at_end = signatures[declaration_index].returns_zero_at_end,
         };
+        if (tree_conditionals.body_count && declaration.body_start)
+        {
+            builder.tree_conditionals = c_ir_tree_conditionals_find(&tree_conditionals, declaration.body_start - 1);
+            builder.ast_lower_statistics = options.ast_lower_statistics;
+        }
         builder.lower_machine.frames = arena_allocate(lowering_temporary.arena, CIrLowerFrame, lower_frame_capacity);
         builder.locals = arena_allocate(lowering_temporary.arena, CIntegerIrLocal, local_array_capacity);
         builder.local_entities = arena_allocate(lowering_temporary.arena, u32, local_array_capacity);
@@ -63733,7 +64547,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                 .message = alias_defined_here
                                ? string_format(arena, S8("'{S8}' is both defined here and aliased to '{S8}'"), parse.entities[entity_index].name,
                                                parse.entities[alias_target.value].name)
-                               : string_format(arena, S8("alias '{S8}' names '{S8}', which is not defined in this translation unit"),
+                               : string_format(arena,
+                                               entity_alias_indirect[entity_index] ? S8("ifunc '{S8}' names '{S8}', which is not defined in this translation unit")
+                                                                                   : S8("alias '{S8}' names '{S8}', which is not defined in this translation unit"),
                                                parse.entities[entity_index].name, parse.entities[alias_target.value].name),
                 .location = c_preprocess_site_location(&preprocess, parse.entities[entity_index].location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
@@ -63744,6 +64560,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                             (IrSymbolAlias){
                                 .symbol = alias_symbol,
                                 .target = target_symbol,
+                                .is_indirect = entity_alias_indirect[entity_index],
                             });
     }
     // The initializer registrations go in beside the aliases and for the same
@@ -63903,10 +64720,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
             fits = c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, &position, 1, workspace, 1);
             u64 requested_size = 0;
             fits = fits && c_ir_scratch_reservation_size(position, temporary_arena->reserved_size, &requested_size);
-            // Ordinary queries continue to reuse thread scratch. Only a query
-            // stack larger than its available workspace needs another mapping.
+            // Ordinary queries continue to reuse thread scratch. A query
+            // stack that would leave function lowering less than half of
+            // that workspace gets its own mapping: the stack is sized from
+            // the unit's largest declaration and lives for the whole unit,
+            // so in a tests-included self-compile (556,579 frames, 253 MB)
+            // it left every later function body about 15 MB.
             u64 query_position = position - (fits ? workspace : 0);
-            if (fits && query_position > temporary_arena->reserved_size)
+            if (fits && query_position > temporary_arena->reserved_size - workspace / 2)
             {
                 owned_temporary_arena = c_frontend_arena_create((ArenaCreation){.reserved_size = requested_size, .flags = {.no_pool = true}},
                                                                C_FRONTEND_RESERVATION_LOWERING);
@@ -63923,7 +64744,25 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_run(Arena* arena, String8 source_
         }
         if (fits)
         {
-            result = c_lower_to_ir_reserved_run(arena, source_path, preprocess, parse, target, options, plan, temporary_arena, function_reservation_limit);
+            // Under -fc-ast-pilot the tree's lowering index
+            // (c_ir_tree_conditionals_build) lives in an arena of its own for
+            // the call. Without a tree, or when that reservation is refused,
+            // lowering runs every scan.
+            u32 tree_body_count = 0;
+            u32 tree_conditional_count = 0;
+            u64 tree_size = options.syntax_tree ? c_ir_tree_conditionals_size(options.syntax_tree, &tree_body_count, &tree_conditional_count) : 0;
+            u64 tree_reservation = 0;
+            bool tree_sized = tree_body_count && align_forward_checked(arena_minimum_position + tree_size, BUSTER_KB(64), &tree_reservation);
+            Arena* tree_arena = tree_sized ? arena_create((ArenaCreation){.reserved_size = tree_reservation,
+                                                                          .initial_size = BUSTER_KB(64),
+                                                                          .flags = {.no_pool = true}})
+                                           : 0;
+            result = c_lower_to_ir_reserved_run(arena, source_path, preprocess, parse, target, options, plan, temporary_arena, function_reservation_limit,
+                                                tree_arena, tree_body_count, tree_conditional_count);
+            if (tree_arena)
+            {
+                arena_destroy(tree_arena, 1);
+            }
         }
         else
         {

@@ -368,6 +368,7 @@ BUSTER_GLOBAL_LOCAL bool a64_metadata_predicate_feature(u32 predicate_offset, Ta
         {.name = "HasSHA2", .feature = TARGET_CPU_FEATURE_AARCH64_SHA2},
         {.name = "HasSHA3", .feature = TARGET_CPU_FEATURE_AARCH64_SHA3},
         {.name = "HasSME", .feature = TARGET_CPU_FEATURE_AARCH64_SME},
+        {.name = "HasSMEI16I64", .feature = TARGET_CPU_FEATURE_AARCH64_SME_I16I64},
         {.name = "HasTRACEV8_4", .feature = TARGET_CPU_FEATURE_AARCH64_TRACEV8_4},
     };
     if (feature)

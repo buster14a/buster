@@ -236,8 +236,25 @@ either selector do not replay the profile; the selected line must increase
 exactly once against every GitHub parent while the other recognized selector
 count stays unchanged. The publisher checks the exact head request bytes and
 hash. Analyzer profiles run in place of compiler timing/corpus profiles;
-`scaling.request` and a newly requested inline-acceptance selector cannot be
-combined with them.
+`scaling.request`, a newly requested inline-acceptance selector and a fresh
+ast-pilot selector cannot be combined with them.
+
+A fresh exact `profile: ast-pilot-acceptance-v1` line, added once against
+every parent, adds issue #3397's fixed `-fc-ast-pilot` adoption profile to
+the ordinary comparison: the candidate binary without and with the flag on
+`-fsyntax-only` and `-c` cells. Its method, budget and evidence are in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
+A fresh exact `profile: throughput-real-source-v1` line, added once against
+every parent, adds the real-source throughput leg (#2761) after the corpus
+leg. The merge base's `./build.sh bench_throughput run --real-source` times
+the pinned cJSON 1.7.19, Lua 5.4.8 and SQLite 3.53.4 descriptors' own
+compile-link command on the same two binaries, so the merge base must already
+contain that harness option. The inputs are fetched from pinned URLs and
+checked against pinned hashes before timing. The leg is report-only. Its
+evidence is under `throughput_real_source/` in the artifact, and a missing,
+partial, failed or cancelled leg fails the check. Its method is in
+[benchmarking.md](../../docs/agents/benchmarking.md).
 
 V1 preserves its historical fixed 182-row qualification and 135-execution,
 47-alias candidate profile. V2 independently derives the ordered Release
