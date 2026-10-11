@@ -42,7 +42,6 @@
 
 enum
 {
-    ASSEMBLY_UNIT_SECTION_CAPACITY = 32,
     ASSEMBLY_UNIT_SECTION_STACK_CAPACITY = 16,
     ASSEMBLY_UNIT_DIAGNOSTIC_CAPACITY = 16,
     ASSEMBLY_UNIT_OPERAND_CAPACITY = 64,
@@ -131,6 +130,15 @@ struct AssemblyUnitBuilder
     // does not maintain it; nothing interns after that.
     u32* symbol_slots;
     u64 symbol_slot_mask;
+    // The same index over result.sections, whose names are unique. Every
+    // section but the implicit first `.text` comes from one statement, so
+    // section_capacity is the statement count plus one.
+    u32* section_slots;
+    u64 section_slot_mask;
+    // Per section, the private section-base symbol assembly_unit_location_symbol
+    // chose, or UINT32_MAX before the first `.` relocation in that section.
+    u32* section_location_symbols;
+    u32 section_capacity;
     u32 integer_count;
     u32 integer_capacity;
     u32 alias_count;
@@ -234,7 +242,7 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_diagnostic_format(AssemblyUnitBuilder* bu
 
 // ---------------------------------------------------------------- symbols
 
-BUSTER_GLOBAL_LOCAL u32* assembly_unit_symbol_slot(AssemblyUnitBuilder* builder, String8 name)
+BUSTER_GLOBAL_LOCAL u64 assembly_unit_name_hash(String8 name)
 {
     u64 hash = 1469598103934665603ull;
     for (u64 index = 0; index < name.length; index += 1)
@@ -242,7 +250,24 @@ BUSTER_GLOBAL_LOCAL u32* assembly_unit_symbol_slot(AssemblyUnitBuilder* builder,
         hash ^= name.pointer[index];
         hash *= 1099511628211ull;
     }
-    u64 slot_index = hash & builder->symbol_slot_mask;
+    return hash;
+}
+
+// A power-of-two slot count at least twice `count`, so an index stays under
+// half full.
+BUSTER_GLOBAL_LOCAL u64 assembly_unit_slot_capacity(u64 count)
+{
+    u64 capacity = 16;
+    while (capacity < count * 2 + 1)
+    {
+        capacity <<= 1;
+    }
+    return capacity;
+}
+
+BUSTER_GLOBAL_LOCAL u32* assembly_unit_symbol_slot(AssemblyUnitBuilder* builder, String8 name)
+{
+    u64 slot_index = assembly_unit_name_hash(name) & builder->symbol_slot_mask;
     u32* slot = builder->symbol_slots + slot_index;
     while (*slot && !string_equal(builder->result.symbols[*slot - 1].name, name))
     {
@@ -334,32 +359,47 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_section_kind_for_name(String8 name, Assem
     return matched;
 }
 
+BUSTER_GLOBAL_LOCAL u32* assembly_unit_section_slot(AssemblyUnitBuilder* builder, String8 name)
+{
+    u64 slot_index = assembly_unit_name_hash(name) & builder->section_slot_mask;
+    u32* slot = builder->section_slots + slot_index;
+    while (*slot && !string_equal(builder->result.sections[*slot - 1].name, name))
+    {
+        slot_index = (slot_index + 1) & builder->section_slot_mask;
+        slot = builder->section_slots + slot_index;
+    }
+    return slot;
+}
+
 BUSTER_GLOBAL_LOCAL u32 assembly_unit_section_select(AssemblyUnitBuilder* builder, String8 name, AssemblyUnitSectionKind kind)
 {
     builder->current_stack_note = false;
-    for (u32 index = 0; index < builder->result.section_count; index += 1)
+    u32* slot = assembly_unit_section_slot(builder, name);
+    u32 result = UINT32_MAX;
+    if (*slot)
     {
-        if (string_equal(builder->result.sections[index].name, name))
-        {
-            return index;
-        }
+        result = *slot - 1;
     }
-    if (builder->result.section_count >= ASSEMBLY_UNIT_SECTION_CAPACITY)
+    else if (builder->result.section_count >= builder->section_capacity)
     {
         assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("too many sections in one assembly unit"));
-        return UINT32_MAX;
     }
-    u32 index = builder->result.section_count++;
-    builder->result.sections[index] = (AssemblyUnitSection){
-        .name = name,
-        // GNU as gives a hand-written section no alignment of its own: the
-        // `.init` fragments of crti.o and crtn.o are concatenated byte after
-        // byte, and any padding between them would run as code.
-        .alignment = 1,
-        .kind = kind,
-    };
-    builder->section_offsets[index] = 0;
-    return index;
+    else
+    {
+        result = builder->result.section_count++;
+        builder->result.sections[result] = (AssemblyUnitSection){
+            .name = name,
+            // GNU as gives a hand-written section no alignment of its own: the
+            // `.init` fragments of crti.o and crtn.o are concatenated byte after
+            // byte, and any padding between them would run as code.
+            .alignment = 1,
+            .kind = kind,
+        };
+        builder->section_offsets[result] = 0;
+        builder->section_location_symbols[result] = UINT32_MAX;
+        *slot = result + 1;
+    }
+    return result;
 }
 
 // The section every unit starts in, created on first use so a file that only
@@ -1066,39 +1106,38 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_integer(AssemblyUnitBuilder* bu
 }
 
 // A private local symbol at section offset zero represents a section base.
-// It is created only when a `.` address actually needs a relocation.
+// It is created only when a `.` address actually needs a relocation. Every
+// call happens in assembly_unit_materialize_integers, after the last symbol
+// attribute changes, so the first symbol that qualifies stays the answer for
+// its section. Interned names are unique, so before this section's first
+// base symbol exists the only candidate is the one interned under the
+// section's name.
 BUSTER_GLOBAL_LOCAL u32 assembly_unit_location_symbol(AssemblyUnitBuilder* builder)
 {
-    u32 symbol = builder->result.symbol_count;
-    for (u32 index = 0; index < builder->result.symbol_count; index += 1)
+    u32 symbol = builder->section_location_symbols[builder->current_section];
+    String8 name = builder->result.sections[builder->current_section].name;
+    if (symbol == UINT32_MAX)
     {
-        AssemblyUnitSymbol record = builder->result.symbols[index];
-        if (record.defined && record.section == builder->current_section && !record.value && !record.global && !record.weak &&
-            string_equal(record.name, builder->result.sections[builder->current_section].name))
+        u32* slot = assembly_unit_symbol_slot(builder, name);
+        AssemblyUnitSymbol record = *slot ? builder->result.symbols[*slot - 1] : (AssemblyUnitSymbol){0};
+        if (*slot && record.defined && record.section == builder->current_section && !record.value && !record.global && !record.weak)
         {
-            symbol = index;
-            break;
+            symbol = *slot - 1;
         }
-    }
-    if (symbol == builder->result.symbol_count)
-    {
-        if (symbol < builder->symbol_capacity)
+        else if (builder->result.symbol_count < builder->symbol_capacity)
         {
-            builder->result.symbols[builder->result.symbol_count++] = (AssemblyUnitSymbol){
-                .name = builder->result.sections[builder->current_section].name, .section = builder->current_section, .defined = true,
+            symbol = builder->result.symbol_count++;
+            builder->result.symbols[symbol] = (AssemblyUnitSymbol){
+                .name = name, .section = builder->current_section, .defined = true,
             };
             // A later intern of this name finds it unless an earlier symbol
             // already owns the name, the first-match rule interning keeps.
-            u32* slot = assembly_unit_symbol_slot(builder, builder->result.symbols[symbol].name);
             if (!*slot)
             {
                 *slot = symbol + 1;
             }
         }
-        else
-        {
-            symbol = UINT32_MAX;
-        }
+        builder->section_location_symbols[builder->current_section] = symbol;
     }
     return symbol;
 }
@@ -1378,15 +1417,13 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_define_section_starts(AssemblyUnitBuilder
         AssemblyUnitSymbol* symbol = builder->result.symbols + index;
         if (!symbol->defined && !symbol->global && !symbol->weak)
         {
-            for (u32 section = 0; section < builder->result.section_count && !symbol->defined; section += 1)
+            u32 section = *assembly_unit_section_slot(builder, symbol->name);
+            if (section)
             {
-                if (string_equal(builder->result.sections[section].name, symbol->name))
-                {
-                    symbol->defined = true;
-                    symbol->section = section;
-                    symbol->value = 0;
-                    builder->symbol_section_start[index] = true;
-                }
+                symbol->defined = true;
+                symbol->section = section - 1;
+                symbol->value = 0;
+                builder->symbol_section_start[index] = true;
             }
         }
     }
@@ -2438,13 +2475,16 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     }
     String8 blanked = {.pointer = text, .length = source.length};
 
-    builder.symbol_capacity = statement_count * 2 + comma_count + ASSEMBLY_UNIT_SECTION_CAPACITY;
+    builder.section_capacity = statement_count + 1;
+    // Each section adds at most one private section-base symbol.
+    builder.symbol_capacity = statement_count * 2 + comma_count + builder.section_capacity;
     builder.relocation_capacity = statement_count + comma_count + 16;
     builder.integer_capacity = statement_count + comma_count + 16;
     builder.piece_capacity = statement_count + 16;
     builder.numeric_label_capacity = statement_count * 2 + 16;
-    builder.result.sections = arena_allocate(arena, AssemblyUnitSection, ASSEMBLY_UNIT_SECTION_CAPACITY);
-    builder.section_offsets = arena_allocate(arena, u64, ASSEMBLY_UNIT_SECTION_CAPACITY);
+    builder.result.sections = arena_allocate(arena, AssemblyUnitSection, builder.section_capacity);
+    builder.section_offsets = arena_allocate(arena, u64, builder.section_capacity);
+    builder.section_location_symbols = arena_allocate(arena, u32, builder.section_capacity);
     builder.result.symbols = arena_allocate(arena, AssemblyUnitSymbol, builder.symbol_capacity);
     builder.result.relocations = arena_allocate(arena, AssemblyUnitRelocation, builder.relocation_capacity);
     builder.integers = arena_allocate(arena, AssemblyUnitInteger, builder.integer_capacity);
@@ -2457,13 +2497,12 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     builder.symbol_local = arena_allocate_zeroed(arena, bool, builder.symbol_capacity);
     builder.symbol_section_start = arena_allocate_zeroed(arena, bool, builder.symbol_capacity);
     builder.symbol_weak_definition_line = arena_allocate_zeroed(arena, u32, builder.symbol_capacity);
-    u64 symbol_slot_capacity = 16;
-    while (symbol_slot_capacity < (u64)builder.symbol_capacity * 2 + 1)
-    {
-        symbol_slot_capacity <<= 1;
-    }
+    u64 symbol_slot_capacity = assembly_unit_slot_capacity(builder.symbol_capacity);
     builder.symbol_slots = arena_allocate_zeroed(arena, u32, symbol_slot_capacity);
     builder.symbol_slot_mask = symbol_slot_capacity - 1;
+    u64 section_slot_capacity = assembly_unit_slot_capacity(builder.section_capacity);
+    builder.section_slots = arena_allocate_zeroed(arena, u32, section_slot_capacity);
+    builder.section_slot_mask = section_slot_capacity - 1;
 
     assembly_unit_collect_numeric_labels(&builder, blanked);
     assembly_unit_parse(&builder, blanked);
