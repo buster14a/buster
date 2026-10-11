@@ -38828,7 +38828,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_label_address(UnitTestArguments
         {
             for (u32 index = body_start; index < tokens.token_count; index += 1)
             {
-                if (c_token_is_punctuator(tokens.tokens + index, C_PUNCTUATOR_AMPERSAND_AMPERSAND))
+                if (tokens.tokens[index].kind == C_TOKEN_PUNCTUATOR &&
+                    tokens.tokens[index].punctuator == C_PUNCTUATOR_AMPERSAND_AMPERSAND)
                 {
                     if (BUSTER_REQUIRE(arguments, conjunction < BUSTER_ARRAY_LENGTH(expected)))
                     {
