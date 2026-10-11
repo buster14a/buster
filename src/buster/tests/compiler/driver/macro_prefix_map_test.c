@@ -23,7 +23,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macro_prefix_map(UnitTes
         {S8("-fmacro-prefix-map=pre=partial"), {0}, S8("prefix/file.c"), S8("\"partialfix/file.c\""), S8("\"partialfix/file.c\"")},
         {S8("-fmacro-prefix-map=PREFIX/=mapped/"), {0}, S8("prefix/file.c"), S8("\"prefix/file.c\""), S8("\"prefix/file.c\"")},
         {S8("-fmacro-prefix-map=prefix/=first/"), S8("-fmacro-prefix-map=prefix/=last/"), S8("prefix/file.c"),
-         S8("\"last/file.c\""), S8("\"last/file.c\"")},
+         S8("\"last/file.c\""), S8("\"first/file.c\"")},
         {S8("-fmacro-prefix-map=prefix/=short/"), S8("-fmacro-prefix-map=prefix/file=long"), S8("prefix/file.c"),
          S8("\"long.c\""), S8("\"long.c\"")},
         {S8("-fmacro-prefix-map=prefix/file=long"), S8("-fmacro-prefix-map=prefix/=short/"), S8("prefix/file.c"),
