@@ -1663,7 +1663,7 @@ jobs:
             exit 1
           fi
           echo 'ANALYZER_POLICY candidate-only-v1: one full analysis, no reference pass'
-          build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 2 --quiet --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/full.log"
+          build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 4 --quiet --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/full.log"
           build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --aggregate --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/aggregate.log"
       - name: Report reused analyzer validation
         if: ${{ !cancelled() && needs.reuse.outputs.reuse == 'true' }}

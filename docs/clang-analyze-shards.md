@@ -100,6 +100,13 @@ Clang control checks relative includes and confirms a changed transitive header
 is reanalyzed. Every desktop combination entrypoint and the independent analyzer
 job run these controls.
 
+The hosted invocation requests four workers across eight shards. This explicit
+`--jobs 4` is the owner-directed setting for the hosted lane (#3502); the native
+scheduler default remains two workers. The #2046 comparison measured 8.0–14.3%
+lower wall time and 42.6–54.5% more child CPU at four workers. Its 5% CPU
+allowance was that campaign's conservative acceptance criterion, not a
+repository contract.
+
 The required analyzer job executes **one complete candidate analysis**, followed
 by independent aggregation of its retained results. Pull requests, merge groups,
 main/tag pushes and manual runs all use that same path. Changes to `build.c`, its

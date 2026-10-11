@@ -134,7 +134,7 @@ chmod +x "$output"
         self.assertEqual(len(self.lines(folder / "clang.log")), 1)
         calls = self.lines(folder / "driver.log")
         self.assertEqual(len(calls), 2)
-        self.assertIn("--shards 8 --jobs 2 --quiet", calls[0])
+        self.assertIn("--shards 8 --jobs 4 --quiet", calls[0])
         self.assertNotIn("--aggregate", calls[0])
         self.assertIn("--aggregate", calls[1])
         self.assertTrue(all("--baseline-driver" not in call for call in calls))

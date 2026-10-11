@@ -543,13 +543,18 @@ with `queue-collect`/`queue-summarize`; see [ci-runner-queue.md](ci-runner-queue
 ## Independent Clang analyzer gate
 
 `Clang analyzer shards` analyzes the generated split-source Release database
-with bounded module workers and mandatory fail-closed aggregation. Desktop
-unity analysis remains covered. The job exercises native failure controls and
-resolves the candidate and reference commit identities before analysis. Equal
-identities on pushes and dispatches run the full candidate campaign once and
-retain an explicit skip reason; pull-request, merge-group and distinct identities
-keep the reference/candidate comparison on identical commands. Missing or invalid
-selection evidence fails before candidate analysis; the campaign re-resolves the
+with eight shards, four requested workers and mandatory fail-closed aggregation.
+The explicit `--jobs 4` is the hosted-CI owner decision in #3502; the native
+driver default remains two workers. The #2046 comparison measured 8.0–14.3%
+lower wall time and 42.6–54.5% more child CPU at four workers. Its 5% CPU
+allowance was that campaign's conservative acceptance criterion, not a
+repository contract. Desktop unity analysis remains covered. The job exercises
+native failure controls and resolves candidate/reference commit identities
+before analysis. Equal identities on pushes and dispatches run the full
+candidate campaign once and retain an explicit skip reason; pull-request,
+merge-group and distinct identities keep the reference/candidate comparison
+on identical commands. Missing or invalid selection evidence fails before
+candidate analysis; the campaign re-resolves the
 identities and checks the complete retained record rather than trusting an
 exported decision alone.
 Both modes retain candidate coverage, diagnostics, timing and child RSS evidence,
