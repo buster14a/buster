@@ -30,7 +30,10 @@ descriptor's compile-link on the same two binaries. A fresh exact
 PRODUCTION_PROFILE_REQUEST_LINE adds the PGO/LTO production-profile leg
 (#2761): the head's own `./build.sh production_profile` builds its compilers in
 an isolated clone of the head, then the base revision's harness times that
-run's Release compiler against its PGO+LTO compiler on the corpus.
+run's Release compiler against its PGO+LTO compiler on the corpus. A fresh
+exact COMPILER_PROBES_REQUEST_LINE adds the compiler-probes leg (#2761):
+compiler_probes.py builds the FAST register-allocation and scheduler line-mark
+probes against both revisions in isolated clones and times them as pairs.
 
 The receipt records identities, the profile, toolchain versions, binary hashes
 and timings, and is written even when a step fails. The candidate's build runs
@@ -42,7 +45,8 @@ read_exported_json (classification reads the export, #2929), collect_evidence,
 measure_throughput (corpus leg), scaling_requested and measure_scaling (scaling leg),
 ast_pilot_request_selection and measure_ast_pilot (#3397 opt-in flag pair),
 real_source_request_selection and measure_real_source (#2761 real-source leg),
-production_profile_request_selection and measure_production_profile (#2761 PGO/LTO leg), main. Validity rules live in compiler_receipt.classify.
+production_profile_request_selection and measure_production_profile (#2761 PGO/LTO leg),
+compiler_probes_request_selection and measure_compiler_probes (#2761 probe leg), main. Validity rules live in compiler_receipt.classify.
 """
 
 from __future__ import annotations
@@ -71,6 +75,8 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               THROUGHPUT_REAL_SOURCE_PROFILE, THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
                               throughput_real_source_digest, validate_throughput_real_source,
                               PRODUCTION_PROFILE_PROFILE, PRODUCTION_PROFILE_REQUEST_LINE, validate_production_profile,
+                              COMPILER_PROBES_PROFILE, COMPILER_PROBES_REQUEST_LINE, COMPILER_PROBES_ROLES,
+                              compiler_probes_digest, validate_compiler_probes,
                               INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUEST_LINE,
                               ANALYZER_REQUEST_LINES,
                               ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, MAIN40_PROFILE, MAIN_PROFILES, named_main_profile, RECEIPT_SCHEMA, SCALING_PROFILE,
@@ -95,6 +101,10 @@ REAL_SOURCE_TIMEOUT_SECONDS = 1800
 # 2.8 GHz Xeon. Twice that keeps the leg, its corpus run and the ordinary
 # comparison inside the unchanged 90-minute compare-pull job.
 PRODUCTION_PROFILE_BUILD_TIMEOUT_SECONDS = 40 * 60
+# Measured: the whole compiler-probes leg (two clones, four probe builds, 12
+# cases of 2 + 30 pairs) took 218 s on a hosted 4-vCPU 2.8 GHz Xeon; this
+# bound keeps it inside the unchanged compare-pull budget.
+COMPILER_PROBES_TIMEOUT_SECONDS = 20 * 60
 ANALYZER_DRIVER_BUILD_TIMEOUT_SECONDS = 600
 ANALYZER_GENERATE_TIMEOUT_SECONDS = 900
 ANALYZER_HELPER_TIMEOUT_SECONDS = 76 * 60
@@ -116,6 +126,7 @@ LAB_REQUIRED = ("summary.json",)
 THROUGHPUT_REQUIRED = ("summary.json", "metadata.json")
 REAL_SOURCE_REQUIRED = ("summary.json", "metadata.json", "staging.json", "cpuinfo.txt")
 PRODUCTION_PROFILE_REQUIRED = ("summary.txt", "evidence/phases.tsv")
+COMPILER_PROBES_REQUIRED = ("summary.json",)
 SCALING_REQUIRED = ("scaling.json", "scaling-metadata.json")
 # Raw evidence without compiled outputs, per-run binary copies or perf data.
 EVIDENCE_IGNORE = ("*.exe", "instances", "*.data", "*.data.old", "*.o", "*.obj")
@@ -129,6 +140,8 @@ REAL_SOURCE_IGNORE = SCALING_IGNORE
 # manifests; its seven build trees and raw profiles are rebuilt from the head.
 PRODUCTION_PROFILE_IGNORE = (*EVIDENCE_IGNORE, "release", "g0", "lto", "pgo", "pgo-lto", "instrumented",
                              "instrumented-lto", "*.profraw", "*.profdata")
+# The probe leg keeps its summary and logs; its clones and binaries are not evidence.
+COMPILER_PROBES_IGNORE = (*EVIDENCE_IGNORE, "bin")
 TOOLS = (("clang", "--version"), ("cmake", "--version"), ("ninja", "--version"), ("tcc", "-v"),
          ("perf", "--version"), ("taskset", "--version"), ("git", "--version"))
 
@@ -942,6 +955,18 @@ def production_profile_request_selection(candidate: Path, head: str) -> tuple[bo
     return True, ""
 
 
+def compiler_probes_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #2761's probe profile only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, COMPILER_PROBES_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the compiler-probes selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the compiler-probes selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
 def analyzer_profile_request_status(candidate: Path, head: str) -> tuple[bool, str]:
     """Compatibility boolean wrapper for callers interested only in selection state."""
     selected, problem = analyzer_profile_request_selection(candidate, head)
@@ -1520,6 +1545,41 @@ def measure_production_profile(candidate: Path, bins: Path, work: Path, evidence
     record["status"] = "complete" if not errors else "failed"
 
 
+def measure_compiler_probes(candidate: Path, work: Path, evidence: Path, base: str, head: str, receipt: dict) -> None:
+    """Run #2761's probe leg on both revisions and record it, with independently hashed binaries, in the receipt."""
+    record = receipt["compiler_probes"]
+    output = work / "compiler-probes"
+    exported = evidence / "compiler_probes"
+    errors: list[str] = []
+    argv = [sys.executable, "-B", str(Path(__file__).resolve().with_name("compiler_probes.py")), "run",
+            "--repository", str(candidate), "--base", base, "--head", head,
+            "--work", str(work / "compiler-probes-work"), "--output", str(output)]
+    measured = time.monotonic()
+    status = run(argv, candidate, evidence / "compiler-probes.log", COMPILER_PROBES_TIMEOUT_SECONDS)
+    receipt["timings"]["compiler_probes_seconds"] = round(time.monotonic() - measured, 3)
+    binaries: dict = {}
+    for probe in COMPILER_PROBES_PROFILE["probes"]:
+        for role, revision in zip(COMPILER_PROBES_ROLES, (base, head)):
+            built = output / "bin" / f"{probe}-{role}"
+            if built.is_file():
+                binaries.setdefault(probe, {})[role] = {"sha256": sha256(built), "size_bytes": built.stat().st_size,
+                                                        "revision": revision}
+    record["binaries"] = binaries
+    summary = None
+    if output.is_dir():
+        problems, record["evidence_omissions"] = export_tree(output, exported, evidence, COMPILER_PROBES_IGNORE,
+                                                             COMPILER_PROBES_REQUIRED)
+        errors.extend(problems)
+        summary, problem = read_exported_json(exported / "summary.json")
+        if problem:
+            errors.append(f"exported evidence compiler_probes/summary.json unreadable: {problem}")
+    errors.extend(validate_compiler_probes(status, summary, base, head, binaries))
+    record["cells"] = compiler_probes_digest(summary)
+    record["exit"] = status
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
 def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path, bins: Path, log: Path,
             receipt: dict, summaries: list) -> None:
     """Build both revisions and run the lab, corpus and scaling legs; the lab summary goes to summaries."""
@@ -1572,6 +1632,17 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         # Its build leg and the other long opt-in legs together would not fit the compare-pull job.
         if real_requested or ast_requested:
             reasons.append("production-profile-v1 cannot be combined with real-source throughput or ast-pilot acceptance")
+    probes_requested = arguments.mode == "pull" and getattr(arguments, "compiler_probes_requested", False)
+    problem = getattr(arguments, "compiler_probes_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if probes_requested:
+        receipt["compiler_probes"] = {"requested": True, "request_line": COMPILER_PROBES_REQUEST_LINE,
+                                      "profile": COMPILER_PROBES_PROFILE, "status": "pending"}
+        # One long opt-in leg per compare-pull job keeps the unchanged 90-minute budget provable.
+        if real_requested or ast_requested or production_requested:
+            reasons.append("compiler-probes-v1 cannot be combined with real-source throughput, ast-pilot acceptance "
+                           "or the PGO/LTO production profile")
     if not reasons:
         for role, commit in (("baseline", arguments.base), ("candidate", arguments.head), ("closure", arguments.base)):
             mark(receipt, evidence, f"build-{role}")
@@ -1687,6 +1758,9 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         if production_requested:
             mark(receipt, evidence, "production-profile")
             measure_production_profile(candidate, bins, work, evidence, arguments.head, receipt, harness)
+        if probes_requested:
+            mark(receipt, evidence, "compiler-probes")
+            measure_compiler_probes(candidate, work, evidence, arguments.base, arguments.head, receipt)
         mark(receipt, evidence, "validate")
         raw_closure = {}
         if snapshot_closure:
@@ -1768,6 +1842,14 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             reasons.append("the PGO/LTO production profile was requested but did not reach its measurement phase")
         if record["status"] != "complete":
             receipt["state"] = "failed"
+    if probes_requested:
+        record = receipt["compiler_probes"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("the compiler probes were requested but did not reach their measurement phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
 
 
 
@@ -1797,6 +1879,8 @@ def main(argv: list[str] | None = None) -> int:
         real_source_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.production_profile_requested, arguments.production_profile_request_problem = (
         production_profile_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.compiler_probes_requested, arguments.compiler_probes_request_problem = (
+        compiler_probes_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}
     utility = getattr(arguments, "utility_owned_phases", False)
     main_owned = getattr(arguments, "main_owned_phases", False)

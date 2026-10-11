@@ -42,7 +42,8 @@ evidence, and emits only the comment entry. It writes no check and runs no
 measurement; expired or unverifiable evidence is reported and not published.
 
 Map: validate_inline_bundle and validate_ast_pilot_bundle (opt-in flag pairs),
-validate_real_source_bundle and validate_production_profile_bundle (#2761 opt-in legs),
+validate_real_source_bundle, validate_production_profile_bundle and
+validate_compiler_probes_bundle (#2761 opt-in legs),
 decide (pure decision), read_evidence, verify_analyzer_request_freshness
 (fresh request selectors), queue_delay, links,
 commit_report, recovered_identity, bind_request, report_check_url, main.
@@ -80,6 +81,8 @@ from compiler_receipt import (validate_closure, ANALYZER_PROFILE, ANALYZER_PROFI
                               THROUGHPUT_REAL_SOURCE_PROFILE, THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
                               throughput_real_source_digest, validate_throughput_real_source,
                               PRODUCTION_PROFILE_PROFILE, PRODUCTION_PROFILE_REQUEST_LINE, validate_production_profile,
+                              COMPILER_PROBES_PROFILE, COMPILER_PROBES_REQUEST_LINE, compiler_probes_digest,
+                              validate_compiler_probes,
                               MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
                               check_name, classify, classify_scaling, classify_throughput, host_problem, number,
                               range_label, regression_policy, render, SCALING_PROFILE, scaling_digest, validate_inline_acceptance,
@@ -275,6 +278,30 @@ def validate_production_profile_bundle(record: object, bundle: object, head: str
     return problems
 
 
+COMPILER_PROBES_BUNDLE_FILES = {"summary": "compiler_probes/summary.json"}
+
+
+def validate_compiler_probes_bundle(record: object, bundle: object, base: str, head: str) -> list[str]:
+    """Re-derive the requested #2761 probe result from its exported raw samples."""
+    if record is None:
+        return []
+    if not isinstance(record, dict) or record.get("requested") is not True:
+        return ["receipt compiler-probes record is present but not a request"]
+    problems: list[str] = []
+    if record.get("status") != "complete" or record.get("exit") != 0:
+        problems.append("receipt compiler-probes run did not complete successfully")
+    if record.get("request_line") != COMPILER_PROBES_REQUEST_LINE:
+        problems.append("receipt compiler-probes request selector is not the exact supported line")
+    if record.get("profile") != COMPILER_PROBES_PROFILE:
+        problems.append("receipt compiler-probes profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(COMPILER_PROBES_BUNDLE_FILES):
+        return [*problems, "requested compiler-probes evidence bundle is incomplete"]
+    problems.extend(validate_compiler_probes(record.get("exit"), bundle["summary"], base, head, record.get("binaries")))
+    if record.get("cells") != compiler_probes_digest(bundle["summary"]):
+        problems.append("receipt compiler-probes cells do not match the exported raw samples")
+    return problems
+
+
 def decide(expected: dict, authorized: bool, compare_result: str, receipt: object, summary: object,
            policy_value: str, throughput: object = None, require_throughput: bool = True,
            extra_reasons: list[str] | None = None, *,
@@ -358,6 +385,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.append(f"{selected_profile['name']} cannot be combined with real-source throughput")
                 if receipt.get("production_profile") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with the PGO/LTO production profile")
+                if receipt.get("compiler_probes") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with the compiler probes")
                 reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
                 reasons.extend(validate_analyzer_bundle(receipt,
                                                         analyzer_bundle.get("summary") if isinstance(analyzer_bundle, dict) else None,
@@ -412,6 +441,17 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.extend(validate_production_profile_bundle(receipt["production_profile"],
                                                                       corpus.get("production_profile_bundle"),
                                                                       expected.get("head", "")))
+                if receipt.get("compiler_probes") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("the compiler probes are valid only in pull mode")
+                    if any(receipt.get(key) is not None for key in
+                           ("throughput_real_source", "ast_pilot_acceptance", "production_profile")):
+                        reasons.append("the compiler probes cannot be combined with real-source throughput, "
+                                       "ast-pilot acceptance or the PGO/LTO production profile")
+                    reasons.extend(validate_compiler_probes_bundle(receipt["compiler_probes"],
+                                                                   corpus.get("compiler_probes_bundle"),
+                                                                   expected.get("base", ""), expected.get("head", "")))
             if compare_result != "success":
                 reasons.append(f"compare job result is {compare_result!r}, not success")
             if problem:
@@ -759,7 +799,8 @@ def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
                         for operation in ("snapshot", "restore", "verify")})
     if receipt.get("throughput_profile") != THROUGHPUT_PROFILE or "scaling_profile" in receipt or \
             not isinstance(receipt.get("inline_acceptance"), dict) or receipt["inline_acceptance"].get("requested") is not False or \
-            "ast_pilot_acceptance" in receipt or "throughput_real_source" in receipt or "production_profile" in receipt:
+            "ast_pilot_acceptance" in receipt or "throughput_real_source" in receipt or "production_profile" in receipt or \
+            "compiler_probes" in receipt:
         raise ValueError("owned ordinary Main evidence changed the complete original corpus recipe")
     identity = receipt.get("identity")
     if not isinstance(identity, dict) or identity.get("trusted_revision") != route["main_measurement_revision"]:
@@ -984,6 +1025,23 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         break
                 throughput["production_profile_bundle"] = (bundle if not problem and
                                                            len(bundle) == len(PRODUCTION_PROFILE_BUNDLE_FILES) else None)
+            if isinstance(receipt, dict) and receipt.get("compiler_probes") is not None and not problem:
+                bundle = {}
+                for key, member in COMPILER_PROBES_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required compiler-probes evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed"
+                        break
+                throughput["compiler_probes_bundle"] = (bundle if not problem and
+                                                        len(bundle) == len(COMPILER_PROBES_BUNDLE_FILES) else None)
     return receipt, summary, problem, artifact, throughput
 
 
@@ -1051,11 +1109,13 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     head_ast_count = head_lines.count(AST_PILOT_ACCEPTANCE_REQUEST_LINE)
     head_real_count = head_lines.count(THROUGHPUT_REAL_SOURCE_REQUEST_LINE)
     head_production_count = head_lines.count(PRODUCTION_PROFILE_REQUEST_LINE)
+    head_probes_count = head_lines.count(COMPILER_PROBES_REQUEST_LINE)
     parent_analyzer_deltas = {line: [] for line in ANALYZER_REQUEST_LINES}
     parent_inline_counts = []
     ast_deltas = []
     real_deltas = []
     production_deltas = []
+    probes_deltas = []
     for parent in parent_shas:
         parent_bytes, problem = _github_file(api, parent)
         if problem:
@@ -1070,6 +1130,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
         ast_deltas.append(head_ast_count - parent_lines.count(AST_PILOT_ACCEPTANCE_REQUEST_LINE))
         real_deltas.append(head_real_count - parent_lines.count(THROUGHPUT_REAL_SOURCE_REQUEST_LINE))
         production_deltas.append(head_production_count - parent_lines.count(PRODUCTION_PROFILE_REQUEST_LINE))
+        probes_deltas.append(head_probes_count - parent_lines.count(COMPILER_PROBES_REQUEST_LINE))
     ast_record = receipt.get("ast_pilot_acceptance")
     if ast_record is not None and not all(delta == 1 for delta in ast_deltas):
         return ("the exact ast-pilot selector was not freshly added once at this head relative to every parent; "
@@ -1088,6 +1149,12 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
                 "parent; append one selector line for each explicit production-profile request")
     if production_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in production_deltas):
         return "a fresh production-profile selector has no production-profile record in the receipt"
+    probes_record = receipt.get("compiler_probes")
+    if probes_record is not None and not all(delta == 1 for delta in probes_deltas):
+        return ("the exact compiler-probes selector was not freshly added once at this head relative to every "
+                "parent; append one selector line for each explicit compiler-probes request")
+    if probes_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in probes_deltas):
+        return "a fresh compiler-probes selector has no compiler-probes record in the receipt"
     if analyzer_profile:
         selected_deltas = parent_analyzer_deltas[request_line]
         other_deltas = [delta for line, values in parent_analyzer_deltas.items() if line != request_line

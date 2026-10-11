@@ -933,6 +933,75 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    the leg fits inside the unchanged 90-minute `compare-pull` job next to the
    roughly 14-minute ordinary comparison. No job timeout changed.
 
+   **Issue #2761 opt-in compiler probes.** The same route accepts one fresh
+   exact line `profile: compiler-probes-v1`, selected by the same
+   every-parent freshness rule. It is the Zen 5 route for a targeted
+   register-allocator or scheduler claim, next to the end-to-end self-host.
+   It cannot be combined with an analyzer, real-source, ast-pilot or
+   production profile; one long opt-in leg per job keeps the budget provable.
+   `tools/fast_ra_scaling.c` (the real FAST prepass and prepassed placement on
+   empty-value chain and fanout CFGs) and `tools/machine_line_mark_scaling.c`
+   (`machine_schedule_function` with one line mark per instruction) include
+   compiler internals, so they cannot be direct workloads. After the corpus
+   leg, `measure_compiler_probes` runs `tools/bench_direct/compiler_probes.py
+   run`:
+   - It makes two shared clones of the candidate checkout, at the merge base
+     and at the head. The base checkout and its closure checks stay untouched.
+   - It copies the head's probe sources outside both clones, as the audits do,
+     and builds each probe once against each clone's own `src/` with clang.
+     The commands are those in
+     [2026-09-07T222944Z](../performance-audits/2026-09-07T222944Z.md) and
+     [2026-09-18T224655Z](../performance-audits/2026-09-18T224655Z.md)
+     (line-mark: schedule mode only, `BUSTER_LINE_MARK_HELPER_BENCH=0`). The
+     one addition is `codegen.c` in the FAST probe's source list: since #2876
+     `machine.c` calls its `codegen_a64_windows_save_area_size`, and the
+     audit's command no longer links without it.
+   - Its cases are fixed: FAST chain and fanout at 256, 1024, 4096 and 16384
+     blocks, and line-mark schedule at 1024, 4096, 16384 and 65536 leaves.
+     Each invocation takes 11 timed samples after its own untimed warmup.
+   - Per case and binary there are two warmup invocations, then 30 pairs on
+     CPU 2. Even pairs run the base first and odd pairs the head first. Every
+     pair runs: there is no early stop, rerun or trimming.
+   - The statistic is the median of each invocation's samples (`total_ns` or
+     `schedule_ns`), the head/base ratio per pair, and per case the median
+     ratio with a distribution-free 95% order-statistic interval. It is
+     report-only.
+
+   The probes' `key=value` lines are their structured output; nothing was
+   added to them. Every non-`_ns` field (sizes, spill counts, retained bytes,
+   the line-mark hash) is the self-check, and it must be identical across
+   every invocation of one binary. Whether the base and the head agree is
+   reported, not required, since an allocator or scheduler change may change
+   it legitimately.
+
+   `compiler_publish.py` re-validates the receipt's `compiler_probes` record
+   against `compiler_probes/summary.json` (`validate_compiler_probes`), which
+   keeps every raw sample. It refuses:
+   - an exit other than 0, a failed status or any recorded error;
+   - a profile, base or head other than the frozen profile and the compared
+     revisions;
+   - a probe binary hash that differs from the one `compiler_compare` hashed
+     itself, or a missing probe source hash;
+   - a missing, extra or reordered case, or changed case arguments;
+   - fewer than two warmups or 30 pairs, or a pair out of the fixed order;
+   - an invocation that failed, timed out or has partial or non-positive
+     samples, a self-check that changes, or a size other than the case's;
+   - stated results that differ from those re-derived from the raw samples.
+
+   Missing, partial, failed or cancelled evidence therefore fails the check.
+   The binaries are not exported. Their hashes differ even in an A/A run,
+   because `-g` records each clone's path.
+
+   Cost: on a hosted 4-vCPU 2.8 GHz Xeon (diagnostic, not Zen 5), a real A/A
+   run at `955ea4b2` took 218 s, partly alongside other test runs. The two
+   clones and four builds took about 3 minutes (each build 35 to 38 s), and
+   the 12 cases about 40 s. Every case's interval contained 1.0. The leg has its
+   own 20-minute timeout, so it fits inside the unchanged 90-minute
+   `compare-pull` job next to the roughly 14-minute ordinary comparison. No
+   job timeout changed. A head whose probe no longer compiles against the
+   merge base (for example after an allocator API change) fails the leg with
+   its build log; land the probe change first.
+
    **Without perf (#2768).** Before the first timed run the lab runs
    `perf stat -- true` once (`probe_counters`). If perf is missing, exits
    nonzero (for example under a strict `perf_event_paranoid`), or writes no

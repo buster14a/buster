@@ -30,6 +30,7 @@ import compiler_receipt  # noqa: E402
 import inline_acceptance  # noqa: E402
 import ast_pilot_acceptance  # noqa: E402
 import throughput_real_source  # noqa: E402
+import compiler_probes  # noqa: E402
 
 A256, B256 = "1" * 64, "2" * 64
 
@@ -3987,6 +3988,304 @@ class ProductionProfileTest(unittest.TestCase):
             self.assertTrue((root / "evidence" / "production_profile" / "evidence" / "phases.tsv").is_file())
             self.assertEqual((record["status"], record["build_exit"], record["exit"]), ("failed", 0, 3))
             self.assertTrue(any("corpus" in error for error in record["errors"]), record["errors"])
+
+
+PROBE_HASHES = {"fast_ra": {"baseline": "3" * 64, "candidate": "4" * 64},
+                "line_mark": {"baseline": "5" * 64, "candidate": "6" * 64}}
+
+
+def probe_invocation(probe: str, case: dict, value: int) -> dict:
+    """One passed synthetic invocation of case with every sample at value nanoseconds."""
+    definition = compiler_receipt.COMPILER_PROBES_PROFILE["probes"][probe]
+    return {"exit": 0, "samples": [value] * compiler_receipt.COMPILER_PROBES_PROFILE["repeats"],
+            "check": {definition["size_key"]: str(case["size"]), "hash": "00ff"}}
+
+
+def compiler_probes_evidence(base: str = "b" * 40, head: str = "a" * 40) -> tuple[dict, dict]:
+    """A complete synthetic compiler-probes-v1 record and bundle: the head is 10% faster on every case."""
+    profile = compiler_receipt.COMPILER_PROBES_PROFILE
+    cases = []
+    for probe, definition in profile["probes"].items():
+        for case in definition["cases"]:
+            values = {"baseline": 1000, "candidate": 900}
+            cases.append({"probe": probe, "name": case["name"], "arguments": list(case["arguments"]),
+                          "warmups": {role: [probe_invocation(probe, case, values[role])
+                                             for unused in range(profile["warmups"])] for role in values},
+                          "pairs": [dict({"order": ["baseline", "candidate"] if index % 2 == 0 else ["candidate", "baseline"]},
+                                         **{role: probe_invocation(probe, case, values[role]) for role in values})
+                                    for index in range(profile["pairs"])]})
+    binaries = {probe: {role: {"sha256": digest, "size_bytes": 1, "revision": base if role == "baseline" else head}
+                        for role, digest in roles.items()} for probe, roles in PROBE_HASHES.items()}
+    summary = {"schema": compiler_receipt.COMPILER_PROBES_SCHEMA, "profile": copy.deepcopy(profile), "base": base,
+               "head": head, "probe_source_sha256": {probe: "7" * 64 for probe in profile["probes"]},
+               "binaries": copy.deepcopy(binaries), "cases": cases, "status": "complete", "errors": []}
+    summary["results"] = compiler_receipt.compiler_probes_digest(summary)
+    summary = json.loads(json.dumps(summary))
+    record = {"requested": True, "request_line": compiler_receipt.COMPILER_PROBES_REQUEST_LINE,
+              "profile": copy.deepcopy(profile), "status": "complete", "exit": 0, "errors": [],
+              "binaries": copy.deepcopy(binaries), "cells": compiler_receipt.compiler_probes_digest(summary)}
+    return record, {"summary": summary}
+
+
+class CompilerProbesTest(unittest.TestCase):
+    """#2761: the fixed compiler-probes-v1 FAST RA and line-mark profile on the pull-compare route."""
+
+    def validate(self, summary: object, status: object = 0, binaries: dict | None = None,
+                 base: str = "b" * 40, head: str = "a" * 40) -> list[str]:
+        if binaries is None:
+            binaries = compiler_probes_evidence()[0]["binaries"]
+        return compiler_receipt.validate_compiler_probes(status, summary, base, head, binaries)
+
+    def test_profile_is_frozen_report_only_and_uses_the_audited_commands(self) -> None:
+        profile = compiler_receipt.COMPILER_PROBES_PROFILE
+        root = Path(__file__).resolve().parents[2]
+        self.assertEqual(profile["name"], "compiler-probes-v1")
+        self.assertEqual(compiler_receipt.COMPILER_PROBES_REQUEST_LINE, "profile: " + profile["name"])
+        self.assertIs(profile["report_only"], True)
+        self.assertEqual((profile["cpu"], profile["warmups"], profile["pairs"]), (2, 2, 30))
+        for probe, definition in profile["probes"].items():
+            with self.subTest(probe=probe):
+                self.assertTrue((root / definition["source"]).is_file())
+                audit = (root / definition["audit"]).read_text(encoding="utf-8")
+                self.assertIn(definition["source"].split("/")[-1], audit)
+                # Every flag and source comes from the audit's own command; codegen.c is the one
+                # recorded addition, needed by machine.c since #2876.
+                for item in [*definition["compile"], *definition["link"], *definition["sources"]]:
+                    if item != "src/buster/lib/compiler/codegen/codegen.c":
+                        self.assertIn(item.replace("-Isrc", "-I"), audit, item)
+                for case in definition["cases"]:
+                    self.assertEqual(case["arguments"].count(str(profile["repeats"])), 1, case)
+        self.assertLessEqual(compiler_compare.COMPILER_PROBES_TIMEOUT_SECONDS, 20 * 60)
+
+    def test_complete_evidence_validates_and_every_gap_fails(self) -> None:
+        record, bundle = compiler_probes_evidence()
+        summary = bundle["summary"]
+        self.assertEqual(self.validate(summary), [])
+        self.assertEqual(len(summary["results"]), 12)
+        self.assertTrue(all(row["ratio"] == 0.9 and row["candidate_faster"] == 30 for row in summary["results"]))
+        same = compiler_probes_evidence(head="b" * 40)[1]["summary"]
+        same_binaries = {probe: {"baseline": {"sha256": "3" * 64}, "candidate": {"sha256": "3" * 64}}
+                         for probe in compiler_receipt.COMPILER_PROBES_PROFILE["probes"]}
+        same["binaries"] = {probe: {role: {"sha256": "3" * 64, "size_bytes": 1, "revision": "b" * 40}
+                                    for role in ("baseline", "candidate")} for probe in same_binaries}
+        self.assertEqual(self.validate(same, binaries=same_binaries, head="b" * 40), [], "an A/A run is valid")
+
+        def changed(edit) -> dict:
+            value = copy.deepcopy(summary)
+            edit(value)
+            return value
+
+        def invocation(edit, case: int = 0, pair: int = 3, role: str = "candidate"):
+            return changed(lambda value: edit(value["cases"][case]["pairs"][pair][role]))
+
+        cases = {
+            "failed run": (summary, {"status": 1}),
+            "cancelled run": (summary, {"status": None}),
+            "missing summary": (None, {}),
+            "other schema": (changed(lambda value: value.update(schema="other")), {}),
+            "changed profile": (changed(lambda value: value["profile"].update(pairs=10)), {}),
+            "other base": (summary, {"base": "c" * 40}),
+            "other head": (summary, {"head": "c" * 40}),
+            "failed status": (changed(lambda value: value.update(status="failed")), {}),
+            "reported error": (changed(lambda value: value.update(errors=["line_mark baseline build exited 1"])), {}),
+            "missing source hash": (changed(lambda value: value["probe_source_sha256"].pop("fast_ra")), {}),
+            "stale binary": (summary, {"binaries": dict(record["binaries"], fast_ra={
+                "baseline": {"sha256": "8" * 64}, "candidate": {"sha256": "4" * 64}})}),
+            "missing binary": (changed(lambda value: value["binaries"]["line_mark"].pop("candidate")), {}),
+            "binary from another revision": (changed(lambda value: value["binaries"]["fast_ra"]["candidate"].update(
+                revision="c" * 40)), {}),
+            "no measured binaries": (summary, {"binaries": {}}),
+            "missing case": (changed(lambda value: value["cases"].pop()), {}),
+            "reordered cases": (changed(lambda value: value["cases"].reverse()), {}),
+            "changed case arguments": (changed(lambda value: value["cases"][0].update(arguments=["256", "1", "chain"])), {}),
+            "missing pair": (changed(lambda value: value["cases"][2]["pairs"].pop()), {}),
+            "pair out of order": (changed(lambda value: value["cases"][2]["pairs"][1].update(
+                order=["baseline", "candidate"])), {}),
+            "failed invocation": (invocation(lambda value: value.update(exit=1)), {}),
+            "timed-out invocation": (invocation(lambda value: value.update(exit=124)), {}),
+            "partial samples": (invocation(lambda value: value["samples"].pop()), {}),
+            "zero sample": (invocation(lambda value: value["samples"].__setitem__(0, 0)), {}),
+            "unparsed self-check": (invocation(lambda value: value.update(check=None)), {}),
+            "other probe size": (invocation(lambda value: value["check"].update(blocks="512")), {}),
+            "changing self-check": (invocation(lambda value: value["check"].update(hash="0100")), {}),
+            "missing warmup": (changed(lambda value: value["cases"][1]["warmups"]["baseline"].pop()), {}),
+            "failed warmup": (changed(lambda value: value["cases"][1]["warmups"]["candidate"][0].update(exit=2)), {}),
+            "tampered result": (changed(lambda value: value["results"][0].update(ratio=1.5)), {}),
+        }
+        for name, (value, options) in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(self.validate(value, **options), name)
+        self.assertEqual(compiler_receipt.compiler_probes_interval([float(item) for item in range(30)]), (9.0, 20.0))
+
+    def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
+        record, bundle = compiler_probes_evidence()
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["compiler_probes"] = record
+        values = {"expected": dict(EXPECTED, mode="pull"), "authorized": True, "compare_result": "success",
+                  "receipt": pull, "summary": summary(), "policy_value": "",
+                  "throughput": dict(corpus(), compiler_probes_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        stale = copy.deepcopy(record)
+        stale["cells"][0]["ratio"] = 0.5
+        widened = copy.deepcopy(record)
+        widened["profile"]["pairs"] = 5
+        rebound = copy.deepcopy(record)
+        rebound["binaries"]["line_mark"]["candidate"]["sha256"] = "9" * 64
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "empty bundle": {"throughput": dict(corpus(), compiler_probes_bundle={})},
+            "failed run": {"receipt": dict(pull, compiler_probes=dict(record, status="failed", exit=1))},
+            "cancelled run": {"receipt": dict(pull, compiler_probes=dict(record, status="pending", exit=None))},
+            "stale cells": {"receipt": dict(pull, compiler_probes=stale)},
+            "changed profile": {"receipt": dict(pull, compiler_probes=widened)},
+            "other measured binary": {"receipt": dict(pull, compiler_probes=rebound)},
+            "other selector": {"receipt": dict(pull, compiler_probes=dict(record, request_line="profile: other"))},
+            "not a request": {"receipt": dict(pull, compiler_probes=dict(record, requested=False))},
+            "other base": {"expected": dict(EXPECTED, mode="pull", base="c" * 40)},
+            "with the production profile": {"receipt": dict(pull, production_profile=production_profile_evidence()[0])},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("Compiler probes (compiler-probes-v1): complete", report)
+        self.assertIn("| fast_ra/chain-256 | 1.0 | 0.9 | 0.9000 [0.9000, 0.9000] | 30/30 | yes |", report)
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Compiler Probes Test")
+            fixture_git(repo, "config", "user.email", "compiler-probes@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            fixture_git(repo, "add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            fixture_git(repo, "commit", "-qm", "seed")
+            line = compiler_receipt.COMPILER_PROBES_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                fixture_git(repo, "commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.compiler_probes_request_selection(
+                        repo, fixture_git(repo, "rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            fixture_git(repo, "commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.compiler_probes_request_selection(repo, fixture_git(repo, "rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.COMPILER_PROBES_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", compiler_probes=compiler_probes_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("compiler_probes")
+        self.assertIn("no compiler-probes record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+        self.assertEqual(verify(Api(1, 0), expected, dict(plain, state="superseded"), {}), "")
+
+    def test_probe_output_parsing_needs_one_consistent_line_per_sample(self) -> None:
+        line = "blocks=256 prepass_ns=10 placement_ns=20 total_ns=30 spills=0 frame=0\n"
+        self.assertEqual(compiler_probes.parse_output(line * 3, "total_ns"),
+                         ([30, 30, 30], {"blocks": "256", "spills": "0", "frame": "0"}))
+        for name, text in {"empty": "", "missing metric": line.replace("total_ns=30 ", ""),
+                           "non-numeric metric": line.replace("total_ns=30", "total_ns=fast"),
+                           "stray token": line + "error\n", "changing self-check": line + line.replace("spills=0", "spills=1"),
+                           "blank line": line + "\n" + line}.items():
+            with self.subTest(case=name):
+                self.assertIsNone(compiler_probes.parse_output(text, "total_ns")[1])
+
+    def test_cases_alternate_and_the_leg_refuses_failed_builds(self) -> None:
+        calls = []
+        with mock.patch.object(compiler_probes, "invoke", side_effect=lambda binary, *rest: calls.append(binary) or {}):
+            case = compiler_receipt.COMPILER_PROBES_PROFILE["probes"]["fast_ra"]["cases"][0]
+            measured = compiler_probes.measure_case({"baseline": "A", "candidate": "B"}, "fast_ra", case, Path("log"))
+        self.assertEqual(calls[:4], ["A", "B", "A", "B"])
+        self.assertEqual(calls[4:8], ["A", "B", "B", "A"])
+        self.assertEqual(len(calls), 2 * (2 + 30))
+        self.assertEqual([pair["order"][0] for pair in measured["pairs"][:2]], ["baseline", "candidate"])
+        head, base = "a" * 40, "b" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            def failed(argv, cwd, log, timeout):
+                return 0 if argv[0] == "git" else 1
+            with mock.patch.object(compiler_probes, "logged", side_effect=failed), \
+                    mock.patch.object(compiler_probes, "invoke") as invoke:
+                (root / "work" / "probes-candidate" / "tools").mkdir(parents=True)
+                for definition in compiler_receipt.COMPILER_PROBES_PROFILE["probes"].values():
+                    (root / "work" / "probes-candidate" / definition["source"]).write_text("int main;\n", encoding="utf-8")
+                status = compiler_probes.run_leg(root, base, head, root / "work", root / "out")
+            invoke.assert_not_called()
+            summary_value = json.loads((root / "out" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual((status, summary_value["status"], summary_value["cases"]), (1, "failed", []))
+            self.assertTrue(any("build exited 1" in error for error in summary_value["errors"]))
+            self.assertTrue(compiler_receipt.validate_compiler_probes(status, summary_value, base, head, {}))
+
+    def test_compare_leg_hashes_binaries_and_records_failures(self) -> None:
+        record_value, bundle = compiler_probes_evidence()
+        head, base = "a" * 40, "b" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("work", "evidence", "candidate"):
+                (root / name).mkdir()
+            def leg(run_status) -> dict:
+                receipt_value = {"timings": {}, "compiler_probes": {"requested": True, "status": "pending"}}
+                with mock.patch.object(compiler_compare, "run", side_effect=run_status) as run:
+                    compiler_compare.measure_compiler_probes(root / "candidate", root / "work", root / "evidence",
+                                                             base, head, receipt_value)
+                return receipt_value["compiler_probes"], run
+            record, run = leg(lambda *rest: 2)
+            self.assertEqual(run.call_args.args[0][2:4], [str(Path(compiler_compare.__file__).resolve().with_name(
+                "compiler_probes.py")), "run"])
+            self.assertEqual((record["status"], record["exit"], record["binaries"]), ("failed", 2, {}))
+            self.assertTrue(any("exited 2" in error for error in record["errors"]), record["errors"])
+            def produced(argv, cwd, *rest):
+                output = Path(argv[argv.index("--output") + 1])
+                (output / "bin").mkdir(parents=True)
+                for probe in compiler_receipt.COMPILER_PROBES_PROFILE["probes"]:
+                    for role in ("baseline", "candidate"):
+                        (output / "bin" / f"{probe}-{role}").write_bytes(f"{probe}-{role}".encode())
+                (output / "summary.json").write_text(json.dumps(bundle["summary"]), encoding="utf-8")
+                return 0
+            output_root = root / "work" / "compiler-probes"
+            record, run = leg(produced)
+            self.assertFalse((root / "evidence" / "compiler_probes" / "bin").exists())
+            self.assertTrue((root / "evidence" / "compiler_probes" / "summary.json").is_file())
+            self.assertEqual(record["binaries"]["fast_ra"]["baseline"]["sha256"],
+                             hashlib.sha256(b"fast_ra-baseline").hexdigest())
+            # The synthetic summary names other hashes, so the independent hashes refuse it.
+            self.assertEqual(record["status"], "failed")
+            self.assertTrue(any("is not the measured" in error for error in record["errors"]), record["errors"])
+            self.assertTrue(output_root.is_dir())
+
 
 if __name__ == "__main__":
     unittest.main()

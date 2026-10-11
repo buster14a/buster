@@ -215,26 +215,26 @@
       "id": "tool:fast_ra_scaling.c",
       "kind": "tool",
       "validation": "performance",
-      "measures": "FAST register-allocation prepass scaling probe",
+      "measures": "#2761 fixed compiler-probes-v1 on an owner request line: the head's probe, built with its audit's command (plus codegen.c, needed since #2876) against the merge base's and the head's src/ in isolated clones, times the real FAST prepass and placement on chain and fanout CFGs of 256 to 16384 blocks, 2 warmups and 30 alternating pairs per case on CPU 2; report-only",
       "zen5": {
-        "route": "none",
-        "status": "NOT VALIDATED",
-        "consumer": "",
-        "resolution": "The probe links compiler internals, and a direct workload is compiled alone against system headers, so it cannot be ported there. A FAST allocator claim needs pull-compare (its corpus runs FAST).",
-        "claim_route": "pull-compare"
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "compiler-probes-v1",
+        "request": "one exact fresh line, profile: compiler-probes-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
       }
     },
     {
       "id": "tool:machine_line_mark_scaling.c",
       "kind": "tool",
       "validation": "performance",
-      "measures": "scheduler line-mark repair scaling probe",
+      "measures": "#2761 fixed compiler-probes-v1 on an owner request line: the head's probe, built with its audit's schedule-only command against the merge base's and the head's src/ in isolated clones, times machine_schedule_function with one line mark per instruction at 1024 to 65536 leaves, 2 warmups and 30 alternating pairs per case on CPU 2; report-only",
       "zen5": {
-        "route": "none",
-        "status": "NOT VALIDATED",
-        "consumer": "",
-        "resolution": "The probe links compiler internals, and a direct workload is compiled alone against system headers, so it cannot be ported there. A scheduler claim needs pull-compare.",
-        "claim_route": "pull-compare"
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "compiler-probes-v1",
+        "request": "one exact fresh line, profile: compiler-probes-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
       }
     },
     {
