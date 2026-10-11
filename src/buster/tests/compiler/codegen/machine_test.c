@@ -11564,6 +11564,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, exact_map.expansion_rows == MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT);
     BUSTER_TEST(arguments, exact_map.expansion_nonexact_rows == exact_map.expansion_rows);
     BUSTER_TEST(arguments, exact_map.dense_encoding_tables == 64);
+    BUSTER_TEST(arguments, exact_map.dense_encoding_ready_tables == 64);
+    BUSTER_TEST(arguments, exact_map.dense_encoding_failed_tables == 0);
     BUSTER_TEST(arguments, exact_map.immediate_patch_tables == 9);
     BUSTER_TEST(arguments, exact_map.memory_base_tables == 8);
     BUSTER_TEST(arguments, exact_map.displacement_patch_tables == 8);
@@ -11579,6 +11581,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // MULH64's mul rcx adds one static row.
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_rows == 1503,
                     string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1503 (rows: {u32})"), exact_map.fixed_template_rows));
+    BUSTER_TEST(arguments, exact_map.fixed_template_pending_rows == 0);
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
     BUSTER_TEST_FIXTURE(arguments, machine_test_gpr_preparation);

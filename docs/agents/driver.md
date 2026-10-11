@@ -333,25 +333,22 @@ publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
 the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
 not predefined at any level. `-mattr` overrides still refine the level.
 The psABI's LAHF-SAHF has no target feature and is implied by long mode.
-Without `-march`/`-mcpu` the CPU is the build host's. An invocation with no
-`-target`, or with `-target native`, starts from `target_native`
-(`compiler_driver_parse_arguments`), whose model and features
-`cpu_detect_model` probes at start-up. In effect this is `-march=native`: the
-feature set is the same, though `-v` prints the detected model name (for
-example `cpu=emeraldrapids`) where `-march=native` prints `cpu=native`. Clang
-and GCC differ here; their default is the portable `x86-64` baseline. Any
-other `-target`/`--target` triple starts from `baseline`
-(`target_parse_triple`), even one that names the host; `-target x86_64-linux`
-alone gives `cpu=baseline features=sse2`. Without a pinned CPU, three things
-follow the machine: object bytes, the predefined feature macros (`__AVX2__`,
-`__AVX512F__`, ...), and therefore which `#if`-guarded regions are compiled
-at all. Such output may use instructions that another machine lacks. For
-portable or cross-machine-comparable output, pass `-march=baseline`, a psABI
-level, or a named model. Tools that compare outputs across machines pin one:
-the native-retirement census uses `baseline` and the work ledger uses
-`znver3`. The host default is deliberate. It matches the
-`BUSTER_NATIVE_TARGET=native` host build and the compiler-throughput priority
-(GitHub #1557).
+Without `-march`/`-mcpu` the CPU model is `baseline`, matching Clang's and
+GCC's portable `x86-64` default. A command with no `-target` compiles for the
+host's architecture and operating system (`target_native`,
+`compiler_driver_parse_arguments`) but not for its CPU features. It is the
+same as naming the host triple: on x86-64, `-target x86_64-linux` alone gives
+`cpu=baseline features=sse2`, and AArch64 gets `fp-armv8,neon`, Apple targets
+included, where Apple Clang would pick `apple-m1`. So object bytes and the
+predefined feature macros (`__AVX2__`, `__AVX512F__`, ...) do not depend on
+the build machine. `-march=native`, or `-target native`, selects the host's
+detected model and features. Tests exercise native code unless they select a
+target: `ide test` and `ide metamorphic` set
+`compiler_driver_host_cpu_default`, so their in-process invocations keep the
+host CPU, while `compiler_driver_test_run_cc`, the build.c test gates and
+`test_self_host` stage compiles pass `-march=native`.
+The native-retirement census pins `baseline`, and the work ledger pins
+`znver3` (GitHub #1557).
 `-mtune=<model>` is accepted with any nonempty value, `native` included, and
 ignored: it selects only a scheduling model, and instruction selection here has
 no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
@@ -359,7 +356,8 @@ no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
 `-mpclmul`) are `-mattr=+feature` and `-mattr=-feature` in the same ordered
 override list, so the last option naming a feature wins and they refine a
 `-march` level wherever they sit. The feature names are the ones `-mattr`
-takes, dotted spellings included. On x86-64 they also follow GCC's implied
+takes, dotted spellings included. On AArch64, `sve` is a feature name and is
+not included in CPU-model defaults. On x86-64 they also follow GCC's implied
 features: `-mavx2` adds AVX, and `-mno-avx2` / `-mno-avx` also drop every
 enabled feature that requires it (AVX-512, FMA, VNNI, ...). The dependency pairs
 are `target_x86_feature_requirements` in `target.c`: the rules
@@ -382,14 +380,31 @@ left baseline code generation and no hint that the request was ignored.
 `-fno-strict-overflow` is accepted as `-fwrapv` (signed overflow already wraps;
 there is no `-fno-wrapv`, so `-fstrict-overflow` stays unsupported). `-w` is
 accepted and publishes no warning text or records and outranks every other
-warning option. `--version`, `-dumpversion` and
-`-dumpmachine` need no input and exit 0 (`compiler_driver_query_text`):
+warning option. `--version`, `-dumpversion`, `-dumpmachine` and
+`-print-target-triple`/`-print-effective-triple` need no input and exit 0
+(`compiler_driver_query_text`):
 `-dumpversion` prints `18.0.0`, the `__clang_major__`/`__clang_minor__`/
 `__clang_patchlevel__` triple (`__clang_version__` is `18.0.0 (buster)`);
 `-dumpmachine` prints the effective target as `arch-os[-environment]` with the
 `gnu` environment on Linux and `msvc` on Windows (for example
 `x86_64-linux-gnu`); `--version` prints `Buster clang version 18.0.0 (buster)`,
-`Target: <that triple>` and `Thread model: posix`.
+`Target: <that triple>` and `Thread model: posix`. `-print-target-triple` and
+`-print-effective-triple` print Clang's normalized `arch-vendor-os[-environment]`
+form, with the vendor `apple` on macOS/iOS and `unknown` elsewhere (for example
+`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-android`,
+`x86_64-unknown-windows-msvc`).
+`-trigraphs` and `-ftrigraphs` enable trigraph replacement and `-fno-trigraphs`
+disables it. A later `-std=` restores that dialect's default (on in strict C99
+to C17, off in GNU modes and C23), so the last of these options wins, as in
+Clang. `-nostdlibinc` drops the system include directories but keeps the
+compiler resource directory (`stddef.h` and the other freestanding headers);
+`-nostdinc` drops both. `-working-directory=DIR` and `-working-directory DIR`
+resolve relative input paths against `DIR` with host path rules (on POSIX only
+a leading `/` is absolute and `\` and `:` are ordinary filename bytes; on
+Windows `\x.c` takes the root name of `DIR` (`C:` or UNC `\\server`) and
+`C:x.c` its root-relative directory, as in LLVM's `make_absolute`). Output paths and `-I` directories stay relative to the process
+directory, and a `DIR` that is not a directory is rejected with
+`unable to set working directory: DIR`.
 Windows targets implement the MSVC ABI only, so the MinGW spellings
 (`*-mingw32`, and a `gnu`/`gnullvm` environment on Windows) are rejected with
 `unsupported target environment` instead of being aliased to MSVC (#1492);
@@ -452,7 +467,12 @@ metadata validates the exact accumulator, port register and immediate range.
 Source selection consumes both operands even though the imported XED rows mark
 the accumulator and DX as implicit. The hidden `OeAX()` accumulator selects
 AX or EAX and has no ModRM field; its width determines the word prefix rather
-than DX's fixed 16-bit width.
+than DX's fixed 16-bit width. The memory-looking `(%dx)` port spelling that
+GNU objdump prints and GNU as accepts names DX itself
+(`assembly_x86_att_port_dx_parse`), so only a bare parenthesized `%dx` on
+`in`/`out` qualifies; `(%rdx)`, `(%edx)`, displacement, segment and index forms
+remain invalid. Unsized Intel `ldmxcsr`/`stmxcsr [mem]` infers MXCSR's only m32
+width, as AT&T's unsuffixed spelling already does.
 `assembly_test_att_port_suffixes` checks exact bytes against matching Intel
 spellings, including immediate boundaries, word prefixes and invalid register,
 memory, suffix-width and 64-bit neighbours. It never executes port I/O.
@@ -480,9 +500,11 @@ unit's declaration records then come from the tree
 which hands any unit that `c_parse_ast` would diagnose or read differently
 back to `c_parse_ast`. Semantic analysis answers function-body
 expression-type queries from the tree where it can (the
-[tree expression typer](frontend/ast.md#tree-expression-typer)), and its body
+[tree expression typer](frontend/ast.md#tree-expression-typer)), its body
 binder follows each function body's
-[statement plan](frontend/ast.md#statement-plan-from-the-tree); no other
+[statement plan](frontend/ast.md#statement-plan-from-the-tree), and lowering
+answers its root-conditional splits from it
+([lowering from the tree](frontend/ast.md#lowering-from-the-tree)); no other
 stage reads it. Only under the flag does analysis share the primitive and
 pointer type rows those queries mint
 ([interned rows](frontend/ast.md#interned-rows)). With the flag the object
@@ -491,8 +513,8 @@ the unit with the parse error class and a located diagnostic published like
 `c_parse_ast`'s. It does nothing for `-E`, assembly inputs or the other
 languages. Any other layout value is an argument error
 (`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints
-`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT` and `C_AST_STATEMENTS`
-rows beside `C_TYPE_LAYOUT`.
+`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT`, `C_AST_STATEMENTS` and
+`C_AST_LOWER` rows beside `C_TYPE_LAYOUT`.
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
 nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`
@@ -657,8 +679,13 @@ shifted ADD, writeback or post-index addressing, `@PAGE` off
 Mach-O, or an instruction the relocation cannot patch (LDUR, LDP) is a structured
 diagnostic naming the combination. Out-of-range pages and misaligned scaled offsets
 are link-time checks (`object_aarch64_elf_page_relocate` and the PE/Mach-O
-equivalents), as with any assembler. GOT, TLS and codegen-PIC expansion stay with
-their own owners and remain refused here. Numeric `:lo12:` expressions on ELF and COFF
+equivalents), as with any assembler. On ELF, `adrp Xd, :got:sym` and
+`ldr Xt, [Xn, :got_lo12:sym]` are also accepted (#3192), spelling
+`R_AARCH64_ADR_GOT_PAGE` and `R_AARCH64_LD64_GOT_LO12_NC` with an exactly zero
+addend; `:got:` on any other instruction, `:got_lo12:` on anything but a plain
+64-bit `ldr [base, offset]`, and either modifier on Mach-O or COFF are
+diagnosed. TLS and codegen-PIC expansion stay with their own owners and
+remain refused here. Numeric `:lo12:` expressions on ELF and COFF
 are absolute nonnegative immediates without a symbol or relocation. ADD accepts
 0 through 4095; load/store offsets must be aligned and fit the encoded 12-bit
 scaled field, so their byte offset may exceed 4095. Negative, misaligned and
@@ -775,8 +802,9 @@ remains open for unrelated encoding defects and further proof.
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
 suffixes (so `.init_array.00101` keeps its priority; `.preinit_array` takes
-none, as `ld` runs only that exact name), exact `.init`/`.fini`,
-and the existing DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`,
+none, as `ld` runs only that exact name), exact `.init`/`.fini`, exact
+`.tls$` (PE thread-local data, which Windows assembly output prints for both
+TLS kinds), and the existing DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`,
 `.debug_str`, `.debug_loc`, `.debug_ranges`, `.debug_addr`,
 `.debug_str_offsets`, `.debug_line_str`, `.debug_rnglists`,
 `.debug_loclists`). DWARF sections retain nonallocated object identities
@@ -885,12 +913,12 @@ destinations are the same register, are operand diagnostics, as in llvm-mc.
 Not in this vocabulary, and still refused unless another owner accepts them:
 
 - relocated operands other than the page-address forms documented with the unit
-  vocabulary (GOT, TLS and `:got_lo12:`-style modifiers; the control owner
-  handles label LDR);
+  vocabulary (TLS and further GOT-style modifiers; the control owner handles
+  label LDR, and ELF `:got:`/`:got_lo12:` are documented above);
 - CASP, LDAPR (RCPC), LDTR/STTR, CRC32 and pointer authentication;
 - AdvSIMD forms beyond the list above that the direct SIMD owner does not
-  cover, such as by-element arithmetic (`fmla v0.4s, v1.4s, v2.s[0]`) and
-  multi-register or replicating structure loads and stores.
+  cover. By-element FMLA such as `fmla v0.4s, v1.4s, v2.s[0]` is encoded and
+  asserted by `aarch64_base_assembly_tests` (#2932).
 
 `aarch64_base_assembly_tests` checks the encoder against llvm-mc-derived words
 for each family, plus refusal and feature-gating controls. The driver round
@@ -1176,13 +1204,31 @@ with `INPUT`, `GROUP`, `AS_NEEDED`, `OUTPUT_FORMAT`, `OUTPUT_ARCH`, or
 whitespace and C block comments are accepted for this classification. The
 first script in search order stops lookup; a later ELF library cannot hide it.
 The driver neither interprets script members nor creates an image from them.
-Ordinary missing/malformed-library policy and automatic runtime-provider
+Other ELF missing/malformed-library policy and automatic runtime-provider
 lookup retain their existing behavior. `compiler_driver_test_elf_linker_scripts`
 covers literal script/non-script boundaries, both ELF CPUs, normal/exact
 library spellings, single/multi-input links, first-request error ordering,
 later-ELF/script precedence, and preservation of an existing output.
-General GNU linker-script interpretation and Apple's missing-library behavior
-remain separate #1285 work.
+General GNU linker-script interpretation remains separate work.
+
+On macOS and iOS, `-lNAME` searches explicit `-L` roots in order, probing
+`libNAME.tbd` before `libNAME.dylib` within each root, then
+`<sysroot>/usr/lib` when a sysroot was supplied. A compatible thin or fat
+Mach-O dylib contributes its `LC_ID_DYLIB` install name and current and
+compatibility versions to `LC_LOAD_DYLIB`; TAPI YAML TBD v1-v4 stubs provide
+the same metadata, and wrong-CPU or wrong-platform candidates are skipped.
+Mach-O dylib platforms come from `LC_BUILD_VERSION` and `LC_VERSION_MIN_*`;
+TBD v4 `targets:` entries must match both architecture and platform suffix,
+while TBD v1-v3 `archs:` entries match the CPU and an optional top-level
+`platform:` narrows the platform. Located versions are written verbatim,
+including zero; absent TBD current/compatibility versions default to 1.0.0,
+while a present malformed version makes the stub unusable. `-lc` and `-lm` keep
+their existing implicit behavior. Without a located candidate, only the
+allowlisted Apple system libraries retain the legacy `/usr/lib/libNAME.dylib`
+fallback; other requests fail with `cannot find -l<request>`. TBD v5 JSON is
+unsupported. `compiler_driver_test_mach_library_search` covers parser bounds,
+architecture selection, search order, versions, fallback, refusal and archive
+interaction on every host without running the cross-linked image.
 
 ELF executable data placement honors both page and requested object alignment.
 Align the final virtual address, not only its file offset: an initialized
@@ -1237,9 +1283,35 @@ define those names are selected; libgcc.a is not otherwise added to the link,
 so the libgcc_s helper policy above is unchanged. Links without such a
 reference, including weak ones, do not read or name libgcc.a. A missing
 archive, or one that does not define the name, fails the link with the archive
-and symbol named, before replacing the output. AArch64 (`__aarch64_cpu_features`,
-`__init_cpu_features_resolver`, outline atomics) and non-Linux targets remain
-out of scope.
+and symbol named, before replacing the output.
+
+The same policy covers AArch64 Linux (GitHub #3508), with a target-keyed name
+set and GCC triple list (`aarch64-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`aarch64-redhat-linux`, `aarch64-suse-linux`); the x86-64 names and triples
+are unchanged. Every AArch64 name below is a hidden definition that only the
+static `libgcc.a` provides; `libgcc_s.so.1` exports none of them, so they
+belong here rather than in the libgcc_s helper policy:
+
+- GCC 10+ and Clang default to `-moutline-atomics`, so `__atomic_*` builtins
+  call `__aarch64_<op><bytes>_<order>` helpers: `cas` (1, 2, 4, 8 and 16
+  bytes) and `swp`, `ldadd`, `ldclr`, `ldeor`, `ldset` (1, 2, 4 and 8 bytes),
+  each with `relax`, `acq`, `rel`, `acq_rel` or `sync`
+  (`compiler_driver_elf_outline_atomic_symbol`). Each helper member references
+  `__aarch64_have_lse_atomics`, so `lse-init.o` and its `.init_array` LSE
+  probe are selected with it.
+- GCC 14+ and compiler-rt FMV resolvers use `__aarch64_cpu_features`,
+  `__init_cpu_features_resolver` and `__init_cpu_features` (`cpuinfo.o`, with
+  its own constructor). GCC 13 and older `libgcc.a` has no `cpuinfo.o`, so such
+  a link fails with the archive and symbol named, as the host link does.
+- `__builtin___clear_cache` calls `__aarch64_sync_cache_range`
+  (`sync-cache.o`).
+
+The selected members reference `getauxval` or `__getauxval`, which bind to
+glibc like any other import. `compiler_driver_elf_aarch64_cpu_runtime_tests`
+checks these links against the host link on AArch64 Linux hosts.
+`compiler_driver_elf_aarch64_cpu_runtime_selection_tests` covers selection,
+refusal, and per-target keying from any Linux host. SME runtime entry points,
+Android, and non-Linux targets remain out of scope.
 
 `compiler_driver_elf_dynamic_symbols` walks that table once and produces two
 things.
@@ -1316,8 +1388,9 @@ model; `-fno-pic` clears it, while `-fno-pie` cancels only a PIE spelling.
 On x86-64 and AArch64 ELF the positive spellings select the implemented PIC
 reference model (see the position-independent code bullets in
 [machine.md](machine.md)). On AArch64 ELF the model makes `-fPIC` objects
-acceptable to `ld.lld -shared -z text`; Buster's own `-shared` and `-pie`
-writers still exist only for x86-64 Linux. Thread-local access under AArch64
+acceptable to `ld.lld -shared -z text`; Buster's Linux `-shared` and `-pie`
+writers still exist only for x86-64. Android AArch64 executable links use the
+AArch64 PIC model automatically. Thread-local access under AArch64
 ELF PIC is refused by a named code-generation diagnostic (emitting TLSDESC is
 not implemented; foreign TLSDESC objects are relaxed at link time, see the
 AArch64 TLS paragraph below) and publishes no output. Cancellation, preprocessing,
@@ -1325,14 +1398,14 @@ syntax-only and assembly/prebuilt-only input routes retain their behavior.
 Mach-O and COFF keep their existing target models; Wasm/eBPF compatibility
 behavior is unchanged. LLVM-bitcode and direct backend model requests remain
 an audit residual of issue #1289.
-On x86-64 Android every executable link is a PIE, with or without `-pie`
-(`-no-pie` cannot select another image there): the kernel places bionic's
-executable at a load bias, so a fixed-address image marked `ET_DYN` would run
-its preinit entries, IFUNC runner and every data pointer unrelocated. The same
-writer names `/system/bin/linker64` and `libc.so`, and its entry stub does not
-register RDX as a loader finalizer, because bionic's `linker64` leaves RDX
-unspecified at the entry point. `-shared` stays refused for Android, and
-Android AArch64 still stages a fixed-address image. `android/runtime_order.sh`
+On x86-64 and AArch64 Android every executable link is a PIE, with or without
+`-pie` (`-no-pie` cannot select another image there): the kernel places
+bionic's executable at a load bias, so a fixed-address image marked `ET_DYN`
+would run its preinit entries, IFUNC runner and every data pointer
+unrelocated. The writers name `/system/bin/linker64` and `libc.so`; their
+entry stubs do not register a loader finalizer, because bionic's `linker64`
+does not provide the glibc x86-64 RDX finalizer contract or an AArch64 X0
+finalizer. `-shared` stays refused for Android. `android/runtime_order.sh`
 executes an x86-64 image on the CI emulator (see the Android CI notes in
 [testing.md](testing.md)).
 On any other target a link that asks for either image is refused as an
@@ -1409,9 +1482,17 @@ are tracked on GitHub #1418.
 | `-xc++` and other unknown joined `-x<lang>` | `unsupported language: c++` | Same language names as `-x <lang>`; C is the only source frontend. |
 | bare `-x` | `missing argument after -x` | As GCC and Clang. |
 
-`link_native_image_elf64_x86_64_position_independent` writes both kinds as an
-ET_DYN at base zero. Its orientation comment is the contract; in short:
+`link_native_image_elf64_position_independent` writes the supported
+position-independent images as an ET_DYN at base zero. Its orientation comment
+is the contract; in short:
 
+- An Android AArch64 PIE shares the address-zero ELF layout and uses
+  `EM_AARCH64`, `/system/bin/linker64`, and `libc.so`. Its `R_AARCH64_RELATIVE`,
+  `GLOB_DAT`, and `JUMP_SLOT` relocations use ABI types 1027, 1025, and 1026.
+  The hosted stub omits the X0 loader-finalizer registration; imported calls
+  use PLT thunks, direct page/PREL references bind locally or through copy
+  slots, and imported function-address references without GOT indirection are
+  refused. Linux AArch64 PIE/shared output remains unsupported.
 - Every absolute address becomes a dynamic relocation: `R_X86_64_RELATIVE` for
   a definition bound in the image, `R_X86_64_64`/`GLOB_DAT` for an import and,
   in a shared object, for an exported definition, because an executable may
@@ -1465,7 +1546,7 @@ headers exist, and the `-fPIC` refusal.
 `compiler_driver_test_local_dynamic_tls` links GCC and Clang `-O2 -fPIC`
 local-dynamic objects (plain, `-fno-plt`, and `-g`) into each image kind and
 runs them, the shared object under both a Buster PIE and the host toolchain.
-AArch64 ELF, PE DLLs and Mach-O dylibs have no writer yet.
+AArch64 ELF shared objects, PE DLLs and Mach-O dylibs have no writer yet.
 
 `compiler_driver_test_initial_exec_tls` serializes independent MOV-form ELF
 fixtures using rax and r8, then links and executes them as fixed-address and
@@ -1681,6 +1762,18 @@ and a sparse type-index offset entry per 8 KiB of records. DbgHelp (cdb,
 WinDbg, `symchk`, `dbh`) faults with `0xc0000005` loading a PDB whose TPI
 stream names no hash stream (#3411). The regression is `pdb_test_tpi_hashes`.
 
+CodeView names a frame-resident location with `S_DEFRANGE_REGISTER_REL`
+against RBP (x86-64) or X29 (AArch64), the base codegen normalizes FRAME offsets
+to (`codeview_emit_frame_relative`). `S_DEFRANGE_FRAMEPOINTER_REL` is not used:
+it needs an `S_FRAMEPROC` record this producer does not emit, and cdb and RAD
+drop it without one. A frame-resident piece of a split variable uses the same
+record with the `spilledUdtMember` flag and its 12-bit offset in the parent; a
+piece past that offset stays unavailable. Consecutive line entries for one
+source line become one C13 row, so a `file:line` breakpoint resolves to a
+single range. Regressions: `codeview_test_long_location_range`,
+`codeview_test_line_ranges`, `codeview_test_pointer_sizes` and the CodeView
+consumer in `codegen_test_machine_debug_locations`.
+
 With `-g`, named scalar locals that need more than one defining instruction to
 describe stay in distinct frame slots, so their location lists follow stores
 through reassignment and control-flow joins. A frame location starts after its
@@ -1753,13 +1846,17 @@ sized from the by-value nesting depth of the initialized type
 a flat table does not limit them. Driver regressions
 (`compiler_driver_test_large_static_initializers`) compile with `-c` a
 1,000,000-element `unsigned char` array, a 250,000-entry `const char *` table
-and a 200,000-entry struct array. Remaining limits: a flat initializer past
-about 1.7 million elements stops in `c_parse_typed_constant`; a single
-function of about 225,000 non-foldable statements exhausts the machine scratch
-in `codegen.c` (both tracked by #2527); and an array of
-`struct { int a; const char *s; short v[3]; }` compiles to 220,000 entries but
-aborts with an arena validation failure from 230,000 (#3254). The mobile
-builds of the driver fixture use smaller counts to keep their deadlines. A reservation that cannot be carved
+and a 200,000-entry struct array. Semantic analysis no longer sizes its
+initializer work by the tokens of the whole braced list: the typed-constant
+task stack in `c_parse_typed_constant` grows on demand, and the array-count
+inference frames and continuations are also bounded by the type count.
+`c_test_parse_large_static_initializers` analyses a 230,000-entry
+`struct { int a; const char *s; short v[3]; }` table (#3254) and a
+4,000,000-element byte table, both of which aborted on the 256 MiB thread
+scratch before. Measured with `ide cc -c`: 8,000,000 bytes take 3.2 s and
+471 MB; 1,000,000 entries of that struct take 15 s and 2.7 GB, so time, not a
+reservation, is the next limit. The mobile builds of the driver fixture use
+smaller counts to keep their deadlines. A reservation that cannot be carved
 is a positioned `initializer working storage exceeds the scratch reservation`
 or `initializer nesting exceeds its capacity` diagnostic and a failed result.
 
@@ -1770,10 +1867,31 @@ stack grows with the widest path through the type (`c_ir_emit_zero_value`),
 the cursor stack follows the type's nesting depth, and the unit-lifetime query
 stack gets its own mapping when it would leave lowering less than half of the
 thread scratch. `c_test_ir_local_table_zero_scratch` lowers a 20,000-entry
-local table that previously exhausted the scratch (#2527); generating machine
-code for a function that large still aborts in the fast register allocator
-(#3413). A task stack that cannot grow is the diagnostic
+local table that previously exhausted the scratch (#2527). A task stack that
+cannot grow is the diagnostic
 `aggregate zero-initializer exceeds the lowering scratch reservation`.
+
+### Large functions in the backend
+
+Machine selection, placement, scheduling and encoding of one function share
+the thread scratch, which is 256 MiB by default. `codegen_machine_scratch_bound` plans the
+function's need from its IR instruction, value and block counts before
+selection. The plan has a linear term several times the measured peak (about
+290 bytes per machine row under FAST, 410 under QUALITY) and a term for the
+FAST allocator's block-by-register liveness planes. When the bound exceeds
+what is left of the thread scratch, `codegen_machine_scratch_begin` installs
+private reservations of that size as the thread's scratch arenas for this one
+function, so nested pass scratch grows with it too, and restores the originals
+afterwards. Ordinary functions, including every function of the self-host,
+never take this path. A bound past 256 GiB, or a reservation the system
+refuses, fails the function with `kind=capacity reason=machine-scratch`
+instead of an arena validation abort (#3413).
+`c_test_large_function_machine_scratch_runtime` compiles and runs a
+5,000-entry local table, about 555,000 machine rows in one block, under both
+allocators; `codegen_test_machine_scratch_plan` checks the plan, the
+replacement and its restoration. Backend time, not memory, is the next limit
+for such functions: 128,000 and 256,000 `sink += x + i;` statements in one
+function take about 10 s and 42 s.
 
 ## ELF TLS companion lookup
 
@@ -1922,3 +2040,28 @@ SOURCE input metrics. Include resolution, preprocessing, semantics, canonical
 IR validation, backends and publication run fresh. See
 [bounded raw source reuse](../source-lex-reuse.md), including ownership and
 qualified-host performance acceptance, which remains pending.
+
+
+## Native fixture-derived AArch64 assembly census
+
+`./build.sh test_aarch64_assembly_census --ide build/Release/ide` compiles the
+sorted `tests/*.c` fixture set for AArch64 Linux at O0, O1 and O2, records
+producer failures and include exclusions, and compares the deduplicated constant
+instruction rows with `llvm-mc` through `llvm-objdump`. Symbolic and nonconstant
+rows are explicit exclusions and need the separate relocation suites. This is a
+fixture-derived correctness census, not a full ISA census or runtime test.
+
+Use `--clang`, `--llvm-mc`, `--llvm-objdump`, `--out` and `--timeout-seconds`
+to pin tools and retain evidence. The output directory must be new. Process,
+capture, fixture, instruction and elapsed-time bounds fail closed. Unknown
+assembler refusals, observer failures, empty comparisons and encoding differences
+fail; every successful row partition accounts for each row as a comparison or an
+unknown refusal. Producer exclusions are reported as `PASS_WITH_EXCLUSIONS`, which
+does not establish coverage for the excluded C fixtures. No refusal is exempt:
+the by-element FMLA spelling once documented by #2688 is encoded since #2932.
+
+`./build.sh test_aarch64_assembly_census --self-test` runs deterministic native
+subprocess controls for refusal detection, observer failures, empty and
+malformed disassembly, raw-word parsing and unequal encodings. The hosted workflow
+retains source/tool/binary identities, listings, constant rows, object files,
+disassembly and the report on success or failure.

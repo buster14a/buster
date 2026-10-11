@@ -375,7 +375,7 @@ BUSTER_GLOBAL_LOCAL String8 c_test_body_scratch_repeat(Arena* arena, String8 hea
 // slot table of an inferred initializer. The evaluator is also refused with
 // a later invalid body, which still reports its own finding.
 #define C_TEST_BODY_SCRATCH_EVALUATOR_TERMS 40
-#define C_TEST_BODY_SCRATCH_CASE_TERMS 30
+#define C_TEST_BODY_SCRATCH_CASE_TERMS 100
 // Two named clobbers and sixteen numbered registers, valid on x86-64
 // (xmm0..xmm15) and AArch64 (x0..x15).
 #define C_TEST_BODY_SCRATCH_CLOBBERS 18
@@ -434,16 +434,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_validation_scratch_families(UnitT
                                    string_equal(recovered.messages[1], bad_message));
     }
 
-    // Typed constants: a case label of 1 + 4 * terms tokens takes one task
-    // per token plus one.
+    // Typed constants: a case label of terms left-associative additions
+    // nests one task per term. The task stack starts at 32 rows and doubles
+    // toward one per token, so its first growth to 64 rows is the request
+    // to refuse.
     {
-        u64 tokens = 1 + 4 * (u64)C_TEST_BODY_SCRATCH_CASE_TERMS;
         String8 label = c_test_body_scratch_repeat(arguments->arena, S8("1"), S8(" + 0*1"), C_TEST_BODY_SCRATCH_CASE_TERMS, S8(""));
         String8 cases = string_format(arguments->arena,
             S8("int main(void){{int x=1; switch (x) {{case {S8}: x=2; break; case 3: x=4; break; default: break;} return x;}"), label);
         CTestBodyScratchRun open = c_test_body_scratch_run(arguments, cases, 0, trace);
         BUSTER_TEST(arguments, open.lowered);
-        u32 tasks = c_test_body_scratch_find_count(trace, open.trace_count, 0, 0, tokens + 1);
+        u32 initial = c_test_body_scratch_find_count(trace, open.trace_count, 0, 0, 32);
+        u32 tasks = initial < open.trace_count ? c_test_body_scratch_find(trace, open.trace_count, 0, trace[initial].element_size, 64) : UINT32_MAX;
+        BUSTER_TEST(arguments, initial < tasks && tasks < open.trace_count);
         c_test_body_scratch_refuse_at(arguments, &result, cases, trace, open.trace_count, 0, tasks, S8("main"));
     }
 
@@ -1680,6 +1683,73 @@ BUSTER_GLOBAL_LOCAL void c_test_append_u32(char8* destination, u64 capacity, u64
     {
         destination[(*length)++] = digits[--digit_count];
     }
+}
+
+// Semantic analysis of one large static initializer. It used to size two
+// work buffers by the tokens of the whole braced list: the typed-constant
+// task stack (72 bytes per token, asked whether the whole list is one
+// constant) aborted a 230,000-entry struct table (#3254), and the
+// array-count inference frames and continuations (56 bytes per token)
+// aborted a 4,000,000-element byte table (#2527), both with an arena
+// validation failure in the 256 MiB thread scratch. Both now grow with the
+// work or are bounded by the type count.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parse_large_static_initializers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    // A unit of 8,000,000 tokens needs the driver's own unit reservation.
+    Arena* persistent = arena_create((ArenaCreation){.reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE, .flags = {.no_pool = true}});
+    BUSTER_TEST(arguments, persistent != 0);
+    if (persistent)
+    {
+        for (u32 shape = 0; shape < 2; shape += 1)
+        {
+            u32 element_count = shape == 0 ? 230000 : 4000000;
+            String8 prefix = shape == 0 ? S8("struct R { int a; const char *s; short v[3]; };\nstruct R t[] = {")
+                                        : S8("unsigned char d[] = {");
+            String8 element_open = shape == 0 ? S8("{") : S8("");
+            String8 element_middle = shape == 0 ? S8(", \"n\", {1, 2, 3}}") : S8("");
+            String8 suffix = S8("};\n");
+            u64 source_capacity = prefix.length + (u64)element_count * (element_open.length + element_middle.length + 12) + suffix.length;
+            TemporalArena temporary = arena_begin_temporal(persistent);
+            char8* source_bytes = arena_allocate(persistent, char8, source_capacity);
+            u64 source_length = 0;
+            c_test_append_source(source_bytes, source_capacity, &source_length, prefix);
+            for (u32 element = 0; element < element_count; element += 1)
+            {
+                c_test_append_source(source_bytes, source_capacity, &source_length, element_open);
+                c_test_append_u32(source_bytes, source_capacity, &source_length, shape == 0 ? element : element & 255);
+                c_test_append_source(source_bytes, source_capacity, &source_length, element_middle);
+                c_test_append_source(source_bytes, source_capacity, &source_length, S8(","));
+            }
+            c_test_append_source(source_bytes, source_capacity, &source_length, suffix);
+            String8 source = {.pointer = source_bytes, .length = source_length};
+            CPreprocessResult preprocess = c_preprocess(persistent, source, (CPreprocessOptions){
+                .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17,
+            });
+            CParseResult parse = c_parse(persistent, preprocess);
+            BUSTER_TEST(arguments, !preprocess.diagnostic_count);
+            BUSTER_TEST_RAW(arguments, !parse.diagnostic_count,
+                parse.diagnostic_count ? parse.diagnostics[0].message : S8("large static initializer analysis"));
+            if (BUSTER_REQUIRE(arguments, parse.declaration_count == (shape == 0 ? 2u : 1u)))
+            {
+                CDeclaration declaration = parse.declarations[parse.declaration_count - 1];
+                CType* type = c_type_from_id(&parse, declaration.type);
+                bool array = type && type->kind == C_TYPE_ARRAY && type->array_bound < parse.array_bound_count;
+                if (BUSTER_REQUIRE(arguments, array))
+                {
+                    CArrayBound bound = parse.array_bounds[type->array_bound];
+                    BUSTER_TEST(arguments, bound.has_inferred_count && bound.inferred_count == element_count);
+                }
+            }
+            scratch_end(temporary);
+        }
+        BUSTER_TEST(arguments, arena_destroy(persistent, 1));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
 }
 
 // One local table whose every brace-enclosed element zero-fills its record
@@ -5326,6 +5396,92 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_initializer_cursor_depth_runtim
     return result;
 }
 
+// One function holding a 5,000-entry local table: about 555,000 machine rows
+// in a single block. QUALITY placement and scheduling took more than the
+// 256 MiB thread scratch for it and aborted in arena validation (#3413);
+// machine scratch is now planned per function from its IR counts. Compile it
+// under both allocators and check every entry at run time.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_large_function_machine_scratch_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Not on Windows AArch64: the function is over 1 MiB of code, past what
+    // one PE ARM64 unwind record describes; the object writer refuses it
+    // there (#3578).
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS && !(BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64)
+    u32 const entry_count = 5000;
+    String8 prefix = S8("typedef struct Text { const char* pointer; unsigned long length; } Text;\n"
+                        "struct Case { _Bool flag; Text text; unsigned char count; unsigned char bytes[12]; };\n"
+                        "static unsigned long check(struct Case const* cases, unsigned long count)\n{\n"
+                        "    unsigned long bad = 0;\n"
+                        "    for (unsigned long i = 0; i < count; i += 1)\n    {\n"
+                        "        bad += cases[i].flag != (_Bool)(i & 1) || cases[i].text.length != 2 || cases[i].text.pointer[0] != 'c' ||\n"
+                        "               cases[i].text.pointer[1] != (char)('0' + i % 10) || cases[i].count != 2 ||\n"
+                        "               cases[i].bytes[0] != (unsigned char)(i & 255) || cases[i].bytes[1] != 7 || cases[i].bytes[11] != 0;\n"
+                        "    }\n    return bad;\n}\n"
+                        "int main(void)\n{\n    struct Case const cases[] = {\n");
+    String8 entry_open = S8("        {");
+    String8 entry_text = S8(", (Text){\"c");
+    String8 entry_bytes = S8("\", 2}, 2, {");
+    String8 entry_close = S8(", 7}},\n");
+    String8 suffix_open = S8("    };\n    return sizeof(cases) / sizeof(cases[0]) != ");
+    String8 suffix_close = S8(" || check(cases, sizeof(cases) / sizeof(cases[0])) != 0;\n}\n");
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u64 source_capacity = prefix.length + (u64)entry_count * (entry_open.length + entry_text.length + entry_bytes.length + entry_close.length + 16) +
+                          suffix_open.length + suffix_close.length + 16;
+    char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+    u64 source_length = 0;
+    c_test_append_source(source_bytes, source_capacity, &source_length, prefix);
+    for (u32 entry = 0; entry < entry_count; entry += 1)
+    {
+        c_test_append_source(source_bytes, source_capacity, &source_length, entry_open);
+        c_test_append_u32(source_bytes, source_capacity, &source_length, entry & 1);
+        c_test_append_source(source_bytes, source_capacity, &source_length, entry_text);
+        c_test_append_u32(source_bytes, source_capacity, &source_length, entry % 10);
+        c_test_append_source(source_bytes, source_capacity, &source_length, entry_bytes);
+        c_test_append_u32(source_bytes, source_capacity, &source_length, entry & 255);
+        c_test_append_source(source_bytes, source_capacity, &source_length, entry_close);
+    }
+    c_test_append_source(source_bytes, source_capacity, &source_length, suffix_open);
+    c_test_append_u32(source_bytes, source_capacity, &source_length, entry_count);
+    c_test_append_source(source_bytes, source_capacity, &source_length, suffix_close);
+    String8 source_text = {.pointer = source_bytes, .length = source_length};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("large-function-machine-scratch"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=quality"), S8("-fregister-allocator=fast")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            TemporalArena run_temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(run_temporary.arena, S8("large-function-machine-scratch-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], S8("-o"), output, source};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(run_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(run_temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                string_format(run_temporary.arena, S8("large function machine scratch {S8}: {S8}"), modes[mode], compiled.diagnostic));
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(run_temporary.arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                        string_format(run_temporary.arena, S8("large function machine scratch runtime {S8}: status={u32} timed_out={u32}"),
+                            modes[mode], execution.platform_status, (u32)execution.timed_out));
+                }
+            }
+            c_test_scratch_end(run_temporary);
+        }
+    }
+    c_test_scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // A definition may omit a parameter's name (C23 N3007; GCC and Clang accept it
 // before C23 and diagnose only under -pedantic). The unnamed parameter binds
 // nothing but still occupies its ABI slot, so every named parameter around it
@@ -5868,6 +6024,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestA
     // The successor fixture preserves wide negative declaration types, which
     // GCC 14 narrows to int. Clang covers that rule in both requested dialects.
     // GCC covers the >64-bit extension: Clang 17 does not support its successors.
+    // GCC 13 implemented C23 enumerator types and fixed underlying types
+    // (N3029, N3030); GCC 11.5 and 12.4 reject every GCC row below. An
+    // identified older GCC release is a documented profile, so its rows are
+    // NOT_RUN; any other GCC, including an unidentified one, stays required.
+    TestProcessEnvironment oracle_environment =
+        buster_test_process_environment_with_override(arguments->arena, S8("LC_ALL"), S8("C"));
+    String8 gcc = executable_resolve_in_path(arguments->arena, S8("gcc"));
+    TestReferenceIdentity gcc_identity = gcc.length && oracle_environment.keys.pointer
+        ? buster_test_reference_identity(arguments->arena, gcc, &oracle_environment) : (TestReferenceIdentity){0};
+    bool gcc_predates_c23_enums = gcc_identity.gcc_major && gcc_identity.gcc_major < 13;
+    arguments->show(arguments, S8("TEST_ORACLE_IDENTITY suite=c-frontend fixture=enumerator-type-differential tool={S8} version={S8} "
+        "target={S8} observed={u32} gcc_major={u32}\n"), gcc, gcc_identity.version, gcc_identity.target, (u32)gcc_identity.observed,
+        gcc_identity.gcc_major);
     for (u32 test_case = 0; test_case < 2 * BUSTER_ARRAY_LENGTH(fixtures); test_case += 1)
     {
         u32 c23 = test_case & 1;
@@ -5888,7 +6057,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestA
             BUSTER_TEST(arguments, source_written);
             BUSTER_TEST(arguments, reference_written);
             BUSTER_TEST(arguments, compiler.length != 0);
-            if (compiler.length && reference_written)
+            bool reference_not_run = reference == 1 && gcc_predates_c23_enums;
+            if (reference_not_run)
+            {
+                arguments->show(arguments, S8("TEST_ORACLE_V1 suite=c-frontend fixture=enumerator-type-differential "
+                    "case=gcc/{S8}/{S8}/fixture-{u32} status=NOT_RUN required=0 tool={S8} version={S8} "
+                    "reason=GCC {u32} predates C23 enumerator types (GCC 13)\n"),
+                    reference_dialects[c23], optimizations[form], fixture, compiler, gcc_identity.version, gcc_identity.gcc_major);
+            }
+            if (compiler.length && reference_written && !reference_not_run)
             {
                 String8 command[] = {compiler, reference_dialects[c23], optimizations[form], reference_path, S8("-o"), output_path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
@@ -21114,6 +21291,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_fact_census(UnitTestArguments* 
         BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_MEMO_HITS) == 3);
         BUSTER_TEST(arguments, c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_LOWER, C_CENSUS_PHASE_STRING_MEMO_HITS) == 1);
         BUSTER_TEST(arguments, lower_decodes == 0);
+        // A unit nothing will lower (the driver's -fsyntax-only) counts the
+        // literal at its first sight instead of decoding it, and the other
+        // three consumers read the recorded length as before.
+        CParserResult unlowered = c_parse_ast(arguments->arena, preprocess);
+        unlowered.string_literal_lengths_only = true;
+        CCensusCounters unlowered_before = c_census_counters();
+        CAnalysisResult semantic = c_analyze_semantics_only(arguments->arena, preprocess, unlowered);
+        CCensusCounters unlowered_after = c_census_counters();
+        BUSTER_TEST(arguments, semantic.analysis_complete && semantic.diagnostic_count == 0 && !unlowered_after.overflowed);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&unlowered_before, &unlowered_after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_DECODES) == 0);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&unlowered_before, &unlowered_after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_COUNTS) ==
+                                   C_TEST_CENSUS_SEMANTIC_STRING_COUNTS + 1);
+        BUSTER_TEST(arguments, c_test_census_phase_delta(&unlowered_before, &unlowered_after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_MEMO_HITS) == 3);
     }
     return result;
 }
@@ -34088,7 +34278,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
         process_admission &= oracle_environment_ready;
         String8 reference_versions[BUSTER_ARRAY_LENGTH(references)] = {0};
         String8 reference_targets[BUSTER_ARRAY_LENGTH(references)] = {0};
-        bool gcc13_native_profiles[BUSTER_ARRAY_LENGTH(references)] = {0};
+        bool gcc_pre_gnu23_native_profiles[BUSTER_ARRAY_LENGTH(references)] = {0};
         bool healthy_gnu17[BUSTER_ARRAY_LENGTH(references)][BUSTER_ARRAY_LENGTH(optimizations)] = {0};
         u64 diagnostic_limit = BUSTER_KB(64);
         for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
@@ -34136,32 +34326,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                 String8 target_line = target_newline == BUSTER_STRING_NO_MATCH ? target_output : string_slice(target_output, 0, target_newline);
                 reference_versions[reference] = string_format(arguments->arena, S8("{S8}"), version_line);
                 reference_targets[reference] = string_format(arguments->arena, S8("{S8}"), target_line);
-                bool host_target = false;
-#if BUSTER_CPU_ARCH_X86_64
-                host_target = target_line.length && string_first_sequence(target_line, S8("x86_64")) == 0 &&
-                              string_first_sequence(target_line, S8("linux")) != BUSTER_STRING_NO_MATCH;
-#elif BUSTER_CPU_ARCH_AARCH64
-                host_target = target_line.length && string_first_sequence(target_line, S8("aarch64")) == 0 &&
-                              string_first_sequence(target_line, S8("linux")) != BUSTER_STRING_NO_MATCH;
-#endif
-                bool gcc13_macro = string_first_sequence(profile_output, S8("#define __GNUC__ 13\n")) != BUSTER_STRING_NO_MATCH;
-                bool non_clang_macro = string_first_sequence(profile_output, S8("#define __clang__")) == BUSTER_STRING_NO_MATCH;
-                bool linux_macro = string_first_sequence(profile_output, S8("#define __linux__ 1\n")) != BUSTER_STRING_NO_MATCH;
-#if BUSTER_CPU_ARCH_X86_64
-                bool native_architecture_macro = string_first_sequence(profile_output, S8("#define __x86_64__ 1\n")) != BUSTER_STRING_NO_MATCH;
-#elif BUSTER_CPU_ARCH_AARCH64
-                bool native_architecture_macro = string_first_sequence(profile_output, S8("#define __aarch64__ 1\n")) != BUSTER_STRING_NO_MATCH;
-#else
-                bool native_architecture_macro = false;
-#endif
-                bool macro_profile = profile_observed && gcc13_macro && non_clang_macro && linux_macro && native_architecture_macro;
-                gcc13_native_profiles[reference] = reference == 0 && version_observed && target_observed && version_line.length &&
-                    string_first_sequence(version_line, S8("gcc ")) == 0 &&
-                    string_first_sequence(version_line, S8(" 13.")) != BUSTER_STRING_NO_MATCH && host_target && macro_profile;
+                // GCC 14 added the -std=gnu23 spelling; GCC 11 through 13 refuse it with the same
+                // diagnostic (observed on 11.5, 12.4 and 13.3).
+                u32 gcc_major = reference == 0 && version_observed && target_observed && profile_observed
+                    ? buster_test_reference_gcc_major(identity_temporary.arena, version_line, target_line, profile_output) : 0;
+                gcc_pre_gnu23_native_profiles[reference] = gcc_major >= 11 && gcc_major <= 13;
                 arguments->show(arguments, S8("TEST_ORACLE_IDENTITY suite=compiler-driver fixture=function-parameter-compatibility "
-                    "tool={S8} version={S8} target={S8} predefined_macros_observed={u32} gcc13_non_clang_native_profile={u32}\n"),
+                    "tool={S8} version={S8} target={S8} predefined_macros_observed={u32} gcc11_to_13_non_clang_native_profile={u32}\n"),
                     identity_compiler, reference_versions[reference], reference_targets[reference], (u32)profile_observed,
-                    (u32)gcc13_native_profiles[reference]);
+                    (u32)gcc_pre_gnu23_native_profiles[reference]);
             }
             c_test_scratch_end(identity_temporary);
         }
@@ -34340,8 +34513,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                 .search_path = false,
                             };
                             bool healthy_control = dialect == 0 || healthy_gnu17[reference][optimization];
-                            bool profile_authenticated = dialect == 1 && reference == 0 && gcc13_native_profiles[reference];
-                            // GCC 13 lacks only the -std=gnu23 spelling (GCC 14 added it). That exact,
+                            bool profile_authenticated = dialect == 1 && reference == 0 && gcc_pre_gnu23_native_profiles[reference];
+                            // GCC 11-13 lack only the -std=gnu23 spelling (GCC 14 added it). That exact,
                             // authenticated refusal is a reference-version limit, so it stays NOT_RUN even
                             // under --ci=1 (#2579); every other probe outcome is still a failure.
                             TestOracleProbeDisposition probe_disposition = buster_test_oracle_probe_disposition(
@@ -40099,6 +40272,163 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArgumen
         }
         c_test_scratch_end(temporary);
     }
+    return result;
+}
+
+// Lowering's root-conditional splits read from the tree (-fc-ast-pilot,
+// GitHub #3102): every shape compiles to the same object as the token scan
+// gives, at `-g0` and `-g`. Debug and sanitized builds also check each tree
+// answer against the scan (BUSTER_REFERENCE_CHECKS). The shapes cover
+// conditions widened over parentheses, casts, prefix operators, calls and
+// label addresses; `:` before a parenthesized or cast else operand; chains in
+// either arm; GNU `?:`; and conditionals in calls, returns, initializers,
+// subscripts, statement expressions and `if` conditions. A conditional after a
+// root assignment or comma goes to the scan.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("int g(int v) { return v + 1; }\n"
+                        "int h(int a, int b) { return a - b; }\n"
+                        "int f(int a, int b, int *p, unsigned char c)\n"
+                        "{\n"
+                        "    int r = a ? b : c;\n"
+                        "    r += (a) ? (b) : (c);\n"
+                        "    r += ((a + b)) ? ((r)) : (int)c;\n"
+                        "    r += (int)c ? -a : !b;\n"
+                        "    r += -a ? ~b : a ? b : c ? 1 : 2;\n"
+                        "    r += a ? b ? 3 : 4 : 5;\n"
+                        "    r += g(a) ? h(a ? b : c, b ? a : 0) : p[a ? 0 : 1];\n"
+                        "    r += a ?: b;\n"
+                        "    r += (a ?: (b ?: c));\n"
+                        "    r = a, r = b ? r : 0;\n"
+                        "    r += (a, b) ? 1 : 2;\n"
+                        "    r += ({ int t = a ? b : c; t ? t : 1; });\n"
+                        "    r += sizeof(a ? b : c) ? (int)sizeof(char) : 0;\n"
+                        "    if (a ? b : c) r += 1;\n"
+                        "    while (r > 100 ? 1 : 0) r -= 1;\n"
+                        "    void *target = a ? &&one : &&two;\n"
+                        "    goto *target;\n"
+                        "one:\n"
+                        "    r += 1;\n"
+                        "two:\n"
+                        "    r += (p ? *p : 0) + (p != 0 ? p[0] : -1);\n"
+                        "    return a > b ? (r ? r : 1) : b > a ? -r : 0;\n"
+                        "}\n");
+    String8 debug[] = {S8("-g0"), S8("-g")};
+    TemporalArena temporary = scratch_begin(0, 0);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-tree-root-conditionals"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    for (u32 level = 0; level < BUSTER_ARRAY_LENGTH(debug); level += 1)
+    {
+        ByteSlice objects[2] = {0};
+        CompilerDriverResult compiled[2] = {0};
+        for (u32 pilot = 0; pilot < 2; pilot += 1)
+        {
+            String8 output = buster_test_temporary_path(arena, string_format(arena, S8("buster-tree-root-conditionals-{u32}-{u32}"), level, pilot),
+                                                        S8(".o"));
+            String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), debug[level], S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"),
+                                 output, input};
+            compiled[pilot] = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8){command + !pilot, BUSTER_ARRAY_LENGTH(command) - !pilot}));
+            BUSTER_TEST_RAW(arguments, compiled[pilot].error == COMPILER_DRIVER_ERROR_NONE, compiled[pilot].diagnostic);
+            objects[pilot] = compiled[pilot].error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
+        }
+        BUSTER_TEST_RAW(arguments,
+                        objects[0].length && objects[0].length == objects[1].length && memcmp(objects[0].pointer, objects[1].pointer, objects[0].length) == 0,
+                        string_format(arena, S8("{S8}: the pilot's object differs from the default's"), debug[level]));
+        CAstLowerStatistics lower = compiled[1].c_ast.lower;
+        BUSTER_TEST(arguments, compiled[0].c_ast.lower.bodies == 0 && compiled[0].c_ast.lower.answers == 0);
+        BUSTER_TEST(arguments, lower.bodies == 3);
+        BUSTER_TEST(arguments, lower.conditionals >= 30);
+        BUSTER_TEST(arguments, lower.answers >= 20);
+        BUSTER_TEST(arguments, lower.negatives > 0);
+        BUSTER_TEST(arguments, lower.fallbacks > 0);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// The root-conditional index build's walks and widening stay linear in the
+// input (CAstLowerStatistics.steps, which leaves out the memo's binary-search
+// comparisons; GitHub #3102). Each chain shape is compiled at
+// depth n and 2n, with and without -fc-ast-pilot. The objects must match, and
+// doubling the depth may at most double the steps, plus a constant for the
+// function around the chain. Without the memo, a left-nested chain walked its
+// shared leftmost paths and parentheses again for every level, and its steps
+// quadrupled.
+//   left:   ((a ? b : c) ? b : c) ...    every condition holds the previous one
+//   prefix: (-(-a ? b : c) ? b : c) ...  the same under a prefix operator
+//   right:  a ? b : a ? b : ... c        every else operand holds the next one
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditional_chains(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Per level the head, then the leaf, then per level the close.
+    String8 heads[] = {S8("("), S8("(-"), S8("a ? b : ")};
+    String8 leaves[] = {S8("a"), S8("a"), S8("c")};
+    String8 closes[] = {S8(" ? b : c)"), S8(" ? b : c)"), S8("")};
+    String8 shape_names[] = {S8("left"), S8("prefix"), S8("right")};
+    u32 depths[] = {128, 256};
+    String8 prefix = S8("int f(int a, int b, int c) { return ");
+    String8 suffix = S8("; }\n");
+    TemporalArena temporary = scratch_begin(0, 0);
+    Arena* arena = temporary.arena;
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(shape_names); shape += 1)
+    {
+        u64 steps[BUSTER_ARRAY_LENGTH(depths)] = {0};
+        for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+        {
+            u32 depth = depths[depth_index];
+            u64 length = prefix.length + leaves[shape].length + suffix.length + (u64)depth * (heads[shape].length + closes[shape].length);
+            char8* bytes = arena_allocate(arena, char8, length);
+            u64 cursor = 0;
+            memcpy(bytes + cursor, prefix.pointer, prefix.length);
+            cursor += prefix.length;
+            for (u32 level = 0; level < depth; level += 1)
+            {
+                memcpy(bytes + cursor, heads[shape].pointer, heads[shape].length);
+                cursor += heads[shape].length;
+            }
+            memcpy(bytes + cursor, leaves[shape].pointer, leaves[shape].length);
+            cursor += leaves[shape].length;
+            for (u32 level = 0; level < depth; level += 1)
+            {
+                memcpy(bytes + cursor, closes[shape].pointer, closes[shape].length);
+                cursor += closes[shape].length;
+            }
+            memcpy(bytes + cursor, suffix.pointer, suffix.length);
+            String8 source = {.pointer = bytes, .length = length};
+            String8 input = buster_test_temporary_path(arena, string_format(arena, S8("buster-tree-chain-{S8}-{u32}"), shape_names[shape], depth),
+                                                       S8(".c"));
+            BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+            ByteSlice objects[2] = {0};
+            for (u32 pilot = 0; pilot < 2; pilot += 1)
+            {
+                String8 output = buster_test_temporary_path(
+                    arena, string_format(arena, S8("buster-tree-chain-{S8}-{u32}-{u32}"), shape_names[shape], depth, pilot), S8(".o"));
+                String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), S8("-g0"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"),
+                                     output, input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8){command + !pilot, BUSTER_ARRAY_LENGTH(command) - !pilot}));
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                objects[pilot] = compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
+                if (pilot)
+                {
+                    steps[depth_index] = compiled.c_ast.lower.steps;
+                    BUSTER_TEST(arguments, compiled.c_ast.lower.conditionals == depth);
+                    BUSTER_TEST(arguments, compiled.c_ast.lower.answers > 0);
+                }
+            }
+            BUSTER_TEST_RAW(arguments,
+                            objects[0].length && objects[0].length == objects[1].length &&
+                                memcmp(objects[0].pointer, objects[1].pointer, objects[0].length) == 0,
+                            string_format(arena, S8("{S8} chain of {u32}: the pilot's object differs from the default's"), shape_names[shape], depth));
+        }
+        BUSTER_TEST_RAW(arguments, steps[0] > 0 && steps[1] <= 2 * steps[0] + 64,
+                        string_format(arena, S8("{S8} chain: {u64} index steps at depth {u32}, {u64} at depth {u32}"), shape_names[shape], steps[0],
+                                      depths[0], steps[1], depths[1]));
+    }
+    scratch_end(temporary);
     return result;
 }
 
@@ -61931,6 +62261,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_redefinition_names_previous_site);
     C_TEST_FIXTURE(arguments, c_test_empty_scalar_initializer_runtime);
     C_TEST_FIXTURE(arguments, c_test_nested_initializer_cursor_depth_runtime);
+    C_TEST_FIXTURE(arguments, c_test_large_function_machine_scratch_runtime);
     C_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
     C_TEST_FIXTURE(arguments, c_test_enum_bool_conversion);
     C_TEST_FIXTURE(arguments, c_test_enum_lowering);
@@ -62038,6 +62369,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_ir_lower_scratch_capacity);
     C_TEST_FIXTURE(arguments, c_test_ir_query_scratch_growth);
     C_TEST_FIXTURE(arguments, c_test_ir_local_table_zero_scratch);
+    C_TEST_FIXTURE(arguments, c_test_parse_large_static_initializers);
     C_TEST_FIXTURE(arguments, c_test_ir_row_streams);
     C_TEST_FIXTURE(arguments, c_test_label_values_gate);
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_growth);
@@ -62047,6 +62379,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_line_filename_escapes);
     C_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
     C_TEST_FIXTURE(arguments, c_test_type_interning_objects);
+    C_TEST_FIXTURE(arguments, c_test_tree_root_conditionals);
+    C_TEST_FIXTURE(arguments, c_test_tree_root_conditional_chains);
     C_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
     C_TEST_FIXTURE(arguments, c_test_local_label_declarations);
     C_TEST_FIXTURE(arguments, c_test_local_labels);

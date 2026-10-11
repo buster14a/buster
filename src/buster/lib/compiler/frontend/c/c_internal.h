@@ -495,6 +495,8 @@ BUSTER_C_EXTERN bool c_number_convert_at(CNumberFacts const* facts, char8 const*
 typedef struct CStringLiteralMemoSlot CStringLiteralMemoSlot;
 struct CStringLiteralMemoSlot
 {
+    // Null for a length-only slot (CStringLiteralMemo.lengths_only); a
+    // recorded decode always has a buffer, even for an empty literal.
     u8* bytes;
     // Decoded byte count, which is the element count of a narrow fragment.
     u32 length;
@@ -509,8 +511,11 @@ struct CStringLiteralMemo
     CStringLiteralMemoSlot* slots;
     u32 capacity;
     u32 count;
+    // First sights are counted and record no bytes: set when nothing will
+    // lower the unit (CParserResult.string_literal_lengths_only).
+    bool lengths_only;
 };
-BUSTER_C_EXTERN CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens);
+BUSTER_C_EXTERN CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens, bool lengths_only);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
 // Per-body validation scratch (#1256). While c_parse_validate_lowering_constraints
@@ -1569,6 +1574,12 @@ struct CTypeParseMachine
     // inside one is reported there, because neither path has a later fallback
     // that names it.
     u32 member_declarator_depth;
+    // The `(` and `)` of the identifier list of the old-style definition
+    // whose parenthesized declarator is being parsed, `(a)` in
+    // `int (k(a)) int a; {...}`, else both zero: its names are parameters,
+    // not declarations (GitHub #3368).
+    u32 identifier_list_open;
+    u32 identifier_list_close;
     u32 expression_task_count;
     u32 expression_task_capacity;
     CConstantEvaluationMode constant_evaluation_mode;

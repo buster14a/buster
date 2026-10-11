@@ -3868,6 +3868,113 @@ BUSTER_GLOBAL_LOCAL bool link_test_elf_section_in_program_header(ByteSlice image
     return result;
 }
 
+// Pin the published AArch64 dynamic layout contract (#1314).
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_dynamic_layout_facts(UnitTestArguments* arguments, ByteSlice image)
+{
+    UnitTestResult result = {0};
+    enum
+    {
+        AARCH64_ELF_RELOCATION_SIZE = 24,
+        AARCH64_ELF_PLT_ENTRY_SIZE = 16,
+    };
+    u16 machine = 0;
+    if (image.length >= 64)
+    {
+        memcpy(&machine, image.pointer + 18, sizeof(machine));
+    }
+    BUSTER_TEST(arguments, machine == 183);
+    u64 plt_header = 0;
+    u64 got_header = 0;
+    u64 relocation_header = 0;
+    u64 symbol_header = 0;
+    bool sections_found = link_test_elf_section_find(image, S8(".plt"), 0, &plt_header) &&
+                          link_test_elf_section_find(image, S8(".got.plt"), 0, &got_header) &&
+                          link_test_elf_section_find(image, S8(".rela.plt"), 0, &relocation_header) &&
+                          link_test_elf_section_find(image, S8(".dynsym"), 0, &symbol_header);
+    BUSTER_TEST(arguments, sections_found);
+    if (machine == 183 && sections_found)
+    {
+        u64 plt_offset = link_read_u64(image.pointer, plt_header + 24);
+        u64 plt_size = link_read_u64(image.pointer, plt_header + 32);
+        u64 got_address = link_read_u64(image.pointer, got_header + 16);
+        u64 got_size = link_read_u64(image.pointer, got_header + 32);
+        u64 relocation_offset = link_read_u64(image.pointer, relocation_header + 24);
+        u64 relocation_address = link_read_u64(image.pointer, relocation_header + 16);
+        u64 relocation_size = link_read_u64(image.pointer, relocation_header + 32);
+        u64 symbol_address = link_read_u64(image.pointer, symbol_header + 16);
+        bool section_bounds = plt_offset <= image.length && plt_size <= image.length - plt_offset &&
+                              relocation_offset <= image.length && relocation_size <= image.length - relocation_offset &&
+                              relocation_size % AARCH64_ELF_RELOCATION_SIZE == 0 && got_address <= UINT64_MAX - got_size;
+        BUSTER_TEST(arguments, section_bounds);
+        u64 code_load = link_test_elf_program_header(image, 1, 1);
+        u64 write_load = link_test_elf_program_header(image, 1, 2);
+        BUSTER_TEST(arguments, code_load && link_read_u32(image.pointer, code_load + 4) == 5 &&
+                                   link_test_elf_section_in_program_header(image, S8(".plt"), code_load));
+        BUSTER_TEST(arguments, write_load && link_read_u32(image.pointer, write_load + 4) == 6 &&
+                                   link_test_elf_section_in_program_header(image, S8(".got.plt"), write_load));
+        bool has_pltgot = link_test_elf_dynamic_entry(image, 3, 0);
+        bool has_bind_now = link_test_elf_dynamic_entry(image, 24, 0);
+        u64 jump_relocation_address = 0;
+        u64 plt_relocation_size = 0;
+        u64 dynamic_symbol_address = 0;
+        bool has_jump_relocation = link_test_elf_dynamic_entry(image, 23, &jump_relocation_address);
+        bool has_plt_relocation_size = link_test_elf_dynamic_entry(image, 2, &plt_relocation_size);
+        bool has_dynamic_symbol = link_test_elf_dynamic_entry(image, 6, &dynamic_symbol_address);
+        BUSTER_TEST(arguments, !has_pltgot && has_bind_now);
+        BUSTER_TEST(arguments, has_jump_relocation && jump_relocation_address == relocation_address);
+        BUSTER_TEST(arguments, has_dynamic_symbol && dynamic_symbol_address == symbol_address);
+        u64 rela_address = 0;
+        u64 rela_size = 0;
+        bool has_rela = link_test_elf_dynamic_entry(image, 7, &rela_address);
+        bool has_rela_size = link_test_elf_dynamic_entry(image, 8, &rela_size);
+        u64 jump_count = 0;
+        u64 copy_count = 0;
+        bool valid_types = true;
+        bool copy_entries_follow_jumps = true;
+        bool copy_seen = false;
+        bool jump_slots_valid = true;
+        if (section_bounds)
+        {
+            for (u64 entry = 0; entry < relocation_size; entry += AARCH64_ELF_RELOCATION_SIZE)
+            {
+                u64 relocation = relocation_offset + entry;
+                u64 offset = link_read_u64(image.pointer, relocation);
+                u64 info = link_read_u64(image.pointer, relocation + 8);
+                u32 type = (u32)info;
+                if (type == 1026)
+                {
+                    u64 thunk = plt_offset + (jump_count + 1) * AARCH64_ELF_PLT_ENTRY_SIZE;
+                    jump_slots_valid = jump_slots_valid && !copy_seen && offset >= got_address && offset < got_address + got_size &&
+                                       (info >> 32) == jump_count + 1 && thunk <= image.length && AARCH64_ELF_PLT_ENTRY_SIZE <= image.length - thunk &&
+                                       link_read_u32(image.pointer, thunk + 8) == UINT32_C(0xd61f0220) &&
+                                       link_read_u32(image.pointer, thunk + 12) == UINT32_C(0xd503201f);
+                    jump_count += 1;
+                }
+                else if (type == 1024)
+                {
+                    copy_seen = true;
+                    copy_count += 1;
+                }
+                else
+                {
+                    valid_types = false;
+                }
+                copy_entries_follow_jumps = copy_entries_follow_jumps && !(type == 1026 && copy_seen);
+            }
+        }
+        BUSTER_TEST(arguments, valid_types);
+        BUSTER_TEST(arguments, copy_entries_follow_jumps);
+        BUSTER_TEST(arguments, jump_slots_valid);
+        BUSTER_TEST(arguments, section_bounds && plt_size == (jump_count + 1) * AARCH64_ELF_PLT_ENTRY_SIZE);
+        BUSTER_TEST(arguments, has_plt_relocation_size && plt_relocation_size == jump_count * AARCH64_ELF_RELOCATION_SIZE);
+        BUSTER_TEST(arguments, !has_rela || (has_rela_size && rela_address == jump_relocation_address + plt_relocation_size &&
+                                             rela_size == copy_count * AARCH64_ELF_RELOCATION_SIZE));
+        BUSTER_TEST(arguments, has_plt_relocation_size &&
+                                   plt_relocation_size + (has_rela ? rela_size : 0) == relocation_size);
+    }
+    return result;
+}
+
 // The fixed-address dynamic executable's layout is hardened as GNU ld's default
 // is (#2720): R, R+X and RW loads with no writable-and-executable page,
 // read-only data and the dynamic tables outside the executable load,
@@ -3900,6 +4007,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_hardened_layout(UnitTestArgumen
         if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE && linked.executable.length >= 64))
         {
             ByteSlice image = linked.executable;
+            if (architectures[architecture] == CPU_ARCH_AARCH64)
+            {
+                UnitTestResult aarch64_layout = link_test_aarch64_dynamic_layout_facts(arguments, image);
+                result.succeeded_test_count += aarch64_layout.succeeded_test_count;
+                result.test_count += aarch64_layout.test_count;
+            }
             u64 read_load = link_test_elf_program_header(image, 1, 0);
             u64 code_load = link_test_elf_program_header(image, 1, 1);
             u64 write_load = link_test_elf_program_header(image, 1, 2);
@@ -4568,9 +4681,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_copy_symbol_table(UnitTestArgum
                              : (ByteSlice){.pointer = (u8*)aarch64_text, .length = sizeof(aarch64_text)};
         for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
         {
-            // An x86-64 Android executable is the PIE, whose copy slots follow
-            // the references that need them; this text makes none.
-            if (architectures[architecture] == CPU_ARCH_X86_64 && systems[system] == OPERATING_SYSTEM_ANDROID)
+            // Android executables use the PIE copy-slot layout rather than
+            // the fixed-address symbol-table layout covered here.
+            if (systems[system] == OPERATING_SYSTEM_ANDROID)
             {
                 continue;
             }
@@ -5976,6 +6089,162 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_tls_membership(UnitTestArguments* a
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_android_zero_got_slot(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 text_words[] = {UINT32_C(0x90000000), UINT32_C(0xf9400000), UINT32_C(0xd65f03c0)};
+    ObjectSymbol symbols[] = {
+        {.name = S8("main"), .size = sizeof(text_words), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("absent"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true, .weak = true, .hidden = true},
+    };
+    ObjectRelocation relocations[] = {
+        {.offset = 0, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21},
+        {.offset = 4, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12},
+    };
+    ObjectFile object = link_test_object_make(arguments->arena,
+                                              (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_ANDROID},
+                                              (ByteSlice){.pointer = (u8*)text_words, .length = sizeof(text_words)}, symbols, BUSTER_ARRAY_LENGTH(symbols),
+                                              relocations, BUSTER_ARRAY_LENGTH(relocations));
+    NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &object,
+                                                               (NativeExecutableLinkOptions){
+                                                                   .entry_symbol = S8("main"),
+                                                                   .image_kind = NATIVE_IMAGE_PIE,
+                                                               });
+    BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
+    LinkTestElfSymbol main_symbol = {0};
+    u64 text_header = 0;
+    bool main_found = linked.error == LINK_ERROR_NONE &&
+                      link_test_elf_symbol(linked.executable, S8("main"), &main_symbol) &&
+                      link_test_elf_section_find(linked.executable, S8(".text"), 0, &text_header);
+    BUSTER_TEST(arguments, main_found);
+    if (main_found)
+    {
+        u64 text_address = link_read_u64(linked.executable.pointer, text_header + 16);
+        u64 text_offset = link_read_u64(linked.executable.pointer, text_header + 24);
+        u64 text_size = link_read_u64(linked.executable.pointer, text_header + 32);
+        u64 main_delta = main_symbol.value >= text_address ? main_symbol.value - text_address : UINT64_MAX;
+        bool main_range = main_delta <= text_size && sizeof(text_words) <= text_size - main_delta &&
+                          text_offset <= linked.executable.length && main_delta <= linked.executable.length - text_offset &&
+                          sizeof(text_words) <= linked.executable.length - (text_offset + main_delta);
+        BUSTER_TEST(arguments, main_range);
+        if (main_range)
+        {
+            u64 main_offset = text_offset + main_delta;
+            u32 adrp_word = link_read_u32(linked.executable.pointer, main_offset);
+            u32 ldr_word = link_read_u32(linked.executable.pointer, main_offset + 4);
+            A64MCInst adrp = {0};
+            bool adrp_valid = a64_mc_decode(adrp_word, &adrp) && adrp.opcode == A64_OPCODE_ADRP && (adrp_word & 31) == 0;
+            bool ldr_valid = (ldr_word & UINT32_C(0xffc00000)) == UINT32_C(0xf9400000) &&
+                             (ldr_word & 31) == 0 && ((ldr_word >> 5) & 31) == 0;
+            bool sequence_valid = adrp_valid && ldr_valid && link_read_u32(linked.executable.pointer, main_offset + 8) == UINT32_C(0xd65f03c0);
+            BUSTER_TEST(arguments, sequence_valid);
+            if (sequence_valid)
+            {
+                s64 page_displacement = adrp.operands[1].value;
+                u64 load_biases[] = {0, UINT64_C(0x10000)};
+                u64 slot_addresses[BUSTER_ARRAY_LENGTH(load_biases)] = {0};
+                bool slot_addresses_valid = true;
+                u64 ldr_offset = (u64)((ldr_word >> 10) & 0xfff) * sizeof(u64);
+                for (u32 bias_index = 0; bias_index < BUSTER_ARRAY_LENGTH(load_biases); bias_index += 1)
+                {
+                    u64 load_bias = load_biases[bias_index];
+                    bool place_valid = load_bias <= UINT64_MAX - main_symbol.value;
+                    u64 place = place_valid ? load_bias + main_symbol.value : 0;
+                    u64 page = place & ~UINT64_C(0xfff);
+                    u64 slot_page = 0;
+                    if (place_valid && page_displacement < 0)
+                    {
+                        u64 magnitude = (u64)-page_displacement;
+                        place_valid = page >= magnitude;
+                        if (place_valid) slot_page = page - magnitude;
+                    }
+                    else if (place_valid)
+                    {
+                        place_valid = page <= UINT64_MAX - (u64)page_displacement;
+                        if (place_valid) slot_page = page + (u64)page_displacement;
+                    }
+                    place_valid = place_valid && slot_page <= UINT64_MAX - ldr_offset;
+                    if (place_valid)
+                    {
+                        u64 slot = slot_page + ldr_offset;
+                        place_valid = slot >= load_bias;
+                        if (place_valid) slot_addresses[bias_index] = slot - load_bias;
+                    }
+                    slot_addresses_valid = slot_addresses_valid && place_valid;
+                }
+                BUSTER_TEST(arguments, slot_addresses_valid && slot_addresses[0] == slot_addresses[1]);
+                if (slot_addresses_valid && slot_addresses[0] == slot_addresses[1])
+                {
+                    u64 slot = slot_addresses[0];
+                    bool writable = false;
+                    bool file_backed = false;
+                    u64 slot_file_offset = 0;
+                    for (u32 load_index = 0; ; load_index += 1)
+                    {
+                        u64 load_header = link_test_elf_program_header(linked.executable, 1, load_index);
+                        if (!load_header) break;
+                        u64 load_address = link_read_u64(linked.executable.pointer, load_header + 16);
+                        u64 file_offset = link_read_u64(linked.executable.pointer, load_header + 8);
+                        u64 file_size = link_read_u64(linked.executable.pointer, load_header + 32);
+                        u64 memory_size = link_read_u64(linked.executable.pointer, load_header + 40);
+                        if (slot >= load_address)
+                        {
+                            u64 relative = slot - load_address;
+                            bool in_memory = relative <= memory_size && sizeof(u64) <= memory_size - relative;
+                            bool in_file = relative <= file_size && sizeof(u64) <= file_size - relative &&
+                                           file_offset <= linked.executable.length && relative <= linked.executable.length - file_offset &&
+                                           sizeof(u64) <= linked.executable.length - (file_offset + relative);
+                            if ((link_read_u32(linked.executable.pointer, load_header + 4) & 2) && in_memory)
+                            {
+                                writable = true;
+                                if (in_file)
+                                {
+                                    file_backed = true;
+                                    slot_file_offset = file_offset + relative;
+                                }
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, writable && file_backed);
+                    if (file_backed) BUSTER_TEST(arguments, link_read_u64(linked.executable.pointer, slot_file_offset) == 0);
+                    u64 rela_address = 0;
+                    u64 rela_size = 0;
+                    bool no_slot_relocation = true;
+                    if (link_test_elf_dynamic_entry(linked.executable, 7, &rela_address))
+                    {
+                        u64 rela_header = 0;
+                        u64 rela_section_size = 0;
+                        bool rela_valid = link_test_elf_dynamic_entry(linked.executable, 8, &rela_size);
+                        if (rela_valid && rela_size)
+                        {
+                            rela_valid = link_test_elf_section_find(linked.executable, S8(".rela.dyn"), 0, &rela_header);
+                            if (rela_valid)
+                            {
+                                rela_valid = link_read_u64(linked.executable.pointer, rela_header + 16) == rela_address;
+                                rela_section_size = link_read_u64(linked.executable.pointer, rela_header + 32);
+                                rela_valid = rela_valid && rela_size <= rela_section_size && rela_size % 24 == 0 &&
+                                             link_read_u64(linked.executable.pointer, rela_header + 24) <= linked.executable.length &&
+                                             rela_size <= linked.executable.length - link_read_u64(linked.executable.pointer, rela_header + 24);
+                            }
+                        }
+                        BUSTER_TEST(arguments, rela_valid);
+                        if (rela_valid && rela_size)
+                        {
+                            u64 rela_offset = link_read_u64(linked.executable.pointer, rela_header + 24);
+                            for (u64 entry = 0; entry < rela_size; entry += 24)
+                            {
+                                no_slot_relocation = no_slot_relocation && link_read_u64(linked.executable.pointer, rela_offset + entry) != slot;
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, no_slot_relocation);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_shared_local_initial_exec_tls_addend(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6704,9 +6973,242 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_mach_got_loads(UnitTestArguments* a
     return result;
 }
 
+typedef struct LinkTestMachFixup
+{
+    String8 symbol;
+    u64 segment_offset;
+    s64 addend;
+    u8 segment;
+} LinkTestMachFixup;
+
+BUSTER_GLOBAL_LOCAL u64 link_test_uleb128_read(u8 const* bytes, u64 end, u64* cursor)
+{
+    u64 value = 0;
+    u32 shift = 0;
+    bool more = true;
+    while (more && *cursor < end)
+    {
+        u8 byte = bytes[(*cursor)++];
+        value |= shift < 64 ? (u64)(byte & 0x7f) << shift : 0;
+        shift += 7;
+        more = (byte & 0x80) != 0;
+    }
+    return value;
+}
+
+BUSTER_GLOBAL_LOCAL s64 link_test_sleb128_read(u8 const* bytes, u64 end, u64* cursor)
+{
+    u64 value = 0;
+    u32 shift = 0;
+    u8 byte = 0x80;
+    while ((byte & 0x80) && *cursor < end)
+    {
+        byte = bytes[(*cursor)++];
+        value |= shift < 64 ? (u64)(byte & 0x7f) << shift : 0;
+        shift += 7;
+    }
+    if (shift < 64 && (byte & 0x40))
+    {
+        value |= ~UINT64_C(0) << shift;
+    }
+    return (s64)value;
+}
+
+// Decodes the classic dyld rebase (`bind` false) or bind stream of a linked
+// Mach-O image into one entry per fixed-up pointer, reading only the opcodes
+// link_native_executable_mach_o64 writes.  Returns UINT32_MAX for anything else.
+BUSTER_GLOBAL_LOCAL u32 link_test_mach_fixups(ByteSlice image, bool bind, LinkTestMachFixup* fixups, u32 capacity)
+{
+    u32 count = 0;
+    u64 stream = 0;
+    u64 stream_size = 0;
+    u32 command_count = image.length >= 32 && link_read_u32(image.pointer, 0) == 0xfeedfacf ? link_read_u32(image.pointer, 16) : 0;
+    u64 command = 32;
+    for (u32 command_index = 0; command_index < command_count && command + 8 <= image.length; command_index += 1)
+    {
+        u32 size = link_read_u32(image.pointer, command + 4);
+        if (size < 8 || size > image.length - command)
+        {
+            break;
+        }
+        if (link_read_u32(image.pointer, command) == 0x80000022 && size >= 24)
+        {
+            stream = link_read_u32(image.pointer, command + (bind ? 16 : 8));
+            stream_size = link_read_u32(image.pointer, command + (bind ? 20 : 12));
+        }
+        command += size;
+    }
+    bool valid = stream <= image.length && stream_size <= image.length - stream;
+    u64 end = stream + stream_size;
+    u64 cursor = stream;
+    LinkTestMachFixup current = {0};
+    bool done = !valid || !stream_size;
+    while (!done && valid)
+    {
+        if (cursor >= end)
+        {
+            valid = false;
+            continue;
+        }
+        u8 byte = image.pointer[cursor++];
+        u8 opcode = byte & 0xf0;
+        u8 immediate = byte & 0x0f;
+        if (byte == 0)
+        {
+            done = true;
+        }
+        else if (opcode == 0x10 || (bind && (opcode == 0x30 || byte == 0x51)))
+        {
+            // The pointer type and the library ordinal hold for every entry.
+            done = false;
+        }
+        else if (bind && opcode == 0x40)
+        {
+            current.symbol = (String8){.pointer = (char8*)image.pointer + cursor, .length = 0};
+            while (cursor < end && image.pointer[cursor])
+            {
+                cursor += 1;
+                current.symbol.length += 1;
+            }
+            cursor += 1;
+        }
+        else if (bind && opcode == 0x60)
+        {
+            current.addend = link_test_sleb128_read(image.pointer, end, &cursor);
+        }
+        else if ((bind && opcode == 0x70) || (!bind && opcode == 0x20))
+        {
+            current.segment = immediate;
+            current.segment_offset = link_test_uleb128_read(image.pointer, end, &cursor);
+        }
+        else if ((bind && byte == 0x90) || (!bind && byte == 0x51))
+        {
+            if (count < capacity)
+            {
+                fixups[count] = current;
+            }
+            count += 1;
+            current.segment_offset += sizeof(u64);
+        }
+        else
+        {
+            valid = false;
+        }
+    }
+
+    return valid && count <= capacity ? count : UINT32_MAX;
+}
+
+BUSTER_GLOBAL_LOCAL u32 link_test_mach_fixup_matches(LinkTestMachFixup* fixups, u32 count, u64 segment_offset, String8 symbol, s64 addend)
+{
+    u32 matches = 0;
+    for (u32 index = 0; count != UINT32_MAX && index < count; index += 1)
+    {
+        matches += fixups[index].segment == 2 && fixups[index].segment_offset == segment_offset && string_equal(fixups[index].symbol, symbol) &&
+                           fixups[index].addend == addend
+                       ? 1u
+                       : 0u;
+    }
+    return matches;
+}
+
+// #3547: a pointer-sized word in __DATA that names an import is a dyld bind
+// site carrying its addend, as Apple ld writes it -- not a rebase of the
+// import's call stub, which is not the address dyld or any other image gives
+// the symbol, and for data is code.  A pointer to a definition here is still
+// rebased, and __const words take the same binds because this writer keeps
+// __const in the writable __DATA segment, where ld64's __DATA_CONST would
+// also be written by dyld.  The two programs below are the issue's:
+// `int *optind_pointer = &optind;` and `int (*puts_pointer)(const char *) = puts;`.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_mach_import_pointers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ObjectSymbol symbols[] = {
+        {.name = S8("main"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("optind"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        {.name = S8("puts"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("local"), .value = 24, .size = 8, .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA},
+    };
+    // optind_pointer, puts_pointer, &optind + 12 and local_pointer.
+    u8 data[32] = {0};
+    u8 constant[16] = {0};
+    ObjectRelocation relocations[] = {
+        {.offset = 0, .section = OBJECT_SECTION_DATA, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        {.offset = 8, .section = OBJECT_SECTION_DATA, .symbol = 2, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        {.addend = 12, .offset = 16, .section = OBJECT_SECTION_DATA, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        {.offset = 24, .section = OBJECT_SECTION_DATA, .symbol = 3, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        {.addend = -8, .offset = 8, .section = OBJECT_SECTION_READ_ONLY_DATA, .symbol = 2, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+    };
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        bool x86 = architecture == 0;
+        Target target = {.cpu_arch = x86 ? CPU_ARCH_X86_64 : CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS};
+        u8 x86_text[] = {0xc3};
+        u32 aarch64_text[] = {0xd65f03c0};
+        ByteSlice text = x86 ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_text) : (ByteSlice){.pointer = (u8*)aarch64_text, .length = sizeof(aarch64_text)};
+        symbols[0].size = text.length;
+        ObjectFile object = link_test_object_make(arguments->arena, target, text, symbols, BUSTER_ARRAY_LENGTH(symbols), relocations,
+                                                  BUSTER_ARRAY_LENGTH(relocations));
+        object.sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data);
+        object.sections[OBJECT_SECTION_DATA].alignment = 8;
+        object.sections[OBJECT_SECTION_READ_ONLY_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(constant);
+        object.sections[OBJECT_SECTION_READ_ONLY_DATA].alignment = 8;
+        String8 output_path =
+            link_test_temporary_executable_path(arguments->arena, x86 ? S8("buster-mach-import-pointers-x86") : S8("buster-mach-import-pointers-aarch64"), S8(""));
+        NativeExecutableLinkOptions options = {.output_path = output_path, .entry_symbol = S8("main")};
+        NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &object, options);
+        u64 data_header = 0;
+        u64 const_header = 0;
+        bool found = linked.error == LINK_ERROR_NONE && link_test_mach_section_find(linked.executable, S8("__DATA"), S8("__data"), &data_header) &&
+                     link_test_mach_section_find(linked.executable, S8("__DATA"), S8("__const"), &const_header);
+        if (BUSTER_REQUIRE(arguments, found))
+        {
+            ByteSlice image = linked.executable;
+            UnitTestResult layout = link_test_mach_linkedit_layout(arguments, image, true, 0);
+            result.succeeded_test_count += layout.succeeded_test_count;
+            result.test_count += layout.test_count;
+            // __data opens the segment, so its offsets are segment offsets.
+            u64 data_address = link_read_u64(image.pointer, data_header + 32);
+            u32 data_offset = link_read_u32(image.pointer, data_header + 48);
+            u64 const_segment_offset = link_read_u64(image.pointer, const_header + 32) - data_address;
+            LinkTestMachFixup binds[16];
+            LinkTestMachFixup rebases[16];
+            u32 bind_count = link_test_mach_fixups(image, true, binds, BUSTER_ARRAY_LENGTH(binds));
+            u32 rebase_count = link_test_mach_fixups(image, false, rebases, BUSTER_ARRAY_LENGTH(rebases));
+            // Two __got slots, then the four import pointers.
+            BUSTER_TEST(arguments, bind_count == 6 && rebase_count == 1);
+            BUSTER_TEST(arguments, link_test_mach_fixup_matches(binds, bind_count, 0, S8("_optind"), 0) == 1);
+            BUSTER_TEST(arguments, link_test_mach_fixup_matches(binds, bind_count, 8, S8("_puts"), 0) == 1);
+            BUSTER_TEST(arguments, link_test_mach_fixup_matches(binds, bind_count, 16, S8("_optind"), 12) == 1);
+            BUSTER_TEST(arguments, link_test_mach_fixup_matches(binds, bind_count, const_segment_offset + 8, S8("_puts"), -8) == 1);
+            // Only the local pointer is rebased, and it holds the definition.
+            BUSTER_TEST(arguments, rebase_count == 1 && rebases[0].segment == 2 && rebases[0].segment_offset == 24);
+            BUSTER_TEST(arguments, link_read_u64(image.pointer, data_offset + 24) == data_address + 24);
+            // dyld writes the bound words; the file leaves them zero rather
+            // than holding a stub address.
+            BUSTER_TEST(arguments, link_read_u64(image.pointer, data_offset) == 0 && link_read_u64(image.pointer, data_offset + 8) == 0 &&
+                                       link_read_u64(image.pointer, data_offset + 16) == 0);
+        }
+        // An absolute word in code is no bind site, and imported data still
+        // cannot be reached from there.
+        if (x86)
+        {
+            u8 absolute_text[] = {0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xc3};
+            ObjectRelocation code_relocation = {.offset = 2, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+            symbols[0].size = sizeof(absolute_text);
+            ObjectFile code = link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(absolute_text), symbols,
+                                                    BUSTER_ARRAY_LENGTH(symbols), &code_relocation, 1);
+            NativeExecutableLinkResult refused = link_native_executable(arguments->arena, &code, options);
+            BUSTER_TEST(arguments, refused.error == LINK_ERROR_RELOCATION && string_equal(refused.symbol, S8("optind")));
+        }
+    }
+    return result;
+}
+
 // Finds the single `mov eax, [rip + disp32]; ret` in .text and returns the
-// absolute address it loads together with the TLS directory's AddressOfIndex.
-BUSTER_GLOBAL_LOCAL bool link_test_pe_x64_tls_index_load(ByteSlice image, u64* load_address, u64* address_of_index)
+// absolute address it loads together with the TLS directory's AddressOfIndex
+// and the file bytes of its StartAddressOfRawData..EndAddressOfRawData template.
+BUSTER_GLOBAL_LOCAL bool link_test_pe_x64_tls_index_load(ByteSlice image, u64* load_address, u64* address_of_index, ByteSlice* tls_template)
 {
     bool result = false;
     u32 pe_offset = image.length >= 0x40 && image.pointer[0] == 'M' && image.pointer[1] == 'Z' ? link_read_u32(image.pointer, 0x3c) : 0;
@@ -6722,7 +7224,11 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_x64_tls_index_load(ByteSlice image, u64* l
         u32 tls_rva = link_read_u32(image.pointer, optional + 184);
         u32 load_count = 0;
         bool index_found = false;
-        if (optional_size >= 192 && section_table <= image.length && (u64)section_count <= (image.length - section_table) / 40)
+        u64 template_start = 0;
+        u64 template_end = 0;
+        bool template_found = false;
+        bool headers_valid = optional_size >= 192 && section_table <= image.length && (u64)section_count <= (image.length - section_table) / 40;
+        if (headers_valid)
         {
             for (u16 section_index = 0; section_index < section_count; section_index += 1)
             {
@@ -6736,7 +7242,10 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_x64_tls_index_load(ByteSlice image, u64* l
                 }
                 if (tls_rva >= virtual_address && tls_rva - virtual_address <= raw_size && raw_size - (tls_rva - virtual_address) >= 40)
                 {
-                    *address_of_index = link_read_u64(image.pointer, raw_offset + (tls_rva - virtual_address) + 16);
+                    u64 directory = raw_offset + (tls_rva - virtual_address);
+                    template_start = link_read_u64(image.pointer, directory);
+                    template_end = link_read_u64(image.pointer, directory + 8);
+                    *address_of_index = link_read_u64(image.pointer, directory + 16);
                     index_found = true;
                 }
                 if (memcmp(image.pointer + header, ".text\0", 6) == 0)
@@ -6754,14 +7263,28 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_x64_tls_index_load(ByteSlice image, u64* l
                 }
             }
         }
-        result = tls_rva && index_found && load_count == 1;
+        for (u16 section_index = 0; headers_valid && index_found && section_index < section_count; section_index += 1)
+        {
+            u64 header = section_table + (u64)section_index * 40;
+            u64 start = image_base + link_read_u32(image.pointer, header + 12);
+            u32 raw_size = link_read_u32(image.pointer, header + 16);
+            u32 raw_offset = link_read_u32(image.pointer, header + 20);
+            if (template_start >= start && template_end >= template_start && template_end - start <= raw_size && raw_offset <= image.length &&
+                raw_size <= image.length - raw_offset)
+            {
+                *tls_template = (ByteSlice){.pointer = image.pointer + raw_offset + (template_start - start), .length = template_end - template_start};
+                template_found = true;
+            }
+        }
+        result = tls_rva && index_found && template_found && load_count == 1;
     }
     return result;
 }
 
-// GitHub #1323 W1: an x86-64 COFF object must bind the TLS index load to the
-// loader's _tls_index, so linking that object (here, or with lld-link/link.exe)
-// resolves the load to AddressOfIndex rather than to the TLS template.
+// GitHub #1323 W1/W3: an x86-64 COFF object must bind the TLS index load to
+// the loader's _tls_index and carry its thread-local data in .tls$, so linking
+// that object (here, or with lld-link/link.exe) resolves the load to
+// AddressOfIndex and builds the same TLS template as a direct link.
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_pe_x64_tls_index_object(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6773,6 +7296,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_pe_x64_tls_index_object(UnitTestArg
         {.name = S8("main"), .size = sizeof(code), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
         {.name = S8("tls_a"), .size = 4, .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
         {.name = S8("tls_b"), .value = 4, .size = 4, .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        {.name = S8("tls_zero"), .value = 8, .size = 24, .section = OBJECT_SECTION_THREAD_LOCAL_ZERO, .kind = OBJECT_SYMBOL_DATA, .global = true},
     };
     // Codegen's canonical form: the index load names the variable it serves.
     ObjectRelocation relocations[] = {
@@ -6782,15 +7306,47 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_pe_x64_tls_index_object(UnitTestArg
                                               BUSTER_ARRAY_LENGTH(symbols), relocations, BUSTER_ARRAY_LENGTH(relocations));
     object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data = (ByteSlice){.pointer = (u8*)tls_values, .length = sizeof(tls_values)};
     object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].virtual_size = sizeof(tls_values);
+    object.sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size = 32;
+    object.sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment = 16;
     NativeExecutableLinkOptions options = {.entry_symbol = S8("main")};
 
     NativeExecutableLinkResult direct = link_native_executable(arguments->arena, &object, options);
     u64 direct_load = 0;
     u64 direct_index = 0;
+    ByteSlice direct_template = {0};
     BUSTER_TEST(arguments, direct.error == LINK_ERROR_NONE &&
-                               link_test_pe_x64_tls_index_load(direct.executable, &direct_load, &direct_index) && direct_load == direct_index);
+                               link_test_pe_x64_tls_index_load(direct.executable, &direct_load, &direct_index, &direct_template) &&
+                               direct_load == direct_index);
 
     ObjectArtifact artifact = object_write(arguments->arena, &object, OBJECT_FORMAT_COFF);
+    // W3b: MSVC and Clang place all thread-local data, zero-initialized
+    // included, in initialized .tls$ sections; platform linkers build the
+    // loader's template only from those. No .tdata/.tbss may remain.
+    u32 tls_sections = 0;
+    u32 other_tls_sections = 0;
+    if (artifact.error == OBJECT_ERROR_NONE && artifact.bytes.length >= 20)
+    {
+        u16 section_count = 0;
+        memcpy(&section_count, artifact.bytes.pointer + 2, sizeof(section_count));
+        for (u16 section_index = 0; section_index < section_count && 20 + ((u64)section_index + 1) * 40 <= artifact.bytes.length; section_index += 1)
+        {
+            u8 const* header = artifact.bytes.pointer + 20 + (u64)section_index * 40;
+            u32 raw_size = link_read_u32(header, 16);
+            u32 raw_offset = link_read_u32(header, 20);
+            u32 characteristics = link_read_u32(header, 36);
+            if (memcmp(header, ".tls$\0\0\0", 8) == 0)
+            {
+                bool zeros = raw_offset <= artifact.bytes.length && raw_size <= artifact.bytes.length - raw_offset;
+                for (u32 offset = 0; zeros && raw_size == 32 && offset < raw_size; offset += 1)
+                {
+                    zeros = artifact.bytes.pointer[raw_offset + offset] == 0;
+                }
+                tls_sections += (characteristics & 0xc00000e0) == 0xc0000040 && raw_offset && zeros;
+            }
+            other_tls_sections += memcmp(header, ".tdata", 6) == 0 || memcmp(header, ".tbss", 5) == 0;
+        }
+    }
+    BUSTER_TEST(arguments, tls_sections == 2 && other_tls_sections == 0);
     ObjectFile roundtrip = object_read(arguments->arena, artifact.bytes, target);
     bool bound = artifact.error == OBJECT_ERROR_NONE && roundtrip.error == OBJECT_ERROR_NONE && roundtrip.relocation_count == 1 &&
                  roundtrip.relocations[0].symbol < roundtrip.symbol_count;
@@ -6802,12 +7358,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_pe_x64_tls_index_object(UnitTestArg
                                    relocation->offset == 2 && index_symbol->section == OBJECT_SECTION_UNDEFINED && index_symbol->global &&
                                    index_symbol->kind == OBJECT_SYMBOL_DATA);
         BUSTER_STRING_TEST(arguments, index_symbol->name, S8("_tls_index"));
+        u32 zero_symbol = UINT32_MAX;
+        for (u32 index = 0; index < roundtrip.symbol_count; index += 1)
+        {
+            zero_symbol = string_equal(roundtrip.symbols[index].name, S8("tls_zero")) ? index : zero_symbol;
+        }
+        BUSTER_TEST(arguments, zero_symbol != UINT32_MAX && roundtrip.symbols[zero_symbol].section == OBJECT_SECTION_THREAD_LOCAL_DATA);
         NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &roundtrip, options);
         u64 linked_load = 0;
         u64 linked_index = 0;
+        ByteSlice linked_template = {0};
         BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE &&
-                                   link_test_pe_x64_tls_index_load(linked.executable, &linked_load, &linked_index) &&
+                                   link_test_pe_x64_tls_index_load(linked.executable, &linked_load, &linked_index, &linked_template) &&
                                    linked_load == linked_index);
+        // The template the loader copies is unchanged by the round trip.
+        BUSTER_TEST(arguments, direct_template.length >= 48 && direct_template.length == linked_template.length &&
+                                   memcmp(direct_template.pointer, linked_template.pointer, direct_template.length) == 0);
 
         // Any other use of the loader symbol is not an index load; the PE
         // linker must not quietly resolve it to the index slot.
@@ -6822,6 +7388,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, link_test_mach_got_loads);
+    BUSTER_TEST_FIXTURE(arguments, link_test_mach_import_pointers);
     BUSTER_TEST_FIXTURE(arguments, link_test_elf_stack_contract);
     UnitTestResult tls_membership = link_test_tls_membership(arguments);
     result.succeeded_test_count += tls_membership.succeeded_test_count;
@@ -6839,6 +7406,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult aarch64_ldst = link_test_aarch64_elf_ldst(arguments);
     result.succeeded_test_count += aarch64_ldst.succeeded_test_count;
     result.test_count += aarch64_ldst.test_count;
+    BUSTER_TEST_FIXTURE(arguments, link_test_aarch64_android_zero_got_slot);
     UnitTestResult single_input_alias = link_test_single_input_alias(arguments);
     result.succeeded_test_count += single_input_alias.succeeded_test_count;
     result.test_count += single_input_alias.test_count;
@@ -8805,6 +9373,12 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         bool valid = got_linked.error == LINK_ERROR_NONE && link_test_elf_section_find(got_linked.executable, S8(".text"), 0, &text_header) &&
                      link_test_elf_section_find(got_linked.executable, S8(".rodata"), 0, &data_header);
         BUSTER_TEST(arguments, valid);
+        if (valid && dynamic)
+        {
+            UnitTestResult aarch64_layout = link_test_aarch64_dynamic_layout_facts(arguments, got_linked.executable);
+            result.succeeded_test_count += aarch64_layout.succeeded_test_count;
+            result.test_count += aarch64_layout.test_count;
+        }
         if (valid)
         {
             u64 text_address = link_read_u64(got_linked.executable.pointer, text_header + 16);
@@ -8937,6 +9511,12 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                     .entry_symbol = S8("main"),
                                                                                 });
     BUSTER_TEST(arguments, aarch64_libc_executable.error == LINK_ERROR_NONE);
+    if (aarch64_libc_executable.error == LINK_ERROR_NONE)
+    {
+        UnitTestResult aarch64_layout = link_test_aarch64_dynamic_layout_facts(arguments, aarch64_libc_executable.executable);
+        result.succeeded_test_count += aarch64_layout.succeeded_test_count;
+        result.test_count += aarch64_layout.test_count;
+    }
     ObjectRelocationKind imported_aarch64_branch_kinds[] = {OBJECT_RELOCATION_AARCH64_CALL26, OBJECT_RELOCATION_AARCH64_JUMP26};
     u32 imported_aarch64_branch_words[] = {UINT32_C(0x94000000), UINT32_C(0x14000000)};
     for (u32 branch_index = 0; branch_index < BUSTER_ARRAY_LENGTH(imported_aarch64_branch_kinds); branch_index += 1)
@@ -9223,6 +9803,12 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                    .runtime_data_symbol_count = BUSTER_ARRAY_LENGTH(copy_alias_exports),
                                                                                });
     BUSTER_TEST(arguments, aarch64_copy_executable.error == LINK_ERROR_NONE);
+    if (aarch64_copy_executable.error == LINK_ERROR_NONE)
+    {
+        UnitTestResult aarch64_layout = link_test_aarch64_dynamic_layout_facts(arguments, aarch64_copy_executable.executable);
+        result.succeeded_test_count += aarch64_layout.succeeded_test_count;
+        result.test_count += aarch64_layout.test_count;
+    }
     // Two slots -- environ with tzname -- and one jump slot per import, the
     // three data names plus the hosted stub's `exit` and `__cxa_atexit`.  No x86-64 type of
     // either kind survives.
@@ -9269,6 +9855,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, valid);
         if (valid)
         {
+            UnitTestResult aarch64_layout = link_test_aarch64_dynamic_layout_facts(arguments, page_linked.executable);
+            result.succeeded_test_count += aarch64_layout.succeeded_test_count;
+            result.test_count += aarch64_layout.test_count;
             u64 text_offset = link_read_u64(page_linked.executable.pointer, text_header + 24);
             u64 text_address = link_read_u64(page_linked.executable.pointer, text_header + 16);
             A64MCInst page = {0};
@@ -9483,6 +10072,12 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                           BUSTER_ARRAY_LENGTH(aarch64_version_exports),
                                                                                   });
     BUSTER_TEST(arguments, aarch64_version_executable.error == LINK_ERROR_NONE);
+    if (aarch64_version_executable.error == LINK_ERROR_NONE)
+    {
+        UnitTestResult aarch64_layout = link_test_aarch64_dynamic_layout_facts(arguments, aarch64_version_executable.executable);
+        result.succeeded_test_count += aarch64_layout.succeeded_test_count;
+        result.test_count += aarch64_layout.test_count;
+    }
     String8 aarch64_version_recorded = {0};
     BUSTER_TEST(arguments, link_test_elf_symbol_version(aarch64_version_executable.executable, S8("abs"), &aarch64_version_recorded, 0) &&
                                string_equal(aarch64_version_recorded, S8("GLIBC_2.2.5")));
@@ -9504,6 +10099,12 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                     .entry_symbol = S8("main"),
                                                                                 });
     BUSTER_TEST(arguments, aarch64_tls_executable.error == LINK_ERROR_NONE);
+    if (aarch64_tls_executable.error == LINK_ERROR_NONE)
+    {
+        UnitTestResult aarch64_layout = link_test_aarch64_dynamic_layout_facts(arguments, aarch64_tls_executable.executable);
+        result.succeeded_test_count += aarch64_layout.succeeded_test_count;
+        result.test_count += aarch64_layout.test_count;
+    }
     u64 thread_local_data_header = 0;
     u64 thread_local_zero_header = 0;
     u64 tls_got_header = 0;
@@ -9966,6 +10567,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                            (NativeExecutableLinkOptions){
                                                                                .output_path = android_output_path,
                                                                                .entry_symbol = S8("main"),
+                                                                               .image_kind = NATIVE_IMAGE_PIE,
                                                                            });
     BUSTER_TEST(arguments, android_executable.error == LINK_ERROR_NONE);
     bool android_header_valid =

@@ -2432,7 +2432,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_ifunc_tests(UnitTestArgum
     return result;
 }
 
-#if BUSTER_CPU_ARCH_X86_64
 // A GNU archive of `count` members named m0.o, m1.o, ... in order, with the
 // symbol index GNU ld requires: member `index` defines names[index][0..].
 BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_elf_cpu_runtime_archive(Arena* arena, ByteSlice const* members, String8 const* const* names,
@@ -2513,6 +2512,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_elf_cpu_runtime_archive(Arena* are
     return bytes;
 }
 
+#if BUSTER_CPU_ARCH_X86_64
 // Issue 3399: GCC and Clang target_clones and __builtin_cpu_* code calls
 // __cpu_indicator_init and reads __cpu_model from the static libgcc.a, which
 // the host compiler driver links implicitly. This linker selects the
@@ -2522,95 +2522,6 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_elf_cpu_runtime_archive(Arena* are
 // sysroot with no GCC installation, refuse the link with the archive and
 // symbol named and leave no output. Runtime members that depend on each other
 // are selected in either archive order.
-// Issue 3414: default PIE GCC and Clang objects read an absent weak name's
-// address through R_X86_64_GOTPCREL or REX_GOTPCRELX, a site that cannot
-// always be rewritten into a direct form (`cmpq $0, name@GOTPCREL(%rip)`).
-// The libc-free programs take the static writer, the libc one the dynamic
-// writer, and every program must read both names as null in PIE and
-// position-dependent outputs, as the host linker does.
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_weak_got_tests(UnitTestArguments* arguments)
-{
-    UnitTestResult result = {0};
-    Arena* arena = arguments->arena;
-    String8 compiler = S8(BUSTER_HOST_C_COMPILER_ID);
-    bool supported = string_equal(compiler, S8("GNU")) || string_equal(compiler, S8("Clang"));
-    if (supported)
-    {
-        typedef struct ElfWeakGotCase ElfWeakGotCase;
-        struct ElfWeakGotCase
-        {
-            String8 name;
-            String8 program;
-        };
-        ElfWeakGotCase cases[] = {
-            {S8("compare"), S8("extern void weak_got_hook(void) __attribute__((weak));\n"
-                "extern int weak_got_data __attribute__((weak));\n"
-                "int main(void) { return (weak_got_hook ? 1 : 0) | (&weak_got_data ? 2 : 0); }\n")},
-            {S8("load"), S8("extern void weak_got_hook(void) __attribute__((weak));\n"
-                "extern int weak_got_data __attribute__((weak));\n"
-                "__attribute__((noinline)) int weak_got_count(void const* a, void const* b) { return (a != 0) + (b != 0); }\n"
-                "int main(void) { return weak_got_count((void const*)weak_got_hook, &weak_got_data); }\n")},
-            {S8("libc"), S8("int puts(const char*);\n"
-                "extern void weak_got_hook(void) __attribute__((weak));\n"
-                "extern int weak_got_data __attribute__((weak));\n"
-                "int main(void)\n"
-                "{\n"
-                "    int absent = !weak_got_hook && !&weak_got_data;\n"
-                "    puts(absent ? \"weak absent\" : \"weak present\");\n"
-                "    return !absent;\n"
-                "}\n")},
-        };
-        String8 root = buster_test_temporary_path(arena, S8("buster-elf-weak-got"), S8(""));
-        OsDirectoryCreateResult created = os_make_directory(root);
-        BUSTER_TEST(arguments, created.error.v == 0);
-        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
-        {
-            ElfWeakGotCase test = cases[index];
-            String8 source = string_format_z(arena, S8("{S8}/{S8}.c"), root, test.name);
-            String8 object = string_format_z(arena, S8("{S8}/{S8}.o"), root, test.name);
-            BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(test.program)));
-            String8 compile[] = {S8("-w"), S8("-O2"), S8("-fPIE"), S8("-c"), source, S8("-o"), object};
-            bool produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile));
-            BUSTER_TEST(arguments, produced);
-            if (produced)
-            {
-                // The input must exercise the GOT form, not a direct one.
-                ObjectFile read = object_read(arena, file_read(arena, object, (FileReadOptions){0}), target_native);
-                BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE);
-                u32 got_hook = 0;
-                u32 got_data = 0;
-                for (u32 relocation = 0; read.error == OBJECT_ERROR_NONE && relocation < read.relocation_count; relocation += 1)
-                {
-                    ObjectRelocation* entry = read.relocations + relocation;
-                    String8 name = entry->symbol < read.symbol_count ? read.symbols[entry->symbol].name : (String8){0};
-                    bool got = object_relocation_kind_is_x86_got(entry->kind);
-                    got_hook += got && string_equal(name, S8("weak_got_hook"));
-                    got_data += got && string_equal(name, S8("weak_got_data"));
-                }
-                BUSTER_TEST(arguments, got_hook != 0 && got_data != 0);
-                String8 kinds[] = {S8("-pie"), S8("-no-pie")};
-                for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
-                {
-                    String8 oracle = string_format_z(arena, S8("{S8}/{S8}-oracle{S8}"), root, test.name, kinds[kind]);
-                    String8 host_link[] = {kinds[kind], object, S8("-o"), oracle};
-                    bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
-                    BUSTER_TEST(arguments, linked);
-                    if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, oracle));
-                    String8 output = string_format_z(arena, S8("{S8}/{S8}-buster{S8}"), root, test.name, kinds[kind]);
-                    String8 command[] = {kinds[kind], object, S8("-o"), output};
-                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
-                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-                    BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
-                    if (compiled.error != COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("weak GOT {S8}{S8}: {S8}\n"), test.name, kinds[kind], compiled.diagnostic);
-                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
-                }
-            }
-        }
-        BUSTER_TEST(arguments, os_directory_delete(root));
-    }
-    return result;
-}
-
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_cpu_runtime_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2853,6 +2764,372 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_cpu_runtime_tests(UnitTes
     return result;
 }
 #endif
+
+BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_elf_aarch64_runtime_compile(Arena* arena, String8 target, String8 source, String8 object)
+{
+    String8 command[] = {S8("-target"), target, S8("-nostdinc"), S8("-g0"), S8("-c"), source, S8("-o"), object};
+    return compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+}
+
+// Issue 3508: the AArch64 runtime names are keyed by target and selected on
+// any Linux host. This compiler builds AArch64 objects shaped like libgcc.a's
+// lse members: an outline-atomic helper that reads __aarch64_have_lse_atomics,
+// and the lse-init-like member that defines it. A link that needs the helper
+// selects both, in either archive order. A sysroot with no GCC installation,
+// or a -L libgcc.a that lacks the helper, refuses the link with the symbol
+// named and leaves no output. A name outside the helper family (there is no
+// 16-byte ldadd) and each target's runtime names linked for the other target
+// never read libgcc.a. On an AArch64 host the selected program also runs.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_aarch64_cpu_runtime_selection_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 root = buster_test_temporary_path(arena, S8("buster-elf-aarch64-cpu-runtime-selection"), S8(""));
+    OsDirectoryCreateResult created = os_make_directory(root);
+    BUSTER_TEST(arguments, created.error.v == 0);
+    String8 aarch64 = S8("aarch64-linux-gnu");
+    String8 sources[] = {
+        S8("extern _Bool __aarch64_have_lse_atomics;\n"
+           "int __aarch64_ldadd4_acq_rel(int value, int *pointer) { int old = *pointer; *pointer = old + value; return old + __aarch64_have_lse_atomics; }\n"),
+        S8("_Bool __aarch64_have_lse_atomics = 1;\n"),
+        S8("int __aarch64_ldadd4_acq_rel(int, int *);\n"
+           "int counter;\n"
+           "int main(void) { return __aarch64_ldadd4_acq_rel(1, &counter) != 1 || counter != 1; }\n"),
+        S8("int __aarch64_ldadd16_acq(int);\n"
+           "int main(void) { return __aarch64_ldadd16_acq(0); }\n"),
+        S8("extern int __cpu_model;\n"
+           "int main(void) { return __cpu_model; }\n"),
+    };
+    String8 targets[] = {aarch64, aarch64, aarch64, aarch64, aarch64, S8("x86_64-linux-gnu")};
+    // The last object is the AArch64 caller built for x86-64.
+    u32 source_indices[] = {0, 1, 2, 3, 4, 2};
+    String8 objects[BUSTER_ARRAY_LENGTH(targets)] = {0};
+    bool produced = created.error.v == 0;
+    for (u32 index = 0; produced && index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        String8 source = string_format_z(arena, S8("{S8}/source-{u32}.c"), root, index);
+        produced = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(sources[index]));
+    }
+    for (u32 index = 0; produced && index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        String8 source = string_format_z(arena, S8("{S8}/source-{u32}.c"), root, source_indices[index]);
+        objects[index] = string_format_z(arena, S8("{S8}/object-{u32}.o"), root, index);
+        CompilerDriverResult compiled = compiler_driver_elf_aarch64_runtime_compile(arena, targets[index], source, objects[index]);
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+        produced = compiled.error == COMPILER_DRIVER_ERROR_NONE;
+    }
+    BUSTER_TEST(arguments, produced);
+    if (produced)
+    {
+        String8 helper = S8("__aarch64_ldadd4_acq_rel");
+        String8 empty = string_format_z(arena, S8("{S8}/empty-sysroot"), root);
+        created = os_make_directory(empty);
+        BUSTER_TEST(arguments, created.error.v == 0);
+        String8 sysroot = string_format_z(arena, S8("--sysroot={S8}"), empty);
+        String8 missing_output = string_format_z(arena, S8("{S8}/missing"), root);
+        String8 missing[] = {S8("-target"), aarch64, sysroot, objects[2], S8("-o"), missing_output};
+        CompilerDriverResult refused = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing)));
+        BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK && refused.native_link.error == LINK_ERROR_UNRESOLVED_SYMBOL);
+        BUSTER_STRING_TEST(arguments, refused.native_link.symbol, helper);
+        BUSTER_STRING_TEST(arguments, refused.diagnostic,
+                           string_format(arena, S8("{S8} is defined by the GCC runtime libgcc.a, which was not found in -L directories or the "
+                                                   "target's GCC installation"),
+                                         helper));
+        BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(missing_output));
+
+        ByteSlice helper_bytes = file_read(arena, objects[0], (FileReadOptions){0});
+        ByteSlice probe_bytes = file_read(arena, objects[1], (FileReadOptions){0});
+        static String8 const helper_names[] = {S8_INITIALIZER("__aarch64_ldadd4_acq_rel")};
+        static String8 const probe_names[] = {S8_INITIALIZER("__aarch64_have_lse_atomics")};
+        for (u32 order = 0; order < 2; order += 1)
+        {
+            ByteSlice members[] = {order ? probe_bytes : helper_bytes, order ? helper_bytes : probe_bytes};
+            String8 const* member_names[] = {order ? probe_names : helper_names, order ? helper_names : probe_names};
+            u32 member_name_counts[] = {1, 1};
+            String8 directory = string_format_z(arena, S8("{S8}/order-{u32}"), root, order);
+            created = os_make_directory(directory);
+            BUSTER_TEST(arguments, created.error.v == 0);
+            String8 runtime_archive = string_format_z(arena, S8("{S8}/libgcc.a"), directory);
+            BUSTER_TEST(arguments, file_write(runtime_archive, compiler_driver_elf_cpu_runtime_archive(arena, members, member_names, member_name_counts,
+                                                                                                       BUSTER_ARRAY_LENGTH(members))));
+            String8 output = string_format_z(arena, S8("{S8}/buster"), directory);
+            String8 search = string_format_z(arena, S8("-L{S8}"), directory);
+            String8 command[] = {S8("-target"), aarch64, search, objects[2], S8("-o"), output};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+#if BUSTER_CPU_ARCH_AARCH64
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
+#endif
+        }
+
+        String8 lacking_directory = string_format_z(arena, S8("{S8}/lacking"), root);
+        created = os_make_directory(lacking_directory);
+        BUSTER_TEST(arguments, created.error.v == 0);
+        String8 lacking_archive = string_format_z(arena, S8("{S8}/libgcc.a"), lacking_directory);
+        BUSTER_TEST(arguments, file_write(lacking_archive, compiler_driver_elf_semantic_archive(arena, probe_bytes)));
+        String8 lacking_output = string_format_z(arena, S8("{S8}/lacking-output"), root);
+        String8 lacking_search = string_format_z(arena, S8("-L{S8}"), lacking_directory);
+        String8 lacking[] = {S8("-target"), aarch64, lacking_search, objects[2], S8("-o"), lacking_output};
+        refused = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(lacking)));
+        BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK && refused.native_link.error == LINK_ERROR_UNRESOLVED_SYMBOL);
+        BUSTER_STRING_TEST(arguments, refused.native_link.symbol, helper);
+        BUSTER_STRING_TEST(arguments, refused.diagnostic, string_format(arena, S8("GCC runtime {S8} does not define {S8}"), lacking_archive, helper));
+        BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(lacking_output));
+
+        // Whether these links succeed depends on whether the host has the
+        // target's libc; either way the malformed libgcc.a is never read.
+        String8 garbage_directory = string_format_z(arena, S8("{S8}/garbage"), root);
+        created = os_make_directory(garbage_directory);
+        String8 garbage_archive = string_format_z(arena, S8("{S8}/libgcc.a"), garbage_directory);
+        bool garbage_written = created.error.v == 0 && file_write(garbage_archive, BUSTER_SLICE_TO_BYTE_SLICE(S8("not an archive")));
+        BUSTER_TEST(arguments, garbage_written);
+        String8 garbage_search = string_format_z(arena, S8("-L{S8}"), garbage_directory);
+        String8 unread[] = {aarch64, aarch64, S8("x86_64-linux-gnu")};
+        u32 unread_objects[] = {3, 4, 5};
+        for (u32 index = 0; garbage_written && index < BUSTER_ARRAY_LENGTH(unread); index += 1)
+        {
+            String8 output = string_format_z(arena, S8("{S8}/unread-{u32}"), root, index);
+            String8 command[] = {S8("-target"), unread[index], garbage_search, objects[unread_objects[index]], S8("-o"), output};
+            CompilerDriverResult linked = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, !string_starts_with_sequence(linked.diagnostic, S8("could not read archive")) &&
+                                       !string_starts_with_sequence(linked.diagnostic, S8("GCC runtime")),
+                            linked.diagnostic);
+        }
+    }
+    BUSTER_TEST(arguments, os_directory_delete(root));
+    return result;
+}
+
+#if BUSTER_CPU_ARCH_AARCH64
+// Issue 3508: GCC 10+ and Clang default to -moutline-atomics on AArch64
+// Linux, so __atomic_* builtins call __aarch64_<operation><bytes>_<order>
+// helpers. GCC 14+ and compiler-rt FMV resolvers read __aarch64_cpu_features.
+// Both live only in the static libgcc.a: the lse members with lse-init.o and
+// its constructor, and cpuinfo.o. The host link is the oracle. The atomics
+// program checks its own results. The FMV probe fails unless cpuinfo.o's
+// constructor set the initialized bit (63). An older libgcc.a has no
+// cpuinfo.o; then the host link fails, and this linker must refuse with the
+// archive and symbol named. As on x86-64, a missing runtime refuses the link.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_aarch64_cpu_runtime_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 compiler = S8(BUSTER_HOST_C_COMPILER_ID);
+    bool supported = string_equal(compiler, S8("GNU")) || string_equal(compiler, S8("Clang"));
+    if (supported)
+    {
+        String8 root = buster_test_temporary_path(arena, S8("buster-elf-aarch64-cpu-runtime"), S8(""));
+        OsDirectoryCreateResult created = os_make_directory(root);
+        BUSTER_TEST(arguments, created.error.v == 0);
+        String8 atomics_source = string_format_z(arena, S8("{S8}/atomics.c"), root);
+        String8 atomics_object = string_format_z(arena, S8("{S8}/atomics.o"), root);
+        String8 features_source = string_format_z(arena, S8("{S8}/features.c"), root);
+        String8 features_object = string_format_z(arena, S8("{S8}/features.o"), root);
+        String8 unrelated_source = string_format_z(arena, S8("{S8}/unrelated.c"), root);
+        String8 unrelated_object = string_format_z(arena, S8("{S8}/unrelated.o"), root);
+        BUSTER_TEST(arguments, file_write(atomics_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "int puts(const char *);\n"
+            "long counter;\n"
+            "int flag;\n"
+            "int main(void)\n"
+            "{\n"
+            "    __atomic_fetch_add(&counter, 41, __ATOMIC_ACQ_REL);\n"
+            "    long expected = 41;\n"
+            "    int ok = __atomic_compare_exchange_n(&counter, &expected, 42, 0, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE) && counter == 42;\n"
+            "    __atomic_fetch_or(&flag, 1, __ATOMIC_RELAXED);\n"
+            "    ok = ok && flag == 1;\n"
+            "    puts(ok ? \"outline atomics ok\" : \"outline atomics wrong\");\n"
+            "    return !ok;\n"
+            "}\n"))));
+        BUSTER_TEST(arguments, file_write(features_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "extern struct { unsigned long long features; } __aarch64_cpu_features;\n"
+            "int main(void) { return (int)(__aarch64_cpu_features.features >> 63) != 1; }\n"))));
+        BUSTER_TEST(arguments, file_write(unrelated_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int unrelated_runtime_member;\n"))));
+        // Baseline ARMv8.0 keeps the helpers out of line even where the host
+        // compiler defaults to an LSE-capable architecture.
+        String8 atomics_compile[] = {S8("-w"), S8("-O2"), S8("-march=armv8-a"), S8("-moutline-atomics"), S8("-c"), atomics_source, S8("-o"), atomics_object};
+        String8 features_compile[] = {S8("-w"), S8("-O2"), S8("-c"), features_source, S8("-o"), features_object};
+        String8 unrelated_compile[] = {S8("-w"), S8("-O2"), S8("-c"), unrelated_source, S8("-o"), unrelated_object};
+        bool produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(atomics_compile)) &&
+                        compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(features_compile)) &&
+                        compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(unrelated_compile));
+        BUSTER_TEST(arguments, produced);
+        if (produced)
+        {
+            String8 oracle = string_format_z(arena, S8("{S8}/atomics-oracle"), root);
+            String8 host_link[] = {atomics_object, S8("-o"), oracle};
+            bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
+            BUSTER_TEST(arguments, linked);
+            if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, oracle));
+            String8 output = string_format_z(arena, S8("{S8}/atomics-buster"), root);
+            String8 command[] = {atomics_object, S8("-o"), output};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
+
+            // The host libgcc.a decides whether FMV's runtime exists; the
+            // failed host link's stderr is expected output in that case.
+            String8 features_oracle = string_format_z(arena, S8("{S8}/features-oracle"), root);
+            String8 features_host_link[] = {features_object, S8("-o"), features_oracle};
+            bool features_linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(features_host_link));
+            if (features_linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, features_oracle));
+            String8 features_output = string_format_z(arena, S8("{S8}/features-buster"), root);
+            String8 features_command[] = {features_object, S8("-o"), features_output};
+            compiled = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(features_command)));
+            if (features_linked)
+            {
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, features_output));
+            }
+            else
+            {
+                BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_LINK && compiled.native_link.error == LINK_ERROR_UNRESOLVED_SYMBOL);
+                BUSTER_STRING_TEST(arguments, compiled.native_link.symbol, S8("__aarch64_cpu_features"));
+                BUSTER_TEST_RAW(arguments, string_starts_with_sequence(compiled.diagnostic, S8("GCC runtime ")) &&
+                                           string_ends_with_sequence(compiled.diagnostic, S8(" does not define __aarch64_cpu_features")),
+                                compiled.diagnostic);
+                BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(features_output));
+            }
+
+            String8 fake = string_format_z(arena, S8("{S8}/fake"), root);
+            created = os_make_directory(fake);
+            BUSTER_TEST(arguments, created.error.v == 0);
+            String8 fake_archive = string_format_z(arena, S8("{S8}/libgcc.a"), fake);
+            ByteSlice member = file_read(arena, unrelated_object, (FileReadOptions){0});
+            BUSTER_TEST(arguments, file_write(fake_archive, compiler_driver_elf_semantic_archive(arena, member)));
+            String8 search = string_format_z(arena, S8("-L{S8}"), fake);
+            String8 lacking_output = string_format_z(arena, S8("{S8}/lacking"), root);
+            String8 lacking[] = {search, atomics_object, S8("-o"), lacking_output};
+            CompilerDriverResult refused = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(lacking)));
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK && refused.native_link.error == LINK_ERROR_UNRESOLVED_SYMBOL);
+            BUSTER_TEST(arguments, string_starts_with_sequence(refused.native_link.symbol, S8("__aarch64_")));
+            BUSTER_STRING_TEST(arguments, refused.diagnostic,
+                               string_format(arena, S8("GCC runtime {S8} does not define {S8}"), fake_archive, refused.native_link.symbol));
+            BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(lacking_output));
+
+            String8 empty = string_format_z(arena, S8("{S8}/empty-sysroot"), root);
+            created = os_make_directory(empty);
+            BUSTER_TEST(arguments, created.error.v == 0);
+            String8 sysroot = string_format_z(arena, S8("--sysroot={S8}"), empty);
+            String8 missing_output = string_format_z(arena, S8("{S8}/missing"), root);
+            String8 missing[] = {sysroot, atomics_object, S8("-o"), missing_output};
+            refused = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing)));
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK && refused.native_link.error == LINK_ERROR_UNRESOLVED_SYMBOL);
+            BUSTER_STRING_TEST(arguments, refused.diagnostic,
+                               string_format(arena, S8("{S8} is defined by the GCC runtime libgcc.a, which was not found in -L directories or the "
+                                                       "target's GCC installation"),
+                                             refused.native_link.symbol));
+            BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(missing_output));
+        }
+        BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+    return result;
+}
+#endif
+
+// Issue 3414: default PIE GCC and Clang objects read an absent weak name's
+// address through the GOT. On x86-64 that is R_X86_64_GOTPCREL or
+// REX_GOTPCRELX, a site that cannot always be rewritten into a direct form
+// (`cmpq $0, name@GOTPCREL(%rip)`); on AArch64 it is the ADR_GOT_PAGE and
+// LD64_GOT_LO12_NC pair. The libc-free programs take the static writer, the
+// libc one the dynamic writer, and every program must read both names as null
+// in each output kind the target writes, as the host linker does. AArch64
+// Linux writes only fixed-address executables, so it links -no-pie alone.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_weak_got_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 compiler = S8(BUSTER_HOST_C_COMPILER_ID);
+    bool supported = string_equal(compiler, S8("GNU")) || string_equal(compiler, S8("Clang"));
+    if (supported)
+    {
+        typedef struct ElfWeakGotCase ElfWeakGotCase;
+        struct ElfWeakGotCase
+        {
+            String8 name;
+            String8 program;
+        };
+        ElfWeakGotCase cases[] = {
+            {S8("compare"), S8("extern void weak_got_hook(void) __attribute__((weak));\n"
+                "extern int weak_got_data __attribute__((weak));\n"
+                "int main(void) { return (weak_got_hook ? 1 : 0) | (&weak_got_data ? 2 : 0); }\n")},
+            {S8("load"), S8("extern void weak_got_hook(void) __attribute__((weak));\n"
+                "extern int weak_got_data __attribute__((weak));\n"
+                "__attribute__((noinline)) int weak_got_count(void const* a, void const* b) { return (a != 0) + (b != 0); }\n"
+                "int main(void) { return weak_got_count((void const*)weak_got_hook, &weak_got_data); }\n")},
+            {S8("libc"), S8("int puts(const char*);\n"
+                "extern void weak_got_hook(void) __attribute__((weak));\n"
+                "extern int weak_got_data __attribute__((weak));\n"
+                "int main(void)\n"
+                "{\n"
+                "    int absent = !weak_got_hook && !&weak_got_data;\n"
+                "    puts(absent ? \"weak absent\" : \"weak present\");\n"
+                "    return !absent;\n"
+                "}\n")},
+        };
+        String8 root = buster_test_temporary_path(arena, S8("buster-elf-weak-got"), S8(""));
+        OsDirectoryCreateResult created = os_make_directory(root);
+        BUSTER_TEST(arguments, created.error.v == 0);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            ElfWeakGotCase test = cases[index];
+            String8 source = string_format_z(arena, S8("{S8}/{S8}.c"), root, test.name);
+            String8 object = string_format_z(arena, S8("{S8}/{S8}.o"), root, test.name);
+            BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(test.program)));
+            String8 compile[] = {S8("-w"), S8("-O2"), S8("-fPIE"), S8("-c"), source, S8("-o"), object};
+            bool produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile));
+            BUSTER_TEST(arguments, produced);
+            if (produced)
+            {
+                // The input must exercise the GOT form, not a direct one.
+                ObjectFile read = object_read(arena, file_read(arena, object, (FileReadOptions){0}), target_native);
+                BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE);
+                u32 got_hook = 0;
+                u32 got_data = 0;
+                for (u32 relocation = 0; read.error == OBJECT_ERROR_NONE && relocation < read.relocation_count; relocation += 1)
+                {
+                    ObjectRelocation* entry = read.relocations + relocation;
+                    String8 name = entry->symbol < read.symbol_count ? read.symbols[entry->symbol].name : (String8){0};
+#if BUSTER_CPU_ARCH_X86_64
+                    bool got = object_relocation_kind_is_x86_got(entry->kind);
+#else
+                    bool got = entry->kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 || entry->kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12;
+#endif
+                    got_hook += got && string_equal(name, S8("weak_got_hook"));
+                    got_data += got && string_equal(name, S8("weak_got_data"));
+                }
+                BUSTER_TEST(arguments, got_hook != 0 && got_data != 0);
+#if BUSTER_CPU_ARCH_X86_64
+                String8 kinds[] = {S8("-pie"), S8("-no-pie")};
+#else
+                String8 kinds[] = {S8("-no-pie")};
+#endif
+                for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+                {
+                    String8 oracle = string_format_z(arena, S8("{S8}/{S8}-oracle{S8}"), root, test.name, kinds[kind]);
+                    String8 host_link[] = {kinds[kind], object, S8("-o"), oracle};
+                    bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
+                    BUSTER_TEST(arguments, linked);
+                    if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, oracle));
+                    String8 output = string_format_z(arena, S8("{S8}/{S8}-buster{S8}"), root, test.name, kinds[kind]);
+                    String8 command[] = {kinds[kind], object, S8("-o"), output};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+                    if (compiled.error != COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("weak GOT {S8}{S8}: {S8}\n"), test.name, kinds[kind], compiled.diagnostic);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
+                }
+            }
+        }
+        BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+    return result;
+}
 #endif
 
 #if !BUSTER_ANDROID && !BUSTER_IOS
@@ -2863,6 +3140,59 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_android_preinit_field(ByteSlice bytes, 
     *value = 0;
     for (u32 index = 0; result && index < width; index += 1) *value |= (u64)bytes.pointer[offset + index] << (index * 8);
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_android_symbol_value(ByteSlice bytes, String8 wanted, u64* value)
+{
+    u64 section_table = 0;
+    u64 section_stride = 0;
+    u64 section_count = 0;
+    bool valid = compiler_driver_android_preinit_field(bytes, 40, 8, &section_table) &&
+                 compiler_driver_android_preinit_field(bytes, 58, 2, &section_stride) &&
+                 compiler_driver_android_preinit_field(bytes, 60, 2, &section_count) && section_stride >= 64 &&
+                 section_table <= bytes.length && section_count <= (bytes.length - section_table) / section_stride;
+    bool found = false;
+    for (u64 section = 0; valid && !found && section < section_count; section += 1)
+    {
+        u64 header = section_table + section * section_stride;
+        u64 type = 0;
+        u64 offset = 0;
+        u64 size = 0;
+        u64 strings_index = 0;
+        u64 entry_size = 0;
+        valid = compiler_driver_android_preinit_field(bytes, header + 4, 4, &type) &&
+                compiler_driver_android_preinit_field(bytes, header + 24, 8, &offset) &&
+                compiler_driver_android_preinit_field(bytes, header + 32, 8, &size) &&
+                compiler_driver_android_preinit_field(bytes, header + 40, 4, &strings_index) &&
+                compiler_driver_android_preinit_field(bytes, header + 56, 8, &entry_size);
+        if (valid && type == 2)
+        {
+            valid = strings_index < section_count && entry_size >= 24 && offset <= bytes.length && size <= bytes.length - offset;
+            u64 strings_header = section_table + strings_index * section_stride;
+            u64 strings_offset = 0;
+            u64 strings_size = 0;
+            valid = valid && compiler_driver_android_preinit_field(bytes, strings_header + 24, 8, &strings_offset) &&
+                    compiler_driver_android_preinit_field(bytes, strings_header + 32, 8, &strings_size) &&
+                    strings_offset <= bytes.length && strings_size <= bytes.length - strings_offset;
+            for (u64 entry = 0; valid && !found && entry + entry_size <= size; entry += entry_size)
+            {
+                u64 name_offset = 0;
+                u64 symbol_value = 0;
+                valid = compiler_driver_android_preinit_field(bytes, offset + entry, 4, &name_offset) &&
+                        compiler_driver_android_preinit_field(bytes, offset + entry + 8, 8, &symbol_value) && name_offset < strings_size;
+                u64 name_length = 0;
+                while (valid && name_offset + name_length < strings_size &&
+                       bytes.pointer[strings_offset + name_offset + name_length] != 0)
+                {
+                    name_length += 1;
+                }
+                found = valid && name_offset + name_length < strings_size && name_length == wanted.length &&
+                        memcmp(bytes.pointer + strings_offset + name_offset, wanted.pointer, wanted.length) == 0;
+                if (found) *value = symbol_value;
+            }
+        }
+    }
+    return found;
 }
 
 // The DT_PREINIT_ARRAY/DT_PREINIT_ARRAYSZ tags (bits 0 and 1 of the result)
@@ -2926,16 +3256,224 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_android_address_offset(ByteSlice bytes,
     return found;
 }
 
-// Issue 1243: an Android executable is staged through the Linux dynamic
-// writers, so it publishes `.preinit_array` through DT_PREINIT_ARRAY for the
-// bionic linker too. The emulator suite cannot execute a freshly linked file
-// from its app sandbox, so this link-only control checks the image itself on
+BUSTER_GLOBAL_LOCAL bool compiler_driver_android_weak_zero_evaluate(ByteSlice bytes, u64 main_address, u64 load_bias, u64* value,
+                                                                   u64* loaded_slot, u32* slot_relocation_type)
+{
+    if (value) *value = 0;
+    if (loaded_slot) *loaded_slot = 0;
+    if (slot_relocation_type) *slot_relocation_type = 0;
+    u64 program_table = 0;
+    u64 program_count = 0;
+    bool valid = value && bytes.length >= 64 &&
+                 compiler_driver_android_preinit_field(bytes, 32, 8, &program_table) &&
+                 compiler_driver_android_preinit_field(bytes, 56, 2, &program_count) &&
+                 program_table <= bytes.length && program_count <= (bytes.length - program_table) / 56;
+    u64 dynamic_offset = 0;
+    u64 dynamic_size = 0;
+    bool dynamic_found = false;
+    for (u64 header = 0; valid && !dynamic_found && header < program_count; header += 1)
+    {
+        u64 base = program_table + header * 56;
+        u64 type = 0;
+        valid = compiler_driver_android_preinit_field(bytes, base, 4, &type);
+        if (valid && type == 2)
+        {
+            dynamic_found = compiler_driver_android_preinit_field(bytes, base + 8, 8, &dynamic_offset) &&
+                            compiler_driver_android_preinit_field(bytes, base + 32, 8, &dynamic_size);
+        }
+    }
+    u64 rela_address = 0;
+    u64 rela_size = 0;
+    u64 rela_offset = 0;
+    bool has_rela_address = dynamic_found && compiler_driver_android_dynamic_value(bytes, dynamic_offset, dynamic_size, 7, &rela_address);
+    bool has_rela_size = dynamic_found && compiler_driver_android_dynamic_value(bytes, dynamic_offset, dynamic_size, 8, &rela_size);
+    valid = valid && dynamic_found && has_rela_address == has_rela_size;
+    if (valid && has_rela_address && rela_size)
+    {
+        valid = compiler_driver_android_address_offset(bytes, program_table, program_count, rela_address, &rela_offset);
+    }
+    u64 main_offset = 0;
+    valid = valid && compiler_driver_android_address_offset(bytes, program_table, program_count, main_address, &main_offset);
+    bool register_known[31] = {0};
+    u64 registers[31] = {0};
+    bool started = false;
+    bool done = false;
+    for (u32 instruction_index = 0; valid && !done && instruction_index < 32; instruction_index += 1)
+    {
+        u64 instruction_offset = main_offset + (u64)instruction_index * sizeof(u32);
+        u64 raw_instruction = 0;
+        valid = compiler_driver_android_preinit_field(bytes, instruction_offset, sizeof(u32), &raw_instruction);
+        u32 instruction = (u32)raw_instruction;
+        u32 opcode = 0;
+        if ((instruction & UINT32_C(0x9f000000)) == UINT32_C(0x90000000)) opcode = 1;
+        else if ((instruction & UINT32_C(0x9f000000)) == UINT32_C(0x10000000)) opcode = 2;
+        else if ((instruction & UINT32_C(0xff800000)) == UINT32_C(0xd2800000)) opcode = 3;
+        else if ((instruction & UINT32_C(0xff000000)) == UINT32_C(0x91000000)) opcode = 4;
+        else if ((instruction & UINT32_C(0xffc00000)) == UINT32_C(0xf9400000)) opcode = 5;
+        switch (opcode)
+        {
+        case 1:
+        case 2:
+        {
+            started = true;
+            u32 destination = instruction & 31;
+            u32 immediate = (((instruction >> 29) & 3) | (((instruction >> 5) & 0x7ffff) << 2));
+            s64 signed_immediate = immediate & (UINT32_C(1) << 20) ? (s64)immediate - (INT64_C(1) << 21) : immediate;
+            u64 place_offset = main_address + (u64)instruction_index * sizeof(u32);
+            bool address_valid = main_address <= UINT64_MAX - (u64)instruction_index * sizeof(u32) &&
+                                 load_bias <= UINT64_MAX - place_offset;
+            u64 place = address_valid ? load_bias + place_offset : 0;
+            u64 address = 0;
+            if (address_valid && opcode == 1)
+            {
+                u64 page = place & ~UINT64_C(0xfff);
+                s64 displacement = signed_immediate * 4096;
+                if (displacement < 0)
+                {
+                    u64 magnitude = (u64)-displacement;
+                    address_valid = page >= magnitude;
+                    if (address_valid) address = page - magnitude;
+                }
+                else
+                {
+                    address_valid = page <= UINT64_MAX - (u64)displacement;
+                    if (address_valid) address = page + (u64)displacement;
+                }
+            }
+            else if (address_valid)
+            {
+                if (signed_immediate < 0)
+                {
+                    u64 magnitude = (u64)-signed_immediate;
+                    address_valid = place >= magnitude;
+                    if (address_valid) address = place - magnitude;
+                }
+                else
+                {
+                    address_valid = place <= UINT64_MAX - (u64)signed_immediate;
+                    if (address_valid) address = place + (u64)signed_immediate;
+                }
+            }
+            valid = valid && address_valid;
+            if (destination < BUSTER_ARRAY_LENGTH(registers))
+            {
+                register_known[destination] = address_valid;
+                registers[destination] = address;
+            }
+        }
+        break;
+        case 3:
+        {
+            started = true;
+            u32 destination = instruction & 31;
+            if (destination < BUSTER_ARRAY_LENGTH(registers))
+            {
+                u32 shift = ((instruction >> 21) & 3) * 16;
+                register_known[destination] = true;
+                registers[destination] = (u64)((instruction >> 5) & 0xffff) << shift;
+            }
+        }
+        break;
+        case 4:
+        {
+            if (started)
+            {
+                u32 destination = instruction & 31;
+                u32 source = (instruction >> 5) & 31;
+                u32 shift = (instruction >> 22) & 1 ? 12 : 0;
+                u64 immediate = (u64)((instruction >> 10) & 0xfff) << shift;
+                bool known = source < BUSTER_ARRAY_LENGTH(registers) && register_known[source] &&
+                             registers[source] <= UINT64_MAX - immediate;
+                if (destination < BUSTER_ARRAY_LENGTH(registers))
+                {
+                    register_known[destination] = known;
+                    if (known) registers[destination] = registers[source] + immediate;
+                }
+            }
+        }
+        break;
+        case 5:
+        {
+            if (started)
+            {
+                u32 destination = instruction & 31;
+                u32 source = (instruction >> 5) & 31;
+                u64 immediate = (u64)((instruction >> 10) & 0xfff) * 8;
+                bool known = false;
+                u64 loaded_value = 0;
+                u64 slot_address = 0;
+                u32 relocation_type = 0;
+                bool source_known = source < BUSTER_ARRAY_LENGTH(registers) && register_known[source] &&
+                                   registers[source] <= UINT64_MAX - immediate;
+                if (source_known && registers[source] + immediate >= load_bias)
+                {
+                    slot_address = registers[source] + immediate - load_bias;
+                    bool relocation_found = false;
+                    for (u64 entry = 0; valid && !relocation_found && entry + 24 <= rela_size; entry += 24)
+                    {
+                        u64 relocation_address = 0;
+                        u64 information = 0;
+                        u64 addend = 0;
+                        valid = compiler_driver_android_preinit_field(bytes, rela_offset + entry, 8, &relocation_address) &&
+                                compiler_driver_android_preinit_field(bytes, rela_offset + entry + 8, 8, &information) &&
+                                compiler_driver_android_preinit_field(bytes, rela_offset + entry + 16, 8, &addend);
+                        if (valid && relocation_address == slot_address)
+                        {
+                            relocation_found = true;
+                            relocation_type = (u32)information;
+                            if (relocation_type == 1027)
+                            {
+                                s64 signed_addend = (s64)addend;
+                                if (signed_addend < 0)
+                                {
+                                    u64 magnitude = (u64)(-(signed_addend + 1)) + 1;
+                                    known = load_bias >= magnitude;
+                                    if (known) loaded_value = load_bias - magnitude;
+                                }
+                                else
+                                {
+                                    known = load_bias <= UINT64_MAX - (u64)signed_addend;
+                                    if (known) loaded_value = load_bias + (u64)signed_addend;
+                                }
+                            }
+                        }
+                    }
+                    if (valid && !relocation_found)
+                    {
+                        u64 slot_offset = 0;
+                        valid = compiler_driver_android_address_offset(bytes, program_table, program_count, slot_address, &slot_offset) &&
+                                compiler_driver_android_preinit_field(bytes, slot_offset, sizeof(u64), &loaded_value);
+                        known = valid;
+                    }
+                }
+                else if (source_known)
+                {
+                    valid = false;
+                }
+                if (loaded_slot) *loaded_slot = slot_address;
+                if (slot_relocation_type) *slot_relocation_type = relocation_type;
+                if (destination < BUSTER_ARRAY_LENGTH(registers))
+                {
+                    register_known[destination] = known;
+                    if (known) registers[destination] = loaded_value;
+                }
+            }
+        }
+        break;
+        default:
+            done = started;
+            break;
+        }
+    }
+    if (valid && register_known[0]) *value = registers[0];
+    return valid && started && register_known[0];
+}
+
+// Issue 1243: Android PIEs publish `.preinit_array` through DT_PREINIT_ARRAY
+// for the bionic linker. This link-only control checks the image itself on
 // every host: both tags are present, the array is one 8-byte entry inside a
 // writable load, and that entry addresses code inside an executable load.
-// The kernel places the executable at a load bias, so on x86-64, whose
-// Android images are PIEs, the entry must also carry an R_X86_64_RELATIVE and
-// the image must name bionic's loader; android/runtime_order.sh executes such
-// an image on the emulator.
+// Both architectures require a relative relocation and bionic's linker.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2967,10 +3505,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTest
         ByteSlice bytes = compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
         u64 program_table = 0;
         u64 program_count = 0;
+        u64 image_type = 0;
         bool valid = bytes.length >= 64 && memcmp(bytes.pointer, "\177ELF\2\1", 6) == 0 &&
+                     compiler_driver_android_preinit_field(bytes, 16, 2, &image_type) &&
                      compiler_driver_android_preinit_field(bytes, 32, 8, &program_table) &&
                      compiler_driver_android_preinit_field(bytes, 56, 2, &program_count);
-        BUSTER_TEST(arguments, valid);
+        u64 lowest_load = UINT64_MAX;
         u64 dynamic_offset = 0;
         u64 dynamic_size = 0;
         u64 preinit_address = 0;
@@ -2980,13 +3520,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTest
         {
             u64 base = program_table + header * 56;
             u64 type = 0;
-            valid = compiler_driver_android_preinit_field(bytes, base, 4, &type);
+            u64 address = 0;
+            valid = compiler_driver_android_preinit_field(bytes, base, 4, &type) &&
+                    compiler_driver_android_preinit_field(bytes, base + 16, 8, &address);
             if (valid && type == 2)
             {
                 valid = compiler_driver_android_preinit_field(bytes, base + 8, 8, &dynamic_offset) &&
                         compiler_driver_android_preinit_field(bytes, base + 32, 8, &dynamic_size);
             }
+            if (valid && type == 1) lowest_load = BUSTER_MIN(lowest_load, address);
         }
+        BUSTER_TEST(arguments, valid && image_type == 3 && lowest_load == 0);
         if (valid) tags = compiler_driver_android_preinit_dynamic(bytes, dynamic_offset, dynamic_size, &preinit_address, &preinit_size);
         BUSTER_TEST(arguments, valid && tags == 3 && preinit_size == 8);
         // Map the array through the load that holds it, then the entry
@@ -3022,7 +3566,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTest
             }
         }
         BUSTER_TEST(arguments, valid && writable && function != 0 && executable);
-        if (valid && target == 0)
+        if (valid)
         {
             u64 flags = 0;
             u64 relocations = 0;
@@ -3042,7 +3586,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTest
                 relocated = compiler_driver_android_preinit_field(bytes, relocation_offset + entry, 8, &slot) &&
                             compiler_driver_android_preinit_field(bytes, relocation_offset + entry + 8, 8, &information) &&
                             compiler_driver_android_preinit_field(bytes, relocation_offset + entry + 16, 8, &addend) &&
-                            slot == preinit_address && information == 8 && addend == function;
+                            slot == preinit_address && information == (target == 0 ? 8u : 1027u) && addend == function;
             }
             bool interpreter = false;
             for (u64 header = 0; header < program_count; header += 1)
@@ -3056,6 +3600,353 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTest
                 }
             }
             BUSTER_TEST(arguments, pie && relocated && interpreter);
+        }
+    }
+    String8 pointer_source = buster_test_temporary_path(arena, S8("buster-android-relative"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(pointer_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+        "static int x;\n"
+        "int *p = &x;\n"
+        "int main(void) { return *p; }\n"))));
+    String8 pointer_output = buster_test_temporary_path(arena, S8("buster-android-relative"), S8(""));
+    String8 pointer_command[] = {S8("-target"), S8("aarch64-linux-android"), S8("-nostdinc"), S8("-g0"), pointer_source, S8("-o"), pointer_output};
+    CompilerDriverResult pointer_compiled =
+        compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pointer_command)));
+    BUSTER_TEST(arguments, pointer_compiled.error == COMPILER_DRIVER_ERROR_NONE);
+    ByteSlice pointer_bytes = pointer_compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, pointer_output, (FileReadOptions){0}) : (ByteSlice){0};
+    u64 pointer_table = 0;
+    u64 pointer_count = 0;
+    u64 pointer_entry = 0;
+    u64 pointer_type = 0;
+    bool pointer_valid = pointer_bytes.length >= 64 &&
+                         compiler_driver_android_preinit_field(pointer_bytes, 16, 2, &pointer_type) && pointer_type == 3 &&
+                         compiler_driver_android_preinit_field(pointer_bytes, 24, 8, &pointer_entry) &&
+                         compiler_driver_android_preinit_field(pointer_bytes, 32, 8, &pointer_table) &&
+                         compiler_driver_android_preinit_field(pointer_bytes, 56, 2, &pointer_count);
+    u64 entry_offset = 0;
+    u64 entry_word = 0;
+    bool no_loader_finalizer = pointer_valid &&
+                               compiler_driver_android_address_offset(pointer_bytes, pointer_table, pointer_count, pointer_entry, &entry_offset) &&
+                               compiler_driver_android_preinit_field(pointer_bytes, entry_offset + 4 * sizeof(u32), 4, &entry_word) &&
+                               entry_word != UINT32_C(0xb4000080);
+    BUSTER_TEST(arguments, no_loader_finalizer);
+    u64 x_address = 0;
+    bool x_symbol = pointer_valid && compiler_driver_android_symbol_value(pointer_bytes, S8("x"), &x_address);
+    BUSTER_TEST(arguments, x_symbol);
+    u64 dynamic_offset = 0;
+    u64 dynamic_size = 0;
+    u64 relocations = 0;
+    u64 relocation_size = 0;
+    u64 relocation_offset = 0;
+    bool listed = pointer_valid && compiler_driver_android_address_offset(pointer_bytes, pointer_table, pointer_count,
+                                                                           pointer_entry, &entry_offset);
+    for (u64 header = 0; pointer_valid && header < pointer_count; header += 1)
+    {
+        u64 base = pointer_table + header * 56;
+        u64 type = 0;
+        if (compiler_driver_android_preinit_field(pointer_bytes, base, 4, &type) && type == 2)
+        {
+            listed = compiler_driver_android_preinit_field(pointer_bytes, base + 8, 8, &dynamic_offset) &&
+                     compiler_driver_android_preinit_field(pointer_bytes, base + 32, 8, &dynamic_size);
+        }
+    }
+    listed = listed && compiler_driver_android_dynamic_value(pointer_bytes, dynamic_offset, dynamic_size, 7, &relocations) &&
+             compiler_driver_android_dynamic_value(pointer_bytes, dynamic_offset, dynamic_size, 8, &relocation_size) &&
+             compiler_driver_android_address_offset(pointer_bytes, pointer_table, pointer_count, relocations, &relocation_offset);
+    bool relative_pointer = false;
+    for (u64 entry = 0; listed && !relative_pointer && entry + 24 <= relocation_size; entry += 24)
+    {
+        u64 slot = 0;
+        u64 information = 0;
+        u64 addend = 0;
+        u64 slot_offset = 0;
+        if (compiler_driver_android_preinit_field(pointer_bytes, relocation_offset + entry, 8, &slot) &&
+            compiler_driver_android_preinit_field(pointer_bytes, relocation_offset + entry + 8, 8, &information) &&
+            compiler_driver_android_preinit_field(pointer_bytes, relocation_offset + entry + 16, 8, &addend) &&
+            information == 1027 && addend == x_address &&
+            compiler_driver_android_address_offset(pointer_bytes, pointer_table, pointer_count, slot, &slot_offset))
+        {
+            u64 initial_pointer = 0;
+            relative_pointer = compiler_driver_android_preinit_field(pointer_bytes, slot_offset, 8, &initial_pointer) && initial_pointer == addend;
+        }
+    }
+    BUSTER_TEST(arguments, relative_pointer);
+    String8 weak_source = buster_test_temporary_path(arena, S8("buster-android-weak-zero"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(weak_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+        "extern int absent __attribute__((weak,visibility(\"hidden\")));\n"
+        "int main(void) { return &absent != 0; }\n"))));
+    String8 weak_output = buster_test_temporary_path(arena, S8("buster-android-weak-zero"), S8(""));
+    String8 weak_command[] = {S8("-target"), S8("aarch64-linux-android"), S8("-nostdinc"), S8("-g0"), S8("-fPIC"), weak_source, S8("-o"), weak_output};
+    CompilerDriverResult weak_compiled =
+        compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(weak_command)));
+    BUSTER_TEST(arguments, weak_compiled.error == COMPILER_DRIVER_ERROR_NONE);
+    ByteSlice weak_bytes = weak_compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, weak_output, (FileReadOptions){0}) : (ByteSlice){0};
+    u64 weak_main = 0;
+    bool weak_main_found = compiler_driver_android_symbol_value(weak_bytes, S8("main"), &weak_main);
+    BUSTER_TEST(arguments, weak_main_found);
+    u64 weak_value_base = UINT64_MAX;
+    u64 weak_value_bias = UINT64_MAX;
+    u64 weak_slot = 0;
+    u32 weak_slot_relocation = 0;
+    bool weak_base_known = weak_main_found &&
+                           compiler_driver_android_weak_zero_evaluate(weak_bytes, weak_main, 0, &weak_value_base, &weak_slot, &weak_slot_relocation);
+    u64 weak_bias_slot = 0;
+    u32 weak_bias_relocation = 0;
+    bool weak_bias_known = weak_main_found && compiler_driver_android_weak_zero_evaluate(weak_bytes, weak_main, 0x10000, &weak_value_bias,
+                                                                                       &weak_bias_slot, &weak_bias_relocation);
+    BUSTER_TEST(arguments, weak_base_known && weak_value_base == 0 && weak_bias_known && weak_value_bias == 0);
+    String8 visible_weak_source = buster_test_temporary_path(arena, S8("buster-android-weak-visible"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(visible_weak_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+        "extern int present_weak __attribute__((weak));\n"
+        "int main(void) { return &present_weak != 0; }\n"))));
+    String8 visible_weak_output = buster_test_temporary_path(arena, S8("buster-android-weak-visible"), S8(""));
+    String8 visible_weak_command[] = {S8("-target"), S8("aarch64-linux-android"), S8("-nostdinc"), S8("-g0"), S8("-fPIC"),
+                                     visible_weak_source, S8("-o"), visible_weak_output};
+    CompilerDriverResult visible_weak_compiled = compiler_driver_execute_invocation(
+        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(visible_weak_command)));
+    BUSTER_TEST(arguments, visible_weak_compiled.error == COMPILER_DRIVER_ERROR_NONE);
+    ByteSlice visible_weak_bytes =
+        visible_weak_compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, visible_weak_output, (FileReadOptions){0}) : (ByteSlice){0};
+    u64 visible_weak_main = 0;
+    bool visible_weak_main_found = compiler_driver_android_symbol_value(visible_weak_bytes, S8("main"), &visible_weak_main);
+    BUSTER_TEST(arguments, visible_weak_main_found);
+    u64 visible_weak_value = 0;
+    u64 visible_weak_slot = 0;
+    u32 visible_weak_relocation = 0;
+    bool visible_weak_value_known =
+        visible_weak_main_found && compiler_driver_android_weak_zero_evaluate(visible_weak_bytes, visible_weak_main, 0, &visible_weak_value,
+                                                                              &visible_weak_slot, &visible_weak_relocation);
+    BUSTER_TEST(arguments, visible_weak_main_found && !visible_weak_value_known && visible_weak_slot && visible_weak_relocation == 1025);
+    scratch_end(temporary);
+    return result;
+}
+#endif
+
+#if !BUSTER_ANDROID && !BUSTER_IOS
+// The Mach-O thread-local contract a platform linker reads, decoded from the
+// written bytes independently of object_read: one S_THREAD_LOCAL_VARIABLES
+// section whose 24-byte descriptors each carry an UNSIGNED 64-bit extern
+// relocation to __tlv_bootstrap at +0 and to a local `$tlv$init` storage
+// symbol at +16, with the variable symbols defined on the descriptors.
+typedef struct CompilerDriverMachTls CompilerDriverMachTls;
+struct CompilerDriverMachTls
+{
+    u64 descriptor_size;
+    u32 descriptor_sections;
+    u32 bootstrap_relocations;
+    u32 storage_relocations;
+    u32 other_relocations;
+    u32 descriptor_symbols;
+    u32 storage_symbols;
+};
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_field(ByteSlice bytes, u64 offset, u32 width, u64* value)
+{
+    bool result = offset <= bytes.length && width <= bytes.length - offset;
+    *value = 0;
+    if (result)
+    {
+        memcpy(value, bytes.pointer + offset, width);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_mach_string(ByteSlice bytes, u64 table, u64 table_size, u64 index)
+{
+    String8 result = {0};
+    if (index < table_size && table <= bytes.length && table_size <= bytes.length - table)
+    {
+        result.pointer = (char8*)bytes.pointer + table + index;
+        while (index + result.length < table_size && result.pointer[result.length])
+        {
+            result.length += 1;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerDriverMachTls compiler_driver_mach_tls(ByteSlice bytes)
+{
+    CompilerDriverMachTls result = {0};
+    u64 magic = 0;
+    u64 command_count = 0;
+    bool valid = compiler_driver_mach_field(bytes, 0, 4, &magic) && magic == 0xfeedfacf && compiler_driver_mach_field(bytes, 16, 4, &command_count);
+    u64 command = 32;
+    u32 section_number = 0;
+    u32 descriptor_number = 0;
+    u64 descriptor_relocations = 0;
+    u64 descriptor_relocation_count = 0;
+    u64 symbols = 0;
+    u64 symbol_count = 0;
+    u64 strings = 0;
+    u64 string_size = 0;
+    for (u64 index = 0; valid && index < command_count; index += 1)
+    {
+        u64 kind = 0;
+        u64 size = 0;
+        valid = compiler_driver_mach_field(bytes, command, 4, &kind) && compiler_driver_mach_field(bytes, command + 4, 4, &size) && size >= 8;
+        if (valid && kind == 0x19)
+        {
+            u64 section_total = 0;
+            valid = compiler_driver_mach_field(bytes, command + 64, 4, &section_total);
+            for (u64 section = 0; valid && section < section_total; section += 1)
+            {
+                u64 header = command + 72 + section * 80;
+                u64 flags = 0;
+                section_number += 1;
+                valid = compiler_driver_mach_field(bytes, header + 64, 4, &flags);
+                if (valid && (flags & 0xff) == 0x13)
+                {
+                    result.descriptor_sections += 1;
+                    descriptor_number = section_number;
+                    valid = compiler_driver_mach_field(bytes, header + 40, 8, &result.descriptor_size) &&
+                            compiler_driver_mach_field(bytes, header + 56, 4, &descriptor_relocations) &&
+                            compiler_driver_mach_field(bytes, header + 60, 4, &descriptor_relocation_count);
+                }
+            }
+        }
+        if (valid && kind == 0x2)
+        {
+            valid = compiler_driver_mach_field(bytes, command + 8, 4, &symbols) && compiler_driver_mach_field(bytes, command + 12, 4, &symbol_count) &&
+                    compiler_driver_mach_field(bytes, command + 16, 4, &strings) && compiler_driver_mach_field(bytes, command + 20, 4, &string_size);
+        }
+        command += size;
+    }
+    for (u64 index = 0; valid && index < symbol_count; index += 1)
+    {
+        u64 name = 0;
+        u64 type = 0;
+        u64 section = 0;
+        valid = compiler_driver_mach_field(bytes, symbols + index * 16, 4, &name) && compiler_driver_mach_field(bytes, symbols + index * 16 + 4, 1, &type) &&
+                compiler_driver_mach_field(bytes, symbols + index * 16 + 5, 1, &section);
+        String8 text = compiler_driver_mach_string(bytes, strings, string_size, name);
+        bool defined = (type & 0x0e) == 0x0e;
+        bool storage = text.length > 9 && string_equal(string_slice(text, text.length - 9, text.length), S8("$tlv$init"));
+        result.descriptor_symbols += defined && section == descriptor_number &&
+                                     (string_equal(text, S8("_tl")) || string_equal(text, S8("_tz")) || string_equal(text, S8("_ts")));
+        result.storage_symbols += defined && storage && !(type & 1) && section != descriptor_number;
+    }
+    for (u64 index = 0; valid && descriptor_number && index < descriptor_relocation_count; index += 1)
+    {
+        u64 address = 0;
+        u64 information = 0;
+        u64 name = 0;
+        valid = compiler_driver_mach_field(bytes, descriptor_relocations + index * 8, 4, &address) &&
+                compiler_driver_mach_field(bytes, descriptor_relocations + index * 8 + 4, 4, &information) &&
+                compiler_driver_mach_field(bytes, symbols + (information & 0xffffff) * 16, 4, &name);
+        String8 text = compiler_driver_mach_string(bytes, strings, string_size, name);
+        // r_extern, r_length 3 (eight bytes), not pc-relative, UNSIGNED.
+        bool unsigned_extern = (information >> 24) == ((3u << 1) | (1u << 3));
+        bool bootstrap = unsigned_extern && address % 24 == 0 && string_equal(text, S8("__tlv_bootstrap"));
+        bool storage = unsigned_extern && address % 24 == 16 && text.length > 9 &&
+                       string_equal(string_slice(text, text.length - 9, text.length), S8("$tlv$init"));
+        result.bootstrap_relocations += bootstrap;
+        result.storage_relocations += storage;
+        result.other_relocations += !bootstrap && !storage;
+    }
+    if (!valid)
+    {
+        result = (CompilerDriverMachTls){0};
+    }
+    return result;
+}
+
+// GitHub #1323 M1: Buster's Mach-O TLS objects carry the __thread_vars
+// descriptors ld64 requires, read back to the canonical model, and link
+// (natively) to the same bytes as a direct compile. ld64.lld links them
+// where it is installed; the libSystem stub only supplies __tlv_bootstrap.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_mach_tls_object_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = buster_test_temporary_path(arena, S8("buster-mach-tls"), S8(".c"));
+    String8 stub = buster_test_temporary_path(arena, S8("buster-mach-tls-libSystem"), S8(".tbd"));
+    BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("_Thread_local int tl = 5;\n_Thread_local int tz;\n"
+                                                                        "static _Thread_local long ts = 7;\n"
+                                                                        "int get(void) { return tl + tz + (int)ts; }\n"
+                                                                        "int main(void) { tz = 1; return get() == 13 ? 0 : 1; }\n"))));
+    BUSTER_TEST(arguments, file_write(stub, BUSTER_SLICE_TO_BYTE_SLICE(S8("--- !tapi-tbd\ntbd-version: 4\ntargets: [ x86_64-macos, arm64-macos ]\n"
+                                                                      "install-name: '/usr/lib/libSystem.B.dylib'\ncurrent-version: 1311\n"
+                                                                      "exports:\n  - targets: [ x86_64-macos, arm64-macos ]\n"
+                                                                      "    symbols: [ __tlv_bootstrap, dyld_stub_binder ]\n...\n"))));
+    String8 linker_names[] = {S8("ld64.lld"), S8("ld64.lld-21"), S8("ld64.lld-20"), S8("ld64.lld-19"), S8("ld64.lld-18")};
+    String8 linker = {0};
+    for (u32 index = 0; !linker.length && index < BUSTER_ARRAY_LENGTH(linker_names); index += 1)
+    {
+        linker = executable_resolve_in_path(arena, linker_names[index]);
+    }
+    String8 targets[] = {S8("aarch64-apple-macos"), S8("x86_64-apple-macos")};
+    String8 architectures[] = {S8("arm64"), S8("x86_64")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        String8 object_path = buster_test_temporary_path(arena, S8("buster-mach-tls"), string_format(arena, S8("-{u32}.o"), target_index));
+        String8 direct_path = buster_test_temporary_path(arena, S8("buster-mach-tls-direct"), string_format(arena, S8("-{u32}"), target_index));
+        String8 via_path = buster_test_temporary_path(arena, S8("buster-mach-tls-via"), string_format(arena, S8("-{u32}"), target_index));
+        String8 object_command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target_index], S8("-o"), object_path, source};
+        CompilerDriverResult compiled =
+            compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+        bool compiled_ok = compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object;
+        BUSTER_TEST(arguments, compiled_ok);
+        ByteSlice bytes = compiled_ok ? file_read(arena, object_path, (FileReadOptions){0}) : (ByteSlice){0};
+        CompilerDriverMachTls tls = compiler_driver_mach_tls(bytes);
+        BUSTER_TEST(arguments, tls.descriptor_sections == 1 && tls.descriptor_size == 3 * 24 && tls.bootstrap_relocations == 3 &&
+                                   tls.storage_relocations == 3 && tls.other_relocations == 0 && tls.descriptor_symbols == 3 &&
+                                   tls.storage_symbols == 3);
+        if (compiled_ok)
+        {
+            // The reader restores the canonical model: the variables on
+            // their storage, no descriptor bytes in the TLS template and no
+            // `$tlv$init` aliases left to receive descriptors of their own.
+            ObjectFile reread = object_read(arena, bytes, compiled.object.target);
+            u32 variables = 0;
+            u32 aliases = 0;
+            for (u32 index = 0; reread.error == OBJECT_ERROR_NONE && index < reread.symbol_count; index += 1)
+            {
+                ObjectSymbol* symbol = reread.symbols + index;
+                bool in_thread_local = symbol->section < reread.section_count && (reread.sections[symbol->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                                                                              reread.sections[symbol->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO);
+                variables += in_thread_local && (string_equal(symbol->name, S8("tl")) || string_equal(symbol->name, S8("tz")) || string_equal(symbol->name, S8("ts")));
+                aliases += string_first_sequence(symbol->name, S8("$tlv$init")) < symbol->name.length;
+            }
+            BUSTER_TEST(arguments, reread.error == OBJECT_ERROR_NONE && variables == 3 && aliases == 0 &&
+                                       reread.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ==
+                                           compiled.object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length &&
+                                       reread.sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size ==
+                                           compiled.object.sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size);
+            String8 direct_command[] = {S8("-g0"), S8("-target"), targets[target_index], S8("-o"), direct_path, source};
+            String8 via_command[] = {S8("-g0"), S8("-target"), targets[target_index], S8("-o"), via_path, object_path};
+            CompilerDriverResult direct =
+                compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(direct_command)));
+            CompilerDriverResult via =
+                compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(via_command)));
+            ByteSlice direct_bytes = direct.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, direct_path, (FileReadOptions){0}) : (ByteSlice){0};
+            ByteSlice via_bytes = via.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, via_path, (FileReadOptions){0}) : (ByteSlice){0};
+            BUSTER_TEST(arguments, direct_bytes.length && direct_bytes.length == via_bytes.length &&
+                                       memcmp(direct_bytes.pointer, via_bytes.pointer, direct_bytes.length) == 0);
+        }
+        if (!linker.length)
+        {
+            arguments->show(arguments, S8("MACH_TLS_EXTERNAL status=unavailable reason=missing-ld64.lld target={S8}\n"), targets[target_index]);
+        }
+        else if (compiled_ok)
+        {
+            String8 output = buster_test_temporary_path(arena, S8("buster-mach-tls-ld64"), string_format(arena, S8("-{u32}"), target_index));
+            String8 link_command[] = {linker, S8("-arch"), architectures[target_index], S8("-platform_version"), S8("macos"), S8("11.0"), S8("11.0"),
+                                      object_path, stub, S8("-o"), output};
+            ProcessSpawnOptions options = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                           .use_process_environment = true, .new_process_group = true};
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link_command), (SliceString8){0}, (SliceString8){0}, options);
+            ProcessWaitResult waited = spawned.handle ? os_process_wait_deadline(arena, spawned, UINT64_C(30000000)) : (ProcessWaitResult){0};
+            bool linked = spawned.handle && waited.result == PROCESS_RESULT_SUCCESS;
+            if (!linked && spawned.handle)
+            {
+                ByteSlice error = waited.streams[STANDARD_STREAM_ERROR];
+                arguments->show(arguments, S8("MACH_TLS_EXTERNAL linker stderr={S8}\n"),
+                                (String8){.pointer = (char8*)error.pointer, .length = BUSTER_MIN(error.length, 2000)});
+            }
+            arguments->show(arguments, S8("MACH_TLS_EXTERNAL status={S8} target={S8} linker={S8}\n"), linked ? S8("pass") : S8("fail"),
+                            targets[target_index], linker);
+            BUSTER_TEST(arguments, linked);
         }
     }
     scratch_end(temporary);
@@ -3078,6 +3969,7 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_aarch64_printer_roundtrip);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_android_preinit_tags);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_mach_tls_object_tests);
 #endif
 #if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_semantic_tests);
@@ -3085,8 +3977,12 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_ifunc_tests);
 #if BUSTER_CPU_ARCH_X86_64
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_cpu_runtime_tests);
-    BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_weak_got_tests);
 #endif
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_aarch64_cpu_runtime_selection_tests);
+#if BUSTER_CPU_ARCH_AARCH64
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_aarch64_cpu_runtime_tests);
+#endif
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_weak_got_tests);
 #endif
 #if BUSTER_ANDROID || BUSTER_IOS
     BUSTER_UNUSED(arguments);

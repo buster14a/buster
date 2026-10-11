@@ -13,7 +13,7 @@ enum
     CODEGEN_TEST_CODEVIEW_S_LOCAL = 0x113e,
     CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD = 0x1140,
     CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER = 0x1141,
-    CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL = 0x1142,
+    CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL = 0x1145,
     CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
 };
 
@@ -906,6 +906,39 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_x64_has_stack_alignment(ByteSlice code, u6
     return found_mask && found_application;
 }
 
+// Machine scratch for one function is planned from its IR counts (#3413).
+// An ordinary function keeps the thread scratch. One whose bound outgrows
+// any thread scratch arena, including one an outer caller has filled,
+// runs on private reservations installed as the thread's scratch arenas, so
+// a pass's nested scratch grows with it, and the originals come back at the
+// end. A bound past the limit is refused before any pass runs.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_scratch_plan(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CodegenTestMachineScratch small = codegen_test_machine_scratch(arguments->arena, 1000, 800, 40, 0);
+    BUSTER_TEST(arguments, small.fits && !small.replaced && small.restored);
+    BUSTER_TEST(arguments, small.bound < BUSTER_MB(8));
+    // 200,000 rows bound about 513 MB, past the 256 MiB thread scratch.
+    CodegenTestMachineScratch large = codegen_test_machine_scratch(arguments->arena, 200000, 200000, 1, 0);
+    BUSTER_TEST(arguments, large.fits && large.replaced && large.restored);
+    BUSTER_TEST(arguments, large.bound > BUSTER_MB(400) && large.scratch_reserved >= large.bound);
+    BUSTER_TEST(arguments, large.nested_distinct && large.nested_reserved >= large.bound);
+    // Many blocks over many values: the liveness planes dominate the bound.
+    CodegenTestMachineScratch planes = codegen_test_machine_scratch(arguments->arena, 40000, 50000, 2000, 0);
+    BUSTER_TEST(arguments, planes.fits && planes.replaced && planes.restored);
+    BUSTER_TEST(arguments, planes.bound > (u64)2000 * (2 * 50000 / 64) * sizeof(u64) * 16 && planes.bound < BUSTER_MB(600));
+    // The same small function while the other thread arena holds live outer
+    // allocations up to its last 32 KiB: a nested pass could land there, so
+    // the plan must replace both arenas rather than trust the free one.
+    CodegenTestMachineScratch occupied = codegen_test_machine_scratch(arguments->arena, 1000, 800, 40, BUSTER_KB(32));
+    BUSTER_TEST(arguments, occupied.bound == small.bound && occupied.fits && occupied.replaced && occupied.restored);
+    BUSTER_TEST(arguments, occupied.nested_distinct && occupied.nested_reserved >= occupied.bound);
+    CodegenTestMachineScratch refused = codegen_test_machine_scratch(arguments->arena, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0);
+    BUSTER_TEST(arguments, !refused.fits && !refused.replaced && refused.restored);
+    BUSTER_TEST(arguments, refused.bound == UINT64_MAX);
+    return result;
+}
+
 // Exercise executable-image construction under sanitizers without invoking
 // uninstrumented generated code. An absent constant pool is {NULL, 0}.
 BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_executable_data_copy(UnitTestArguments* arguments)
@@ -1053,23 +1086,32 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_codeview_location_mask(ByteSlice bytes, s32
                 mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_LOCAL ? CODEGEN_TEST_CONSUMER_LOCAL : 0;
                 local_count += record_kind == CODEGEN_TEST_CODEVIEW_S_LOCAL;
                 mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER ? CODEGEN_TEST_CONSUMER_REGISTER : 0;
-                mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL ? CODEGEN_TEST_CONSUMER_FRAME : 0;
-                if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL && record_length >= 6)
+                // REGISTER_REL: base register, flags (bit 0 spilledUdtMember,
+                // bits 4..15 offset in parent), then the base-relative offset.
+                u16 relative_flags = 0;
+                s32 frame = 0;
+                if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL && record_length >= 10)
                 {
-                    s32 frame = 0;
-                    memcpy(&frame, bytes.pointer + record + 4, 4);
-                    *found_frame_value |= frame == expected_frame;
+                    memcpy(&relative_flags, bytes.pointer + record + 6, 2);
+                    memcpy(&frame, bytes.pointer + record + 8, 4);
                 }
-                mask |= (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
-                         record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER) ? CODEGEN_TEST_CONSUMER_PIECE : 0;
+                bool frame_member = record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL && (relative_flags & 1u);
+                bool whole_frame = record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL && !relative_flags;
+                mask |= whole_frame ? CODEGEN_TEST_CONSUMER_FRAME : 0;
+                *found_frame_value |= whole_frame && frame == expected_frame;
+                mask |= (frame_member || record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER) ? CODEGEN_TEST_CONSUMER_PIECE : 0;
                 mask |= record_kind == 0x1107 ? CODEGEN_TEST_CONSUMER_CONSTANT : 0; // S_CONSTANT
                 u32 range_start = UINT32_MAX;
                 u16 range_length = 0;
-                if ((record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER ||
-                     record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL) && record_length >= 14)
+                if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER && record_length >= 14)
                 {
                     memcpy(&range_start, bytes.pointer + record + 8, 4);
                     memcpy(&range_length, bytes.pointer + record + 14, 2);
+                }
+                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL && record_length >= 18)
+                {
+                    memcpy(&range_start, bytes.pointer + record + 12, 4);
+                    memcpy(&range_length, bytes.pointer + record + 18, 2);
                 }
                 else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER && record_length >= 18)
                 {
@@ -1087,11 +1129,10 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_codeview_location_mask(ByteSlice bytes, s32
                     defrange_count += 1;
                     exact_mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER && range_start == 0 && range_length == 10
                                       ? CODEGEN_TEST_CONSUMER_REGISTER : 0;
-                    exact_mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL && range_start == 10 && range_length == 10
-                                      ? CODEGEN_TEST_CONSUMER_FRAME : 0;
-                    exact_piece_count += (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
-                                          record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER) &&
-                                         range_start == 20 && range_length == 10;
+                    exact_mask |= whole_frame && range_start == 10 && range_length == 10 ? CODEGEN_TEST_CONSUMER_FRAME : 0;
+                    // The two frame-resident pieces: bytes 0..8 at +32 and 8..12 at +16.
+                    exact_piece_count += frame_member && range_start == 20 && range_length == 10 &&
+                                         ((relative_flags >> 4 == 0 && frame == 32) || (relative_flags >> 4 == 8 && frame == 16));
                     found_unavailable_range |= range_start == 30 && range_length == 10;
                 }
                 record += 2 + record_length;
@@ -3808,6 +3849,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_seed_capacity);
     BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_block_local_storage);
     BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_first_scratch_storage);
+    BUSTER_TEST_FIXTURE(arguments, codegen_test_machine_scratch_plan);
     UnitTestResult ebpf_scalars = codegen_test_ebpf_scalars(arguments);
     result.succeeded_test_count += ebpf_scalars.succeeded_test_count;
     result.test_count += ebpf_scalars.test_count;
