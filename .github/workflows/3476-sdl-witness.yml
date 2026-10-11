@@ -1,0 +1,133 @@
+name: Issue 3476 SDL witness
+# Explicit branch-owned development diagnostic. No PR, merge-group or main run.
+on:
+  push:
+    branches:
+      - codex/3476-sdl-witness
+    paths:
+      - 'tools/sdl3_qualification.c'
+      - 'tools/fixtures/sdl3_fixture.c'
+      - 'tools/fixtures/sdl3_bool_callee.c'
+      - 'tools/fixtures/sdl3_bool_caller.c'
+      - '.github/workflows/3476-sdl-witness.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sdl3-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  linux-x86-64:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    env:
+      DISPLAY: ':93'
+      SDL_VIDEO_DRIVER: x11
+      SDL_AUDIO_DRIVER: pulseaudio
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: libsdl-org/SDL
+          ref: 7f3ae3d57459e59943a4ecfefc8f6277ec6bf540
+          path: external/SDL
+          persist-credentials: false
+      - name: Record pristine upstream checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: external/SDL
+          source-repository: libsdl-org/SDL
+      - name: Install selected external backends
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build pkg-config gdb libx11-dev libxext-dev libxcursor-dev libxfixes-dev libxi-dev libxrandr-dev libxss-dev libxtst-dev libpulse-dev pulseaudio pulseaudio-utils xvfb
+      - name: Bootstrap native build driver and SDL intake tool
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/sdl3-build"
+          clang -D_DEFAULT_SOURCE -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char tools/sdl3_qualification.c -o "$RUNNER_TEMP/sdl3-qualification"
+          gcc -D_DEFAULT_SOURCE -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char tools/sdl3_qualification.c -o "$RUNNER_TEMP/sdl3-qualification-gcc"
+      - name: Configure and build the exact compiler
+        run: |
+          "$RUNNER_TEMP/sdl3-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/sdl3-build" build --config Release -t ide -- -j2
+      - name: Start isolated software display and virtual audio server
+        run: |
+          mkdir -p "$RUNNER_TEMP/sdl3-environment"
+          Xvfb :93 -screen 0 800x600x24 -nolisten tcp >"$RUNNER_TEMP/sdl3-environment/xvfb.log" 2>&1 &
+          pulseaudio --start --exit-idle-time=-1 --log-target=file:"$RUNNER_TEMP/sdl3-environment/pulse.log"
+          pactl load-module module-null-sink sink_name=buster_sdl3 rate=48000 channels=1
+          pactl set-default-sink buster_sdl3
+          pactl list sinks >"$RUNNER_TEMP/sdl3-environment/sinks.txt"
+      - name: Pristine input negative controls
+        run: |
+          src="$GITHUB_WORKSPACE/external/SDL"
+          tool="$RUNNER_TEMP/sdl3-qualification"
+          refuse() {
+            if "$tool" --check "$src" "$RUNNER_TEMP/sdl3-controls/$1"; then
+              echo "Expected input refusal: $1"; exit 1
+            fi
+          }
+          mkdir -p "$RUNNER_TEMP/sdl3-controls"
+          touch "$src/buster-dirty-input-control"
+          refuse untracked
+          rm "$src/buster-dirty-input-control"
+          printf '%s\n' '/buster-ignored-input.h' >> "$src/.git/info/exclude"
+          touch "$src/buster-ignored-input.h"
+          refuse ignored
+          rm "$src/buster-ignored-input.h"
+          for flag in assume-unchanged skip-worktree; do
+            git -C "$src" update-index "--$flag" README.md
+            printf '\nchanged\n' >> "$src/README.md"
+            refuse "$flag"
+            git -C "$src" update-index "--no-$flag" README.md
+            git -C "$src" checkout -- README.md
+          done
+          git -C "$src" config core.sparseCheckout true
+          refuse sparse
+          git -C "$src" config --unset core.sparseCheckout
+          GIT_INDEX_FILE="$RUNNER_TEMP/redirected-index" refuse environment
+          pin=7f3ae3d57459e59943a4ecfefc8f6277ec6bf540
+          control=$(git -C "$src" -c user.name=SDL-control -c user.email=sdl-control@example.invalid commit-tree "HEAD^{tree}" -p HEAD -m control)
+          git -C "$src" replace "$pin" "$control"
+          refuse replacement
+          git -C "$src" replace -d "$pin"
+          git -C "$src" checkout --detach "$control"
+          refuse wrong-pin
+          git -C "$src" checkout --detach "$pin"
+          "$tool" --check "$src" "$RUNNER_TEMP/sdl3-controls/clean"
+      - name: Pristine reference and Buster intake
+        run: |
+          "$RUNNER_TEMP/sdl3-qualification" "$GITHUB_WORKSPACE/external/SDL" "$GITHUB_WORKSPACE/build/Release/ide" "$RUNNER_TEMP/sdl3-evidence"
+      - name: Retain machine records
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/sdl3-environment
+      - name: Retain failed and successful stage evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # reviewed pin
+        with:
+          name: sdl3-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/sdl3-evidence
+            ${{ runner.temp }}/sdl3-environment
+            ${{ runner.temp }}/sdl3-controls
+          if-no-files-found: warn
+          retention-days: 14
