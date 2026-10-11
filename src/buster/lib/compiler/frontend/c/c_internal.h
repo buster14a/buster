@@ -1586,6 +1586,9 @@ struct CTypeParseMachine
     u64 phase_released_bytes;
     u64 phase_releases;
     CTypeLayoutCache layout_cache;
+    // Owns a grown member-search workspace; the initial buffers stay in the
+    // analysis machine arena. Released by semantic teardown, never a query rewind.
+    Arena* promoted_member_arena;
     CParsePromotedMemberWork* promoted_member_work;
     u32* promoted_member_visited;
     u32 promoted_member_capacity;
