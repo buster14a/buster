@@ -1,0 +1,129 @@
+name: Issue 3632 version-script witness
+# Explicit branch-owned development diagnostic. No PR, merge-group or main run.
+on:
+  push:
+    branches:
+      - codex/3632-version-script-witness
+    paths:
+      - 'tools/sdl3_qualification.c'
+      - 'tools/fixtures/sdl3_fixture.c'
+      - 'tools/fixtures/sdl3_bool_callee.c'
+      - 'tools/fixtures/sdl3_bool_caller.c'
+      - '.github/workflows/3632-version-script-witness.yml'
+      - 'src/buster/lib/compiler/link/link.c'
+      - 'src/buster/tests/compiler/link/link_test.c'
+      - 'src/buster/tests/compiler/driver/driver_pass_through_test.c'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sdl3-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  linux-x86-64:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    env:
+      DISPLAY: ':93'
+      SDL_VIDEO_DRIVER: x11
+      SDL_AUDIO_DRIVER: pulseaudio
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: libsdl-org/SDL
+          ref: 7f3ae3d57459e59943a4ecfefc8f6277ec6bf540
+          path: external/SDL
+          persist-credentials: false
+      - name: Record pristine upstream checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: external/SDL
+          source-repository: libsdl-org/SDL
+      - name: Install selected external backends
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build pkg-config gdb libx11-dev libxext-dev libxcursor-dev libxfixes-dev libxi-dev libxrandr-dev libxss-dev libxtst-dev libpulse-dev pulseaudio pulseaudio-utils xvfb
+      - name: Bootstrap native build driver and SDL intake tool
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/sdl3-build"
+          clang -D_DEFAULT_SOURCE -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char tools/sdl3_qualification.c -o "$RUNNER_TEMP/sdl3-qualification"
+          gcc -D_DEFAULT_SOURCE -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char tools/sdl3_qualification.c -o "$RUNNER_TEMP/sdl3-qualification-gcc"
+      - name: Configure and build the exact compiler
+        run: |
+          "$RUNNER_TEMP/sdl3-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/sdl3-build" build --config Release -t ide -- -j2
+      - name: Registered machine and mixed-compiler regressions
+        run: build/Release/ide test --module=link_tests,compiler_driver_tests --ci=1 --verbose=1
+      - name: Repaired self-host fixed point
+        run: '"$RUNNER_TEMP/sdl3-build" test_self_host --config Release'
+      - name: Exact repair source-size comparison
+        run: |
+          git fetch --no-tags origin a51a5d017af9ece948e7283d4e4a73924dbdde74 866343905137af01330b9aad6468b891cc297944
+          "$RUNNER_TEMP/sdl3-build" source_size --rev a51a5d017af9ece948e7283d4e4a73924dbdde74 --base 866343905137af01330b9aad6468b891cc297944
+      - name: Start isolated software display and virtual audio server
+        run: |
+          mkdir -p "$RUNNER_TEMP/sdl3-environment"
+          Xvfb :93 -screen 0 800x600x24 -nolisten tcp >"$RUNNER_TEMP/sdl3-environment/xvfb.log" 2>&1 &
+          pulseaudio --start --exit-idle-time=-1 --log-target=file:"$RUNNER_TEMP/sdl3-environment/pulse.log"
+          pactl load-module module-null-sink sink_name=buster_sdl3 rate=48000 channels=1
+          pactl set-default-sink buster_sdl3
+          pactl list sinks >"$RUNNER_TEMP/sdl3-environment/sinks.txt"
+      - name: Repaired mode matrix
+        run: '"$RUNNER_TEMP/sdl3-build" test_mode_matrix --config Release'
+      - name: Pristine reference and Buster intake
+        run: |
+          "$RUNNER_TEMP/sdl3-qualification" "$GITHUB_WORKSPACE/external/SDL" "$GITHUB_WORKSPACE/build/Release/ide" "$RUNNER_TEMP/sdl3-evidence"
+      - name: Retain machine records
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/sdl3-environment
+      - name: Retain failed and successful stage evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # reviewed pin
+        with:
+          name: sdl3-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/sdl3-evidence
+            ${{ runner.temp }}/sdl3-environment
+            ${{ runner.temp }}/sdl3-controls
+          if-no-files-found: warn
+          retention-days: 14
+  baseline:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 15a9e8d41d12b20a686559853f5977ff6c1f2fee
+          persist-credentials: false
+      - name: Record regression-only identity
+        run: git rev-parse HEAD 'HEAD^{tree}'
+      - name: Baseline bootstrap and build
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/3632-baseline-build"
+          "$RUNNER_TEMP/3632-baseline-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/3632-baseline-build" build --config Release -t ide -- -j2
+      - name: Baseline self-host fixed point
+        run: '"$RUNNER_TEMP/3632-baseline-build" test_self_host --config Release'
+      - name: Failure-first registered regressions
+        continue-on-error: true
+        run: build/Release/ide test --module=machine_tests,compiler_driver_tests --ci=1 --verbose=1
