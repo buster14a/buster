@@ -859,10 +859,9 @@ two cases:
    here states what it reads.** `CParserTreeFallback` names each case:
    - `specifiers`: a parenthesized specifier (`typeof`, `_Atomic(T)`,
      `_Alignas`, `_BitInt`), or an enum's fixed type;
-   - `declarator`: a redundant group after a decorated typedef name
-     (`__attribute__((a)) T (x)`), or after a keyword other than a type or
-     qualifier word, where the walker reads the group as a parameter list
-     (it reads that `T (x)` as a function `T`); attributes on a pointer or
+   - `declarator`: a redundant group after a keyword other than a type or
+     qualifier word, where the walker reads the group as a parameter list;
+     attributes on a pointer or
      opening a group; or a function returning a function or an array;
    - `old_style`: an old-style declaration list, including one after a
      parenthesized name (`int (k(a)) int a; {...}`);
@@ -902,14 +901,20 @@ After a typedef or tag name it is a group too
 `c_parser_type_name_before_group` answers for a tag after `struct`, `union`
 or `enum` (`c_parse_tag_name_before_group`), and for a typedef name in the
 type's position (`c_parse_typedef_name_position`: first in the declaration,
-or after storage-class, function-specifier and qualifier words only). The
+or after storage-class, function-specifier and qualifier words and
+declaration decorations only). A decoration is recognizable only from its
+head, so when the backward walk over those words stops at a `)` or `]`, the
+prefix is walked again forwards from the declaration's start, stepping over
+`__attribute__((...))`, `__declspec(...)`, `[[...]]` and `__extension__`
+(`c_parse_skip_declaration_decoration`); `int f(void)` stops at `int` and
+never walks forwards. The
 scans have no binding table, so `c_parse_ast_run` records each file-scope
 typedef record's name in `CParserTypedefNames`, a set it asks only in that
 position; at file scope a typedef name cannot be redeclared, and block-scope
 typedefs never reach these scans. `T (x);`, `struct S (s2);`,
 `T (tg(int a)) { ... }` and `struct P (pg(void)) { ... }` therefore declare
-`x`, `s2`, `tg` and `pg`. After a decoration, `__attribute__((a)) T (x)`, the
-walker still reads the group as `T`'s parameter list. The split reads the
+`x`, `s2`, `tg` and `pg`, and so do decorated forms such as
+`static __attribute__((a)) T (y);` and `[[maybe_unused]] T (z);`. The split reads the
 same position, with the grammar's `TYPEDEF_NAME` in place of the set, so its
 records match. The type parser
 (`c_type_parse_parenthesized_step`) nests a group that opens a group holding

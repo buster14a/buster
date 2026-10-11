@@ -377,7 +377,10 @@ fixture as well as compiling both architectures.
   a cast is selected as `MOV_RI` of that immediate instead of `MOV_RR`. A
   constant or cast whose every use is such a cast is marked `fused_dead` and
   selects into nothing. Edge arguments count as uses, so a value reaching a
-  block parameter keeps its row. AArch64 selection does not do this yet.
+  block parameter keeps its row. AArch64 selection applies the same rule
+  through `machine_a64_cast_copies_constant` and `MACHINE_A64_MOV_RI`; its
+  classification pass counts the copy-cast reads and the marking runs after
+  branch fusion against the same use counts, edge arguments included.
 - FAST/QUALITY start a join's or loop header's general block parameters in
   registers. `machine_fast_parameter_contract` gives each non-pinned,
   non-mutable general parameter a caller-saved (or already-saved) register
@@ -1186,8 +1189,9 @@ fixture as well as compiling both architectures.
   position-independent planner uses `LINK_ELF_PIC_GOT_ADDRESS_ZERO`. AArch64
   `ADR_GOT_PAGE`/`LD64_GOT_LO12_NC` already become `MOVZ #0`/`ADD #0` in
   `object_aarch64_elf_page_relocate`. `compiler_driver_elf_weak_got_tests`
-  links host PIE objects as PIE and `-no-pie` against a host-linker oracle
-  (#3414).
+  links host `-fPIE` objects against a host-linker oracle (#3414): as PIE and
+  `-no-pie` on x86-64, and `-no-pie` only on AArch64 Linux, which writes only
+  fixed-address executables.
   It relaxes the two indirect
   thread-local models back to local-exec for the same reason
   (`link_elf_relax_thread_local`), and a foreign object's local-dynamic

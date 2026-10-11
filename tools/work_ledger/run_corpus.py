@@ -12,8 +12,8 @@ for an exact instruction total.
 The corpus is frozen by its inputs, not by the subject: the self-host unit is
 always the pinned tree given by --self-host-root, so a subject that changes the
 compiler's own source still compiles the same program. Every unit pins
-`-march=znver3`, because the default CPU model follows the host and would make
-outputs differ between runners (and under valgrind's CPUID).
+`-march=znver3` so outputs are fixed and identical between runners (and
+under valgrind's CPUID), independent of the driver's default CPU.
 
 Results are written as one JSON document; tools/work_ledger/ledger_report.py
 turns one or more of them into the mechanism ledger and subject comparisons.

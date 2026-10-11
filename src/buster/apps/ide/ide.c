@@ -264,6 +264,10 @@ ProcessResult process_arguments(void)
     if (string_equal(command, S8("test")) || string_equal(command, S8("metamorphic")))
     {
         compiler_state.command = string_equal(command, S8("metamorphic")) ? COMPILER_COMMAND_METAMORPHIC : COMPILER_COMMAND_TEST;
+#if BUSTER_INCLUDE_TESTS
+        // Tests exercise native code unless they select a target (#1557).
+        compiler_driver_host_cpu_default = true;
+#endif
         ProcessResult result = PROCESS_RESULT_SUCCESS;
         for (u64 index = 2; result == PROCESS_RESULT_SUCCESS && index < arguments.length; index += 1)
         {

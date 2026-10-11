@@ -15,12 +15,13 @@
 // ids — but each owns its image layout whole, because the formats agree
 // on almost nothing. A position-independent image (NativeImageKind SHARED
 // for -shared, PIE for -pie) has one writer,
-// link_native_image_elf64_x86_64_position_independent, for x86-64 Linux and
-// every x86-64 Android executable (bionic names, no RDX loader finalizer); the
-// dispatcher refuses the kind on every other target, and its own comment
-// states the relocation and preemption rules. link_elf_version_plan_build and
-// link_elf_copy_plan_build are the symbol-version and copy-slot construction
-// it shares with the x86-64 dynamic writer.
+// link_native_image_elf64_position_independent, for x86-64 Linux/shared
+// images, x86-64 Android executables, and Android AArch64 PIEs; the latter
+// omit bionic's loader-finalizer registration. Linux AArch64 PIEs and
+// AArch64 shared objects remain unsupported. The dispatcher refuses the kind
+// on every other target, and the writer states the relocation and preemption
+// rules. link_elf_version_plan_build and link_elf_copy_plan_build are the
+// symbol-version and copy-slot construction shared with the x86-64 dynamic writer.
 // link_comdat_associations_resolve follows object-local associative paths in
 // bounded linear work after group arbitration; state marks detect cycles and
 // replay each unresolved path without allocating an auxiliary stack.
@@ -105,11 +106,10 @@
 // symbol nothing has and the import's own thunk or slot is what answers.
 // link_elf_symbol_resolves_to_zero and link_elf_symbol_needs_dynamic_import,
 // above the first ELF writer, are the single form of that question; the
-// writers, the dispatcher at the bottom, and the Android writer all ask it.
-// The AArch64 dynamic writer consumes the x86-64 writer's published import
-// indices rather than deriving a second numbering. The dynamic writers ask it
-// once per symbol and then read their own import numbering, using the same
-// link-local export index as version and alias construction.
+// ELF writers, the PIC planner and the dispatcher use these shared
+// classification helpers. The AArch64 dynamic overlay consumes import indices
+// published by the x86-64 layout instead of deriving a second order; writers
+// use the same link-local export index for version and alias construction.
 // That index also records the names each requested library leaves undefined,
 // and every hosted executable writer exports its own definition of such a
 // name, as ld does, so a library can call back into the program that loads
@@ -133,8 +133,9 @@
 // STT_FUNC, because the loader resolves the canonical PLT slot's JUMP_SLOT
 // through the resolver and the PLT entry stays the address (GNU ld's canonical
 // PLT). Protected, weak and unknown direct addresses fail by name. Explicit
-// PLT32 references remain call-only. Android and AArch64 layout staging
-// retain their separate address contracts (#1275).
+// PLT32 references remain call-only. AArch64 Android PIEs bind direct page
+// references locally or through copy slots and refuse imported function
+// addresses that need a canonical PLT value (#1275).
 
 #include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/link/link_internal.h>
@@ -1197,7 +1198,7 @@ BUSTER_GLOBAL_LOCAL u32 link_aarch64_adr(u32 destination, s64 displacement, bool
 // runner's own frame and branches past it.  Both the builder's own bound and
 // the slot the AArch64 dynamic writer overlays are taken from here, so
 // neither can drift from what is emitted.
-BUSTER_GLOBAL_LOCAL u32 link_aarch64_elf_entry_stub_words(bool hosted, LinkInitializerPlan const* plan)
+BUSTER_GLOBAL_LOCAL u32 link_aarch64_elf_entry_stub_words(bool hosted, bool loader_finalizer, LinkInitializerPlan const* plan)
 {
     u32 constructor_count = plan ? plan->constructor_count : 0;
     u32 destructor_count = plan ? plan->destructor_count : 0;
@@ -1205,7 +1206,8 @@ BUSTER_GLOBAL_LOCAL u32 link_aarch64_elf_entry_stub_words(bool hosted, LinkIniti
     bool deferred = link_initializer_plan_defers_destructors(hosted, plan);
     u32 inline_destructors = destructor_count && !deferred ? destructor_count + 2 : 0u;
     u32 runner = deferred ? destructor_count + 4 : 0u;
-    return 4 + (hosted ? 4u : 0u) + (deferred ? 4u : 0u) + (registered ? 3u : 0u) + constructor_count * 4 + 1 + inline_destructors + (hosted ? 1u : 2u) + 1 + runner;
+    return 4 + (hosted && loader_finalizer ? 4u : 0u) + (deferred ? 4u : 0u) + (registered ? 3u : 0u) + constructor_count * 4 + 1 +
+           inline_destructors + (hosted ? 1u : 2u) + 1 + runner;
 }
 
 // The AArch64 spelling of the same stub, in whole words.  `ORR Xd, XZR, Xm`
@@ -1215,8 +1217,9 @@ BUSTER_GLOBAL_LOCAL u32 link_aarch64_elf_entry_stub_words(bool hosted, LinkIniti
 // displacements through link_aarch64_branch_encode after the layout settles
 // -- exactly what the call to `main` already needed.  A capacity short of
 // what the shape needs writes nothing and reports zero words.
-BUSTER_GLOBAL_LOCAL u32 link_aarch64_build_elf_entry_stub(u32* words, u32 capacity, bool hosted, LinkInitializerPlan const* plan, u32* entry_word,
-                                                          u32* exit_word, u32* atexit_word, u32* loader_atexit_word, u32* initializer_words)
+BUSTER_GLOBAL_LOCAL u32 link_aarch64_build_elf_entry_stub(u32* words, u32 capacity, bool hosted, bool loader_finalizer,
+                                                          LinkInitializerPlan const* plan, u32* entry_word, u32* exit_word, u32* atexit_word,
+                                                          u32* loader_atexit_word, u32* initializer_words)
 {
     u32 count = 0;
     u32 constructor_count = plan ? plan->constructor_count : 0;
@@ -1231,13 +1234,13 @@ BUSTER_GLOBAL_LOCAL u32 link_aarch64_build_elf_entry_stub(u32* words, u32 capaci
     u32 argv_register = registered ? 20u : 1u;
     u32 envp_register = registered ? 21u : 2u;
     u32 initializer_index = 0;
-    if (capacity >= link_aarch64_elf_entry_stub_words(hosted, plan))
+    if (capacity >= link_aarch64_elf_entry_stub_words(hosted, loader_finalizer, plan))
     {
         words[count++] = 0xf94003e0u | argc_register;
         words[count++] = 0x910023e0u | argv_register;
         words[count++] = 0x8b000000u | (argc_register << 16) | (3u << 10) | (argv_register << 5) | envp_register;
         words[count++] = 0x91002000u | (envp_register << 5) | envp_register;
-        if (hosted)
+        if (hosted && loader_finalizer)
         {
             // X0 still holds the loader finalizer: the argument reads above
             // use X19-X21. Skip a null finalizer, then __cxa_atexit(X0, 0, 0).
@@ -1330,7 +1333,7 @@ BUSTER_GLOBAL_LOCAL u32 link_aarch64_build_elf_entry_stub(u32* words, u32 capaci
 // and destructor sequences have different fixed and per-entry sizes.
 BUSTER_GLOBAL_LOCAL u32 link_elf_entry_stub_slot(u32 x86_stub_size, LinkInitializerPlan const* plan)
 {
-    u32 aarch64_size = link_aarch64_elf_entry_stub_words(true, plan) * (u32)sizeof(u32);
+    u32 aarch64_size = link_aarch64_elf_entry_stub_words(true, true, plan) * (u32)sizeof(u32);
     return x86_stub_size > aarch64_size ? x86_stub_size : aarch64_size;
 }
 
@@ -4958,12 +4961,7 @@ BUSTER_GLOBAL_LOCAL bool link_elf_virtual_align(u64 start, u64 alignment, u64* o
     return valid;
 }
 
-// Dynamic relocation types.  The two machines number theirs independently, and
-// the AArch64 dynamic writer builds its image by patching the x86-64 writer's
-// output, so every type that writer stamped has to be translated on the way
-// out.  Naming them here keeps that translation table in one place: a type
-// left behind is not a link failure but a loader applying the wrong machine's
-// rule, which on AArch64 turns a copy relocation into a 16-bit absolute move.
+// Dynamic relocation types for the independently numbered ELF machines.
 enum
 {
     ELF_RELOCATION_TYPE_X86_64_64 = 1,
@@ -4974,8 +4972,12 @@ enum
     ELF_RELOCATION_TYPE_X86_64_DTPOFF64 = 17,
     ELF_RELOCATION_TYPE_X86_64_TPOFF64 = 18,
     ELF_RELOCATION_TYPE_X86_64_IRELATIVE = 37,
+    ELF_RELOCATION_TYPE_AARCH64_ABS64 = 257,
     ELF_RELOCATION_TYPE_AARCH64_COPY = 1024,
+    ELF_RELOCATION_TYPE_AARCH64_GLOB_DAT = 1025,
     ELF_RELOCATION_TYPE_AARCH64_JUMP_SLOT = 1026,
+    ELF_RELOCATION_TYPE_AARCH64_RELATIVE = 1027,
+    ELF_RELOCATION_TYPE_AARCH64_IRELATIVE = 1032,
 };
 
 // One link-local name index serves import classification, version binding and
@@ -6172,16 +6174,16 @@ BUSTER_GLOBAL_LOCAL void link_elf_copy_aliases_write(LinkElfCopyPlan const* plan
     }
 }
 
-// One R_X86_64_COPY per slot, naming the owning import's .dynsym entry,
-// which each writer numbers `import + 1`.
+// One architecture-specific COPY relocation per slot, naming the owning
+// import's .dynsym entry, which each writer numbers `import + 1`.
 BUSTER_GLOBAL_LOCAL void link_elf_copy_relocations_write(LinkElfCopyPlan const* plan, bool const* copied, u32 import_count, u64 const* addresses,
-                                                        u8* bytes, u64* relocation_cursor)
+                                                        u32 relocation_type, u8* bytes, u64* relocation_cursor)
 {
     for (u32 import_index = 0; import_index < import_count; import_index += 1)
     {
         if (copied[import_index] && plan->owners[import_index] == import_index)
         {
-            link_elf_write_relocation(bytes, relocation_cursor, addresses[import_index], import_index + 1, ELF_RELOCATION_TYPE_X86_64_COPY, 0);
+            link_elf_write_relocation(bytes, relocation_cursor, addresses[import_index], import_index + 1, relocation_type, 0);
         }
     }
 }
@@ -6198,7 +6200,7 @@ BUSTER_GLOBAL_LOCAL bool link_elf_x86_function_plt_reference(ObjectFile* object,
 
 // A non-null `layout` receives the decisions the AArch64 overlay consumes.
 // `function_address_identity` is enabled only for Linux x86-64 final
-// executables, never the AArch64 or Android layout staging calls.
+// executables, never the AArch64 fixed-address overlay.
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_64_dynamic(Arena* arena, ObjectFile* object,
                                                                                            NativeExecutableLinkOptions options, LinkElfIndex* exports,
                                                                                            LinkElfDynamicLayout* layout, bool export_thread_local, bool function_address_identity)
@@ -6494,7 +6496,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     // while the flag was ignored. Thread-local definitions are exported too:
     // their STT_TLS value is a module-block offset, which a library's dynamic
     // TLS relocations need even when the executable relaxes its own accesses.
-    // Android staging retains its prior export scope through export_thread_local.
+    // Linux AArch64 retains its prior TLS export scope through this parameter.
     bool export_dynamic = false;
     for (u32 argument_index = 0; argument_index < options.linker_argument_count; argument_index += 1)
     {
@@ -6874,7 +6876,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         return result;
     }
     u64 dynamic_relocation_cursor = relocation_offset + plt_relocation_size;
-    link_elf_copy_relocations_write(&copies, import_copied, import_count, copy_slot_addresses, bytes, &dynamic_relocation_cursor);
+    link_elf_copy_relocations_write(&copies, import_copied, import_count, copy_slot_addresses, ELF_RELOCATION_TYPE_X86_64_COPY, bytes,
+                                    &dynamic_relocation_cursor);
     for (u32 index = 0; index < object->symbol_count; index += 1)
     {
         if (function_got_indices[index] != UINT32_MAX && import_indices[index] != UINT32_MAX)
@@ -7366,21 +7369,26 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     return result;
 }
 
-// Position-independent images: an x86-64 ELF ET_DYN laid out at address
-// zero, which the loader places anywhere.  One writer serves both kinds.
+// Position-independent ELF images are laid out at address zero, which the
+// loader places anywhere. One writer serves x86-64 Linux shared/PIE images,
+// x86-64 Android PIEs, and AArch64 Android PIEs; AArch64 remains executable-
+// only here, and Linux AArch64 PIE/shared output remains unsupported.
 // NATIVE_IMAGE_SHARED is a `-shared` object: no entry point and no
 // interpreter, every defined default-visibility symbol exported, undefined
 // symbols left for the loader, and the initializer arrays kept for the loader
 // to walk (DT_INIT_ARRAY/DT_FINI_ARRAY).  NATIVE_IMAGE_PIE is a `-pie`
 // executable: the hosted entry stub and import rules of
 // link_native_executable_elf64_x86_64_dynamic, at a base the loader chooses.
+// AArch64 Android uses bionic's linker64/libc.so and omits X0 loader-finalizer
+// registration; the x86-64 hosted stub retains its architecture's own rule.
 //
 // Nothing in the image may hold a link-time address the loader does not
 // correct, so every absolute address becomes a dynamic relocation:
-// R_X86_64_RELATIVE for a definition bound here, R_X86_64_64 or GLOB_DAT for
-// an import and -- in a shared object -- for an exported definition another
-// module can preempt; the executable that copy-relocates a library's data is
-// what makes the data half of that rule necessary.  A direct call or rel32
+// R_X86_64_RELATIVE/R_AARCH64_RELATIVE for a definition bound here,
+// R_X86_64_64/R_AARCH64_ABS64 or GLOB_DAT for an import and -- in a shared
+// object -- for an exported definition another module can preempt; the
+// executable that copy-relocates a library's data is what makes the data half
+// of that rule necessary. A direct call or rel32
 // binds to this image's own definition (a direct reference cannot be
 // preempted, which is ld's -Bsymbolic-functions answer), and a rel32 to
 // preemptible data, a 32-bit absolute address or any address relocation in
@@ -7389,11 +7397,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
 // copy slot after .bss instead (link_elf_pic_copy_mark), as ld and lld do for
 // GCC's -fPIE code, and binds every reference to it there.  A GOT load of a definition bound here is relaxed into
 // a direct LEA where the psABI allows it and gets a RELATIVE slot otherwise.
+// On AArch64 Android, CALL26/JUMP26 imports use PLT thunks, direct page/PREL
+// references bind locally or through copy slots, and an imported function
+// address without a GOT cannot use a canonical PLT value. Zero-bound symbols
+// use a zero GOT slot or MOVZ #0, never a PC-relative value.
 //
-// Thread-local storage follows the image kind.  A PIE is the initial
+// Thread-local storage follows the image kind. A PIE is the initial
 // executable, so its block sits at a link-time offset from the thread pointer
-// and every model is relaxed to local-exec exactly as the fixed-address
-// writer does.  A shared object's block does not, so general-dynamic keeps its
+// and x86-64 models are relaxed to local-exec exactly as the fixed-address
+// writer does; AArch64 TLS sequences use the existing AArch64 relaxer. A
+// shared object's block does not, so general-dynamic keeps its
 // __tls_get_addr call and gets a DTPMOD64/DTPOFF64 slot pair, initial-exec a
 // TPOFF64 slot and DF_STATIC_TLS, and local-exec is refused.  Local dynamic
 // keeps its call too and shares one pair for the whole image -- DTPMOD64 and
@@ -7407,7 +7420,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
 //        .rela.plt
 //   RW, read-only after relocation (PT_GNU_RELRO): .rodata, [.init_array,
 //        .fini_array], .dynamic, .got
-//   RW: .got.plt (lazy PLT slots), .data, .tdata, .tbss, .bss, [PIE copy slots]
+//   RW: .got.plt (PLT slots), .data, .tdata, .tbss, .bss, [PIE copy slots]
 // .rodata moves behind the relocation boundary because a C constant may hold
 // an address, and the one page of alignment is what avoids text relocations.
 
@@ -7452,6 +7465,13 @@ typedef enum LinkElfPicAction
     LINK_ELF_PIC_ACTION_PC32,
     LINK_ELF_PIC_ACTION_GOT_RELAX,
     LINK_ELF_PIC_ACTION_GOT_SLOT,
+    LINK_ELF_PIC_ACTION_AARCH64_BRANCH,
+    LINK_ELF_PIC_ACTION_AARCH64_PAGE,
+    LINK_ELF_PIC_ACTION_AARCH64_GOT_RELAX,
+    LINK_ELF_PIC_ACTION_AARCH64_GOT_PAGE,
+    LINK_ELF_PIC_ACTION_AARCH64_GOT_LO12,
+    LINK_ELF_PIC_ACTION_AARCH64_PREL,
+    LINK_ELF_PIC_ACTION_AARCH64_TLS_LE,
     LINK_ELF_PIC_ACTION_ABSOLUTE64,
     LINK_ELF_PIC_ACTION_ABSOLUTE32_ZERO,
     LINK_ELF_PIC_ACTION_LOCAL_EXEC,
@@ -7495,10 +7515,25 @@ struct LinkElfPicImage
     u32 local_dynamic_slot;
     LinkError error;
     bool shared;
+    bool aarch64;
     bool static_tls;
     bool requires_position_independent_objects;
-    u8 reserved[1];
 };
+
+BUSTER_GLOBAL_LOCAL u32 link_elf_pic_dynamic_type(LinkElfPicImage* image, u32 x86_type)
+{
+    u32 result = x86_type;
+    if (image->aarch64)
+    {
+        if (x86_type == ELF_RELOCATION_TYPE_X86_64_64) result = ELF_RELOCATION_TYPE_AARCH64_ABS64;
+        else if (x86_type == ELF_RELOCATION_TYPE_X86_64_COPY) result = ELF_RELOCATION_TYPE_AARCH64_COPY;
+        else if (x86_type == ELF_RELOCATION_TYPE_X86_64_GLOB_DAT) result = ELF_RELOCATION_TYPE_AARCH64_GLOB_DAT;
+        else if (x86_type == ELF_RELOCATION_TYPE_X86_64_JUMP_SLOT) result = ELF_RELOCATION_TYPE_AARCH64_JUMP_SLOT;
+        else if (x86_type == ELF_RELOCATION_TYPE_X86_64_RELATIVE) result = ELF_RELOCATION_TYPE_AARCH64_RELATIVE;
+        else if (x86_type == ELF_RELOCATION_TYPE_X86_64_IRELATIVE) result = ELF_RELOCATION_TYPE_AARCH64_IRELATIVE;
+    }
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL bool link_elf_symbol_is_thread_local(ObjectSymbol const* symbol)
 {
@@ -7661,7 +7696,14 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_copy_mark(LinkElfPicImage* image)
     {
         ObjectRelocation* relocation = object->relocations + index;
         u32 symbol_index = relocation->symbol;
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 && relocation->section < OBJECT_SECTION_COUNT &&
+        bool imported_data_reference =
+            relocation->kind == OBJECT_RELOCATION_X86_64_PC32 ||
+            (image->aarch64 &&
+             ((object_relocation_kind_is_aarch64_elf_page(relocation->kind) &&
+               relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 &&
+               relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12) ||
+              relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64));
+        if (imported_data_reference && relocation->section < OBJECT_SECTION_COUNT &&
             !object_section_kind_is_debug((ObjectSectionKind)relocation->section) && symbol_index < object->symbol_count &&
             (image->classes[symbol_index] & LINK_ELF_PIC_SYMBOL_IMPORTED) && object->symbols[symbol_index].kind == OBJECT_SYMBOL_DATA &&
             object->symbols[symbol_index].thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_YES)
@@ -7671,6 +7713,14 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_copy_mark(LinkElfPicImage* image)
         }
     }
 }
+
+BUSTER_GLOBAL_LOCAL bool link_aarch64_elf_tprel_offset(ObjectFile* object, ObjectSymbol const* symbol, s64 addend, u64 limit, u64* offset);
+BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_relaxable(ObjectRelocationKind kind);
+BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_relax(Arena* arena, ObjectFile* object, u8* bytes, u64 const* section_offsets, u32* failed);
+BUSTER_GLOBAL_LOCAL u32 link_aarch64_adrp(u32 destination, u64 instruction_address, u64 target_address, bool* valid);
+BUSTER_GLOBAL_LOCAL bool link_aarch64_patch_initializer_calls(u8* bytes, ObjectFile* object, LinkInitializerPlan const* plan,
+                                                              u64 const* section_offsets, u64 image_base, u64 entry_stub_offset,
+                                                              u32 const* initializer_words);
 
 // The planning pass: one action per relocation, and the PLT entries, .got
 // slots and dynamic relocations those actions need.
@@ -7751,6 +7801,100 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
                     }
                 }
                 break;
+            case OBJECT_RELOCATION_AARCH64_CALL26:
+            case OBJECT_RELOCATION_AARCH64_JUMP26:
+                if (imported)
+                {
+                    valid = !is_thread_local && symbol->kind == OBJECT_SYMBOL_FUNCTION;
+                    if (valid) link_elf_pic_plt_entry(image, relocation->symbol);
+                }
+                else
+                {
+                    bool absent_weak_call = (symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) && symbol->weak &&
+                                            symbol->kind == OBJECT_SYMBOL_FUNCTION;
+                    valid = !is_thread_local && (!(symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) || absent_weak_call) &&
+                            !(symbol_class & LINK_ELF_PIC_SYMBOL_PREEMPTIBLE);
+                }
+                action = LINK_ELF_PIC_ACTION_AARCH64_BRANCH;
+                break;
+            case OBJECT_RELOCATION_AARCH64_ELF_PAGE21:
+            case OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12:
+            case OBJECT_RELOCATION_AARCH64_ELF_ADR_PREL_LO21:
+            case OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12:
+            case OBJECT_RELOCATION_AARCH64_ELF_LDST16_LO12:
+            case OBJECT_RELOCATION_AARCH64_ELF_LDST32_LO12:
+            case OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12:
+            case OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12:
+            case OBJECT_RELOCATION_AARCH64_PREL32:
+            case OBJECT_RELOCATION_AARCH64_PREL64:
+            {
+                bool page = object_relocation_kind_is_aarch64_elf_page(relocation->kind);
+                valid = !is_thread_local && (!bound_elsewhere || (symbol_class & LINK_ELF_PIC_SYMBOL_COPIED));
+                requires_position_independent_objects = bound_elsewhere && symbol->kind == OBJECT_SYMBOL_FUNCTION;
+                bool zero = (symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) != 0;
+                bool low12 = relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12 ||
+                             (relocation->kind >= OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12 &&
+                              relocation->kind <= OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12);
+                if (zero && (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32 || relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64))
+                {
+                    valid = false;
+                    requires_position_independent_objects = true;
+                }
+                else if (zero && relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADR_PREL_LO21)
+                {
+                    // MOVZ #0 replaces the ADR, so no addend survives it.
+                    valid = valid && relocation->addend == 0;
+                }
+                else if (zero && (low12 || relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21))
+                {
+                    // MOVZ #0 replaces the ADRP; only an addend inside page zero survives.
+                    valid = valid && relocation->addend >= 0 && relocation->addend <= 0xfff;
+                }
+                action = page ? LINK_ELF_PIC_ACTION_AARCH64_PAGE : LINK_ELF_PIC_ACTION_AARCH64_PREL;
+            }
+            break;
+            case OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21:
+            case OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12:
+                valid = !is_thread_local;
+                if (valid && bound_elsewhere)
+                {
+                    action = relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 ? LINK_ELF_PIC_ACTION_AARCH64_GOT_PAGE
+                                                                                           : LINK_ELF_PIC_ACTION_AARCH64_GOT_LO12;
+                    if (image->got_indices[relocation->symbol] == UINT32_MAX)
+                    {
+                        image->got_indices[relocation->symbol] =
+                            link_elf_pic_got_slot(image, relocation->symbol, LINK_ELF_PIC_GOT_ADDRESS_SYMBOLIC);
+                    }
+                }
+                else if (valid && (symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) && !imported)
+                {
+                    action = relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21 ? LINK_ELF_PIC_ACTION_AARCH64_GOT_PAGE
+                                                                                           : LINK_ELF_PIC_ACTION_AARCH64_GOT_LO12;
+                    if (image->got_indices[relocation->symbol] == UINT32_MAX)
+                    {
+                        image->got_indices[relocation->symbol] =
+                            link_elf_pic_got_slot(image, relocation->symbol, LINK_ELF_PIC_GOT_ADDRESS_ZERO);
+                    }
+                }
+                else
+                {
+                    action = LINK_ELF_PIC_ACTION_AARCH64_GOT_RELAX;
+                }
+                break;
+            case OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12:
+            case OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12:
+                valid = !image->shared && is_thread_local && !imported;
+                action = LINK_ELF_PIC_ACTION_AARCH64_TLS_LE;
+                break;
+            case OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21:
+            case OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12:
+            case OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21:
+            case OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12:
+            case OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12:
+            case OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL:
+                valid = !imported || symbol->thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_YES;
+                action = LINK_ELF_PIC_ACTION_SKIP;
+                break;
             case OBJECT_RELOCATION_ABSOLUTE64:
                 // Only storage the loader may write before RELRO seals it.
                 valid = !is_thread_local && (relocation->section == OBJECT_SECTION_DATA || relocation->section == OBJECT_SECTION_READ_ONLY_DATA ||
@@ -7762,7 +7906,8 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
                 break;
             case OBJECT_RELOCATION_ABSOLUTE32:
             case OBJECT_RELOCATION_X86_64_ABSOLUTE32S:
-                valid = (symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) != 0;
+                valid = (symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) != 0 &&
+                        (relocation->kind != OBJECT_RELOCATION_X86_64_ABSOLUTE32S || !image->aarch64);
                 requires_position_independent_objects = !is_thread_local;
                 action = LINK_ELF_PIC_ACTION_ABSOLUTE32_ZERO;
                 break;
@@ -7867,42 +8012,71 @@ BUSTER_GLOBAL_LOCAL bool link_elf_linker_argument_present(NativeExecutableLinkOp
     return result;
 }
 
-// Writes PLT0 and one lazy entry per imported function, with the .got.plt
-// slot each entry's first jump reads holding the address of its own push, and
-// the JUMP_SLOT relocation that slot takes.  The encodings are the fixed-
-// address writer's; only their addresses differ.
+// Writes PLT0 and one thunk per imported function, with each .got.plt slot
+// receiving its architecture-specific initial value and JUMP_SLOT relocation.
+// x86-64 retains lazy binding; bionic eagerly resolves the AArch64 slots.
 BUSTER_GLOBAL_LOCAL bool link_elf_pic_plt_write(LinkElfPicImage* image, u8* bytes, u64 plt_offset, u64 got_plt_offset, u64 relocation_offset)
 {
     bool valid = true;
-    LinkX86InstructionBuilder plt0 = {.bytes = bytes + plt_offset, .capacity = ELF_PLT_ENTRY_SIZE};
-    BusterX86MetadataPhysicalOperand plt_memory = link_x86_memory_rip(64, 0);
-    BusterX86MetadataPhysicalOperand nop_memory = link_x86_memory_base(0, 8, 0);
-    nop_memory.memory.has_displacement = true;
-    valid = link_x86_emit(&plt0, S8("PUSH"), &plt_memory, 1) && link_x86_emit(&plt0, S8("JMP"), &plt_memory, 1) &&
-            link_x86_emit(&plt0, S8("NOP"), &nop_memory, 1) && plt0.count == ELF_PLT_ENTRY_SIZE;
-    if (valid)
-    {
-        link_write_u32(bytes, plt_offset + 2, (u32)(s32)((s64)(got_plt_offset + 8) - (s64)(plt_offset + 6)));
-        link_write_u32(bytes, plt_offset + 8, (u32)(s32)((s64)(got_plt_offset + 16) - (s64)(plt_offset + 12)));
-    }
     u64 relocation_cursor = relocation_offset;
-    for (u32 entry = 0; valid && entry < image->plt_count; entry += 1)
+    if (image->aarch64)
     {
-        u64 entry_offset = plt_offset + (u64)(entry + 1) * ELF_PLT_ENTRY_SIZE;
-        u64 slot_offset = got_plt_offset + (u64)(ELF_GOT_RESERVED_COUNT + entry) * sizeof(u64);
-        LinkX86InstructionBuilder plt_entry = {.bytes = bytes + entry_offset, .capacity = ELF_PLT_ENTRY_SIZE};
-        BusterX86MetadataPhysicalOperand slot_memory = link_x86_memory_rip(64, 0);
-        BusterX86MetadataPhysicalOperand entry_immediate = link_x86_immediate(entry, 32);
-        BusterX86MetadataPhysicalOperand plt_relative = link_x86_relative(0, 32);
-        valid = link_x86_emit(&plt_entry, S8("JMP"), &slot_memory, 1) && link_x86_emit_push_imm32(&plt_entry, &entry_immediate) &&
-                link_x86_emit(&plt_entry, S8("JMP"), &plt_relative, 1) && plt_entry.count == ELF_PLT_ENTRY_SIZE;
+        link_write_u64(bytes, got_plt_offset, plt_offset);
+        for (u32 word = 0; word < ELF_PLT_ENTRY_SIZE / sizeof(u32); word += 1)
+        {
+            link_write_u32(bytes, plt_offset + (u64)word * sizeof(u32), UINT32_C(0xd503201f));
+        }
+        for (u32 entry = 0; valid && entry < image->plt_count; entry += 1)
+        {
+            u64 entry_offset = plt_offset + (u64)(entry + 1) * ELF_PLT_ENTRY_SIZE;
+            u64 slot_offset = got_plt_offset + (u64)(ELF_GOT_RESERVED_COUNT + entry) * sizeof(u64);
+            bool adrp_valid = false;
+            u32 adrp = link_aarch64_adrp(16, entry_offset, slot_offset, &adrp_valid);
+            u64 low = slot_offset & UINT64_C(0xfff);
+            valid = adrp_valid && !(low & 7) && low / 8 <= 0xfff;
+            if (valid)
+            {
+                link_write_u32(bytes, entry_offset, adrp);
+                link_write_u32(bytes, entry_offset + 4, UINT32_C(0xf9400000) | ((u32)(low / 8) << 10) | (16 << 5) | 17);
+                link_write_u32(bytes, entry_offset + 8, UINT32_C(0xd61f0220));
+                link_write_u32(bytes, entry_offset + 12, UINT32_C(0xd503201f));
+                link_write_u64(bytes, slot_offset, plt_offset);
+                link_elf_write_relocation(bytes, &relocation_cursor, slot_offset, image->dynamic_indices[image->plt_symbols[entry]],
+                                          ELF_RELOCATION_TYPE_AARCH64_JUMP_SLOT, 0);
+            }
+        }
+    }
+    else
+    {
+        LinkX86InstructionBuilder plt0 = {.bytes = bytes + plt_offset, .capacity = ELF_PLT_ENTRY_SIZE};
+        BusterX86MetadataPhysicalOperand plt_memory = link_x86_memory_rip(64, 0);
+        BusterX86MetadataPhysicalOperand nop_memory = link_x86_memory_base(0, 8, 0);
+        nop_memory.memory.has_displacement = true;
+        valid = link_x86_emit(&plt0, S8("PUSH"), &plt_memory, 1) && link_x86_emit(&plt0, S8("JMP"), &plt_memory, 1) &&
+                link_x86_emit(&plt0, S8("NOP"), &nop_memory, 1) && plt0.count == ELF_PLT_ENTRY_SIZE;
         if (valid)
         {
-            link_write_u32(bytes, entry_offset + 2, (u32)(s32)((s64)slot_offset - (s64)(entry_offset + 6)));
-            link_write_u32(bytes, entry_offset + 12, (u32)(s32)((s64)plt_offset - (s64)(entry_offset + 16)));
-            link_write_u64(bytes, slot_offset, entry_offset + 6);
-            link_elf_write_relocation(bytes, &relocation_cursor, slot_offset, image->dynamic_indices[image->plt_symbols[entry]],
-                                      ELF_RELOCATION_TYPE_X86_64_JUMP_SLOT, 0);
+            link_write_u32(bytes, plt_offset + 2, (u32)(s32)((s64)(got_plt_offset + 8) - (s64)(plt_offset + 6)));
+            link_write_u32(bytes, plt_offset + 8, (u32)(s32)((s64)(got_plt_offset + 16) - (s64)(plt_offset + 12)));
+        }
+        for (u32 entry = 0; valid && entry < image->plt_count; entry += 1)
+        {
+            u64 entry_offset = plt_offset + (u64)(entry + 1) * ELF_PLT_ENTRY_SIZE;
+            u64 slot_offset = got_plt_offset + (u64)(ELF_GOT_RESERVED_COUNT + entry) * sizeof(u64);
+            LinkX86InstructionBuilder plt_entry = {.bytes = bytes + entry_offset, .capacity = ELF_PLT_ENTRY_SIZE};
+            BusterX86MetadataPhysicalOperand slot_memory = link_x86_memory_rip(64, 0);
+            BusterX86MetadataPhysicalOperand entry_immediate = link_x86_immediate(entry, 32);
+            BusterX86MetadataPhysicalOperand plt_relative = link_x86_relative(0, 32);
+            valid = link_x86_emit(&plt_entry, S8("JMP"), &slot_memory, 1) && link_x86_emit_push_imm32(&plt_entry, &entry_immediate) &&
+                    link_x86_emit(&plt_entry, S8("JMP"), &plt_relative, 1) && plt_entry.count == ELF_PLT_ENTRY_SIZE;
+            if (valid)
+            {
+                link_write_u32(bytes, entry_offset + 2, (u32)(s32)((s64)slot_offset - (s64)(entry_offset + 6)));
+                link_write_u32(bytes, entry_offset + 12, (u32)(s32)((s64)plt_offset - (s64)(entry_offset + 16)));
+                link_write_u64(bytes, slot_offset, entry_offset + 6);
+                link_elf_write_relocation(bytes, &relocation_cursor, slot_offset, image->dynamic_indices[image->plt_symbols[entry]],
+                                          ELF_RELOCATION_TYPE_X86_64_JUMP_SLOT, 0);
+            }
         }
     }
     return valid;
@@ -7925,11 +8099,13 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_got_write(LinkElfPicImage* image, u8* byte
         {
         case LINK_ELF_PIC_GOT_ADDRESS_RELATIVE:
             link_write_u64(bytes, slot_offset, address);
-            link_elf_write_relocation(bytes, relocation_cursor, slot_offset, 0, ELF_RELOCATION_TYPE_X86_64_RELATIVE, address);
+            link_elf_write_relocation(bytes, relocation_cursor, slot_offset, 0,
+                                      link_elf_pic_dynamic_type(image, ELF_RELOCATION_TYPE_X86_64_RELATIVE), address);
             break;
         case LINK_ELF_PIC_GOT_ADDRESS_SYMBOLIC:
             link_write_u64(bytes, slot_offset, address);
-            link_elf_write_relocation(bytes, relocation_cursor, slot_offset, image->dynamic_indices[symbol_index], ELF_RELOCATION_TYPE_X86_64_GLOB_DAT, 0);
+            link_elf_write_relocation(bytes, relocation_cursor, slot_offset, image->dynamic_indices[symbol_index],
+                                      link_elf_pic_dynamic_type(image, ELF_RELOCATION_TYPE_X86_64_GLOB_DAT), 0);
             break;
         case LINK_ELF_PIC_GOT_ADDRESS_ZERO:
             break;
@@ -7958,8 +8134,8 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_got_write(LinkElfPicImage* image, u8* byte
 // The applying pass: carries out each planned action against the laid-out
 // image, and writes the dynamic relocation an ABSOLUTE64 takes from
 // `*relocation_cursor`.
-BUSTER_GLOBAL_LOCAL void link_elf_pic_relocate(LinkElfPicImage* image, u8* bytes, u64 const* section_offsets, u64 plt_offset, u64 got_offset,
-                                               u64 thread_local_size, u64* relocation_cursor)
+BUSTER_GLOBAL_LOCAL void link_elf_pic_relocate(Arena* arena, LinkElfPicImage* image, u8* bytes, u64 const* section_offsets, u64 plt_offset,
+                                               u64 got_offset, u64 thread_local_size, u64* relocation_cursor)
 {
     ObjectFile* object = image->object;
     for (u32 index = 0; image->error == LINK_ERROR_NONE && index < object->relocation_count; index += 1)
@@ -8022,6 +8198,87 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_relocate(LinkElfPicImage* image, u8* bytes
             if (valid) link_write_u32(bytes, place, (u32)(s32)displacement);
         }
         break;
+        case LINK_ELF_PIC_ACTION_AARCH64_BRANCH:
+        {
+            if ((symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) && symbol->weak)
+            {
+                link_write_u32(bytes, place, UINT32_C(0xd503201f));
+            }
+            else
+            {
+                u32 instruction = link_read_u32(section->data.pointer, relocation->offset);
+                u32 patched = 0;
+                valid = valid && link_address_difference(target, place, relocation->addend, &displacement) &&
+                        link_aarch64_branch_relocate(relocation->kind, instruction, displacement, &patched);
+                if (valid) link_write_u32(bytes, place, patched);
+            }
+        }
+        break;
+        case LINK_ELF_PIC_ACTION_AARCH64_PAGE:
+        case LINK_ELF_PIC_ACTION_AARCH64_GOT_RELAX:
+        case LINK_ELF_PIC_ACTION_AARCH64_GOT_PAGE:
+        case LINK_ELF_PIC_ACTION_AARCH64_GOT_LO12:
+        {
+            u32 instruction = link_read_u32(section->data.pointer, relocation->offset);
+            u32 patched = 0;
+            if (action == LINK_ELF_PIC_ACTION_AARCH64_PAGE && (symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) &&
+                (relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 ||
+                 relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADR_PREL_LO21))
+            {
+                A64MCInst decoded = {0};
+                valid = valid && a64_mc_decode(instruction, &decoded) &&
+                        (relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 ? decoded.opcode == A64_OPCODE_ADRP
+                                                                                   : decoded.opcode == A64_OPCODE_ADR);
+                patched = UINT32_C(0xd2800000) | (instruction & 31);
+            }
+            else
+            {
+                ObjectRelocationKind kind = relocation->kind;
+                if (action == LINK_ELF_PIC_ACTION_AARCH64_GOT_PAGE || action == LINK_ELF_PIC_ACTION_AARCH64_GOT_LO12)
+                {
+                    u32 slot = image->got_indices[relocation->symbol];
+                    valid = valid && slot < image->got_count;
+                    target = got_offset + (u64)slot * sizeof(u64);
+                    kind = action == LINK_ELF_PIC_ACTION_AARCH64_GOT_PAGE ? OBJECT_RELOCATION_AARCH64_ELF_PAGE21
+                                                                          : OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12;
+                }
+                valid = valid && object_aarch64_elf_page_relocate(kind, instruction, place, target, relocation->addend, &patched);
+            }
+            if (valid) link_write_u32(bytes, place, patched);
+        }
+        break;
+        case LINK_ELF_PIC_ACTION_AARCH64_PREL:
+            valid = valid && link_address_difference(target, place, relocation->addend, &displacement);
+            if (valid && relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
+            {
+                valid = displacement >= INT32_MIN && displacement <= INT32_MAX;
+                if (valid) link_write_u32(bytes, place, (u32)(s32)displacement);
+            }
+            else if (valid && relocation->kind == OBJECT_RELOCATION_AARCH64_PREL64)
+            {
+                link_write_u64(bytes, place, (u64)displacement);
+            }
+            else
+            {
+                valid = false;
+            }
+            break;
+        case LINK_ELF_PIC_ACTION_AARCH64_TLS_LE:
+        {
+            u64 thread_pointer_offset = 0;
+            valid = valid && link_aarch64_elf_tprel_offset(object, symbol, relocation->addend, 0xffffff, &thread_pointer_offset);
+            if (valid)
+            {
+                u32 instruction = link_read_u32(section->data.pointer, relocation->offset);
+                u32 immediate = relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12
+                                    ? (u32)(thread_pointer_offset >> 12)
+                                    : (u32)(thread_pointer_offset & 0xfff);
+                instruction &= ~(UINT32_C(0xfff) << 10);
+                instruction |= immediate << 10;
+                link_write_u32(bytes, place, instruction);
+            }
+        }
+        break;
         case LINK_ELF_PIC_ACTION_ABSOLUTE64:
         {
             u64 value = 0;
@@ -8032,15 +8289,17 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_relocate(LinkElfPicImage* image, u8* bytes
                 link_write_u64(bytes, place, value);
                 if (link_elf_pic_bound_elsewhere(symbol_class))
                 {
-                    link_elf_write_relocation(bytes, relocation_cursor, place, image->dynamic_indices[relocation->symbol], ELF_RELOCATION_TYPE_X86_64_64,
-                                              (u64)relocation->addend);
+                    link_elf_write_relocation(bytes, relocation_cursor, place, image->dynamic_indices[relocation->symbol],
+                                              link_elf_pic_dynamic_type(image, ELF_RELOCATION_TYPE_X86_64_64), (u64)relocation->addend);
                 }
                 else if (!zero)
                 {
                     // An indirect function's resolver (a shared object's
                     // IFUNC slot): the loader calls it and stores the result.
                     link_elf_write_relocation(bytes, relocation_cursor, place, 0,
-                                              symbol->indirect ? ELF_RELOCATION_TYPE_X86_64_IRELATIVE : ELF_RELOCATION_TYPE_X86_64_RELATIVE, value);
+                                              link_elf_pic_dynamic_type(image, symbol->indirect ? ELF_RELOCATION_TYPE_X86_64_IRELATIVE
+                                                                                               : ELF_RELOCATION_TYPE_X86_64_RELATIVE),
+                                              value);
                 }
             }
         }
@@ -8091,6 +8350,17 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_relocate(LinkElfPicImage* image, u8* bytes
             link_elf_pic_fail(image, LINK_ERROR_RELOCATION, symbol->name);
         }
     }
+    if (image->aarch64 && image->error == LINK_ERROR_NONE)
+    {
+        u32 failed = UINT32_MAX;
+        if (!link_aarch64_tls_relax(arena, object, bytes, section_offsets, &failed))
+        {
+            String8 name = failed < object->relocation_count && object->relocations[failed].symbol < object->symbol_count
+                               ? object->symbols[object->relocations[failed].symbol].name
+                               : (String8){0};
+            link_elf_pic_fail(image, LINK_ERROR_RELOCATION, name);
+        }
+    }
 }
 
 // A System V .hash with a real bucket array: a library is searched by every
@@ -8113,15 +8383,14 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_hash_write(LinkElfPicImage* image, u8* byt
     }
 }
 
-BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_position_independent(Arena* arena, ObjectFile* object,
-                                                                                                    NativeExecutableLinkOptions options,
-                                                                                                    LinkElfIndex* exports)
+BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_independent(Arena* arena, ObjectFile* object,
+                                                                                            NativeExecutableLinkOptions options,
+                                                                                            LinkElfIndex* exports)
 {
     NativeExecutableLinkResult result = {0};
-    // An Android image is the same image for bionic: its loader and its C
-    // library, and no RDX finalizer (link_x86_build_elf_entry_stub).
+    bool aarch64 = object->target.cpu_arch == CPU_ARCH_AARCH64;
     bool bionic = object->target.os == OPERATING_SYSTEM_ANDROID;
-    String8 interpreter = bionic ? S8("/system/bin/linker64") : S8("/lib64/ld-linux-x86-64.so.2");
+    String8 interpreter = bionic ? S8("/system/bin/linker64") : aarch64 ? S8("/lib/ld-linux-aarch64.so.1") : S8("/lib64/ld-linux-x86-64.so.2");
     String8 runtime_library = bionic ? S8("libc.so") : S8("libc.so.6");
     static String8 const export_dynamic_spellings[] = {S8_INITIALIZER("-export-dynamic"), S8_INITIALIZER("--export-dynamic"), S8_INITIALIZER("-E")};
     static String8 const no_undefined_spellings[] = {S8_INITIALIZER("--no-undefined"), S8_INITIALIZER("-no-undefined")};
@@ -8138,7 +8407,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
         }
     }
     bool shared = options.image_kind == NATIVE_IMAGE_SHARED;
-    LinkElfPicImage image = {.object = object, .exports = exports, .local_dynamic_slot = UINT32_MAX, .shared = shared};
+    LinkElfPicImage image = {.object = object, .exports = exports, .local_dynamic_slot = UINT32_MAX, .shared = shared, .aarch64 = aarch64};
+    if (aarch64 && (!bionic || shared))
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+    }
     if ((options.dynamic_library_count && !options.dynamic_libraries) || options.dynamic_library_count == UINT32_MAX ||
         object->section_count < OBJECT_SECTION_COUNT || !object->sections || (object->symbol_count && !object->symbols) ||
         (object->relocation_count && !object->relocations) || object->symbol_count >= UINT32_MAX - 3 ||
@@ -8146,7 +8419,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     {
         result.error = LINK_ERROR_INVALID_INPUT;
     }
-    buster_x86_metadata_prewarm();
+    if (!aarch64) buster_x86_metadata_prewarm();
     // An executable gets the hosted entry stub the fixed-address writer
     // builds, which calls its initializers itself; a library leaves its
     // arrays in place for the loader.
@@ -8160,8 +8433,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     u32 entry_exit_displacement_offset = 0;
     u32 entry_atexit_displacement_offset = 0;
     u32 loader_atexit_displacement_offset = 0;
+    u32 aarch64_entry_word = 0;
+    u32 aarch64_exit_word = 0;
+    u32 aarch64_atexit_word = 0;
+    u32 aarch64_loader_atexit_word = 0;
     u8* entry_stub = 0;
     u32* initializer_displacement_offsets = 0;
+    u32* initializer_words = 0;
     u32* copy_import_indices = 0;
     u64 preinit_offset = 0;
     u64 preinit_size = 0;
@@ -8183,14 +8461,30 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
             hosted_object = stripped_object;
             object = &hosted_object;
             image.object = object;
-            u32 capacity = link_x86_elf_entry_stub_capacity(&plan);
-            entry_stub = arena_allocate(arena, u8, capacity);
-            initializer_displacement_offsets = arena_allocate(arena, u32, (u64)plan.constructor_count + plan.destructor_count + 1);
-            if (!link_x86_build_elf_entry_stub(entry_stub, capacity, &entry_stub_size, &entry_call_displacement_offset, true, !bionic, &entry_exit_displacement_offset,
-                                               &entry_atexit_displacement_offset, &loader_atexit_displacement_offset, &plan,
-                                               initializer_displacement_offsets))
+            if (aarch64)
             {
-                result.error = LINK_ERROR_RELOCATION;
+                u32 capacity = link_aarch64_elf_entry_stub_words(true, !bionic, &plan);
+                u32 initializer_count = plan.constructor_count + plan.destructor_count;
+                u32* stub_words = arena_allocate(arena, u32, capacity);
+                initializer_words = arena_allocate(arena, u32, initializer_count ? initializer_count : 1);
+                u32 built_words = link_aarch64_build_elf_entry_stub(stub_words, capacity, true, !bionic, &plan, &aarch64_entry_word,
+                                                                    &aarch64_exit_word, &aarch64_atexit_word,
+                                                                    &aarch64_loader_atexit_word, initializer_words);
+                entry_stub = (u8*)stub_words;
+                entry_stub_size = built_words * (u32)sizeof(u32);
+                if (!built_words) result.error = LINK_ERROR_RELOCATION;
+            }
+            else
+            {
+                u32 capacity = link_x86_elf_entry_stub_capacity(&plan);
+                entry_stub = arena_allocate(arena, u8, capacity);
+                initializer_displacement_offsets = arena_allocate(arena, u32, (u64)plan.constructor_count + plan.destructor_count + 1);
+                if (!link_x86_build_elf_entry_stub(entry_stub, capacity, &entry_stub_size, &entry_call_displacement_offset, true, !bionic,
+                                                   &entry_exit_displacement_offset, &entry_atexit_displacement_offset,
+                                                   &loader_atexit_displacement_offset, &plan, initializer_displacement_offsets))
+                {
+                    result.error = LINK_ERROR_RELOCATION;
+                }
             }
             String8 entry_name = options.entry_symbol.length ? options.entry_symbol : S8("main");
             entry_symbol_index = link_symbol_find(object, entry_name);
@@ -8465,16 +8759,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
         }
         link_elf_pic_hash_write(&image, bytes, hash_offset, hash_bucket_count, dynamic_symbol_count, first_alias, copies.alias_names);
         u64 relocation_cursor = data_relocation_offset;
-        link_elf_copy_relocations_write(&copies, image.copied, image.import_count, image.copy_addresses, bytes, &relocation_cursor);
+        link_elf_copy_relocations_write(&copies, image.copied, image.import_count, image.copy_addresses,
+                                        link_elf_pic_dynamic_type(&image, ELF_RELOCATION_TYPE_X86_64_COPY), bytes, &relocation_cursor);
         if (image.plt_count && !link_elf_pic_plt_write(&image, bytes, plt_offset, got_plt_offset, plt_relocation_offset))
         {
             result.error = LINK_ERROR_RELOCATION;
         }
-        if (got_plt_size) link_write_u64(bytes, got_plt_offset, dynamic_offset);
+        if (got_plt_size && !aarch64) link_write_u64(bytes, got_plt_offset, dynamic_offset);
         link_elf_pic_got_write(&image, bytes, got_offset, section_offsets, &relocation_cursor);
         if (result.error == LINK_ERROR_NONE)
         {
-            link_elf_pic_relocate(&image, bytes, section_offsets, plt_offset, got_offset, thread_local_size, &relocation_cursor);
+            link_elf_pic_relocate(arena, &image, bytes, section_offsets, plt_offset, got_offset, thread_local_size, &relocation_cursor);
             result.error = image.error;
             result.symbol = image.symbol;
         }
@@ -8485,37 +8780,69 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     }
     if (result.error == LINK_ERROR_NONE && !shared)
     {
-        // The entry stub's calls: `main`, the initializers, `exit` and the
-        // two `__cxa_atexit` registrations, each a rel32 from the stub. A
-        // bionic stub has no loader registration to patch.
-        u32 targets[] = {entry_symbol_index, exit_symbol_index, atexit_symbol_index, atexit_symbol_index};
-        u32 fields[] = {entry_call_displacement_offset, entry_exit_displacement_offset, loader_atexit_displacement_offset,
-                        entry_atexit_displacement_offset};
-        u32 call_count = plan.destructor_count ? 4u : 3u;
-        for (u32 call = 0; result.error == LINK_ERROR_NONE && call < call_count; call += 1)
+        if (aarch64)
         {
-            if (bionic && call == 2) continue;
-            u64 address = 0;
-            u64 field = entry_stub_offset + fields[call];
-            s64 displacement = 0;
-            if (!link_elf_hosted_call_address(object, targets[call], image.plt_indices, section_offsets, 0, plt_offset, &address))
+            u32 targets[] = {entry_symbol_index, exit_symbol_index, atexit_symbol_index};
+            u32 fields[] = {aarch64_entry_word, aarch64_exit_word, aarch64_atexit_word};
+            u32 call_count = 2u + (plan.destructor_count != 0);
+            for (u32 call = 0; result.error == LINK_ERROR_NONE && call < call_count; call += 1)
             {
-                result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
-                result.symbol = object->symbols[targets[call]].name;
+                u64 address = 0;
+                u64 field = entry_stub_offset + (u64)fields[call] * sizeof(u32);
+                u32 instruction = 0;
+                if (!link_elf_hosted_call_address(object, targets[call], image.plt_indices, section_offsets, 0, plt_offset, &address))
+                {
+                    result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
+                    result.symbol = object->symbols[targets[call]].name;
+                }
+                else if (!link_aarch64_branch_encode(A64_OPCODE_BL, (s64)address - (s64)field, &instruction))
+                {
+                    result.error = LINK_ERROR_RELOCATION;
+                }
+                else
+                {
+                    link_write_u32(bytes, field, instruction);
+                }
             }
-            else if (!link_address_difference(address, field + 4, 0, &displacement) || displacement < INT32_MIN || displacement > INT32_MAX)
+            if (result.error == LINK_ERROR_NONE &&
+                !link_aarch64_patch_initializer_calls(bytes, object, &plan, section_offsets, 0, entry_stub_offset, initializer_words))
             {
                 result.error = LINK_ERROR_RELOCATION;
             }
-            else
-            {
-                link_write_u32(bytes, field, (u32)(s32)displacement);
-            }
         }
-        if (result.error == LINK_ERROR_NONE &&
-            !link_x86_patch_initializer_calls(bytes, object, &plan, section_offsets, 0, entry_stub_offset, initializer_displacement_offsets))
+        else
         {
-            result.error = LINK_ERROR_RELOCATION;
+            // The x86 entry stub's calls are rel32 fields. A bionic stub has
+            // no loader registration to patch.
+            u32 targets[] = {entry_symbol_index, exit_symbol_index, atexit_symbol_index, atexit_symbol_index};
+            u32 fields[] = {entry_call_displacement_offset, entry_exit_displacement_offset, loader_atexit_displacement_offset,
+                            entry_atexit_displacement_offset};
+            u32 call_count = plan.destructor_count ? 4u : 3u;
+            for (u32 call = 0; result.error == LINK_ERROR_NONE && call < call_count; call += 1)
+            {
+                if (bionic && call == 2) continue;
+                u64 address = 0;
+                u64 field = entry_stub_offset + fields[call];
+                s64 displacement = 0;
+                if (!link_elf_hosted_call_address(object, targets[call], image.plt_indices, section_offsets, 0, plt_offset, &address))
+                {
+                    result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
+                    result.symbol = object->symbols[targets[call]].name;
+                }
+                else if (!link_address_difference(address, field + 4, 0, &displacement) || displacement < INT32_MIN || displacement > INT32_MAX)
+                {
+                    result.error = LINK_ERROR_RELOCATION;
+                }
+                else
+                {
+                    link_write_u32(bytes, field, (u32)(s32)displacement);
+                }
+            }
+            if (result.error == LINK_ERROR_NONE &&
+                !link_x86_patch_initializer_calls(bytes, object, &plan, section_offsets, 0, entry_stub_offset, initializer_displacement_offsets))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+            }
         }
     }
     if (result.error == LINK_ERROR_NONE &&
@@ -8596,7 +8923,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
         bytes[5] = 1;
         bytes[6] = 1;
         link_write_u16(bytes, 16, 3);
-        link_write_u16(bytes, 18, ELF_MACHINE_X86_64);
+        link_write_u16(bytes, 18, aarch64 ? ELF_MACHINE_AARCH64 : ELF_MACHINE_X86_64);
         link_write_u32(bytes, 20, 1);
         link_write_u64(bytes, 24, shared ? 0 : entry_stub_offset);
         link_write_u64(bytes, 32, ELF_HEADER_SIZE);
@@ -8748,12 +9075,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         return result;
     }
     object = &stripped_object;
-    u32 entry_stub_capacity = link_aarch64_elf_entry_stub_words(false, &plan);
+    u32 entry_stub_capacity = link_aarch64_elf_entry_stub_words(false, true, &plan);
     u32* entry_stub = arena_allocate(arena, u32, entry_stub_capacity);
     u32* initializer_words =
         arena_allocate(arena, u32, plan.constructor_count + plan.destructor_count ? plan.constructor_count + plan.destructor_count : 1);
     u32 entry_stub_word = 0;
-    u32 entry_stub_words = link_aarch64_build_elf_entry_stub(entry_stub, entry_stub_capacity, false, &plan, &entry_stub_word, 0, 0, 0, initializer_words);
+    u32 entry_stub_words =
+        link_aarch64_build_elf_entry_stub(entry_stub, entry_stub_capacity, false, true, &plan, &entry_stub_word, 0, 0, 0, initializer_words);
     u64 entry_stub_size = (u64)entry_stub_words * sizeof(u32);
     if (!entry_stub_words)
     {
@@ -9027,15 +9355,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
 BUSTER_GLOBAL_LOCAL u32 link_aarch64_adrp(u32 destination, u64 instruction_address, u64 target_address, bool* valid)
 {
     u32 word = 0;
-    if (!valid || !a64_adrp_encode(destination, instruction_address, target_address, &word))
-    {
-        if (valid)
-        {
-            *valid = false;
-        }
-        return 0;
-    }
-    return word;
+    bool encoded = valid && a64_adrp_encode(destination, instruction_address, target_address, &word);
+    if (valid) *valid = encoded;
+    return encoded ? word : 0;
 }
 
 // The thread-pointer offset of a defined TLS symbol plus addend for a
@@ -9570,14 +9892,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         return result;
     }
     u32 initializer_count = plan.constructor_count + plan.destructor_count;
-    u32 entry_stub_capacity = link_aarch64_elf_entry_stub_words(true, &plan);
+    u32 entry_stub_capacity = link_aarch64_elf_entry_stub_words(true, true, &plan);
     u32* entry_stub = arena_allocate(arena, u32, entry_stub_capacity);
     u32* initializer_words = arena_allocate(arena, u32, initializer_count ? initializer_count : 1);
     u32 entry_stub_word = 0;
     u32 exit_stub_word = 0;
     u32 atexit_stub_word = 0;
     u32 loader_atexit_stub_word = 0;
-    u32 entry_stub_words = link_aarch64_build_elf_entry_stub(entry_stub, entry_stub_capacity, true, &plan, &entry_stub_word, &exit_stub_word,
+    u32 entry_stub_words = link_aarch64_build_elf_entry_stub(entry_stub, entry_stub_capacity, true, true, &plan, &entry_stub_word, &exit_stub_word,
                                                              &atexit_stub_word, &loader_atexit_stub_word, initializer_words);
     if (!entry_stub_words)
     {
@@ -15158,91 +15480,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     return result;
 }
 
-// Android AArch64 only: x86-64 takes the PIE writer (see the dispatcher).
-// This stages a fixed-address Linux image and marks it ET_DYN, so bionic runs
-// it at a load bias that no absolute address in it accounts for.
-BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_elf64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options, LinkElfIndex* exports)
-{
-    static char8 const interpreter[] = "/system/bin/linker64";
-    static char8 const library[] = "libc.so";
-    NativeExecutableLinkOptions staging_options = options;
-    staging_options.output_path = (String8){0};
-    ObjectFile staging_object = *object;
-    staging_object.target.os = OPERATING_SYSTEM_LINUX;
-    bool has_import = options.dynamic_library_count != 0;
-    for (u32 index = 0; index < object->symbol_count; index += 1)
-    {
-        if (link_elf_symbol_needs_dynamic_import(exports, &object->symbols[index]))
-        {
-            has_import = true;
-            break;
-        }
-    }
-    NativeExecutableLinkResult result = {0};
-    if (!link_validate_linker_arguments(object->target, options, has_import, &result.symbol))
-    {
-        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
-    }
-    else if (object->target.cpu_arch == CPU_ARCH_AARCH64)
-    {
-        result = has_import ? link_native_executable_elf64_aarch64_dynamic(arena, &staging_object, staging_options, exports, false)
-                            : link_native_executable_elf64_aarch64(arena, &staging_object, staging_options);
-    }
-    else
-    {
-        result.error = LINK_ERROR_UNSUPPORTED_HOST;
-    }
-    if (result.error == LINK_ERROR_NONE)
-    {
-        u8* bytes = result.executable.pointer;
-        link_write_u16(bytes, 16, 3);
-        if (has_import)
-        {
-            u64 interpreter_program_header = ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_SIZE;
-            u64 interpreter_offset = link_read_u64(bytes, interpreter_program_header + 8);
-            u64 interpreter_size = link_read_u64(bytes, interpreter_program_header + 32);
-            if (sizeof(interpreter) > interpreter_size)
-            {
-                result.error = LINK_ERROR_INVALID_INPUT;
-                return result;
-            }
-            memset(bytes + interpreter_offset, 0, interpreter_size);
-            memcpy(bytes + interpreter_offset, interpreter, sizeof(interpreter));
-            u64 dynamic_program_header = ELF_HEADER_SIZE + (u64)ELF_DYNAMIC_PROGRAM_HEADER_INDEX * ELF_PROGRAM_HEADER_SIZE;
-            u64 dynamic_offset = link_read_u64(bytes, dynamic_program_header + 8);
-            u64 string_table_offset = 0;
-            u64 dynamic_count = link_read_u64(bytes, dynamic_program_header + 32) / ELF_DYNAMIC_SIZE;
-            for (u64 index = 0; index < dynamic_count && !string_table_offset; index += 1)
-            {
-                u64 entry = dynamic_offset + index * ELF_DYNAMIC_SIZE;
-                u64 tag = link_read_u64(bytes, entry);
-                if (!tag)
-                {
-                    break;
-                }
-                if (tag == 5)
-                {
-                    string_table_offset = link_read_u64(bytes, entry + 8) - UINT64_C(0x400000);
-                }
-            }
-            if (!string_table_offset)
-            {
-                result.error = LINK_ERROR_INVALID_INPUT;
-                return result;
-            }
-            memset(bytes + string_table_offset + 1, 0, sizeof("libc.so.6"));
-            memcpy(bytes + string_table_offset + 1, library, sizeof(library));
-        }
-        if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
-        {
-            result.error = LINK_ERROR_FILE_WRITE;
-            result.symbol = options.output_path;
-        }
-    }
-
-    return result;
-}
-
 String8 link_error_name(LinkError error)
 {
     static String8 const names[LINK_ERROR_COUNT] = {
@@ -15722,12 +15959,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
     }
     else if ((object->target.os == OPERATING_SYSTEM_LINUX &&
               (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64)) ||
-             (object->target.os == OPERATING_SYSTEM_ANDROID && object->target.cpu_arch == CPU_ARCH_X86_64))
+             (object->target.os == OPERATING_SYSTEM_ANDROID &&
+              (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64)))
     {
         // Bionic's kernel-placed executable is position independent: an
         // image of link-time addresses marked ET_DYN would run its preinit
         // entries, IFUNC runner and every data pointer unrelocated. Android
-        // x86-64 therefore always takes the PIE writer.
+        // x86-64 and AArch64 therefore always take the PIE writer.
         if (object->target.os == OPERATING_SYSTEM_ANDROID && options.image_kind == NATIVE_IMAGE_EXECUTABLE)
         {
             options.image_kind = NATIVE_IMAGE_PIE;
@@ -15753,9 +15991,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
             {
                 result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
             }
-            else if (object->target.cpu_arch == CPU_ARCH_X86_64 && options.image_kind != NATIVE_IMAGE_EXECUTABLE)
+            else if (options.image_kind != NATIVE_IMAGE_EXECUTABLE &&
+                     (object->target.cpu_arch == CPU_ARCH_X86_64 ||
+                      (object->target.os == OPERATING_SYSTEM_ANDROID && object->target.cpu_arch == CPU_ARCH_AARCH64)))
             {
-                result = link_native_image_elf64_x86_64_position_independent(arena, object, options, exports);
+                result = link_native_image_elf64_position_independent(arena, object, options, exports);
             }
             else if (options.image_kind != NATIVE_IMAGE_EXECUTABLE)
             {
@@ -15791,10 +16031,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
              (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
         result = link_native_executable_mach_o64(arena, object, options);
-    }
-    else if (object->target.os == OPERATING_SYSTEM_ANDROID && object->target.cpu_arch == CPU_ARCH_AARCH64)
-    {
-        result = link_native_executable_android_elf64(arena, &rebound, options, exports);
     }
     else
     {

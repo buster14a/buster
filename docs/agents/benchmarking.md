@@ -669,8 +669,8 @@ captures (#2741).
     same checkout path, one after the other: an `-O3` unity compile of `ide.c`
     takes about 5 GiB, and parallel builds can be OOM-killed. Run each workload
     with the same command line and working directory, and pin `ide cc`'s own
-    output target (for example `-march=znver3`), since it defaults to the host
-    CPU. A stage-1 self-compile takes about 10 minutes per profile;
+    output target (for example `-march=znver3`), since it defaults to the
+    portable baseline. A stage-1 self-compile takes about 10 minutes per profile;
     `--cache-sim=yes --branch-sim=yes` roughly doubles that.
   - **Read the numbers as diagnostics, never as acceptance evidence.**
     `-march=x86-64-v3` compiles out `BUSTER_SIMD_512` kernels such as
