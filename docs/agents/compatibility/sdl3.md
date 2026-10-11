@@ -21,6 +21,7 @@ sources or accepting a different revision.
 | Selected source/component | Verified terms at the pin | Primary evidence |
 | --- | --- | --- |
 | SDL first-party source | Zlib | [LICENSE.txt](https://github.com/libsdl-org/SDL/blob/7f3ae3d57459e59943a4ecfefc8f6277ec6bf540/LICENSE.txt) |
+| HIDAPI (required by upstream virtual-joystick configuration) | BSD-3-Clause OR GPL-3.0 OR original HIDAPI permissive terms; upstream allows user choice, BSD-3-Clause selected for this external intake | [HIDAPI LICENSE.txt](https://github.com/libsdl-org/SDL/blob/7f3ae3d57459e59943a4ecfefc8f6277ec6bf540/src/hidapi/LICENSE.txt), [LICENSE-bsd.txt](https://github.com/libsdl-org/SDL/blob/7f3ae3d57459e59943a4ecfefc8f6277ec6bf540/src/hidapi/LICENSE-bsd.txt) |
 | Software renderer YUV conversion | BSD-3-Clause | [yuv2rgb/LICENSE](https://github.com/libsdl-org/SDL/blob/7f3ae3d57459e59943a4ecfefc8f6277ec6bf540/src/video/yuv2rgb/LICENSE) |
 | Bundled fdlibm functions | Sun permissive notice-preservation terms; exact aggregate SPDX mapping unverified | [e_sqrt.c](https://github.com/libsdl-org/SDL/blob/7f3ae3d57459e59943a4ecfefc8f6277ec6bf540/src/libm/e_sqrt.c), per-file notices remain authoritative |
 | Internal qsort | Zlib, Gareth McCaughan attribution | [SDL_qsort.c](https://github.com/libsdl-org/SDL/blob/7f3ae3d57459e59943a4ecfefc8f6277ec6bf540/src/stdlib/SDL_qsort.c) |
@@ -39,12 +40,12 @@ remains as recorded in [LICENSES/README.md](../../../LICENSES/README.md).
 
 The profile is declared before compilation and identical for both compilers:
 Debug, shared SDL3 and SDL3_test, X11 with directly linked system libraries,
-software rendering, PulseAudio, joysticks (without HIDAPI), haptics, POSIX threads, libc, no PCH, and portable
+software rendering, PulseAudio, joysticks, virtual joysticks, HIDAPI, haptics, POSIX threads, libc, no PCH, and portable
 scalar routines (`SDL_ASSEMBLY=OFF`). It preserves `-fwrapv`,
 `-fno-strict-aliasing` and `-funsigned-char`.
 
 The predeclared exclusions are Wayland, KMS/DRM, offscreen video, OpenGL,
-OpenGL ES, Vulkan/GPU, ALSA, PipeWire, JACK, sndio, OSS, cameras, HIDAPI,
+OpenGL ES, Vulkan/GPU, ALSA, PipeWire, JACK, sndio, OSS, cameras, HIDAPI joystick drivers/libusb,
 sensors, udev, io_uring, D-Bus and IBus. These are outside the first
 configuration, not backends disabled in response to a failure. Dummy video
 and audio remain compiled as controls. Upstream CTest's own default dummy
@@ -59,10 +60,21 @@ failure is not attributed to Buster. No hardware joystick claim follows from
 this correction. Profile revision 3 also enables haptics in both compilers:
 the unmodified `main_testInitQuitSubSystem` explicitly tests that subsystem.
 Every preceding failure remains recorded; tests are not filtered to hide it.
+Profile revision 4 enables HIDAPI because pristine upstream CMake makes
+`SDL_VIRTUAL_JOYSTICK` depend on it; disabling HIDAPI had implicitly disabled
+the virtual driver, even with the main joystick subsystem enabled. HIDAPI
+joystick device drivers and libusb remain explicitly disabled for both
+compilers. The BSD license option is recorded above.
 
 A timed-out fixture retains its primary failure and runs a separately labelled,
-bounded GDB stack/instruction diagnostic. Debugger success does not repair the
-failed runtime cell.
+bounded GDB polling-breakpoint diagnostic. The debugger stops after 100
+poll calls and captures the returned register and caller instructions; it
+is an instrumented diagnostic, not an uninterrupted hang stack. Debugger success does not repair the
+failed runtime cell. A separate, SDL-free mixed-compiler diagnostic calls
+a Clang-compiled boolean callee from Clang, GCC and Buster clients. The client
+supplies a nonnull pointer; the callee returns whether it is null. This checks
+a literal false verdict without SDL/server state and retains callee disassembly.
+It is a diagnostic, not a substitute for the full native workload.
 
 Declared upstream build targets are `SDL3-shared`, `testautomation`,
 `testatomic`, `testthread`, `testsem` and `testerror`.

@@ -7,6 +7,8 @@ on:
     paths:
       - 'tools/sdl3_qualification.c'
       - 'tools/fixtures/sdl3_fixture.c'
+      - 'tools/fixtures/sdl3_bool_callee.c'
+      - 'tools/fixtures/sdl3_bool_caller.c'
       - '.github/workflows/sdl3-qualification.yml'
   workflow_dispatch:
 permissions:

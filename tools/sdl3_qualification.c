@@ -281,6 +281,40 @@ static int sdl_compiler(int argc, char** argv)
     return result;
 }
 
+// This diagnostic has no SDL dependency: Clang's foreign bool callee sees
+// the client's nonnull pointer and must return false to every client.
+static int sdl_bool_probe(const char* self)
+{
+    char callee[BUSTER_SDL_PATH];
+    sdl_path(callee, sdl_out, "bool-callee.o");
+    char* helper[] = {"clang", "-O2", "-g", "-Wall", "-Wextra", "-Werror",
+        "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", "-c",
+        "tools/fixtures/sdl3_bool_callee.c", "-o", callee, NULL};
+    int result = sdl_run("fixture-bool-callee-compile", helper, "30");
+    char* disassemble[] = {"objdump", "-dr", callee, NULL};
+    int assembly = result == 0 ? sdl_run("fixture-bool-callee-disassembly", disassemble, "20") : 125;
+    bool all = result == 0 && assembly == 0;
+    const char* compilers[] = {"clang", "gcc", self};
+    const char* names[] = {"fixture-bool-clang", "fixture-bool-gcc", "fixture-bool-buster"};
+    for (unsigned i = 0; result == 0 && i < 3; i += 1)
+    {
+        char object[BUSTER_SDL_PATH], binary[BUSTER_SDL_PATH], name[128];
+        snprintf(name, sizeof(name), "%s.o", names[i]);
+        sdl_path(object, sdl_out, name);
+        sdl_path(binary, sdl_out, names[i]);
+        char* compile[] = {(char*)compilers[i], i == 2 ? "--cc" : "-Wall",
+            "-g", "-O0", "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", "-c",
+            "tools/fixtures/sdl3_bool_caller.c", "-o", object, NULL};
+        int built = sdl_run(names[i], compile, "30");
+        char* link[] = {"clang", object, callee, "-o", binary, NULL};
+        int linked = built == 0 ? sdl_run(names[i], link, "20") : 125;
+        char* run[] = {binary, NULL};
+        int ran = linked == 0 ? sdl_run(names[i], run, "10") : 125;
+        all = all && built == 0 && linked == 0 && ran == 0;
+    }
+    return all ? 0 : 1;
+}
+
 static int sdl_configure(const char* source, const char* output, const char* compiler, bool candidate)
 {
     char cc[BUSTER_SDL_PATH + 64];
@@ -298,7 +332,7 @@ static int sdl_configure(const char* source, const char* output, const char* com
         "-DSDL_ALSA=OFF", "-DSDL_PIPEWIRE=OFF", "-DSDL_JACK=OFF", "-DSDL_SNDIO=OFF", "-DSDL_OSS=OFF",
         "-DSDL_WAYLAND=OFF", "-DSDL_KMSDRM=OFF", "-DSDL_OFFSCREEN=OFF",
         "-DSDL_OPENGL=OFF", "-DSDL_OPENGLES=OFF", "-DSDL_VULKAN=OFF", "-DSDL_GPU=OFF",
-        "-DSDL_CAMERA=OFF", "-DSDL_JOYSTICK=ON", "-DSDL_HIDAPI=OFF", "-DSDL_HAPTIC=ON", "-DSDL_SENSOR=OFF",
+        "-DSDL_CAMERA=OFF", "-DSDL_JOYSTICK=ON", "-DSDL_HIDAPI=ON", "-DSDL_HIDAPI_JOYSTICK=OFF", "-DSDL_HIDAPI_LIBUSB=OFF", "-DSDL_HAPTIC=ON", "-DSDL_SENSOR=OFF",
         "-DSDL_LIBUDEV=OFF", "-DSDL_LIBURING=OFF", "-DSDL_DBUS=OFF", "-DSDL_IBUS=OFF",
         candidate ? "-DCMAKE_C_COMPILER_ARG1=--cc" : "-DCMAKE_C_COMPILER_ARG1=",
         NULL
@@ -382,10 +416,11 @@ static int sdl_fixture_run(const char* object, const char* library, const char* 
         }
         if (result == 124 || result == 137)
         {
-            char* debug[] = {"timeout", "--signal=INT", "--kill-after=5", "10",
-                "gdb", "--batch", "-ex", "set pagination off", "-ex", "set confirm off",
-                "-ex", "run", "-ex", "thread apply all bt", "-ex", "x/16i $pc", "--args", binary, NULL};
-            int diagnostic = sdl_run("fixture-timeout-stack-diagnostic", debug, "20");
+            char* debug[] = {"gdb", "--batch", "-ex", "set pagination off", "-ex", "set confirm off",
+                "-ex", "set breakpoint pending on", "-ex", "break SDL_PollEvent", "-ex", "ignore 1 100",
+                "-ex", "run", "-ex", "finish", "-ex", "info registers rax",
+                "-ex", "thread apply all bt", "-ex", "disassemble /r sdl_input", "--args", binary, NULL};
+            int diagnostic = sdl_run("fixture-input-poll-breakpoint-diagnostic", debug, "20");
             fprintf(stderr, "SDL_DEBUGGER_DIAGNOSTIC status=%d primary_status=%d\n", diagnostic, result);
         }
     }
@@ -424,7 +459,7 @@ int main(int argc, char** argv)
             sdl_path(candidate, output, "candidate");
             ok = ok && mkdir(cc_logs, 0700) == 0 && setenv("BUSTER_SDL_IDE", compiler, 1) == 0 && setenv("BUSTER_SDL_CC_LOG", cc_logs, 1) == 0;
             char* versions[] = {"clang", "--version", NULL};
-            char* hashes[] = {"sha256sum", compiler, self, "tools/sdl3_qualification.c", "tools/fixtures/sdl3_fixture.c", "LICENSES/README.md", NULL};
+            char* hashes[] = {"sha256sum", compiler, self, "tools/sdl3_qualification.c", "tools/fixtures/sdl3_fixture.c", "tools/fixtures/sdl3_bool_callee.c", "tools/fixtures/sdl3_bool_caller.c", "LICENSES/README.md", NULL};
             char* packages[] = {"dpkg-query", "-W", NULL};
             char* inputs[] = {"git", "-C", source, "ls-tree", "-r", "HEAD", NULL};
             if (ok)
@@ -434,6 +469,7 @@ int main(int argc, char** argv)
                      sdl_run("dependency-inventory", packages, "30") == 0 &&
                      sdl_run("upstream-inputs", inputs, "30") == 0;
             }
+            int bool_probe = ok ? sdl_bool_probe(self) : 125;
             int reference_config = ok ? sdl_configure(source, reference, "clang", false) : 125;
             int reference_build = reference_config == 0 ? sdl_build(reference, "reference-build") : 125;
             int reference_tests = reference_build == 0 ? sdl_tests(reference, "reference-tests") : 125;
@@ -461,16 +497,16 @@ int main(int argc, char** argv)
                 int n = fprintf(report,
                     "upstream=%s\nreference_configure=%d\nreference_build=%d\nreference_tests=%d\n"
                     "candidate_configure=%d\ncandidate_build=%d\ncandidate_tests=%d\n"
-                    "pristine_after=%d\nnot_executed_status=125\n"
+                    "pristine_after=%d\nnot_executed_status=125\nforeign_bool_diagnostic=%d\n"
                     "trusted_client_compile=%d\nbuster_client_compile=%d\n"
                     "trusted_reference=%d\nbuster_reference=%d\ntrusted_candidate=%d\nbuster_candidate=%d\n"
                     "gpu=pending\naudible_device=pending\nperformance_9700x=pending\n",
                     BUSTER_SDL_PIN, reference_config, reference_build, reference_tests,
-                    candidate_config, candidate_build, candidate_tests, pristine_after,
+                    candidate_config, candidate_build, candidate_tests, pristine_after, bool_probe,
                     trusted_client, buster_client, trusted_reference, buster_reference, trusted_candidate, buster_candidate);
                 saved = fclose(report) == 0 && n >= 0;
             }
-            result = ok && saved && pristine_after && reference_config == 0 && reference_build == 0 &&
+            result = ok && saved && pristine_after && bool_probe == 0 && reference_config == 0 && reference_build == 0 &&
                      reference_tests == 0 && candidate_config == 0 && candidate_build == 0 && candidate_tests == 0 &&
                      trusted_reference == 0 && buster_reference == 0 && trusted_candidate == 0 && buster_candidate == 0 ? 0 : 1;
         }
