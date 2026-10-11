@@ -17,8 +17,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          curl --fail --location --silent --show-error -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/buster14a/buster/actions/artifacts/11714337379/zip" -o "$RUNNER_TEMP/sdl-evidence.zip"
-          echo "6a36244bc3a0cf61ff4b1d5c34eecbdbde0aa61c53d20b6de777f8ca983c1da0  $RUNNER_TEMP/sdl-evidence.zip" | sha256sum --check
+          curl --fail --location --silent --show-error -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/buster14a/buster/actions/artifacts/11714941774/zip" -o "$RUNNER_TEMP/sdl-evidence.zip"
+          echo "775d9b539a3295ca2215e85820f41726675d0b16db0ca2f765f7f8486825623c  $RUNNER_TEMP/sdl-evidence.zip" | sha256sum --check
           unzip -q "$RUNNER_TEMP/sdl-evidence.zip" -d "$RUNNER_TEMP/sdl-inspection"
           cat "$RUNNER_TEMP/sdl-inspection/sdl3-evidence/qualification.txt"
-          grep -n -A65 -B8 -E "LINKER_SUPPORTS_VERSION_SCRIPT|XOpenDisplay|X11_X11_LIB|X11_Xext_LIB|Could NOT find X11|unsupported|error:" "$RUNNER_TEMP/sdl-inspection/sdl3-evidence/candidate/CMakeFiles/CMakeConfigureLog.yaml" | head -1100
+          for sdl_cell in reference candidate; do
+            echo "CELL=$sdl_cell"
+            grep -n -E "X11_X11_LIB:|X11_Xext_LIB:|X11_X11_INCLUDE_PATH:|CMAKE_LIBRARY_ARCHITECTURE" "$RUNNER_TEMP/sdl-inspection/sdl3-evidence/$sdl_cell/CMakeCache.txt" || true
+            grep -n -E "CMAKE_C_SIZEOF_DATA_PTR|CMAKE_C_IMPLICIT_LINK_DIRECTORIES|CMAKE_C_LIBRARY_ARCHITECTURE" "$RUNNER_TEMP/sdl-inspection/sdl3-evidence/$sdl_cell/CMakeFiles/4.4.0/CMakeCCompiler.cmake" || true
+          done
+          grep -n -A45 -B18 "Performing Test LINKER_SUPPORTS_VERSION_SCRIPT" "$RUNNER_TEMP/sdl-inspection/sdl3-evidence/candidate/CMakeFiles/CMakeConfigureLog.yaml"
+          grep -n -A10 -B40 "unsupported linker argument for this output: -v" "$RUNNER_TEMP/sdl-inspection/sdl3-evidence/candidate/CMakeFiles/CMakeConfigureLog.yaml"
+          grep -n -A140 -B5 -E 'variable: "X11_X11_LIB"|variable: "X11_Xext_LIB"' "$RUNNER_TEMP/sdl-inspection/sdl3-evidence/candidate/CMakeFiles/CMakeConfigureLog.yaml"
