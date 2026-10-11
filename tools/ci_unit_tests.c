@@ -1064,7 +1064,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_tests_main(Arena* arena, SliceString8 
         bool valid_jobs = !jobs_text.length || (jobs.status == INTEGER_PARSING_SUCCESS && jobs.length == jobs_text.length && jobs.value > 0);
         String8 schedule = os_get_environment_variable(S8("BUSTER_TEST_UNIT_SCHEDULE"));
         // Preserve the existing qualification receipt protocol.
-        if (!schedule.length && environment_variable_is_nonzero(S8("BUSTER_CI_CHECKS_EVIDENCE"))) { schedule = S8("pair"); }
+        String8 checks_evidence = os_get_environment_variable(S8("BUSTER_CI_CHECKS_EVIDENCE"));
+        if (!schedule.length && checks_evidence.length && !string_equal(checks_evidence, S8("0"))) { schedule = S8("pair"); }
         bool valid_schedule = !schedule.length || string_equal(schedule, S8("modules")) || string_equal(schedule, S8("pair"));
         valid_jobs = valid_jobs && valid_schedule;
         bool grouped = valid_jobs && jobs_text.length && jobs.value >= 4 && !BUSTER_SINGLE_THREADED;
