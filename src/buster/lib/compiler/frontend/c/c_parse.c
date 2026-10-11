@@ -8377,7 +8377,9 @@ BUSTER_GLOBAL_LOCAL C_AST_TYPES_NOINLINE CTypeId c_parse_expression_tree_member(
 // rewound as the frame's completion rewinds it, so the query function keeps
 // its signature. A leaf that fails is undone, as the machine's rollback undoes
 // it, and the invalid type returned leaves the query to the machine, which
-// fails the same way.
+// fails the same way. When the answer's node is a member access over a const
+// or volatile aggregate, the same memo probe covers the access's tokens, and
+// on a miss c_parse_expression_tree_member makes the machine's calls instead.
 BUSTER_C_INTERNAL CTypeId c_parse_expression_tree_string(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result,
                                                           CScopeId scope, u32 flags, CAstTypeAnswer tree)
 {

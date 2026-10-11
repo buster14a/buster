@@ -417,7 +417,8 @@ unchanged.
       the published `void` row (`c_ast_types_builtin_call`).
 - **What it declines.** Every shape whose machine answer appends a row stays
   with the machine:
-  - a qualified member or array element;
+  - a qualified member or array element, except a member access queried
+    alone, which is replayed (below);
   - an array operand of `+` or `-`, which decays;
   - a pointer or `nullptr` conditional;
   - a qualified operand whose unqualified row was never recorded;
@@ -461,6 +462,23 @@ unchanged.
 
   The replayed row is the answer. A leaf that fails is undone, and the query
   runs the machine.
+
+  A query of a `.` or `->` alone, perhaps parenthesized, over a base the pass
+  accepts (and safe, with constraint checks) and a const or volatile struct or
+  union is replayed too. The machine types the base as the tree does, then
+  makes two calls (`c_parse_direct_expression_postfix`):
+  - `c_parse_member_type` on the qualified aggregate;
+  - `c_parse_add_qualified_type` on the member it finds, which appends the
+    member's qualified copy.
+
+  The decline branch reports it (`c_ast_types_decline`) as
+  `C_AST_TYPE_STRING` with the member node's kind, so the query function's
+  code is unchanged. The replay probes the memo for the access's tokens, as
+  the machine's root task does after stripping the parentheses. On a miss,
+  `c_parse_expression_tree_member` makes the same two calls, and the appended
+  row is the answer. The node is never accepted, so its parents still decline.
+  Verify mode holds the replayed row, and any alignment record it inherits,
+  to the machine's.
 - **Constraint checks.** A checked query is answered only from a node whose
   operands are safe and whose own checked-mode rule cannot fire. For the
   binary operators that is the machine's operand rule. The cases it settles by

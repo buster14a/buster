@@ -31,6 +31,10 @@
 // that token (CAstTypeAnswer.replay_*), and c_parse_expression_tree_query makes
 // exactly the machine's task: the memo probe and, on a miss, the string leaf.
 // For the token alone the replay's row is the answer (C_AST_TYPE_STRING).
+// A query of a `.` or `->` alone over an accepted base and a const or
+// volatile aggregate is the other replay: the machine's member search and
+// its append of the member's qualified copy, whose row is the answer
+// (c_ast_types_decline).
 //
 // Ownership and lifetime. A caller that built the tree (the driver's
 // -fc-ast-pilot) passes it in CParserResult.ast; c_analyze_semantics_core puts
@@ -117,7 +121,8 @@
 //                does, over a base of a kind listed here before CALL (the
 //                machine types any other base in its leaf); declined when the
 //                aggregate is qualified, because the machine then appends a
-//                qualified copy of the member type.
+//                qualified copy of the member type. A query of that node
+//                alone replays the append (c_ast_types_decline).
 //   INDEX        an array or pointer base with an integer index, as the
 //                machine's subscript operation; declined for a qualified array
 //                (a qualified element row), a vector base and the reversed
@@ -200,6 +205,8 @@
 //   c_ast_types_compound_literal,
 //   c_ast_types_address
 //   c_ast_types_locate, c_ast_types_answer       query lookup and the decision
+//   c_ast_types_decline                          declines, and the qualified
+//                                                member replay, out of line
 //   c_ast_types_lookups_agree                    query-scope name checks
 //   c_ast_types_publish                          machine state after an answer
 //   c_ast_types_verify_*, c_test_*               the differential (tests builds),
