@@ -220,6 +220,14 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12,
     OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12,
     OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL,
+    // ARM64_RELOC_GOT_LOAD_PAGE21 (5) and ARM64_RELOC_GOT_LOAD_PAGEOFF12 (6):
+    // `adrp Xn` of the page holding the symbol's GOT slot and the 64-bit
+    // `ldr Xt, [Xn, #lo12]` of that slot. Darwin reaches every symbol a
+    // translation unit does not define this way; a direct page pair to a
+    // dylib symbol has no meaning to a platform linker. A linker that binds
+    // the symbol in the same image relaxes the pair to ADRP/ADD of the symbol.
+    OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21,
+    OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
