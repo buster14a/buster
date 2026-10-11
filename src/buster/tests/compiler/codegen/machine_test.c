@@ -5,6 +5,7 @@
 // machine_test_a64_atomic_pair_updates pins pair-update payloads, clobbers,
 // both frontend forms, small/large frame expansion and the direct CAS oracle.
 // machine_test_a64_large_aggregate_copy covers pointer/frame copies beyond imm12.
+// machine_test_x64_narrow_call_results checks ABI-width RAX captures.
 // machine_test_boolean_i128_cast checks Boolean widening and its strict IR contract.
 // machine_test_frame_capacity guards checked placement and capacity diagnostics.
 // machine_test_sparse_local_state compares sparse and row-based local discovery.
@@ -4138,6 +4139,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_disconnected_dominance(UnitTestA
     }
     return result;
 }
+
+#include <buster/tests/compiler/codegen/x64_narrow_call_result_test_internal.h>
 
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_boolean_i128_cast(UnitTestArguments* arguments)
 {
@@ -10412,6 +10415,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_frame_address_rematerialization);
     BUSTER_TEST_FIXTURE(arguments, machine_test_recreated_edge_sources);
     BUSTER_TEST_FIXTURE(arguments, machine_test_boolean_i128_cast);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_narrow_call_results);
     BUSTER_TEST_FIXTURE(arguments, machine_test_i128_block_parameters);
     BUSTER_TEST_FIXTURE(arguments, machine_test_pointer_block_parameters);
     BUSTER_TEST_FIXTURE(arguments, machine_test_parameter_edge_split);
