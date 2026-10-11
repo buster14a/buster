@@ -859,6 +859,16 @@ class WorkflowPolicyTests(unittest.TestCase):
                       publish)
         self.assertIn("native_retirement_integration.py catch-up-main", publish)
         self.assertIn('test "$pull_remote" = "$head"', publish)
+        # A lease failure is main supersession only when main_admissible
+        # rejects the live base; an admissible catch-up movement exits 1.
+        lease_failure = publish.split('--force-with-lease="refs/heads/$head_ref:$head"', 1)[1]
+        lease_failure = lease_failure.split("\n          fi\n", 1)[0]
+        self.assertIn('main_admissible "$current_base" || lease_status=$?', lease_failure)
+        self.assertLess(lease_failure.index('main_admissible "$current_base"'),
+                        lease_failure.index("exit 75"))
+        self.assertIn('if [[ "$lease_status" == 75 ]]; then', lease_failure)
+        self.assertEqual(lease_failure.count("exit 75"), 1)
+        self.assertTrue(lease_failure.rstrip().endswith("exit 1"))
         self.assertLess(publish.index("Native retirement trusted integration"),
                         publish.index('--force-with-lease="refs/heads/$head_ref:$head"'))
         self.assertNotIn('"$commit:refs/heads/main"', publish)
