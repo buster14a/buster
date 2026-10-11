@@ -1,5 +1,8 @@
 #define _GNU_SOURCE
-/* #3180: opt-in Linux Git qualification. main owns pristine intake and the
+/* #3180: additional source-only diagnostic, not dependency-enabled qualification.
+ * Upstream COMPUTE_HEADER_DEPENDENCIES=no is explicit only in this experiment.
+ * It cannot satisfy normal depfile/incremental/header/performance acceptance.
+ * Opt-in Linux Git source census. main owns pristine intake and the
  * independent Makefile census; compiler_mode records each upstream CC action.
  * run_step owns process-group deadlines and logs. No production compiler edits.
  * This diagnostic harness does not qualify performance or the entire Git suite.
@@ -299,7 +302,7 @@ static const char* make_command(const char* self, const char* target)
 {
     return format("make -k -j2 V=1 CC=%s CFLAGS=%s NO_CURL=YesPlease NO_EXPAT=YesPlease "
         "NO_OPENSSL=YesPlease NO_TCLTK=YesPlease NO_GETTEXT=YesPlease NO_PERL=YesPlease "
-        "NO_PYTHON=YesPlease COMPUTE_HEADER_DEPENDENCIES=yes %s",
+        "NO_PYTHON=YesPlease COMPUTE_HEADER_DEPENDENCIES=no %s",
         quote(self), quote("-O0 -g -Wall"), target);
 }
 
@@ -463,6 +466,7 @@ int main(int argc, char** argv)
         char self[4096], source[4096], compiler[4096], oracle[4096], output[4096];
         if (!realpath(argv[0], self) || !realpath(argv[2], source) || !realpath(argv[3], compiler) ||
             !realpath(argv[4], oracle) || !realpath(argv[5], output)) fail("absolute existing paths");
+        puts("GIT_SOURCE_ONLY_DIAGNOSTIC: COMPUTE_HEADER_DEPENDENCIES=no; original qualification remains blocked");
         evidence = output;
         summary = fopen(format("%s/summary.tsv", evidence), "wx");
         if (!summary) fail("evidence directory must be fresh");

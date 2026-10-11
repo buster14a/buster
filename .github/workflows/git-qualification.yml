@@ -1,11 +1,14 @@
-name: Git qualification
-# Opt-in cloud correctness census; no PR/main/queue/push trigger.
+name: Git source-only diagnostic
+# Separate explicitly requested source-only diagnostic; no PR/main/queue trigger.
 on:
   workflow_dispatch:
+  push:
+    branches: [codex/3180-git-source-only-diagnostic]
+    paths: ['.github/workflows/git-qualification.yml']
 permissions:
   contents: read
 concurrency:
-  group: git-qualification-${{ github.run_id }}
+  group: git-source-only-${{ github.run_id }}
   cancel-in-progress: false
 jobs:
   native-controls:
@@ -90,7 +93,7 @@ jobs:
       - name: Build trusted compiler
         run: |
           "$RUNNER_TEMP/git-qualification-driver" build --config Release -t ide -- -j2
-      - name: Independent pristine Git Makefile census
+      - name: Explicit source-only census with depfile qualification excluded
         run: |
           "$RUNNER_TEMP/git-qualification-cc" --run "$GITHUB_WORKSPACE/external/git" "$GITHUB_WORKSPACE/build/Release/ide" "$(command -v clang)" "$RUNNER_TEMP/git-qualification"
       - name: Retain machine records
@@ -103,7 +106,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: git-qualification-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: git-source-only-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/git-qualification/*.log
             ${{ runner.temp }}/git-qualification/*.tsv
