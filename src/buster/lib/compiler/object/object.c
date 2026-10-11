@@ -7571,9 +7571,20 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                             {
                                 read_ok = false;
                             }
-                            kind = string_equal(referenced->name, S8("__tls_index")) ? OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 : OBJECT_RELOCATION_X86_64_PC32;
+                            // Only an undefined global DATA _tls_index names the
+                            // loader's slot; a defined one (the CRT's own
+                            // tlssup) stays an ordinary PC32 target.
+                            bool tls_index_name = string_equal(referenced->name, OBJECT_COFF_TLS_INDEX_NAME);
+                            bool tls_index_symbol = tls_index_name && referenced->section == OBJECT_SECTION_UNDEFINED &&
+                                                    referenced->global && referenced->kind == OBJECT_SYMBOL_DATA;
+                            kind = tls_index_symbol && relocation_type == 4 ? OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32
+                                   : tls_index_symbol                       ? OBJECT_RELOCATION_COUNT
+                                                                            : OBJECT_RELOCATION_X86_64_PC32;
                             addend = (s64)(s32)stored - 4 - (relocation_type - 4);
-                            referenced->kind = OBJECT_SYMBOL_FUNCTION;
+                            if (!tls_index_symbol)
+                            {
+                                referenced->kind = OBJECT_SYMBOL_FUNCTION;
+                            }
                         }
                         else if (relocation_type == 0xb)
                         {
@@ -7588,7 +7599,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                     }
                     else
                     {
-                        bool tls_index_name = string_equal(referenced->name, S8("__tls_index"));
+                        bool tls_index_name = string_equal(referenced->name, OBJECT_COFF_TLS_INDEX_NAME);
                         bool tls_index_symbol = referenced->section == OBJECT_SECTION_UNDEFINED && referenced->global &&
                                                 referenced->kind == OBJECT_SYMBOL_DATA && tls_index_name;
                         kind = relocation_type == 2     ? OBJECT_RELOCATION_COFF_ADDR32NB
@@ -14284,79 +14295,75 @@ BUSTER_GLOBAL_LOCAL void object_coff_name_write(ObjectBuffer* buffer, u64 offset
     }
 }
 
-// Codegen associates all three Windows TLS address relocations with the TLS
+// Codegen associates every Windows TLS address relocation with the TLS
 // variable so the in-memory linker can resolve the variable's final offset.
-// COFF's index pair instead names the loader-provided __tls_index symbol.
-// Rewrite only the serialized view; the SECREL low relocation continues to
-// reference the variable itself.
-BUSTER_GLOBAL_LOCAL bool object_coff_bind_aarch64_tls_index(Arena* arena, ObjectFile* object, ObjectWriteStatistics* statistics)
+// COFF's index load (the x86-64 REL32 and the ARM64 ADRP/LDR pair) instead
+// names the loader-provided _tls_index symbol, as link.exe and lld-link
+// expect. Rewrite only the serialized view; the SECREL offset relocations
+// continue to reference the variable itself.
+BUSTER_GLOBAL_LOCAL bool object_coff_bind_tls_index(Arena* arena, ObjectFile* object, ObjectWriteStatistics* statistics)
 {
+    u32 pc32_count = 0;
     u32 page_count = 0;
     u32 low_count = 0;
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocationKind kind = object->relocations[index].kind;
         statistics->relocation_visits += 1;
+        pc32_count += kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32;
         page_count += kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP;
         low_count += kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12;
     }
-    if (!page_count && !low_count)
-    {
-        return true;
-    }
-    if (page_count != low_count)
-    {
-        return false;
-    }
+    bool needed = pc32_count || page_count || low_count;
+    // x86-64 loads the index with one REL32; ARM64 pairs ADRP with LDR.
+    bool valid = object->target.cpu_arch == CPU_ARCH_AARCH64 ? !pc32_count && page_count == low_count : !page_count && !low_count;
 
     u32 symbol_index = UINT32_MAX;
-    for (u32 index = 0; index < object->symbol_count; index += 1)
+    for (u32 index = 0; needed && valid && index < object->symbol_count; index += 1)
     {
         ObjectSymbol* symbol = object->symbols + index;
         statistics->symbol_visits += 1;
-        if (string_equal(symbol->name, S8("__tls_index")))
+        if (string_equal(symbol->name, OBJECT_COFF_TLS_INDEX_NAME))
         {
-            if (symbol_index != UINT32_MAX || symbol->section != OBJECT_SECTION_UNDEFINED || !symbol->global ||
-                symbol->kind != OBJECT_SYMBOL_DATA)
-            {
-                return false;
-            }
+            valid = symbol_index == UINT32_MAX && symbol->section == OBJECT_SECTION_UNDEFINED && symbol->global &&
+                    symbol->kind == OBJECT_SYMBOL_DATA;
             symbol_index = index;
         }
     }
+    valid = valid && (symbol_index != UINT32_MAX || object->symbol_count != UINT32_MAX);
 
-    if (symbol_index == UINT32_MAX && object->symbol_count == UINT32_MAX)
+    if (needed && valid)
     {
-        return false;
-    }
-    u32 output_symbol_count = object->symbol_count + (symbol_index == UINT32_MAX);
-    ObjectSymbol* symbols = arena_allocate(arena, ObjectSymbol, output_symbol_count);
-    memcpy(symbols, object->symbols, (u64)object->symbol_count * sizeof(*symbols));
-    if (symbol_index == UINT32_MAX)
-    {
-        symbol_index = object->symbol_count;
-        symbols[symbol_index] = (ObjectSymbol){
-            .name = S8("__tls_index"),
-            .section = OBJECT_SECTION_UNDEFINED,
-            .kind = OBJECT_SYMBOL_DATA,
-            .global = true,
-        };
-    }
-    ObjectRelocation* relocations = arena_allocate(arena, ObjectRelocation, object->relocation_count);
-    memcpy(relocations, object->relocations, (u64)object->relocation_count * sizeof(*relocations));
-    for (u32 index = 0; index < object->relocation_count; index += 1)
-    {
-        ObjectRelocationKind kind = relocations[index].kind;
-        statistics->relocation_visits += 1;
-        if (kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12)
+        u32 output_symbol_count = object->symbol_count + (symbol_index == UINT32_MAX);
+        ObjectSymbol* symbols = arena_allocate(arena, ObjectSymbol, output_symbol_count);
+        memcpy(symbols, object->symbols, (u64)object->symbol_count * sizeof(*symbols));
+        if (symbol_index == UINT32_MAX)
         {
-            relocations[index].symbol = symbol_index;
+            symbol_index = object->symbol_count;
+            symbols[symbol_index] = (ObjectSymbol){
+                .name = OBJECT_COFF_TLS_INDEX_NAME,
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_DATA,
+                .global = true,
+            };
         }
+        ObjectRelocation* relocations = arena_allocate(arena, ObjectRelocation, object->relocation_count);
+        memcpy(relocations, object->relocations, (u64)object->relocation_count * sizeof(*relocations));
+        for (u32 index = 0; index < object->relocation_count; index += 1)
+        {
+            ObjectRelocationKind kind = relocations[index].kind;
+            statistics->relocation_visits += 1;
+            if (kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
+                kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12)
+            {
+                relocations[index].symbol = symbol_index;
+            }
+        }
+        object->symbols = symbols;
+        object->symbol_count = output_symbol_count;
+        object->relocations = relocations;
     }
-    object->symbols = symbols;
-    object->symbol_count = output_symbol_count;
-    object->relocations = relocations;
-    return true;
+    return !needed || valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_coff_section_alignment_characteristics(ObjectSection* section, u32* characteristics)
@@ -14651,7 +14658,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
         if (split && object_writer_32_capacity(&split_object, OBJECT_FORMAT_COFF, &capacity, statistics) &&
             object_writer_32_arena_fits(arena, &split_object, OBJECT_FORMAT_COFF, capacity))
         {
-            bool tls_bound = split_object.target.cpu_arch != CPU_ARCH_AARCH64 || object_coff_bind_aarch64_tls_index(arena, &split_object, statistics);
+            bool tls_bound = object_coff_bind_tls_index(arena, &split_object, statistics);
             if (!tls_bound)
             {
                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
@@ -15197,7 +15204,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
                               source->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12;
             if (format != OBJECT_FORMAT_COFF || object->target.cpu_arch != CPU_ARCH_AARCH64 || (source->offset & 3) ||
                 (source->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 &&
-                 string_equal(object->symbols[source->symbol].name, S8("__tls_index"))) ||
+                 string_equal(object->symbols[source->symbol].name, OBJECT_COFF_TLS_INDEX_NAME)) ||
                 object->sections[source->section].alignment < 4 ||
                 (tls_offset ? !object_aarch64_pe_tls_offset_addend_encode(source->kind, word, source->addend, &encoded)
                             : !object_aarch64_pe_page_addend_encode(page_kind, word, source->addend, &encoded)))
@@ -15225,7 +15232,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
             u32 encoded = 0;
             memcpy(&word, object->sections[source->section].data.pointer + source->offset, sizeof(word));
             if (format != OBJECT_FORMAT_COFF || object->target.cpu_arch != CPU_ARCH_AARCH64 || (source->offset & 3) ||
-                string_equal(object->symbols[source->symbol].name, S8("__tls_index")) ||
+                string_equal(object->symbols[source->symbol].name, OBJECT_COFF_TLS_INDEX_NAME) ||
                 object->sections[source->section].alignment < 4 ||
                 !object_aarch64_pe_page_addend_encode(source->kind, word, source->addend, &encoded))
             {
