@@ -99,9 +99,12 @@ class ConfigureEvidenceTests(unittest.TestCase):
             b"# ninja log v7\n"
             b"0\t40\t1700000000\ta.c.obj\thash-first\n"
             b"0\t7\t1700000001\ta.c.obj\thash-last\n"
+            b"not a ninja edge
+"
         )
         result = evidence.summarize_ninja_log(data)
         self.assertEqual(result["edges"], 1)
+        self.assertEqual(result["malformed_lines"], 1)
         self.assertEqual(result["edge_duration_sum_ms"], 7)
         self.assertEqual(result["all_edges"],
                          [{"output": "a.c.obj", "start_ms": 0, "end_ms": 7, "duration_ms": 7}])
