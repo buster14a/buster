@@ -25,7 +25,7 @@ jobs:
       - name: Checkout exact repair source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 5c9fa1af208f9a6c0fbcda6605bfc5c7f5de71df
+          ref: 868ae5e708eeb7eee277f9dc17fe59f71aabed51
           path: candidate
           fetch-depth: 0
           persist-credentials: false
