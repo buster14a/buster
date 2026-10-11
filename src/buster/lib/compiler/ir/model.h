@@ -486,6 +486,9 @@ struct IrSymbol
     // has_owner_function is set; the link name does not depend on it.
     bool has_owner_function;
     IrSymbolId owner_function;
+    // Optimizer directives merged from compatible function declarations.
+    bool always_inline;
+    bool noinline;
 };
 
 // One symbol that is a second name for another: __attribute__((alias("t"))).
