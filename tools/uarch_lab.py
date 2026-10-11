@@ -2977,7 +2977,10 @@ def prepare_variant(lab, warmups):
         if status != 0:
             raise RuntimeError("warm-up failed: " + err.strip()[-400:])
         print("[compare] %s warm-up %.2f s" % (lab.meta["config"]["role"], lab.last_elapsed), flush=True)
-    shutil.copyfile(out, os.path.join(lab.output, "reference.exe"))
+    reference = os.path.join(lab.output, "reference.exe")
+    shutil.copyfile(out, reference)
+    # Stage-two self-hosting executes this exact output; retain its permissions.
+    shutil.copymode(out, reference)
     if lab.transcripts:
         shutil.copyfile(out + ".diagnostics", os.path.join(lab.output, "reference.diagnostics"))
 

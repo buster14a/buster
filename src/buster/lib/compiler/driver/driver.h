@@ -6,8 +6,10 @@
 // artifacts), and compiler_driver_metrics_format renders the opt-in per-input
 // records (CompilerDriverInputResult, requested by collect_input_metrics /
 // -fmetrics-out) that a batched multi-input invocation publishes in input
-// order. compiler_prewarm / compiler_parallel_prewarm prepare shared tables
-// before lanes run. driver.c owns the implementation and its layout map.
+// order. The embedding facade supplies input_source and retain_object for one
+// in-memory C input without publishing an object file. compiler_prewarm /
+// compiler_parallel_prewarm prepare shared tables before lanes run. driver.c
+// owns the implementation and its layout map.
 
 #include <buster/lib/compiler/diagnostic.h>
 #include <buster/lib/compiler/assembly/assembly_unit.h>
@@ -210,6 +212,10 @@ struct CompilerDriverInvocation
     String8* linker_arguments;
     String8* gpu_arguments;
     String8 output_path;
+    // -MF writes the depfile here; otherwise it is derived from the object path.
+    String8 dependency_path;
+    // Ordered, space-joined -MT/-MQ targets; empty uses an -MQ-quoted object path.
+    String8 dependency_targets;
     String8 entry_symbol;
     String8 sysroot;
     // Source text of the `-` input. A parsed command line names it with the
@@ -217,6 +223,13 @@ struct CompilerDriverInvocation
     // and embedding callers supply it themselves. A null pointer means it was
     // not supplied; an empty translation unit has a nonnull pointer.
     String8 standard_input;
+    // API-only in-memory C input. When non-null, input_paths[0] names the
+    // virtual source path for diagnostics, __FILE__, and quoted includes; it
+    // is not opened. The source has no filesystem identity.
+    String8 input_source;
+    // API-only: retain the single -c object's ObjectFile in the result and
+    // suppress writing an object file.
+    bool retain_object;
     // Where to write the source measurement as key=value text. `-v` prints the
     // same numbers as a table for a human; this is the form another program
     // reads, so a build driver can divide its own instruction count by them.
@@ -229,6 +242,11 @@ struct CompilerDriverInvocation
     // other preprocessed count is still gathered. The cc command sets it when
     // it prints neither report.
     bool omit_spelled_bytes;
+    // API-only (`ide run`): with COMPILER_DRIVER_ACTION_LINK, stop after
+    // link_objects on either the single-unit or multi-input path and return
+    // the merged in-memory object in CompilerDriverResult.object; do not look
+    // up dynamic libraries, write an executable or create an output file.
+    bool retain_linked_object;
     // `-dM`: with -E, print the macros defined at the end of preprocessing as
     // `#define` lines instead of the preprocessed text. Ignored without -E.
     bool dump_macros;
@@ -285,6 +303,11 @@ struct CompilerDriverInvocation
     CompilerDriverError error;
     AssemblySyntax assembly_syntax;
     bool emit_llvm_bitcode;
+    // -MD/-MMD enable depfile emission; the last one selects system filtering.
+    bool dependency_file;
+    bool dependency_exclude_system;
+    // -MP emits phony rules for header prerequisites.
+    bool dependency_phony_targets;
     bool verbose;
     // -w: the driver publishes no warning text or warning records.
     bool suppress_warnings;
