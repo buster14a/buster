@@ -38,6 +38,7 @@
 //   native_retirement_census_main                frozen native coverage inventory
 //   gpu_tools_main                               real GPU toolchain acceptance
 //   uefi_boot_*                                 pinned firmware boot gate
+//   tools/external_projects.c                   main-only project routing and records
 //   tools/ci_no_code.c                          conservative no-code admission plan
 //   tools/source_size.c                         source-size report and ratchet
 //   tools/ci_unit_tests.c                       isolated test-module partitions
@@ -157,6 +158,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_UEFI,
     BUILD_COMMAND_SOURCE_SIZE,
     BUILD_COMMAND_CI_NO_CODE,
+    BUILD_COMMAND_EXTERNAL_PROJECTS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST,
@@ -25476,6 +25478,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_TEST_UEFI:
         case BUILD_COMMAND_SOURCE_SIZE:
         case BUILD_COMMAND_CI_NO_CODE:
+        case BUILD_COMMAND_EXTERNAL_PROJECTS:
         case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY:
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
         {
@@ -39432,6 +39435,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 #include "tools/compiler_closure.c"
 #include "tools/source_size.c"
 #include "tools/ci_no_code.c"
+#include "tools/external_projects.c"
 #include "tools/ci_unit_tests.c"
 #include "tools/clang_suite.c"
 #include "tools/compiler_profile_qualification.c"
@@ -39502,6 +39506,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_UEFI] = S8_INITIALIZER("test_uefi"),
         [BUILD_COMMAND_SOURCE_SIZE] = S8_INITIALIZER("source_size"),
         [BUILD_COMMAND_CI_NO_CODE] = S8_INITIALIZER("ci_no_code"),
+        [BUILD_COMMAND_EXTERNAL_PROJECTS] = S8_INITIALIZER("external_projects"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
         [BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST] = S8_INITIALIZER("coverage_manifest_self_test"),
@@ -39611,6 +39616,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_TEST_UEFI: result = uefi_boot_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_SOURCE_SIZE: result = source_size_main(arena, owned_arguments); break;
             case BUILD_COMMAND_CI_NO_CODE: result = ci_no_code_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_EXTERNAL_PROJECTS: result = external_projects_main(arena, owned_arguments); break;
             case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY: result = binary_coverage_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_GPU_TOOLCHAINS: result = gpu_tools_main(arena, owned_arguments); break;
             default: BUSTER_UNREACHABLE(); break;
@@ -40840,6 +40846,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_TEST_UEFI:
         case BUILD_COMMAND_SOURCE_SIZE:
         case BUILD_COMMAND_CI_NO_CODE:
+        case BUILD_COMMAND_EXTERNAL_PROJECTS:
         {
             // Executed before the ordinary build-option parser.
         }
