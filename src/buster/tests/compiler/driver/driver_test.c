@@ -767,10 +767,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
 }
 
 // A fresh `cc` process registers the closed x86-64 shape set and resolves
-// each shape on its first serial lookup; this process resolves every shape
-// before compiling.  The two must write the same object bytes for code whose
+// each shape on its first serial lookup, and encodes each variable-memory
+// cell on its first read; this process prepares every shape and cell before
+// compiling.  The two must write the same object bytes for code whose
 // expansions reach the shape bridge (x87, division, atomics, conversions and
-// flag materialization), under every machine allocator.  -fno-machine-fallback turns
+// flag materialization) and for pointer loads and stores at zero, disp8 and
+// disp32 offsets, under every machine allocator.  -fno-machine-fallback turns
 // an unresolved shape into a failed compile instead of a silent canonical
 // fallback.  A child running the opt-in unit gang must resolve every shape
 // before its workers start, or its first worker lookup aborts; its linked
@@ -781,7 +783,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lazy_x86_shapes(UnitTest
 #if !BUSTER_ANDROID && !BUSTER_IOS
     Arena* arena = arguments->arena;
     u64 position = arena->position;
-    machine_x86_64_exact_prewarm_all_shapes();
+    machine_x86_64_exact_prewarm_all();
     String8 input = buster_test_temporary_path(arena, S8("lazy-x86-shapes"), S8(".c"));
     String8 local_output = buster_test_temporary_path(arena, S8("lazy-x86-shapes-local"), S8(".o"));
     String8 child_output = buster_test_temporary_path(arena, S8("lazy-x86-shapes-child"), S8(".o"));
@@ -798,7 +800,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lazy_x86_shapes(UnitTest
                         "{ __atomic_compare_exchange_n(p, &e, d, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return e; }\n"
                         "float integer_to_float(int x) { return (float)x; }\n"
                         "int double_less(double a, double b) { return a < b; }\n"
-                        "unsigned char nonzero(unsigned x) { return (unsigned char)(x != 0); }\n");
+                        "unsigned char nonzero(unsigned x) { return (unsigned char)(x != 0); }\n"
+                        "struct fields { char c; short s; int i; i64 l; char pad[300]; i64 far; };\n"
+                        "i64 copy_fields(struct fields* from, struct fields* to)\n"
+                        "{ to->c = from->c; to->s = from->s; to->i = from->i; to->far = from->l + from->far; return to->l + from->c; }\n");
     ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
                                    .use_process_environment = 1, .search_path = 1};
     // Only the machine allocators reach the shape bridge; the canonical

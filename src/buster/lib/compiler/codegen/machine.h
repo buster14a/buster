@@ -1870,7 +1870,7 @@ BUSTER_F_DECL MachineX64CanonicalAuthoritySite const* machine_x86_64_canonical_a
 BUSTER_F_DECL u32 machine_x86_64_neutral_patch_site_count(void);
 BUSTER_F_DECL MachineX64NeutralPatchSite const* machine_x86_64_neutral_patch_site(u32 ordinal);
 BUSTER_F_DECL void machine_x86_64_exact_prewarm(void);
-BUSTER_F_DECL void machine_x86_64_exact_prewarm_all_shapes(void);
+BUSTER_F_DECL void machine_x86_64_exact_prewarm_all(void);
 BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode);
 BUSTER_F_DECL MachineMemoryEffect machine_opcode_memory_effect(MachineOpcodeInfo const* info);
 BUSTER_F_DECL bool machine_opcode_is_memory(MachineOpcodeInfo const* info);
@@ -2178,6 +2178,10 @@ struct MachineX64ExactMapAudit
     u32 memory_base_tables;
     u32 displacement_patch_tables;
     u32 variable_memory_encoding_tables;
+    // Variable-memory cells encoded once machine_x86_64_exact_prewarm_all
+    // has run, and how many of them the metadata authority refused.
+    u32 variable_memory_encoded_cells;
+    u32 variable_memory_failed_cells;
     // Fixed-shape template rows allotted by prewarm, and how many of them
     // the metadata authority refused (those rows keep their metadata lane).
     u32 fixed_template_rows;

@@ -11449,6 +11449,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, exact_map.memory_base_tables == 8);
     BUSTER_TEST(arguments, exact_map.displacement_patch_tables == 8);
     BUSTER_TEST(arguments, exact_map.variable_memory_encoding_tables == 9);
+    // Prewarm encodes cells on first read; the complete form must leave
+    // every cell of every table encoded, and the authority must refuse none.
+    BUSTER_TEST(arguments, exact_map.variable_memory_encoded_cells == 9u * 3u * 256u);
+    BUSTER_TEST(arguments, exact_map.variable_memory_failed_cells == 0);
     // Every fixed-shape template row prewarm allots must be one the
     // metadata authority accepted; a refused row would silently keep the
     // slower metadata lane for its shape. The vpermt2d variant of the

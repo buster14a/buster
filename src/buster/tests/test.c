@@ -3417,7 +3417,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
         // The metadata and machine suites exercise x86 emission on every host,
         // including AArch64 CI. Prepare the exact-plan tables, with every shape
         // resolved, before their lanes.
-        machine_x86_64_exact_prewarm_all_shapes();
+        machine_x86_64_exact_prewarm_all();
         x86_64_metadata_test_prewarm_symbolic_immediate_plans();
         // Every lane in the gang below is an aarch64 suite, and each one queries
         // canonical form validity per encode and per decode.
