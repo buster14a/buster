@@ -255,7 +255,7 @@ Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `benc
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
 `test_timing_summary_self_test`, `musl_directory_self_test`, `generate_guard_self_test`,
-`compiler_discovery_self_test`,
+`compiler_discovery_self_test`, `compatibility_ide_selection_self_test`,
 `import_assembly_metadata`, `import_arm_a64_metadata`,
 `import_arm_a64_sysregs`, `test_self_host`, `test_mode_matrix`, `test_differential`,
 `native_retirement_census`,
@@ -309,6 +309,13 @@ and only after process-tree cleanup is proven; compiler exits, malformed output,
 identity rejection and cleanup uncertainty remain single-attempt failures.
 macOS also reports the actual unversioned `gcc` identity, independently of the
 selected versioned GCC row.
+
+`compatibility_ide_selection_self_test` checks the shared compiler selection
+of the compatibility harnesses (`compat_ide_select`) against inert files:
+every combination of Release, Debug and flat executables in its own root,
+crossed with an omitted, Debug and Release request. It runs in the
+combination-matrix preflight; see the
+[compatibility index](compatibility.md#compiler-selection) for the policy.
 
 `musl_directory_self_test` checks complete, unique directory inventories through
 two capacity growths, opposite creation orders, manifest sorting and architecture
