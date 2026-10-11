@@ -308,6 +308,10 @@ PRODUCTION_PROFILE_PROFILE = {
 COMPILER_PROBES_REQUEST_LINE = "profile: compiler-probes-v1"
 COMPILER_PROBES_SCHEMA = "buster-compiler-probes-v1"
 COMPILER_PROBES_ROLES = ("baseline", "candidate")
+# A timed sample cannot exceed the harness's per-invocation timeout; bounding it here keeps
+# every median and ratio finite before any float arithmetic.
+COMPILER_PROBES_INVOCATION_TIMEOUT_SECONDS = 60
+COMPILER_PROBES_SAMPLE_LIMIT_NS = COMPILER_PROBES_INVOCATION_TIMEOUT_SECONDS * 1_000_000_000
 _PROBE_DEFINES = ["-DBUSTER_INCLUDE_TESTS=0", "-DBUSTER_LINK_LIBC=1", "-DBUSTER_OPTIMIZE=1", "-DBUSTER_SINGLE_THREADED=1"]
 _PROBE_LANGUAGE = ["-Isrc", "-fwrapv", "-fno-strict-aliasing", "-funsigned-char"]
 _PROBE_LIBRARY = ["src/buster/lib/arena.c", "src/buster/lib/os.c", "src/buster/lib/integer.c", "src/buster/lib/string.c",
@@ -767,7 +771,7 @@ def _compiler_probes_invocation(value: object, definition: dict, case: dict, rep
     check = value.get("check") if isinstance(value, dict) else None
     if isinstance(value, dict) and set(value) == {"exit", "samples", "check"} and type(value["exit"]) is int and \
             value["exit"] == 0 and isinstance(value["samples"], list) and len(value["samples"]) == repeats and \
-            all(type(sample) is int and sample > 0 for sample in value["samples"]) and \
+            all(type(sample) is int and 0 < sample <= COMPILER_PROBES_SAMPLE_LIMIT_NS for sample in value["samples"]) and \
             isinstance(check, dict) and set(check) == set(definition["check_fields"]) and \
             all(isinstance(check[key], str) and re.fullmatch(pattern, check[key])
                 for key, pattern in definition["check_fields"].items()) and \

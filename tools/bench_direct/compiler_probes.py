@@ -28,14 +28,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from compiler_receipt import (COMPILER_PROBES_PROFILE, COMPILER_PROBES_ROLES, COMPILER_PROBES_SCHEMA,
-                              compiler_probes_digest)
+from compiler_receipt import (COMPILER_PROBES_INVOCATION_TIMEOUT_SECONDS, COMPILER_PROBES_PROFILE,
+                              COMPILER_PROBES_ROLES, COMPILER_PROBES_SCHEMA, compiler_probes_digest)
 
 GIT_TIMEOUT_SECONDS = 600
 # Measured: one probe build (machine.c dominates) took 35-38 s on a hosted 2.8 GHz Xeon.
 BUILD_TIMEOUT_SECONDS = 600
 # The slowest case (65536-leaf schedule) took 0.39 s per invocation on the same host.
-INVOCATION_TIMEOUT_SECONDS = 60
+INVOCATION_TIMEOUT_SECONDS = COMPILER_PROBES_INVOCATION_TIMEOUT_SECONDS
 OUTPUT_LIMIT = 1024 * 1024
 
 

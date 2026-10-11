@@ -4124,6 +4124,12 @@ class CompilerProbesTest(unittest.TestCase):
             "timed-out invocation": (invocation(lambda value: value.update(exit=124)), {}),
             "partial samples": (invocation(lambda value: value["samples"].pop()), {}),
             "zero sample": (invocation(lambda value: value["samples"].__setitem__(0, 0)), {}),
+            "overflowing pair samples": (invocation(lambda value: value.update(samples=[10 ** 309] * 11)), {}),
+            "overflowing warmup samples": (changed(lambda value: value["cases"][9]["warmups"]["baseline"][1].update(
+                samples=[10 ** 309] * 11)), {}),
+            "sample past the invocation timeout": (invocation(lambda value: value["samples"].__setitem__(
+                5, compiler_receipt.COMPILER_PROBES_SAMPLE_LIMIT_NS + 1)), {}),
+            "float sample": (invocation(lambda value: value["samples"].__setitem__(0, 1.5)), {}),
             "unparsed self-check": (invocation(lambda value: value.update(check=None)), {}),
             "other probe size": (invocation(lambda value: value["check"].update(blocks="512")), {}),
             "self-check reduced to its size": (changed(lambda value: [
@@ -4152,6 +4158,10 @@ class CompilerProbesTest(unittest.TestCase):
         for name, (value, options) in cases.items():
             with self.subTest(case=name):
                 self.assertTrue(self.validate(value, **options), name)
+                # Malformed evidence is refused with reasons, never raised.
+                self.assertIsInstance(compiler_receipt.compiler_probes_digest(value), list)
+        self.assertEqual(compiler_probes.INVOCATION_TIMEOUT_SECONDS * 10 ** 9,
+                         compiler_receipt.COMPILER_PROBES_SAMPLE_LIMIT_NS)
         self.assertEqual(compiler_receipt.compiler_probes_interval([float(item) for item in range(30)]), (9.0, 20.0))
 
     def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
@@ -4233,7 +4243,16 @@ class CompilerProbesTest(unittest.TestCase):
             if probe == "line_mark":
                 check.update(mode="remap", batch="999")
 
+        def overflowed(locate) -> tuple:
+            """An artifact with one invocation's samples past any finite float, cells re-derived from it."""
+            changed_summary = copy.deepcopy(bundle["summary"])
+            locate(changed_summary["cases"][4]).update(samples=[10 ** 309] * 11)
+            changed_summary["results"] = compiler_receipt.compiler_probes_digest(changed_summary)
+            return dict(record, cells=compiler_receipt.compiler_probes_digest(changed_summary)), changed_summary
+
         for name, (changed_record, changed_summary, drop) in {
+            "overflowing warmup samples": (*overflowed(lambda case: case["warmups"]["candidate"][0]), False),
+            "overflowing timed pair samples": (*overflowed(lambda case: case["pairs"][7]["baseline"]), False),
             "self-checks reduced to their size": (*consistent(reduce), False),
             "remapped line-mark": (*consistent(remap), False),
             "missing member": (record, None, True),

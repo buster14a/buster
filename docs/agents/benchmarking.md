@@ -990,8 +990,9 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
      itself, or a missing probe source hash;
    - a missing, extra or reordered case, or changed case arguments;
    - fewer than two warmups or 30 pairs, or a pair out of the fixed order;
-   - an invocation that failed, timed out or has partial or non-positive
-     samples, a self-check field that is missing, extra or malformed, a
+   - an invocation that failed, timed out or has partial samples, or a sample
+     that is not an integer from 1 ns to the 60-second invocation timeout
+     (checked before any median or ratio arithmetic), a self-check field that is missing, extra or malformed, a
      workload marker other than the case's, or a self-check that changes;
    - stated results that differ from those re-derived from the raw samples.
 
