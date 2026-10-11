@@ -942,10 +942,14 @@ active_launch_pipe_dir=
 cleanup() {
     local status=$?
     local prior_status=$status
+    # Cancellation may arrive after a normal failure already entered EXIT
+    # cleanup. Keep its status while the owned bounded shutdown finishes.
+    trap 'status=130; prior_status=130' INT
+    trap 'status=143; prior_status=143' TERM
+    trap - EXIT
     local shutdown_status
     local shutdown_outcome=unavailable
     local cleanup_summary
-    trap - EXIT INT TERM
     if [[ -n ${active_launch_stream_pid:-}${active_launch_reader_pid:-}${active_launch_pipe_dir:-} ]]; then
         stop_launch_stream "$active_launch_stream_pid"
         active_launch_stream_pid=

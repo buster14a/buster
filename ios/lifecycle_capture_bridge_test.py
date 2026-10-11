@@ -553,6 +553,43 @@ fi
                     self.assertTrue(destination.is_symlink())
                     self.assertEqual(destination.readlink(), sentinel)
 
+    def test_extracted_cleanup_cancellation_joins_shutdown_and_preserves_signal_status(self):
+        source = LAUNCHER.read_text()
+        start = source.index("cleanup() {")
+        cleanup = source[start:source.index("\n}", start) + 2]
+        for signum, expected in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
+            for initial, shutdown in ((0, 0), (1, 0), (0, 9), (1, 9)):
+                with self.subTest(signal=signum, initial_status=initial, shutdown_status=shutdown):
+                    state = self.root / ("cleanup-%d-%d-%d" % (signum, initial, shutdown))
+                    state.mkdir()
+                    prefix = state / "console"
+                    script = state / "cleanup.sh"
+                    script.write_text("#!/bin/bash\nset -euo pipefail\n"
+                        "udid=00000000-0000-0000-0000-000000000002\n"
+                        "console_log_base=" + shlex.quote(str(prefix)) + "\n"
+                        "shutdown_timeout_seconds=1\nshutdown_postcondition_eligible=0\n"
+                        "shutdown_postcondition_probe_status=not-run\n"
+                        "shutdown_postcondition_parser_status=not-run\n"
+                        "shutdown_postcondition_state=unavailable\nshutdown_disposition=not-attempted\n"
+                        "adopt_pending_create_identity() { :; }\n"
+                        "run_lifecycle_phase() {\n"
+                        '    [[ $1 == shutdown && $6 == xcrun && $7 == simctl && $8 == shutdown && $9 == "$udid" ]]\n'
+                        "    kill -" + str(signum) + ' "$$"\n'
+                        "    kill -" + str(signum) + ' "$$"\n'
+                        '    printf "owned shutdown completed\\n" >"$console_log_base.shutdown-completed"\n'
+                        "    last_lifecycle_outcome=" + ("success" if shutdown == 0 else "command-failure") + "\n"
+                        "    return " + str(shutdown) + "\n"
+                        "}\n" + cleanup + "\ntrap cleanup EXIT\nexit " + str(initial) + "\n")
+                    result = subprocess.run(["/bin/bash", str(script)], capture_output=True, timeout=3)
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    self.assertEqual(Path(str(prefix) + ".shutdown-completed").read_text(),
+                                     "owned shutdown completed\n")
+                    receipt = Path(str(prefix) + ".shutdown.status.log").read_text()
+                    self.assertIn("prior_status=%d" % expected, receipt)
+                    self.assertIn("result_status=%d" % expected, receipt)
+                    self.assertIn("shutdown_status=%d shutdown_outcome=%s" %
+                                  (shutdown, "success" if shutdown == 0 else "command-failure"), receipt)
+
     def test_extracted_phase_malformed_named_fields_refuse_without_shell_arithmetic_failure(self):
         state = self.root / "phase-malformed-receipt"
         state.mkdir()
