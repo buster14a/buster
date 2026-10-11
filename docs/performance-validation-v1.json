@@ -12,7 +12,7 @@
       "id": "build:bench_throughput",
       "kind": "build-command",
       "validation": "performance",
-      "measures": "native compiler throughput corpus, paired baseline/candidate: the predeclared default CI corpus runs as profile throughput-corpus-v2 across FAST and QUALITY in every pull-request comparison (custom and real-source workload selections stay diagnostic); the scale subcommand's multi-TU -fcompile-jobs series (#424) runs as profile scaling-v1 inside the pull-request comparison when benchmarks/9700x/scaling.request changes",
+      "measures": "native compiler throughput corpus, paired baseline/candidate: the predeclared default CI corpus runs as profile throughput-corpus-v2 across FAST and QUALITY in every pull-request comparison (custom workload selections stay diagnostic; real-source descriptors have their own fixed profile row); the scale subcommand's multi-TU -fcompile-jobs series (#424) runs as profile scaling-v1 inside the pull-request comparison when benchmarks/9700x/scaling.request changes",
       "zen5": {
         "route": "pull-compare",
         "status": "covered",
@@ -26,6 +26,17 @@
       "measures": "the same throughput-corpus-v2 FAST/QUALITY run for each commit after it lands on main",
       "zen5": {
         "route": "main-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
+      "id": "build:bench_throughput@throughput-real-source",
+      "kind": "build-command",
+      "validation": "performance",
+      "measures": "#2761 fixed throughput-real-source-v1 on an owner request line: the base revision's bench_throughput run --real-source times the pinned cJSON 1.7.19, Lua 5.4.8 and SQLite 3.53.4 version-2 descriptors' compile_link_argv to a linked executable on the matched baseline/candidate binaries, FAST and QUALITY, two warmups and two rounds of 20 A/B pairs, on staged trees bound to pinned archive, descriptor and input-tree hashes; report-only with the guard off",
+      "zen5": {
+        "route": "pull-compare",
         "status": "covered",
         "consumer": "tools/bench_direct/compiler_publish.py"
       }
@@ -386,8 +397,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "Hosted timing is diagnostic; a qualification claim needs a 9700X profile.",
-        "claim_route": "none"
+        "resolution": "Hosted functional admission and timing are diagnostic; a real-source throughput claim needs the fixed throughput-real-source-v1 profile on pull-compare (benchmarks/9700x/compiler-compare.request).",
+        "claim_route": "pull-compare"
       }
     },
     {

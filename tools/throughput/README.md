@@ -185,6 +185,44 @@ metadata, not performed work. This is hosted functional admission only: it does
 not enlarge the default CI corpus, run timing samples, qualify a dedicated host,
 or establish A/A or A/B performance acceptance. Those remain separate work.
 
+### Timed real-source runs
+
+`run --real-source DESCRIPTOR ROOT` (repeatable, at most four) times a
+version-2 descriptor's own `compile_link_argv` on an already staged tree:
+
+```sh
+./build.sh bench_throughput run --baseline /base/ide --candidate /candidate/ide --output build/real-source \
+  --no-guard --mode all --pairs 20 --warmups 2 --timeout 120 --cpu 2 \
+  --real-source tools/throughput/workloads/cjson-1.7.19.workload /absolute/cjson-staging \
+  --real-source tools/throughput/workloads/lua-5.4.8.workload /absolute/lua-5.4.8/src \
+  --real-source tools/throughput/workloads/sqlite-3.53.4.workload /absolute/sqlite-amalgamation-3530400
+```
+
+Each descriptor adds one job per selected allocator mode, named
+`<descriptor name>/<mode>`, after any synthetic jobs. A job is one process:
+the descriptor's frozen template expanded exactly as `admit-workload` expands
+it (`-I$ROOT`, target, CPU, direct-SSA, non-PIC, `$LINK_SOURCES`), except that
+the measured mode replaces `-fregister-allocator=$MODE`. The process compiles
+every link source and links an executable in the staged root. Before any
+timing, the harness parses each descriptor, refuses a version-1 or duplicate
+descriptor, a mode the descriptor does not declare, and any missing, changed
+or undeclared staged file (complete tree hash). After timing it checks the
+descriptor and tree again. Paired A/B timing, rounds, warmups, determinism
+checks and the raw files are the ordinary `run` contract below.
+
+Real sources replace the default synthetic corpus unless `--workload` also
+selects cases, so they require `--no-guard`: each cell reports
+`diagnostic (guard disabled)` and the run makes no pass or regression claim.
+The template is frozen, so `--flag`, `--artifact assembly`, `--pmu` and
+allocation probes are refused. `metadata.json` adds a `real_sources` array
+(descriptor path and SHA-256, staged root, input tree hash, requested
+translation-unit bytes, operation and template); its jobs record the
+descriptor as `source` and the input tree hash as `sha256`. Synthetic-only
+metadata keeps its bytes. The host still needs the descriptors' native
+dependencies, for Lua the readline headers and library. On the 9700X this
+runs as the fixed `throughput-real-source-v1` profile; see
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
 ## Shared library boundary
 
 `build.c::bench_throughput_add` constructs both executables with `shared.c`,
