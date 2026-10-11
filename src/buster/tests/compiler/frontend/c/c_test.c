@@ -1663,6 +1663,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_query_scratch_growth(UnitTestArgume
         }
         BUSTER_TEST(arguments, arena_destroy(persistent, 1));
     }
+    c_test_release_preprocess_arenas();
     return result;
 }
 
@@ -1749,6 +1750,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_local_table_zero_scratch(UnitTestAr
         }
         BUSTER_TEST(arguments, arena_destroy(persistent, 1));
     }
+    c_test_release_preprocess_arenas();
     return result;
 }
 
@@ -2075,6 +2077,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_calls_and_wide_switch(
         }
         c_test_scratch_end(temporary);
     }
+    c_test_release_preprocess_arenas();
     return result;
 }
 
@@ -6748,6 +6751,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_phase_arena_release(UnitTestArguments*
         BUSTER_TEST(arguments, arena_destroy(phase, 1));
         BUSTER_TEST(arguments, arena_destroy(arena, 1));
     }
+    c_test_release_preprocess_arenas();
     return result;
 }
 
@@ -20799,6 +20803,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_pragma_operands(UnitTestArguments
             BUSTER_TEST(arguments, seen);
         }
     }
+    c_test_release_preprocess_arenas();
     return result;
 }
 
@@ -21228,6 +21233,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_number_facts(UnitTestArguments* argume
         BUSTER_TEST(arguments, artifacts[0].binary.length == artifacts[1].binary.length &&
                                    !memcmp(artifacts[0].binary.pointer, artifacts[1].binary.pointer, artifacts[0].binary.length));
     }
+    c_test_release_preprocess_arenas();
     return result;
 }
 
@@ -21257,6 +21263,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_memo(UnitTestArguments*
     // Narrow valid fragments only: the plain, u8, escaped and empty shapes,
     // four of every eight, plus three of the final partial cycle's four.
     BUSTER_TEST(arguments, recorded == 1500 / 8 * 4 + 3);
+    c_test_release_preprocess_arenas();
     return result;
 }
 
@@ -21374,6 +21381,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_source_metrics(UnitTestArgume
     BUSTER_TEST(arguments, expansions.diagnostic_count == 0);
     BUSTER_TEST(arguments, c_preprocess_detail(expansions)->preprocessed.definitions == 2);
     BUSTER_TEST(arguments, c_preprocess_detail(expansions)->preprocessed.expansions == 2);
+    c_test_release_preprocess_arenas();
     return result;
 }
 
@@ -28415,6 +28423,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     {
         BUSTER_TEST(arguments, invalid_line.diagnostics[diagnostic_index].kind == C_DIAGNOSTIC_INVALID_LINE);
     }
+    c_test_release_preprocess_arenas();
     return result;
 }
 
@@ -28480,6 +28489,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_intern_scan_by_shape(UnitTestArguments
     BUSTER_TEST(arguments, unlabeled_identifiers == 0);
     BUSTER_TEST(arguments, labeled_others == 0);
     BUSTER_TEST(arguments, spelling_symbol_disagreements == 0);
+    c_test_release_preprocess_arenas();
     return result;
 }
 
@@ -28568,6 +28578,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_multiline_comment_conditionals(UnitTes
     CPreprocessResult nested = c_preprocess(arguments->arena, nested_source, (CPreprocessOptions){.source_path = S8("comment-rescan.c")});
     BUSTER_TEST(arguments, nested.diagnostic_count == 0 && nested.token_count == 2);
     c_test_preprocessed_token(arguments, &result, nested, 0, C_TOKEN_IDENTIFIER, S8("kept"));
+    c_test_release_preprocess_arenas();
     return result;
 }
 
@@ -29085,6 +29096,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
         }
         c_test_scratch_end(edge_temporary);
     }
+    c_test_release_preprocess_arenas();
     return result;
 }
 
@@ -30113,6 +30125,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
         BUSTER_TEST(arguments, found_pow);
         BUSTER_TEST(arguments, ir_validate_canonical_module(math_builtin_ir.program, math_module).error == IR_VALIDATION_NONE);
     }
+    c_test_release_preprocess_arenas();
     return result;
 }
 
@@ -31685,6 +31698,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
     c_test_auto_type_diagnostic(arguments, &result, S8("int f(void) { __auto_type value = 1; return 0; }\n"), C_PREPROCESS_DIALECT_C23,
                                 C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("GNU __auto_type is only available in GNU dialects"));
 
+    c_test_release_preprocess_arenas();
     return result;
 }
 
@@ -37829,6 +37843,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
         BUSTER_TEST(arguments, cast_count == 1);
         BUSTER_TEST(arguments, ir_validate_canonical_module(argument_ir.program, module).error == IR_VALIDATION_NONE);
     }
+    c_test_release_preprocess_arenas();
     return result;
 }
 
@@ -41704,6 +41719,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_lookup_work_growth(UnitTestArgum
     // about 4x the probes. A linear scan grows 16x.
     BUSTER_TEST_RAW(arguments, small != UINT64_MAX && large != UINT64_MAX && small >= SMALL && large <= small * 6 && large <= LARGE * 16,
                     string_format(arguments->arena, S8("label find probes small={u64} large={u64}"), small, large));
+    c_test_release_preprocess_arenas();
     return result;
 }
 
@@ -44049,6 +44065,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
         }
         c_test_scratch_end(temporary);
     }
+    c_test_release_preprocess_arenas();
     return result;
 }
 
@@ -61876,20 +61893,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_omitted_conditional(UnitTestArgume
 
 // Each fixture must return every reservation it made and never hold more than
 // C_TEST_FIXTURE_UNIT_LIMIT preprocessing units at once: each unit reserves
-// three 1 GiB arenas until it is released (GitHub #3431). The thread's arena
-// pool is drained between fixtures as well, so phase and translation-unit
-// arenas one fixture parked do not add to the next fixture's peak.
+// three 1 GiB arenas until it is released (GitHub #3431). Both readings are
+// taken inside the fixture's scope, before the scope's end releases the units
+// it left, so a unit kept alive across the fixture fails here instead of being
+// released silently; the scope still ends, and the units are still released,
+// when the check fails. The thread's arena pool is drained afterwards, so
+// phase and translation-unit arenas one fixture parked do not add to the next
+// fixture's peak.
 #define C_TEST_FIXTURE_UNIT_LIMIT 8
 #define C_FRONTEND_TEST_FIXTURE(arguments, function) \
     do \
     { \
+        TestArenaScope fixture_scope_ = buster_test_arena_begin((arguments), (arguments)->arena, S8(#function), false); \
         u64 live_ = arena_test_live_reserved_bytes(); \
         u64 units_ = c_test_preprocess_unit_peak_reset(); \
-        BUSTER_TEST_FIXTURE(arguments, function); \
-        u64 held_ = c_test_preprocess_unit_peak() - units_; \
+        UnitTestResult fixture_result_ = function(arguments); \
         u64 left_ = arena_test_live_reserved_bytes(); \
+        u64 held_ = c_test_preprocess_unit_peak() - units_; \
+        result.test_count += fixture_result_.test_count; \
+        result.succeeded_test_count += fixture_result_.succeeded_test_count; \
+        buster_test_arena_end((arguments), fixture_scope_, true); \
         BUSTER_TEST_RAW(arguments, left_ == live_ && held_ <= C_TEST_FIXTURE_UNIT_LIMIT, \
-                        string_format(arguments->arena, S8("{S8}: {u64} reserved bytes live before, {u64} after; {u64} units held at once"), \
+                        string_format((arguments)->arena, S8("{S8}: {u64} reserved bytes live before, {u64} after; {u64} units held at once"), \
                                       S8(#function), live_, left_, held_)); \
         c_test_release_preprocess_arenas(); \
         arena_pool_release_thread(); \
