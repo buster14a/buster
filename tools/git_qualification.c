@@ -242,7 +242,7 @@ static const char* make_command(const char* self, const char* target)
     return format("make -k -j2 V=1 CC=%s CFLAGS=%s NO_CURL=YesPlease NO_EXPAT=YesPlease "
         "NO_OPENSSL=YesPlease NO_TCLTK=YesPlease NO_GETTEXT=YesPlease NO_PERL=YesPlease "
         "NO_PYTHON=YesPlease COMPUTE_HEADER_DEPENDENCIES=yes %s",
-        quote(self), quote("-O0 -g -Wall -march=x86-64"), target);
+        quote(self), quote("-O0 -g -Wall"), target);
 }
 
 static int campaign(const char* self, const char* source, const char* compiler, const char* oracle)
