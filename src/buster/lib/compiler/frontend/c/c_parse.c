@@ -38456,6 +38456,9 @@ BUSTER_C_INTERNAL bool c_parse_label_address_cast_at(CParseResult* result, CPrep
     u32 open = index - 1;
     while (open > start && depth)
     {
+#if BUSTER_INCLUDE_TESTS
+        c_logical_label_type_work += 1;
+#endif
         open -= 1;
         depth += c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_RIGHT_PARENTHESIS);
         depth -= c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_PARENTHESIS);

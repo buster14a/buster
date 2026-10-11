@@ -1,5 +1,6 @@
 #include <buster/tests/compiler/frontend/c/c_test.h>
 #include <buster/lib/time.h>
+#include <stdio.h>
 #include <buster/lib/compiler/frontend/c/c_gen_internal.h>
 #include <buster/lib/compiler/frontend/c/c_parse_internal.h>
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
@@ -2254,7 +2255,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_parenthesized_logical_chains(
             CIRLowerResult lowered = c_test_lower_source(temporary.arena, (String8){.pointer = source_bytes, .length = source_length},
                                                          S8("parenthesized-logical-chain.c"), target_native, &preprocess, &parse);
             u64 ns = timestamp_ns_between(clock_start, timestamp_take());
-            printf("LOGICAL_WORK depth=%u shape=%u ns=%llu label=%llu call_reference=%llu\\n", depth, shape,
+            printf("LOGICAL_WORK depth=%u shape=%u ns=%llu label=%llu call_reference=%llu\n", depth, shape,
                    (unsigned long long)ns, (unsigned long long)(c_test_logical_label_type_work() - label_start),
                    (unsigned long long)(c_test_logical_call_reference_work() - call_start));
             BUSTER_TEST_RAW(arguments, lowered.canonical_ir_certified,
