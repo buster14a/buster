@@ -23405,9 +23405,8 @@ u64 c_test_logical_call_reference_rows(void)
 // The scan the chain replaces, kept as the reference: a Debug or sanitized
 // build checks every step of every walk. An independent publication fact
 // proves negative lookups without a scan when no callee starts at '('.
-// It is not compiled into the Release
-// tree because that tree carries the tests (BUSTER_INCLUDE_TESTS=1) and
-// running the scan there would put back exactly the cost the chain removes.
+// The scan is not compiled into Release, even though that tree carries
+// tests (BUSTER_INCLUDE_TESTS=1), because it would restore the removed cost.
 BUSTER_C_INTERNAL void c_ir_prepared_call_chained_check(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 end, u32 answer)
 {
     BUSTER_CHECK(call->open_index < builder->preprocess.token_count &&
@@ -23420,8 +23419,7 @@ BUSTER_C_INTERNAL void c_ir_prepared_call_chained_check(CIntegerIrBuilder* build
     // published call ever started at '(', there can be no such candidate.
     // This fact is recorded from publication, independently of the chain.
     // Check every lookup; retain the full scan whenever the fact permits it.
-    for (u32 index = 0; builder->prepared_call_has_parenthesized_callee &&
-                            index < builder->prepared_call_count && reference == UINT32_MAX; index += 1)
+    for (u32 index = 0; builder->prepared_call_has_parenthesized_callee && index < builder->prepared_call_count && reference == UINT32_MAX; index += 1)
     {
 #if BUSTER_INCLUDE_TESTS
         c_logical_call_reference_work += 1;
