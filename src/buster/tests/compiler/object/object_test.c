@@ -4405,8 +4405,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_32_writer_limits(UnitTestArgument
 }
 
 // Issue 3407: grouping relocations by section must not change a byte of COFF
-// output. Zero, one and many priority groups, with unrelated data and code
-// relocations interleaved among the initializer ones, are written on x86-64
+// output. Zero, one and 60 constructor priority groups (zero, three and three
+// destructor groups), with unrelated data and code relocations interleaved
+// among the initializer ones, are written on x86-64
 // and AArch64 and compared with SHA-256 digests the writer produced while it
 // still swept every relocation once per section (main 9d92ff80).
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_priority_split_bytes(UnitTestArguments* arguments)
