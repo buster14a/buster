@@ -34187,6 +34187,61 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(literal_temporary);
     }
+    // A GNU statement expression in a file-scope initializer (#3364) is
+    // rejected by the frontend at its `(`, as GCC and Clang do, so
+    // -fsyntax-only and -c report the same located diagnostic instead of -c
+    // failing first in the static-initializer folder. Statement expressions
+    // in function bodies still compile. The sources are temporary files, so
+    // the native-retirement inventory stays unchanged.
+    {
+        TemporalArena statement_temporary = arena_begin_temporal(arguments->arena);
+        Arena* statement_arena = statement_temporary.arena;
+        String8 statement_source = buster_test_temporary_path(statement_arena, S8("buster-c-file-scope-statement-expression"), S8(".c"));
+        String8 statement_object = buster_test_temporary_path(statement_arena, S8("buster-c-file-scope-statement-expression"), S8(".o"));
+        String8 statement_texts[] = {
+            S8("static int sx = ({ 1; });\n"
+               "int main(void) { return sx - 1; }\n"),
+            S8("static int sx = ({ typedef int T; T v = 1; v; });\n"
+               "int main(void) { return sx - 1; }\n"),
+            S8("static int sx = sizeof(({ 1; }));\n"
+               "int main(void) { return sx - 4; }\n"),
+            S8("int f(void) { return ({ int a = 2; a; }); }\n"
+               "int main(void) { int v = ({ typedef int T; T t = 1; t; }); return v - 1 + f() - 2; }\n"),
+        };
+        String8 statement_locations[] = {S8(":1:17: "), S8(":1:17: "), S8(":1:24: "), S8("")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(statement_texts); index += 1)
+        {
+            if (BUSTER_REQUIRE(arguments, file_write(statement_source, BUSTER_SLICE_TO_BYTE_SLICE(statement_texts[index]))))
+            {
+                bool rejected = statement_locations[index].length != 0;
+                String8 syntax_command[] = {S8("-std=gnu17"), S8("-fsyntax-only"), statement_source};
+                CompilerDriverResult checked = compiler_driver_execute_invocation(
+                    statement_arena, compiler_driver_parse_arguments(statement_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+                String8 object_command[] = {S8("-std=gnu17"), S8("-g0"), S8("-c"), S8("-o"), statement_object, statement_source};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    statement_arena, compiler_driver_parse_arguments(statement_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+                if (rejected)
+                {
+                    String8 expected = string_format(statement_arena, S8("{S8}statement expression not allowed at file scope"), statement_locations[index]);
+                    BUSTER_TEST_RAW(arguments, checked.error != COMPILER_DRIVER_ERROR_NONE, checked.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, string_first_sequence(checked.diagnostic, expected) != BUSTER_STRING_NO_MATCH, checked.diagnostic);
+                    BUSTER_TEST_RAW(arguments, string_equal(checked.diagnostic, compiled.diagnostic), compiled.diagnostic);
+                }
+                else
+                {
+                    BUSTER_TEST_RAW(arguments, checked.error == COMPILER_DRIVER_ERROR_NONE, checked.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, os_file_delete(statement_object));
+                    }
+                }
+            }
+        }
+        BUSTER_TEST(arguments, os_file_delete(statement_source));
+        scratch_end(statement_temporary);
+    }
 #if BUSTER_LINUX
     buster_test_arena_end(arguments, driver_fixture, true);
     driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_dynamic_library_path"), false);
