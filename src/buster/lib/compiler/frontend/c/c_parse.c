@@ -33705,15 +33705,17 @@ BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value(CTypeParseMachine* m
 }
 
 // The assignment-conversion check of a value the caller has just typed with
-// c_parse_checked_expression_type. A valid checked type is reused rather than
-// typed again unchecked. The two can name different rows, because a cast
-// parses its type name afresh on every query, but the rows are structurally
-// the same, so the verdict and message are too. Reference checks compare both.
+// c_parse_checked_expression_type, which began with `types_before` type rows.
+// A valid checked type is reused rather than typed again unchecked, but only
+// when that typing appended no row. A typing that appends rows (a cast's type
+// name, a string operand's array) appends them again on every query, and
+// lowering keeps every row, so -g output would lose the repeats' unreferenced
+// DWARF types. Reference checks compare both paths' verdict and message.
 BUSTER_C_INTERNAL bool c_parse_incompatible_checked_value(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                             CScopeId scope, CTypeId destination, bool checked, CTypeId source,
-                                                            u32 start, u32 end, String8* message_out)
+                                                            u32 types_before, u32 start, u32 end, String8* message_out)
 {
-    bool reuse = checked && source.value < result->type_count;
+    bool reuse = checked && source.value < result->type_count && result->type_count == types_before;
     bool incompatible = reuse
         ? c_parse_incompatible_aggregate_source(machine, result, preprocess, scope, destination, source, start, end, true, message_out)
         : c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, destination, start, end, true, message_out);
@@ -34709,10 +34711,11 @@ BUSTER_C_INTERNAL bool c_parse_initializer_expression_constraint(CTypeParseMachi
                                             preprocess.tokens[start].kind == C_TOKEN_CHARACTER_LITERAL));
     if (start < end)
     {
+        u32 types_before = result->type_count;
         bool typed = c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, scope, start, end, &source, &checked);
         String8 conversion_message = {0};
         if (!checked.message.length && c_parse_incompatible_checked_value(machine, result, preprocess, scope, destination, typed, source,
-                                                                          start, end, &conversion_message))
+                                                                          types_before, start, end, &conversion_message))
             c_parse_lowering_constraint_consider(&checked,
                 conversion_message.length ? conversion_message : S8("initializer has an incompatible type"), start, end);
     }
@@ -35865,11 +35868,12 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
                     if (!c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_BRACE))
                     {
                         CTypeId initializer_type = C_TYPE_ID_INVALID;
+                        u32 types_before = result->type_count;
                         bool typed = c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, entity->scope,
                             cursor + 1, value_end, &initializer_type, diagnostic);
                         String8 conversion_message = {0};
                         if (c_parse_incompatible_checked_value(machine, result, preprocess, entity->scope, entity->type, typed, initializer_type,
-                                                               cursor + 1, value_end, &conversion_message))
+                                                               types_before, cursor + 1, value_end, &conversion_message))
                             c_parse_lowering_constraint_consider(diagnostic,
                                 conversion_message.length ? conversion_message : S8("initializer has an incompatible type"), cursor, value_end);
                     }
