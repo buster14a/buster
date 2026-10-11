@@ -1841,19 +1841,22 @@ the same way and diagnostic only:
   or an array operand that decays.
 - Zen 5 validation stays incomplete (#2761).
 
-The stage-1 adoption budget is **not yet measured** on the Ryzen 7 9700X. As
-of main `a6705764` no approved route can time one compiler binary with and
-without `-fc-ast-pilot`:
-- the pull-request comparison (`compiler-compare-v1`) times two binaries with
-  default flags, and only for `-c`;
-- the one same-binary flag pair, the issue #48 inline profile, accepts
-  `-fcanonical-inline` only;
-- a direct workload cannot build or run the compiler.
+The stage-1 adoption budget **passes** on the Ryzen 7 9700X. The evidence is
+audit [`2026-10-11T142146Z`](../../performance-audits/2026-10-11T142146Z.md):
+the first `ast-pilot-acceptance-v1` run (#3397), on candidate main `298713ae`,
+through request-only PR #3536. One binary was timed with and without
+`-fc-ast-pilot`, 20 ABBA pairs per cell:
+- `-fsyntax-only`: instructions B/A 0.8503 and wall time 0.8930
+  [0.8902, 0.8944]. Peak RSS does not move (−0.12 MB).
+- `-c`: wall time 0.9546 [0.9533, 0.9571] and instructions 0.9382. Peak RSS
+  grows by 31.7 MB, within 1.05 × the tree's 36.25 MB retained bytes.
+- Objects and diagnostics are identical in both cells.
 
-[#3397](https://github.com/buster14a/buster/issues/3397) proposes a fixed
-`compare-pull` profile for this measurement. Until it merges and one owner
-request runs it, the budget is neither passed nor failed. The hosted counts
-above are not acceptance, and the default stays off.
+The RSS check also passes under the other reading of "plus 5%" (retained
+bytes plus 5% of the default's peak), so that open owner decision (#3397) does
+not change the verdict. The profile is report-only. The pass holds for that
+candidate's exact binary, and making the hook the default is a separate,
+owner-decided change.
 
 For the typer's remaining out-of-body phases, these budgets were declared
 before any measured run. These are the queries outside a typed body or
@@ -1904,6 +1907,43 @@ diagnostic only, and its result is negative. No candidate was built:
 - The 17 constant-evaluation runs (3.22 M) are never the typer's.
 - 92% of the machine Ir still left under the pilot is declines and misses
   inside typed bodies.
+
+The count cache's audit, below, leaves a second lead: under `-fsyntax-only`
+nothing reads the bytes a first sight records. The candidate counts a narrow
+fragment's first sight (`c_ir_count_quoted`) and records only its length, but
+only when the compile will not lower. The driver says so with a flag on `CParserResult`, set for
+`-fsyntax-only` alone, because `c_analyze_semantics_only` also runs before
+lowering. With the flag clear, which covers `-c` and every other caller, a
+first sight decodes and records bytes exactly as before. A length-only slot is
+a miss for `c_ir_decode_string_literal_range_for_target`, which then decodes
+without recording. These budgets were declared before the measured runs. The
+base is main `680e16d3`, with the count cache's input, flags and four
+Callgrind arms, below (`--cache-sim=no --branch-sim=no`):
+- **Correctness:**
+  - no verify mismatch over the corpus;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms;
+  - the same exit status and no diagnostics on `-fsyntax-only` in every arm;
+  - focused tests: the same element counts and types with and without the
+    flag, and the same bytes from a decode that meets a length-only slot;
+  - the literal-memo census expectations in `c_test.c` are unchanged.
+- **`-fsyntax-only` (D against A, and C against B).** The whole compile must
+  run fewer instructions, by more than the 0.05% rebuild noise. Each arm must
+  report its calls to `c_ir_decode_quoted` and `c_ir_count_quoted`. Any
+  decode that a length-only slot sends back is charged.
+- **`-c` (D against A, `-g0`).** It must not grow by more than the 0.05% noise.
+  `c_ir_decode_quoted` and `c_ir_count_quoted` must be called exactly as often
+  as in A, so no count pass is added.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761).
+
+The count-only first sight's hosted census is
+[`2026-10-11T142104Z`](../../performance-audits/2026-10-11T142104Z.md),
+diagnostic only. Every budget passes, and the change ships:
+- `-fsyntax-only` falls by 183.9 M Ir: −1.755% default and −1.990% under the
+  pilot. The 30,943 first-sight decodes (310.9 M) become counts (127.2 M), and
+  no length-only slot sends a decode back.
+- `-c` moves by +0.0001%, with the same decode calls and no count calls.
+  Objects are byte-identical at `-g0` and `-g`.
 
 For a per-token cache of string literals' element counts in the machine's
 leaf (`c_parse_string_literal_expression_type`), these budgets were declared
