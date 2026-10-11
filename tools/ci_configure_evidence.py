@@ -41,7 +41,7 @@ def matrix_tree_name(name):
     return any(name.startswith(prefix) for prefix in TREE_PREFIXES)
 
 
-def summarize_ninja_log(data: bytes) -> dict:
+def summarize_ninja_log(data: bytes, build_directory: str | None = None) -> dict:
     lines = data.decode("utf-8", errors="replace").splitlines()
     version = None
     malformed_lines = 0
@@ -83,28 +83,39 @@ def summarize_ninja_log(data: bytes) -> dict:
             "hash": fields[4] if len(fields) > 4 else None,
         }
     edges = []
-    grouped_edges = {}
+    aliased_outputs = {}
+    aliases = set()
+    if build_directory is not None:
+        normalized_outputs = {}
+        for entry in entries.values():
+            normalized_output = os.path.normcase(entry["output"])
+            normalized_outputs.setdefault(normalized_output, []).append(entry)
+        build_directory = build_directory.rstrip("/\\")
+        for entry in entries.values():
+            output = entry["output"]
+            drive_letter = len(output) > 1 and output[0].isalpha() and output[1] == ":"
+            if (os.path.isabs(output) or output.startswith("/") or drive_letter
+                    or entry["hash"] is None):
+                continue
+            absolute_output = os.path.normcase(f"{build_directory}/{output}")
+            for alias in normalized_outputs.get(absolute_output, []):
+                if (alias["output"] != output and alias["output"] not in aliases
+                        and alias["start_ms"] == entry["start_ms"]
+                        and alias["end_ms"] == entry["end_ms"]
+                        and alias["hash"] == entry["hash"]):
+                    aliased_outputs.setdefault(output, []).append(alias["output"])
+                    aliases.add(alias["output"])
     for entry in entries.values():
-        if entry["hash"] is None:
-            edges.append({
-                "output": entry["output"],
-                "outputs": [entry["output"]],
-                "start_ms": entry["start_ms"],
-                "end_ms": entry["end_ms"],
-                "duration_ms": entry["duration_ms"],
-            })
+        output = entry["output"]
+        if output in aliases:
             continue
-        key = (entry["start_ms"], entry["end_ms"], entry["hash"])
-        grouped_edges.setdefault(key, []).append(entry["output"])
-    for (start_ms, end_ms, _), outputs in grouped_edges.items():
-        outputs.sort()
-        output = min(outputs, key=lambda value: (len(value), value))
+        outputs = sorted([output, *aliased_outputs.get(output, [])])
         edges.append({
             "output": output,
             "outputs": outputs,
-            "start_ms": start_ms,
-            "end_ms": end_ms,
-            "duration_ms": end_ms - start_ms,
+            "start_ms": entry["start_ms"],
+            "end_ms": entry["end_ms"],
+            "duration_ms": entry["duration_ms"],
         })
     all_edges = sorted(edges, key=lambda edge: (-edge["duration_ms"], edge["output"]))
     return {
@@ -209,7 +220,8 @@ def collect(build_root, output, *, profile_requested=False, environment=None,
             if name == ".ninja_log" and record["status"] == "captured":
                 summary_path = output / tree / "ninja-log-summary.json"
                 try:
-                    summary = summarize_ninja_log(data)
+                    summary = summarize_ninja_log(
+                        data, (build_root / tree).resolve().as_posix())
                     with summary_path.open("x", encoding="utf-8") as stream:
                         json.dump(summary, stream, indent=2, sort_keys=True)
                         stream.write("\n")

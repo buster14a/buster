@@ -2,6 +2,7 @@
 """Isolated regression tests for configure-evidence retention (no toolchain)."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -116,29 +117,89 @@ class ConfigureEvidenceTests(unittest.TestCase):
         link = next(edge for edge in result["all_edges"] if edge["output"] == "ide.exe")
         self.assertEqual(link["duration_ms"], 15)
 
-    def test_multi_output_ninja_edges_are_counted_once(self):
+    def test_only_build_directory_aliases_are_merged(self):
+        build_directory = "/x/build/t"
+        lines = ["# ninja log v7"]
+        for index in range(1, 4):
+            relative = f"CMakeFiles/edge{index}"
+            absolute = f"{build_directory}/{relative}"
+            lines.extend((
+                f"1\t16\t8134371059249091\t{relative}\t35ac50d1984a72a1",
+                f"1\t16\t8134371059249091\t{absolute}\t35ac50d1984a72a1",
+            ))
+        data = ("\n".join(lines) + "\n").encode()
+
+        result = evidence.summarize_ninja_log(data, build_directory)
+        self.assertEqual(result["edges"], 3)
+        self.assertEqual(result["edge_duration_sum_ms"], 3 * 15)
+        for index, edge in enumerate(result["all_edges"], 1):
+            relative = f"CMakeFiles/edge{index}"
+            absolute = f"{build_directory}/{relative}"
+            self.assertEqual(edge, {
+                "output": relative,
+                "outputs": sorted([relative, absolute]),
+                "start_ms": 1,
+                "end_ms": 16,
+                "duration_ms": 15,
+            })
+
+        without_build_directory = evidence.summarize_ninja_log(data)
+        self.assertEqual(without_build_directory["edges"], 6)
+        self.assertEqual(without_build_directory["edge_duration_sum_ms"], 6 * 15)
+        self.assertTrue(all(len(edge["outputs"]) == 1
+                            for edge in without_build_directory["all_edges"]))
+
+    def test_absolute_output_under_another_directory_is_not_merged(self):
+        build_directory = "/x/build/t"
         data = (
             b"# ninja log v7\n"
-            b"2\t9\t8134371059249091\tc.txt\t74a94d333aafb5ff\n"
-            b"1\t1023\t8134371059249091\ta.txt\t35ac50d1984a72a1\n"
-            b"1\t1023\t8134371059249091\tC:/Users/Administrator/work/ninja-multi/b.txt\t35ac50d1984a72a1\n"
-            b"1\t1023\t8134371059249091\tother.txt\tother-hash\n"
+            b"1\t16\t8134371059249091\tCMakeFiles/edge1\t35ac50d1984a72a1\n"
+            b"1\t16\t8134371059249091\t/other/CMakeFiles/edge1\t35ac50d1984a72a1\n"
         )
-        result = evidence.summarize_ninja_log(data)
-        self.assertEqual(result["edges"], 3)
-        self.assertEqual(result["edge_duration_sum_ms"], 7 + 1022 + 1022)
-        self.assertEqual([edge["output"] for edge in result["all_edges"]],
-                         ["a.txt", "other.txt", "c.txt"])
-        grouped = next(edge for edge in result["all_edges"] if edge["output"] == "a.txt")
-        self.assertEqual(grouped, {
-            "output": "a.txt",
-            "outputs": ["C:/Users/Administrator/work/ninja-multi/b.txt", "a.txt"],
+        result = evidence.summarize_ninja_log(data, build_directory)
+        self.assertEqual(result["edges"], 2)
+        self.assertEqual(result["edge_duration_sum_ms"], 2 * 15)
+        self.assertTrue(all(len(edge["outputs"]) == 1 for edge in result["all_edges"]))
+
+    @unittest.skipUnless(os.name == "nt", "Windows path normalization")
+    def test_windows_style_absolute_alias_is_merged(self):
+        build_directory = r"D:\a\b\build\t"
+        relative = "CMakeFiles/test_all-Release"
+        absolute = "D:/A/b/build/t/CMakeFiles/test_all-Release"
+        data = (
+            b"# ninja log v7\n"
+            + f"1\t16\t8134371059249091\t{relative}\t35ac50d1984a72a1\n".encode()
+            + f"1\t16\t8134371059249091\t{absolute}\t35ac50d1984a72a1\n".encode()
+        )
+        result = evidence.summarize_ninja_log(data, build_directory)
+        self.assertEqual(result["edges"], 1)
+        self.assertEqual(result["all_edges"], [{
+            "output": relative,
+            "outputs": sorted([relative, absolute]),
             "start_ms": 1,
-            "end_ms": 1023,
-            "duration_ms": 1022,
-        })
-        unrelated = next(edge for edge in result["all_edges"] if edge["output"] == "other.txt")
-        self.assertEqual(unrelated["outputs"], ["other.txt"])
+            "end_ms": 16,
+            "duration_ms": 15,
+        }])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX path normalization")
+    def test_posix_absolute_alias_uses_exact_build_directory(self):
+        build_directory = "/x/build/t"
+        relative = "CMakeFiles/test_all-Release"
+        absolute = f"{build_directory}/{relative}"
+        data = (
+            b"# ninja log v7\n"
+            + f"1\t16\t8134371059249091\t{relative}\t35ac50d1984a72a1\n".encode()
+            + f"1\t16\t8134371059249091\t{absolute}\t35ac50d1984a72a1\n".encode()
+        )
+        result = evidence.summarize_ninja_log(data, build_directory)
+        self.assertEqual(result["edges"], 1)
+        self.assertEqual(result["all_edges"], [{
+            "output": relative,
+            "outputs": sorted([relative, absolute]),
+            "start_ms": 1,
+            "end_ms": 16,
+            "duration_ms": 15,
+        }])
 
     def test_hashless_ninja_lines_remain_per_output(self):
         data = (
@@ -193,14 +254,17 @@ class ConfigureEvidenceTests(unittest.TestCase):
         self.assertEqual(result["ninja_log_summaries"], [])
 
     def test_cli_prints_ninja_log_breakdown(self):
+        build_directory = (self.build / self.tree).resolve().as_posix()
+        absolute_output = f"{build_directory}/compile.obj"
         self.write(f"{self.tree}/.ninja_log",
                    b"# ninja log v5\n"
                    b"0\t1500\t0\tcompile.obj\thash\n"
-                   b"0\t1500\t0\tC:/build/compile.obj\thash\n"
-                   b"0\t500\t0\tlink.exe\tlink-hash\n")
-        run = subprocess.run([sys.executable, evidence.__file__, "--build-root", str(self.build),
+                   + f"0\t1500\t0\t{absolute_output}\thash\n".encode()
+                   + b"0\t500\t0\tlink.exe\tlink-hash\n")
+        relative_build_root = os.path.relpath(self.build, self.root)
+        run = subprocess.run([sys.executable, evidence.__file__, "--build-root", relative_build_root,
                               "--output", str(self.output)],
-                             capture_output=True, text=True, check=False)
+                             capture_output=True, text=True, check=False, cwd=self.root)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertTrue(run.stdout.startswith("CMake evidence: 1 trees, 0 configure logs, "))
         self.assertIn(f"NINJA_LOG_SUMMARY tree={self.tree} edges=2 "
