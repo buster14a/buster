@@ -377,7 +377,7 @@ static int campaign(const char* self, const char* source, const char* compiler, 
             int unit = run_step(format("%s-unit-tests", variant), work, "make -C t -k -j2 unit-tests", 300);
             int tests = run_step(format("%s-integration", variant), work,
                 "make -C t -k -j2 t0000-basic.sh t0001-init.sh t1500-rev-parse.sh "
-                "t2000-checkout-cache-clash.sh t5601-clone.sh t5300-pack-object.sh", 300);
+                "t2000-conflict-when-checking-files-out.sh t5601-clone.sh t5300-pack-object.sh", 300);
             if (unit || tests) failed = 1;
             witnesses[v] = operation_witness(variant, work);
             if (!witnesses[v]) failed = 1;
