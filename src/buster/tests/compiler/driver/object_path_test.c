@@ -2193,6 +2193,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_preinit_tests(UnitTestArg
 // a static image (no libc reference) and a dynamic one, `-pie` on x86-64, and
 // against the host linker as the oracle. On x86-64 the defining object is
 // also linked `-shared` by this linker and loaded by a host-linked program.
+// On AArch64 a resolver records its arguments, and the program checks them
+// against its own auxiliary vector: glibc's AT_HWCAP | _IFUNC_ARG_HWCAP and
+// __ifunc_arg_t, from the static and dynamic runners as from ld.so.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_ifunc_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2288,6 +2291,71 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_ifunc_tests(UnitTestArgum
                 }
             }
         }
+#if BUSTER_CPU_ARCH_AARCH64
+        if (produced)
+        {
+            // AT_HWCAP is never 0 on AArch64 Linux (FP and ASIMD at least), so
+            // the old hwcap-0 runner fails this. A missing AT_HWCAP2 is 0 on
+            // both sides; glibc 2.40 grows _size past 24 with _hwcap3/_hwcap4.
+            String8 hwcap_source = string_format_z(arena, S8("{S8}/hwcap.c"), root);
+            BUSTER_TEST(arguments, file_write(hwcap_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+                "typedef struct { unsigned long size, hwcap, hwcap2; } Argument;\n"
+                "static unsigned long seen_hwcap, seen_size, seen_arg_hwcap, seen_arg_hwcap2;\n"
+                "static int seen_arg, resolutions;\n"
+                "static int one(void) { return 1; }\n"
+                "static int (*resolve_probe(unsigned long hwcap, const Argument *arg))(void)\n"
+                "{\n"
+                "    resolutions += 1;\n"
+                "    seen_hwcap = hwcap;\n"
+                "    seen_arg = arg != 0;\n"
+                "    if (arg) { seen_size = arg->size; seen_arg_hwcap = arg->hwcap; seen_arg_hwcap2 = arg->hwcap2; }\n"
+                "    return one;\n"
+                "}\n"
+                "int probe(void) __attribute__((ifunc(\"resolve_probe\")));\n"
+                "#ifdef DYNAMIC\n"
+                "int puts(const char *);\n"
+                "#endif\n"
+                "int main(int argc, char **argv, char **envp)\n"
+                "{\n"
+                "    unsigned long hwcap = 0, hwcap2 = 0;\n"
+                "    char **cursor = envp;\n"
+                "    while (*cursor) cursor += 1;\n"
+                "    for (unsigned long *aux = (unsigned long *)(cursor + 1); aux[0]; aux += 2)\n"
+                "    {\n"
+                "        if (aux[0] == 16) hwcap = aux[1];\n"
+                "        if (aux[0] == 26) hwcap2 = aux[1];\n"
+                "    }\n"
+                "    int ok = probe() == 1 && resolutions == 1 && hwcap != 0 && seen_hwcap == (hwcap | (1UL << 62)) && seen_arg &&\n"
+                "             seen_size >= 24 && seen_arg_hwcap == hwcap && seen_arg_hwcap2 == hwcap2;\n"
+                "#ifdef DYNAMIC\n"
+                "    puts(ok ? \"hwcap ok\" : \"hwcap wrong\");\n"
+                "#endif\n"
+                "    return !ok;\n"
+                "}\n"))));
+            for (u32 index = 0; index < 2; index += 1)
+            {
+                String8 object_path = string_format_z(arena, S8("{S8}/hwcap-{S8}.o"), root, mains[index]);
+                String8 compile[] = {S8("-w"), S8("-O2"), S8("-fPIE"), index ? S8("-DDYNAMIC") : S8("-UDYNAMIC"), S8("-c"), hwcap_source,
+                                     S8("-o"), object_path};
+                bool compiled_host = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile));
+                BUSTER_TEST(arguments, compiled_host);
+                String8 oracle = string_format_z(arena, S8("{S8}/hwcap-{S8}-oracle"), root, mains[index]);
+                String8 host_link[] = {S8("-no-pie"), object_path, S8("-o"), oracle};
+                bool linked = compiled_host && compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
+                BUSTER_TEST(arguments, linked);
+                if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, oracle));
+                if (compiled_host)
+                {
+                    String8 output = string_format_z(arena, S8("{S8}/hwcap-{S8}-buster"), root, mains[index]);
+                    String8 command[] = {S8("-no-pie"), object_path, S8("-o"), output};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
+                }
+            }
+        }
+#endif
 #if BUSTER_CPU_ARCH_X86_64
         if (produced)
         {
