@@ -1639,6 +1639,15 @@ struct CParsePromotedMemberWork
 };
 
 // ---- tree expression typer (c_ast_types.c) ----------------------------------
+
+// The typer's rarely taken answers stay out of line: inlined into
+// c_parse_expression_type_query, which every query runs, they change that
+// function's code on the default path too.
+#if BUSTER_COMPILER_MSVC
+#define C_AST_TYPES_NOINLINE __declspec(noinline)
+#else
+#define C_AST_TYPES_NOINLINE __attribute__((noinline))
+#endif
 //
 // What the typer made of one type query. ANSWER carries the type and the
 // nonplace-projection fact exactly as a valid, constraint-free machine answer
@@ -1651,8 +1660,13 @@ typedef enum CAstTypeStatus
     C_AST_TYPE_MISS,
     C_AST_TYPE_DECLINE,
     C_AST_TYPE_ANSWER,
-    // An answer that is the row a replay of the queried string literal
-    // appends; `type` is invalid until c_parse_expression_tree_query replays it.
+    // An answer that is the row a replay of the queried node appends: a
+    // string literal, whose `type` is invalid until
+    // c_parse_expression_tree_query replays it, or, when `node_kind` is
+    // MEMBER or MEMBER_ARROW, a member access over a const or volatile
+    // aggregate, whose `type` is that aggregate's row until the replay
+    // appends the member's qualified copy. One status keeps the query
+    // function's code as it was.
     C_AST_TYPE_STRING,
 } CAstTypeStatus;
 
@@ -1666,7 +1680,8 @@ struct CAstTypeAnswer
     // [replay_start, replay_end), when not empty, is a string-literal token
     // whose typing the answer must replay exactly as the machine's task would
     // (c_parse_expression_tree_query): a checked cast's operand, or under
-    // C_AST_TYPE_STRING the queried literal itself.
+    // C_AST_TYPE_STRING the queried literal itself, or the queried member
+    // access's tokens, which end at the member's name.
     u32 replay_start;
     u32 replay_end;
     bool nonplace_projection;
@@ -1740,6 +1755,10 @@ struct CAstTypeVerifyMark
     u32 types;
     u32 diagnostics;
     u32 array_bounds;
+    u32 type_alignments;
+    // The live shared qualified copies (CTypeInterning), which a replay may
+    // log and the hold takes back with its rows.
+    u32 interned_qualified;
     u32 members;
     u32 enum_members;
     u32 entities;
@@ -1772,10 +1791,13 @@ struct CAstTypePending
     CAstTypeVerifyMark mark;
     u32 replay_types;
     u32 replay_bounds;
+    u32 replay_alignments;
     // More rows than C_AST_TYPE_REPLAY_ROWS are counted but not kept, which
     // the comparison reports as a mismatch.
     CType replay_type_rows[C_AST_TYPE_REPLAY_ROWS];
     CArrayBound replay_bound_rows[C_AST_TYPE_REPLAY_ROWS];
+    // The alignment records a replayed row inherited (c_parse_add_qualified_type).
+    CTypeAlignment replay_alignment_rows[C_AST_TYPE_REPLAY_ROWS];
 };
 #endif
 
