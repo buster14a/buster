@@ -11,6 +11,8 @@
 // explicit integer bridges, K operations, spills and rematerialization.
 // machine_x64_select_inline_hint maps fixed NOP/PAUSE literals to explicit
 // rows whose encoder emits through checked instruction metadata.
+// machine_x64_receive_call_result discards unspecified upper RAX bits for
+// Boolean and narrow scalar results using the shared ABI shape.
 // machine_x64_value_shape and the call/return/argument selectors carry
 // frame-backed wide vectors through explicit XMM/YMM/ZMM ABI transfer rows.
 // machine_x64_select_i128_divide emits scalar MIR loop blocks; optional
@@ -70,10 +72,10 @@ struct MachineX64ValueShape
     // layout counts on both sides of a call. Win64 indirect arguments reuse
     // this field for their private copy's alignment, with a sixteen-byte floor.
     u32 stack_alignment;
-    // For a sub-32-bit scalar integer argument, the MOVSX/MOVZX opcode that
-    // widens it into its argument register: the de-facto System V contract
-    // clang's callers implement extends such arguments to 32 bits, and
-    // callees exist that read the widened register directly. Zero when a
+    // For Boolean and 8/16-bit integer scalars, the MOVSX/MOVZX opcode
+    // used at argument staging and call-result capture. Foreign callees
+    // need only define the result's low byte/word; internal scalar values
+    // must not retain the unspecified upper register bits. Zero when a
     // plain move suffices.
     u16 scalar_extend_opcode;
     // A frame-backed sixteen-byte value occupies one whole XMM ABI register.
@@ -7406,10 +7408,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_receive_call_result(MachineX64Selector* sel
             }
             else
             {
+                // Capture only the ABI-defined low byte/word before a branch,
+                // conversion or spill can observe the internal scalar value.
                 row = machine_x64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                                         machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX)},
-                                                           .opcode = MACHINE_X64_MOV_RR,
+                                                           .opcode = plan->return_shape.scalar_extend_opcode
+                                                               ? plan->return_shape.scalar_extend_opcode : MACHINE_X64_MOV_RR,
                                                        });
             }
             machine_x64_define(selector, result_register, row);

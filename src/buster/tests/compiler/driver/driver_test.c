@@ -21,6 +21,7 @@
 // (compiler_driver_test_frame_vector_lane) and checks the cells serially.
 // compiler_driver_test_elf_weak_unwind checks local FDE anchors and host overrides.
 // compiler_driver_test_elf_symbolic_immediates checks imm32 types and host overflow.
+// compiler_driver_test_x64_narrow_call_results observes dirty foreign returns.
 // compiler_driver_test_sysv_indirect_variadic checks AL against a foreign probe.
 // compiler_driver_test_variadic_workspace checks successive calls against host va_arg.
 // compiler_driver_test_aarch64_platform_large_va_arg checks classified large
@@ -13727,6 +13728,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_packed_x87_overalig
 // The aligned foreign callees have a zero address byte, so reloading their
 // addresses into RAX cannot accidentally preserve a nonzero variadic AL count.
 // Keep the inline sources outside the frozen native-retirement test inventory.
+#include <buster/tests/compiler/driver/x64_narrow_call_result_test_internal.h>
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_indirect_variadic(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -33582,6 +33585,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_padding_eightbytes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_empty_aggregates);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_indirect_variadic);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x64_narrow_call_results);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_variadic_workspace);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_aligned_calls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_large_frame);
