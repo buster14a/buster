@@ -22,7 +22,7 @@
 // silent misselection.
 // machine_a64_select_inline_hint selects the fixed NOP/YIELD literal rows.
 // Symbol addresses: machine_a64_symbol_reference picks the inline literal, the
-// Darwin page pair, or under ELF -fPIC the GOT or page pair that the
+// Darwin page pair or GOT load, or under ELF -fPIC the GOT or page pair that the
 // MACHINE_A64_LEA_SYMBOL encoder case emits (thread-locals are refused there in
 // machine_a64_select_global_address).
 //
@@ -2939,8 +2939,10 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_field(MachineA64Selector* selector, 
     return selected;
 }
 
-// The reference form of a symbol address. Darwin always pairs a page with a
-// page offset. Under AArch64 ELF -fPIC an address another object could
+// The reference form of a symbol address. Darwin pairs a page with a page
+// offset for a symbol this module defines, and loads the address of any
+// other one out of its GOT slot (ARM64_RELOC_GOT_LOAD_PAGE21/PAGEOFF12),
+// because a linker may bind it to a dylib. Under AArch64 ELF -fPIC an address another object could
 // interpose is read out of its GOT slot, and one this object binds itself is a
 // page pair; without -fPIC the canonical inline literal stays. A direct call
 // never needs a form of its own: BL names the symbol and the linker adds the
@@ -2952,7 +2954,9 @@ BUSTER_GLOBAL_LOCAL u8 machine_a64_symbol_reference(MachineA64Selector* selector
     {
         if (selector->target.os == OPERATING_SYSTEM_MACOS || selector->target.os == OPERATING_SYSTEM_IOS)
         {
-            result = (u8)MACHINE_SYMBOL_REFERENCE_MACH_PAGE;
+            IrSymbol* record = ir_symbol_from_id(&selector->program->symbols, symbol);
+            bool external = record && !record->is_definition && record->linkage != IR_LINKAGE_INTERNAL;
+            result = (u8)(external ? MACHINE_SYMBOL_REFERENCE_GOT : MACHINE_SYMBOL_REFERENCE_MACH_PAGE);
         }
         else if (selector->position_independent)
         {
@@ -9105,6 +9109,14 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(Arena* arena, MachineA64Enco
     return true;
 }
 
+// Publishes the frame event of the prologue instruction just emitted, at
+// its real end offset. A full event array fails the encode.
+BUSTER_GLOBAL_LOCAL void machine_a64_frame_event(MachineA64Encoder* encoder, CodegenFunctionDescriptor* frame, u32 capacity,
+                                                 CodegenUnwindActionKind kind, u8 register_index, u32 value)
+{
+    encoder->overflow |= !codegen_unwind_action_append(frame, capacity, encoder->count, kind, register_index, value);
+}
+
 MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* function, MachineStackPlacement* placement)
 {
     return machine_encode_aarch64_into(arena, function, placement, 0, 0);
@@ -9320,7 +9332,12 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
     result.row_offsets = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
     // PE keeps saves beside the frame chain before establishing X29.
     // ELF/Mach-O retain the existing frame, with saves above the body slots.
-    // Module unwind actions describe the instructions of the selected shape.
+    // Each frame instruction publishes its frame event at the real cursor.
+    // PE: the chain's three events, every save, X28, X29, the large probe's
+    // thirteen no-effect words and its allocation, X28's base. ELF/Mach-O:
+    // the chain's three, X29, one per SP chunk, every save, and X28.
+    u32 frame_event_capacity = windows_frame ? 22u + push_count : 6u + frame_chunk_words + push_count;
+    CodegenFunctionDescriptor frame = {.unwind_actions = arena_allocate(arena, CodegenUnwindAction, frame_event_capacity)};
     if (windows_frame)
     {
         // Put every save within the unwind format's small SP-relative range.
@@ -9328,42 +9345,58 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
         // allocations. Its value also recovers SP directly in each epilogue.
         u32 chain_fields[] = {MACHINE_A64_X29, MACHINE_A64_SP, MACHINE_A64_X30, (0u - windows_save_area / 8u) & 0x7fu};
         machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_STPXPRE, chain_fields, BUSTER_ARRAY_LENGTH(chain_fields));
+        machine_a64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, windows_save_area);
+        machine_a64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, MACHINE_A64_X29, 0);
+        machine_a64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, MACHINE_A64_X30, 8);
         u32 slot = 16;
         for (u32 saved_register = 0; saved_register < MACHINE_A64_REGISTER_COUNT; saved_register += 1)
         {
             if ((placement->callee_saved_mask >> saved_register) & 1u)
             {
                 machine_a64_emit_generated_unsigned_memory(&encoder, saved_register, MACHINE_A64_SP, slot, 8, true);
+                machine_a64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, (u8)saved_register, slot);
                 slot += 8;
             }
         }
         machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_X28, MACHINE_A64_SP, slot, 8, true);
+        machine_a64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, MACHINE_A64_X28, slot);
         u32 frame_fields[] = {MACHINE_A64_X29, MACHINE_A64_SP, 0};
         machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, frame_fields, BUSTER_ARRAY_LENGTH(frame_fields));
+        machine_a64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, MACHINE_A64_X29, 0);
+        // The shared compact probe publishes its own span: SP is unchanged
+        // through its leading words, then allocates once.
         CodegenBuffer probe = {.bytes = encoder.bytes, .count = encoder.count, .capacity = encoder.capacity};
-        bool large_probe = codegen_a64_windows_large_stack_adjust(&probe, frame_area, true, 0, 0);
+        bool large_probe = codegen_a64_windows_large_stack_adjust(&probe, frame_area, true, &frame, frame_event_capacity);
         encoder.count = (u32)probe.count;
         encoder.overflow |= probe.error != CODEGEN_ERROR_NONE;
         if (!large_probe && frame_area)
         {
             machine_a64_emit(&encoder, 0xd10003ffu | (frame_area << 10));
+            machine_a64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, frame_area);
             machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_SP, MACHINE_A64_SP, 0, 8, true);
+            machine_a64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_NOP, 0, 0);
         }
         u32 base_fields[] = {MACHINE_A64_X28, MACHINE_A64_SP, 0};
         machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, base_fields, BUSTER_ARRAY_LENGTH(base_fields));
+        machine_a64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_NOP, 0, 0);
     }
     else
     {
         machine_a64_emit(&encoder, 0xa9bf7bfd);
+        machine_a64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, 16);
+        machine_a64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, MACHINE_A64_X29, 0);
+        machine_a64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, MACHINE_A64_X30, 8);
         {
             u32 fields[] = {MACHINE_A64_X29, MACHINE_A64_SP, 0};
             machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
         }
+        machine_a64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, MACHINE_A64_X29, 0);
         u32 frame_remaining = frame_total;
         while (frame_remaining)
         {
             u32 frame_chunk = BUSTER_MIN(frame_remaining, A64_SP_ADJUST_CHUNK);
             machine_a64_emit(&encoder, 0xd10003ff | (frame_chunk << 10));
+            machine_a64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, frame_chunk);
             machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_SP, MACHINE_A64_SP, 0, 8, true);
             frame_remaining -= frame_chunk;
         }
@@ -9387,13 +9420,18 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
             save_slot += 1;
             machine_a64_emit_generated_unsigned_memory(&encoder, saved_register, save_base,
                                                         large_save_offset ? 8u * (push_count - save_slot) : frame_area - 8u * save_slot, 8, true);
+            // Unwind offsets are SP-relative whichever base addressed the store.
+            machine_a64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, (u8)saved_register,
+                                    frame_area - 8u * save_slot);
         }
         machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_X28, save_base, large_save_offset ? 8u * push_count : frame_area, 8, true);
+        machine_a64_frame_event(&encoder, &frame, frame_event_capacity, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, MACHINE_A64_X28, frame_area);
         {
             u32 fields[] = {MACHINE_A64_X28, MACHINE_A64_SP, 0};
             machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
         }
     }
+    u32 prologue_size = encoder.count;
     u32 edit_cursor = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
@@ -10725,6 +10763,9 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
         result.epilog_offsets = arena_allocate(arena, u32, epilogs.total_count ? epilogs.total_count : 1);
         result.epilog_count = epilogs.total_count;
         machine_stream_flatten(&epilogs, result.epilog_offsets);
+        result.frame_events = frame.unwind_actions;
+        result.frame_event_count = frame.unwind_action_count;
+        result.prologue_size = prologue_size;
         result.bytes = encoder.bytes;
         result.byte_count = encoder.count;
         result.valid = true;

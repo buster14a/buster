@@ -251,20 +251,25 @@ bool jit_apply_aarch64_mach_page_relocation(ObjectRelocationKind kind, u8* patch
 }
 
 
+// The JIT owns no GOT: a Mach-O GOT load (the x86 `movq` of REX_GOTPCRELX or
+// the AArch64 GOT_LOAD pair) is relaxed in place to the direct address of its
+// target -- the import's thunk or binding, or the definition -- which is the
+// value the slot would have held.
 BUSTER_GLOBAL_LOCAL bool jit_relocation_uses_function_thunk(ObjectRelocationKind kind, ObjectSectionKind source_kind)
 {
-    return (kind == OBJECT_RELOCATION_X86_64_PC32 && source_kind == OBJECT_SECTION_TEXT) || kind == OBJECT_RELOCATION_X86_64_PLT32 ||
-           kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26;
+    return ((kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX) && source_kind == OBJECT_SECTION_TEXT) ||
+           kind == OBJECT_RELOCATION_X86_64_PLT32 || kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26;
 }
 
 BUSTER_GLOBAL_LOCAL bool jit_relocation_is_supported(ObjectRelocationKind kind, CpuArch arch)
 {
     return kind == OBJECT_RELOCATION_ABSOLUTE64 ||
            ((kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_PLT32 ||
-             kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S) && arch == CPU_ARCH_X86_64) ||
+             kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S || kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX) && arch == CPU_ARCH_X86_64) ||
            ((kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26 ||
              kind == OBJECT_RELOCATION_AARCH64_PREL32 || kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ||
-             kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12) &&
+             kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 || kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 ||
+             kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12) &&
             arch == CPU_ARCH_AARCH64);
 }
 
@@ -273,7 +278,8 @@ BUSTER_GLOBAL_LOCAL bool jit_external_data_relocation_is_supported(ObjectRelocat
     return (arch == CPU_ARCH_X86_64 && kind == OBJECT_RELOCATION_ABSOLUTE64) ||
            (arch == CPU_ARCH_AARCH64 &&
             (kind == OBJECT_RELOCATION_AARCH64_PREL32 || kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ||
-             kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12));
+             kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 || kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 ||
+             kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12));
 }
 
 BUSTER_GLOBAL_LOCAL u64 jit_relocation_size(ObjectRelocationKind kind)
@@ -640,7 +646,29 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
             }
         }
         u8* patch = (u8*)program->section_addresses[relocation->section] + relocation->offset;
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32)
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX &&
+            buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX, (u8*)program->section_addresses[relocation->section],
+                                                    relocation->offset, source->data.length, relocation->addend) != BUSTER_X86_METADATA_GOT_PATCH_PC32)
+        {
+            program->error = JIT_ERROR_UNSUPPORTED_RELOCATION;
+            program->failing_symbol = symbol->name;
+            return false;
+        }
+        if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12)
+        {
+            u32 instruction = 0;
+            memcpy(&instruction, patch, sizeof(instruction));
+            if ((instruction & UINT32_C(0xffc00000)) != UINT32_C(0xf9400000) || (instruction & 31) == 31 || relocation->addend)
+            {
+                program->error = JIT_ERROR_UNSUPPORTED_RELOCATION;
+                program->failing_symbol = symbol->name;
+                return false;
+            }
+            instruction = UINT32_C(0x91000000) | (instruction & 0x3ff);
+            memcpy(patch, &instruction, sizeof(instruction));
+        }
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 ||
+            relocation->kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX)
         {
             s64 displacement = 0;
             if (!jit_address_difference(target, (u64)(uintptr_t)patch, relocation->addend, &displacement) || displacement < INT32_MIN ||
@@ -716,18 +744,18 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
             s32 value = (s32)displacement;
             memcpy(patch, &value, sizeof(value));
         }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21)
         {
-            if (!jit_apply_aarch64_mach_page_relocation(relocation->kind, patch, (u64)(uintptr_t)patch, target, relocation->addend))
+            if (!jit_apply_aarch64_mach_page_relocation(OBJECT_RELOCATION_AARCH64_MACH_PAGE21, patch, (u64)(uintptr_t)patch, target, relocation->addend))
             {
                 program->error = JIT_ERROR_CAPACITY;
                 program->failing_symbol = symbol->name;
                 return false;
             }
         }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12)
         {
-            if (!jit_apply_aarch64_mach_page_relocation(relocation->kind, patch, (u64)(uintptr_t)patch, target, relocation->addend))
+            if (!jit_apply_aarch64_mach_page_relocation(OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, patch, (u64)(uintptr_t)patch, target, relocation->addend))
             {
                 program->error = JIT_ERROR_CAPACITY;
                 program->failing_symbol = symbol->name;

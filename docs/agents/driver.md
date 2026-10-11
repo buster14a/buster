@@ -67,6 +67,56 @@ explicitly; the existing portable write-failure tests still run. This is
 controlled failure-path coverage, not a real disk-failure or crash-durability
 claim. Run `ide test --module=compiler_diagnostic_tests --verbose=1 --ci=1`.
 
+## In-memory execution (`ide run`)
+
+Use `ide run <C compiler options and inputs> [-- <program arguments>]`.
+Arguments before the first literal `--` are compiler options and inputs;
+everything after it is passed to the program, and omitting the separator means
+there are no program arguments. The first input path becomes `argv[0]` exactly
+as spelled, including `-` for source read from standard input. The program is
+called as `int main(int, char **, char **)`, with the current process
+environment as `envp`; a returned `int` becomes the `ide` process exit status.
+Calling `exit()` instead terminates the `ide` process directly.
+
+The command runs the ordinary C frontend, canonical-IR lowering, native
+code-generation and `link_objects` merge, then passes the merged object to
+`jit_link_object`. It creates neither an intermediate object file nor an
+executable image. Included headers are still read from the filesystem. When
+the source input is `-`, `ide` consumes standard input to EOF before calling
+the program, so the program sees its standard input at EOF.
+
+Failures exit with status 1, print `run: error:` to stderr, and execute no
+program code. Execution requires an x86-64 Linux host and an x86-64 Linux
+target; other hosts report
+`run: error: ide run supports only x86-64 Linux hosts`, and a foreign target
+is named in its refusal. Queries, non-link actions (`-c`, `-S`, `-E`,
+`-fsyntax-only`), explicit `-o`, `-shared`, `-pie`, LLVM bitcode, GPU targets,
+and linker/library/framework options including `-l` are refused. `ide run`
+binds only its documented host imports and loads no libraries.
+
+With `BUSTER_LINK_LIBC` on the supported host, the only imported functions
+bound by the command are:
+
+```text
+puts, putchar, printf, sprintf, snprintf, vprintf, vsnprintf, getchar,
+strlen, strcmp, strncmp, strcpy, strncpy, strcat, strchr, strrchr, strstr,
+memcpy, memmove, memset, memcmp, malloc, calloc, realloc, free, atoi, atol,
+strtol, strtoul, strtod, abs, labs, qsort, rand, srand, exit, abort, write,
+read, __errno_location
+```
+
+Without `BUSTER_LINK_LIBC`, the binding table is empty. Data imports such as
+`stdout`, `stderr` and `environ` are unsupported, as are TLS references;
+nonempty initializer/finalizer arrays are refused. The underlying JIT's Apple
+Silicon implementation remains subject to its one-`MAP_JIT`-region
+restriction, although `ide run` itself is supported only on x86-64 Linux.
+This is in-process execution, not a sandbox: the program has the `ide`
+process's privileges and can affect it. After a returned `main`, the JIT
+program is released and its arena is destroyed; when the program calls
+`exit()`, the operating system reclaims them as the process terminates.
+Executed test coverage is x86-64 Linux only; shebang execution is not
+implemented.
+
 ## Opt-in native translation-unit lanes
 
 `-fcompile-jobs=N` accepts a positive 32-bit worker request. Omission (or
@@ -283,6 +333,25 @@ publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
 the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
 not predefined at any level. `-mattr` overrides still refine the level.
 The psABI's LAHF-SAHF has no target feature and is implied by long mode.
+Without `-march`/`-mcpu` the CPU is the build host's. An invocation with no
+`-target`, or with `-target native`, starts from `target_native`
+(`compiler_driver_parse_arguments`), whose model and features
+`cpu_detect_model` probes at start-up. In effect this is `-march=native`: the
+feature set is the same, though `-v` prints the detected model name (for
+example `cpu=emeraldrapids`) where `-march=native` prints `cpu=native`. Clang
+and GCC differ here; their default is the portable `x86-64` baseline. Any
+other `-target`/`--target` triple starts from `baseline`
+(`target_parse_triple`), even one that names the host; `-target x86_64-linux`
+alone gives `cpu=baseline features=sse2`. Without a pinned CPU, three things
+follow the machine: object bytes, the predefined feature macros (`__AVX2__`,
+`__AVX512F__`, ...), and therefore which `#if`-guarded regions are compiled
+at all. Such output may use instructions that another machine lacks. For
+portable or cross-machine-comparable output, pass `-march=baseline`, a psABI
+level, or a named model. Tools that compare outputs across machines pin one:
+the native-retirement census uses `baseline` and the work ledger uses
+`znver3`. The host default is deliberate. It matches the
+`BUSTER_NATIVE_TARGET=native` host build and the compiler-throughput priority
+(GitHub #1557).
 `-mtune=<model>` is accepted with any nonempty value, `native` included, and
 ignored: it selects only a scheduling model, and instruction selection here has
 no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
@@ -290,7 +359,8 @@ no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
 `-mpclmul`) are `-mattr=+feature` and `-mattr=-feature` in the same ordered
 override list, so the last option naming a feature wins and they refine a
 `-march` level wherever they sit. The feature names are the ones `-mattr`
-takes, dotted spellings included. On x86-64 they also follow GCC's implied
+takes, dotted spellings included. On AArch64, `sve` is a feature name and is
+not included in CPU-model defaults. On x86-64 they also follow GCC's implied
 features: `-mavx2` adds AVX, and `-mno-avx2` / `-mno-avx` also drop every
 enabled feature that requires it (AVX-512, FMA, VNNI, ...). The dependency pairs
 are `target_x86_feature_requirements` in `target.c`: the rules
@@ -383,7 +453,12 @@ metadata validates the exact accumulator, port register and immediate range.
 Source selection consumes both operands even though the imported XED rows mark
 the accumulator and DX as implicit. The hidden `OeAX()` accumulator selects
 AX or EAX and has no ModRM field; its width determines the word prefix rather
-than DX's fixed 16-bit width.
+than DX's fixed 16-bit width. The memory-looking `(%dx)` port spelling that
+GNU objdump prints and GNU as accepts names DX itself
+(`assembly_x86_att_port_dx_parse`), so only a bare parenthesized `%dx` on
+`in`/`out` qualifies; `(%rdx)`, `(%edx)`, displacement, segment and index forms
+remain invalid. Unsized Intel `ldmxcsr`/`stmxcsr [mem]` infers MXCSR's only m32
+width, as AT&T's unsuffixed spelling already does.
 `assembly_test_att_port_suffixes` checks exact bytes against matching Intel
 spellings, including immediate boundaries, word prefixes and invalid register,
 memory, suffix-width and 64-bit neighbours. It never executes port I/O.
@@ -1152,6 +1227,26 @@ or name libgcc_s. This uses an installed target runtime; it installs or embeds
 none. Apple, Windows, Android and freestanding runtime provisioning remain
 separate #1272 work.
 
+Native x86-64 Linux links also supply GCC's CPU-feature runtime (GitHub
+#3399). GCC and Clang `target_clones` resolvers and `__builtin_cpu_init`,
+`__builtin_cpu_supports` and `__builtin_cpu_is` call `__cpu_indicator_init`
+and read `__cpu_model` / `__cpu_features2`. Those are hidden definitions in
+the static `libgcc.a` (`cpuinfo.o`, with its own `.init_array` constructor),
+which the host compiler driver links implicitly as `-lgcc`. After objects,
+explicit archives and the ELF runtime object are selected, a remaining strong
+undefined reference to one of these names that no selected object defines
+makes `compiler_driver_elf_cpu_runtime` read `libgcc.a`: first from the `-L`
+directories, then the newest `usr/lib/gcc`, `usr/lib64/gcc` or Debian
+`usr/lib/gcc-cross` `<triple>/<version>/` directory under the sysroot, or the
+host without one (`compiler_driver_elf_libgcc_path`). Only the members that
+define those names are selected; libgcc.a is not otherwise added to the link,
+so the libgcc_s helper policy above is unchanged. Links without such a
+reference, including weak ones, do not read or name libgcc.a. A missing
+archive, or one that does not define the name, fails the link with the archive
+and symbol named, before replacing the output. AArch64 (`__aarch64_cpu_features`,
+`__init_cpu_features_resolver`, outline atomics) and non-Linux targets remain
+out of scope.
+
 `compiler_driver_elf_dynamic_symbols` walks that table once and produces two
 things.
 
@@ -1236,6 +1331,16 @@ syntax-only and assembly/prebuilt-only input routes retain their behavior.
 Mach-O and COFF keep their existing target models; Wasm/eBPF compatibility
 behavior is unchanged. LLVM-bitcode and direct backend model requests remain
 an audit residual of issue #1289.
+On x86-64 Android every executable link is a PIE, with or without `-pie`
+(`-no-pie` cannot select another image there): the kernel places bionic's
+executable at a load bias, so a fixed-address image marked `ET_DYN` would run
+its preinit entries, IFUNC runner and every data pointer unrelocated. The same
+writer names `/system/bin/linker64` and `libc.so`, and its entry stub does not
+register RDX as a loader finalizer, because bionic's `linker64` leaves RDX
+unspecified at the entry point. `-shared` stays refused for Android, and
+Android AArch64 still stages a fixed-address image. `android/runtime_order.sh`
+executes an x86-64 image on the CI emulator (see the Android CI notes in
+[testing.md](testing.md)).
 On any other target a link that asks for either image is refused as an
 unsupported option, while a compile-only invocation ignores the link option,
 as GCC does.
@@ -1248,8 +1353,8 @@ value are argument errors, and a GPU target ignores the option. The bit
 reaches `st_other` on ELF only; Mach-O and COFF objects do not record it.
 
 The default fixed-address dynamic executable
-(`link_native_executable_elf64_x86_64_dynamic`, which the AArch64 and Android
-dynamic writers also build on) is hardened the way GNU ld's default is
+(`link_native_executable_elf64_x86_64_dynamic`, which the AArch64 Linux and
+Android dynamic writers also build on) is hardened the way GNU ld's default is
 (#2720). It has three loads: R (headers, `.interp`, `.dynstr`/`.dynsym`/
 `.hash`/version tables, `.rela.plt`/`.rela.dyn`, `.rodata`, `.eh_frame_hdr`,
 `.eh_frame`), R+X (the entry stub, `.text`, `.plt`) and RW. The RW load starts
@@ -1482,9 +1587,31 @@ switches, runtime paths, version scripts, and other `-z` modes are refused.
 
 `-Wp,` and `-Wa,` are unsupported and are never warning options. This includes
 preprocessor macro/include operations and dependency requests. Direct `-D`,
-`-U`, and `-I` remain available; dependency generation (`-M`, `-MM`, `-MD`,
-`-MMD`, `-MF`, `-MT`, `-MP`) is refused in every spelling. A failed request
-preserves any existing artifact instead of reporting a successful stale build.
+`-U`, and `-I` remain available; `-Wp,-M*` stays refused. The driver supports
+the bounded `-MD`/`-MMD` dependency-file contract described below; standalone
+`-M`, `-MM`, and `-MG` remain unsupported.
+
+## Dependency files
+
+`-MD` and `-MMD` write a Make-compatible depfile for C `-c` output. The default
+depfile path comes from the object path by removing only the basename's last
+extension and appending `.d`; `-MF` overrides it. `-MT` adds a raw target,
+`-MQ` adds an escaped target, and the default target is the escaped object path.
+Multiple target options retain command-line order. `-MP` adds phony rules for
+header prerequisites. `-MF`, `-MT`, `-MQ`, and `-MP` require `-MD` or `-MMD`;
+explicit `-MF`/target options cannot be used with multiple inputs.
+
+Prerequisites come from resolved preprocessor include identities, in
+first-inclusion order; the main source comes first unless compiling stdin.
+Repeated identities appear once, builtin headers and `<command-line>` do not
+appear, and forced includes follow the main source. `-MMD` excludes headers
+found in system include paths and all headers included from a system header.
+Makefile-special spaces, tabs, dollar signs, and `#` characters are escaped.
+Paths containing a newline or carriage return cannot be represented and fail
+with a file-write diagnostic.
+The depfile is atomically published only after successful compilation and
+object publication, so a failed compile preserves existing object and depfile
+contents.
 
 ## Warning options
 
@@ -1554,25 +1681,33 @@ source debug models and their larger object payloads unless requested.
 `-g` selects DWARF 4 for native ELF/Mach-O targets and CodeView for Windows
 objects. Unwind information remains independent of source debug information.
 
+A linked Windows image's PDB (`pdb_build`) gives its TPI stream a hash stream:
+one `hashTypeRecord` bucket per record modulo `0x3ffff` (`pdb_type_record_hash`)
+and a sparse type-index offset entry per 8 KiB of records. DbgHelp (cdb,
+WinDbg, `symchk`, `dbh`) faults with `0xc0000005` loading a PDB whose TPI
+stream names no hash stream (#3411). The regression is `pdb_test_tpi_hashes`.
+
 With `-g`, named scalar locals that need more than one defining instruction to
 describe stay in distinct frame slots, so their location lists follow stores
 through reassignment and control-flow joins. A frame location starts after its
 first entry-block store. A local first stored on a later control-flow path
-gets per-block ranges from a forward must-initialized pass over the published
-CFG (`machine_debug_initialized_build`): the whole of each reachable block
-that every incoming path has written, else the rest of a block after its own
-first write. A write on only some paths therefore never reaches the join, and
-uninitialized frame bytes are never exposed. Ranges are produced in machine
-layout order, and `codegen_canonical_location_append` merges a seed into the
-previous one when it continues the same local with the same whole location,
-so back-to-back blocks become one location-list entry or CodeView
-`S_DEFRANGE_*` record. Past `MACHINE_DEBUG_INITIALIZED_CELL_LIMIT` block-local
-cells, or once a function's deferred ranges would exceed
-`MACHINE_DEBUG_INITIALIZED_RANGE_LIMIT`, the remaining locals stay
-unavailable. The CodeView symbol reserve counts every location range
-(`CODEVIEW_DEFRANGE_RECORD_BYTES`), and a range longer than the 16-bit
-`S_DEFRANGE_*` length is emitted as consecutive records of at most
-`CODEVIEW_DEFRANGE_MAX_LENGTH` bytes rather than clamped. Regressions:
+gets must-initialized ranges from the published CFG
+(`machine_debug_initialized_build`): the whole of each reachable block that
+every incoming path has written, else the rest of a block after its own first
+write. A write on only some paths therefore never reaches the join, and
+uninitialized frame bytes are never exposed. These per-block ranges are
+organized in machine layout order and emitted as one debug value for each
+layout-adjacent run; a partial-start block starts a new run. Machine blocks
+are published in selection layout order, with each block's line marks forming
+a contiguous row group, so adjacent block spans meet at a row boundary.
+Replaying the run therefore preserves the same seeds as separate block
+replay followed by `codegen_canonical_location_append`. Past
+`MACHINE_DEBUG_INITIALIZED_CELL_LIMIT` block-local cells, or once the
+per-block range budget `MACHINE_DEBUG_INITIALIZED_RANGE_LIMIT` is exceeded,
+the remaining locals stay unavailable. The CodeView symbol reserve counts
+every location range (`CODEVIEW_DEFRANGE_RECORD_BYTES`), and a range longer
+than the 16-bit `S_DEFRANGE_*` length is emitted as consecutive records of at
+most `CODEVIEW_DEFRANGE_MAX_LENGTH` bytes rather than clamped. Regressions:
 `codegen_test_debug_local_seed_coverage`,
 `machine_test_debug_value_initialized_blocks`,
 `machine_test_debug_value_initialized_budget`,
@@ -1633,6 +1768,18 @@ aborts with an arena validation failure from 230,000 (#3254). The mobile
 builds of the driver fixture use smaller counts to keep their deadlines. A reservation that cannot be carved
 is a positioned `initializer working storage exceeds the scratch reservation`
 or `initializer nesting exceeds its capacity` diagnostic and a failed result.
+
+Automatic aggregate initializers lower through the nested compound-literal
+machine, which zero-fills each brace-enclosed element before storing its
+members. Its scratch is per element and released with it: the zero-value task
+stack grows with the widest path through the type (`c_ir_emit_zero_value`),
+the cursor stack follows the type's nesting depth, and the unit-lifetime query
+stack gets its own mapping when it would leave lowering less than half of the
+thread scratch. `c_test_ir_local_table_zero_scratch` lowers a 20,000-entry
+local table that previously exhausted the scratch (#2527); generating machine
+code for a function that large still aborts in the fast register allocator
+(#3413). A task stack that cannot grow is the diagnostic
+`aggregate zero-initializer exceeds the lowering scratch reservation`.
 
 ## ELF TLS companion lookup
 
@@ -1711,9 +1858,19 @@ suffix to classify, so it needs `-x c` or `-x cpp-output`, or `-E`, which reads
 it as C source; without either, or under another language, the parser refuses
 it, and it may appear only once. The source text travels in
 `CompilerDriverInvocation.standard_input`: the `cc` command reads standard
-input to EOF into it after parsing, and embedding callers fill it themselves. A
-null pointer there fails the input as a read error. Diagnostics and `__FILE__`
-name the input `-`, and `-c` without `-o` writes `-.o`, as Clang does.
+input to EOF into it after parsing, and API callers fill it themselves. A null
+pointer there fails the input as a read error. Diagnostics and `__FILE__` name
+the input `-`, and `-c` without `-o` writes `-.o`, as Clang does.
+
+The embedding facade instead sets the API-only
+`CompilerDriverInvocation.input_source` for one C input. A non-null pointer
+means the bytes are used directly and `input_paths[0]` supplies only the
+virtual filename for diagnostics, `__FILE__`, and quoted-include lookup; the
+driver does not open that path and assigns no filesystem identity. An empty
+source is valid when its pointer is non-null. `retain_object` is another
+API-only field: for a single `-c` input it keeps `result.object` in the caller's
+arena and suppresses file output. The public embedding module owns the arena
+through object serialization or JIT release.
 `compiler_driver_test_probe_spellings` covers the admission rules, both routes
 and the `-static`/`-mtune` spellings (GitHub #2851).
 

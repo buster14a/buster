@@ -2431,6 +2431,428 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_ifunc_tests(UnitTestArgum
     }
     return result;
 }
+
+#if BUSTER_CPU_ARCH_X86_64
+// A GNU archive of `count` members named m0.o, m1.o, ... in order, with the
+// symbol index GNU ld requires: member `index` defines names[index][0..].
+BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_elf_cpu_runtime_archive(Arena* arena, ByteSlice const* members, String8 const* const* names,
+                                                                     u32 const* name_counts, u32 count)
+{
+    u32 symbol_count = 0;
+    u64 string_bytes = 0;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        symbol_count += name_counts[index];
+        for (u32 name = 0; name < name_counts[index]; name += 1) string_bytes += names[index][name].length + 1;
+    }
+    u64 index_length = 4 + 4 * (u64)symbol_count + string_bytes;
+    u64 length = 8 + 60 + index_length + (index_length & 1);
+    for (u32 index = 0; index < count; index += 1) length += 60 + members[index].length + (members[index].length & 1);
+    ByteSlice bytes = {.pointer = arena_allocate(arena, u8, length), .length = length};
+    memcpy(bytes.pointer, "!<arch>\n", 8);
+    u64 cursor = 8;
+    u64 member_offsets[2];
+    BUSTER_CHECK(count <= BUSTER_ARRAY_LENGTH(member_offsets));
+    u64 offset = 8 + 60 + index_length + (index_length & 1);
+    for (u32 index = 0; index < count; index += 1)
+    {
+        member_offsets[index] = offset;
+        offset += 60 + members[index].length + (members[index].length & 1);
+    }
+    for (u32 index = 0; index <= count; index += 1)
+    {
+        u8* header = bytes.pointer + cursor;
+        memset(header, ' ', 60);
+        u64 member_length = index ? members[index - 1].length : index_length;
+        String8 name = index ? string_format(arena, S8("m{u32}.o/"), index - 1) : S8("/");
+        String8 size = string_format(arena, S8("{u64}"), member_length);
+        BUSTER_CHECK(name.length <= 16 && size.length <= 10);
+        memcpy(header, name.pointer, name.length);
+        header[16] = '0';
+        header[28] = '0';
+        header[34] = '0';
+        memcpy(header + 40, "644", 3);
+        memcpy(header + 48, size.pointer, size.length);
+        memcpy(header + 58, "`\n", 2);
+        cursor += 60;
+        if (index)
+        {
+            memcpy(bytes.pointer + cursor, members[index - 1].pointer, member_length);
+            cursor += member_length;
+        }
+        else
+        {
+            u8* table = bytes.pointer + cursor;
+            table[0] = (u8)(symbol_count >> 24);
+            table[1] = (u8)(symbol_count >> 16);
+            table[2] = (u8)(symbol_count >> 8);
+            table[3] = (u8)symbol_count;
+            u64 slot = 4;
+            u64 string_cursor = 4 + 4 * (u64)symbol_count;
+            for (u32 member = 0; member < count; member += 1)
+            {
+                for (u32 symbol = 0; symbol < name_counts[member]; symbol += 1)
+                {
+                    u32 member_offset = (u32)member_offsets[member];
+                    table[slot + 0] = (u8)(member_offset >> 24);
+                    table[slot + 1] = (u8)(member_offset >> 16);
+                    table[slot + 2] = (u8)(member_offset >> 8);
+                    table[slot + 3] = (u8)member_offset;
+                    slot += 4;
+                    String8 symbol_name = names[member][symbol];
+                    memcpy(table + string_cursor, symbol_name.pointer, symbol_name.length);
+                    table[string_cursor + symbol_name.length] = 0;
+                    string_cursor += symbol_name.length + 1;
+                }
+            }
+            cursor += member_length;
+        }
+        if (member_length & 1) bytes.pointer[cursor++] = '\n';
+    }
+    BUSTER_CHECK(cursor == length);
+    return bytes;
+}
+
+// Issue 3399: GCC and Clang target_clones and __builtin_cpu_* code calls
+// __cpu_indicator_init and reads __cpu_model from the static libgcc.a, which
+// the host compiler driver links implicitly. This linker selects the
+// CPU-feature members only when such a reference remains. The host link is the
+// oracle; the program also fails if __cpu_model was never initialized, since
+// every x86-64 CPU has SSE2. A -L libgcc.a that lacks the runtime, and a
+// sysroot with no GCC installation, refuse the link with the archive and
+// symbol named and leave no output. Runtime members that depend on each other
+// are selected in either archive order.
+// Issue 3414: default PIE GCC and Clang objects read an absent weak name's
+// address through R_X86_64_GOTPCREL or REX_GOTPCRELX, a site that cannot
+// always be rewritten into a direct form (`cmpq $0, name@GOTPCREL(%rip)`).
+// The libc-free programs take the static writer, the libc one the dynamic
+// writer, and every program must read both names as null in PIE and
+// position-dependent outputs, as the host linker does.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_weak_got_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 compiler = S8(BUSTER_HOST_C_COMPILER_ID);
+    bool supported = string_equal(compiler, S8("GNU")) || string_equal(compiler, S8("Clang"));
+    if (supported)
+    {
+        typedef struct ElfWeakGotCase ElfWeakGotCase;
+        struct ElfWeakGotCase
+        {
+            String8 name;
+            String8 program;
+        };
+        ElfWeakGotCase cases[] = {
+            {S8("compare"), S8("extern void weak_got_hook(void) __attribute__((weak));\n"
+                "extern int weak_got_data __attribute__((weak));\n"
+                "int main(void) { return (weak_got_hook ? 1 : 0) | (&weak_got_data ? 2 : 0); }\n")},
+            {S8("load"), S8("extern void weak_got_hook(void) __attribute__((weak));\n"
+                "extern int weak_got_data __attribute__((weak));\n"
+                "__attribute__((noinline)) int weak_got_count(void const* a, void const* b) { return (a != 0) + (b != 0); }\n"
+                "int main(void) { return weak_got_count((void const*)weak_got_hook, &weak_got_data); }\n")},
+            {S8("libc"), S8("int puts(const char*);\n"
+                "extern void weak_got_hook(void) __attribute__((weak));\n"
+                "extern int weak_got_data __attribute__((weak));\n"
+                "int main(void)\n"
+                "{\n"
+                "    int absent = !weak_got_hook && !&weak_got_data;\n"
+                "    puts(absent ? \"weak absent\" : \"weak present\");\n"
+                "    return !absent;\n"
+                "}\n")},
+        };
+        String8 root = buster_test_temporary_path(arena, S8("buster-elf-weak-got"), S8(""));
+        OsDirectoryCreateResult created = os_make_directory(root);
+        BUSTER_TEST(arguments, created.error.v == 0);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            ElfWeakGotCase test = cases[index];
+            String8 source = string_format_z(arena, S8("{S8}/{S8}.c"), root, test.name);
+            String8 object = string_format_z(arena, S8("{S8}/{S8}.o"), root, test.name);
+            BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(test.program)));
+            String8 compile[] = {S8("-w"), S8("-O2"), S8("-fPIE"), S8("-c"), source, S8("-o"), object};
+            bool produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile));
+            BUSTER_TEST(arguments, produced);
+            if (produced)
+            {
+                // The input must exercise the GOT form, not a direct one.
+                ObjectFile read = object_read(arena, file_read(arena, object, (FileReadOptions){0}), target_native);
+                BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE);
+                u32 got_hook = 0;
+                u32 got_data = 0;
+                for (u32 relocation = 0; read.error == OBJECT_ERROR_NONE && relocation < read.relocation_count; relocation += 1)
+                {
+                    ObjectRelocation* entry = read.relocations + relocation;
+                    String8 name = entry->symbol < read.symbol_count ? read.symbols[entry->symbol].name : (String8){0};
+                    bool got = object_relocation_kind_is_x86_got(entry->kind);
+                    got_hook += got && string_equal(name, S8("weak_got_hook"));
+                    got_data += got && string_equal(name, S8("weak_got_data"));
+                }
+                BUSTER_TEST(arguments, got_hook != 0 && got_data != 0);
+                String8 kinds[] = {S8("-pie"), S8("-no-pie")};
+                for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+                {
+                    String8 oracle = string_format_z(arena, S8("{S8}/{S8}-oracle{S8}"), root, test.name, kinds[kind]);
+                    String8 host_link[] = {kinds[kind], object, S8("-o"), oracle};
+                    bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
+                    BUSTER_TEST(arguments, linked);
+                    if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, oracle));
+                    String8 output = string_format_z(arena, S8("{S8}/{S8}-buster{S8}"), root, test.name, kinds[kind]);
+                    String8 command[] = {kinds[kind], object, S8("-o"), output};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+                    if (compiled.error != COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("weak GOT {S8}{S8}: {S8}\n"), test.name, kinds[kind], compiled.diagnostic);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
+                }
+            }
+        }
+        BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_cpu_runtime_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 compiler = S8(BUSTER_HOST_C_COMPILER_ID);
+    bool supported = string_equal(compiler, S8("GNU")) || string_equal(compiler, S8("Clang"));
+    if (supported)
+    {
+        String8 root = buster_test_temporary_path(arena, S8("buster-elf-cpu-runtime"), S8(""));
+        OsDirectoryCreateResult created = os_make_directory(root);
+        BUSTER_TEST(arguments, created.error.v == 0);
+        String8 source = string_format_z(arena, S8("{S8}/clones.c"), root);
+        String8 object = string_format_z(arena, S8("{S8}/clones.o"), root);
+        String8 unrelated_source = string_format_z(arena, S8("{S8}/unrelated.c"), root);
+        String8 unrelated_object = string_format_z(arena, S8("{S8}/unrelated.o"), root);
+        BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "int puts(const char *);\n"
+            "__attribute__((target_clones(\"default\", \"avx2\"))) int work(int x) { return x + 1; }\n"
+            "int main(void)\n"
+            "{\n"
+            "    int ok = work(41) == 42 && __builtin_cpu_supports(\"sse2\");\n"
+            "    puts(ok ? \"cpu runtime ok\" : \"cpu runtime wrong\");\n"
+            "    return !ok;\n"
+            "}\n"))));
+        BUSTER_TEST(arguments, file_write(unrelated_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int unrelated_runtime_member;\n"))));
+        String8 compile[] = {S8("-w"), S8("-O2"), S8("-c"), source, S8("-o"), object};
+        String8 unrelated_compile[] = {S8("-w"), S8("-O2"), S8("-c"), unrelated_source, S8("-o"), unrelated_object};
+        bool produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)) &&
+                        compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(unrelated_compile));
+        BUSTER_TEST(arguments, produced);
+        if (produced)
+        {
+            String8 oracle = string_format_z(arena, S8("{S8}/oracle"), root);
+            String8 host_link[] = {object, S8("-o"), oracle};
+            bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
+            BUSTER_TEST(arguments, linked);
+            if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, oracle));
+            String8 kinds[] = {S8("-no-pie"), S8("-pie")};
+            for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+            {
+                String8 output = string_format_z(arena, S8("{S8}/buster{S8}"), root, kinds[kind]);
+                String8 command[] = {kinds[kind], object, S8("-o"), output};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
+            }
+
+            String8 fake = string_format_z(arena, S8("{S8}/fake"), root);
+            created = os_make_directory(fake);
+            BUSTER_TEST(arguments, created.error.v == 0);
+            String8 fake_archive = string_format_z(arena, S8("{S8}/libgcc.a"), fake);
+            ByteSlice member = file_read(arena, unrelated_object, (FileReadOptions){0});
+            BUSTER_TEST(arguments, file_write(fake_archive, compiler_driver_elf_semantic_archive(arena, member)));
+            String8 search = string_format_z(arena, S8("-L{S8}"), fake);
+            String8 lacking_output = string_format_z(arena, S8("{S8}/lacking"), root);
+            String8 lacking[] = {search, object, S8("-o"), lacking_output};
+            CompilerDriverResult refused = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(lacking)));
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK && refused.native_link.error == LINK_ERROR_UNRESOLVED_SYMBOL);
+            BUSTER_TEST(arguments, string_equal(refused.native_link.symbol, S8("__cpu_indicator_init")) ||
+                                   string_equal(refused.native_link.symbol, S8("__cpu_model")));
+            BUSTER_STRING_TEST(arguments, refused.diagnostic,
+                               string_format(arena, S8("GCC runtime {S8} does not define {S8}"), fake_archive, refused.native_link.symbol));
+            BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(lacking_output));
+
+            String8 empty = string_format_z(arena, S8("{S8}/empty-sysroot"), root);
+            created = os_make_directory(empty);
+            BUSTER_TEST(arguments, created.error.v == 0);
+            String8 sysroot = string_format_z(arena, S8("--sysroot={S8}"), empty);
+            String8 missing_output = string_format_z(arena, S8("{S8}/missing"), root);
+            String8 missing[] = {sysroot, object, S8("-o"), missing_output};
+            refused = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing)));
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK && refused.native_link.error == LINK_ERROR_UNRESOLVED_SYMBOL);
+            BUSTER_STRING_TEST(arguments, refused.diagnostic,
+                               string_format(arena, S8("{S8} is defined by the GCC runtime libgcc.a, which was not found in -L directories or the "
+                                                       "target's GCC installation"),
+                                             refused.native_link.symbol));
+            BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(missing_output));
+        }
+
+        // A runtime member can need a name that another member defines, in
+        // either archive order: here the program references only
+        // __cpu_indicator_init, whose member references __cpu_model.
+        String8 init_source = string_format_z(arena, S8("{S8}/runtime-init.c"), root);
+        String8 init_object = string_format_z(arena, S8("{S8}/runtime-init.o"), root);
+        String8 model_source = string_format_z(arena, S8("{S8}/runtime-model.c"), root);
+        String8 model_object = string_format_z(arena, S8("{S8}/runtime-model.o"), root);
+        String8 caller_source = string_format_z(arena, S8("{S8}/runtime-caller.c"), root);
+        String8 caller_object = string_format_z(arena, S8("{S8}/runtime-caller.o"), root);
+        BUSTER_TEST(arguments, file_write(init_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "struct model { unsigned vendor, type, subtype, features[1]; };\n"
+            "extern struct model __cpu_model;\n"
+            "int __cpu_indicator_init(void) { __cpu_model.vendor = 7; return 0; }\n"))));
+        BUSTER_TEST(arguments, file_write(model_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "struct model { unsigned vendor, type, subtype, features[1]; };\n"
+            "struct model __cpu_model;\n"
+            "int model_vendor(void) { return (int)__cpu_model.vendor; }\n"))));
+        BUSTER_TEST(arguments, file_write(caller_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "int __cpu_indicator_init(void);\n"
+            "int model_vendor(void);\n"
+            "int main(void) { return __cpu_indicator_init() != 0 || model_vendor() != 7; }\n"))));
+        String8 init_compile[] = {S8("-w"), S8("-O2"), S8("-c"), init_source, S8("-o"), init_object};
+        String8 model_compile[] = {S8("-w"), S8("-O2"), S8("-c"), model_source, S8("-o"), model_object};
+        String8 caller_compile[] = {S8("-w"), S8("-O2"), S8("-c"), caller_source, S8("-o"), caller_object};
+        bool runtime_produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(init_compile)) &&
+                                compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(model_compile)) &&
+                                compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(caller_compile));
+        BUSTER_TEST(arguments, runtime_produced);
+        for (u32 order = 0; runtime_produced && order < 2; order += 1)
+        {
+            ByteSlice init_bytes = file_read(arena, init_object, (FileReadOptions){0});
+            ByteSlice model_bytes = file_read(arena, model_object, (FileReadOptions){0});
+            ByteSlice members[] = {order ? init_bytes : model_bytes, order ? model_bytes : init_bytes};
+            static String8 const init_names[] = {S8_INITIALIZER("__cpu_indicator_init")};
+            static String8 const model_names[] = {S8_INITIALIZER("__cpu_model"), S8_INITIALIZER("model_vendor")};
+            String8 const* member_names[] = {order ? init_names : model_names, order ? model_names : init_names};
+            u32 member_name_counts[] = {order ? 1u : 2u, order ? 2u : 1u};
+            String8 directory = string_format_z(arena, S8("{S8}/order-{u32}"), root, order);
+            created = os_make_directory(directory);
+            BUSTER_TEST(arguments, created.error.v == 0);
+            String8 runtime_archive = string_format_z(arena, S8("{S8}/libgcc.a"), directory);
+            BUSTER_TEST(arguments, file_write(runtime_archive, compiler_driver_elf_cpu_runtime_archive(arena, members, member_names, member_name_counts, BUSTER_ARRAY_LENGTH(members))));
+            String8 oracle = string_format_z(arena, S8("{S8}/oracle"), directory);
+            String8 host_link[] = {caller_object, runtime_archive, S8("-o"), oracle};
+            bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
+            BUSTER_TEST(arguments, linked);
+            if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, oracle));
+            String8 output = string_format_z(arena, S8("{S8}/buster"), directory);
+            String8 search = string_format_z(arena, S8("-L{S8}"), directory);
+            String8 command[] = {search, caller_object, S8("-o"), output};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
+        }
+
+        // Cases ported from Devin's duplicate branch for this issue. A
+        // malformed -L libgcc.a is read only by a link that needs the runtime.
+        // Ordinary links and weak references must succeed without touching it.
+        // A refusal preserves an existing output byte for byte.
+        String8 garbage_directory = string_format_z(arena, S8("{S8}/garbage"), root);
+        created = os_make_directory(garbage_directory);
+        String8 garbage_archive = string_format_z(arena, S8("{S8}/libgcc.a"), garbage_directory);
+        bool garbage_written = created.error.v == 0 && file_write(garbage_archive, BUSTER_SLICE_TO_BYTE_SLICE(S8("not an archive")));
+        BUSTER_TEST(arguments, garbage_written);
+        String8 garbage_search = string_format_z(arena, S8("-L{S8}"), garbage_directory);
+        String8 sentinel_output = string_format_z(arena, S8("{S8}/sentinel"), root);
+        String8 sentinel = S8("preserve this output");
+        if (produced && garbage_written)
+        {
+            BUSTER_TEST(arguments, file_write(sentinel_output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+            String8 malformed[] = {garbage_search, object, S8("-o"), sentinel_output};
+            CompilerDriverResult refused = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(malformed)));
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK &&
+                                   string_starts_with_sequence(refused.diagnostic, string_format(arena, S8("could not read archive {S8}:"), garbage_archive)));
+            BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, sentinel_output, (FileReadOptions){0})), sentinel);
+        }
+        String8 ordinary_source = string_format_z(arena, S8("{S8}/ordinary.c"), root);
+        String8 ordinary_object = string_format_z(arena, S8("{S8}/ordinary.o"), root);
+        String8 weak_source = string_format_z(arena, S8("{S8}/weak.c"), root);
+        String8 weak_object = string_format_z(arena, S8("{S8}/weak.o"), root);
+        BUSTER_TEST(arguments, file_write(ordinary_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
+        BUSTER_TEST(arguments, file_write(weak_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "extern struct { unsigned vendor; } __cpu_model __attribute__((weak));\n"
+            "int main(void) { return &__cpu_model != 0; }\n"))));
+        // The weak object is position-independent, so it reads the absent
+        // name through the GOT (issue 3414); it links as both image kinds.
+        String8 ordinary_compile[] = {S8("-w"), S8("-O2"), S8("-c"), ordinary_source, S8("-o"), ordinary_object};
+        String8 weak_compile[] = {S8("-w"), S8("-O0"), S8("-fPIE"), S8("-c"), weak_source, S8("-o"), weak_object};
+        bool unneeded_produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(ordinary_compile)) &&
+                                 compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(weak_compile));
+        BUSTER_TEST(arguments, unneeded_produced);
+        for (u32 index = 0; unneeded_produced && garbage_written && index < 3; index += 1)
+        {
+            String8 output = string_format_z(arena, S8("{S8}/unneeded-{u32}"), root, index);
+            String8 command[] = {garbage_search, index == 2 ? S8("-pie") : S8("-no-pie"), index ? weak_object : ordinary_object, S8("-o"), output};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
+        }
+
+        // The newest GCC version directory wins, and names that are not
+        // versions are skipped. The newest archive here is malformed, so the
+        // diagnostic names it. Once it is removed, the older unrelated archive
+        // is the one reported.
+        String8 versions_sysroot = string_format_z(arena, S8("{S8}/versions"), root);
+        String8 triple = string_format_z(arena, S8("{S8}/usr/lib/gcc/x86_64-linux-gnu"), versions_sysroot);
+        String8 directories[] = {
+            versions_sysroot,
+            string_format_z(arena, S8("{S8}/usr"), versions_sysroot),
+            string_format_z(arena, S8("{S8}/usr/lib"), versions_sysroot),
+            string_format_z(arena, S8("{S8}/usr/lib/gcc"), versions_sysroot),
+            triple,
+            string_format_z(arena, S8("{S8}/9"), triple),
+            string_format_z(arena, S8("{S8}/13.2.1"), triple),
+            string_format_z(arena, S8("{S8}/include"), triple),
+        };
+        bool directories_made = true;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(directories); index += 1)
+        {
+            directories_made = directories_made && os_make_directory(directories[index]).error.v == 0;
+        }
+        BUSTER_TEST(arguments, directories_made);
+        if (produced && directories_made)
+        {
+            String8 older_archive = string_format_z(arena, S8("{S8}/9/libgcc.a"), triple);
+            String8 newest_archive = string_format_z(arena, S8("{S8}/13.2.1/libgcc.a"), triple);
+            String8 include_archive = string_format_z(arena, S8("{S8}/include/libgcc.a"), triple);
+            ByteSlice member = file_read(arena, unrelated_object, (FileReadOptions){0});
+            BUSTER_TEST(arguments, file_write(older_archive, compiler_driver_elf_semantic_archive(arena, member)));
+            BUSTER_TEST(arguments, file_write(newest_archive, BUSTER_SLICE_TO_BYTE_SLICE(S8("not an archive"))));
+            BUSTER_TEST(arguments, file_write(include_archive, BUSTER_SLICE_TO_BYTE_SLICE(S8("not an archive either"))));
+            String8 sysroot = string_format_z(arena, S8("--sysroot={S8}"), versions_sysroot);
+            String8 command[] = {sysroot, object, S8("-o"), sentinel_output};
+            for (u32 attempt = 0; attempt < 2; attempt += 1)
+            {
+                BUSTER_TEST(arguments, file_write(sentinel_output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+                CompilerDriverResult refused = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK);
+                if (attempt)
+                {
+                    BUSTER_STRING_TEST(arguments, refused.diagnostic,
+                                       string_format(arena, S8("GCC runtime {S8} does not define {S8}"), older_archive, refused.native_link.symbol));
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, string_starts_with_sequence(refused.diagnostic,
+                                                                       string_format(arena, S8("could not read archive {S8}:"), newest_archive)));
+                    BUSTER_TEST(arguments, os_file_delete(newest_archive));
+                }
+                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, sentinel_output, (FileReadOptions){0})), sentinel);
+            }
+        }
+        BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+    return result;
+}
+#endif
 #endif
 
 #if !BUSTER_ANDROID && !BUSTER_IOS
@@ -2469,12 +2891,51 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_android_preinit_dynamic(ByteSlice bytes,
     return tags;
 }
 
+// The value of the first `tag` before DT_NULL, or false without one.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_android_dynamic_value(ByteSlice bytes, u64 offset, u64 size, u64 wanted, u64* value)
+{
+    bool found = false;
+    bool terminated = false;
+    for (u64 entry = 0; !found && !terminated && entry + 16 <= size; entry += 16)
+    {
+        u64 tag = 0;
+        terminated = !compiler_driver_android_preinit_field(bytes, offset + entry, 8, &tag) || tag == 0;
+        found = !terminated && tag == wanted && compiler_driver_android_preinit_field(bytes, offset + entry + 8, 8, value);
+    }
+    return found;
+}
+
+// The file offset of `address` through the load that maps it.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_android_address_offset(ByteSlice bytes, u64 program_table, u64 program_count, u64 address, u64* offset)
+{
+    bool found = false;
+    for (u64 header = 0; !found && header < program_count; header += 1)
+    {
+        u64 base = program_table + header * 56;
+        u64 type = 0;
+        u64 file_offset = 0;
+        u64 virtual_address = 0;
+        u64 file_size = 0;
+        bool valid = compiler_driver_android_preinit_field(bytes, base, 4, &type) &&
+                     compiler_driver_android_preinit_field(bytes, base + 8, 8, &file_offset) &&
+                     compiler_driver_android_preinit_field(bytes, base + 16, 8, &virtual_address) &&
+                     compiler_driver_android_preinit_field(bytes, base + 32, 8, &file_size);
+        found = valid && type == 1 && address >= virtual_address && address - virtual_address < file_size;
+        if (found) *offset = file_offset + (address - virtual_address);
+    }
+    return found;
+}
+
 // Issue 1243: an Android executable is staged through the Linux dynamic
 // writers, so it publishes `.preinit_array` through DT_PREINIT_ARRAY for the
 // bionic linker too. The emulator suite cannot execute a freshly linked file
 // from its app sandbox, so this link-only control checks the image itself on
 // every host: both tags are present, the array is one 8-byte entry inside a
 // writable load, and that entry addresses code inside an executable load.
+// The kernel places the executable at a load bias, so on x86-64, whose
+// Android images are PIEs, the entry must also carry an R_X86_64_RELATIVE and
+// the image must name bionic's loader; android/runtime_order.sh executes such
+// an image on the emulator.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2561,6 +3022,41 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTest
             }
         }
         BUSTER_TEST(arguments, valid && writable && function != 0 && executable);
+        if (valid && target == 0)
+        {
+            u64 flags = 0;
+            u64 relocations = 0;
+            u64 relocation_size = 0;
+            u64 relocation_offset = 0;
+            u64 interpreter_offset = 0;
+            bool relocated = false;
+            bool pie = compiler_driver_android_dynamic_value(bytes, dynamic_offset, dynamic_size, 0x6ffffffb, &flags) && (flags & 0x08000000) != 0;
+            bool listed = compiler_driver_android_dynamic_value(bytes, dynamic_offset, dynamic_size, 7, &relocations) &&
+                          compiler_driver_android_dynamic_value(bytes, dynamic_offset, dynamic_size, 8, &relocation_size) &&
+                          compiler_driver_android_address_offset(bytes, program_table, program_count, relocations, &relocation_offset);
+            for (u64 entry = 0; listed && !relocated && entry + 24 <= relocation_size; entry += 24)
+            {
+                u64 slot = 0;
+                u64 information = 0;
+                u64 addend = 0;
+                relocated = compiler_driver_android_preinit_field(bytes, relocation_offset + entry, 8, &slot) &&
+                            compiler_driver_android_preinit_field(bytes, relocation_offset + entry + 8, 8, &information) &&
+                            compiler_driver_android_preinit_field(bytes, relocation_offset + entry + 16, 8, &addend) &&
+                            slot == preinit_address && information == 8 && addend == function;
+            }
+            bool interpreter = false;
+            for (u64 header = 0; header < program_count; header += 1)
+            {
+                u64 type = 0;
+                if (compiler_driver_android_preinit_field(bytes, program_table + header * 56, 4, &type) && type == 3)
+                {
+                    interpreter = compiler_driver_android_preinit_field(bytes, program_table + header * 56 + 8, 8, &interpreter_offset) &&
+                                  interpreter_offset <= bytes.length && bytes.length - interpreter_offset >= sizeof("/system/bin/linker64") &&
+                                  memcmp(bytes.pointer + interpreter_offset, "/system/bin/linker64", sizeof("/system/bin/linker64")) == 0;
+                }
+            }
+            BUSTER_TEST(arguments, pie && relocated && interpreter);
+        }
     }
     scratch_end(temporary);
     return result;
@@ -2587,6 +3083,10 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_semantic_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_preinit_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_ifunc_tests);
+#if BUSTER_CPU_ARCH_X86_64
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_cpu_runtime_tests);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_weak_got_tests);
+#endif
 #endif
 #if BUSTER_ANDROID || BUSTER_IOS
     BUSTER_UNUSED(arguments);

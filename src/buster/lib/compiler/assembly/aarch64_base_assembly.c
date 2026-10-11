@@ -12,6 +12,8 @@
 //   (`A64BaseOperand`); `a64_base_operands_split` splits at top-level commas;
 //   `a64_base_memory_parse` owns `[base{, offset}]{!}` addressing and
 //   `a64_base_list_parse` owns `{ Vt.T, ... }{[lane]}` register lists.
+// - Predicate operands: `a64_base_predicate_parse` recognizes `pN.<b|h|s|d>`;
+//   `a64_base_encode_ptrue` owns PTRUE/PTRUES predicate patterns.
 // - Immediates: `a64_base_integer_parse`, `a64_base_float_parse`,
 //   `a64_base_logical_immediate` (bitmask N:immr:imms) and
 //   `a64_base_float_immediate` (FMOV imm8).
@@ -19,8 +21,9 @@
 //   `A64BaseFamily` plus family-specific bits; LSE atomics are decoded from
 //   their regular spelling by `a64_base_atomic_mnemonic`.
 // - Families: one `a64_base_encode_*` function per instruction class, selected
-//   by the switch in `a64_base_encode`; `a64_base_feature` gates FP, NEON and
-//   FP16 per entry, and `a64_base_system_register` names MRS/MSR operands.
+//   by the switch in `a64_base_encode`; `a64_base_feature` gates FP, NEON,
+//   FP16 and SVE/SME per entry, and `a64_base_system_register` names MRS/MSR
+//   operands.
 //
 // Constraints: no symbols, labels or relocation specifiers (those keep their
 // fixup-aware owners); register-31 roles (SP versus ZR) follow each field's
@@ -49,6 +52,7 @@ typedef enum A64BaseOperandKind
     A64_BASE_OPERAND_NONE,
     A64_BASE_OPERAND_GPR,
     A64_BASE_OPERAND_FPR,
+    A64_BASE_OPERAND_PREDICATE,
     A64_BASE_OPERAND_VECTOR,
     A64_BASE_OPERAND_ELEMENT,
     A64_BASE_OPERAND_IMMEDIATE,
@@ -91,7 +95,7 @@ typedef enum A64BaseAddress
 typedef struct A64BaseRegister A64BaseRegister;
 struct A64BaseRegister
 {
-    // GPR/FPR: register width. Vector/element: element width.
+    // GPR/FPR: register width. Vector/element/predicate: element width.
     u8 bits;
     u8 number;
     u8 lanes;
@@ -169,6 +173,7 @@ typedef enum A64BaseFamily
     A64_BASE_FAMILY_SYSTEM_BARRIER,
     A64_BASE_FAMILY_EXCEPTION,
     A64_BASE_FAMILY_SYSTEM_MOVE,
+    A64_BASE_FAMILY_PREDICATE,
     A64_BASE_FAMILY_VECTOR_IMMEDIATE,
     A64_BASE_FAMILY_VECTOR_LOGICAL_IMMEDIATE,
     A64_BASE_FAMILY_VECTOR_FP_IMMEDIATE,
@@ -485,6 +490,8 @@ BUSTER_GLOBAL_LOCAL const A64BaseMnemonic a64_base_mnemonics[] = {
     A64_BASE_ENTRY("cmle", A64_BASE_FAMILY_VECTOR_COMPARE_ZERO, 0, 0x2e209800),
     A64_BASE_ENTRY("ld1", A64_BASE_FAMILY_VECTOR_LANE, 1, 0),
     A64_BASE_ENTRY("st1", A64_BASE_FAMILY_VECTOR_LANE, 0, 0),
+    A64_BASE_ENTRY("ptrue", A64_BASE_FAMILY_PREDICATE, 0, 0),
+    A64_BASE_ENTRY("ptrues", A64_BASE_FAMILY_PREDICATE, 1, 0),
 };
 
 BUSTER_GLOBAL_LOCAL char8 a64_base_lower(char8 value)
@@ -542,6 +549,31 @@ BUSTER_GLOBAL_LOCAL bool a64_base_register_number(String8 text, u8* number)
     if (valid)
     {
         *number = (u8)value;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool a64_base_predicate_parse(String8 text, A64BaseOperand* operand)
+{
+    u64 dot = text.length;
+    for (u64 index = 0; index < text.length && dot == text.length; index += 1)
+    {
+        if (text.pointer[index] == '.')
+        {
+            dot = index;
+        }
+    }
+    u8 number = 0;
+    bool valid = text.length >= dot && dot >= 2 && text.length - dot == 2 &&
+                 a64_base_lower(text.pointer[0]) == 'p' &&
+                 a64_base_register_number(string_slice(text, 1, dot), &number) && number <= 15;
+    char8 suffix = valid ? a64_base_lower(text.pointer[dot + 1]) : 0;
+    u8 bits = suffix == 'b' ? 8 : suffix == 'h' ? 16 : suffix == 's' ? 32 : suffix == 'd' ? 64 : 0;
+    valid = valid && bits != 0;
+    if (valid)
+    {
+        operand->kind = A64_BASE_OPERAND_PREDICATE;
+        operand->reg = (A64BaseRegister){.bits = bits, .number = number};
     }
     return valid;
 }
@@ -1079,6 +1111,9 @@ BUSTER_GLOBAL_LOCAL bool a64_base_operand_parse(String8 text, A64BaseOperand* op
     {
     }
     else if (valid && a64_base_prefetch_parse(text, operand))
+    {
+    }
+    else if (valid && a64_base_predicate_parse(text, operand))
     {
     }
     else if (valid)
@@ -2445,6 +2480,57 @@ BUSTER_GLOBAL_LOCAL bool a64_base_encode_system(A64BaseMnemonic entry, A64BaseOp
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL bool a64_base_encode_ptrue(u8 set_flags, A64BaseOperand const* operands, u32 count, u32* word)
+{
+    static struct
+    {
+        String8 name;
+        u8 value;
+    } const patterns[] = {
+        {S8_INITIALIZER("pow2"), 0},
+        {S8_INITIALIZER("vl1"), 1},
+        {S8_INITIALIZER("vl2"), 2},
+        {S8_INITIALIZER("vl3"), 3},
+        {S8_INITIALIZER("vl4"), 4},
+        {S8_INITIALIZER("vl5"), 5},
+        {S8_INITIALIZER("vl6"), 6},
+        {S8_INITIALIZER("vl7"), 7},
+        {S8_INITIALIZER("vl8"), 8},
+        {S8_INITIALIZER("vl16"), 9},
+        {S8_INITIALIZER("vl32"), 10},
+        {S8_INITIALIZER("vl64"), 11},
+        {S8_INITIALIZER("vl128"), 12},
+        {S8_INITIALIZER("vl256"), 13},
+        {S8_INITIALIZER("mul4"), 29},
+        {S8_INITIALIZER("mul3"), 30},
+        {S8_INITIALIZER("all"), 31},
+    };
+    u64 pattern = 31;
+    bool pattern_valid = count == 1;
+    if (count == 2)
+    {
+        pattern_valid = a64_base_unsigned(operands + 1, 31, &pattern);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(patterns); index += 1)
+        {
+            if (operands[1].kind == A64_BASE_OPERAND_NAME && a64_base_equal(operands[1].name, patterns[index].name))
+            {
+                pattern = patterns[index].value;
+                pattern_valid = true;
+            }
+        }
+    }
+    u8 element_bits = count ? operands[0].reg.bits : 0;
+    u8 size = element_bits == 8 ? 0 : element_bits == 16 ? 1 : element_bits == 32 ? 2 : 3;
+    bool valid = (count == 1 || count == 2) && operands[0].kind == A64_BASE_OPERAND_PREDICATE &&
+                 operands[0].reg.number <= 15 && pattern_valid;
+    if (valid)
+    {
+        *word = UINT32_C(0x2518e000) | ((u32)size << 22) | ((u32)set_flags << 16) | ((u32)pattern << 5) |
+                operands[0].reg.number;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool a64_base_encode(A64BaseMnemonic entry, A64BaseOperand const* operands, u32 count, u32* word)
 {
     bool valid;
@@ -2701,6 +2787,9 @@ BUSTER_GLOBAL_LOCAL bool a64_base_encode(A64BaseMnemonic entry, A64BaseOperand c
     case A64_BASE_FAMILY_VECTOR_LANE:
         valid = a64_base_encode_vector_lane(entry.variant, operands, count, word);
         break;
+    case A64_BASE_FAMILY_PREDICATE:
+        valid = a64_base_encode_ptrue(entry.variant, operands, count, word);
+        break;
     default:
         valid = false;
         break;
@@ -2708,9 +2797,10 @@ BUSTER_GLOBAL_LOCAL bool a64_base_encode(A64BaseMnemonic entry, A64BaseOperand c
     return valid;
 }
 
-// The feature an entry needs for these operands: FP/SIMD registers need
-// fp-armv8, AdvSIMD families and vector operands need neon, and scalar
-// half-precision arithmetic needs fullfp16 (half loads and stores do not).
+// The feature an entry needs for these operands: PTRUE/PTRUES need SVE or SME;
+// FP/SIMD registers need fp-armv8, AdvSIMD families and vector operands need
+// neon, and scalar half-precision arithmetic needs fullfp16 (half loads and
+// stores do not).
 BUSTER_GLOBAL_LOCAL A64BaseAssemblyStatus a64_base_feature(Target target, A64BaseMnemonic entry, A64BaseOperand const* operands, u32 count)
 {
     bool vector_family = entry.family >= A64_BASE_FAMILY_VECTOR_IMMEDIATE;
@@ -2720,7 +2810,15 @@ BUSTER_GLOBAL_LOCAL A64BaseAssemblyStatus a64_base_feature(Target target, A64Bas
     bool fp = simd || a64_base_operands_fp(operands, count);
     bool half = a64_base_fp_operands_half(operands, count) && entry.family != A64_BASE_FAMILY_LOAD_STORE;
     A64BaseAssemblyStatus status = A64_BASE_ASSEMBLY_OK;
-    if (fp && !target_cpu_feature_has(target, TARGET_CPU_FEATURE_AARCH64_FP_ARMV8))
+    if (entry.family == A64_BASE_FAMILY_PREDICATE)
+    {
+        if (!target_cpu_feature_has(target, TARGET_CPU_FEATURE_AARCH64_SVE) &&
+            !target_cpu_feature_has(target, TARGET_CPU_FEATURE_AARCH64_SME))
+        {
+            status = A64_BASE_ASSEMBLY_REQUIRES_SVE_OR_SME;
+        }
+    }
+    else if (fp && !target_cpu_feature_has(target, TARGET_CPU_FEATURE_AARCH64_FP_ARMV8))
     {
         status = A64_BASE_ASSEMBLY_REQUIRES_FP;
     }
