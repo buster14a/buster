@@ -28,6 +28,16 @@ A passing configure probe, linked CLI or `--version` result does not qualify
 transfers, TLS verification, mixed-compiler ABI or performance. Current observed
 results and exact candidate revisions belong on the issue and implementation PR.
 
+## Build-system prerequisite
+
+Normal CMake/Ninja compiler probes request `-MD -MT ... -MF ...`.
+Buster dependency-file emission is owned by
+[#2302](https://github.com/buster14a/buster/issues/2302).
+The [curl reproducer](https://github.com/buster14a/buster/issues/2302#issuecomment-6108097129)
+retains the observed configure refusal before curl C compilation.
+Preserve these flags when rerunning after that implementation lands; removing
+them or forcing a compiler-check result cannot qualify the normal build graph.
+
 ## Declared configuration
 
 The harness uses curl's unchanged CMake/Ninja graph and normal feature detection.
