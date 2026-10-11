@@ -732,7 +732,7 @@ The existing expression machine lowers that range; discovery does not evaluate
 or rewrite indexes, arguments or callback dispatch.
 
 The registered `c_test_call_result_callees` regression reads the first-party
-`tests/basic_c_indexed_callback.c` reduction. It checks distinct callback
+`src/buster/tests/compiler/driver/fixtures/basic_c_indexed_callback.c` reduction. It checks distinct callback
 selection, ordinary and weighted signatures, negative/nonzero Boolean indexes,
 grouped and lazy calls, and separate exactly-once callee/index/argument counters.
 Canonical call counts and validation span six native layouts, GNU17/GNU23 and

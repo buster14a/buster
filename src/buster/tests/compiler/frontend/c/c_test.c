@@ -40919,7 +40919,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_control_call(Unit
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    ByteSlice indexed_input = file_read(arguments->arena, S8("tests/basic_c_indexed_callback.c"), (FileReadOptions){0});
+    ByteSlice indexed_input = file_read(arguments->arena, S8("src/buster/tests/compiler/driver/fixtures/basic_c_indexed_callback.c"), (FileReadOptions){0});
     BUSTER_TEST(arguments, indexed_input.length != 0);
     String8 sources[] = {
         S8(
