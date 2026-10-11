@@ -61,6 +61,12 @@ BUSTER_GLOBAL_LOCAL FfmpegCommand ffmpeg_run(Arena* arena, String8 directory, St
     result.recorded = clang_suite_write(arena, string_format(arena, S8("{S8}.stdout"), prefix), result.output) &&
                       clang_suite_write(arena, string_format(arena, S8("{S8}.stderr"), prefix), result.error) &&
                       clang_suite_write(arena, string_format(arena, S8("{S8}.status"), prefix), status) && recorded;
+    if (!string_starts_with_sequence(quickjs_basename(prefix), S8("cc-")) && result.wait.result != PROCESS_RESULT_SUCCESS)
+    {
+        string_print(S8("FFMPEG_COMMAND_FAILURE artifacts={S8}\n{S8}\n{S8}\n"), prefix,
+                     string_slice(result.output, result.output.length > 8192 ? result.output.length - 8192 : 0, result.output.length),
+                     string_slice(result.error, result.error.length > 8192 ? result.error.length - 8192 : 0, result.error.length));
+    }
     return result;
 }
 
