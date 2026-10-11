@@ -29,3 +29,11 @@ FAST and NONE run first, followed by MIR_STACK and QUALITY. Every Buster unit
 records unique/lexed file and byte counts (include amplification) plus
 preprocessed token and spelling-byte totals. Generated wrappers, objects,
 metrics, synthetic fonts, and logs remain under `build/stb-<hash>-<pid>/`.
+
+The harness also compiles pristine `stb_vorbis.c` at the same pin with Clang
+and with both Buster frontend forms under FAST and QUALITY. These are
+compile-only cells, recorded as `STB_COMPILE unit=stb_vorbis.c`; they do not
+claim Vorbis decoding execution or differential output coverage. Ordinary
+whole-project execution remains in the existing post-main external-project
+job. The project license is
+[MIT OR Unlicense](https://github.com/nothings/stb/blob/2c980bb59875b0d32144a71867fbdebb2f77cd20/LICENSE).
