@@ -377,7 +377,10 @@ fixture as well as compiling both architectures.
   a cast is selected as `MOV_RI` of that immediate instead of `MOV_RR`. A
   constant or cast whose every use is such a cast is marked `fused_dead` and
   selects into nothing. Edge arguments count as uses, so a value reaching a
-  block parameter keeps its row. AArch64 selection does not do this yet.
+  block parameter keeps its row. AArch64 selection applies the same rule
+  through `machine_a64_cast_copies_constant` and `MACHINE_A64_MOV_RI`; its
+  classification pass counts the copy-cast reads and the marking runs after
+  branch fusion against the same use counts, edge arguments included.
 - FAST/QUALITY start a join's or loop header's general block parameters in
   registers. `machine_fast_parameter_contract` gives each non-pinned,
   non-mutable general parameter a caller-saved (or already-saved) register
@@ -471,6 +474,17 @@ fixture as well as compiling both architectures.
   row has read yet (`physical_live_mask`: staged call arguments). A value
   crossing the next call moves only into a paid callee-saved register. Dead,
   rematerializable, or unplaceable occupants keep the eviction.
+- FAST/QUALITY remember the register each value was first bound to
+  (`MachineFastState.preferred_registers`). A free pick for a reload
+  (`machine_fast_ensure` with no fixed target) takes that register while it is
+  free, through the same advisory path as consumer hints: it never evicts and
+  never overrides fixed, tied, pinned, forbidden or callee-saved preferences.
+  A value reloaded on two paths then usually meets the join in one register,
+  so fewer copies repair the disagreement. On unity `ide.c` (x86-64
+  `-march=native -g0`) this removed about 4.3k FAST and 2.8k QUALITY copies
+  and 0.08% / 0.06% of `.text`. Boundary spills and reloads barely move,
+  because they come from a value missing on some path, not from disagreement
+  ([#56 census](https://github.com/buster14a/buster/issues/56#issuecomment-6108071761)).
 - A FAST/QUALITY fixed physical destination evicts its current owner without a
   store when that owner's last use is the same row and it does not escape its
   block (or that use lies below the loop floor): a dying value staged into an argument or return register is consumed
@@ -981,7 +995,9 @@ fixture as well as compiling both architectures.
   natural alignment, and places anonymous arguments in aligned stack slots.
   Both platforms use public eight-byte pointer lists. `va_copy` copies eight
   bytes; `va_arg` selects ordinary MIR loads, alignment, cursor stores and
-  exact aggregate copies for the supported values through sixteen bytes.
+  exact aggregate copies. Values through sixteen bytes are read inline. Larger
+  indirect aggregates consume one pointer and copy the pointee; Darwin also
+  reads larger by-value HFAs/HVAs from aligned inline stack slots.
   `compiler_driver_test_aarch64_platform_variadic` requires zero fallback
   for every MIR allocator and frontend form, then executes native standalone
   and mixed-compiler callers, callees and public-list consumers on matching
@@ -1173,8 +1189,9 @@ fixture as well as compiling both architectures.
   position-independent planner uses `LINK_ELF_PIC_GOT_ADDRESS_ZERO`. AArch64
   `ADR_GOT_PAGE`/`LD64_GOT_LO12_NC` already become `MOVZ #0`/`ADD #0` in
   `object_aarch64_elf_page_relocate`. `compiler_driver_elf_weak_got_tests`
-  links host PIE objects as PIE and `-no-pie` against a host-linker oracle
-  (#3414).
+  links host `-fPIE` objects against a host-linker oracle (#3414): as PIE and
+  `-no-pie` on x86-64, and `-no-pie` only on AArch64 Linux, which writes only
+  fixed-address executables.
   It relaxes the two indirect
   thread-local models back to local-exec for the same reason
   (`link_elf_relax_thread_local`), and a foreign object's local-dynamic
