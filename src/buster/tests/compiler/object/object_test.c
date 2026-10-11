@@ -4143,8 +4143,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_32_writer_limits(UnitTestArgument
 // Issue 990: the priority split remaps COFF initializer relocations in one
 // placement pass, whatever the group count. Its ledger share is exactly R
 // when a group moved an entry and zero otherwise; the rest is object_write's
-// validation, the TLS index scan, the writer's census and its two
-// per-section relocation sweeps (issue 3407). The same
+// validation, the TLS index scan, the writer's census, the two passes that
+// group relocations by section and the two sweeps over those groups (issues
+// 3407 and 1319), each R however many sections the split adds. The same
 // input is written twice, so the split must leave it untouched.
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_priority_split_ledger(UnitTestArguments* arguments)
 {
@@ -4230,22 +4231,29 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_priority_split_ledger(UnitTe
         u32 split_sections = OBJECT_SECTION_COUNT + groups + (groups ? 1 : 0);
         u64 placement = groups ? RELOCATION_COUNT : 0;
         // object_write's validation, the TLS index scan and the writer's
-        // census, the two sweeps and the placement.
-        u64 expected = 3 * (u64)RELOCATION_COUNT + 2 * (u64)split_sections * RELOCATION_COUNT + placement;
+        // census, the grouping passes, the two sweeps and the placement.
+        u64 expected = 3 * (u64)RELOCATION_COUNT + 2 * (u64)RELOCATION_COUNT + 2 * (u64)RELOCATION_COUNT + placement;
         ObjectArtifact first = object_write(temporary.arena, &object, OBJECT_FORMAT_COFF);
         ObjectArtifact second = object_write(temporary.arena, &object, OBJECT_FORMAT_COFF);
         if (BUSTER_REQUIRE(arguments, first.error == OBJECT_ERROR_NONE && second.error == OBJECT_ERROR_NONE))
         {
             BUSTER_TEST(arguments, first.statistics.relocation_visits == expected);
+            // The split still emits one COFF section per kind and group.
+            u16 emitted_sections = 0;
+            if (first.bytes.length >= 4)
+            {
+                memcpy(&emitted_sections, first.bytes.pointer + 2, sizeof(emitted_sections));
+            }
+            BUSTER_TEST(arguments, emitted_sections == split_sections);
             BUSTER_TEST(arguments, first.bytes.length == second.bytes.length &&
                                        memcmp(first.bytes.pointer, second.bytes.pointer, first.bytes.length) == 0);
             BUSTER_TEST(arguments, memcmp(relocations, original, sizeof(original)) == 0);
             BUSTER_TEST(arguments, object_bytes_contain(first.bytes, S8(".CRT$XCU")) && object_bytes_contain(first.bytes, S8(".CRT$XTX")));
             BUSTER_TEST(arguments, object_bytes_contain(first.bytes, S8(".CRT$XTA00200")) == (groups != 0));
-            // Past the per-section sweeps, a group adds nothing but the one
-            // placement pass.
-            u64 per_section = 2 * (u64)split_sections * RELOCATION_COUNT;
-            u64 remainder = first.statistics.relocation_visits - per_section;
+            // The sweeps visit each relocation once whatever the section
+            // count, so a group adds nothing but the one placement pass.
+            u64 sweeps = 2 * (u64)RELOCATION_COUNT;
+            u64 remainder = first.statistics.relocation_visits - sweeps;
             baseline_visits = shape == 0 ? remainder : baseline_visits;
             BUSTER_TEST(arguments, remainder == baseline_visits + placement);
             ObjectFile read = object_read(temporary.arena, first.bytes, object.target);

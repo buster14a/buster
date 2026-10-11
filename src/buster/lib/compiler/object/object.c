@@ -14397,12 +14397,15 @@ BUSTER_GLOBAL_LOCAL bool object_coff_section_alignment_characteristics(ObjectSec
 // section: section s owns entries [(*starts)[s], (*starts)[s + 1]). A writer
 // that emits per-section tables walks its own group instead of rescanning
 // every relocation for every section. Relocations naming a section at or
-// past section_count belong to no group.
-BUSTER_GLOBAL_LOCAL u32* object_relocations_by_section(Arena* arena, ObjectFile* object, u32 section_count, u32** starts)
+// past section_count belong to no group. Its counting and placement passes
+// each visit every relocation once, and both are counted.
+BUSTER_GLOBAL_LOCAL u32* object_relocations_by_section(Arena* arena, ObjectFile* object, u32 section_count, u32** starts,
+                                                       ObjectWriteStatistics* statistics)
 {
     u32* counts = arena_allocate_zeroed(arena, u32, (u64)section_count + 1);
     for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
     {
+        statistics->relocation_visits += 1;
         u32 section = object->relocations[relocation].section;
         if (section < section_count)
         {
@@ -14418,6 +14421,7 @@ BUSTER_GLOBAL_LOCAL u32* object_relocations_by_section(Arena* arena, ObjectFile*
     memcpy(cursors, counts, (u64)section_count * sizeof(*cursors));
     for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
     {
+        statistics->relocation_visits += 1;
         u32 section = object->relocations[relocation].section;
         if (section < section_count)
         {
@@ -14464,7 +14468,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
         relocation_counts[source->section] += 1;
     }
     u32* section_relocation_starts = 0;
-    u32* section_relocations = object_relocations_by_section(arena, object, section_count, &section_relocation_starts);
+    u32* section_relocations = object_relocations_by_section(arena, object, section_count, &section_relocation_starts, statistics);
     for (u32 section = 0; section < section_count && buffer.error == OBJECT_ERROR_NONE; section += 1)
     {
         ObjectSection* object_section = object->sections + section;
@@ -14834,7 +14838,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64_with_capacity(Arena* ar
         statistics->payload_bytes_copied += object->sections[section].data.length;
     }
     u32* section_relocation_starts = 0;
-    u32* section_relocations = object_relocations_by_section(arena, object, section_count, &section_relocation_starts);
+    u32* section_relocations = object_relocations_by_section(arena, object, section_count, &section_relocation_starts, statistics);
     for (u32 section = 0; section < section_count; section += 1)
     {
         statistics->section_visits += 1;
