@@ -2219,6 +2219,90 @@ BUSTER_GLOBAL_LOCAL void c_test_append_logical_chain(char8* destination, u64 cap
     }
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_address_prefix_indexed_paths(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("typedef int T;\n"
+                        "struct s { int value; };\n"
+                        "int call(int);\n"
+                        "void *f(int a, int b)\n"
+                        "{\n"
+                        "    &&body_start;\n"
+                        "    (void)(call(a) && b);\n"
+                        "    (void)((int) &&cast_int);\n"
+                        "    (void)((void *) &&cast_void);\n"
+                        "    (void)((struct s *) &&cast_struct);\n"
+                        "    (void)((T) &&cast_typedef);\n"
+                        "    (void)(sizeof(a) && b);\n"
+                        "    (void)(_Alignof(int) && b);\n"
+                        "    (void)(((a)) && b);\n"
+                        "    (void)(a && b);\n"
+                        "    (void)((a) && (b));\n"
+                        "    switch (a) { case 0: &&case_label; break; }\n"
+                        "body_start:\n"
+                        "cast_int:\n"
+                        "cast_void:\n"
+                        "cast_struct:\n"
+                        "cast_typedef:\n"
+                        "case_label:\n"
+                        "return_label:\n"
+                        "    return &&return_label;\n"
+                        "}\n");
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    u32 body_start = UINT32_MAX;
+    CScopeId scope = C_SCOPE_ID_INVALID;
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    {
+        CDeclaration* declaration = &parse.declarations[declaration_index];
+        if (declaration->kind == C_DECLARATION_FUNCTION && string_equal(declaration->name, S8("f")))
+        {
+            body_start = declaration->body_start;
+            scope = declaration->scope;
+            break;
+        }
+    }
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    bool expected_label_address_prefix_results[] = {true, false, true, true, true, true, false, false, false, false, false, true, true};
+    CParseResult parse_without_position_index = parse;
+    parse_without_position_index.position_index = NULL;
+    if (BUSTER_REQUIRE(arguments, body_start != UINT32_MAX && parse.position_index))
+    {
+        u32 conjunction_count = 0;
+        for (u32 index = body_start; index < preprocess.token_count; index += 1)
+        {
+            if (preprocess.tokens[index].kind == C_TOKEN_PUNCTUATOR &&
+                preprocess.tokens[index].punctuator == C_PUNCTUATOR_AMPERSAND_AMPERSAND)
+            {
+                if (conjunction_count < BUSTER_ARRAY_LENGTH(expected_label_address_prefix_results))
+                {
+                    bool expected = expected_label_address_prefix_results[conjunction_count];
+                    BUSTER_TEST_RAW(arguments,
+                                    c_parse_label_address_prefix_with_typedef(&parse, &preprocess, scope, body_start, index) == expected,
+                                    string_format(temporary.arena, S8("indexed label-address proof differed at conjunction {u32}"), conjunction_count));
+                    BUSTER_TEST_RAW(arguments,
+                                    c_parse_label_address_prefix_with_typedef(&parse_without_position_index, &preprocess, scope, body_start, index) ==
+                                        expected,
+                                    string_format(temporary.arena, S8("unindexed label-address proof differed at conjunction {u32}"), conjunction_count));
+                }
+                else
+                {
+                    BUSTER_TEST_RAW(arguments, false, S8("more conjunctions than expected in label-address source"));
+                }
+                BUSTER_TEST_RAW(arguments, c_test_parse_label_address_prefix_paths_agree(&parse, &preprocess, scope, body_start, index),
+                                string_format(temporary.arena, S8("indexed and fallback label-address proofs differed at token {u32}"), index));
+                conjunction_count += 1;
+            }
+        }
+        BUSTER_TEST(arguments, conjunction_count == BUSTER_ARRAY_LENGTH(expected_label_address_prefix_results));
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_parenthesized_logical_chains(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -40919,6 +41003,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_control_call(Unit
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    ByteSlice indexed_input = file_read(arguments->arena, S8("src/buster/tests/compiler/driver/fixtures/basic_c_indexed_callback.c"), (FileReadOptions){0});
+    BUSTER_TEST(arguments, indexed_input.length != 0);
     String8 sources[] = {
         S8(
             "static int factory_calls, invoke_calls, arg_calls, slot;\n"
@@ -41018,6 +41104,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
             "int grouped_condition(int enabled) { RESET(); int value = 0; if (enabled && ((value = (*(holder.callback))(arg(5))) > 0)) { } return value == enabled * 10 && invoke_calls == enabled && arg_calls == enabled; }\n"
             "int grouped_pointer(void) { RESET(); Unary pointer = twice; int value = (*(pointer))(6); return value == 12 && invoke_calls == 1; }\n"
             "int main(void) { return !grouped_member() || !grouped_condition(0) || !grouped_condition(1) || !grouped_pointer(); }\n"),
+        BYTE_SLICE_TO_STRING(8, indexed_input),
     };
     typedef struct CTestCallResultExpected CTestCallResultExpected;
     struct CTestCallResultExpected
@@ -41052,6 +41139,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
         {3, S8("grouped_member"), 3},
         {3, S8("grouped_condition"), 2},
         {3, S8("grouped_pointer"), 1},
+        {4, S8("indexed_plain"), 2},
+        {4, S8("indexed_member"), 2},
+        {4, S8("indexed_weighted"), 2},
+        {4, S8("indexed_effects"), 6},
+        {4, S8("indexed_slot"), 4},
+        {4, S8("indexed_group"), 5},
+        {4, S8("indexed_lazy"), 6},
+        {4, S8("indexed_updates"), 1},
     };
     for (u32 program = 0; program < BUSTER_ARRAY_LENGTH(sources); program += 1)
     {
@@ -41126,6 +41221,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
         }
     }
     String8 rejected[] = {
+        S8("int table[2][2]; int bad(void) { return table[1][0](3); }"),
+        S8("typedef int (*Unary)(int); struct Dsp { Unary uni[2][2][2]; };"
+           "int bad(struct Dsp *s) { return s->uni[1][0][1](); }"),
+        S8("typedef int (*Unary)(int); struct Dsp { Unary uni[2][2][2]; };"
+           "int bad(struct Dsp *s) { return s->uni[1][0][1](1, 2); }"),
+        S8("typedef int (*Unary)(int); struct Dsp { Unary uni[2][2][2]; };"
+           "int bad(struct Dsp *s) { return s->uni[1][0.5][1](3); }"),
         S8("static int scalar(void) { return 1; } int bad(void) { return scalar()(3); }"),
         S8("typedef int (*Unary)(int); static int twice(int value) { return value * 2; }"
            "static Unary get(void) { return twice; } int bad(void) { return get()(); }"),
@@ -41150,7 +41252,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
                 BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified,
                     string_format(temporary.arena, S8("invalid call result case={u32} dialect={u32} form={u32} diagnostics={u32} certified={u32}"),
                         index, dialect, form, lowered.diagnostic_count, (u32)lowered.canonical_ir_certified));
-                if (index == 0 && BUSTER_REQUIRE(arguments, lowered.diagnostic_count != 0))
+                if (index == 4 && BUSTER_REQUIRE(arguments, lowered.diagnostic_count != 0))
                 {
                     BUSTER_TEST_RAW(arguments, string_equal(lowered.diagnostics[0].message,
                         S8("in function 'bad': called object is not a function or function pointer (have 'int')")),
@@ -62371,6 +62473,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_ir_local_table_zero_scratch);
     C_TEST_FIXTURE(arguments, c_test_parse_large_static_initializers);
     C_TEST_FIXTURE(arguments, c_test_ir_row_streams);
+    C_TEST_FIXTURE(arguments, c_test_label_address_prefix_indexed_paths);
     C_TEST_FIXTURE(arguments, c_test_label_values_gate);
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_growth);
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_message_lifetime);

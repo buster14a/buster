@@ -92,6 +92,101 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_arguments(U
     options.linker_arguments = soname_flag;
     options.linker_argument_count = 2;
     BUSTER_TEST(arguments, !link_validate_linker_arguments(parsed.target, options, true, &unsupported));
+    // Meson's linker query and the split spelling query the actual native
+    // linker, with no C file. Missing source/stdin inputs must not be read.
+    String8 probe_spellings[][2] = {{S8("-Wl,--version"), S8("-O0")}, {S8("-Xlinker"), S8("--version")}};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 spelling = 0; spelling < BUSTER_ARRAY_LENGTH(probe_spellings); spelling += 1)
+        {
+            String8 command[] = {S8("--target"), targets[target], probe_spellings[spelling][0], probe_spellings[spelling][1], S8("-g")};
+            CompilerDriverInvocation query = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            if (BUSTER_REQUIRE(arguments, query.error == COMPILER_DRIVER_ERROR_NONE && query.query == COMPILER_DRIVER_QUERY_LINKER_VERSION))
+            {
+                String8 identity = compiler_driver_query_text(arena, &query);
+                BUSTER_TEST(arguments, string_starts_with_sequence(identity, S8("Buster native linker\nTarget: ")));
+                BUSTER_TEST(arguments, !compiler_driver_test_string_contains(identity, S8("GNU")) &&
+                                           !compiler_driver_test_string_contains(identity, S8("LLD")) &&
+                                           !compiler_driver_test_string_contains(identity, S8("clang version")));
+                CompilerDriverResult executed = compiler_driver_execute_invocation(arena, query);
+                BUSTER_TEST(arguments, executed.error == COMPILER_DRIVER_ERROR_NONE && !executed.has_object &&
+                                           !executed.native_link.executable.length);
+                BUSTER_STRING_TEST(arguments, executed.output, identity);
+            }
+        }
+    }
+    String8 probe[] = {S8("--target=x86_64-unknown-linux"), S8("-march=x86-64"), S8("-Wl,--version"), S8("-O0"), S8("-g")};
+    CompilerDriverInvocation meson = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(probe));
+    BUSTER_TEST(arguments, meson.error == COMPILER_DRIVER_ERROR_NONE && meson.input_count == 0 &&
+                               meson.query == COMPILER_DRIVER_QUERY_LINKER_VERSION);
+    String8 output = buster_test_temporary_path(arena, S8("buster-linker-query"), S8(""));
+    String8 sentinel = S8("linker query must preserve this output");
+    BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+    String8 absent = string_format_z(arena, S8("{S8}.missing.c"), output);
+    String8 with_input[] = {S8("--target=x86_64-unknown-linux"), S8("-Wl,--version"), S8("-o"), output, absent};
+    CompilerDriverInvocation query = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(with_input));
+    CompilerDriverResult executed = compiler_driver_execute_invocation(arena, query);
+    BUSTER_TEST(arguments, executed.error == COMPILER_DRIVER_ERROR_NONE);
+    ByteSlice preserved = file_read(arena, output, (FileReadOptions){0});
+    BUSTER_STRING_TEST(arguments, ((String8){.pointer = (char8*)preserved.pointer, .length = preserved.length}), sentinel);
+    String8 stdin_query[] = {S8("--target=x86_64-unknown-linux"), S8("-Wl,--version"), S8("-x"), S8("c"), S8("-")};
+    CompilerDriverInvocation stdin_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(stdin_query));
+    BUSTER_TEST(arguments, compiler_driver_execute_invocation(arena, stdin_invocation).error == COMPILER_DRIVER_ERROR_NONE);
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    // Observe the real CLI status/streams as well as the invocation API.
+    String8 cli_output = {0}, cli_error = {0};
+    String8 cli_queries[][5] = {
+        {S8("--target=x86_64-unknown-linux"), S8("-Wl,--version"), S8("-O0"), S8("-g"), absent},
+        {S8("--target=x86_64-unknown-linux"), S8("-Xlinker"), S8("--version"), S8("-x"), S8("c")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cli_queries); index += 1)
+    {
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(cli_queries[index]),
+                                                           &cli_output, &cli_error));
+        BUSTER_STRING_TEST(arguments, cli_output, S8("Buster native linker\nTarget: x86_64-unknown-linux-gnu\n"));
+        BUSTER_TEST(arguments, cli_error.length == 0);
+    }
+    BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(stdin_query),
+                                                       &cli_output, &cli_error));
+    BUSTER_STRING_TEST(arguments, cli_output, S8("Buster native linker\nTarget: x86_64-unknown-linux-gnu\n"));
+    BUSTER_TEST(arguments, cli_error.length == 0);
+    String8 invalid_cli[] = {S8("--target=x86_64-unknown-linux"), S8("-c"), S8("-Wl,--version"), absent};
+    BUSTER_TEST(arguments, !compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_cli),
+                                                        &cli_output, &cli_error));
+    BUSTER_TEST(arguments, cli_output.length == 0 && compiler_driver_test_string_contains(cli_error, S8("native linker --version")));
+#endif
+    CompilerDriverInvocation api_query = {.target = meson.target, .query = COMPILER_DRIVER_QUERY_LINKER_VERSION};
+    BUSTER_STRING_TEST(arguments, compiler_driver_execute_invocation(arena, api_query).output, compiler_driver_query_text(arena, &meson));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modes); index += 1)
+    {
+        String8 command[] = {S8("--target=x86_64-unknown-linux"), modes[index], S8("-Wl,--version")};
+        CompilerDriverInvocation refused_query = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, refused_query.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        BUSTER_TEST(arguments, compiler_driver_execute_invocation(arena, refused_query).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    }
+    String8 query_refusals[][3] = {
+        {S8("--target=x86_64-unknown-linux"), S8("-Wl,--version,--gc-sections"), S8("-O0")},
+        {S8("--target=x86_64-unknown-linux"), S8("-Wl,--gc-sections,--version"), S8("-O0")},
+        {S8("--target=x86_64-unknown-linux"), S8("-Wl,--version"), S8("--version")},
+        {S8("--target=wasm64-unknown-unknown"), S8("-Wl,--version"), S8("-O0")},
+        {S8("--target=nvptx64-nvidia-cuda"), S8("-Wl,--version"), S8("-O0")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(query_refusals); index += 1)
+    {
+        CompilerDriverInvocation refused_query = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(query_refusals[index]));
+        BUSTER_TEST(arguments, refused_query.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    }
+    api_query.action = COMPILER_DRIVER_ACTION_OBJECT;
+    BUSTER_TEST(arguments, compiler_driver_execute_invocation(arena, api_query).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    api_query.action = COMPILER_DRIVER_ACTION_LINK;
+    api_query.linker_arguments = export_flag;
+    api_query.linker_argument_count = 1;
+    BUSTER_TEST(arguments, compiler_driver_execute_invocation(arena, api_query).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    // --version as a SONAME value is not a query and still produces a library.
+    String8 soname_query[] = {S8("--target=x86_64-unknown-linux"), S8("-shared"), S8("-Wl,-soname,--version"),
+                             S8("tests/basic_c_multi_main.c")};
+    CompilerDriverInvocation soname = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(soname_query));
+    BUSTER_TEST(arguments, soname.error == COMPILER_DRIVER_ERROR_NONE && soname.query == COMPILER_DRIVER_QUERY_NONE);
     scratch_end(temporary);
     return result;
 }
@@ -174,7 +269,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_images(Unit
     BUSTER_TEST(arguments, preserved.pointer && string_equal((String8){.pointer = (char8*)preserved.pointer, .length = preserved.length}, sentinel));
     BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("extern int missing(void); int answer(void) { return missing(); }\n"))));
     // SONAME operands remain literal even when they resemble linker flags.
-    String8 sonames[] = {S8("defs"), S8("--no-undefined"), S8("--soname=literal")};
+    String8 sonames[] = {S8("defs"), S8("--no-undefined"), S8("--soname=literal"), S8("--version")};
     for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(sonames); name += 1)
     {
         String8 shared[] = {S8("-shared"), S8("-g0"), string_format_z(arena, S8("-Wl,-soname,{S8}"), sonames[name]), S8("-o"), output, source};

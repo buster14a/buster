@@ -91,7 +91,8 @@ typedef enum CompilerDriverAction
 } CompilerDriverAction;
 
 // Informational queries answered without any input: --version, -dumpversion,
-// -dumpmachine and -print-target-triple/-print-effective-triple.
+// -dumpmachine, -print-target-triple/-print-effective-triple, and the native
+// linker identity (-Wl,--version or -Xlinker --version).
 // compiler_driver_query_text renders the text.
 typedef enum CompilerDriverQuery
 {
@@ -100,6 +101,7 @@ typedef enum CompilerDriverQuery
     COMPILER_DRIVER_QUERY_DUMP_VERSION,
     COMPILER_DRIVER_QUERY_DUMP_MACHINE,
     COMPILER_DRIVER_QUERY_TARGET_TRIPLE,
+    COMPILER_DRIVER_QUERY_LINKER_VERSION,
     COMPILER_DRIVER_QUERY_COUNT,
 } CompilerDriverQuery;
 
@@ -635,6 +637,7 @@ BUSTER_F_DECL String8 compiler_driver_c_ast_pilot_name(CompilerDriverCAstPilot p
 // The output of a parsed --version/-dumpversion/-dumpmachine query. The version
 // is the one the C frontend presents in __clang_major__/__clang_minor__/
 // __clang_patchlevel__; the machine is the invocation's effective target.
+// The linker query reports Buster's own identity, without a GNU/LLVM version.
 BUSTER_F_DECL String8 compiler_driver_query_text(Arena* arena, CompilerDriverInvocation const* invocation);
 // Resolves an input against -working-directory with the host's path rules, as
 // LLVM's make_absolute does. On Windows a rooted path without a drive ("\\x.c")

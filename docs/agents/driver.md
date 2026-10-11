@@ -799,6 +799,28 @@ source and encoder paths did for this snapshot; they do not supply an
 independent architectural oracle for every form. The broader #2931 issue
 remains open for unrelated encoding defects and further proof.
 
+On Mach-O, `.section SEGMENT,SECTION[,TYPE[,ATTRIBUTES]]` and
+`.pushsection` accept the pairs Buster's listing writer represents:
+`__TEXT,__text,regular,pure_instructions`, `__TEXT,__const`,
+`__DATA,__data`, `__DATA,__bss,zerofill`, `__DATA,__thread_data`,
+`__DATA,__thread_bss`, the `__mod_init_func`/`__mod_term_func` pairs with
+`mod_init_funcs`/`mod_term_funcs`, and
+`__TEXT,__eh_frame,coalesced,no_toc+strip_static_syms+live_support`.
+Known `__DWARF,__debug_*` sections retain their debug identities.
+The segment/section pairs normalize to the object's section names, so
+`.text` and `__TEXT,__text` reopen the same section. Unknown pairs, types,
+attributes and extra operands are structured directive diagnostics.
+AArch64 `adrp Xd, sym@TLVPPAGE` and
+`ldr Xt, [Xn, sym@TLVPPAGEOFF]` retain the Darwin TLVP page/load relocations,
+with zero addends; nonzero signed addends are refused because the platform
+linker rejects them. The low half must be a plain 64-bit unsigned-offset
+LDR; ADD, stores, other widths and writeback are refused. The Mach-O-only
+`@GOTPAGE`/`@GOTPAGEOFF` pair uses the existing GOT-load page/load kinds;
+its addend must be zero and its low half must load into a 64-bit integer
+register other than XZR. `compiler_driver_test_macho_aarch64_listing_round_trip` compares
+serialized text and TLVP/GOT kinds, offsets, addends and symbols with direct
+`-c`, for plain functions and defined/undefined TLS in fast/quality modes.
+
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
 suffixes (so `.init_array.00101` keeps its priority; `.preinit_array` takes
@@ -1197,19 +1219,42 @@ Its configured native Linux control builds a real archive with host compiler
 and archiver, links an independent host control, and runs both Buster's direct
 and sysroot-default named links.
 
-For requested Linux shared libraries, a located GNU linker script beginning
-with `INPUT`, `GROUP`, `AS_NEEDED`, `OUTPUT_FORMAT`, `OUTPUT_ARCH`, or
-`SEARCH_DIR` and an opening parenthesis is refused as
-`unsupported GNU linker script <path> requested by -l<request>`. Leading
-whitespace and C block comments are accepted for this classification. The
-first script in search order stops lookup; a later ELF library cannot hide it.
-The driver neither interprets script members nor creates an image from them.
-Other ELF missing/malformed-library policy and automatic runtime-provider
-lookup retain their existing behavior. `compiler_driver_test_elf_linker_scripts`
-covers literal script/non-script boundaries, both ELF CPUs, normal/exact
-library spellings, single/multi-input links, first-request error ordering,
-later-ELF/script precedence, and preservation of an existing output.
-General GNU linker-script interpretation remains separate work.
+For requested Linux shared libraries, located GNU linker scripts support
+`INPUT(...)`, `GROUP(...)` and `AS_NEEDED(...)`, including nested commands,
+commas, quoted filenames, whitespace and C block comments. Members name ELF64
+shared libraries or further scripts: bare filenames, absolute paths and `-lX`
+(including `-l:FILE`). Bare members search beside the script, then the current
+directory, then the existing explicit/default ELF roots. Named members use the
+existing ELF roots. Absolute members are prefixed with the sysroot when their
+script is inside that sysroot; `=` and `$SYSROOT` force that prefix, following
+[GNU ld's file-command rules](https://sourceware.org/binutils/docs/ld.html).
+Explicit `-L` paths retain their literal meaning.
+
+Expansion uses an explicit worklist in member order, limited to 32 script files
+on a dependency chain, 32 nested command levels, 4,096 total script members per
+invocation, and 65,536 bytes per script. Cycles reach the same depth/count refusal;
+they never recurse on the C stack. DSO identity comes from `DT_SONAME` when
+present, with filename spelling retained otherwise; repeated identities create
+one dynamic-library entry. Worklist and expanded-library storage is allocated
+only when a script is encountered.
+
+This is a shared-library subset: archive/object members are refused, including
+glibc's `libc_nonshared.a`, rather than dropped or admitted as shared objects.
+`GROUP` preserves member order without archive rescanning. `AS_NEEDED` includes
+its members unconditionally, just like `INPUT`; it does not implement GNU ld's
+as-needed selection. Other commands, including `OUTPUT_FORMAT`, `OUTPUT_ARCH`
+and `SEARCH_DIR`, remain unsupported. Unsupported syntax, archive members and
+bounds failures retain `unsupported GNU linker script <path> requested by
+-l<request>`; missing DSOs retain the original request's missing-library error.
+A later DSO cannot hide the first located script. Automatic runtime lookup and
+the existing special treatment of `-lc` are unchanged.
+
+`compiler_driver_test_elf_linker_scripts` covers both ELF CPUs, normal/exact
+requests, single/multi-input links, member forms, comments, SONAME identity,
+nested scripts at/beyond the cap, cycles, parser byte/member/command-depth bounds,
+unsupported grammar, first-request error ordering and preserved output on refusal.
+On native Linux with a configured GCC or Clang driver, a host-style
+`INPUT(-lncursesw)` fixture compares its `DT_NEEDED` identity with GNU ld.
 
 On macOS and iOS, `-lNAME` searches explicit `-L` roots in order, probing
 `libNAME.tbd` before `libNAME.dylib` within each root, then
@@ -1635,6 +1680,29 @@ configured host compiler builds `fixtures/aarch64_elf_tlsdesc.c` with `-fPIC
 Buster-compiled main defining the other thread-local, and the test checks
 every descriptor appears relaxed and the image prints the same values as a
 host-linked control.
+
+## Native linker identity
+
+`ide cc -Wl,--version` and `ide cc -Xlinker --version` print
+`Buster native linker` followed by the effective target triple and exit
+successfully without reading source or standard input, compiling, spawning an
+external tool, or writing an artifact. `-march=x86-64 -O0 -g` may accompany the query. The independent
+`-m64` driver capability is tracked by
+[#3458](https://github.com/buster14a/buster/issues/3458). The typed invocation API exposes
+`COMPILER_DRIVER_QUERY_LINKER_VERSION`; execution returns the identity in
+`CompilerDriverResult.output`.
+
+The query requires a native x86-64/AArch64 link action and a supported native
+OS. The raw linker request must contain exactly `--version`; other linker
+arguments, compiler queries, compile-only actions, bitcode and GPU pipelines
+are refused. A SONAME operand named `--version` retains its ordinary meaning.
+The identity makes no GNU ld/LLD compatibility or invented version claim.
+Buster currently links in process and has no external-linker selector.
+
+Meson versions without a Buster linker detection/class implementation still
+reject this truthful identity. Native query support alone does not qualify
+Meson/QEMU configuration: upstream recognition and tests against unmodified
+Meson are required under [#3475](https://github.com/buster14a/buster/issues/3475).
 
 ## Pass-through options
 

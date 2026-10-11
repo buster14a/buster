@@ -138,6 +138,7 @@
 //   c_ir_lower_compound_literal_step              ordered evaluation and final
 //                                                 per-subobject initializer values
 //   c_ir_lower_expression_core_step               the expression evaluator
+//   c_ir_lower_condition_step                     depth-zero logical splits
 //   c_ir_lower_dispatch                           lowering-machine dispatch
 //   c_ir_tree_conditionals_build,                 root `?:` splits from the
 //   c_ir_tree_root_conditional                    tree's CONDITIONAL nodes
@@ -24195,6 +24196,49 @@ BUSTER_C_INTERNAL u32 c_ir_va_arg_type_separator(CIntegerIrBuilder* builder, u32
     return separator;
 }
 
+// A callback can be selected by several adjacent subscripts. Consume the
+// complete suffix before requiring its named base; the member walk then
+// includes that base's owning object. The same rule applies to a subscripted
+// record before a callback member, such as slots[i][j].callback.
+BUSTER_C_INTERNAL u32 c_ir_subscript_callee_base(CIntegerIrBuilder* builder, u32 start, u32 last)
+{
+    u32 base = last;
+    bool valid = true;
+    while (valid && c_token_is_punctuator(&builder->preprocess.tokens[base], C_PUNCTUATOR_RIGHT_BRACKET))
+    {
+        u32 depth = 0;
+        u32 open = UINT32_MAX;
+        for (u32 cursor = base + 1; cursor > start;)
+        {
+            cursor -= 1;
+            CToken current = builder->preprocess.tokens[cursor];
+            if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET))
+            {
+                depth += 1;
+            }
+            else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                if (!depth)
+                {
+                    break;
+                }
+                depth -= 1;
+                if (!depth)
+                {
+                    open = cursor;
+                    break;
+                }
+            }
+        }
+        valid = open != UINT32_MAX && open > start;
+        if (valid)
+        {
+            base = open - 1;
+        }
+    }
+    return valid && builder->preprocess.tokens[base].kind == C_TOKEN_IDENTIFIER ? base : UINT32_MAX;
+}
+
 BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u32 start, u32 end, u32** emission_order_out,
                                                      u32* emission_count_out)
 {
@@ -24385,33 +24429,10 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         }
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
         {
-            u32 depth = 0;
-            u32 open = UINT32_MAX;
-            for (u32 cursor = index + 1; cursor > start;)
+            u32 base = c_ir_subscript_callee_base(builder, start, index);
+            if (base != UINT32_MAX)
             {
-                cursor -= 1;
-                CToken current = builder->preprocess.tokens[cursor];
-                if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET))
-                {
-                    depth += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    if (!depth)
-                    {
-                        break;
-                    }
-                    depth -= 1;
-                    if (!depth)
-                    {
-                        open = cursor;
-                        break;
-                    }
-                }
-            }
-            if (open != UINT32_MAX && open > start && builder->preprocess.tokens[open - 1].kind == C_TOKEN_IDENTIFIER)
-            {
-                callee_start = open - 1;
+                callee_start = base;
                 indexed_callee = true;
             }
         }
@@ -24475,38 +24496,12 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             {
                 break;
             }
-            u32 bracket_depth = 0;
-            u32 bracket_open = UINT32_MAX;
-            for (u32 cursor = base_last + 1; cursor > start;)
-            {
-                cursor -= 1;
-                CToken current = builder->preprocess.tokens[cursor];
-                if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET))
-                {
-                    bracket_depth += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    if (!bracket_depth)
-                    {
-                        break;
-                    }
-                    bracket_depth -= 1;
-                    if (!bracket_depth)
-                    {
-                        bracket_open = cursor;
-                        break;
-                    }
-                }
-            }
-            // The subscripted base has to be a name for the walk to continue;
-            // anything else (a call result, a parenthesized expression) keeps
-            // the callee where it is, as it does today.
-            if (bracket_open == UINT32_MAX || bracket_open <= start || builder->preprocess.tokens[bracket_open - 1].kind != C_TOKEN_IDENTIFIER)
+            u32 base = c_ir_subscript_callee_base(builder, start, base_last);
+            if (base == UINT32_MAX)
             {
                 break;
             }
-            callee_start = bracket_open - 1;
+            callee_start = base;
         }
         indirect |= callee_start != index || indexed_callee || parenthesized_callee;
         if ((!indexed_callee && !parenthesized_callee && token.kind != C_TOKEN_IDENTIFIER) ||
@@ -37938,65 +37933,134 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
         }
         u32 logical_or = UINT32_MAX;
         u32 logical_and = UINT32_MAX;
-        u32 parentheses = 0;
-        u32 brackets = 0;
-        u32 braces = 0;
-        for (u32 index = task.start; index < task.end; index += 1)
+        if (builder->group_facts_exact)
         {
-            CToken token = builder->preprocess.tokens[index];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            for (u32 index = task.start; index < task.end; index += 1)
             {
-                parentheses += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-            {
-                if (!parentheses)
+                CToken token = builder->preprocess.tokens[index];
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    u32 close = c_ir_matching_delimiter_cached(builder, index, task.end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                               C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                    if (close == UINT32_MAX)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    index = close;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                parentheses -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                brackets += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
-            {
-                if (!brackets)
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+                {
+                    u32 close = c_ir_matching_delimiter_cached(builder, index, task.end, C_PUNCTUATOR_LEFT_BRACKET,
+                                                               C_PUNCTUATOR_RIGHT_BRACKET);
+                    if (close == UINT32_MAX)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    index = close;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                brackets -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-            {
-                braces += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-            {
-                if (!braces)
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+                {
+                    u32 close = c_ir_matching_delimiter_cached(builder, index, task.end, C_PUNCTUATOR_LEFT_BRACE,
+                                                               C_PUNCTUATOR_RIGHT_BRACE);
+                    if (close == UINT32_MAX)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    index = close;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                braces -= 1;
-            }
-            else if (!parentheses && !brackets && !braces && logical_or == UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE))
-            {
-                logical_or = index;
-            }
-            else if (!parentheses && !brackets && !braces && logical_and == UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
-                     !c_ir_label_address_prefix(builder, task.start, index))
-            {
-                logical_and = index;
+                else if (logical_or == UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE))
+                {
+                    logical_or = index;
+                }
+                else if (logical_and == UINT32_MAX && c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+                         !c_ir_label_address_prefix(builder, task.start, index))
+                {
+                    logical_and = index;
+                }
             }
         }
-        if (parentheses || brackets || braces)
+        else
         {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            u32 parentheses = 0;
+            u32 brackets = 0;
+            u32 braces = 0;
+            for (u32 index = task.start; index < task.end; index += 1)
+            {
+                CToken token = builder->preprocess.tokens[index];
+                if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    parentheses += 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                {
+                    if (!parentheses)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    parentheses -= 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+                {
+                    brackets += 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+                {
+                    if (!brackets)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    brackets -= 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+                {
+                    braces += 1;
+                }
+                else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+                {
+                    if (!braces)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    braces -= 1;
+                }
+                else if (!parentheses && !brackets && !braces && logical_or == UINT32_MAX &&
+                         c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE))
+                {
+                    logical_or = index;
+                }
+                else if (!parentheses && !brackets && !braces && logical_and == UINT32_MAX &&
+                         c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+                         !c_ir_label_address_prefix(builder, task.start, index))
+                {
+                    logical_and = index;
+                }
+            }
+            if (parentheses || brackets || braces)
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
         }
         u32 operation = logical_or != UINT32_MAX ? logical_or : logical_and;
         if (operation != UINT32_MAX)

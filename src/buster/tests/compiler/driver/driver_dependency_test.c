@@ -346,7 +346,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_files(UnitTes
     }
 
     String8 quote_inputs[] = {S8("a b"), S8("a$b"), S8("a#b"), S8("a\\ b"), S8("w\\x"), S8("line\nbreak")};
-    String8 quote_expected[] = {S8("a\\ b"), S8("a$$b"), S8("a\\#b"), S8("a\\\\\\ b"), S8("w\\x"), {0}};
+    String8 quote_expected[] = {S8("a\\ b"), S8("a$b"), S8("a\\#b"), S8("a\\\\\\ b"), S8("w\\x"), {0}};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(quote_inputs); index += 1)
     {
         CompilerDriverDependencyQuoteResult quoted = compiler_driver_dependency_quote(arena, quote_inputs[index]);

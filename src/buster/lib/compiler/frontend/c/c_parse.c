@@ -129,8 +129,11 @@
 //   c_parse_local_declarations_split,             block-scope declarations,
 //   c_parse_local_declarations                    auto inference, local
 //                                                 linkage redeclarations
-//   c_parse_label_address_prefix_proven,          statement boundaries, asm
-//   c_parse_statement_end                         goto, label addresses
+//   c_parse_label_address_opener                   indexed label opener lookup
+//   c_parse_label_address_prefix_proven, _at       opener-based label proof
+//   c_parse_label_address_prefix_proven_indexed    indexed label proof
+//   c_parse_label_address_prefix_with_typedef, _at typedef-aware label proof
+//   c_parse_statement_end                          goto, label addresses
 //   c_parse_statement_plan_build,                 the statement plan read from
 //   c_parse_bind_plan_segment,                    the syntax tree, its
 //   c_parse_plan_declarators,                     one-pass segment binding,
@@ -8356,6 +8359,32 @@ BUSTER_C_INTERNAL void c_parse_expression_tree_replay(CTypeParseMachine* machine
     }
 }
 
+// The machine's two calls for a member access over a const or volatile
+// aggregate (c_parse_direct_expression_postfix): c_parse_member_type on the
+// aggregate's row, `tree.type`, then c_parse_add_qualified_type, which
+// appends the member's qualified copy. That row is the answer. The member's
+// name ends the access. A member that is not found appends nothing, and the
+// query goes to the machine. Its scratch is the machine's, rewound as the
+// string replay rewinds it. Kept out of line: inlined into
+// c_parse_expression_type_query, it changed that function's code on every
+// query, the default path's included.
+BUSTER_GLOBAL_LOCAL C_AST_TYPES_NOINLINE CTypeId c_parse_expression_tree_member(CTypeParseMachine* machine, CPreprocessResult const* preprocess,
+                                                                                CParseResult* result, CAstTypeAnswer tree)
+{
+    CToken name = preprocess->tokens[tree.replay_end - 1];
+    CType const* aggregate = result->types + tree.type.value;
+    CType qualifiers = {.is_const = aggregate->is_const, .is_volatile = aggregate->is_volatile};
+    Arena* scratch = machine->scratch_arena;
+    u64 scratch_mark = scratch->position;
+    CTypeId member = c_parse_member_type(scratch, result, tree.type, name.symbol, c_token_spelling(preprocess->spelling_base, name), 0, 0, 0);
+    CTypeId type = member.value < result->type_count ? c_parse_add_qualified_type(result, member, qualifiers) : C_TYPE_ID_INVALID;
+    if (scratch->position != scratch_mark)
+    {
+        arena_set_position(scratch, scratch_mark);
+    }
+    return type;
+}
+
 // The answer to a query of one string-literal token alone, perhaps
 // parenthesized (C_AST_TYPE_STRING from c_ast_types_answer): the machine's
 // root SIZEOF task strips the parentheses, consults the per-body memo for the
@@ -8367,7 +8396,9 @@ BUSTER_C_INTERNAL void c_parse_expression_tree_replay(CTypeParseMachine* machine
 // rewound as the frame's completion rewinds it, so the query function keeps
 // its signature. A leaf that fails is undone, as the machine's rollback undoes
 // it, and the invalid type returned leaves the query to the machine, which
-// fails the same way.
+// fails the same way. When the answer's node is a member access over a const
+// or volatile aggregate, the same memo probe covers the access's tokens, and
+// on a miss c_parse_expression_tree_member makes the machine's calls instead.
 BUSTER_C_INTERNAL CTypeId c_parse_expression_tree_string(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result,
                                                           CScopeId scope, u32 flags, CAstTypeAnswer tree)
 {
@@ -8381,6 +8412,10 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_tree_string(CTypeParseMachine* mach
     if (c_parse_expression_query_lookup(machine, result, slot, tree.replay_end, scope, flags) && machine->expression_queries)
     {
         type = machine->expression_queries[slot].type;
+    }
+    else if (tree.node_kind == C_AST_MEMBER || tree.node_kind == C_AST_MEMBER_ARROW)
+    {
+        type = c_parse_expression_tree_member(machine, preprocess, result, tree);
     }
     else
     {
@@ -25183,7 +25218,7 @@ BUSTER_C_INTERNAL void c_parse_bind_function_static_asserts(CTypeParseMachine* m
 BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                             CScopeId root_scope, u32 start, u32 end, bool is_file_scope);
 
-BUSTER_C_SHARED bool c_parse_label_address_prefix_proven(CPreprocessResult const* preprocess, u32 body_start, u32 index)
+BUSTER_C_INTERNAL bool c_parse_label_address_prefix_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 open)
 {
     if (body_start >= preprocess->token_count || index >= preprocess->token_count ||
         !c_token_is_punctuator(&preprocess->tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND))
@@ -25210,33 +25245,35 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix_proven(CPreprocessResult const
     if (c_token_is_punctuator(&previous, C_PUNCTUATOR_RIGHT_PARENTHESIS))
     {
         u32 depth = 0;
-        u32 open = UINT32_MAX;
-        for (u32 scan = index - 1; scan >= body_start; scan -= 1)
+        if (open == UINT32_MAX)
         {
-            u8 punctuator = preprocess->tokens[scan].punctuator;
-            if (c_punctuator_in_set(punctuator, C_PUNCTUATOR_SET_PARENTHESES))
+            for (u32 scan = index - 1; scan >= body_start; scan -= 1)
             {
-                if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS)
+                u8 punctuator = preprocess->tokens[scan].punctuator;
+                if (c_punctuator_in_set(punctuator, C_PUNCTUATOR_SET_PARENTHESES))
                 {
-                    depth += 1;
+                    if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS)
+                    {
+                        depth += 1;
+                    }
+                    else
+                    {
+                        if (!depth)
+                        {
+                            break;
+                        }
+                        depth -= 1;
+                        if (!depth)
+                        {
+                            open = scan;
+                            break;
+                        }
+                    }
                 }
-                else
+                if (scan == body_start)
                 {
-                    if (!depth)
-                    {
-                        break;
-                    }
-                    depth -= 1;
-                    if (!depth)
-                    {
-                        open = scan;
-                        break;
-                    }
+                    break;
                 }
-            }
-            if (scan == body_start)
-            {
-                break;
             }
         }
         if (open != UINT32_MAX)
@@ -25290,10 +25327,33 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix_proven(CPreprocessResult const
            !c_token_is_punctuator(&previous, C_PUNCTUATOR_MINUS_MINUS);
 }
 
-BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult const* preprocess, CScopeId scope,
-                                                                    u32 body_start, u32 index)
+BUSTER_C_SHARED bool c_parse_label_address_prefix_proven(CPreprocessResult const* preprocess, u32 body_start, u32 index)
 {
-    if (c_parse_label_address_prefix(preprocess, body_start, index))
+    return c_parse_label_address_prefix_proven_at(preprocess, body_start, index, UINT32_MAX);
+}
+
+BUSTER_C_INTERNAL u32 c_parse_label_address_opener(CParseResult* result, CPreprocessResult const* preprocess, u32 body_start, u32 index)
+{
+    u32 open = UINT32_MAX;
+    if (result && result->position_index && index > body_start && index < preprocess->token_count &&
+        c_token_is_punctuator(&preprocess->tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+        c_token_is_punctuator(&preprocess->tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        open = c_parse_matching_opener_indexed(result, *preprocess, index - 1, body_start);
+    }
+    return open;
+}
+
+BUSTER_C_INTERNAL bool c_parse_label_address_prefix_proven_indexed(CParseResult* result, CPreprocessResult const* preprocess, u32 body_start, u32 index)
+{
+    u32 open = c_parse_label_address_opener(result, preprocess, body_start, index);
+    return c_parse_label_address_prefix_proven_at(preprocess, body_start, index, open);
+}
+
+BUSTER_C_INTERNAL bool c_parse_label_address_prefix_with_typedef_at(CParseResult* result, CPreprocessResult const* preprocess, CScopeId scope,
+                                                                     u32 body_start, u32 index, u32 open)
+{
+    if (c_parse_label_address_prefix_proven_at(preprocess, body_start, index, open))
     {
         return true;
     }
@@ -25304,30 +25364,32 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* res
         return false;
     }
     u32 depth = 0;
-    u32 open = UINT32_MAX;
-    for (u32 scan = index - 1; scan >= body_start; scan -= 1)
+    if (open == UINT32_MAX)
     {
-        CToken token = preprocess->tokens[scan];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        for (u32 scan = index - 1; scan >= body_start; scan -= 1)
         {
-            depth += 1;
-        }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            if (!depth)
+            CToken token = preprocess->tokens[scan];
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            {
+                depth += 1;
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                if (!depth)
+                {
+                    break;
+                }
+                depth -= 1;
+                if (!depth)
+                {
+                    open = scan;
+                    break;
+                }
+            }
+            if (scan == body_start)
             {
                 break;
             }
-            depth -= 1;
-            if (!depth)
-            {
-                open = scan;
-                break;
-            }
-        }
-        if (scan == body_start)
-        {
-            break;
         }
     }
     if (open == UINT32_MAX || open < body_start || open + 1 >= index - 1)
@@ -25374,6 +25436,26 @@ BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* res
     }
     return type_name && !tag_name;
 }
+
+BUSTER_C_SHARED bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult const* preprocess, CScopeId scope,
+                                                                    u32 body_start, u32 index)
+{
+    u32 open = c_parse_label_address_opener(result, preprocess, body_start, index);
+    return c_parse_label_address_prefix_with_typedef_at(result, preprocess, scope, body_start, index, open);
+}
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_C_SHARED bool c_test_parse_label_address_prefix_paths_agree(CParseResult* result, CPreprocessResult const* preprocess,
+                                                                    CScopeId scope, u32 body_start, u32 index)
+{
+    u32 open = c_parse_label_address_opener(result, preprocess, body_start, index);
+    bool proven_agrees = c_parse_label_address_prefix_proven_at(preprocess, body_start, index, UINT32_MAX) ==
+                         c_parse_label_address_prefix_proven_at(preprocess, body_start, index, open);
+    bool typedef_agrees = c_parse_label_address_prefix_with_typedef_at(result, preprocess, scope, body_start, index, UINT32_MAX) ==
+                          c_parse_label_address_prefix_with_typedef_at(result, preprocess, scope, body_start, index, open);
+    return proven_agrees && typedef_agrees;
+}
+#endif
 
 BUSTER_C_INTERNAL bool c_parse_asm_goto_label_range(CPreprocessResult preprocess, u32 start, u32 end, u32* label_start_out, u32* label_end_out)
 {
@@ -34563,7 +34645,7 @@ BUSTER_C_INTERNAL void c_parse_validate_labels(CTypeParseMachine* machine, Arena
             CToken token = preprocess.tokens[index];
             bool named_goto = token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_GOTO);
             bool label_address = c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
-                                 c_parse_label_address_prefix_proven(&preprocess, start, index);
+                                 c_parse_label_address_prefix_proven_indexed(result, &preprocess, start, index);
             if (named_goto && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_SEMICOLON))
                 c_parse_lowering_constraint_consider(diagnostic, S8("malformed goto statement"), index, index);
             if ((named_goto || label_address) && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
@@ -35146,7 +35228,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
         // A label address, as in the GNU difference `&&b - &&a`, is an
         // address constant like `&object`: IR lowering decides it.
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
-                 (c_parse_label_address_prefix_proven(&preprocess, start, cursor) ||
+                 (c_parse_label_address_prefix_proven_indexed(result, &preprocess, start, cursor) ||
                   (cursor > start && c_token_is_punctuator(&preprocess.tokens[cursor - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
                    c_parse_label_address_cast_at(result, preprocess, scope, start, cursor))))
             numeric = false;
@@ -38403,7 +38485,7 @@ BUSTER_C_INTERNAL u32 c_parse_label_difference_end(CParseResult* result, CPrepro
             {
                 scanning = false;
                 bool label = preprocess.tokens[cursor + 1].kind == C_TOKEN_IDENTIFIER &&
-                             (c_parse_label_address_prefix_proven(&preprocess, start, cursor) ||
+                             (c_parse_label_address_prefix_proven_indexed(result, &preprocess, start, cursor) ||
                               (cursor > start && c_token_is_punctuator(&preprocess.tokens[cursor - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
                                c_parse_label_address_cast_at(result, preprocess, scope, start, cursor)));
                 difference_end = label ? cursor + 2 : 0;
@@ -38430,7 +38512,7 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
         CToken token = preprocess.tokens[index];
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) && index + 1 < end)
         {
-            label = c_parse_label_address_prefix_proven(&preprocess, start, index) ||
+            label = c_parse_label_address_prefix_proven_indexed(result, &preprocess, start, index) ||
                     (index > start && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
                      c_parse_label_address_cast_at(result, preprocess, scope, start, index));
             u32 difference_end = label ? c_parse_label_difference_end(result, preprocess, scope, start, index, end) : 0;
@@ -38506,7 +38588,7 @@ BUSTER_C_INTERNAL bool c_parse_label_values_needed(CParseResult* result, CPrepro
     {
         if ((!skipped || !skipped[index - start]) && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND))
         {
-            needed = c_parse_label_address_prefix_proven(&preprocess, start, index) ||
+            needed = c_parse_label_address_prefix_proven_indexed(result, &preprocess, start, index) ||
                      (index > start && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
                       c_parse_label_address_cast_at(result, preprocess, c_parse_scope_for_token(result, declaration->scope, index), start, index));
         }
