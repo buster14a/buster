@@ -3782,7 +3782,8 @@ def production_profile_evidence(head: str = "a" * 40) -> tuple[dict, dict]:
     phases = compiler_receipt.PRODUCTION_PROFILE_PHASES
     ledger = (f"{compiler_receipt.PRODUCTION_PROFILE_LEDGER}\tcomplete=1\tphases={phases}\texpected={phases}\n"
               "index\tlabel\tkind\tvariant\tstart_us\tduration_us\toutcome\tuser_cpu_us\tsystem_cpu_us\tpeak_memory_bytes\n" +
-              "".join(f"{index + 1}\tphase-{index}\tcommand\t-\t{index}\t1\tpassed\t1\t1\t1\n" for index in range(phases)))
+              "".join(f"{slot}\t{name}\t{kind}\t{variant}\t{slot}\t1\tpassed\t1\t1\t1\n"
+                      for slot, name, kind, variant in compiler_receipt.PRODUCTION_PROFILE_LEDGER_PHASES))
     build_summary = (f"status=passed\nsource_revision={head}\nsource_tree={'d' * 40}\nproduction_compiler_sha256={B256}\n"
                      "debug_sections=absent\ncorrectness=test_all\nbenchmarks=skipped\nphase_ledger=evidence/phases.tsv\n")
     timed = corpus()
@@ -3844,6 +3845,12 @@ class ProductionProfileTest(unittest.TestCase):
             "incomplete ledger": (change(ledger=bundle["ledger"].replace("complete=1", "complete=0")), {}),
             "partial ledger": (change(ledger="".join(ledger_lines[:-1])), {}),
             "failed phase": (change(ledger=bundle["ledger"].replace("\tpassed\t", "\tfailed\t", 1)), {}),
+            "duplicate phases": (change(ledger="".join(ledger_lines[:2] + [ledger_lines[2]] * len(ledger_lines[2:]))), {}),
+            "missing training": (change(ledger="".join(line for line in ledger_lines if "\ttrain-lto\t" not in line)
+                                        + ledger_lines[-1]), {}),
+            "substituted phase": (change(ledger=bundle["ledger"].replace("\ttest-production\t", "\tskip-tests\t")), {}),
+            "reordered phases": (change(ledger="".join(ledger_lines[:2] + [ledger_lines[3], ledger_lines[2]] + ledger_lines[4:])), {}),
+            "changed columns": (change(ledger=bundle["ledger"].replace("\tpeak_memory_bytes", "\tpeak")), {}),
             "missing corpus": (change(summary=None, metadata=None), {}),
             "partial corpus": (change(summary=dict(bundle["summary"], comparisons=bundle["summary"]["comparisons"][:-1])), {}),
             "stale release": (bundle, {"binaries": {"baseline": {"sha256": "3" * 64}, "candidate": {"sha256": B256}}}),

@@ -260,9 +260,26 @@ THROUGHPUT_REAL_SOURCE_PROFILE = {
 # Changing any value needs a new name. It is report-only like the corpus.
 PRODUCTION_PROFILE_REQUEST_LINE = "profile: production-profile-v1"
 PRODUCTION_PROFILE_LEDGER = "BUSTER_PGO_PHASES_V1"
-# production_profile_phase_expected with --no-benchmark: three toolchain probes,
-# seven trees x (configure, build), two trainings x (train, merge), inspect, test.
-PRODUCTION_PROFILE_PHASES = 23
+# The frozen --no-benchmark phase population in ledger slot order, as
+# (slot, label, kind, variant): production_profile_phase_expected's three
+# toolchain probes, seven trees x (configure, build), two trainings x (train,
+# merge), inspect and test. Copied from a real producer ledger.
+PRODUCTION_PROFILE_LEDGER_PHASES = (
+    (1, "clang-version", "toolchain", "-"), (2, "clang-target", "toolchain", "-"),
+    (3, "llvm-profdata-version", "toolchain", "-"),
+    (4, "generate-release", "configure", "release"), (5, "build-release", "build", "release"),
+    (6, "generate-g0", "configure", "g0"), (7, "build-g0", "build", "g0"),
+    (8, "generate-lto", "configure", "lto"), (9, "build-lto", "build", "lto"),
+    (10, "generate-instrumented", "configure", "instrumented"), (11, "build-instrumented", "build", "instrumented"),
+    (12, "generate-instrumented-lto", "configure", "instrumented-lto"),
+    (13, "build-instrumented-lto", "build", "instrumented-lto"),
+    (14, "train-no-lto", "train", "instrumented"), (15, "merge-profile-no-lto", "merge", "instrumented"),
+    (16, "train-lto", "train", "instrumented-lto"), (17, "merge-profile-lto", "merge", "instrumented-lto"),
+    (18, "generate-pgo", "configure", "pgo"), (19, "build-pgo", "build", "pgo"),
+    (20, "generate-pgo-lto", "configure", "pgo-lto"), (21, "build-pgo-lto", "build", "pgo-lto"),
+    (22, "inspect-production-sections", "inspect", "pgo-lto"), (23, "test-production", "test", "pgo-lto"),
+)
+PRODUCTION_PROFILE_PHASES = len(PRODUCTION_PROFILE_LEDGER_PHASES)
 PRODUCTION_PROFILE_PROFILE = {
     "name": "production-profile-v1",
     "build": "candidate-HEAD ./build.sh production_profile --no-benchmark in an isolated clone of the head: seven "
@@ -712,10 +729,14 @@ def validate_production_profile(build_status: object, summary_text: object, ledg
             problems.append(f"{label} summary.txt {key} is {fields.get(key)!r}, not {wanted!r}")
     lines = ledger_text.splitlines() if isinstance(ledger_text, str) else []
     header = f"{PRODUCTION_PROFILE_LEDGER}\tcomplete=1\tphases={PRODUCTION_PROFILE_PHASES}\texpected={PRODUCTION_PROFILE_PHASES}"
+    columns = "index\tlabel\tkind\tvariant\tstart_us\tduration_us\toutcome\tuser_cpu_us\tsystem_cpu_us\tpeak_memory_bytes"
     rows = [line.split("\t") for line in lines[2:]]
-    if not lines or lines[0] != header or len(rows) != PRODUCTION_PROFILE_PHASES or \
-            any(len(row) != 10 or row[6] != "passed" for row in rows):
-        problems.append(f"{label} phase ledger is not {PRODUCTION_PROFILE_PHASES} complete passed phases")
+    # Every frozen slot exactly once, in order, so a duplicated, missing or substituted phase is refused.
+    population = [(row[0], row[1], row[2], row[3]) if len(row) == 10 else None for row in rows]
+    expected = [(str(slot), name, kind, variant) for slot, name, kind, variant in PRODUCTION_PROFILE_LEDGER_PHASES]
+    if len(lines) < 2 or lines[0] != header or lines[1] != columns or population != expected or \
+            any(row[6] != "passed" for row in rows):
+        problems.append(f"{label} phase ledger is not the {PRODUCTION_PROFILE_PHASES} frozen phases, each passed once in order")
     if isinstance(binaries, dict) and isinstance(binaries.get("baseline"), dict) and \
             binaries["baseline"].get("sha256") == candidate.get("sha256"):
         problems.append(f"{label} release and pgo-lto compilers are the same binary")
