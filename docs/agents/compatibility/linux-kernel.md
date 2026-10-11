@@ -24,7 +24,11 @@ configuration, serial console, initramfs, tmpfs, ELF userspace, timers, futex,
 IPv4, optimization, and disabled Rust/modules. The selected GCC flags keep
 the kernel's required optimization; no `-O0` substitution is made.
 
-GCC builds the reference kernel and HOSTCC utilities. A separate static
+GCC 14 builds the reference kernel and HOSTCC utilities. The pin's x86
+compressed boot string compilation omits an explicit C dialect, so GCC 15's
+C23 default fails on its older bool/false definitions. The reference uses
+GCC 14 without patching source or changing Kbuild flags. ACPI and PCI are
+explicitly enabled for QEMU's clean guest poweroff. A separate static
 GCC/glibc init supplies seven named userspace controls: tmpfs file persistence,
 anonymous memory, fork/wait, pipe communication, monotonic timer, signal
 delivery, and guest loopback UDP. These are smoke controls, not upstream

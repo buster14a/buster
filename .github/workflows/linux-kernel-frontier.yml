@@ -4,7 +4,7 @@ name: Linux kernel qualification frontier
 on:
   workflow_dispatch:
   push:
-    branches: [codex/3186-linux-kernel-frontier]
+    branches: ['codex/3186-linux-kernel-frontier']
     paths:
       - .github/workflows/linux-kernel-frontier.yml
       - tools/linux-kernel/**
@@ -24,11 +24,13 @@ jobs:
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       BUSTER_TEST_JOBS: '2'
+      BUSTER_KERNEL_REFERENCE_CC: gcc-14
     steps:
       - name: Machine specifications
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
-          requested-runner: ubuntu-26.04
+          requested-runner: >-
+            ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
@@ -57,9 +59,9 @@ jobs:
           set -euo pipefail
           mkdir -p evidence/licenses .ci-tools
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y gcc bison flex bc libelf-dev libssl-dev cpio qemu-system-x86
+          sudo apt-get install --no-install-recommends -y gcc gcc-14 bison flex bc libelf-dev libssl-dev cpio qemu-system-x86
           dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' > evidence/host-packages.tsv
-          for package in gcc gcc-15 cpp-15 binutils libc6 libc6-dev libc6-dev-bin bison flex bc libelf-dev libssl-dev cpio qemu-system-x86 qemu-system-common seabios ipxe-qemu; do
+          for package in gcc gcc-14 cpp-14 gcc-15 cpp-15 binutils libc6 libc6-dev libc6-dev-bin bison flex bc libelf-dev libssl-dev cpio qemu-system-x86 qemu-system-common seabios ipxe-qemu; do
             if test -f "/usr/share/doc/$package/copyright"; then
               cp "/usr/share/doc/$package/copyright" "evidence/licenses/$package.copyright"
             else
@@ -73,22 +75,14 @@ jobs:
           git -C external/linux ls-tree -r HEAD > evidence/linux-files.txt
           git rev-parse HEAD 'HEAD^{tree}' > evidence/buster-identity.txt
           gcc --version > evidence/gcc.txt
+          gcc-14 --version > evidence/kernel-reference-gcc.txt
           clang --version > evidence/clang.txt
           ld --version > evidence/ld.txt
           as --version > evidence/as.txt
           qemu-system-x86_64 --version > evidence/qemu.txt
-          sha256sum "$(command -v gcc)" "$(gcc -print-prog-name=cc1)" "$(command -v ld)" "$(command -v as)" "$(command -v qemu-system-x86_64)" "$(command -v cpio)" > evidence/external-tools.sha256
+          sha256sum "$(command -v gcc)" "$(gcc -print-prog-name=cc1)" "$(command -v gcc-14)" "$(gcc-14 -print-prog-name=cc1)" "$(command -v ld)" "$(command -v as)" "$(command -v qemu-system-x86_64)" "$(command -v cpio)" > evidence/external-tools.sha256
           find /usr/share/qemu /usr/share/seabios -type f -print0 | sort -z | xargs -0 sha256sum > evidence/firmware.sha256
           printf 'Cloud diagnostic only. Host tools/firmware are external dependencies. No Zen 5 performance validation.\n' > evidence/scope.txt
-      - name: Build trusted Buster compiler through its native driver
-        id: compiler
-        shell: bash
-        run: |
-          set -euo pipefail
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o .ci-tools/build
-          .ci-tools/build generate --ci --cc clang --linker DEFAULT --no-sanitize --no-fuzz --no-lto
-          .ci-tools/build build --config Release -t ide
-          sha256sum .ci-tools/build build/Release/ide > evidence/compiler.sha256
       - name: Build native frontier tool and independent trusted init
         shell: bash
         run: |
@@ -103,6 +97,15 @@ jobs:
           chmod 1777 "$RUNNER_TEMP/kernel-initramfs/tmp"
           (cd "$RUNNER_TEMP/kernel-initramfs" && find . -print0 | sort -z | cpio --null -o --format=newc) > "$RUNNER_TEMP/kernel-control.cpio"
           sha256sum .ci-tools/kernel-frontier "$RUNNER_TEMP/kernel-initramfs/init" "$RUNNER_TEMP/kernel-control.cpio" tools/linux-kernel/minimal.config > evidence/harness-inputs.sha256
+      - name: Build trusted Buster compiler through its native driver
+        id: compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o .ci-tools/build
+          .ci-tools/build generate --ci --cc clang --linker DEFAULT --no-sanitize --no-fuzz --no-lto
+          .ci-tools/build build --config Release -t ide
+          sha256sum .ci-tools/build build/Release/ide > evidence/compiler.sha256
       - name: Run bounded native reference and Buster frontier
         id: frontier
         shell: bash
@@ -142,6 +145,12 @@ jobs:
         run: |
           printf 'Frontier infrastructure result: %s\n' "$FRONTIER_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
           printf 'This is an opt-in reference/blocker census, not Buster Linux qualification or a performance result.\n' >> "$GITHUB_STEP_SUMMARY"
+          for log in evidence/frontier/*.log; do
+            if test -f "$log"; then
+              printf '%s\n' "$log"
+              tail -n 24 "$log"
+            fi
+          done
           for file in evidence/frontier/stages.txt evidence/frontier/frontier.txt; do
             if test -f "$file"; then cat "$file" >> "$GITHUB_STEP_SUMMARY"; fi
           done

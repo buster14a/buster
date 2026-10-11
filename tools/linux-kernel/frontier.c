@@ -185,6 +185,7 @@ BUSTER_GLOBAL_LOCAL int kernel_run(char const* name, char const* cwd, char* cons
         close(fd);
     }
     printf("LINUX_STAGE name=%s exit=%d\n", name, result);
+    fflush(stdout);
     return result;
 }
 
@@ -193,6 +194,7 @@ BUSTER_GLOBAL_LOCAL int kernel_record(int argc, char** argv, bool host, bool bus
     char cwd[KERNEL_PATH_BYTES], record[KERNEL_PATH_BYTES], result_path[KERNEL_PATH_BYTES], leaf[128];
     char const* directory = getenv("BUSTER_KERNEL_RECORDS");
     char const* compiler = getenv("BUSTER_KERNEL_COMPILER");
+    char const* reference_cc = getenv("BUSTER_KERNEL_REFERENCE_CC");
     int result = 125;
     bool valid = directory && (!buster || compiler) && getcwd(cwd, sizeof(cwd)) &&
                  argc < KERNEL_MAX_ARGUMENTS - 3;
@@ -203,7 +205,7 @@ BUSTER_GLOBAL_LOCAL int kernel_record(int argc, char** argv, bool host, bool bus
         n = snprintf(leaf, sizeof(leaf), "%s-%ld.result", buster ? "buster" : host ? "host" : "target", (long)getpid());
         valid = n > 0 && n < (int)sizeof(leaf) && kernel_path(result_path, directory, leaf) && valid;
         size_t count = 0;
-        kernel_arguments[count++] = (char*)(buster ? compiler : "gcc");
+        kernel_arguments[count++] = (char*)(buster ? compiler : reference_cc ? reference_cc : "gcc-14");
         if (buster)
         {
             kernel_arguments[count++] = "cc";
@@ -355,7 +357,7 @@ BUSTER_GLOBAL_LOCAL int kernel_replay(void)
                         strcpy(kernel_selection[slot].record, entry->d_name);
                         strcpy(kernel_selection[slot].output, original_output);
                     }
-                    fprintf(index, "%s\\t%s\\tunattempted\\t-1\\n", entry->d_name, original_output);
+                    fprintf(index, "%s\t%s\tunattempted\t-1\n", entry->d_name, original_output);
                 }
             }
         }
@@ -403,7 +405,7 @@ BUSTER_GLOBAL_LOCAL int kernel_replay(void)
                 int status = kernel_run(name, kernel_arguments[0], arguments, 15);
                 ++attempted;
                 passed += status == 0 ? 1u : 0u;
-                fprintf(index, "%s\\t%s\\tattempted\\t%d\\n", kernel_selection[row].record,
+                fprintf(index, "%s\t%s\tattempted\t%d\n", kernel_selection[row].record,
                         kernel_selection[row].output, status);
             }
         }
@@ -538,7 +540,7 @@ BUSTER_GLOBAL_LOCAL int kernel_self_test(void)
                     !kernel_target_c(count);
         }
     }
-    printf("LINUX_HARNESS_CONTROLS result=%s directory=%s\\n", valid ? "pass" : "fail", temporary);
+    printf("LINUX_HARNESS_CONTROLS result=%s directory=%s\n", valid ? "pass" : "fail", temporary);
     int result = valid ? 0 : 1;
     return result;
 }
