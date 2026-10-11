@@ -1492,6 +1492,15 @@ struct CAstStatementStatistics
     u64 declaration_hints;
     u64 loop_hints;
     u64 declines;
+    // Block declarations: declarators whose `,` or `;` and `=` the plan
+    // states, initializers among them bound without the per-token tests,
+    // declarations whose auto-inference scans were skipped, and declarator
+    // hints a token next to them refused (the rest of that declaration is
+    // then split from tokens).
+    u64 declarator_hints;
+    u64 initializer_hints;
+    u64 auto_skips;
+    u64 declarator_declines;
     // The last fallback: its reason, and the `{` of the body.
     CAstStatementFallback reason;
     u32 fallback_token;
