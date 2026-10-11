@@ -51,6 +51,8 @@ jobs:
           mode: source
           source-directory: .
           source-repository: ${{ github.repository }}
+      - name: Build native maintenance discovery
+        run: clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/main_push_inventory.c -o tools/main_push_inventory
       - name: Resolve and persist one eligible exact request
         id: plan
         run: python3 tools/native_retirement_controller.py plan --repo-root . --request "$RUNNER_TEMP/native-retirement-request/request.json"
