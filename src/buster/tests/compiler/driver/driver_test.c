@@ -377,7 +377,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverTestMachLoadCommands compiler_driver_test_mach
                 if (valid)
                 {
                     u8 const* name = image.pointer + cursor + name_offset;
-                    u8 const* terminator = memchr(name, 0, command_size - name_offset);
+                    u8 const* terminator = (u8 const*)memchr(name, 0, command_size - name_offset);
                     valid = terminator != 0;
                     if (valid)
                     {

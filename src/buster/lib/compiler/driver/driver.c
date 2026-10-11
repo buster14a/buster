@@ -3722,7 +3722,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverMachDylibStatus compiler_driver_mach_thin_dyli
                         {
                             u8 const* name = bytes.pointer + cursor + name_offset;
                             u64 available = command_size - name_offset;
-                            u8 const* terminator = memchr(name, 0, available);
+                            u8 const* terminator = (u8 const*)memchr(name, 0, available);
                             if (!terminator)
                             {
                                 valid = false;
