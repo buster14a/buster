@@ -24,6 +24,9 @@
 // machine_x64_cast_copies_constant lets a register-copy cast of an integer
 // constant (a C null pointer) define itself with MOV_RI, which the allocators
 // rematerialize; constants only such casts read are marked fused_dead.
+// machine_x64_index_constant_offset folds a constant INDEX index into its base
+// address offset, so a frame array element's address is one rematerializable
+// LEA_FRAME; constants only such rows read are marked fused_dead too.
 
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_internal.h>
@@ -271,11 +274,6 @@ struct MachineX64Selector
     u32 outgoing_slot;
     u32 outgoing_bytes;
     bool dynamic_stack;
-    // The classification virtual registers' rows — the builder's first
-    // chunk, where machine_x64_define writes a definition point in place.
-    // The rows past that chunk's capacity are reached by the chunk walk,
-    // which nineteen functions in twenty never need.
-    MachineVirtualRegister* classification_registers;
     // Per block: the fusion its BRANCH_IF terminator selects, and the block
     // the main loop is selecting.
     MachineX64BranchFusion* branch_fusions;
@@ -1211,23 +1209,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_define(MachineX64Selector* selector, u32 vi
     // carry their definition point from creation.
     if (virtual_register < selector->virtual_register_count)
     {
-        u32 chunk_capacity = selector->builder.virtual_registers.chunk_capacity;
-        MachineVirtualRegister* row;
-        if (virtual_register < chunk_capacity)
-        {
-            row = selector->classification_registers + virtual_register;
-        }
-        else
-        {
-            MachineBuilderChunk* chunk = selector->builder.virtual_registers.first;
-            u32 remaining = virtual_register;
-            while (remaining >= chunk_capacity)
-            {
-                remaining -= chunk_capacity;
-                chunk = chunk->next;
-            }
-            row = (MachineVirtualRegister*)(chunk + 1) + remaining;
-        }
+        MachineVirtualRegister* row = machine_builder_virtual_register_at(&selector->builder, virtual_register);
         if (row->definition_point == MACHINE_POINT_INVALID)
         {
             row->definition_point = machine_point_make(machine_index, MACHINE_POINT_AFTER);
@@ -4760,14 +4742,62 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_array(MachineX64Selector* selector, 
     return selected;
 }
 
+// A non-negative constant index scales into a byte offset of its base, so
+// the element address is one row: LEA_FRAME for a direct local, which both
+// allocators rematerialize, or LEA_OFFSET for a pointer. The computed form
+// copies the base and adds the scaled index into the same register: a
+// mutable value neither allocator can recreate. A negative index, or an
+// offset past a 32-bit displacement, keeps that form.
+BUSTER_GLOBAL_LOCAL bool machine_x64_index_constant_offset(MachineX64Selector* selector, IrInstruction const* instruction, u32* offset_out)
+{
+    IrFunction* function = selector->function;
+    bool found = false;
+    if (instruction->opcode == IR_OPCODE_INDEX && instruction->operand_count >= 2 && instruction->result.value < function->value_count &&
+        instruction->operands[1].value < function->value_count)
+    {
+        IrInstructionId definition = function->values[instruction->operands[1].value].definition;
+        if (definition.value < function->instruction_count && function->instructions[definition.value].opcode == IR_OPCODE_CONSTANT_INTEGER)
+        {
+            MachineSelectionAddress address = machine_x64_address(selector, instruction->result);
+            u32 width = address.index_bit_width;
+            IrInteger decoded;
+            s64 element = -1;
+            if ((address.flags & MACHINE_SELECTION_ADDRESS_INDEX) && address.index_value.value == instruction->operands[1].value &&
+                address.scale && address.scale <= INT32_MAX &&
+                ir_integer_constant_decode(function->instructions + definition.value, width, &decoded))
+            {
+                if (address.flags & MACHINE_SELECTION_ADDRESS_INDEX_SIGNED)
+                {
+                    element = ir_integer_to_s64(decoded, width, &element) ? element : -1;
+                }
+                else if (decoded.high == 0 && decoded.low <= INT32_MAX)
+                {
+                    element = (s64)decoded.low;
+                }
+            }
+            if (element >= 0 && (u64)element <= INT32_MAX / address.scale)
+            {
+                *offset_out = (u32)((u64)element * address.scale);
+                found = true;
+            }
+        }
+    }
+    return found;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_index(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     MachineSelectionAddress address = machine_x64_address(selector, instruction->result);
 
     bool selected = false;
     u32 index_register;
-    if (result_register != UINT32_MAX && instruction->operand_count >= 2 &&
-        machine_x64_operand_register(selector, instruction->operands[1], &index_register))
+    u32 constant_offset = 0;
+    if (result_register != UINT32_MAX && machine_x64_index_constant_offset(selector, instruction, &constant_offset))
+    {
+        selected = machine_x64_select_place_address_offset(selector, instruction->operands[0], result_register, constant_offset);
+    }
+    else if (result_register != UINT32_MAX && instruction->operand_count >= 2 &&
+             machine_x64_operand_register(selector, instruction->operands[1], &index_register))
     {
         bool typed = (address.flags & MACHINE_SELECTION_ADDRESS_INDEX) && address.scale <= INT32_MAX;
         // The index extend resolves before the base address: an unsupported
@@ -9004,24 +9034,31 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         }
         fusion_candidate_base += block_candidate_count;
     }
-    // A cast that copies a constant materializes it itself, so a value every
-    // use of which is such a cast selects into nothing. The reads are
+    // A cast that copies a constant materializes it itself, and an INDEX
+    // folds its constant index into the address offset, so a value every
+    // use of which is one of those rows selects into nothing. The reads are
     // counted over the same rows as use_count; edge arguments are uses no
-    // cast accounts for, so a value reaching a block parameter stays live.
-    u32* copy_cast_reads = arena_allocate(arena, u32, value_capacity);
-    memset(copy_cast_reads, 0, sizeof(u32) * value_capacity);
+    // row accounts for, so a value reaching a block parameter stays live.
+    u32* constant_folded_reads = arena_allocate(arena, u32, value_capacity);
+    memset(constant_folded_reads, 0, sizeof(u32) * value_capacity);
     u64 copied_constant = 0;
+    u32 folded_offset = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         IrBlock* block = function->blocks + block_index;
         for (IrInstructionId id = block->first_instruction; id.value <= block->last_instruction.value; id.value += 1)
         {
             IrInstruction* instruction = function->instructions + id.value;
-            if (instruction->opcode == IR_OPCODE_CAST && instruction->result.value < function->value_count &&
-                selector.value_virtual_registers[instruction->result.value] != UINT32_MAX &&
-                machine_x64_cast_copies_constant(&selector, instruction, &copied_constant))
+            bool selected_result = instruction->result.value < function->value_count &&
+                                   selector.value_virtual_registers[instruction->result.value] != UINT32_MAX;
+            if (selected_result && instruction->opcode == IR_OPCODE_CAST && machine_x64_cast_copies_constant(&selector, instruction, &copied_constant))
             {
-                copy_cast_reads[instruction->operands[0].value] += 1;
+                constant_folded_reads[instruction->operands[0].value] += 1;
+            }
+            else if (selected_result && instruction->opcode == IR_OPCODE_INDEX &&
+                     machine_x64_index_constant_offset(&selector, instruction, &folded_offset))
+            {
+                constant_folded_reads[instruction->operands[1].value] += 1;
             }
         }
     }
@@ -9031,15 +9068,13 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         for (IrInstructionId id = block->first_instruction; id.value <= block->last_instruction.value; id.value += 1)
         {
             u32 value = function->instructions[id.value].result.value;
-            if (value < function->value_count && copy_cast_reads[value] && copy_cast_reads[value] == value_uses[value].use_count)
+            if (value < function->value_count && constant_folded_reads[value] && constant_folded_reads[value] == value_uses[value].use_count)
             {
                 selector.fused_dead[value] = 1;
             }
         }
     }
     selector.virtual_register_count = selector.builder.virtual_registers.total_count;
-    selector.classification_registers =
-        selector.virtual_register_count ? (MachineVirtualRegister*)(selector.builder.virtual_registers.first + 1) : 0;
     u32 typed_instruction_count = 0;
     u32 simd_operation_count = 0;
     for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
