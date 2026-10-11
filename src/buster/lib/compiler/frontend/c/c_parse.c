@@ -8366,6 +8366,22 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_tree_string(CTypeParseMachine* mach
     {
         type = machine->expression_queries[slot].type;
     }
+    else if (tree.status == C_AST_TYPE_QUALIFIED_MEMBER)
+    {
+        // The member's name ends the access. A member that is not found
+        // appends nothing, and the query goes to the machine.
+        CToken name = preprocess->tokens[tree.replay_end - 1];
+        CType const* aggregate = result->types + tree.type.value;
+        CType qualifiers = {.is_const = aggregate->is_const, .is_volatile = aggregate->is_volatile};
+        Arena* scratch = machine->scratch_arena;
+        u64 scratch_mark = scratch->position;
+        CTypeId member = c_parse_member_type(scratch, result, tree.type, name.symbol, c_token_spelling(preprocess->spelling_base, name), 0, 0, 0);
+        type = member.value < result->type_count ? c_parse_add_qualified_type(result, member, qualifiers) : C_TYPE_ID_INVALID;
+        if (scratch->position != scratch_mark)
+        {
+            arena_set_position(scratch, scratch_mark);
+        }
+    }
     else
     {
         Arena* scratch = machine->scratch_arena;
@@ -8441,7 +8457,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_tree_query(CTypeParseMachine* machine,
 {
     CAstTypeAnswer tree = c_ast_types_answer(machine, preprocess, result, scope, start, end);
     bool answered = tree.status == C_AST_TYPE_ANSWER;
-    if (tree.status == C_AST_TYPE_STRING)
+    if (tree.status >= C_AST_TYPE_STRING)
     {
         answered = c_parse_expression_tree_string_answer(machine, preprocess, result, scope, end, slot, flags, tree, type_out, pending);
     }

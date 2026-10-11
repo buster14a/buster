@@ -1609,6 +1609,11 @@ typedef enum CAstTypeStatus
     // An answer that is the row a replay of the queried string literal
     // appends; `type` is invalid until c_parse_expression_tree_query replays it.
     C_AST_TYPE_STRING,
+    // An answer that is the row a replay of the queried `.` or `->` appends:
+    // the member's copy qualified as its const or volatile aggregate is.
+    // `type` is that aggregate's row until c_parse_expression_tree_query
+    // replays it.
+    C_AST_TYPE_QUALIFIED_MEMBER,
 } CAstTypeStatus;
 
 typedef struct CAstTypeAnswer CAstTypeAnswer;
@@ -1621,7 +1626,9 @@ struct CAstTypeAnswer
     // [replay_start, replay_end), when not empty, is a string-literal token
     // whose typing the answer must replay exactly as the machine's task would
     // (c_parse_expression_tree_query): a checked cast's operand, or under
-    // C_AST_TYPE_STRING the queried literal itself.
+    // C_AST_TYPE_STRING the queried literal itself. Under
+    // C_AST_TYPE_QUALIFIED_MEMBER it is the member access's tokens, which
+    // end at the member's name.
     u32 replay_start;
     u32 replay_end;
     bool nonplace_projection;
@@ -1695,6 +1702,7 @@ struct CAstTypeVerifyMark
     u32 types;
     u32 diagnostics;
     u32 array_bounds;
+    u32 type_alignments;
     u32 members;
     u32 enum_members;
     u32 entities;
@@ -1725,6 +1733,7 @@ struct CAstTypePending
     CAstTypeVerifyMark mark;
     u32 replay_types;
     u32 replay_bounds;
+    u32 replay_alignments;
     // More rows than C_AST_TYPE_REPLAY_ROWS are counted but not kept, which
     // the comparison reports as a mismatch.
     CType replay_type_rows[C_AST_TYPE_REPLAY_ROWS];

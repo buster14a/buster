@@ -1928,6 +1928,52 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_agree(CAstTypeBody const* body, CPr
     return agree;
 }
 
+// A `.` or `->` that the member rule declines only because its aggregate is
+// const or volatile (C_AST_TYPE_QUALIFIED_MEMBER), over a base it accepts.
+// The machine types that base as the tree does, then makes two calls,
+// c_parse_member_type on the qualified aggregate and
+// c_parse_add_qualified_type on the member it finds
+// (c_parse_direct_expression_postfix). The second appends the member's
+// qualified copy, and that row is its answer. c_parse_expression_tree_query
+// makes the same two calls. A checked query needs a safe base, as the member
+// rule does. Called only from c_ast_types_answer's decline branch, off the
+// path that ordinary answers take.
+BUSTER_GLOBAL_LOCAL bool c_ast_types_qualified_member(CAstTypeBody const* body, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
+                                                      u32 node, bool checked, CAstTypeAnswer* answer)
+{
+    CAst const* ast = body->ast;
+    u32 kind = ast->kinds[node];
+    bool arrow = kind == C_AST_MEMBER_ARROW;
+    u32 relative = node - body->begin;
+    u32 member_token = ast->tokens[node];
+    u32 base_flags = relative ? body->flags[relative - 1] : 0;
+    CTypeId aggregate = C_TYPE_ID_INVALID;
+    if ((kind == C_AST_MEMBER || arrow) && (base_flags & C_AST_TYPE_FLAG_ACCEPTED) && (!checked || (base_flags & C_AST_TYPE_FLAG_SAFE)) &&
+        c_ast_types_member_base_kind(ast->kinds[node - 1]) && member_token >= 1 && member_token < body->token_total &&
+        body->tokens[member_token].kind == C_TOKEN_IDENTIFIER && body->end[relative] == member_token + 1 &&
+        c_ast_types_punctuator_at(body, member_token - 1, arrow ? C_PUNCTUATOR_ARROW : C_PUNCTUATOR_DOT))
+    {
+        CTypeId base = body->types[relative - 1];
+        CType const* value = result->types + base.value;
+        aggregate = !arrow ? base : value->kind == C_TYPE_POINTER && value->element_type.value < result->type_count ? value->element_type : C_TYPE_ID_INVALID;
+        value = aggregate.value < result->type_count ? result->types + aggregate.value : 0;
+        bool qualified = value && (value->kind == C_TYPE_STRUCT || value->kind == C_TYPE_UNION) && (value->is_const || value->is_volatile) &&
+                         !value->is_restrict && !value->is_atomic;
+        aggregate = qualified ? aggregate : C_TYPE_ID_INVALID;
+    }
+    bool answered = aggregate.value != C_ID_UNDERLYING_INVALID && !c_parse_pending_enum_possible(result) &&
+                    c_parse_type_identity_sites_absent(result, body->first[relative], body->end[relative]) &&
+                    (!(base_flags & C_AST_TYPE_FLAG_LOOKUP_BELOW) || c_ast_types_lookups_agree(body, preprocess, result, scope, node - 1));
+    if (answered)
+    {
+        answer->status = C_AST_TYPE_QUALIFIED_MEMBER;
+        answer->type = aggregate;
+        answer->replay_start = body->first[relative];
+        answer->replay_end = body->end[relative];
+    }
+    return answered;
+}
+
 BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                   u32 start, u32 end)
 {
@@ -1992,6 +2038,11 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
                 answer.replay_end = body->ast->tokens[node] + 1;
                 WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_ANSWERS, 1);
             }
+            else if (c_ast_types_qualified_member(body, preprocess, result, scope, node, checked, &answer))
+            {
+                body->statistics->answers += 1;
+                WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_ANSWERS, 1);
+            }
             else
             {
                 body->statistics->declines += 1;
@@ -2041,6 +2092,7 @@ BUSTER_C_SHARED CAstTypeVerifyMark c_ast_types_verify_begin(CParseResult const* 
         .types = result->type_count,
         .diagnostics = result->diagnostic_count,
         .array_bounds = result->array_bound_count,
+        .type_alignments = result->type_alignment_count,
         .members = result->member_count,
         .enum_members = result->enum_member_count,
         .entities = result->entity_count,
@@ -2163,6 +2215,7 @@ BUSTER_C_SHARED void c_ast_types_verify_hold_replay(CParseResult* result, CAstTy
     CAstTypeVerifyMark mark = pending->mark;
     pending->replay_types = result->type_count - mark.types;
     pending->replay_bounds = result->array_bound_count - mark.array_bounds;
+    pending->replay_alignments = result->type_alignment_count - mark.type_alignments;
     for (u32 row = 0; row < pending->replay_types && row < C_AST_TYPE_REPLAY_ROWS; row += 1)
     {
         pending->replay_type_rows[row] = result->types[mark.types + row];
@@ -2173,6 +2226,7 @@ BUSTER_C_SHARED void c_ast_types_verify_hold_replay(CParseResult* result, CAstTy
     }
     result->type_count = mark.types;
     result->array_bound_count = mark.array_bounds;
+    result->type_alignment_count = mark.type_alignments;
 }
 
 BUSTER_C_SHARED void c_ast_types_verify_end(CTypeParseMachine* machine, CParseResult* result, CAstTypePending const* pending, u32 start, u32 end,
@@ -2208,7 +2262,8 @@ BUSTER_C_SHARED void c_ast_types_verify_end(CTypeParseMachine* machine, CParseRe
     // nothing else.
     bool tables = result->type_count == mark.types + pending->replay_types && result->array_bound_count == mark.array_bounds + pending->replay_bounds &&
                   result->member_count == mark.members && result->enum_member_count == mark.enum_members && result->entity_count == mark.entities &&
-                  result->scope_count == mark.scopes && result->parameter_count == mark.parameters;
+                  result->scope_count == mark.scopes && result->parameter_count == mark.parameters &&
+                  result->type_alignment_count == mark.type_alignments + pending->replay_alignments;
     for (u32 row = 0; tables && row < pending->replay_types; row += 1)
     {
         tables = row < C_AST_TYPE_REPLAY_ROWS && c_ast_types_rows_equal(result->types + mark.types + row, pending->replay_type_rows + row);
@@ -2324,13 +2379,15 @@ CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult prepro
             CAstTypeAnswer answer = c_ast_types_answer(&machine, &preprocess, result, scope, start, end);
             probe.nodes_typed = machine.ast_types->local_statistics.nodes_typed;
             probe.nodes_accepted = machine.ast_types->local_statistics.nodes_accepted;
-            probe.status = answer.status == C_AST_TYPE_STRING ? (u32)C_AST_TYPE_ANSWER : (u32)answer.status;
+            // A replayed answer's row exists only once the replay runs.
+            bool replayed = answer.status == C_AST_TYPE_STRING || answer.status == C_AST_TYPE_QUALIFIED_MEMBER;
+            probe.status = replayed ? (u32)C_AST_TYPE_ANSWER : (u32)answer.status;
             probe.node_kind = answer.node_kind;
-            probe.type = answer.type;
-            probe.kind = answer.type.value < result->type_count ? result->types[answer.type.value].kind : C_TYPE_INVALID;
+            probe.type = replayed ? C_TYPE_ID_INVALID : answer.type;
+            probe.kind = probe.type.value < result->type_count ? result->types[probe.type.value].kind : C_TYPE_INVALID;
             probe.nonplace_projection = answer.nonplace_projection;
             probe.replay = answer.replay_end > answer.replay_start;
-            probe.replay_answer = answer.status == C_AST_TYPE_STRING;
+            probe.replay_answer = replayed;
         }
         c_ast_types_body_end(&machine);
         result->expression_scalar_types = previous_scalars;

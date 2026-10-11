@@ -3720,15 +3720,32 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
      false, C_TYPE_INVALID, false, true},
     {S8_INITIALIZER("unsigned short const* f(void) { return u\"text\"; }"), S8_INITIALIZER("u\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_ANSWER,
      C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
+    // A member of a const or volatile aggregate over an accepted base: the
+    // answer is the qualified copy of the member's row that the replay of
+    // the machine's two calls appends, through `->` or `.`, in parentheses,
+    // and for a member that is itself an aggregate.
+    {S8_INITIALIZER("struct S { int a; }; int f(struct S const* p) { return p->a; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
+    {S8_INITIALIZER("struct S { char* name; }; char* f(struct S const s) { return s.name; }"), S8_INITIALIZER("s"), 1, 3,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
+    {S8_INITIALIZER("union U { long a; }; long f(union U volatile* p) { return (p->a); }"), S8_INITIALIZER("("), 1, 5,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
+    {S8_INITIALIZER("struct T { int x; }; struct S { struct T t; }; int f(struct S const* p) { return p->t.x; }"), S8_INITIALIZER("p"), 1, 3,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
     // Declined: whatever would make the machine append a type row (a
-    // qualified member, a string, a cast to a type name with a qualified
+    // qualified member that is not the queried node, a member of a member of
+    // a qualified aggregate, a string, a cast to a type name with a qualified
     // typedef, a tag, a qualified or restrict pointer or a declarator other
     // than `*`, an array operand of `+`, a pointer conditional), a builtin
     // call, a parenthesized callee, and a conditional whose middle operand
     // holds an assignment, which the machine splits there instead. A string
     // literal of several tokens is left to the machine.
-    {S8_INITIALIZER("struct S { int a; }; int f(struct S const* p) { return p->a; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_DECLINE,
-     C_TYPE_INVALID},
+    {S8_INITIALIZER("struct S { int a; }; int f(struct S const* p) { return p->a + 1; }"), S8_INITIALIZER("p"), 1, 5,
+     C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("struct T { int x; }; struct S { struct T t; }; int f(struct S const* p) { return p->t.x; }"), S8_INITIALIZER("p"), 1, 5,
+     C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("struct S { int a; }; long f(struct S const* p) { return (long)p->a; }"), S8_INITIALIZER("("), 1, 6,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, true},
     {S8_INITIALIZER("char const* f(void) { return \"te\" \"xt\"; }"), S8_INITIALIZER("\"te\""), 0, 2, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
     {S8_INITIALIZER("typedef int T; T const* f(void* p) { return (const T*)p; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_DECLINE,
      C_TYPE_INVALID},
