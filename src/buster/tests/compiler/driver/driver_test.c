@@ -36563,6 +36563,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_static_assert_shadowed_typedef.c"),
         S8("tests/basic_c_cast_deref_conditional.c"),
         S8("tests/basic_c_typeof_update_operand.c"),
+        S8("tests/basic_c_typeof_comma_operand.c"),
 #if BUSTER_CPU_ARCH_X86_64
         // <emmintrin.h> refuses to be included anywhere else.
         S8("tests/basic_c_spin_pause_builtin.c"),
