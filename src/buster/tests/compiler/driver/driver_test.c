@@ -30531,7 +30531,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_ide_run(UnitTestArgument
     bool source_written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
     BUSTER_TEST(arguments, source_written);
     String8 run_arguments[] = {
-        S8("run"), source_path, S8("--"), S8("alpha"), S8("beta gamma"), S8("-c"),
+        S8("run"), S8("-march=native"), source_path, S8("--"), S8("alpha"), S8("beta gamma"), S8("-c"),
     };
     CompilerDriverIdeRunResult run = source_written ?
         compiler_driver_test_spawn(arena, ide, (SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (String8){0}) :
@@ -30539,7 +30539,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_ide_run(UnitTestArgument
     String8 expected_output = string_format(arena, S8("argc=4\nargv[1]=alpha\nargv[2]=beta gamma\nargv[3]=-c\n"));
     BUSTER_TEST(arguments, run.spawned && run.status == 7 && string_equal(run.output, expected_output) && !run.error.length);
 
-    String8 compile_arguments[] = {S8("cc"), source_path, S8("-o"), executable_path};
+    String8 compile_arguments[] = {S8("cc"), S8("-march=native"), source_path, S8("-o"), executable_path};
     CompilerDriverIdeRunResult compiled = source_written ?
         compiler_driver_test_spawn(arena, ide, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_arguments), (String8){0}) :
         (CompilerDriverIdeRunResult){.status = -1};
@@ -30564,7 +30564,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_ide_run(UnitTestArgument
                                         argv0_path);
     bool argv0_written = file_write(argv0_path, BUSTER_SLICE_TO_BYTE_SLICE(argv0_source));
     BUSTER_TEST(arguments, argv0_written);
-    String8 argv0_arguments[] = {S8("run"), argv0_path};
+    String8 argv0_arguments[] = {S8("run"), S8("-march=native"), argv0_path};
     CompilerDriverIdeRunResult argv0_run = argv0_written ?
         compiler_driver_test_spawn(arena, ide, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv0_arguments), (String8){0}) :
         (CompilerDriverIdeRunResult){.status = -1};
@@ -30576,7 +30576,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_ide_run(UnitTestArgument
                              "int main(void) { printf(\"before exit\\n\"); exit(5); return 0; }\n");
     bool exit_written = file_write(exit_path, BUSTER_SLICE_TO_BYTE_SLICE(exit_source));
     BUSTER_TEST(arguments, exit_written);
-    String8 exit_arguments[] = {S8("run"), exit_path};
+    String8 exit_arguments[] = {S8("run"), S8("-march=native"), exit_path};
     CompilerDriverIdeRunResult exited = exit_written ?
         compiler_driver_test_spawn(arena, ide, (SliceString8)BUSTER_ARRAY_TO_SLICE(exit_arguments), (String8){0}) :
         (CompilerDriverIdeRunResult){.status = -1};
@@ -30659,7 +30659,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_ide_run(UnitTestArgument
                               "    (void)envp;\n"
                               "    return argc == 2 && argv[0][0] == '-' && argv[0][1] == 0 && argv[1][0] == 'x' && argv[1][1] == 0 ? 0 : 6;\n"
                               "}\n");
-    String8 stdin_arguments[] = {S8("run"), S8("-"), S8("--"), S8("x")};
+    String8 stdin_arguments[] = {S8("run"), S8("-march=native"), S8("-"), S8("--"), S8("x")};
     CompilerDriverIdeRunResult stdin_run =
         compiler_driver_test_spawn(arena, ide, (SliceString8)BUSTER_ARRAY_TO_SLICE(stdin_arguments), stdin_source);
     BUSTER_TEST_RAW(arguments,
