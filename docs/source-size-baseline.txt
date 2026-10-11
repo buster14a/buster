@@ -1,10 +1,10 @@
 # Source-size baseline: rows are category, tracked files, bytes.
 # Regenerate with ./build.sh source_size --write-baseline; see docs/source-size.md.
 schema buster-source-size-baseline-v1
-commit ff35a92d5f2c8aefa3463e499a88f15eba685c14
-production 229 19707627
-build 372 10084348
-tests 942 25885915
+commit 0a413fcb401121ba26716ed152636bfe865ee5b0
+production 227 19608945
+build 372 10080325
+tests 942 25821445
 generated 48 51984056
-docs 3179 113987093
+docs 3180 113997741
 dormant 65 88893
