@@ -127,11 +127,13 @@ The provisional Arm XML cross-check has 1,695 selected rows (1,523 canonical
 and 172 aliases) and is a separate denominator. Metadata classification and
 profile exclusion do not prove public source reachability or rejection.
 
-PTRUE/PTRUES now have a public source route gated by SVE or SME; ADDHA_MPPZ_S
-(`addha za0.s, p0/m, p0/m, z0.s`) remains refused. The hosted workflow records
-independent LLVM words and checks these source boundaries. These bounded seeds
-leave broader SVE/SVE2, SME/SME2 and optional-extension source coverage
-unfinished. The per-row owner reconciliation is tracked by
+PTRUE/PTRUES now have a public source route gated by SVE or SME. ADDHA is
+public source too: `a64_base_sme_addha` encodes the .S form
+(`addha za0.s, p0/m, p0/m, z0.s`) under `sme` and the .D form (`za0`-`za7`)
+under `sme-i16i64`. The hosted workflow records independent LLVM words, compares
+the enabled objects with them and checks that baseline stays refused. These
+bounded seeds leave broader SVE/SVE2, SME/SME2 and optional-extension source
+coverage unfinished. The per-row owner reconciliation is tracked by
 [#3150](https://github.com/buster14a/buster/issues/3150).
 
 ## Hosted observations

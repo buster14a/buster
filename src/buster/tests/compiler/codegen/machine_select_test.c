@@ -819,10 +819,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_classification_layout_
 // A register-copy cast of an integer constant -- a C null pointer is
 // CAST(INTEGER_TO_POINTER) of zero -- defines its own register with MOV_RI,
 // so the allocator rematerializes it instead of spilling it
-// (`machine_x64_cast_copies_constant`). A chain of such casts resolves to the
-// constant, and a constant or cast that only such casts read selects into
-// nothing. Independent oracle from the IR: a constant with any other reader,
-// edge arguments included, keeps its own row.
+// (`machine_x64_cast_copies_constant`, `machine_a64_cast_copies_constant`).
+// A chain of such casts resolves to the constant, and a constant or cast that
+// only such casts read selects into nothing. Independent oracle from the IR:
+// a constant with any other reader, edge arguments included, keeps its own row.
 BUSTER_GLOBAL_LOCAL bool machine_selection_test_copy_cast(IrFunction* function, IrInstruction* row)
 {
     return row->opcode == IR_OPCODE_CAST && row->operand_count == 1 && row->operands[0].value < function->value_count &&
@@ -862,12 +862,165 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_constant_copy_casts(Un
                         "    keep((void*)r, (void*)x);\n"
                         "    return r + x;\n"
                         "}\n");
+    String8 names[] = {S8("copy_cast_only"), S8("copy_cast_shared")};
+    // AArch64 (`machine_a64_cast_copies_constant`) follows the same rule with
+    // its own MOV_RI and MOV_RR rows.
+    CpuArch arches[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 arch_index = 0; arch_index < BUSTER_ARRAY_LENGTH(arches); arch_index += 1)
+    {
+        Target target = {.cpu_arch = arches[arch_index], .os = OPERATING_SYSTEM_LINUX};
+        bool x86_64 = target.cpu_arch == CPU_ARCH_X86_64;
+        u16 mov_ri = x86_64 ? MACHINE_X64_MOV_RI : MACHINE_A64_MOV_RI;
+        u16 mov_rr = x86_64 ? MACHINE_X64_MOV_RR : MACHINE_A64_MOV_RR;
+        String8 arch_name = x86_64 ? S8("x86-64") : S8("aarch64");
+        IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
+        u32 materialized_casts = 0;
+        u32 dead_casts = 0;
+        u32 plain_casts = 0;
+        for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+        {
+            IrFunction* function = program ? machine_selection_test_find(program, names[name_index]) : 0;
+            BUSTER_TEST(arguments, function != 0);
+            if (!function)
+            {
+                continue;
+            }
+            MachineSelectResult selected = machine_select_canonical_function(arguments->arena, program, function, target);
+            BUSTER_TEST(arguments, selected.supported && machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+            if (!selected.supported)
+            {
+                continue;
+            }
+            // Readers other than a constant-copying cast, counted from the rows
+            // and the published edge arguments.
+            u8* other_reader = arena_allocate(arguments->arena, u8, function->value_count);
+            u8* copy_reader = arena_allocate(arguments->arena, u8, function->value_count);
+            memset(other_reader, 0, function->value_count);
+            memset(copy_reader, 0, function->value_count);
+            for (u32 row_index = 0; row_index < function->instruction_count; row_index += 1)
+            {
+                IrInstruction* row = function->instructions + row_index;
+                bool copying = machine_selection_test_copies_constant(function, row);
+                for (u32 operand = 0; operand < row->operand_count; operand += 1)
+                {
+                    if (row->operands[operand].value < function->value_count)
+                    {
+                        u8* reader = copying ? copy_reader : other_reader;
+                        reader[row->operands[operand].value] = 1;
+                    }
+                }
+            }
+            for (u32 argument = 0; function->published_cfg && argument < function->published_cfg->argument_count; argument += 1)
+            {
+                u32 value = function->published_cfg->arguments[argument].value;
+                if (value < function->value_count)
+                {
+                    other_reader[value] = 1;
+                }
+            }
+            for (u32 register_index = 0; register_index < selected.function.virtual_register_count; register_index += 1)
+            {
+                MachineVirtualRegister* virtual_register = selected.function.virtual_registers + register_index;
+                u32 origin = virtual_register->typed_origin;
+                IrInstructionId definition = origin < function->value_count ? function->values[origin].definition : IR_INSTRUCTION_ID_INVALID;
+                if (definition.value >= function->instruction_count)
+                {
+                    continue;
+                }
+                IrInstruction* row = function->instructions + definition.value;
+                bool defined = virtual_register->definition_point != MACHINE_POINT_INVALID;
+                u16 opcode = defined ? selected.function.instructions[machine_point_instruction(virtual_register->definition_point)].opcode : 0;
+                if (machine_selection_test_copies_constant(function, row))
+                {
+                    // Dead exactly when only constant-copying casts read it;
+                    // otherwise it materializes the constant itself.
+                    bool dead = copy_reader[origin] && !other_reader[origin];
+                    BUSTER_TEST(arguments, dead ? !defined : defined && opcode == mov_ri);
+                    dead_casts += dead && !defined;
+                    materialized_casts += defined && opcode == mov_ri;
+                }
+                else if (machine_selection_test_copy_cast(function, row))
+                {
+                    // A copy of a computed value stays a register copy.
+                    BUSTER_TEST(arguments, defined && opcode == mov_rr);
+                    plain_casts += defined && opcode == mov_rr;
+                }
+                else if (row->opcode == IR_OPCODE_CONSTANT_INTEGER && copy_reader[origin])
+                {
+                    BUSTER_TEST(arguments, defined == (other_reader[origin] != 0));
+                }
+            }
+        }
+        String8 counts = string_format(arguments->arena, S8("{S8} constant copy casts: materialized {u32}, dead {u32}, plain {u32}"), arch_name,
+                                           materialized_casts, dead_casts, plain_casts);
+        // Unprepared IR gives every cast here an ordinary reader as well, so none
+        // is dead; the per-register checks above still bind the dead case.
+        BUSTER_TEST_RAW(arguments, materialized_casts >= 4 && plain_casts >= 1, counts);
+
+    }
+
+    return result;
+}
+
+// A non-negative constant INDEX index folds into its base address offset
+// (`machine_x64_index_constant_offset`): a frame array element's address is
+// one LEA_FRAME, which the allocators rematerialize, and a pointer element's
+// is one LEA_OFFSET, or a copy at offset zero. A negative or variable index
+// keeps the computed form, a mutable copy-then-add value. Independent oracle
+// from the IR rows; a constant only folded INDEX rows read selects into
+// nothing.
+BUSTER_GLOBAL_LOCAL IrInstruction* machine_selection_test_definition(IrFunction* function, IrValueId value)
+{
+    IrInstructionId definition = value.value < function->value_count ? function->values[value.value].definition : IR_INSTRUCTION_ID_INVALID;
+    return definition.value < function->instruction_count ? function->instructions + definition.value : 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_selection_test_folded_index(IrFunction* function, IrInstruction* row)
+{
+    IrInstruction* index = row->opcode == IR_OPCODE_INDEX && row->operand_count >= 2 ? machine_selection_test_definition(function, row->operands[1]) : 0;
+    return index && index->opcode == IR_OPCODE_CONSTANT_INTEGER && index->immediate_count == 1 && !index->immediate_is_negative &&
+           index->immediates[0] < (1u << 20);
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_constant_index_fold(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("long f(void);\n"
+                        "void g(long* p);\n"
+                        "struct S { long x; long arr[4]; };\n"
+                        "long frame_constant(void)\n"
+                        "{\n"
+                        "    long a[8];\n"
+                        "    a[3L] = f();\n"
+                        "    a[0L] = f();\n"
+                        "    g(a);\n"
+                        "    return a[3L] + a[0L];\n"
+                        "}\n"
+                        "long field_constant(void)\n"
+                        "{\n"
+                        "    struct S s;\n"
+                        "    s.arr[2L] = f();\n"
+                        "    g(&s.x);\n"
+                        "    return s.arr[2L];\n"
+                        "}\n"
+                        "long pointer_constant(long* p, unsigned char* q, long i)\n"
+                        "{\n"
+                        "    p[2L] = f();\n"
+                        "    p[0L] = f();\n"
+                        "    p[-1L] = f();\n"
+                        "    p[i] = f();\n"
+                        "    q[5UL] = (unsigned char)f();\n"
+                        "    return p[2L];\n"
+                        "}\n");
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
     IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
-    String8 names[] = {S8("copy_cast_only"), S8("copy_cast_shared")};
-    u32 materialized_casts = 0;
-    u32 dead_casts = 0;
-    u32 plain_casts = 0;
+    String8 names[] = {S8("frame_constant"), S8("field_constant"), S8("pointer_constant")};
+    u32 frame_folds = 0;
+    u32 pointer_folds = 0;
+    u32 zero_copies = 0;
+    u32 computed = 0;
+    u32 dead_constants = 0;
+    u32 frame_spills = 0;
     for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
     {
         IrFunction* function = program ? machine_selection_test_find(program, names[name_index]) : 0;
@@ -882,21 +1035,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_constant_copy_casts(Un
         {
             continue;
         }
-        // Readers other than a constant-copying cast, counted from the rows
-        // and the published edge arguments.
+        // Readers other than a folded INDEX, counted from the rows and the
+        // published edge arguments.
         u8* other_reader = arena_allocate(arguments->arena, u8, function->value_count);
-        u8* copy_reader = arena_allocate(arguments->arena, u8, function->value_count);
+        u8* fold_reader = arena_allocate(arguments->arena, u8, function->value_count);
         memset(other_reader, 0, function->value_count);
-        memset(copy_reader, 0, function->value_count);
+        memset(fold_reader, 0, function->value_count);
         for (u32 row_index = 0; row_index < function->instruction_count; row_index += 1)
         {
             IrInstruction* row = function->instructions + row_index;
-            bool copying = machine_selection_test_copies_constant(function, row);
+            bool folded = machine_selection_test_folded_index(function, row);
             for (u32 operand = 0; operand < row->operand_count; operand += 1)
             {
                 if (row->operands[operand].value < function->value_count)
                 {
-                    u8* reader = copying ? copy_reader : other_reader;
+                    u8* reader = folded && operand == 1 ? fold_reader : other_reader;
                     reader[row->operands[operand].value] = 1;
                 }
             }
@@ -909,44 +1062,89 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_constant_copy_casts(Un
                 other_reader[value] = 1;
             }
         }
+        u8* defined_origin = arena_allocate(arguments->arena, u8, function->value_count);
+        memset(defined_origin, 0, function->value_count);
+        u8* frame_folded = arena_allocate(arguments->arena, u8, selected.function.virtual_register_count + 1);
+        memset(frame_folded, 0, selected.function.virtual_register_count + 1);
         for (u32 register_index = 0; register_index < selected.function.virtual_register_count; register_index += 1)
         {
             MachineVirtualRegister* virtual_register = selected.function.virtual_registers + register_index;
             u32 origin = virtual_register->typed_origin;
-            IrInstructionId definition = origin < function->value_count ? function->values[origin].definition : IR_INSTRUCTION_ID_INVALID;
-            if (definition.value >= function->instruction_count)
+            IrInstruction* row = origin < function->value_count ? machine_selection_test_definition(function, (IrValueId){.value = origin}) : 0;
+            if (!row)
             {
                 continue;
             }
-            IrInstruction* row = function->instructions + definition.value;
             bool defined = virtual_register->definition_point != MACHINE_POINT_INVALID;
-            u16 opcode = defined ? selected.function.instructions[machine_point_instruction(virtual_register->definition_point)].opcode : 0;
-            if (machine_selection_test_copies_constant(function, row))
+            MachineInstruction* definition = defined ? selected.function.instructions + machine_point_instruction(virtual_register->definition_point) : 0;
+            u16 opcode = definition ? definition->opcode : 0;
+            if (machine_selection_test_folded_index(function, row))
             {
-                // Dead exactly when only constant-copying casts read it;
-                // otherwise it materializes the constant itself.
-                bool dead = copy_reader[origin] && !other_reader[origin];
-                BUSTER_TEST(arguments, dead ? !defined : defined && opcode == MACHINE_X64_MOV_RI);
-                dead_casts += dead && !defined;
-                materialized_casts += defined && opcode == MACHINE_X64_MOV_RI;
+                IrInstruction* base = machine_selection_test_definition(function, row->operands[0]);
+                IrInstruction* index = machine_selection_test_definition(function, row->operands[1]);
+                IrType* element = ir_type_from_id(&program->types, row->canonical_type);
+                u64 offset = element ? index->immediates[0] * element->layout.size : UINT64_MAX;
+                bool frame_base = base && (base->opcode == IR_OPCODE_LOCAL || base->opcode == IR_OPCODE_FIELD);
+                if (frame_base)
+                {
+                    // The rematerialization recipe: an immutable value whose
+                    // recorded definition takes a stack slot's address.
+                    bool folded = opcode == MACHINE_X64_LEA_FRAME && machine_ref_kind(definition->operands[1]) == MACHINE_REF_STACK_SLOT &&
+                                  !(virtual_register->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) &&
+                                  (base->opcode != IR_OPCODE_LOCAL || definition->payload == offset);
+                    BUSTER_TEST(arguments, folded);
+                    frame_folds += folded;
+                    frame_folded[register_index] = folded;
+                }
+                else if (offset == 0)
+                {
+                    BUSTER_TEST(arguments, opcode == MACHINE_X64_MOV_RR);
+                    zero_copies += opcode == MACHINE_X64_MOV_RR;
+                }
+                else
+                {
+                    bool folded = opcode == MACHINE_X64_LEA_OFFSET && definition->payload == offset;
+                    BUSTER_TEST(arguments, folded);
+                    pointer_folds += folded;
+                }
             }
-            else if (machine_selection_test_copy_cast(function, row))
+            else if (row->opcode == IR_OPCODE_INDEX)
             {
-                // A copy of a computed value stays a register copy.
-                BUSTER_TEST(arguments, defined && opcode == MACHINE_X64_MOV_RR);
-                plain_casts += defined && opcode == MACHINE_X64_MOV_RR;
+                // The computed form copies the base and adds the scaled
+                // index into the same register, so the value is mutable
+                // and has no recipe.
+                bool kept = opcode == MACHINE_X64_MOV_RR && (virtual_register->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE);
+                BUSTER_TEST(arguments, kept);
+                computed += kept;
             }
-            else if (row->opcode == IR_OPCODE_CONSTANT_INTEGER && copy_reader[origin])
+            if (defined)
             {
-                BUSTER_TEST(arguments, defined == (other_reader[origin] != 0));
+                defined_origin[origin] = 1;
             }
         }
+        for (u32 value = 0; value < function->value_count; value += 1)
+        {
+            IrInstruction* row = machine_selection_test_definition(function, (IrValueId){.value = value});
+            if (row && row->opcode == IR_OPCODE_CONSTANT_INTEGER && fold_reader[value])
+            {
+                BUSTER_TEST(arguments, defined_origin[value] == other_reader[value]);
+                dead_constants += !defined_origin[value];
+            }
+        }
+        // Every folded frame address is live across a call; the allocator
+        // recreates it rather than storing it.
+        MachineStackPlacement placement = machine_fast_placement_build(arguments->arena, &selected.function);
+        BUSTER_TEST(arguments, placement.valid);
+        for (u32 edit_index = 0; edit_index < placement.edit_count; edit_index += 1)
+        {
+            MachineEdit* edit = placement.edits + edit_index;
+            frame_spills += edit->kind == MACHINE_EDIT_SPILL && edit->subject < selected.function.virtual_register_count && frame_folded[edit->subject];
+        }
     }
-    String8 counts = string_format(arguments->arena, S8("constant copy casts: materialized {u32}, dead {u32}, plain {u32}"), materialized_casts,
-                                   dead_casts, plain_casts);
-    // Unprepared IR gives every cast here an ordinary reader as well, so none
-    // is dead; the per-register checks above still bind the dead case.
-    BUSTER_TEST_RAW(arguments, materialized_casts >= 4 && plain_casts >= 1, counts);
+    String8 counts = string_format(arguments->arena, S8("constant index folds: frame {u32}, pointer {u32}, zero copies {u32}, computed {u32}, dead constants {u32}, frame spills {u32}"),
+                                   frame_folds, pointer_folds, zero_copies, computed, dead_constants, frame_spills);
+    BUSTER_TEST_RAW(arguments, frame_folds >= 3 && pointer_folds >= 2 && zero_copies >= 1 && computed >= 2 && dead_constants >= 1 && frame_spills == 0,
+                    counts);
 
     return result;
 }
@@ -954,6 +1152,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_constant_copy_casts(Un
 UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult constant_index_result = machine_selection_test_constant_index_fold(arguments);
+    result.test_count += constant_index_result.test_count;
+    result.succeeded_test_count += constant_index_result.succeeded_test_count;
     UnitTestResult constant_cast_result = machine_selection_test_constant_copy_casts(arguments);
     result.test_count += constant_cast_result.test_count;
     result.succeeded_test_count += constant_cast_result.succeeded_test_count;

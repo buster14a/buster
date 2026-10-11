@@ -6,7 +6,8 @@ on:
       - .github/apt-inputs.json
       - .github/workflows/apt-inputs.yml
       - .github/workflows/gpu-toolchains.yml
-      - .github/workflows/throughput-real-source.yml
+      - .github/workflows/external-projects.yml
+      - tools/external_project_policy.c
       - tools/ci_apt.py
       - tests/ci_apt_test.py
       - tools/ci_apt_retry_test.py
@@ -16,7 +17,8 @@ on:
       - .github/apt-inputs.json
       - .github/workflows/apt-inputs.yml
       - .github/workflows/gpu-toolchains.yml
-      - .github/workflows/throughput-real-source.yml
+      - .github/workflows/external-projects.yml
+      - tools/external_project_policy.c
       - tools/ci_apt.py
       - tests/ci_apt_test.py
       - tools/ci_apt_retry_test.py
@@ -57,7 +59,6 @@ jobs:
           source-repository: ${{ github.repository }}
       - name: Offline fail-closed controls
         run: |
-          python3 tests/ci_apt_test.py -v
           python3 tools/ci_apt_retry_test.py -v
       - name: Check repeatable signed provisioning and consumer selection
         shell: bash
@@ -86,9 +87,3 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  real-source:
-    needs: inputs
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    uses: ./.github/workflows/throughput-real-source.yml
-    with:
-      qualify_pinned_inputs: true

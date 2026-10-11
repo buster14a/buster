@@ -70,8 +70,9 @@ checkout), requires the two to produce byte-identical outputs, records every
 unit's metrics and rusage, and optionally runs the plain build under callgrind.
 The self-host unit compiles a pinned tree given by `--self-host-root`, so a
 subject that edits the compiler's own source still compiles the same program,
-and every unit pins `-march=znver3` so outputs do not follow the host CPU (or
-valgrind's CPUID). `tools/work_ledger/fixtures.txt` freezes the repository
+and every unit pins `-march=znver3` so outputs are fixed and identical
+between runners (and under valgrind's CPUID), independent of the driver's
+default CPU. `tools/work_ledger/fixtures.txt` freezes the repository
 fixtures that compile with plain `-c` at the pinned tree. The external inputs
 are the pinned cJSON, Lua and SQLite archives of
 `tools/throughput/workloads/`.
