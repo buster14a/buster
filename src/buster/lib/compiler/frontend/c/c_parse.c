@@ -35078,6 +35078,45 @@ BUSTER_C_INTERNAL u32 c_parse_file_scope_statement_expression(CParseResult* resu
     return found;
 }
 
+// The `(` of the first evaluated GNU statement expression in a block-scope
+// static initializer [start, end), or end. Such a static is initialized before
+// the function runs, so GCC and Clang reject the `({` as "initializer element is
+// not constant" (#3415), while a sizeof, _Alignof or typeof operand stays
+// unevaluated and constant. The position index answers the common case, a
+// static without one; only a hit walks the range to skip those operands.
+BUSTER_C_INTERNAL u32 c_parse_block_static_statement_expression(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
+{
+    u32 found = end;
+    u32 cursor = c_parse_file_scope_statement_expression(result, preprocess, start, end) < end ? start : end;
+    while (found == end && cursor < end)
+    {
+        CToken token = preprocess.tokens[cursor];
+        bool parenthesized = cursor + 1 < end && c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        bool unevaluated = false;
+        if (parenthesized && token.kind == C_TOKEN_IDENTIFIER)
+        {
+            String8 name = c_token_spelling(preprocess.spelling_base, token);
+            unevaluated = string_equal(name, S8("sizeof")) || c_parse_alignof_word(name) || string_equal(name, S8("typeof")) ||
+                          string_equal(name, S8("typeof_unqual")) || string_equal(name, S8("__typeof")) || string_equal(name, S8("__typeof__"));
+        }
+        if (unevaluated)
+        {
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor + 1);
+            cursor = close < end ? close + 1 : end;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && cursor + 1 < end &&
+                 c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_BRACE))
+        {
+            found = cursor;
+        }
+        else
+        {
+            cursor += 1;
+        }
+    }
+    return found;
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                              CPreprocessResult preprocess)
 {
@@ -35411,9 +35450,15 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
                 String8 conversion_message = {0};
                 bool braced = initializer_start < initializer_end &&
                               c_token_is_punctuator(&preprocess.tokens[initializer_start], C_PUNCTUATOR_LEFT_BRACE);
-                bool incompatible = !braced && c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type,
-                                                                                     initializer_start, initializer_end, true, &conversion_message);
-                if (incompatible)
+                u32 statement_expression = c_parse_block_static_statement_expression(result, preprocess, initializer_start, initializer_end);
+                bool incompatible = statement_expression == initializer_end && !braced &&
+                                    c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type,
+                                                                         initializer_start, initializer_end, true, &conversion_message);
+                if (statement_expression < initializer_end)
+                {
+                    c_parse_lowering_constraint_consider(diagnostic, S8("initializer element is not constant"), start, statement_expression);
+                }
+                else if (incompatible)
                 {
                     c_parse_lowering_constraint_consider(diagnostic,
                         conversion_message.length ? conversion_message : S8("initializer has an incompatible type"),
