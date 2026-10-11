@@ -1610,6 +1610,53 @@ The census also found that the switch and control-statement validators'
 Reading their ends from the tree cannot repay its own lookup, so they stay
 with tokens; this is recorded as a negative result, not a budget.
 
+For the [declaration specifier read](#declaration-specifiers-from-the-tree),
+these budgets were declared before its measured runs. The input and flags are
+the same as for the statement plan (`-g0 -fsyntax-only`, the self-host unity
+input of the base revision). Four arms are counted with Callgrind
+(`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `4e5d563f`, which the candidate branches from. The budgets:
+- **Correctness.**
+  - 0 model differences over the corpus and the frontend sources: every type
+    row, array bound, alignment specifier, type alignment, member, parameter,
+    entity and declaration type, field by field and in table order, with the
+    diagnostics;
+  - a one-off comparison of the same fields on the self-host unity input, also
+    with 0 differences;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **Coverage (reported, not gated).** The runs read from the tree and the runs
+  handed back, by reason, from the `-v` counters.
+- **The read's own effect (C against B).** The whole compile costs fewer
+  instructions, with the index build charged. The machine's root specifier
+  runs (`c_parse_scalar_type_in_scope_attempt` calls) fall by exactly the runs
+  read from the tree.
+- **The default path (D against A).** The read adds one test of a null index
+  per run there, so the difference stays within ±0.05% Ir. The
+  work-equivalence criterion for the body walk does not apply to this change.
+- **Adoption of the hook as the default.** Unchanged from stage 1. Hosted
+  instruction counts show only its instruction half. Wall time, `-c` and RSS
+  acceptance remain with the Zen 5 route (#2761), and no 9700X comparison is
+  requested.
+
+The declaration specifier read's hosted census is
+[`2026-10-11T105317Z`](../../performance-audits/2026-10-11T105317Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. The model matches field by field over the corpus,
+  the frontend sources and the self-host unity input. The objects of all four
+  arms are identical.
+- On the self-host the read answers 79,095 runs: 13,470 primitive and 65,625
+  typedef. It hands 2,113 back, 2,091 of them `input` and 22 `specifiers`. The
+  machine's root runs fall by exactly 79,095.
+- The pilot's compile falls by 141.8 M Ir (−1.53%), with the 17.7 M index
+  charged. The index holds the 144,693 word-only lists, built in one pass.
+- The default path is +0.026%.
+- Zen 5 validation stays incomplete (#2761), so the hook stays opt-in.
+
 For the split's [diagnostic probe](#declaration-split-from-the-tree)
 (`c_parser_tree_probe`), these budgets were declared before its measured runs.
 The probe classifies identifier lanes from their interned ids instead of
@@ -1923,52 +1970,5 @@ negative result, diagnostic only:
   `-g0` and `-g`, and the whole compile moves by at most +0.0035%.
 - **Leaf budget fails.** The leaf grows by 0.53 M, or by 0.25 M when a first
   sight is probed only once. The code does not ship.
-
-For the [declaration specifier read](#declaration-specifiers-from-the-tree),
-these budgets were declared before its measured runs. The input and flags are
-the same as for the statement plan (`-g0 -fsyntax-only`, the self-host unity
-input of the base revision). Four arms are counted with Callgrind
-(`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3` builds:
-- A: base, default flags;
-- B: base with `-fc-ast-pilot`;
-- C: candidate with `-fc-ast-pilot`;
-- D: candidate, default flags.
-
-The base is main `4e5d563f`, which the candidate branches from. The budgets:
-- **Correctness.**
-  - 0 model differences over the corpus and the frontend sources: every type
-    row, array bound, alignment specifier, type alignment, member, parameter,
-    entity and declaration type, field by field and in table order, with the
-    diagnostics;
-  - a one-off comparison of the same fields on the self-host unity input, also
-    with 0 differences;
-  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
-- **Coverage (reported, not gated).** The runs read from the tree and the runs
-  handed back, by reason, from the `-v` counters.
-- **The read's own effect (C against B).** The whole compile costs fewer
-  instructions, with the index build charged. The machine's root specifier
-  runs (`c_parse_scalar_type_in_scope_attempt` calls) fall by exactly the runs
-  read from the tree.
-- **The default path (D against A).** The read adds one test of a null index
-  per run there, so the difference stays within ±0.05% Ir. The
-  work-equivalence criterion for the body walk does not apply to this change.
-- **Adoption of the hook as the default.** Unchanged from stage 1. Hosted
-  instruction counts show only its instruction half. Wall time, `-c` and RSS
-  acceptance remain with the Zen 5 route (#2761), and no 9700X comparison is
-  requested.
-
-The declaration specifier read's hosted census is
-[`2026-10-11T105317Z`](../../performance-audits/2026-10-11T105317Z.md), taken
-the same way and diagnostic only:
-- Every hosted budget passes. The model matches field by field over the corpus,
-  the frontend sources and the self-host unity input. The objects of all four
-  arms are identical.
-- On the self-host the read answers 79,095 runs: 13,470 primitive and 65,625
-  typedef. It hands 2,113 back, 2,091 of them `input` and 22 `specifiers`. The
-  machine's root runs fall by exactly 79,095.
-- The pilot's compile falls by 141.8 M Ir (−1.53%), with the 17.7 M index
-  charged. The index holds the 144,693 word-only lists, built in one pass.
-- The default path is +0.026%.
-- Zen 5 validation stays incomplete (#2761), so the hook stays opt-in.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
