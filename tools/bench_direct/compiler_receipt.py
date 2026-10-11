@@ -3614,11 +3614,12 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
     if isinstance(production, dict) and production.get("requested"):
         profile = PRODUCTION_PROFILE_PROFILE
         compilers = production.get("binaries") if isinstance(production.get("binaries"), dict) else {}
+        # A malformed role record renders as NA; validation refuses it, so rendering must not raise first.
+        hashes = [str(compilers[role].get("sha256", "NA"))[:12] if isinstance(compilers.get(role), dict) else "NA"
+                  for role in ("baseline", "candidate")]
         lines += ["", f"PGO/LTO production profile ({profile['name']}): {production.get('status', 'NA')} "
                   "(the head's own Release compiler as base, its PGO+LTO production compiler as candidate, on the "
-                  f"{THROUGHPUT_PROFILE['name']} corpus; report-only). Release `%s`, PGO+LTO `%s`." % (
-                      str((compilers.get("baseline") or {}).get("sha256", "NA"))[:12],
-                      str((compilers.get("candidate") or {}).get("sha256", "NA"))[:12]), "",
+                  f"{THROUGHPUT_PROFILE['name']} corpus; report-only). Release `%s`, PGO+LTO `%s`." % tuple(hashes), "",
                   "| Workload / mode | Release wall (ms) | PGO+LTO wall (ms) | PGO+LTO / Release | Decision |",
                   "| --- | ---: | ---: | ---: | --- |"]
         for row in production.get("cells") if isinstance(production.get("cells"), list) else []:
