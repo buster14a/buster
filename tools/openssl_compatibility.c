@@ -6,7 +6,7 @@
 
 #define BUSTER_OPENSSL_COMMIT "45e844fa2a14ec92d146bd8f5778ac130b6625fb"
 
-BUSTER_GLOBAL_LOCAL RaddebuggerCommandResult openssl_command(Arena* arena, SliceString8 arguments, String8 working_directory, String8 prefix, RaddebuggerEnvironment environment, bool* stopped)
+BUSTER_GLOBAL_LOCAL RaddebuggerCommandResult openssl_command(Arena* arena, SliceString8 arguments, String8 working_directory, String8 prefix, RaddebuggerEnvironment environment, bool* stopped, u64 timeout_us)
 {
     RaddebuggerCommandResult result = {.wait = {.result = PROCESS_RESULT_FAILED}, .recorded = true};
     if (prefix.length)
@@ -71,7 +71,7 @@ BUSTER_GLOBAL_LOCAL RaddebuggerCommandResult openssl_command(Arena* arena, Slice
         run.spawn = process_run_spawn(arena, &run);
         if (run.spawn.handle)
         {
-            result.wait = os_process_wait_deadline(arena, run.spawn, environment == RADDEBUGGER_ENVIRONMENT_HEADLESS ? RADDEBUGGER_RUNTIME_TIMEOUT_US : RADDEBUGGER_PROCESS_TIMEOUT_US);
+            result.wait = os_process_wait_deadline(arena, run.spawn, timeout_us);
         }
     }
     result.output = BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_OUTPUT]);
@@ -257,7 +257,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult openssl_proxy(Arena* arena, SliceString8 argum
                 os_argument_builder_append(&builder, forwarded.pointer[i]);
             }
             RaddebuggerCommandResult command = openssl_command(arena, os_argument_builder_flush(&builder), (String8){0}, prefix,
-                                                                  RADDEBUGGER_ENVIRONMENT_INHERIT, &stopped);
+                                                                  RADDEBUGGER_ENVIRONMENT_INHERIT, &stopped, RADDEBUGGER_PROCESS_TIMEOUT_US);
             // Configure's preprocessor queries need their real output. Commands
             // printed by the harness belong in the retained build log, not here.
             string_print(S8("{S8}"), command.output);
@@ -305,7 +305,18 @@ BUSTER_GLOBAL_LOCAL String8 openssl_shell_word(Arena* arena, String8 word)
 BUSTER_GLOBAL_LOCAL bool openssl_step(Arena* arena, String8 directory, String8 name, SliceString8 arguments, bool* stopped)
 {
     String8 prefix = path_join(arena, directory, name);
-    bool result = raddebugger_command_ok(raddebugger_command(arena, arguments, directory, prefix, RADDEBUGGER_ENVIRONMENT_INHERIT, stopped));
+    bool tests = string_equal(name, S8("tests"));
+    command_print(arguments);
+    RaddebuggerCommandResult command = openssl_command(arena, arguments, directory, prefix, RADDEBUGGER_ENVIRONMENT_INHERIT, stopped,
+                                                       tests ? 1800ull * 1000ull * 1000ull : RADDEBUGGER_PROCESS_TIMEOUT_US);
+    if (tests)
+    {
+        // Retain the entire bounded TAP log in the evidence directory and print
+        // its final progress/summary even when the upstream suite fails.
+        u64 start = command.output.length > 8192 ? command.output.length - 8192 : 0;
+        string_print(S8("{S8}\n"), string_slice(command.output, start, command.output.length));
+    }
+    bool result = raddebugger_command_ok(command);
     return result;
 }
 

@@ -80,6 +80,10 @@ explicitly incomplete even if every build/test cell passes. Child `.command`,
 invocations and outcomes. Source Git inventory and configdata dump retain
 generated-input configuration. Children use existing bounded captures,
 deadlines and fail-closed cleanup; a timeout or truncated log cannot pass.
+The full upstream test suite has a 30-minute deadline per cell; other children
+retain the existing ten-minute bound. Final TAP progress/summary is also printed
+to the job log. The first portable reference attempt exceeded the shorter
+original deadline, so it is not a passing test result.
 
 The [hosted intake](../../../.github/workflows/openssl-qualification.yml)
 runs only by explicit dispatch or pushes to the issue's owned experiment branch.
