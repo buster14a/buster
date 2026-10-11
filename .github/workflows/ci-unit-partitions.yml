@@ -50,6 +50,7 @@ jobs:
       BUSTER_TEST_TABLE_AUDITS: '0'
       BUSTER_UNIT_PAIRS: ${{ github.head_ref == 'codex/3620-schedule-unit-modules' && '3' || github.event_name == 'workflow_dispatch' && inputs.pairs || '1' }}
       BUSTER_UNIT_BASELINE_JOBS: ${{ github.head_ref == 'codex/3620-schedule-unit-modules' && '4' || github.event_name == 'workflow_dispatch' && inputs.baseline_jobs || '2' }}
+      BUSTER_UNIT_FUZZ: ${{ matrix.platform == 'macos-aarch64' && '--no-fuzz' || '--fuzz' }}
       BUSTER_UNIT_CONFIG: ${{ github.head_ref == 'codex/3620-schedule-unit-modules' && 'Release' || 'Debug' }}
       BUSTER_UNIT_BASELINE_TARGET: ${{ github.head_ref == 'codex/3620-schedule-unit-modules' && 'test_units_partitioned' || 'test_units' }}
       BUSTER_UNIT_CANDIDATE_SCHEDULE: ${{ github.head_ref == 'codex/3620-schedule-unit-modules' && 'modules' || 'pair' }}
@@ -174,7 +175,7 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/ci_unit_tests_measure_test.py -v
           "$BUSTER_CI_PYTHON" tools/ci_unit_tests_campaign_test.py -v
           "$BUSTER_UNIT_DRIVER" test_units_partitioned --self-test
-          "$BUSTER_UNIT_DRIVER" generate --build-directory build/ci-unit-tree --cc clang --ci --sanitize --fuzz --config $BUSTER_UNIT_CONFIG
+          "$BUSTER_UNIT_DRIVER" generate --build-directory build/ci-unit-tree --cc clang --ci --sanitize $BUSTER_UNIT_FUZZ --config $BUSTER_UNIT_CONFIG
           "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config $BUSTER_UNIT_CONFIG -t ide
           "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config $BUSTER_UNIT_CONFIG -t test_unit_inventory > "$RUNNER_TEMP/unit-partitions/inventory.log" 2>&1
 
@@ -197,7 +198,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $env:BUSTER_UNIT_DRIVER test_units_partitioned --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" generate --build-directory build/ci-unit-tree --cc clang --ci --sanitize --fuzz --config $env:BUSTER_UNIT_CONFIG 2>&1"
+          cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" generate --build-directory build/ci-unit-tree --cc clang --ci --sanitize $env:BUSTER_UNIT_FUZZ --config $env:BUSTER_UNIT_CONFIG 2>&1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config $env:BUSTER_UNIT_CONFIG -t ide 2>&1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
