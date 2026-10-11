@@ -2039,6 +2039,10 @@ enum
     // the host headers exist.
     C_AST_CORPUS_TYPE_ANSWER_FLOOR = 47000,
     C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR = 290000,
+    // Of those, answers from a node re-checked at its query once the row it
+    // missed existed (C_AST_TYPE_FLAG_LATE): about 580 in the fixtures, and
+    // about 1,740 with the frontend's own sources.
+    C_AST_CORPUS_TYPE_LATE_ANSWER_FLOOR = 450,
     // Designator probes the const-assignment walk skipped in the fixtures,
     // each checked against the machine: about 1,400 (1,370 for
     // aarch64-windows).
@@ -2078,6 +2082,9 @@ struct CAstCorpusTally
     // The tree expression typer over the same inputs (c_ast_corpus_types).
     u64 type_answers;
     u64 type_compared;
+    // Answers from a node re-typed at its query once a late row existed
+    // (C_AST_TYPE_FLAG_LATE); each is among the compared.
+    u64 type_late_answers;
     // Designator probes the const-assignment walk skipped and verify mode
     // checked against the machine.
     u64 type_probes;
@@ -2209,6 +2216,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
                             string_format(arguments->arena, S8("{S8}: the machine typed {u64} of {u64} skipped designator probes, or changed the model"),
                                           label, verify.probe_mismatches, verify.probes));
             tally->type_answers += statistics.answers;
+            tally->type_late_answers += statistics.late_answers;
             tally->type_compared += verify.compared;
             tally->type_probes += verify.probes;
             arena_destroy(arena, 1);
@@ -2609,6 +2617,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
     BUSTER_TEST(arguments, tally.pinned == BUSTER_ARRAY_LENGTH(c_ast_corpus_pins));
     BUSTER_TEST(arguments, tally.type_answers >= C_AST_CORPUS_TYPE_ANSWER_FLOOR && tally.type_compared == tally.type_answers);
     BUSTER_TEST(arguments, tally.type_probes >= C_AST_CORPUS_TYPE_PROBE_FLOOR);
+    BUSTER_TEST(arguments, tally.type_late_answers >= C_AST_CORPUS_TYPE_LATE_ANSWER_FLOOR);
     BUSTER_TEST(arguments, tally.split_records >= C_AST_CORPUS_SPLIT_RECORD_FLOOR && tally.split_compared >= tally.split_records);
 #if BUSTER_LINUX && !BUSTER_ANDROID
     c_ast_test_merge(&result, c_ast_corpus_sources(arguments, &tally));
@@ -3557,6 +3566,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_oracle(UnitTestArguments* argument
 // that is no expression node misses. The corpus half of the contract (every
 // tree answer equals the machine's, and no diagnostic changes) is
 // c_ast_corpus_types.
+// What a case's late arm gives: the body typed before its queries minted
+// any interned row, the query asked once they exist (C_AST_TYPE_FLAG_LATE).
+typedef enum CAstTypeLate
+{
+    // The same answer as with the rows in place, without a re-check.
+    C_AST_TYPE_LATE_SAME,
+    // The same answer, from a re-check.
+    C_AST_TYPE_LATE_ANSWERED,
+    // A decline: an ancestor of a late node keeps its eager result.
+    C_AST_TYPE_LATE_DECLINED,
+    // The same answer without constraint checks; with them a late operand
+    // is not safe, so its parent declines.
+    C_AST_TYPE_LATE_CHECKED_DECLINED,
+} CAstTypeLate;
+
 typedef struct CAstTypeCase CAstTypeCase;
 struct CAstTypeCase
 {
@@ -3581,6 +3605,9 @@ struct CAstTypeCase
     // without constraint checks the answer is the row its replay appends, so
     // the probe, which does not replay, reports no type.
     bool replay_answer;
+    // Every body case is also asked over a body typed before its queries
+    // minted the interned rows (CAstTypeLate).
+    CAstTypeLate late;
 };
 
 BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
@@ -3647,10 +3674,12 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     // Row-appending shapes, answered once the body queries have interned
     // their rows: `&` and a cast to primitive specifier words or a typedef
     // name under plain `*`s (CTypeInterning).
-    {S8_INITIALIZER("int* f(int a) { return &a; }"), S8_INITIALIZER("&"), 0, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("int* f(int a) { return &a; }"), S8_INITIALIZER("&"), 0, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER, false,
+     C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_ANSWERED},
     {S8_INITIALIZER("struct S { int a; }; int* f(struct S* p) { return &p->a; }"), S8_INITIALIZER("&"), 0, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
-     C_TYPE_POINTER},
-    {S8_INITIALIZER("int f(int* p) { return *&p[1]; }"), S8_INITIALIZER("*"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+     C_TYPE_POINTER, false, C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_ANSWERED},
+    {S8_INITIALIZER("int f(int* p) { return *&p[1]; }"), S8_INITIALIZER("*"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT, false, C_TYPE_INVALID,
+     false, false, C_AST_TYPE_LATE_DECLINED},
     {S8_INITIALIZER("long f(int a) { return (long)a; }"), S8_INITIALIZER("("), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
     {S8_INITIALIZER("unsigned char f(int a) { return (unsigned char)a; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER,
      C_TYPE_UNSIGNED_CHAR},
@@ -3658,10 +3687,30 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     {S8_INITIALIZER("char const* f(void* p) { return (const char*)p; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
     {S8_INITIALIZER("typedef int T; T* f(void* p) { return (T*)p; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
     {S8_INITIALIZER("typedef int T; T** f(void* p) { return (T**)p; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
-    {S8_INITIALIZER("long f(int a) { return a + (long)a; }"), S8_INITIALIZER("a"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    // Late rows: the second `&a` and the second cast are typed before the
+    // first's query mints the row they read, so they are re-checked at their
+    // own query. The parents of a late node keep their eager result: a
+    // dereference and a comparison decline, and a cast over one is safe
+    // under constraint checks only when the operand is.
+    {S8_INITIALIZER("int** f(int* a) { int** q = &a; return &a; }"), S8_INITIALIZER("&"), 1, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER, false,
+     C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_ANSWERED},
+    {S8_INITIALIZER("char** f(void* p) { char** q = (char**)p; return (char**)p; }"), S8_INITIALIZER("("), 2, 6, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_POINTER, false, C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_ANSWERED},
+    {S8_INITIALIZER("short f(void* p) { return *(short*)p; }"), S8_INITIALIZER("*"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_SHORT, false,
+     C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_DECLINED},
+    {S8_INITIALIZER("int f(int a) { return *&a; }"), S8_INITIALIZER("*"), 0, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT, false, C_TYPE_INVALID,
+     false, false, C_AST_TYPE_LATE_DECLINED},
+    {S8_INITIALIZER("void* f(int a) { return (void*)&a; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER, false,
+     C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_CHECKED_DECLINED},
+    {S8_INITIALIZER("int f(int a, int b) { return &a == &b; }"), S8_INITIALIZER("&"), 0, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT, false,
+     C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_DECLINED},
+    {S8_INITIALIZER("long f(int a) { return a + (long)a; }"), S8_INITIALIZER("a"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, false,
+     C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_DECLINED},
     {S8_INITIALIZER("int f(void) { return (int){7}; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
-    {S8_INITIALIZER("typedef long L; L f(int a) { return (L)&a; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
-    {S8_INITIALIZER("int f(int* p, int a) { return &p ? a : 0; }"), S8_INITIALIZER("&"), 0, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("typedef long L; L f(int a) { return (L)&a; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, false,
+     C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_CHECKED_DECLINED},
+    {S8_INITIALIZER("int f(int* p, int a) { return &p ? a : 0; }"), S8_INITIALIZER("&"), 0, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT, false,
+     C_TYPE_INVALID, false, false, C_AST_TYPE_LATE_CHECKED_DECLINED},
     // A cast of one string literal: with constraint checks the machine types
     // the literal too, appending its array row, so the answer replays that.
     {S8_INITIALIZER("typedef char C; C* f(void) { return (C*)\"text\"; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER,
@@ -3808,6 +3857,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
                                               type_case->source, checked, probe.status, (u32)probe.kind, (u32)probe.replay, status, (u32)kind,
                                               (u32)replay));
                 BUSTER_TEST(arguments, !probe.nonplace_projection);
+                bool late_declined = type_case->late == C_AST_TYPE_LATE_DECLINED || (checked && type_case->late == C_AST_TYPE_LATE_CHECKED_DECLINED);
+                bool late_answered = type_case->late == C_AST_TYPE_LATE_ANSWERED;
+                bool late_same = probe.late_status == probe.status && probe.late_kind == probe.kind && probe.late_replay == probe.replay;
+                bool late_decline = probe.late_status == C_TEST_AST_TYPE_PROBE_DECLINE && probe.late_kind == C_TYPE_INVALID;
+                BUSTER_TEST_RAW(arguments,
+                                (late_declined ? late_decline : late_same) && (!late_answered || (probe.late_answers != 0 && probe.late_checks != 0)),
+                                string_format(temporary.arena,
+                                              S8("{S8} (checked {u32}, late): status {u32} kind {u32} replay {u32} answers {u64}, expected status {u32} "
+                                                 "kind {u32} replay {u32}{S8}"),
+                                              type_case->source, checked, probe.late_status, (u32)probe.late_kind, (u32)probe.late_replay,
+                                              probe.late_answers, probe.status, (u32)probe.kind, (u32)probe.replay,
+                                              late_declined   ? S8(", late arm declining")
+                                              : late_answered ? S8(", re-checked")
+                                                              : S8("")));
             }
         }
         c_ast_release(&built.ast);

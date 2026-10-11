@@ -297,7 +297,8 @@ Under `-v` the driver prints four rows with the other verbose counters:
   nodes_accepted=<those it gave a type> answers=<type queries answered from
   the tree> declines=<queries that mapped to a node the typer does not vouch
   for> misses=<queries that mapped to no node> gated=<queries met in a machine
-  state the typer leaves alone>`
+  state the typer leaves alone> late_checks=<queries that re-typed a late
+  node> late_answers=<answers among them>`
 - `C_AST_SPLIT units=<units whose records the tree split published>
   records=<records it published> assertions=<body _Static_assert ranges it
   published> fallbacks=<units it handed to c_parse_ast's walker>
@@ -399,7 +400,8 @@ unchanged.
       `*`s. The answer is the typedef's row or the interned primitive row,
       under interned pointer rows. Each is accepted only once every row it
       reads is already interned, so its machine run appends nothing at any
-      task level.
+      task level. A row the body's own queries mint after the eager pass is
+      found at the query instead ([Late rows](#late-rows)).
     - a call of an unbound void `__builtin_` with no arguments
       (`__builtin_debugtrap()`, `__builtin_unreachable()`), whose answer is
       the published `void` row (`c_ast_types_builtin_call`).
@@ -412,8 +414,8 @@ unchanged.
   - a cast or compound literal to any other type name: a qualified typedef,
     a tag, a qualified or `restrict` pointer, or an array or function
     declarator. Their readers append rows that are not interned.
-  - `&` or a type name whose interned rows do not exist yet when the body is
-    typed;
+  - `&` or a type name whose interned rows do not exist yet when it is
+    queried ([Late rows](#late-rows));
   - a string literal as an operand. Its array row is not interned, because
     lowering gives each array row its own IR array type and `-g` describes
     every IR type. A query of one string-literal token alone is answered by
@@ -486,6 +488,43 @@ unchanged.
   diagnostics and table sizes as they were. A `[index]` designator, and a
   probe range that starts at a `{` but runs on (`{ .a` before `.a.b`), still
   run the machine.
+
+### Late rows
+
+The eager pass types a body before any of its queries run, but most of the
+pointer and primitive rows its `&` and casts read are minted by those queries:
+the first `&a` of a body interns `int *`, and every later `&b` of an `int`
+could read it. Interning the declarations' rows earlier would reorder the `-g`
+type entries ([Interned rows](#interned-rows)), so the typer checks again at
+the query instead:
+- **The mark.** A node declined only because an interned row it reads did not
+  exist is marked `C_AST_TYPE_FLAG_LATE`: an `&` over an accepted operand, and
+  a cast or compound literal whose primitive row or a `*` level's row was
+  missing. Initializers read no interned row, so they are never marked. The
+  mark is bit 8, beside `C_AST_TYPE_FLAG_FAILS` (bit 6) and
+  `C_AST_TYPE_FLAG_STRING` (bit 7), so the per-node flags are `u16`.
+- **The re-check.** When a query maps to a node that the decision declines
+  and that carries the mark, `c_ast_types_retype` runs that kind's own rule
+  again, and the decision is repeated. A row that exists now is the one the
+  machine's run would find instead of appending it, so the answer's run
+  appends nothing, as for any accepted node. A row still missing leaves the
+  node declined. Only declined queries pay for the test.
+- **Nothing is kept.** The node's flags go back to the mark at once, because
+  a speculative rollback can take a late row back. Every query that reaches
+  the node re-checks it against the live interning log.
+- **Ancestors keep their eager result.** Re-typing them needed a second
+  caller of `c_ast_types_type_node`, and the optimizer then moved the
+  per-kind rules out of line in the eager loop, which cost 30 to 70 M
+  instructions on the unity self-host for 171 more answers.
+
+Nothing is interned earlier and nothing is appended, so the type tables, the
+diagnostics and the `-c` objects (`-g0` and `-g`) are those of the pilot
+without the re-check. `c_ast_test_types` asks every body case a second time,
+over a body typed with the interning log hidden as if no query had minted a
+row yet, and requires the same answer, a re-checked answer for the cases
+marked late, or a decline for the ancestors of a late node. The corpus gate
+counts late answers against a floor (`C_AST_CORPUS_TYPE_LATE_ANSWER_FLOOR`),
+and verifies each against the machine.
 
 ### Interned rows
 
@@ -944,6 +983,45 @@ The same audit records that version's hosted census, diagnostic only:
 - On the merge with main `f6e8d25f`, the same arms read −0.077% on the
   default path and −0.84% under the pilot.
 - The requested 9700X comparison decides the performance disposition (#2761).
+
+For the late rows ([Late rows](#late-rows)), these budgets were declared
+before the measured runs, on the same input and flags as stage 3, with
+Callgrind on tests-off `-march=x86-64-v3` builds and the same four arms (A
+base default, B base with `-fc-ast-pilot`, C candidate with it, D candidate
+default). The base is main `f38a7716`, which the candidate branches from.
+- correctness: no verify mismatch over the corpus and the frontend sources,
+  with a floor on late answers there; identical diagnostics and type-table
+  sizes with and without the tree; byte-identical `-c` objects (`-g0` and
+  `-g`) across the four arms, and `c_test_type_interning_objects` passing.
+- coverage: on the self-host, the late re-checks answer at least 2,000 of
+  the about 3,600 `&` and `*`-level queries the census counted.
+- the late rows' effect on the pilot (C against B): the whole compile costs
+  fewer instructions, with the re-typing charged, and machine runs from
+  queries fall.
+- the default path (D against A): the change adds no work there, so within
+  ±0.05% Ir on `-fsyntax-only` and on `-c` (`-g0`).
+- adoption of the hook as the default: unchanged. Hosted counts are
+  diagnostic; Zen 5 acceptance (#2761) stays incomplete, and no benchmark
+  request is made for this slice.
+
+The late rows' hosted census is
+[`2026-10-10T210452Z`](../../performance-audits/2026-10-10T210452Z.md), taken
+the same way and diagnostic only:
+- Correctness, object identity, coverage (2,571 late answers) and the default
+  path (−0.006%, `-c` −0.005%) pass.
+- The pilot budget fails: C − B is +0.30 M (+0.003%). The machine runs the
+  re-checks replace cost about 1,900 instructions each, 4.86 M in all, and
+  the query function's code layout moved by more than that. Re-typing the
+  ancestors too cost 30 to 70 M in the eager loop for 171 more answers, so
+  only the late node is re-checked.
+- On main `9516f631`, which carries #3377 (`FAILS`) and #3381 (`STRING`),
+  with the flags widened to `u16`: `-c` objects stay identical across the
+  four arms; the default path is +0.0018% (`-c` +0.0009%); late answers are
+  2,579; and C − B is +7.05 M (+0.074%). The query function's layout costs
+  +8.70 M self, and `c_ast_types_cast` and `c_ast_types_address` move out of
+  line (+6.89 M, against −5.06 M in the eager loop), for about 2 to 3 M less
+  machine work.
+- Zen 5 acceptance (#2761) stays incomplete, and the hook stays opt-in.
 
 For the in-place columns ([storage](#storage-and-lifetime)), these budgets were
 declared before the measured runs, on the same input and flags, with stage 2's

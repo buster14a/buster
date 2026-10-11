@@ -18,7 +18,10 @@
 // machine run appends nothing. Stage 3 adds the shapes whose rows are interned:
 // `&`, and a cast or compound literal whose type name is a typedef name or a
 // run of primitive specifier words under plain `*`s, each accepted only once
-// every row it reads is interned. It declines every shape whose machine answer
+// every row it reads is interned. A row the body's own queries mint after the
+// eager pass is found at the query: the node is marked late
+// (C_AST_TYPE_FLAG_LATE) and re-typed when a query reaches it
+// (c_ast_types_retype). It declines every shape whose machine answer
 // appends a row: a qualified member or array element, a string literal, an
 // array operand that decays, a pointer conditional, a qualified operand losing
 // its qualifiers without a recorded unqualified row, and a cast or compound
@@ -76,6 +79,14 @@
 // by induction an accepted node's whole machine run appends nothing. It is
 // checked-safe when its operands are and its own checked-mode rule raises no
 // constraint.
+//
+// Late rows. A body's `&` and casts mostly read rows its own queries intern,
+// after the eager pass has run. A node declined only for a missing interned
+// row is marked C_AST_TYPE_FLAG_LATE, and a query that maps to it re-types it
+// with its own rule first (c_ast_types_retype): a row that exists now is the
+// one the machine would find instead of appending. The result is not kept,
+// because a rollback may take the row back. Its ancestors keep their eager
+// result.
 //
 // The query. c_parse_expression_type_query reads the per-body memo first and
 // asks this file only on a miss, before the literal fast path and the machine
@@ -195,8 +206,10 @@
 //   c_ast_types_interned, c_ast_types_type_name,  stage-3 rules over interned
 //   c_ast_types_cast,                             rows
 //   c_ast_types_compound_literal,
-//   c_ast_types_address
-//   c_ast_types_locate, c_ast_types_answer       query lookup and the decision
+//   c_ast_types_address, c_ast_types_mark_late
+//   c_ast_types_retype                           a late node, re-typed at a query
+//   c_ast_types_locate, c_ast_types_answer,      query lookup and the decision
+//   c_ast_types_vouched
 //   c_ast_types_lookups_agree                    query-scope name checks
 //   c_ast_types_publish                          machine state after an answer
 //   c_ast_types_verify_*, c_test_*               the differential (tests builds),
@@ -238,10 +251,16 @@
 // A string literal of one token. It is not ACCEPTED, since its machine answer
 // appends its array row, so every parent declines it; a query of the node
 // alone is answered by replaying the machine's leaf call, whose row is the
-// answer (C_AST_TYPE_STRING). Bit 6 is C_AST_TYPE_FLAG_FAILS's (#3377); the
-// flags are a u8, so this is the last free bit.
+// answer (C_AST_TYPE_STRING). Bit 6 is C_AST_TYPE_FLAG_FAILS's (#3377).
 #define C_AST_TYPE_FLAG_STRING (1u << 7)
-BUSTER_CT_CHECK(C_AST_TYPE_FLAG_STRING <= UINT8_MAX);
+// A body's node declined only because an interned row it reads (an `&`'s
+// pointer, a cast's or compound literal's primitive row or `*` level) did not
+// exist yet when the body was typed: a query of the same body may mint it
+// later. The mark is sticky, and the query re-types the node then
+// (c_ast_types_retype).
+// The flags are a u16 (CAstTypeBody.flags): bits 6 and 7 are taken.
+#define C_AST_TYPE_FLAG_LATE (1u << 8)
+BUSTER_CT_CHECK(C_AST_TYPE_FLAG_LATE <= UINT16_MAX);
 
 // INIT_DECLARATOR's presence bit for an initializer, its last child (c_ast.h).
 #define C_AST_TYPE_INIT_DECLARATOR_INITIALIZER (1u << 2)
@@ -283,7 +302,8 @@ struct CAstTypeBody
     // for none; start_head holds the newest, which is the outermost.
     u32* link;
     u32* start_head;
-    u8* flags;
+    // C_AST_TYPE_FLAG_* bits; wider than a byte since C_AST_TYPE_FLAG_LATE.
+    u16* flags;
     // A member node's bit-field width (0 for an ordinary member); read only
     // for MEMBER and MEMBER_ARROW nodes.
     u8* widths;
@@ -629,7 +649,7 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_span(CAstTypeBody const* body, u32 node, u3
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_ast_types_accept(CAstTypeBody* body, u32 relative, CTypeId type, u32 flags)
 {
     body->types[relative] = type;
-    body->flags[relative] = (u8)(C_AST_TYPE_FLAG_ACCEPTED | flags);
+    body->flags[relative] = (u16)(C_AST_TYPE_FLAG_ACCEPTED | flags);
 }
 
 // The flags a node takes from the operands the machine types for it: safe only
@@ -765,7 +785,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_identifier(CAstTypeBody* body, CPreprocessR
         String8 name = c_token_spelling(preprocess->spelling_base, preprocess->tokens[token]);
         bool function_name = name.length >= 8 && (string_equal(name, S8("__func__")) || string_equal(name, S8("__FUNCTION__")) ||
                                                   string_equal(name, S8("__PRETTY_FUNCTION__")));
-        body->flags[relative] = (u8)(function_name ? C_AST_TYPE_FLAG_FAILS | C_AST_TYPE_FLAG_LOOKUP | C_AST_TYPE_FLAG_LOOKUP_BELOW : 0);
+        body->flags[relative] = (u16)(function_name ? C_AST_TYPE_FLAG_FAILS | C_AST_TYPE_FLAG_LOOKUP | C_AST_TYPE_FLAG_LOOKUP_BELOW : 0);
     }
 }
 
@@ -918,7 +938,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_builtin_call(CAstTypeBody* body, CPreproces
         }
         else if (builtin == C_SYMBOL_BUILTIN_EXPECT)
         {
-            body->flags[relative] = (u8)(C_AST_TYPE_FLAG_FAILS | C_AST_TYPE_FLAG_LOOKUP | C_AST_TYPE_FLAG_LOOKUP_BELOW);
+            body->flags[relative] = (u16)(C_AST_TYPE_FLAG_FAILS | C_AST_TYPE_FLAG_LOOKUP | C_AST_TYPE_FLAG_LOOKUP_BELOW);
         }
     }
 }
@@ -1286,6 +1306,14 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE CTypeId c_ast_types_interned(CAstTypeBody cons
     return body->entities ? C_TYPE_ID_INVALID : c_parse_interned_type(body->result, type);
 }
 
+// Marks a node `late` declined for want of an interned row
+// (C_AST_TYPE_FLAG_LATE). Only a body's rows can appear later: an initializer
+// reads none (c_ast_types_interned).
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_ast_types_mark_late(CAstTypeBody* body, u32 relative, bool late)
+{
+    body->flags[relative] |= (u16)(late && !body->entities ? C_AST_TYPE_FLAG_LATE : 0);
+}
+
 // Whether a specifier word is one c_parse_primitive_type reads into a plain
 // row: the arithmetic and void words, `const` and `volatile`. `restrict` and
 // `_Atomic` are left out, and so is every word another reader handles.
@@ -1329,7 +1357,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_primitive_word(u32 word)
 // frame, each followed by c_parse_pointer_chain; the typedef row is the
 // entity's own (c_parse_qualified_typedef_type with no qualifier), and the
 // primitive and pointer rows are interned (CTypeInterning in c_internal.h),
-// so the name is accepted only when each of them is already interned. Any
+// so the name is accepted only when each of them is already interned, and is
+// marked late when one is not. Any
 // other type name builds rows (a qualified typedef, a tag, an array or
 // function declarator, an attribute) and yields C_TYPE_ID_INVALID. The
 // typedef name is the binder's in a body; in an initializer it is the bound
@@ -1364,6 +1393,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody* body, CPreproces
     }
     CTypeId type = C_TYPE_ID_INVALID;
     bool lookup = false;
+    bool late = false;
     if (words && ast->kinds[first] == C_AST_TYPEDEF_NAME)
     {
         bool identifier = open + 1 < body->token_total && body->tokens[open + 1].kind == C_TOKEN_IDENTIFIER;
@@ -1385,6 +1415,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody* body, CPreproces
         bool plain = spelling.seen_type && spelling.valid_specifiers && spelling.declarator_start == star && spelling.type.kind != C_TYPE_INVALID &&
                      spelling.type.kind != C_TYPE_VA_LIST;
         type = plain ? c_ast_types_interned(body, spelling.type) : C_TYPE_ID_INVALID;
+        late = plain && type.value >= result->type_count;
     }
     for (u32 level = star; type.value < result->type_count && level < close; level += 1)
     {
@@ -1394,7 +1425,9 @@ BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody* body, CPreproces
                                               .array_bound = C_ARRAY_BOUND_INVALID,
                                               .kind = C_TYPE_POINTER,
                                           });
+        late = type.value >= result->type_count;
     }
+    c_ast_types_mark_late(body, relative, late);
     *lookup_out = lookup;
     return type.value < result->type_count ? type : C_TYPE_ID_INVALID;
 }
@@ -1457,7 +1490,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_compound_literal(CAstTypeBody* body, CPrepr
 
 // `&operand`: the machine's ADDRESS_OF operation appends a pointer to the
 // operand's row, an interned row (CTypeInterning), so the node is accepted
-// only when that row already exists. With constraint checks the operand must
+// only when that row already exists; without it the node is marked late. With constraint checks the operand must
 // have a place's shape (c_parse_expression_place_shape over the same tokens);
 // no accepted operand carries the nonplace fact the machine also tests.
 BUSTER_GLOBAL_LOCAL void c_ast_types_address(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 relative)
@@ -1471,6 +1504,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_address(CAstTypeBody* body, CPreprocessResu
                                                                                                .kind = C_TYPE_POINTER,
                                                                                            })
                                                               : C_TYPE_ID_INVALID;
+    c_ast_types_mark_late(body, relative, (operand_flags & C_AST_TYPE_FLAG_ACCEPTED) && type.value >= result->type_count);
     if (type.value < result->type_count)
     {
         u32 flags = c_ast_types_inherit(operand_flags, operand_flags);
@@ -1528,7 +1562,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_node(CAstTypeBody* body, CTypeParseMac
     break;
     case C_AST_STRING:
     {
-        body->flags[relative] = (u8)(body->ast->data[node] == 1 ? C_AST_TYPE_FLAG_STRING : 0);
+        body->flags[relative] = (u16)(body->ast->data[node] == 1 ? C_AST_TYPE_FLAG_STRING : 0);
     }
     break;
     case C_AST_MEMBER:
@@ -1653,6 +1687,44 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_body(CAstTypeBody* body, CTypeParseMac
     WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_NODES, visited);
 }
 
+// Re-types a late node at a query: the row the eager pass missed may exist by
+// now, and a row that does is exactly the one the machine's run would find
+// instead of appending it. Its operands read no late row, so their eager
+// results stand. Only the three late kinds' rules run here; calling
+// c_ast_types_type_node from a second site took the per-kind rules out of
+// line in the eager loop, 30 to 70 M instructions on the unity self-host. The
+// query puts the node's flags back afterwards (c_ast_types_answer), so every
+// query that reaches it re-types it against the live rows.
+BUSTER_GLOBAL_LOCAL void c_ast_types_retype(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node)
+{
+    u32 relative = node - body->begin;
+    body->types[relative] = C_TYPE_ID_INVALID;
+    body->flags[relative] = 0;
+    switch (body->ast->kinds[node])
+    {
+    case C_AST_ADDRESS:
+    {
+        c_ast_types_address(body, preprocess, relative);
+    }
+    break;
+    case C_AST_CAST:
+    {
+        c_ast_types_cast(body, preprocess, node, relative);
+    }
+    break;
+    case C_AST_COMPOUND_LITERAL:
+    {
+        c_ast_types_compound_literal(body, preprocess, node, relative);
+    }
+    break;
+    default:
+    {
+    }
+    break;
+    }
+    body->statistics->late_checks += 1;
+}
+
 // Whether the typer may type now: a tree index, an idle machine and the
 // built delimiter index the span rules read.
 BUSTER_GLOBAL_LOCAL bool c_ast_types_ready(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess)
@@ -1688,7 +1760,7 @@ BUSTER_GLOBAL_LOCAL CAstTypeBody* c_ast_types_region_create(CTypeParseMachine* m
     u32* entities = initializer ? C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count) : 0;
     u32* link = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
     u32* start_head = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, token_count);
-    u8* flags = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u8, count);
+    u16* flags = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u16, count);
     u8* widths = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u8, count);
     bool reserved = body && types && first && end && (entities || !initializer) && link && start_head && flags && widths;
     if (reserved)
@@ -1852,6 +1924,24 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_agree(CAstTypeBody const* body, CPr
     return agree;
 }
 
+// Whether the node may answer the query: accepted, checked-safe or replayed
+// under constraint checks, no half-parsed enumerator list, no type identity
+// site in the range, and every name it rests on resolving as it did.
+// *replay_out says whether a checked answer replays a string operand.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_vouched(CAstTypeBody const* body, CPreprocessResult const* preprocess, CParseResult* result,
+                                                           CScopeId scope, u32 node, u32 flags, bool checked, u32 start, u32 end, bool* replay_out)
+{
+    bool replay = checked && !(flags & C_AST_TYPE_FLAG_SAFE) && (flags & C_AST_TYPE_FLAG_REPLAY);
+    bool vouched = (flags & C_AST_TYPE_FLAG_ACCEPTED) && (!checked || (flags & C_AST_TYPE_FLAG_SAFE) || replay) &&
+                   !c_parse_pending_enum_possible(result) && c_parse_type_identity_sites_absent(result, start, end);
+    if (vouched && (flags & C_AST_TYPE_FLAG_LOOKUP_BELOW))
+    {
+        vouched = c_ast_types_lookups_agree(body, preprocess, result, scope, node);
+    }
+    *replay_out = replay;
+    return vouched;
+}
+
 BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                   u32 start, u32 end)
 {
@@ -1883,15 +1973,22 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
         }
         else
         {
-            u32 flags = body->flags[relative];
             u32 node = body->begin + relative;
+            u32 flags = body->flags[relative];
             bool checked = machine->validate_expression_constraints;
-            bool replay = checked && !(flags & C_AST_TYPE_FLAG_SAFE) && (flags & C_AST_TYPE_FLAG_REPLAY);
-            bool vouched = (flags & C_AST_TYPE_FLAG_ACCEPTED) && (!checked || (flags & C_AST_TYPE_FLAG_SAFE) || replay) &&
-                           !c_parse_pending_enum_possible(result) && c_parse_type_identity_sites_absent(result, start, end);
-            if (vouched && (flags & C_AST_TYPE_FLAG_LOOKUP_BELOW))
+            bool replay = false;
+            bool vouched = c_ast_types_vouched(body, preprocess, result, scope, node, flags, checked, start, end, &replay);
+            // A late node is declined outside a re-check, so only a declined
+            // node's query pays for the test. The re-check's flags go back at
+            // once: a rollback may take the row back, and the next query
+            // re-types the node against the live rows.
+            if (!vouched && (flags & C_AST_TYPE_FLAG_LATE))
             {
-                vouched = c_ast_types_lookups_agree(body, preprocess, result, scope, node);
+                c_ast_types_retype(body, preprocess, node);
+                flags = body->flags[relative];
+                vouched = c_ast_types_vouched(body, preprocess, result, scope, node, flags, checked, start, end, &replay);
+                body->flags[relative] = C_AST_TYPE_FLAG_LATE;
+                body->statistics->late_answers += vouched;
             }
             answer.node_kind = body->ast->kinds[node];
             if (vouched)
@@ -2257,6 +2354,29 @@ CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult prepro
             probe.replay_answer = answer.status == C_AST_TYPE_STRING;
         }
         c_ast_types_body_end(&machine);
+        // An initializer reads no interned row, so its late answer is its
+        // answer.
+        probe.late_status = probe.status;
+        probe.late_kind = probe.kind;
+        probe.late_replay = probe.replay;
+        if (body)
+        {
+            u32 interned = result->interned_type_count;
+            result->interned_type_count = 0;
+            c_ast_types_body_begin(&machine, result, &preprocess, declaration);
+            result->interned_type_count = interned;
+            if (machine.ast_types)
+            {
+                CScopeId scope = c_parse_scope_for_token(result, declaration->scope, start);
+                CAstTypeAnswer answer = c_ast_types_answer(&machine, &preprocess, result, scope, start, end);
+                probe.late_status = answer.status == C_AST_TYPE_STRING ? (u32)C_AST_TYPE_ANSWER : (u32)answer.status;
+                probe.late_kind = answer.type.value < result->type_count ? result->types[answer.type.value].kind : C_TYPE_INVALID;
+                probe.late_replay = answer.replay_end > answer.replay_start;
+                probe.late_checks = machine.ast_types->local_statistics.late_checks;
+                probe.late_answers = machine.ast_types->local_statistics.late_answers;
+            }
+            c_ast_types_body_end(&machine);
+        }
         result->expression_scalar_types = previous_scalars;
         scratch_end(temporary);
     }

@@ -76,6 +76,16 @@ struct CTestAstTypeProbe
     // row is the answer.
     bool replay;
     bool replay_answer;
+    // The same query over a body typed while the interning log was hidden, as
+    // if none of the body's rows had been minted yet, and answered after it
+    // was restored (C_AST_TYPE_FLAG_LATE): its status, kind and replay, and
+    // the typer's late_checks and late_answers. An initializer's are its
+    // plain answer's.
+    u32 late_status;
+    CTypeKind late_kind;
+    bool late_replay;
+    u64 late_checks;
+    u64 late_answers;
 };
 BUSTER_F_DECL CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CAst const* ast, String8 function,
                                                       u32 start, u32 end, bool checked);
