@@ -261,9 +261,13 @@ class MeasurementTests(unittest.TestCase):
             MEASURE.validate_sample(wrong_arm)
         linux_identity = copy.deepcopy(IDENTITY)
         linux_identity.update(platform="linux", runner_image="ubuntu/fixture")
-        linux_path = self.sample("linux-driver", arm="candidate", identity=linux_identity,
-                                 log=parallel_log("compiler_driver_tests"), primary_module="compiler_driver_tests")
-        self.assertEqual(MEASURE.validate_sample(linux_path)["groups"]["primary"]["modules"], ["compiler_driver_tests"])
+        linux_path = self.sample("linux-frontend", arm="candidate", identity=linux_identity,
+                                 log=parallel_log("c_frontend_tests"), primary_module="c_frontend_tests")
+        self.assertEqual(MEASURE.validate_sample(linux_path)["groups"]["primary"]["modules"], ["c_frontend_tests"])
+        wrong_linux = self.sample("wrong-linux-anchor", arm="candidate", identity=linux_identity,
+                                  log=parallel_log("compiler_driver_tests"), primary_module="compiler_driver_tests")
+        with self.assertRaisesRegex(MEASURE.EvidenceError, "platform policy"):
+            MEASURE.validate_sample(wrong_linux)
         wrong_windows = self.sample("wrong-windows-anchor", arm="candidate",
                                     log=parallel_log("compiler_driver_tests"), primary_module="compiler_driver_tests")
         with self.assertRaisesRegex(MEASURE.EvidenceError, "platform policy"):

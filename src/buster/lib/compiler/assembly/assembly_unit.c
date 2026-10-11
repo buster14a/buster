@@ -1,16 +1,18 @@
 // The assembly translation unit: assembly_unit_encode at the bottom takes the
 // complete text of a `.s` file and returns sections, symbols, relocations, and
 // diagnostics. assembly.c's assembly_encode is the instruction layer beneath
-// it and is called once per instruction statement; everything a whole file has that
-// a single statement does not lives here.
+// it and is called once per instruction statement; its result lives in
+// per-statement scratch and only bytes, newly inserted symbol names, and the
+// first diagnostic are retained. Everything a whole file has that a single
+// statement does not lives here.
 //
 // Three passes over an AssemblyUnitBuilder sized from the statement count:
 //   assembly_unit_collect_numeric_labels  local `1:` definitions in source
 //                                         order, so `1f`/`1b` can name one
 //   assembly_unit_parse                   labels, directives, and one
-//                                         assembly_encode call per
-//                                         instruction statement, each producing a
-//                                         piece of bytes in a section
+//                                         assembly_encode call per instruction
+//                                         statement, with only retained data
+//                                         copied out of its per-statement scratch
 //   assembly_unit_materialize             pieces concatenated per section and
 //                                         binding-invariant same-section
 //                                         PC-relative fixups resolved in place
@@ -18,12 +20,12 @@
 // Layout, in file order; each anchor is a definition to search for:
 //   assembly_unit_space ..                 text plumbing shared by the passes
 //   assembly_unit_diagnostic
-//   assembly_unit_symbol_intern ..         symbol and section tables
+//   assembly_unit_symbol_slot ..           indexed symbol lookup, insertion, and section tables
 //   assembly_unit_section_select
 //   assembly_unit_evaluate                 section-relative directive expressions
 //   assembly_unit_materialize_integers     final-label data evaluation
 //   assembly_unit_directive_*              the directive vocabulary
-//   assembly_unit_instruction              the assembly_encode call
+//   assembly_unit_instruction              scratch-backed assembly_encode call
 //   assembly_unit_statement                target comments/separators and positions
 //   assembly_unit_aarch64_control_fixup     checked final-label control fixups
 //   assembly_unit_define_section_starts    a bare section name is its offset 0
@@ -277,7 +279,7 @@ BUSTER_GLOBAL_LOCAL u32* assembly_unit_symbol_slot(AssemblyUnitBuilder* builder,
     return slot;
 }
 
-BUSTER_GLOBAL_LOCAL u32 assembly_unit_symbol_intern(AssemblyUnitBuilder* builder, String8 name)
+BUSTER_GLOBAL_LOCAL u32 assembly_unit_symbol_intern_name(AssemblyUnitBuilder* builder, String8 name, bool duplicate_name)
 {
     u32* slot = assembly_unit_symbol_slot(builder, name);
     u32 result = UINT32_MAX;
@@ -287,18 +289,31 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_symbol_intern(AssemblyUnitBuilder* builder
     }
     else if (builder->result.symbol_count >= builder->symbol_capacity)
     {
-        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("too many symbols in one assembly unit"));
+        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                 S8("too many symbols in one assembly unit"));
     }
     else
     {
         result = builder->result.symbol_count++;
         builder->result.symbols[result] = (AssemblyUnitSymbol){
-            .name = name,
+            .name = duplicate_name ? string_duplicate_arena(builder->arena, name, false) : name,
             .section = ASSEMBLY_UNIT_SECTION_UNDEFINED,
         };
         *slot = result + 1;
     }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 assembly_unit_symbol_intern(AssemblyUnitBuilder* builder, String8 name)
+{
+    return assembly_unit_symbol_intern_name(builder, name, false);
+}
+
+// Statement-path names live in per-statement scratch; a newly inserted one is
+// copied into the unit arena before the symbol (and its index slot) retains it.
+BUSTER_GLOBAL_LOCAL u32 assembly_unit_symbol_intern_statement(AssemblyUnitBuilder* builder, String8 name)
+{
+    return assembly_unit_symbol_intern_name(builder, name, true);
 }
 
 // --------------------------------------------------------------- sections
@@ -1817,74 +1832,95 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_statement_address_symbol(AssemblyUnitBuild
 
 BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder, String8 line)
 {
+    TemporalArena statement = scratch_begin(&builder->arena, 1);
     String8 rewritten = {0};
     String8 plt_symbol = {0};
-    if (!assembly_unit_rewrite_line(builder, line, &rewritten, &plt_symbol))
+    bool result = false;
+    if (assembly_unit_rewrite_line(builder, line, &rewritten, &plt_symbol) && assembly_unit_section_current(builder))
     {
-        return false;
-    }
-    if (!assembly_unit_section_current(builder))
-    {
-        return false;
-    }
-    if (assembly_unit_section_kind_is_zero_fill(builder->result.sections[builder->current_section].kind))
-    {
-        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT, S8("an instruction cannot be emitted into a zero-fill section"));
-        return false;
-    }
-    // A64 instructions are four-byte words, and every object consumer demands
-    // a four-byte section alignment before it accepts a relocation on one.
-    // llvm-mc raises the section's alignment the same way (no padding is added).
-    if (builder->target.cpu_arch == CPU_ARCH_AARCH64 && builder->result.sections[builder->current_section].alignment < 4)
-    {
-        builder->result.sections[builder->current_section].alignment = 4;
-    }
-    AssemblyEncodeResult encoded = assembly_encode(builder->arena, rewritten,
-                                                   (AssemblyEncodeOptions){
-                                                       .target = builder->target,
-                                                       .syntax = builder->syntax,
-                                                       .unit_control_relocations = true,
-                                                   });
-    if (encoded.diagnostic_count)
-    {
-        assembly_unit_diagnostic(builder, encoded.diagnostics[0].kind, encoded.diagnostics[0].message);
-        return false;
-    }
-    u64 base = builder->section_offsets[builder->current_section];
-    bool plt_matched = !plt_symbol.length;
-    for (u32 index = 0; index < encoded.relocation_count; index += 1)
-    {
-        AssemblyRelocation relocation = encoded.relocations[index];
-        if (relocation.symbol >= encoded.symbol_count)
+        if (assembly_unit_section_kind_is_zero_fill(builder->result.sections[builder->current_section].kind))
         {
-            return false;
+            assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT,
+                                     S8("an instruction cannot be emitted into a zero-fill section"));
         }
-        String8 relocation_name = encoded.symbols[relocation.symbol].name;
-        u32 symbol = string_equal(relocation_name, S8(".")) ? assembly_unit_statement_address_symbol(builder, base)
-                                                           : assembly_unit_symbol_intern(builder, relocation_name);
-        if (symbol == UINT32_MAX || !assembly_unit_relocation_append(builder, symbol, base + relocation.offset, relocation.addend, relocation.kind))
+        else
         {
-            return false;
+            // A64 instructions are four-byte words, and every object consumer demands
+            // a four-byte section alignment before it accepts a relocation on one.
+            // llvm-mc raises the section's alignment the same way (no padding is added).
+            if (builder->target.cpu_arch == CPU_ARCH_AARCH64 && builder->result.sections[builder->current_section].alignment < 4)
+            {
+                builder->result.sections[builder->current_section].alignment = 4;
+            }
+            AssemblyEncodeResult encoded = assembly_encode(statement.arena, rewritten,
+                                                           (AssemblyEncodeOptions){
+                                                               .target = builder->target,
+                                                               .syntax = builder->syntax,
+                                                               .unit_control_relocations = true,
+                                                           });
+            if (encoded.diagnostic_count)
+            {
+                String8 message = string_duplicate_arena(builder->arena, encoded.diagnostics[0].message, false);
+                assembly_unit_diagnostic(builder, encoded.diagnostics[0].kind, message);
+            }
+            else
+            {
+                u64 base = builder->section_offsets[builder->current_section];
+                bool plt_matched = !plt_symbol.length;
+                bool valid = true;
+                for (u32 index = 0; index < encoded.relocation_count && valid; index += 1)
+                {
+                    AssemblyRelocation relocation = encoded.relocations[index];
+                    if (relocation.symbol >= encoded.symbol_count)
+                    {
+                        valid = false;
+                    }
+                    else
+                    {
+                        String8 relocation_name = encoded.symbols[relocation.symbol].name;
+                        u32 symbol = string_equal(relocation_name, S8("."))
+                                         ? assembly_unit_statement_address_symbol(builder, base)
+                                         : assembly_unit_symbol_intern_statement(builder, relocation_name);
+                        if (symbol == UINT32_MAX ||
+                            !assembly_unit_relocation_append(builder, symbol, base + relocation.offset,
+                                                             relocation.addend, relocation.kind))
+                        {
+                            valid = false;
+                        }
+                        else
+                        {
+                            bool direct_branch =
+                                relocation.kind == ASSEMBLY_RELOCATION_X86_PC32 && relocation.offset &&
+                                (encoded.bytes.pointer[relocation.offset - 1] == 0xe8 ||
+                                 encoded.bytes.pointer[relocation.offset - 1] == 0xe9);
+                            builder->result.relocations[builder->result.relocation_count - 1].x86_branch = direct_branch;
+                            if (string_equal(encoded.symbols[relocation.symbol].name, plt_symbol))
+                            {
+                                plt_matched = direct_branch;
+                                builder->result.relocations[builder->result.relocation_count - 1].plt = direct_branch;
+                            }
+                        }
+                    }
+                }
+                if (valid && plt_matched)
+                {
+                    u8* bytes = 0;
+                    if (encoded.bytes.length)
+                    {
+                        bytes = arena_allocate(builder->arena, u8, encoded.bytes.length);
+                        memcpy(bytes, encoded.bytes.pointer, encoded.bytes.length);
+                    }
+                    result = assembly_unit_append(builder, bytes, encoded.bytes.length);
+                }
+                else if (valid)
+                {
+                    assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                             S8("@PLT requires a direct x86 call or jump with a 32-bit displacement"));
+                }
+            }
         }
-        bool direct_branch = relocation.kind == ASSEMBLY_RELOCATION_X86_PC32 && relocation.offset &&
-                             (encoded.bytes.pointer[relocation.offset - 1] == 0xe8 || encoded.bytes.pointer[relocation.offset - 1] == 0xe9);
-        builder->result.relocations[builder->result.relocation_count - 1].x86_branch = direct_branch;
-        if (string_equal(encoded.symbols[relocation.symbol].name, plt_symbol))
-        {
-            plt_matched = direct_branch;
-            builder->result.relocations[builder->result.relocation_count - 1].plt = direct_branch;
-        }
     }
-    bool result;
-    if (plt_matched)
-    {
-        result = assembly_unit_append(builder, encoded.bytes.pointer, encoded.bytes.length);
-    }
-    else
-    {
-        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("@PLT requires a direct x86 call or jump with a 32-bit displacement"));
-        result = false;
-    }
+    scratch_end(statement);
     return result;
 }
 

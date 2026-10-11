@@ -4749,6 +4749,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_relocation_properties(UnitTestArg
         {OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12, 4, true},
         {OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12, 4, true},
         {OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL, 4, true},
+        {OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21, 4, false},
+        {OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12, 4, false},
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(expected) == OBJECT_RELOCATION_COUNT);
     bool seen[OBJECT_RELOCATION_COUNT] = {0};
@@ -5059,9 +5061,139 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_arm64_tls_external(UnitTestArgume
     return result;
 }
 
+// #1454: a Mach-O relocation type names the instruction around its field, and
+// ld64/lld resolve it with that meaning. Each object-model kind keeps its own
+// type through the writer and back through the reader: x86-64 BRANCH for a
+// call, GOT_LOAD/GOT for a GOT slot, SIGNED and SIGNED_1/2/4 for every other
+// rip-relative field; arm64 GOT_LOAD_PAGE21/PAGEOFF12 for a slot's ADRP/LDR.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_mach_relocation_identity(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ObjectSymbol symbols[] = {
+        {.name = S8("local_function"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("external_data"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        {.name = S8("external_function"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+    };
+    // call external_function; movq external_data@GOTPCREL(%rip), %rax;
+    // leaq local_function(%rip), %rax; movb $1, local_function(%rip);
+    // addq external_data@GOTPCREL(%rip), %rax; ret.
+    u8 x86_text[] = {
+        0xe8, 0, 0, 0, 0, 0x48, 0x8b, 0x05, 0, 0, 0, 0, 0x48, 0x8d, 0x05, 0, 0, 0, 0, 0xc6, 0x05, 0, 0, 0, 0, 0x01, 0x48, 0x03, 0x05, 0, 0, 0, 0, 0xc3,
+    };
+    ObjectRelocation x86_relocations[] = {
+        {.addend = -4, .offset = 1, .section = OBJECT_SECTION_TEXT, .symbol = 2, .kind = OBJECT_RELOCATION_X86_64_PLT32},
+        {.addend = -4, .offset = 8, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_X86_64_REX_GOTPCRELX},
+        {.addend = -4, .offset = 15, .section = OBJECT_SECTION_TEXT, .symbol = 0, .kind = OBJECT_RELOCATION_X86_64_PC32},
+        {.addend = -5, .offset = 21, .section = OBJECT_SECTION_TEXT, .symbol = 0, .kind = OBJECT_RELOCATION_X86_64_PC32},
+        {.addend = -4, .offset = 29, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_X86_64_GOTPCREL},
+    };
+    u32 x86_types[] = {2, 3, 1, 6, 4};
+    // adrp x8, external_data@GOTPAGE; ldr x8, [x8, external_data@GOTPAGEOFF]; ret.
+    u32 aarch64_words[] = {0x90000008, 0xf9400108, 0xd65f03c0};
+    ObjectRelocation aarch64_relocations[] = {
+        {.offset = 0, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21},
+        {.offset = 4, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12},
+    };
+    u32 aarch64_types[] = {5, 6};
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        bool x86 = architecture == 0;
+        ObjectRelocation* relocations = x86 ? x86_relocations : aarch64_relocations;
+        u32 relocation_count = x86 ? BUSTER_ARRAY_LENGTH(x86_relocations) : BUSTER_ARRAY_LENGTH(aarch64_relocations);
+        u32* types = x86 ? x86_types : aarch64_types;
+        ObjectSection sections[] = {
+            {
+                .name = S8(".text"),
+                .data = x86 ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_text) : (ByteSlice){.pointer = (u8*)aarch64_words, .length = sizeof(aarch64_words)},
+                .kind = OBJECT_SECTION_TEXT,
+                .alignment = 4,
+            },
+        };
+        Target target = {.cpu_arch = x86 ? CPU_ARCH_X86_64 : CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS};
+        ObjectFile object = {
+            .sections = sections,
+            .section_count = BUSTER_ARRAY_LENGTH(sections),
+            .symbols = symbols,
+            .symbol_count = BUSTER_ARRAY_LENGTH(symbols),
+            .relocations = relocations,
+            .relocation_count = relocation_count,
+            .target = target,
+        };
+        ObjectArtifact mach = object_write(arguments->arena, &object, OBJECT_FORMAT_MACH_O64);
+        u32 raw_offset = 0;
+        u32 relocation_offset = 0;
+        u32 written_count = 0;
+        bool offsets_valid = mach.error == OBJECT_ERROR_NONE &&
+                             object_test_mach_text_offsets(mach.bytes, &raw_offset, &relocation_offset, &written_count);
+        if (BUSTER_REQUIRE(arguments, offsets_valid && written_count == relocation_count))
+        {
+            for (u32 index = 0; index < relocation_count; index += 1)
+            {
+                u32 address = 0;
+                u32 information = 0;
+                memcpy(&address, mach.bytes.pointer + relocation_offset + index * 8, sizeof(address));
+                memcpy(&information, mach.bytes.pointer + relocation_offset + index * 8 + 4, sizeof(information));
+                bool pc_relative = relocations[index].kind != OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12;
+                BUSTER_TEST(arguments, address == relocations[index].offset && information >> 28 == types[index]);
+                BUSTER_TEST(arguments, ((information >> 24) & 1u) == (u32)pc_relative && ((information >> 25) & 3u) == 2 && (information & (1u << 27)));
+            }
+            if (x86)
+            {
+                // The field stores A + 4: zero for a field that ends its
+                // instruction, -1 for SIGNED_1's trailing immediate byte.
+                s32 signed_one = 0;
+                memcpy(&signed_one, mach.bytes.pointer + raw_offset + 21, sizeof(signed_one));
+                BUSTER_TEST(arguments, signed_one == -1);
+            }
+        }
+        ObjectFile roundtrip = object_read(arguments->arena, mach.bytes, target);
+        if (BUSTER_REQUIRE(arguments, roundtrip.error == OBJECT_ERROR_NONE && roundtrip.relocation_count == relocation_count))
+        {
+            for (u32 index = 0; index < relocation_count; index += 1)
+            {
+                ObjectRelocation relocation = roundtrip.relocations[index];
+                BUSTER_TEST(arguments, relocation.kind == relocations[index].kind && relocation.addend == relocations[index].addend &&
+                                           relocation.offset == relocations[index].offset && relocation.symbol < roundtrip.symbol_count);
+                // Only a call says the symbol is a function.
+                if (relocation.symbol < roundtrip.symbol_count && relocations[index].symbol == 1)
+                {
+                    BUSTER_TEST(arguments, roundtrip.symbols[relocation.symbol].kind == OBJECT_SYMBOL_DATA);
+                }
+            }
+        }
+        String8 assembly = object_print_assembly(arguments->arena, &object);
+        if (!x86)
+        {
+            BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(assembly), S8("\tadrp x8, _external_data@GOTPAGE\n")));
+            BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(assembly), S8("_external_data@GOTPAGEOFF]")));
+        }
+        // A GOT slot holds exactly the symbol's address: an addend, or a GOT
+        // spelling Mach-O cannot state, is refused rather than reinterpreted.
+        ObjectRelocation saved = relocations[1];
+        relocations[1].addend = x86 ? -8 : 8;
+        BUSTER_TEST(arguments, object_write(arguments->arena, &object, OBJECT_FORMAT_MACH_O64).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+        relocations[1] = saved;
+        if (x86)
+        {
+            relocations[1].kind = OBJECT_RELOCATION_X86_64_GOTPCRELX;
+            BUSTER_TEST(arguments, object_write(arguments->arena, &object, OBJECT_FORMAT_MACH_O64).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+            relocations[1] = saved;
+        }
+        else
+        {
+            // The low half must be the 64-bit load of the slot.
+            aarch64_words[1] = 0x91000108;
+            BUSTER_TEST(arguments, object_write(arguments->arena, &object, OBJECT_FORMAT_MACH_O64).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+            aarch64_words[1] = 0xf9400108;
+        }
+    }
+    return result;
+}
+
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = object_test_assembly_index_order(arguments);
+    BUSTER_TEST_FIXTURE(arguments, object_test_mach_relocation_identity);
     BUSTER_TEST_FIXTURE(arguments, object_test_elf_semantic_refusals);
     BUSTER_TEST_FIXTURE(arguments, object_test_x86_64_elf_listing_metadata);
     BUSTER_TEST_FIXTURE(arguments, object_test_elf_property_note_walk);
@@ -5178,6 +5310,8 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         {CODEGEN_MODULE_RELOCATION_AARCH64_ELF_ADD_LO12, true, false, false, false, false},
         {CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_PAGE21, true, false, false, false, false},
         {CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_LD64_LO12, true, false, false, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21, true, false, false, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12, true, false, false, false, false},
     };
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(relocation_kinds) == CODEGEN_MODULE_RELOCATION_COUNT);
     for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(relocation_kinds); kind_index += 1)
