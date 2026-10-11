@@ -27401,16 +27401,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                     string_slice(target_output, 0, target_newline);
                 compiler_versions[compiler] = string_format(arguments->arena, S8("{S8}"), version_line);
                 compiler_targets[compiler] = string_format(arguments->arena, S8("{S8}"), target_line);
-                bool native_target = target_line.length && string_first_sequence(target_line, S8("x86_64")) == 0 &&
-                    string_first_sequence(target_line, S8("linux")) != BUSTER_STRING_NO_MATCH;
-                bool gcc11_macro = string_first_sequence(profile_output, S8("#define __GNUC__ 11\n")) != BUSTER_STRING_NO_MATCH;
-                bool non_clang_macro = string_first_sequence(profile_output, S8("#define __clang__")) == BUSTER_STRING_NO_MATCH;
-                bool linux_macro = string_first_sequence(profile_output, S8("#define __linux__ 1\n")) != BUSTER_STRING_NO_MATCH;
-                bool x86_64_macro = string_first_sequence(profile_output, S8("#define __x86_64__ 1\n")) != BUSTER_STRING_NO_MATCH;
-                bool macro_profile = profile_ok && gcc11_macro && non_clang_macro && linux_macro && x86_64_macro;
-                gcc11_native_profiles[compiler] = compiler == 1 && version_ok && target_ok && version_line.length &&
-                    string_first_sequence(version_line, S8("gcc ")) == 0 &&
-                    string_first_sequence(version_line, S8(" 11.")) != BUSTER_STRING_NO_MATCH && native_target && macro_profile;
+                gcc11_native_profiles[compiler] = compiler == 1 && version_ok && target_ok && profile_ok &&
+                    buster_test_reference_gcc_major(temporary.arena, version_line, target_line, profile_output) == 11;
                 arguments->show(arguments, S8("TEST_ORACLE_IDENTITY suite=compiler-driver fixture=type-specifiers "
                     "tool={S8} version={S8} target={S8} predefined_macros_observed={u32} gcc11_non_clang_x86_64_profile={u32} "
                     "normalization=LC_ALL:C,no_color=1,no_caret=1,wrap=0\n"),

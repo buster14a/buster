@@ -1548,9 +1548,7 @@ BUSTER_GLOBAL_LOCAL bool test_reference_identity_query(Arena* arena, String8 com
 }
 #endif
 
-// The GNU C major of a native Linux, non-Clang GCC whose version line and
-// __GNUC__ agree; zero for anything else. Pure, so literal controls cover it.
-BUSTER_GLOBAL_LOCAL u32 test_reference_gcc_major(Arena* arena, String8 version, String8 target, String8 profile)
+u32 buster_test_reference_gcc_major(Arena* arena, String8 version, String8 target, String8 profile)
 {
     u32 result = 0;
 #if BUSTER_CPU_ARCH_X86_64
@@ -1614,7 +1612,7 @@ TestReferenceIdentity buster_test_reference_identity(Arena* arena, String8 compi
         result.version = version_newline == BUSTER_STRING_NO_MATCH ? version_output : string_slice(version_output, 0, version_newline);
         result.target = target_newline == BUSTER_STRING_NO_MATCH ? target_output : string_slice(target_output, 0, target_newline);
         result.observed = version_ok && target_ok && profile_ok && result.version.length && result.target.length;
-        result.gcc_major = result.observed ? test_reference_gcc_major(arena, result.version, result.target, profile_output) : 0;
+        result.gcc_major = result.observed ? buster_test_reference_gcc_major(arena, result.version, result.target, profile_output) : 0;
     }
 #else
     BUSTER_UNUSED(arena);
@@ -2216,22 +2214,22 @@ BUSTER_GLOBAL_LOCAL bool test_reference_gcc_major_self_test(void)
         String8 clang_profile = string_format(arena, S8("{S8}#define __clang__ 1\n"), profile);
         String8 foreign_profile = string_format(arena, S8("#define __GNUC__ 11\n{S8}"), architecture_macro);
         String8 malformed_profile = string_format(arena, S8("#define __GNUC__ 11x\n#define __linux__ 1\n{S8}"), architecture_macro);
-        bool accepted = test_reference_gcc_major(arena, version, target, profile) == 11;
-        bool clang_refused = test_reference_gcc_major(arena, version, target, clang_profile) == 0;
-        bool disagreeing_release_refused = test_reference_gcc_major(arena, S8("gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"),
+        bool accepted = buster_test_reference_gcc_major(arena, version, target, profile) == 11;
+        bool clang_refused = buster_test_reference_gcc_major(arena, version, target, clang_profile) == 0;
+        bool disagreeing_release_refused = buster_test_reference_gcc_major(arena, S8("gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"),
                                                                     target, profile) == 0;
-        bool other_driver_refused = test_reference_gcc_major(arena, S8("cc (GCC) 11.5.0"), target, profile) == 0;
-        bool foreign_target_refused = test_reference_gcc_major(arena, version, S8("arm-none-eabi"), profile) == 0;
-        bool non_linux_profile_refused = test_reference_gcc_major(arena, version, target, foreign_profile) == 0;
-        bool malformed_major_refused = test_reference_gcc_major(arena, version, target, malformed_profile) == 0;
-        bool empty_refused = test_reference_gcc_major(arena, (String8){0}, (String8){0}, (String8){0}) == 0;
+        bool other_driver_refused = buster_test_reference_gcc_major(arena, S8("cc (GCC) 11.5.0"), target, profile) == 0;
+        bool foreign_target_refused = buster_test_reference_gcc_major(arena, version, S8("arm-none-eabi"), profile) == 0;
+        bool non_linux_profile_refused = buster_test_reference_gcc_major(arena, version, target, foreign_profile) == 0;
+        bool malformed_major_refused = buster_test_reference_gcc_major(arena, version, target, malformed_profile) == 0;
+        bool empty_refused = buster_test_reference_gcc_major(arena, (String8){0}, (String8){0}, (String8){0}) == 0;
         // The package description must not stand in for the final release token, in either direction.
-        bool old_description_new_release_refused = test_reference_gcc_major(arena,
+        bool old_description_new_release_refused = buster_test_reference_gcc_major(arena,
             S8("gcc (Ubuntu 11.5.0-1ubuntu1~24.04.1) 13.3.0"), target, profile) == 0;
         String8 profile_13 = string_format(arena, S8("#define __GNUC__ 13\n#define __linux__ 1\n{S8}"), architecture_macro);
-        bool new_description_old_release_refused = test_reference_gcc_major(arena,
+        bool new_description_old_release_refused = buster_test_reference_gcc_major(arena,
             S8("gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 11.5.0"), target, profile_13) == 0;
-        bool release_suffix_refused = test_reference_gcc_major(arena, S8("gcc (GCC) 111.0.0"), target, profile) == 0;
+        bool release_suffix_refused = buster_test_reference_gcc_major(arena, S8("gcc (GCC) 111.0.0"), target, profile) == 0;
         result = accepted && clang_refused && disagreeing_release_refused && other_driver_refused && foreign_target_refused &&
                  non_linux_profile_refused && malformed_major_refused && empty_refused && old_description_new_release_refused &&
                  new_description_old_release_refused && release_suffix_refused;

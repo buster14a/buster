@@ -34012,42 +34012,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                 String8 target_line = target_newline == BUSTER_STRING_NO_MATCH ? target_output : string_slice(target_output, 0, target_newline);
                 reference_versions[reference] = string_format(arguments->arena, S8("{S8}"), version_line);
                 reference_targets[reference] = string_format(arguments->arena, S8("{S8}"), target_line);
-                bool host_target = false;
-#if BUSTER_CPU_ARCH_X86_64
-                host_target = target_line.length && string_first_sequence(target_line, S8("x86_64")) == 0 &&
-                              string_first_sequence(target_line, S8("linux")) != BUSTER_STRING_NO_MATCH;
-#elif BUSTER_CPU_ARCH_AARCH64
-                host_target = target_line.length && string_first_sequence(target_line, S8("aarch64")) == 0 &&
-                              string_first_sequence(target_line, S8("linux")) != BUSTER_STRING_NO_MATCH;
-#endif
                 // GCC 14 added the -std=gnu23 spelling; GCC 11 through 13 refuse it with the same
-                // diagnostic (observed on 11.5, 12.4 and 13.3). The macro and version line must agree.
-                // Bind the final release token; the package description may name another release.
-                u64 release_offset = 0;
-                for (u64 index = 0; index < version_line.length; index += 1)
-                {
-                    release_offset = version_line.pointer[index] == ' ' ? index + 1 : release_offset;
-                }
-                String8 release = string_slice(version_line, release_offset, version_line.length);
-                bool pre_gnu23_release = false;
-                for (u32 major = 11; major <= 13; major += 1)
-                {
-                    pre_gnu23_release |= string_first_sequence(profile_output,
-                            string_format(identity_temporary.arena, S8("#define __GNUC__ {u32}\n"), major)) != BUSTER_STRING_NO_MATCH &&
-                        string_first_sequence(release, string_format(identity_temporary.arena, S8("{u32}."), major)) == 0;
-                }
-                bool non_clang_macro = string_first_sequence(profile_output, S8("#define __clang__")) == BUSTER_STRING_NO_MATCH;
-                bool linux_macro = string_first_sequence(profile_output, S8("#define __linux__ 1\n")) != BUSTER_STRING_NO_MATCH;
-#if BUSTER_CPU_ARCH_X86_64
-                bool native_architecture_macro = string_first_sequence(profile_output, S8("#define __x86_64__ 1\n")) != BUSTER_STRING_NO_MATCH;
-#elif BUSTER_CPU_ARCH_AARCH64
-                bool native_architecture_macro = string_first_sequence(profile_output, S8("#define __aarch64__ 1\n")) != BUSTER_STRING_NO_MATCH;
-#else
-                bool native_architecture_macro = false;
-#endif
-                bool macro_profile = profile_observed && pre_gnu23_release && non_clang_macro && linux_macro && native_architecture_macro;
-                gcc_pre_gnu23_native_profiles[reference] = reference == 0 && version_observed && target_observed && version_line.length &&
-                    string_first_sequence(version_line, S8("gcc ")) == 0 && host_target && macro_profile;
+                // diagnostic (observed on 11.5, 12.4 and 13.3).
+                u32 gcc_major = reference == 0 && version_observed && target_observed && profile_observed
+                    ? buster_test_reference_gcc_major(identity_temporary.arena, version_line, target_line, profile_output) : 0;
+                gcc_pre_gnu23_native_profiles[reference] = gcc_major >= 11 && gcc_major <= 13;
                 arguments->show(arguments, S8("TEST_ORACLE_IDENTITY suite=compiler-driver fixture=function-parameter-compatibility "
                     "tool={S8} version={S8} target={S8} predefined_macros_observed={u32} gcc11_to_13_non_clang_native_profile={u32}\n"),
                     identity_compiler, reference_versions[reference], reference_targets[reference], (u32)profile_observed,

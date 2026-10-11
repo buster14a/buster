@@ -240,6 +240,10 @@ BUSTER_F_DECL bool buster_test_process_observation_matches(const TestProcessObse
 BUSTER_F_DECL bool buster_test_process_observation_expected_refusal(const TestProcessObservation* observation, String8 expected_diagnostic);
 BUSTER_F_DECL TestProcessEnvironment buster_test_process_environment_with_override(Arena* arena, String8 name, String8 value);
 BUSTER_F_DECL TestReferenceIdentity buster_test_reference_identity(Arena* arena, String8 compiler, const TestProcessEnvironment* environment);
+// The GNU C major of a native Linux, non-Clang GCC whose final `--version`
+// release token and __GNUC__ agree; zero for anything else. Every fixture that
+// authenticates a GCC release uses this one classifier.
+BUSTER_F_DECL u32 buster_test_reference_gcc_major(Arena* arena, String8 version, String8 target, String8 profile);
 BUSTER_F_DECL TestOracleProbeDisposition buster_test_oracle_probe_disposition(
     const TestProcessObservation* observation, bool profile_authenticated, bool healthy_control, bool success_artifact_valid,
     bool output_artifact_absent, const TestOracleProbeContract* contract, bool required);
