@@ -296,6 +296,7 @@ _PROBE_LANGUAGE = ["-Isrc", "-fwrapv", "-fno-strict-aliasing", "-funsigned-char"
 _PROBE_LIBRARY = ["src/buster/lib/arena.c", "src/buster/lib/os.c", "src/buster/lib/integer.c", "src/buster/lib/string.c",
                   "src/buster/lib/float.c", "src/buster/lib/time.c"]
 _PROBE_LINK = ["-Wl,--gc-sections", "-lpthread", "-ldl", "-lm"]
+_DECIMAL = "[0-9]+"
 COMPILER_PROBES_PROFILE = {
     "name": "compiler-probes-v1",
     "build": "the candidate head's probe source, copied outside both checkouts, compiled by clang against the merge "
@@ -310,8 +311,11 @@ COMPILER_PROBES_PROFILE = {
                         *_PROBE_LIBRARY],
             "link": _PROBE_LINK,
             "metric": "total_ns",
-            "size_key": "blocks",
-            "cases": [{"name": f"{shape}-{blocks}", "size": blocks, "arguments": [str(blocks), "11", shape]}
+            # Every non-_ns field a sample line prints, each matching its pattern exactly.
+            "check_fields": {key: _DECIMAL for key in ("blocks", "prepass_bytes", "total_bytes", "spills", "reloads",
+                                                       "copies", "edits", "frame")},
+            "cases": [{"name": f"{shape}-{blocks}", "arguments": [str(blocks), "11", shape],
+                       "markers": {"blocks": str(blocks)}}
                       for shape in ("chain", "fanout") for blocks in (256, 1024, 4096, 16384)],
         },
         "line_mark": {
@@ -323,8 +327,12 @@ COMPILER_PROBES_PROFILE = {
             "sources": ["src/buster/lib/compiler/codegen/machine.c", *_PROBE_LIBRARY],
             "link": _PROBE_LINK,
             "metric": "schedule_ns",
-            "size_key": "leaves",
-            "cases": [{"name": f"schedule-{leaves}", "size": leaves, "arguments": ["schedule", str(leaves), "11", "1"]}
+            "check_fields": {"mode": "schedule", "leaves": _DECIMAL, "rows": _DECIMAL, "batch": _DECIMAL,
+                             "retained_bytes": _DECIMAL, "permuted": _DECIMAL, "displacement": _DECIMAL,
+                             "hash": "[0-9a-f]{16}"},
+            # The balanced reduction has leaves MOV_RI, leaves - 1 ADD64, one MOV_RR and RET.
+            "cases": [{"name": f"schedule-{leaves}", "arguments": ["schedule", str(leaves), "11", "1"],
+                       "markers": {"mode": "schedule", "leaves": str(leaves), "rows": str(2 * leaves + 1), "batch": "1"}}
                       for leaves in (1024, 4096, 16384, 65536)],
         },
     },
@@ -728,14 +736,21 @@ def compiler_probes_interval(ratios: list) -> tuple[float, float]:
     return ordered[lower - 1], ordered[count - lower]
 
 
-def _compiler_probes_invocation(value: object, size_key: str, size: int, repeats: int) -> tuple[float | None, object]:
-    """(median sample, check fields) of one well-formed passed invocation, else (None, None)."""
+def _compiler_probes_invocation(value: object, definition: dict, case: dict, repeats: int) -> tuple[float | None, object]:
+    """(median sample, check fields) of one well-formed passed invocation, else (None, None).
+
+    Its self-check must carry exactly the probe's check_fields, each matching its pattern, and the
+    case's fixed workload markers (size, and for line-mark the mode, row count and batch).
+    """
     result = None, None
+    check = value.get("check") if isinstance(value, dict) else None
     if isinstance(value, dict) and set(value) == {"exit", "samples", "check"} and type(value["exit"]) is int and \
             value["exit"] == 0 and isinstance(value["samples"], list) and len(value["samples"]) == repeats and \
             all(type(sample) is int and sample > 0 for sample in value["samples"]) and \
-            isinstance(value["check"], dict) and all(isinstance(item, str) for item in value["check"].values()) and \
-            value["check"].get(size_key) == str(size):
+            isinstance(check, dict) and set(check) == set(definition["check_fields"]) and \
+            all(isinstance(check[key], str) and re.fullmatch(pattern, check[key])
+                for key, pattern in definition["check_fields"].items()) and \
+            all(check[key] == marker for key, marker in case["markers"].items()):
         result = float(statistics.median(value["samples"])), value["check"]
     return result
 
@@ -759,7 +774,7 @@ def compiler_probes_case_statistics(probe: str, case: object) -> tuple[dict | No
     else:
         for role in COMPILER_PROBES_ROLES:
             for item in warmups[role]:
-                median, check = _compiler_probes_invocation(item, definition["size_key"], expected["size"], profile["repeats"])
+                median, check = _compiler_probes_invocation(item, definition, expected, profile["repeats"])
                 if median is None:
                     problems.append(f"{label} has a failed or partial {role} warmup")
                 checks[role].append(check)
@@ -776,8 +791,7 @@ def compiler_probes_case_statistics(probe: str, case: object) -> tuple[dict | No
             continue
         values = {}
         for role in COMPILER_PROBES_ROLES:
-            values[role], check = _compiler_probes_invocation(pair[role], definition["size_key"], expected["size"],
-                                                              profile["repeats"])
+            values[role], check = _compiler_probes_invocation(pair[role], definition, expected, profile["repeats"])
             checks[role].append(check)
         if values["baseline"] is None or values["candidate"] is None:
             problems.append(f"{label} pair {index} has a failed or partial invocation")

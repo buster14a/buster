@@ -3994,11 +3994,22 @@ PROBE_HASHES = {"fast_ra": {"baseline": "3" * 64, "candidate": "4" * 64},
                 "line_mark": {"baseline": "5" * 64, "candidate": "6" * 64}}
 
 
+def probe_line(probe: str, case: dict, value: int) -> str:
+    """One sample line in the exact format each probe prints (real 955ea4b2 output, sizes substituted)."""
+    markers = case["markers"]
+    if probe == "fast_ra":
+        return (f"blocks={markers['blocks']} prepass_ns={value // 3} placement_ns={value - value // 3} total_ns={value} "
+                "prepass_bytes=167960 total_bytes=938140 spills=0 reloads=0 copies=0 edits=0 frame=0\n")
+    return (f"mode=schedule leaves={markers['leaves']} rows={markers['rows']} batch=1 schedule_ns={value} "
+            "retained_bytes=393232 permuted=8185 displacement=18282762 hash=c07477f4bdba3597\n")
+
+
 def probe_invocation(probe: str, case: dict, value: int) -> dict:
-    """One passed synthetic invocation of case with every sample at value nanoseconds."""
+    """One passed invocation of case, parsed by the harness from realistic probe output at value nanoseconds."""
     definition = compiler_receipt.COMPILER_PROBES_PROFILE["probes"][probe]
-    return {"exit": 0, "samples": [value] * compiler_receipt.COMPILER_PROBES_PROFILE["repeats"],
-            "check": {definition["size_key"]: str(case["size"]), "hash": "00ff"}}
+    samples, check = compiler_probes.parse_output(probe_line(probe, case, value) * compiler_receipt.COMPILER_PROBES_PROFILE[
+        "repeats"], definition["metric"])
+    return {"exit": 0, "samples": samples, "check": check}
 
 
 def compiler_probes_evidence(base: str = "b" * 40, head: str = "a" * 40) -> tuple[dict, dict]:
@@ -4055,6 +4066,7 @@ class CompilerProbesTest(unittest.TestCase):
                         self.assertIn(item.replace("-Isrc", "-I"), audit, item)
                 for case in definition["cases"]:
                     self.assertEqual(case["arguments"].count(str(profile["repeats"])), 1, case)
+                    self.assertLessEqual(set(case["markers"]), set(definition["check_fields"]), case)
         self.assertLessEqual(compiler_compare.COMPILER_PROBES_TIMEOUT_SECONDS, 20 * 60)
 
     def test_complete_evidence_validates_and_every_gap_fails(self) -> None:
@@ -4107,6 +4119,24 @@ class CompilerProbesTest(unittest.TestCase):
             "zero sample": (invocation(lambda value: value["samples"].__setitem__(0, 0)), {}),
             "unparsed self-check": (invocation(lambda value: value.update(check=None)), {}),
             "other probe size": (invocation(lambda value: value["check"].update(blocks="512")), {}),
+            "self-check reduced to its size": (changed(lambda value: [
+                invocation_value.update(check={"blocks": invocation_value["check"]["blocks"]})
+                for case in value["cases"] if case["probe"] == "fast_ra"
+                for invocation_value in [*case["warmups"]["baseline"], *case["warmups"]["candidate"],
+                                         *(pair[role] for pair in case["pairs"] for role in ("baseline", "candidate"))]]), {}),
+            "missing spill count": (invocation(lambda value: value["check"].pop("spills")), {}),
+            "extra self-check field": (invocation(lambda value: value["check"].update(note="1")), {}),
+            "non-numeric frame": (invocation(lambda value: value["check"].update(frame="-1")), {}),
+            "missing line-mark hash": (invocation(lambda value: value["check"].pop("hash"), case=8), {}),
+            "malformed line-mark hash": (invocation(lambda value: value["check"].update(hash="c07477f4"), case=8), {}),
+            "wrong line-mark mode": (invocation(lambda value: value["check"].update(mode="remap-ordered"), case=8), {}),
+            "wrong line-mark batch": (invocation(lambda value: value["check"].update(batch="999"), case=8), {}),
+            "wrong line-mark rows": (invocation(lambda value: value["check"].update(rows="2048"), case=8), {}),
+            "remapped line-mark everywhere": (changed(lambda value: [
+                invocation_value["check"].update(mode="remap", batch="999")
+                for case in value["cases"] if case["probe"] == "line_mark"
+                for invocation_value in [*case["warmups"]["baseline"], *case["warmups"]["candidate"],
+                                         *(pair[role] for pair in case["pairs"] for role in ("baseline", "candidate"))]]), {}),
             "changing self-check": (invocation(lambda value: value["check"].update(hash="0100")), {}),
             "missing warmup": (changed(lambda value: value["cases"][1]["warmups"]["baseline"].pop()), {}),
             "failed warmup": (changed(lambda value: value["cases"][1]["warmups"]["candidate"][0].update(exit=2)), {}),
@@ -4158,6 +4188,52 @@ class CompilerProbesTest(unittest.TestCase):
         report = compiler_receipt.render(pull, summary(), "success", [])
         self.assertIn("Compiler probes (compiler-probes-v1): complete", report)
         self.assertIn("| fast_ra/chain-256 | 1.0 | 0.9 | 0.9000 [0.9000, 0.9000] | 30/30 | yes |", report)
+
+    def test_artifact_is_read_and_decided_end_to_end(self) -> None:
+        def decided(record: dict, probes_summary: object, drop: bool = False) -> tuple:
+            pull = receipt()
+            pull["mode"] = "pull"
+            pull["identity"].update(mode="pull")
+            pull["compiler_probes"] = record
+            members = {"receipt.json": json.dumps(pull), "lab/summary.json": json.dumps(summary()),
+                       "throughput/summary.json": json.dumps(corpus()["summary"]),
+                       "throughput/metadata.json": json.dumps(corpus()["metadata"])}
+            if not drop:
+                members["compiler_probes/summary.json"] = json.dumps(probes_summary)
+            got = compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+            return compiler_publish.decide(dict(EXPECTED, mode="pull"), True, "success", got[0], got[1], "",
+                                           got[4], extra_reasons=[got[2]] if got[2] else [])
+
+        record, bundle = compiler_probes_evidence()
+        conclusion, unused_title, reasons = decided(record, bundle["summary"])
+        self.assertEqual((conclusion, reasons), ("success", []))
+
+        def consistent(edit) -> tuple:
+            """A malformed artifact whose stated results and receipt cells agree with its own samples."""
+            changed_summary = copy.deepcopy(bundle["summary"])
+            for case in changed_summary["cases"]:
+                for item in [*case["warmups"]["baseline"], *case["warmups"]["candidate"],
+                             *(pair[role] for pair in case["pairs"] for role in ("baseline", "candidate"))]:
+                    edit(case["probe"], item["check"])
+            changed_summary["results"] = compiler_receipt.compiler_probes_digest(changed_summary)
+            return dict(record, cells=compiler_receipt.compiler_probes_digest(changed_summary)), changed_summary
+
+        def reduce(probe: str, check: dict) -> None:
+            for key in [key for key in check if key not in ("blocks", "leaves")]:
+                check.pop(key)
+
+        def remap(probe: str, check: dict) -> None:
+            if probe == "line_mark":
+                check.update(mode="remap", batch="999")
+
+        for name, (changed_record, changed_summary, drop) in {
+            "self-checks reduced to their size": (*consistent(reduce), False),
+            "remapped line-mark": (*consistent(remap), False),
+            "missing member": (record, None, True),
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = decided(changed_record, changed_summary, drop)
+                self.assertEqual(conclusion, "failure", reasons)
 
     def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

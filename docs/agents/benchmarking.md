@@ -968,11 +968,15 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
      report-only.
 
    The probes' `key=value` lines are their structured output; nothing was
-   added to them. Every non-`_ns` field (sizes, spill counts, retained bytes,
-   the line-mark hash) is the self-check, and it must be identical across
-   every invocation of one binary. Whether the base and the head agree is
-   reported, not required, since an allocator or scheduler change may change
-   it legitimately.
+   added to them. Every non-`_ns` field is the self-check, and the profile's
+   `check_fields` fix it exactly: for FAST, `blocks`, `prepass_bytes`,
+   `total_bytes`, `spills`, `reloads`, `copies`, `edits` and `frame`; for
+   line-mark, `mode`, `leaves`, `rows`, `batch`, `retained_bytes`, `permuted`,
+   `displacement` and a 16-digit hex `hash`. Each case's `markers` must match
+   too: its size, and for line-mark `mode=schedule`, `rows` = 2 x leaves + 1
+   and `batch=1`. The self-check must be identical across every invocation of
+   one binary. Whether the base and the head agree is reported, not required,
+   since an allocator or scheduler change may change it legitimately.
 
    `compiler_publish.py` re-validates the receipt's `compiler_probes` record
    against `compiler_probes/summary.json` (`validate_compiler_probes`), which
@@ -985,7 +989,8 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    - a missing, extra or reordered case, or changed case arguments;
    - fewer than two warmups or 30 pairs, or a pair out of the fixed order;
    - an invocation that failed, timed out or has partial or non-positive
-     samples, a self-check that changes, or a size other than the case's;
+     samples, a self-check field that is missing, extra or malformed, a
+     workload marker other than the case's, or a self-check that changes;
    - stated results that differ from those re-derived from the raw samples.
 
    Missing, partial, failed or cancelled evidence therefore fails the check.
