@@ -1900,6 +1900,16 @@ source debug models and their larger object payloads unless requested.
 `-g` selects DWARF 4 for native ELF/Mach-O targets and CodeView for Windows
 objects. Unwind information remains independent of source debug information.
 
+Direct `wasm32-wasip1`, `wasm64-unknown-freestanding`, and `bpfel-unknown-linux`
+output does not emit source debug information. An enabled `-g` request fails
+with a named `driver.argument` diagnostic before reading source or publishing
+an artifact. The typed invocation API rejects `debug_info=true` too, regardless
+of `debug_info_explicit`. Default output, `-g0`, and `-g -g0` remain supported;
+`-g0 -g` is refused. Preprocessing and syntax-only actions accept `-g` because
+they do not emit a debug artifact. `compiler_driver_test_nonnative_debug_options`
+covers these refusals, option ordering, unchanged existing output, and identical
+default/disabled-debug bytes.
+
 A linked Windows image's PDB (`pdb_build`) gives its TPI stream a hash stream:
 one `hashTypeRecord` bucket per record modulo `0x3ffff` (`pdb_type_record_hash`)
 and a sparse type-index offset entry per 8 KiB of records. DbgHelp (cdb,

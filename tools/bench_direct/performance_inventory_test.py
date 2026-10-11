@@ -28,7 +28,8 @@ and policy rows are `not applicable` with a reason. The summary line reports
 how many performance entries are covered; the inventory never claims more.
 
 Each owner-requested fixed profile on the pull-compare route (PROFILE_ROWS)
-needs its own covered `uarch_lab:compare@<profile>` row whose consumer
+needs its own covered `<entry>@<profile>` row (`uarch_lab:compare@...`, or
+`build:bench_throughput@...` for a harness profile) whose consumer
 validates that exact frozen profile, so a flag-pair profile cannot be added,
 or its validation dropped, without the inventory noticing.
 
@@ -57,6 +58,7 @@ RECEIPT = ROOT / "tools" / "bench_direct" / "compiler_receipt.py"
 PROFILE_ROWS = {
     "uarch_lab:compare@canonical-inline-self-host": "INLINE_ACCEPTANCE_PROFILE",
     "uarch_lab:compare@ast-pilot-acceptance": "AST_PILOT_ACCEPTANCE_PROFILE",
+    "build:bench_throughput@throughput-real-source": "THROUGHPUT_REAL_SOURCE_PROFILE",
 }
 
 
