@@ -375,7 +375,7 @@ BUSTER_GLOBAL_LOCAL String8 c_test_body_scratch_repeat(Arena* arena, String8 hea
 // slot table of an inferred initializer. The evaluator is also refused with
 // a later invalid body, which still reports its own finding.
 #define C_TEST_BODY_SCRATCH_EVALUATOR_TERMS 40
-#define C_TEST_BODY_SCRATCH_CASE_TERMS 30
+#define C_TEST_BODY_SCRATCH_CASE_TERMS 100
 // Two named clobbers and sixteen numbered registers, valid on x86-64
 // (xmm0..xmm15) and AArch64 (x0..x15).
 #define C_TEST_BODY_SCRATCH_CLOBBERS 18
@@ -434,16 +434,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_validation_scratch_families(UnitT
                                    string_equal(recovered.messages[1], bad_message));
     }
 
-    // Typed constants: a case label of 1 + 4 * terms tokens takes one task
-    // per token plus one.
+    // Typed constants: a case label of terms left-associative additions
+    // nests one task per term. The task stack starts at 32 rows and doubles
+    // toward one per token, so its first growth to 64 rows is the request
+    // to refuse.
     {
-        u64 tokens = 1 + 4 * (u64)C_TEST_BODY_SCRATCH_CASE_TERMS;
         String8 label = c_test_body_scratch_repeat(arguments->arena, S8("1"), S8(" + 0*1"), C_TEST_BODY_SCRATCH_CASE_TERMS, S8(""));
         String8 cases = string_format(arguments->arena,
             S8("int main(void){{int x=1; switch (x) {{case {S8}: x=2; break; case 3: x=4; break; default: break;} return x;}"), label);
         CTestBodyScratchRun open = c_test_body_scratch_run(arguments, cases, 0, trace);
         BUSTER_TEST(arguments, open.lowered);
-        u32 tasks = c_test_body_scratch_find_count(trace, open.trace_count, 0, 0, tokens + 1);
+        u32 initial = c_test_body_scratch_find_count(trace, open.trace_count, 0, 0, 32);
+        u32 tasks = initial < open.trace_count ? c_test_body_scratch_find(trace, open.trace_count, 0, trace[initial].element_size, 64) : UINT32_MAX;
+        BUSTER_TEST(arguments, initial < tasks && tasks < open.trace_count);
         c_test_body_scratch_refuse_at(arguments, &result, cases, trace, open.trace_count, 0, tasks, S8("main"));
     }
 
@@ -1680,6 +1683,73 @@ BUSTER_GLOBAL_LOCAL void c_test_append_u32(char8* destination, u64 capacity, u64
     {
         destination[(*length)++] = digits[--digit_count];
     }
+}
+
+// Semantic analysis of one large static initializer. It used to size two
+// work buffers by the tokens of the whole braced list: the typed-constant
+// task stack (72 bytes per token, asked whether the whole list is one
+// constant) aborted a 230,000-entry struct table (#3254), and the
+// array-count inference frames and continuations (56 bytes per token)
+// aborted a 4,000,000-element byte table (#2527), both with an arena
+// validation failure in the 256 MiB thread scratch. Both now grow with the
+// work or are bounded by the type count.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parse_large_static_initializers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    // A unit of 8,000,000 tokens needs the driver's own unit reservation.
+    Arena* persistent = arena_create((ArenaCreation){.reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE, .flags = {.no_pool = true}});
+    BUSTER_TEST(arguments, persistent != 0);
+    if (persistent)
+    {
+        for (u32 shape = 0; shape < 2; shape += 1)
+        {
+            u32 element_count = shape == 0 ? 230000 : 4000000;
+            String8 prefix = shape == 0 ? S8("struct R { int a; const char *s; short v[3]; };\nstruct R t[] = {")
+                                        : S8("unsigned char d[] = {");
+            String8 element_open = shape == 0 ? S8("{") : S8("");
+            String8 element_middle = shape == 0 ? S8(", \"n\", {1, 2, 3}}") : S8("");
+            String8 suffix = S8("};\n");
+            u64 source_capacity = prefix.length + (u64)element_count * (element_open.length + element_middle.length + 12) + suffix.length;
+            TemporalArena temporary = arena_begin_temporal(persistent);
+            char8* source_bytes = arena_allocate(persistent, char8, source_capacity);
+            u64 source_length = 0;
+            c_test_append_source(source_bytes, source_capacity, &source_length, prefix);
+            for (u32 element = 0; element < element_count; element += 1)
+            {
+                c_test_append_source(source_bytes, source_capacity, &source_length, element_open);
+                c_test_append_u32(source_bytes, source_capacity, &source_length, shape == 0 ? element : element & 255);
+                c_test_append_source(source_bytes, source_capacity, &source_length, element_middle);
+                c_test_append_source(source_bytes, source_capacity, &source_length, S8(","));
+            }
+            c_test_append_source(source_bytes, source_capacity, &source_length, suffix);
+            String8 source = {.pointer = source_bytes, .length = source_length};
+            CPreprocessResult preprocess = c_preprocess(persistent, source, (CPreprocessOptions){
+                .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17,
+            });
+            CParseResult parse = c_parse(persistent, preprocess);
+            BUSTER_TEST(arguments, !preprocess.diagnostic_count);
+            BUSTER_TEST_RAW(arguments, !parse.diagnostic_count,
+                parse.diagnostic_count ? parse.diagnostics[0].message : S8("large static initializer analysis"));
+            if (BUSTER_REQUIRE(arguments, parse.declaration_count == (shape == 0 ? 2u : 1u)))
+            {
+                CDeclaration declaration = parse.declarations[parse.declaration_count - 1];
+                CType* type = c_type_from_id(&parse, declaration.type);
+                bool array = type && type->kind == C_TYPE_ARRAY && type->array_bound < parse.array_bound_count;
+                if (BUSTER_REQUIRE(arguments, array))
+                {
+                    CArrayBound bound = parse.array_bounds[type->array_bound];
+                    BUSTER_TEST(arguments, bound.has_inferred_count && bound.inferred_count == element_count);
+                }
+            }
+            scratch_end(temporary);
+        }
+        BUSTER_TEST(arguments, arena_destroy(persistent, 1));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
 }
 
 // One local table whose every brace-enclosed element zero-fills its record
@@ -62122,6 +62192,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_ir_lower_scratch_capacity);
     C_TEST_FIXTURE(arguments, c_test_ir_query_scratch_growth);
     C_TEST_FIXTURE(arguments, c_test_ir_local_table_zero_scratch);
+    C_TEST_FIXTURE(arguments, c_test_parse_large_static_initializers);
     C_TEST_FIXTURE(arguments, c_test_ir_row_streams);
     C_TEST_FIXTURE(arguments, c_test_label_values_gate);
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_growth);

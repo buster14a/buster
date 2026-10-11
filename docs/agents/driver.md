@@ -1703,11 +1703,17 @@ sized from the by-value nesting depth of the initialized type
 a flat table does not limit them. Driver regressions
 (`compiler_driver_test_large_static_initializers`) compile with `-c` a
 1,000,000-element `unsigned char` array, a 250,000-entry `const char *` table
-and a 200,000-entry struct array. Remaining limits: a flat initializer past
-about 1.7 million elements stops in `c_parse_typed_constant` (#2527); and an array of
-`struct { int a; const char *s; short v[3]; }` compiles to 220,000 entries but
-aborts with an arena validation failure from 230,000 (#3254). The mobile
-builds of the driver fixture use smaller counts to keep their deadlines. A reservation that cannot be carved
+and a 200,000-entry struct array. Semantic analysis no longer sizes its
+initializer work by the tokens of the whole braced list: the typed-constant
+task stack in `c_parse_typed_constant` grows on demand, and the array-count
+inference frames and continuations are also bounded by the type count.
+`c_test_parse_large_static_initializers` analyses a 230,000-entry
+`struct { int a; const char *s; short v[3]; }` table (#3254) and a
+4,000,000-element byte table, both of which aborted on the 256 MiB thread
+scratch before. Measured with `ide cc -c`: 8,000,000 bytes take 3.2 s and
+471 MB; 1,000,000 entries of that struct take 15 s and 2.7 GB, so time, not a
+reservation, is the next limit. The mobile builds of the driver fixture use
+smaller counts to keep their deadlines. A reservation that cannot be carved
 is a positioned `initializer working storage exceeds the scratch reservation`
 or `initializer nesting exceeds its capacity` diagnostic and a failed result.
 
