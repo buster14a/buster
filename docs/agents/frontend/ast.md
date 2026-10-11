@@ -428,6 +428,26 @@ unchanged.
     the subtree resolves to an entity other than the one the binder bound, or,
     in an initializer, an unbound name resolves to an entity other than the one
     the pass found (`c_ast_types_lookups_agree`).
+- **How the name check stays cheap.** Repeating every lookup per query cost
+  about 50 M Ir on the unity self-host. Almost every marked name there has a
+  symbol that no parameter, local or other non-file-scope entity shares. Such
+  a name finds nothing in any scope before the file scope, so from any query
+  scope whose chain reaches the file scope it resolves as it does from the
+  file scope.
+  - A region settles its marks once, at its first query that needs the check
+    (`c_ast_types_lookups_settled`). Each mark is checked at the file scope
+    against its binding, which must be a file-scope entity or none.
+  - Up to 16 marks per region that a non-file-scope entity also spells are
+    recorded. A query over one of them walks its subtree as before. A region
+    with more walks for every query.
+  - The settlement holds while the lookup generation
+    (`c_parse_lookup_generation`) and the identifier use count are unchanged.
+    The generation lives on the scope cursor. It moves with every entity added
+    and every rollback that takes entities, scopes or identifier uses away.
+    After that, queries walk.
+  - The symbol table and a table of the scopes whose chain reaches the file
+    scope are built once per generation, and are rebuilt only once the nodes
+    settled since the last build reach the entity count.
 - **What it accepts.** Each answer is a row that already exists: an entity's,
   member's, element's, return or typedef type, an operand's own row, an
   immutable scalar row, or an interned primitive or pointer row (see
@@ -437,8 +457,10 @@ unchanged.
   the operator precedence and the scalar conversion check.
   - Stage 1: identifiers bound to an object, function, parameter, local or
     enumerator; number and character literals; `.` and `->` on an unqualified
-    struct or union; `[]` and unary `*` on an array or pointer; and a call
-    whose callee is a bound function or function pointer that is not a builtin.
+    struct or union (and on a const or volatile one once its member's
+    [qualified copy](#qualified-member-copies) is shared); `[]` and unary `*`
+    on an array or pointer; and a call whose callee is a bound function or
+    function pointer that is not a builtin.
   - Stage 2:
     - the binary arithmetic, shift, comparison, bitwise and logical operators;
     - unary `+ - ~ !`;
@@ -462,8 +484,10 @@ unchanged.
       the published `void` row (`c_ast_types_builtin_call`).
 - **What it declines.** Every shape whose machine answer appends a row stays
   with the machine:
-  - a qualified member or array element, except a member access queried
-    alone, which is replayed (below);
+  - a qualified array element, and a member of a const or volatile struct or
+    union whose qualified copy is not shared yet or may not be
+    ([qualified member copies](#qualified-member-copies)), except such a
+    member access queried alone, which is replayed (below);
   - an array operand of `+` or `-`, which decays;
   - a pointer or `nullptr` conditional;
   - a qualified operand whose unqualified row was never recorded;
@@ -532,18 +556,21 @@ unchanged.
 
   A query of a `.` or `->` alone, perhaps parenthesized, over a base the pass
   accepts (and safe, with constraint checks) and a const or volatile struct or
-  union is replayed too. The machine types the base as the tree does, then
-  makes two calls (`c_parse_direct_expression_postfix`):
+  union that the member rule did not accept is replayed too: its qualified
+  copy was not shared when the body was typed, or may not be shared
+  ([qualified member copies](#qualified-member-copies)). The machine types the
+  base as the tree does, then makes two calls
+  (`c_parse_direct_expression_postfix`):
   - `c_parse_member_type` on the qualified aggregate;
-  - `c_parse_add_qualified_type` on the member it finds, which appends the
-    member's qualified copy.
+  - `c_parse_intern_qualified_type` on the member it finds, which shares or
+    appends the member's qualified copy.
 
   The decline branch reports it (`c_ast_types_decline`) as
   `C_AST_TYPE_STRING` with the member node's kind, so the query function's
   code is unchanged. The replay probes the memo for the access's tokens, as
   the machine's root task does after stripping the parentheses. On a miss,
-  `c_parse_expression_tree_member` makes the same two calls, and the appended
-  row is the answer. The node is never accepted, so its parents still decline.
+  `c_parse_expression_tree_member` makes the same two calls, and the row they
+  return is the answer. The node is never accepted, so its parents still decline.
   Verify mode holds the replayed row, and any alignment record it inherits,
   to the machine's.
 - **Constraint checks.** A checked query is answered only from a node whose
@@ -680,9 +707,13 @@ the Zen 5 route ([measurement plan](#measurement-plan)).
 
 ### Qualified member copies
 
-**Status: design only. Nothing here is implemented; it waits for the
-owner's decision on
-[#3102](https://github.com/buster14a/buster/issues/3102).**
+**Status: implemented under `-fc-ast-pilot` as option (b) below, at the
+owner's request on [#3102](https://github.com/buster14a/buster/issues/3102).**
+The machine side is `c_parse_intern_qualified_type`, the typer's lookup is
+`c_parse_interned_qualified_type`, and the rules are in CTypeInterning's
+comment (`c_internal.h`). The design and its prototype evidence follow as
+they were accepted; the implementation's measurements are in the
+[measurement plan](#measurement-plan).
 
 `.` and `->` on a const or volatile struct or union, such as
 `preprocess->tokens` with `preprocess` a pointer to const, is the largest
@@ -790,8 +821,8 @@ audit:
   change, already gets that half.
 - **The default path** moves −0.0055%.
 
-**What an implementation must show.** These budgets go into the
-[measurement plan](#measurement-plan) before any measured run. The four arms
+**What an implementation must show.** These budgets are declared in the
+[measurement plan](#measurement-plan) for the implementation. The four arms
 are those of stage 2:
 - **Correctness.**
   - byte-identical `-c` objects at `-g0` and `-g` across the four arms, and
@@ -1625,6 +1656,48 @@ The same audit records that version's hosted census, diagnostic only:
 - On the merge with main `f6e8d25f`, the same arms read −0.077% on the
   default path and −0.84% under the pilot.
 - The requested 9700X comparison decides the performance disposition (#2761).
+
+For the shared [qualified member copies](#qualified-member-copies), these
+budgets were declared before their measured runs. The base is main
+`680e16d3`. The input, flags and four Callgrind arms are stage 2's, on
+tests-off `-march=x86-64-v3` builds, run on `-fsyntax-only` and on `-c`
+(`-g0`):
+- **Correctness.**
+  - byte-identical `-c` objects at `-g0` and `-g` across the four arms;
+  - `c_test_type_interning_objects` passes with the window shut and open,
+    over new sources:
+    - members read through pointers to const and to volatile aggregates;
+    - nested aggregates and array members;
+    - a member of an aligned typedef type;
+  - no verify mismatch over the corpus, and a floor on shared-copy member
+    answers;
+  - the `struct S const*` member probe answers, and a late-row probe beside
+    it declines;
+  - a mutation that shares a copy carrying an alignment record fails a test.
+- **Default path (D against A):** within ±0.05% Ir on both workloads. Outside
+  the pilot the step makes one extra test for the interning header.
+- **The slice (C against B):**
+  - at least 40 M fewer instructions on `-fsyntax-only`, about half of the
+    prototype's −74 M, with the lookups, the eager pass and code layout
+    charged;
+  - fewer instructions on `-c`;
+  - at least 5,000 fewer machine runs from queries.
+- **Acceptance:** hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761), and the hook stays
+  opt-in.
+
+The shared copies' hosted census is
+[`2026-10-11T152407Z`](../../performance-audits/2026-10-11T152407Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. Objects are identical across the four arms at
+  `-g0` and `-g`, and the corpus verify gate has 0 mismatches.
+- **The pilot (C against B):** −74.9 M Ir (−0.81%) on `-fsyntax-only` and
+  −86.5 M (−0.38%) on `-c`.
+  - Machine runs from queries fall from 28,360 to 20,742.
+  - About half of the saving is those runs, and half is fewer whole-table
+    layout solves over the smaller table (91 to 82).
+- **The default path (D against A):** +0.0034% and +0.0029%.
+- Zen 5 validation stays incomplete (#2761).
 
 For the in-place columns ([storage](#storage-and-lifetime)), these budgets were
 declared before the measured runs, on the same input and flags, with stage 2's
@@ -2534,6 +2607,47 @@ diagnostic only:
   the code inlined into `c_parse_expression_type_query` changed. The shipped
   version keeps the whole decline tail in one out-of-line function that
   returns its answer by value.
+
+For a cheaper query-time name check (`c_ast_types_lookups_agree`, the
+repeat of the machine's by-spelling lookups that the
+[tree expression typer](#tree-expression-typer) makes before it answers),
+these budgets were declared before its measured runs. They use the stage-2
+input, flags and four Callgrind arms on tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `a6705764`, which the candidate branches from. A throwaway
+census build of the base (not committed) found 138,804 checks, 712,144 nodes
+walked, 191,184 lookups and no disagreement on the self-host. The budgets:
+- **Correctness.** The check may decline more, never less, and on the
+  self-host no answer changes:
+  - no verify mismatch over the corpus, with probes for any new rule;
+  - the typer's `-v` counters on the self-host are identical in B and C;
+  - identical diagnostics with and without the flag;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **The check's own cost (C against B).** `c_ast_types_lookups_agree`'s
+  inclusive instructions, plus any increase in `c_ast_types_type_body`'s,
+  fall by at least 30%, and the whole compile falls by at least 10 M Ir.
+  Otherwise the result is recorded as negative and the code does not ship.
+- **Default path (D against A).** Within ±0.05% Ir on `-fsyntax-only` and on
+  `-c` (`-g0`). A change outside that band whose callees and call counts are
+  identical, with byte-identical objects, passes on work equivalence, as for
+  the statement plan (#3370).
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete (#2761) and
+  the hook stays opt-in.
+
+The settled name checks' hosted census is
+[`2026-10-11T114326Z`](../../performance-audits/2026-10-11T114326Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. The typer's counters are identical in B and C,
+  and the objects of all four arms are identical at `-g0` and `-g`.
+- The check falls from 52.48 M to 33.02 M Ir (−37.1%), and the pilot's
+  compile by 19.04 M (−0.203%). 138,650 checks settle, and 148 walk.
+- The default path is +0.0081% on `-fsyntax-only` and +0.0047% on `-c`.
+- Zen 5 validation stays incomplete (#2761).
 
 ### Initializer value typing
 
