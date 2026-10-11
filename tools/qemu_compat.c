@@ -45,6 +45,7 @@ BUSTER_GLOBAL_LOCAL bool qemu_git_verify(Arena* arena, String8 git, String8 sour
         String8 status_args[] = {git, S8("-c"), S8("core.fsmonitor=false"), S8("status"), S8("--porcelain"), S8("--untracked-files=normal"), S8("--ignored=matching"), S8("--ignore-submodules=none")};
         RaddebuggerCommandResult status = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_args), source, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
         valid = raddebugger_command_ok(status) && qemu_status_allowed(status.output, expected);
+        if (!valid) { string_print(S8("QEMU_SOURCE_STATUS path={S8}\n{S8}"), source, status.output); }
     }
     if (valid)
     {
@@ -99,6 +100,25 @@ BUSTER_GLOBAL_LOCAL bool qemu_inputs_verify(Arena* arena, String8 git, String8 s
                     valid = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(cmp_args), source, (String8){0}, RADDEBUGGER_ENVIRONMENT_INHERIT, stopped));
                 }
             }
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool qemu_packagefiles_prepare(Arena* arena, String8 source, String8 output, bool* stopped)
+{
+    String8 names[] = {S8("berkeley-softfloat-3"), S8("berkeley-testfloat-3")};
+    String8 files[] = {S8("meson.build"), S8("meson_options.txt")};
+    bool valid = true;
+    for (u64 index = 0; valid && index < BUSTER_ARRAY_LENGTH(names); index += 1)
+    {
+        for (u64 file_i = 0; valid && file_i < BUSTER_ARRAY_LENGTH(files); file_i += 1)
+        {
+            String8 original = string_format_z(arena, S8("{S8}/subprojects/packagefiles/{S8}/{S8}"), source, names[index], files[file_i]);
+            String8 generated = string_format_z(arena, S8("{S8}/subprojects/{S8}/{S8}"), source, names[index], files[file_i]);
+            String8 copy[] = {S8("cp"), original, generated};
+            String8 prefix = string_format(arena, S8("{S8}/packagefiles-{u64}-{u64}"), output, index, file_i);
+            valid = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(copy), source, prefix, RADDEBUGGER_ENVIRONMENT_INHERIT, stopped));
         }
     }
     return valid;
@@ -195,8 +215,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult qemu_compat_main(Arena* arena, SliceString8 ar
             string8_list_push(arena, &summary, S8("variant\tconfigure\tbuild\tunit\tqtest\tguest\tfunctional\tperformance\n"));
             String8 compilers[] = {clang, string_format(arena, S8("{S8} cc"), ide)};
             String8 variants[] = {S8("reference"), S8("buster")};
-            bool all_passed = true;
-            for (u64 variant = 0; created.created && variant < BUSTER_ARRAY_LENGTH(variants); variant += 1)
+            bool prepared = created.created && qemu_packagefiles_prepare(arena, source, output, &stopped) && qemu_inputs_verify(arena, git, source, &stopped);
+            bool all_passed = prepared;
+            for (u64 variant = 0; prepared && variant < BUSTER_ARRAY_LENGTH(variants); variant += 1)
             {
                 String8 directory = path_join(arena, output, variants[variant]);
                 bool directory_created = os_make_directory_exclusive(directory).created;

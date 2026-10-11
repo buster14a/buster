@@ -28,6 +28,7 @@ jobs:
           requested-runner: >-
             ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        id: checkout
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -109,10 +110,12 @@ jobs:
       - name: Bootstrap native build driver
         id: bootstrap
         run: |
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/qemu-driver"
+          set -o pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/qemu-driver" 2>&1 | tee evidence/bootstrap.log
       - name: Input refusal controls
         run: |
-          "$RUNNER_TEMP/qemu-driver" test_qemu --self-test
+          set -o pipefail
+          "$RUNNER_TEMP/qemu-driver" test_qemu --self-test 2>&1 | tee evidence/input-controls.log
       - name: Build trusted Buster compiler
         id: compiler
         run: |
@@ -146,14 +149,19 @@ jobs:
           mode: retain
           retention-directory: evidence
       - name: Retain census and failed-stage diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        uses: ./.github/actions/native-artifact-upload
         with:
+          label: qemu
+          label_title: QEMU
+          compression-level: '6'
           name: qemu-census-${{ github.sha }}-${{ github.run_attempt }}
           retention-days: 7
           if-no-files-found: error
           path: |
             evidence/
+            build/CMakeCache.txt
+            build/compile_commands.json
             build/qemu-*/*.command
             build/qemu-*/*.stdout
             build/qemu-*/*.stderr

@@ -41,9 +41,12 @@ Checkout these dependencies at the revisions already named in QEMU's wrap files:
 | `subprojects/berkeley-testfloat-3` | `e7af9751d9f9fd3b47911f51a5cfd08af256a9ab` | BSD-3-Clause |
 
 No source is vendored into Buster. The hosted workflow checks out the unchanged
-GitHub mirrors. QEMU's wrap mechanism may copy the two Berkeley projects'
-`meson.build` and `meson_options.txt`; input admission requires these copies
-to match the pinned QEMU `subprojects/packagefiles` byte for byte.
+GitHub mirrors. Because Meson does not apply wrap packagefiles to an already fetched directory,
+the native action copies QEMU's unchanged `meson.build` and `meson_options.txt`
+into the two Berkeley projects after pristine input admission. These are the
+upstream wrap's build descriptions, not C source patches. Commands are retained;
+input admission requires any existing copies to match the pinned QEMU
+`subprojects/packagefiles` byte for byte, and verifies the prepared trees again.
 
 ## Commands and input boundary
 
