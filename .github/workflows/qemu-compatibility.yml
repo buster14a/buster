@@ -8,6 +8,8 @@ on:
       - 'tools/qemu_compat.c'
       - '.github/workflows/qemu-compatibility.yml'
       - 'build.c'
+      - 'src/buster/lib/compiler/driver/driver.c'
+      - 'src/buster/tests/compiler/driver/driver_test.c'
   workflow_dispatch:
 permissions:
   contents: read

@@ -2779,7 +2779,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && x86_64_abi_requested &&
         (invocation.has_gpu_target || invocation.target.cpu_arch != CPU_ARCH_X86_64))
     {
-        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: -m64 for this target"));
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for this target"), S8("-m64"));
     }
     // No canonical object field carries common-storage intent. Reject only an
     // effective request when this invocation will emit a code-generation artifact;
