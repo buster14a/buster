@@ -5402,6 +5402,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_empty_scalar_initializer_runtime(UnitT
 // designator, designators that cross anonymous struct and union members,
 // GNU ranges in a nested array, and compound-literal members as S8 spells
 // them, then check every value at run time.
+// #3579: a later conditional assertion must not change an earlier designator.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_designator_static_assert(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 depths[] = {0, 8, 16, 32};
+    for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        char8* bytes = arena_allocate(temporary.arena, char8, 4096);
+        u64 length = 0;
+        c_test_append_source(bytes, 4096, &length, S8("struct S0 { int x; int y; };\n"
+                                                   "struct S1 { struct S0 x; int y; };\n"
+                                                   "struct S1 a[] = {[2].x.x = 17, 19};\n"
+                                                   "_Static_assert("));
+        for (u32 depth = 0; depth < depths[depth_index]; depth += 1)
+        {
+            c_test_append_source(bytes, 4096, &length, S8("(1 ? "));
+        }
+        c_test_append_source(bytes, 4096, &length, S8("(23)"));
+        for (u32 depth = 0; depth < depths[depth_index]; depth += 1)
+        {
+            c_test_append_source(bytes, 4096, &length, S8(" : 99)"));
+        }
+        c_test_append_source(bytes, 4096, &length, S8(" == 23, \"conditional\");\n"));
+        String8 source = buster_test_temporary_path(temporary.arena, S8("nested-designator-assert"), S8(".c"));
+        String8 source_text = {.pointer = bytes, .length = length};
+        if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fsyntax-only"),
+                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("nested designator depth={u32} form={u32}: {S8}"),
+                        depths[depth_index], form, compiled.diagnostic));
+            }
+        }
+        c_test_scratch_end(temporary);
+    }
+    String8 invalid[] = {
+        S8("struct S0{int x,y;};struct S1{struct S0 x;int y;};struct S1 a[]={[2].bad.x=17,19};"),
+        S8("struct S0{int x,y;};struct S1{struct S0 x;int y;};struct S1 a[]={[2].x.bad=17,19};"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[index],
+            (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0);
+        BUSTER_TEST(arguments, analysis.diagnostic_count != 0);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_initializer_cursor_depth_runtime(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5417,6 +5477,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_initializer_cursor_depth_runtim
         "struct L0 { struct L1 m; int tail[3]; };\n"
         "struct Anonymous { int head; union { struct { union { struct { int deep; int deeper; }; long wide; }; int side; }; double d; }; };\n"
         "struct Case { _Bool flag; Text text; unsigned char count; unsigned char bytes[12]; };\n"
+        "struct S0 { int x; int y; };\n"
+        "struct S1 { struct S0 x; int y; };\n"
+        "struct S1 a[] = {[2].x.x = 17, 19};\n"
+        "_Static_assert((1?(1?(1?(1?(1?(1?(1?(1?(1?(1?(1?(1?(1?(1?(1?(1?(23):99):99):99):99):99):99):99):99):99):99):99):99):99):99):99):99)==23,\"conditional\");\n"
         "int main(void)\n"
         "{\n"
         "    struct Case const cases[] = {\n"
@@ -5443,6 +5507,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_initializer_cursor_depth_runtim
         "    if (anonymous[0].head != 1 || anonymous[0].deeper != 2 || anonymous[0].side != 3 || anonymous[0].deep) return 11;\n"
         "    if (anonymous[1].head != 4 || anonymous[1].deep != 5 || anonymous[1].deeper != 6 || anonymous[1].side != 7) return 12;\n"
         "    if (grid[0][0][0] != 1 || grid[0][0][1] || grid[0][2][1] != 3 || grid[1][1][0] != 4 || grid[1][2][1] != 5 || grid[1][0][0]) return 13;\n"
+        "    if (sizeof a / sizeof a[0] != 3 || a[2].x.x != 17 || a[2].x.y != 19 || a[2].y || a[0].x.x || a[1].x.y) return 14;\n"
         "    return 0;\n"
         "}\n");
     String8 source = buster_test_temporary_path(arguments->arena, S8("nested-initializer-cursor-depth"), S8(".c"));
@@ -62701,6 +62766,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_dynamic_object_size);
     C_TEST_FIXTURE(arguments, c_test_redefinition_names_previous_site);
     C_TEST_FIXTURE(arguments, c_test_empty_scalar_initializer_runtime);
+    C_TEST_FIXTURE(arguments, c_test_nested_designator_static_assert);
     C_TEST_FIXTURE(arguments, c_test_nested_initializer_cursor_depth_runtime);
     C_TEST_FIXTURE(arguments, c_test_large_function_machine_scratch_runtime);
     C_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
