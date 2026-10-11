@@ -603,7 +603,10 @@ fixed number of node and token reads; nothing recurses.
 - **Names.** A record's name is its declarator's `DECLARATOR_NAME`. The
   record is a function when the first derivation above that name is a
   `DECLARATOR_FUNCTION`; its parameter list then gives the identifier-list
-  range, when no `(` is written before the name. Group boundaries are where a
+  range. That holds when the list sits inside a redundant group,
+  `int (k(a))`, or after one, `int (k)(a)`, because the walker records the
+  name's own list either way
+  ([#3368](https://github.com/buster14a/buster/issues/3368)). Group boundaries are where a
   suffix derivation's inner declarator is a pointer. Redundant parentheses
   leave no node, so the split counts the `(` written before the name; more
   than the boundaries is a redundant group, which the walker reads the same
@@ -642,7 +645,8 @@ two cases:
      group as a parameter list (it reads `T (x)` as a function `T`); attributes
      on a pointer or opening a group; or a function returning a function or an
      array;
-   - `old_style`: an old-style declaration list;
+   - `old_style`: an old-style declaration list, including one after a
+     parenthesized name (`int (k(a)) int a; {...}`);
    - `tokens`: a comma operator in an initializer, where the walker splits a
      list, a token next to an anchor that is not the required one, or a
      variadic list inside a redundant group (`int (gv(int, ...))`), since the
@@ -714,7 +718,10 @@ The redundant-parenthesis misreads it found
 ([#3215](https://github.com/buster14a/buster/issues/3215)) are agreement
 constructs too, beside the other redundant shapes: objects and functions in
 one or more groups, a definition whose list sits inside its group, groups in a
-declarator list, after a typedef name and in parameters.
+declarator list, after a typedef name and in parameters. So are the
+old-style definitions whose name sits in a redundant group
+([#3368](https://github.com/buster14a/buster/issues/3368)), with and without
+a declaration list.
 The tree also rejects syntax errors that today's `-fsyntax-only` accepts
 ([#3143](https://github.com/buster14a/buster/issues/3143)).
 
