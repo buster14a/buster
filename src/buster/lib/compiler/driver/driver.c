@@ -4749,16 +4749,16 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_requested_libraries(Arena* arena, C
                 {
                     expanded_members += member_count;
                     String8 directory = script_path;
-                    while (directory.length && directory.pointer[directory.length - 1] != '/') { directory.length -= 1; }
+                    while (directory.length && !compiler_driver_path_separator(directory.pointer[directory.length - 1])) { directory.length -= 1; }
                     if (directory.length) { directory.length -= 1; }
                     // GNU ld rebases absolute members only for a script inside
                     // the supplied sysroot. Compare canonical directory paths.
                     String8 absolute_script = os_path_absolute(arena, script_path, false);
                     String8 absolute_sysroot = invocation.sysroot.length ? os_path_absolute(arena, invocation.sysroot, false) : (String8){0};
-                    while (absolute_sysroot.length > 1 && absolute_sysroot.pointer[absolute_sysroot.length - 1] == '/') { absolute_sysroot.length -= 1; }
+                    while (absolute_sysroot.length > 1 && compiler_driver_path_separator(absolute_sysroot.pointer[absolute_sysroot.length - 1])) { absolute_sysroot.length -= 1; }
                     bool sysrooted = absolute_sysroot.length && string_starts_with_sequence(absolute_script, absolute_sysroot) &&
                                      absolute_script.length > absolute_sysroot.length &&
-                                     (absolute_sysroot.length == 1 || absolute_script.pointer[absolute_sysroot.length] == '/');
+                                     (absolute_sysroot.length == 1 || compiler_driver_path_separator(absolute_script.pointer[absolute_sysroot.length]));
                     for (u32 index = member_count; index; index -= 1)
                     {
                         String8 name = members[index - 1];
@@ -8596,7 +8596,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     // read, fast-path allocation or lookup; export maps also reserve libc.
     u64 library_count = (u64)invocation.library_count + invocation.framework_count;
     u32 library_reserve = invocation.target.os == OPERATING_SYSTEM_WINDOWS ? 8u : invocation.target.os == OPERATING_SYSTEM_LINUX ? COMPILER_DRIVER_ELF_SCRIPT_MEMBERS + 3u : 0u;
-    if (library_count >= (u64)UINT32_MAX - library_reserve || invocation.library_path_count > UINT32_MAX - 8u)
+    if (library_count >= (u64)UINT32_MAX - library_reserve || invocation.library_path_count > UINT32_MAX - 9u)
     {
         result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         result.diagnostic = S8("native library counts exceed driver limits");

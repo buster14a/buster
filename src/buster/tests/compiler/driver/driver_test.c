@@ -15754,6 +15754,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_linker_scripts(UnitT
                     inputs_written &= file_write(path, actual);
                     String8 external = string_format_z(arena, S8("{S8}/libexternal.so"), later);
                     String8 absolute_member = os_path_absolute(arena, path, false);
+                    for (u64 index = 0; index < absolute_member.length; index += 1)
+                    {
+                        if (absolute_member.pointer[index] == '\\') { absolute_member.pointer[index] = '/'; }
+                    }
                     inputs_written &= file_write(external, BUSTER_SLICE_TO_BYTE_SLICE(string_format(arena, S8("INPUT({S8})"), absolute_member)));
                 }
                 if (scenario == 28)
