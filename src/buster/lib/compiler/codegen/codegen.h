@@ -108,29 +108,8 @@ struct CodegenAbiSignature
 };
 
 typedef struct CodegenFunction CodegenFunction;
-typedef enum CodegenUnwindActionKind
-{
-    CODEGEN_UNWIND_ACTION_PUSH_REGISTER,
-    CODEGEN_UNWIND_ACTION_SAVE_REGISTER,
-    CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER,
-    CODEGEN_UNWIND_ACTION_ALLOCATE_STACK,
-    CODEGEN_UNWIND_ACTION_NOP,
-    CODEGEN_UNWIND_ACTION_COUNT,
-} CodegenUnwindActionKind;
-
-typedef struct CodegenUnwindAction CodegenUnwindAction;
-struct CodegenUnwindAction
-{
-    // Offset of the first instruction after this prolog operation.
-    u32 code_offset;
-    // Stack bytes for ALLOCATE_STACK, or the post-operation SP-relative
-    // offset for SAVE_REGISTER and SET_FRAME_POINTER.
-    u32 value;
-    CodegenUnwindActionKind kind;
-    u8 register_index;
-    u8 reserved[3];
-};
-
+// CodegenUnwindAction lives in machine.h: the machine encoders publish it
+// as each frame instruction is emitted.
 typedef struct CodegenFunctionDescriptor CodegenFunctionDescriptor;
 struct CodegenFunctionDescriptor
 {
