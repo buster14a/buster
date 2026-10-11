@@ -1230,9 +1230,10 @@ fallback; other requests fail with `cannot find -l<request>`. TBD v5 reads only
 `install_names`, `current_versions` and `compatibility_versions` honor their
 optional `targets` lists. Inlined `libraries` do not supply the identity.
 The JSON scan validates the complete document with a fixed 64-frame stack;
-malformed/truncated input and deeper nesting are unusable. Identity strings
-and field names must be unescaped because the reader borrows mapped bytes;
-unknown values can contain JSON escapes. Ambiguous duplicate identity fields
+malformed/truncated input and deeper nesting are unusable. Ordinary metadata
+strings borrow mapped bytes; escaped strings/keys are decoded into the caller
+arena, including Unicode surrogate pairs. Invalid Unicode metadata and embedded
+NUL are refused. Ambiguous duplicate identity fields
 and overlapping target-specific metadata are refused. `compiler_driver_test_mach_library_search` covers parser bounds,
 architecture selection, search order, versions, fallback, refusal and archive
 interaction on every host without running the cross-linked image.

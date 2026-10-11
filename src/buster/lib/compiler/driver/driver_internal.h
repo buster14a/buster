@@ -64,5 +64,5 @@ typedef struct CompilerDriverMachDylibIdentity
 BUSTER_F_DECL bool compiler_driver_elf_linker_script(ByteSlice bytes);
 BUSTER_F_DECL CompilerDriverMachDylibStatus compiler_driver_mach_dylib_identity(ByteSlice bytes, Target target,
                                                                                  CompilerDriverMachDylibIdentity* identity);
-BUSTER_F_DECL CompilerDriverMachDylibStatus compiler_driver_mach_tbd_identity(ByteSlice bytes, Target target,
+BUSTER_F_DECL CompilerDriverMachDylibStatus compiler_driver_mach_tbd_identity(Arena* arena, ByteSlice bytes, Target target,
                                                                                 CompilerDriverMachDylibIdentity* identity);

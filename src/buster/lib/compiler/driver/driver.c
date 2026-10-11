@@ -4228,7 +4228,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_tbd_arch_list(ByteSlice bytes, u64
 }
 
 // JSON values are validated with a fixed grammar stack; no input-dependent
-// recursion or allocation is needed. Identity strings borrow the mapped stub.
+// recursion is needed. Ordinary identity strings borrow the mapped stub;
 enum { COMPILER_DRIVER_MACH_JSON_DEPTH = 64 };
 BUSTER_GLOBAL_LOCAL void compiler_driver_mach_json_space(ByteSlice bytes, u64* cursor)
 {
@@ -4441,23 +4441,135 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_value(ByteSlice bytes, u64* c
     return valid;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_plain(String8 value, String8* plain)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_hex(String8 value, u64* cursor, u32* code_point)
 {
-    value = compiler_driver_mach_tbd_trim(value);
-    bool valid = value.length >= 2 && value.pointer[0] == '"' && value.pointer[value.length - 1] == '"';
-    for (u64 index = 1; valid && index + 1 < value.length; index += 1)
+    bool valid = *cursor <= value.length && value.length - *cursor >= 4;
+    *code_point = 0;
+    for (u32 digit = 0; valid && digit < 4; digit += 1)
     {
-        // The identity API borrows bytes rather than allocating decoded strings.
-        valid = value.pointer[index] != '\\' && value.pointer[index] >= 0x20;
-    }
-    if (valid)
-    {
-        *plain = (String8){.pointer = value.pointer + 1, .length = value.length - 2};
+        char8 byte = value.pointer[(*cursor)++];
+        u32 hex = byte >= '0' && byte <= '9' ? (u32)(byte - '0')
+                  : byte >= 'a' && byte <= 'f' ? (u32)(byte - 'a') + 10
+                  : byte >= 'A' && byte <= 'F' ? (u32)(byte - 'A') + 10 : 16;
+        valid = hex < 16;
+        *code_point = (*code_point << 4) | hex;
     }
     return valid;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_field(String8 object, String8 key, String8* value)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_text(Arena* arena, String8 value, String8* plain)
+{
+    bool valid = value.length >= 2 && value.pointer[0] == '"' && value.pointer[value.length - 1] == '"';
+    String8 raw = {0};
+    if (valid)
+    {
+        raw = (String8){.pointer = value.pointer + 1, .length = value.length - 2};
+    }
+    bool escaped = false;
+    for (u64 index = 0; index < raw.length && !escaped; index += 1)
+    {
+        escaped = raw.pointer[index] == '\\';
+    }
+    if (valid && !escaped)
+    {
+        *plain = raw;
+    }
+    else if (valid)
+    {
+        // Decoding cannot grow a JSON string. Borrow ordinary SDK metadata;
+        // allocate only escaped strings, with the caller's identity lifetime.
+        char8* decoded = arena_allocate(arena, char8, raw.length);
+        u64 count = 0;
+        u64 cursor = 0;
+        while (valid && cursor < raw.length)
+        {
+            char8 byte = raw.pointer[cursor++];
+            if (byte != '\\')
+            {
+                decoded[count++] = byte;
+            }
+            else if (cursor == raw.length)
+            {
+                valid = false;
+            }
+            else
+            {
+                byte = raw.pointer[cursor++];
+                if (byte == 'u')
+                {
+                    u32 code_point = 0;
+                    valid = compiler_driver_mach_json_hex(raw, &cursor, &code_point);
+                    if (valid && code_point >= 0xd800 && code_point <= 0xdbff)
+                    {
+                        u32 low = 0;
+                        valid = raw.length - cursor >= 6 && raw.pointer[cursor] == '\\' && raw.pointer[cursor + 1] == 'u';
+                        if (valid)
+                        {
+                            cursor += 2;
+                            valid = compiler_driver_mach_json_hex(raw, &cursor, &low) && low >= 0xdc00 && low <= 0xdfff;
+                            if (valid)
+                            {
+                                code_point = 0x10000 + ((code_point - 0xd800) << 10) + (low - 0xdc00);
+                            }
+                        }
+                    }
+                    else if (valid && code_point >= 0xdc00 && code_point <= 0xdfff)
+                    {
+                        valid = false;
+                    }
+                    // Embedded NUL cannot be represented in LC_LOAD_DYLIB's C string.
+                    valid = valid && code_point;
+                    if (valid && code_point < 0x80)
+                    {
+                        decoded[count++] = (char8)code_point;
+                    }
+                    else if (valid && code_point < 0x800)
+                    {
+                        decoded[count++] = (char8)(0xc0 | (code_point >> 6));
+                        decoded[count++] = (char8)(0x80 | (code_point & 0x3f));
+                    }
+                    else if (valid && code_point < 0x10000)
+                    {
+                        decoded[count++] = (char8)(0xe0 | (code_point >> 12));
+                        decoded[count++] = (char8)(0x80 | ((code_point >> 6) & 0x3f));
+                        decoded[count++] = (char8)(0x80 | (code_point & 0x3f));
+                    }
+                    else if (valid)
+                    {
+                        decoded[count++] = (char8)(0xf0 | (code_point >> 18));
+                        decoded[count++] = (char8)(0x80 | ((code_point >> 12) & 0x3f));
+                        decoded[count++] = (char8)(0x80 | ((code_point >> 6) & 0x3f));
+                        decoded[count++] = (char8)(0x80 | (code_point & 0x3f));
+                    }
+                }
+                else
+                {
+                    switch (byte)
+                    {
+                        case '"': case '\\': case '/': break;
+                        case 'b': byte = '\b'; break;
+                        case 'f': byte = '\f'; break;
+                        case 'n': byte = '\n'; break;
+                        case 'r': byte = '\r'; break;
+                        case 't': byte = '\t'; break;
+                        default: valid = false; break;
+                    }
+                    if (valid)
+                    {
+                        decoded[count++] = byte;
+                    }
+                }
+            }
+        }
+        if (valid)
+        {
+            *plain = (String8){.pointer = decoded, .length = count};
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_field(Arena* arena, String8 object, String8 key, String8* value)
 {
     bool valid = object.length >= 2 && object.pointer[0] == '{';
     bool seen = false;
@@ -4473,7 +4585,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_field(String8 object, String8
         valid = compiler_driver_mach_json_string(bytes, &cursor);
         if (valid)
         {
-            valid = compiler_driver_mach_json_plain(
+            valid = compiler_driver_mach_json_text(arena,
                 (String8){.pointer = object.pointer + start, .length = cursor - start}, &name);
         }
         compiler_driver_mach_json_space(bytes, &cursor);
@@ -4529,10 +4641,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_target(String8 value, Target 
            (target.cpu_arch == CPU_ARCH_AARCH64 || target.cpu_arch == CPU_ARCH_X86_64) && string_equal(value, expected);
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_targets(String8 entry, Target target, bool* matches)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_targets(Arena* arena, String8 entry, Target target, bool* matches)
 {
     String8 targets = {0};
-    bool valid = compiler_driver_mach_json_field(entry, S8("targets"), &targets);
+    bool valid = compiler_driver_mach_json_field(arena, entry, S8("targets"), &targets);
     *matches = !targets.length;
     if (valid && targets.length)
     {
@@ -4542,14 +4654,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_json_targets(String8 entry, Target
         while (valid && compiler_driver_mach_json_array_next(targets, &cursor, &value, &valid))
         {
             String8 plain = {0};
-            valid = compiler_driver_mach_json_plain(value, &plain);
+            valid = compiler_driver_mach_json_text(arena, value, &plain);
             *matches |= valid && compiler_driver_mach_json_target(plain, target);
         }
     }
     return valid;
 }
 
-BUSTER_GLOBAL_LOCAL CompilerDriverMachDylibStatus compiler_driver_mach_tbd_v5_identity(ByteSlice bytes, Target target,
+BUSTER_GLOBAL_LOCAL CompilerDriverMachDylibStatus compiler_driver_mach_tbd_v5_identity(Arena* arena, ByteSlice bytes, Target target,
                                                                                       CompilerDriverMachDylibIdentity* identity)
 {
     CompilerDriverMachDylibStatus result = COMPILER_DRIVER_MACH_DYLIB_UNUSABLE;
@@ -4561,10 +4673,10 @@ BUSTER_GLOBAL_LOCAL CompilerDriverMachDylibStatus compiler_driver_mach_tbd_v5_id
     String8 targets = {0};
     bool valid = compiler_driver_mach_json_value(bytes, &cursor, &document);
     compiler_driver_mach_json_space(bytes, &cursor);
-    valid = valid && cursor == bytes.length && compiler_driver_mach_json_field(document, S8("tapi_tbd_version"), &version) &&
+    valid = valid && cursor == bytes.length && compiler_driver_mach_json_field(arena, document, S8("tapi_tbd_version"), &version) &&
             string_equal(compiler_driver_mach_tbd_trim(version), S8("5")) &&
-            compiler_driver_mach_json_field(document, S8("main_library"), &library) &&
-            compiler_driver_mach_json_field(library, S8("target_info"), &targets) && targets.length && targets.pointer[0] == '[';
+            compiler_driver_mach_json_field(arena, document, S8("main_library"), &library) &&
+            compiler_driver_mach_json_field(arena, library, S8("target_info"), &targets) && targets.length && targets.pointer[0] == '[';
     bool compatible = false;
     bool target_seen = false;
     cursor = 1;
@@ -4573,8 +4685,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverMachDylibStatus compiler_driver_mach_tbd_v5_id
     {
         String8 value = {0};
         String8 plain = {0};
-        valid = compiler_driver_mach_json_field(entry, S8("target"), &value) &&
-                compiler_driver_mach_json_plain(value, &plain) && plain.length;
+        valid = compiler_driver_mach_json_field(arena, entry, S8("target"), &value) &&
+                compiler_driver_mach_json_text(arena, value, &plain) && plain.length;
         target_seen = true;
         compatible |= valid && compiler_driver_mach_json_target(plain, target);
     }
@@ -4583,7 +4695,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverMachDylibStatus compiler_driver_mach_tbd_v5_id
     for (u32 field = 0; valid && field < BUSTER_ARRAY_LENGTH(keys); field += 1)
     {
         String8 array = {0};
-        valid = compiler_driver_mach_json_field(library, keys[field], &array) && (field || array.length);
+        valid = compiler_driver_mach_json_field(arena, library, keys[field], &array) && (field || array.length);
         if (valid && array.length)
         {
             valid = array.pointer[0] == '[';
@@ -4596,9 +4708,9 @@ BUSTER_GLOBAL_LOCAL CompilerDriverMachDylibStatus compiler_driver_mach_tbd_v5_id
                 String8 plain = {0};
                 bool matches = false;
                 u32 packed = 0;
-                valid = compiler_driver_mach_json_field(entry, field ? S8("version") : S8("name"), &value) &&
-                        compiler_driver_mach_json_plain(value, &plain) && plain.length &&
-                        compiler_driver_mach_json_targets(entry, target, &matches);
+                valid = compiler_driver_mach_json_field(arena, entry, field ? S8("version") : S8("name"), &value) &&
+                        compiler_driver_mach_json_text(arena, value, &plain) && plain.length &&
+                        compiler_driver_mach_json_targets(arena, entry, target, &matches);
                 if (valid && field)
                 {
                     valid = compiler_driver_mach_tbd_version(plain, &packed);
@@ -4643,7 +4755,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverMachDylibStatus compiler_driver_mach_tbd_v5_id
     return result;
 }
 
-CompilerDriverMachDylibStatus compiler_driver_mach_tbd_identity(ByteSlice bytes, Target target, CompilerDriverMachDylibIdentity* identity)
+CompilerDriverMachDylibStatus compiler_driver_mach_tbd_identity(Arena* arena, ByteSlice bytes, Target target, CompilerDriverMachDylibIdentity* identity)
 {
     CompilerDriverMachDylibStatus result = COMPILER_DRIVER_MACH_DYLIB_UNUSABLE;
     CompilerDriverMachDylibIdentity parsed = {.current_version = 0x10000, .compatibility_version = 0x10000};
@@ -4658,7 +4770,7 @@ CompilerDriverMachDylibStatus compiler_driver_mach_tbd_identity(ByteSlice bytes,
     }
     if (bytes.pointer && json_cursor < bytes.length && bytes.pointer[json_cursor] == '{')
     {
-        result = compiler_driver_mach_tbd_v5_identity(bytes, target, identity);
+        result = compiler_driver_mach_tbd_v5_identity(arena, bytes, target, identity);
     }
     else if (bytes.pointer && bytes.length)
     {
@@ -4832,7 +4944,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_library_locate(Arena* arena, Compi
                 CompilerDriverMachDylibStatus status = exact && compiler_driver_mach_bytes_are_binary(map.bytes)
                                                            ? compiler_driver_mach_dylib_identity(map.bytes, invocation.target, &candidate)
                                                            : exact || candidate_index == 0
-                                                                 ? compiler_driver_mach_tbd_identity(map.bytes, invocation.target, &candidate)
+                                                                 ? compiler_driver_mach_tbd_identity(arena, map.bytes, invocation.target, &candidate)
                                                                  : compiler_driver_mach_dylib_identity(map.bytes, invocation.target, &candidate);
                 if (status == COMPILER_DRIVER_MACH_DYLIB_USABLE)
                 {
@@ -5726,7 +5838,7 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
                 {
                     CompilerDriverMachDylibIdentity identity = {0};
                     CompilerDriverMachDylibStatus status = shared_index == 0
-                                                               ? compiler_driver_mach_tbd_identity(shared_map.bytes, invocation.target, &identity)
+                                                               ? compiler_driver_mach_tbd_identity(arena, shared_map.bytes, invocation.target, &identity)
                                                                : compiler_driver_mach_dylib_identity(shared_map.bytes, invocation.target, &identity);
                     shared_found = status != COMPILER_DRIVER_MACH_DYLIB_INCOMPATIBLE;
                 }
