@@ -1,1 +1,1 @@
-int main(void) { int a=1,b=0; void *p=(__typeof__((void*)0))&&done; void *q=(__typeof(void*))&&done; void *r=(typeof((void*)0))&&done; void *s=(__typeof__((a && b,(void*)0)))&&done; done: return p!=&&done || q!=&&done || r!=&&done || s!=&&done; }
+int main(void) { void* p = (__typeof__((void*)0))&&done; done: return p != &&done; }

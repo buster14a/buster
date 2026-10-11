@@ -465,6 +465,10 @@ still an operand, and ordinary conjunctions still bind ordinary identifiers.
 `c_test_typeof_label_address` covers GNU17/GNU23, all six native target
 layouts, both canonical forms, and default/pilot verified execution under
 FAST/QUALITY, with undeclared conjunction/sizeof/alignof/typeof neighbors.
+A complete root equality/inequality is a provenance sink: its result is the
+ordinary integer produced by canonical pointer equality. Conditional, comma,
+logical and cast results retain the conservative policy; decorated pointer
+return/call/static-storage and conditional/comma controls remain rejected.
 Every provenance fact the walk records descends from such a
 root, so a body it skips could have recorded or diagnosed nothing. The
 conjunction operator shares the spelling; a body with a goto label and

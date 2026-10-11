@@ -38688,6 +38688,45 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
             }
         }
     }
+    if (label)
+    {
+        // Equality consumes a label pointer and produces an ordinary int,
+        // as canonical POINTER_EQUAL/NOT_EQUAL already do. Only a complete
+        // equality expression is a sink: conditional/comma/logical results
+        // and casts retain the existing conservative provenance policy.
+        u32 first = start;
+        u32 limit = end;
+        while (first < limit && c_token_is_punctuator(&preprocess.tokens[first], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+               c_parse_matching_delimiter_indexed(result, preprocess, first) + 1 == limit)
+        {
+            first += 1;
+            limit -= 1;
+        }
+        u32 root_precedence = UINT32_MAX;
+        for (u32 cursor = first; cursor < limit; cursor += 1)
+        {
+            CToken token = preprocess.tokens[cursor];
+            if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
+            {
+                u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
+                cursor = close < limit ? close : limit;
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+            {
+                root_precedence = BUSTER_MIN(root_precedence, 3u);
+            }
+            else
+            {
+                u32 precedence = c_parse_expression_operator_precedence(token);
+                bool label_address = c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+                    c_parse_label_address_prefix_with_typedef(result, &preprocess, scope, first, cursor);
+                bool binary = precedence && cursor > first && cursor + 1 < limit && !label_address &&
+                    c_parse_expression_token_ends_operand(preprocess.tokens[cursor - 1]);
+                if (binary) root_precedence = BUSTER_MIN(root_precedence, precedence);
+            }
+        }
+        label = root_precedence != c_parse_expression_operator_precedence((CToken){.kind = C_TOKEN_PUNCTUATOR, .punctuator = C_PUNCTUATOR_EQUAL});
+    }
     return label;
 }
 
