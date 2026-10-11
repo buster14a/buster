@@ -96,7 +96,7 @@ BUSTER_GLOBAL_LOCAL bool qemu_inputs_verify(Arena* arena, String8 git, String8 s
                 if (valid && generated_stats.kind != OS_FILE_KIND_MISSING)
                 {
                     String8 original = string_format_z(arena, S8("{S8}/subprojects/packagefiles/{S8}/{S8}"), source, names[index], files[file_i]);
-                    String8 cmp_args[] = {S8("cmp"), original, generated};
+                    String8 cmp_args[] = {executable_resolve_in_path(arena, S8("cmp")), original, generated};
                     valid = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(cmp_args), source, (String8){0}, RADDEBUGGER_ENVIRONMENT_INHERIT, stopped));
                 }
             }
@@ -116,7 +116,7 @@ BUSTER_GLOBAL_LOCAL bool qemu_packagefiles_prepare(Arena* arena, String8 source,
         {
             String8 original = string_format_z(arena, S8("{S8}/subprojects/packagefiles/{S8}/{S8}"), source, names[index], files[file_i]);
             String8 generated = string_format_z(arena, S8("{S8}/subprojects/{S8}/{S8}"), source, names[index], files[file_i]);
-            String8 copy[] = {S8("cp"), original, generated};
+            String8 copy[] = {executable_resolve_in_path(arena, S8("cp")), original, generated};
             String8 prefix = string_format(arena, S8("{S8}/packagefiles-{u64}-{u64}"), output, index, file_i);
             valid = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(copy), source, prefix, RADDEBUGGER_ENVIRONMENT_INHERIT, stopped));
         }
@@ -244,10 +244,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult qemu_compat_main(Arena* arena, SliceString8 ar
                     String8 inventory[] = {meson, S8("introspect"), S8("--tests"), directory};
                     retained = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(inventory), directory,
                         string_format(arena, S8("{S8}/{S8}-test-inventory"), output, variants[variant]), RADDEBUGGER_ENVIRONMENT_INHERIT, &stopped)) && retained;
-                    String8 unit_args[] = {S8("make"), S8("-j2"), S8("check-unit")};
+                    String8 unit_args[] = {executable_resolve_in_path(arena, S8("make")), S8("-j2"), S8("check-unit")};
                     unit = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unit_args), directory,
                         string_format(arena, S8("{S8}/{S8}-unit"), output, variants[variant]), RADDEBUGGER_ENVIRONMENT_INHERIT, &stopped));
-                    String8 qtest_args[] = {S8("make"), S8("-j2"), S8("check-qtest")};
+                    String8 qtest_args[] = {executable_resolve_in_path(arena, S8("make")), S8("-j2"), S8("check-qtest")};
                     qtest = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(qtest_args), directory,
                         string_format(arena, S8("{S8}/{S8}-qtest"), output, variants[variant]), RADDEBUGGER_ENVIRONMENT_INHERIT, &stopped));
                 }
