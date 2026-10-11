@@ -1771,7 +1771,7 @@ Buster currently links in process and has no external-linker selector.
 For a native Linux x86-64 or AArch64 ELF link, raw linker `-v` from
 `-Wl,-v` or `-Xlinker -v` requests the native linker's identity while allowing
 the link to continue. It is consumed only in option position; operands to
-`-soname`, `--soname`, `-h` or `-z` are preserved. Other targets and output
+`-soname`, `--soname`, `-h`, `-z` or `--version-script` are preserved. Other targets and output
 modes continue to reject it. With driver `-v`, the driver also prints a
 ` buster-native-ld` link-report line containing the output, explicit and
 target/sysroot library search roots in lookup order, command-line object,

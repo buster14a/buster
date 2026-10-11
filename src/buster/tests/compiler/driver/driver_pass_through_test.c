@@ -23,6 +23,40 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_arguments(U
     {
         BUSTER_STRING_TEST(arguments, linker_verbose_with_argument.linker_arguments[0], S8("--no-undefined"));
     }
+    String8 version_script_verbose_operand[] = {S8("--target=x86_64-linux-gnu"), S8("a.o"),
+                                                S8("-Wl,--version-script,-v"), S8("-o"), S8("out")};
+    CompilerDriverInvocation version_script_verbose =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(version_script_verbose_operand));
+    BUSTER_TEST(arguments, version_script_verbose.error == COMPILER_DRIVER_ERROR_NONE &&
+                               !version_script_verbose.linker_verbose && version_script_verbose.linker_argument_count == 2);
+    if (version_script_verbose.linker_argument_count == 2)
+    {
+        BUSTER_STRING_TEST(arguments, version_script_verbose.linker_arguments[0], S8("--version-script"));
+        BUSTER_STRING_TEST(arguments, version_script_verbose.linker_arguments[1], S8("-v"));
+    }
+    String8 version_script_xlinker_operand[] = {S8("--target=x86_64-linux-gnu"), S8("a.o"), S8("-Xlinker"),
+                                                S8("--version-script"), S8("-Xlinker"), S8("-v"), S8("-o"), S8("out")};
+    CompilerDriverInvocation version_script_xlinker =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(version_script_xlinker_operand));
+    BUSTER_TEST(arguments, version_script_xlinker.error == COMPILER_DRIVER_ERROR_NONE &&
+                               !version_script_xlinker.linker_verbose && version_script_xlinker.linker_argument_count == 2);
+    if (version_script_xlinker.linker_argument_count == 2)
+    {
+        BUSTER_STRING_TEST(arguments, version_script_xlinker.linker_arguments[0], S8("--version-script"));
+        BUSTER_STRING_TEST(arguments, version_script_xlinker.linker_arguments[1], S8("-v"));
+    }
+    String8 version_script_verbose_trailing[] = {S8("--target=x86_64-linux-gnu"), S8("a.o"),
+                                                 S8("-Wl,--version-script,-v,-v"), S8("-o"), S8("out")};
+    CompilerDriverInvocation version_script_verbose_with_trailing =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(version_script_verbose_trailing));
+    BUSTER_TEST(arguments, version_script_verbose_with_trailing.error == COMPILER_DRIVER_ERROR_NONE &&
+                               version_script_verbose_with_trailing.linker_verbose &&
+                               version_script_verbose_with_trailing.linker_argument_count == 2);
+    if (version_script_verbose_with_trailing.linker_argument_count == 2)
+    {
+        BUSTER_STRING_TEST(arguments, version_script_verbose_with_trailing.linker_arguments[0], S8("--version-script"));
+        BUSTER_STRING_TEST(arguments, version_script_verbose_with_trailing.linker_arguments[1], S8("-v"));
+    }
     String8 soname_verbose_operand[] = {S8("--target=x86_64-linux-gnu"), S8("-shared"), S8("-Wl,-soname,-v"), S8("a.o")};
     CompilerDriverInvocation soname_verbose =
         compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(soname_verbose_operand));
