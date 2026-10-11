@@ -4983,7 +4983,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
 // undeclared name. Each compiles to the same object with and without
 // -fc-ast-pilot, which publishes the split from the tree for all but the
 // shapes it still refuses (an attribute list opening a group, a variadic list
-// inside one), and each program's main returns 0.
+// inside one, an `_Atomic(T)` or `typeof` specifier), and each program's main
+// returns 0.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_groups(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5001,6 +5002,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_gro
             "int main(void) { tp = id; return a + b + c[1] + (d != 0) + e() + (g != 0) + t[1] + tp(0) + (int)sizeof(t) - 8; }\n"),
          true},
         {S8("int (gv(int a, ...)) { return a; }\nint main(void) { return gv(0, 1, 2); }\n"), false},
+        // The `(` of `_Atomic(int)` and `__typeof__(int)` opens the word's
+        // operand, not the `(f)(...)` function shape (#3368). Both fall back
+        // with reason `specifiers`.
+        {S8("_Atomic(int) (av), (*ap), (ar)[2];\n_Atomic(int) (*(af))(void);\n_Atomic(int) (fd(int a)) { return a; }\n"
+            "int main(void) { fd(0); return av + (ap != 0) + ar[1] + (af != 0); }\n"),
+         false},
+        {S8("__typeof__(int) (tv), (*tp);\n__typeof__(int) (td(int a)) { return a; }\nint main(void) { return tv + (tp != 0) + td(0); }\n"), false},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
     {

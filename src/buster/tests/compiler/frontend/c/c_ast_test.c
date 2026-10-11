@@ -3928,6 +3928,9 @@ BUSTER_GLOBAL_LOCAL CAstSplitCase const c_ast_split_cases[] = {
      C_PARSER_TREE_FALLBACK_NONE, 0},
     {S8_INITIALIZER("_Alignas(8) int a;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_SPECIFIERS},
     {S8_INITIALIZER("__typeof__(1) t;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_SPECIFIERS},
+    // The walker read the `(int)` operand and `(av)` as the function shape
+    // `(f)(...)` named `int` (#3368).
+    {S8_INITIALIZER("_Atomic(int) (av); _Atomic(int) (fd(int a)) { return a; }"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_SPECIFIERS},
     {S8_INITIALIZER("enum E : int { A };"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_SPECIFIERS},
     // #3215: redundant groups, published since the walker walks out of them.
     {S8_INITIALIZER("int f(int x) { return x + 1; } int ((*pq))(int) = f;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 0},
