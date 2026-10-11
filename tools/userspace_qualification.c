@@ -175,8 +175,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
             string8_list_push(arena, &command, path_join(arena, path_join(arena, musl_output, S8("clang")), S8("crt/crtn.o")));
         }
         SliceString8 argv = string8_list_to_slice(arena, command);
+        String8List original_raw = {0};
+        SliceString8 original_argv = string8_list_to_slice(arena, original);
+        for (u64 i = 0; i < original_argv.length; i += 1)
+        {
+            string8_list_push(arena, &original_raw, string_format(arena, S8("{u64}:{S8}\n"), original_argv.pointer[i].length, original_argv.pointer[i]));
+        }
         valid = clang_suite_write(arena, path_join(arena, action, S8("upstream-argv.txt")),
-                                  string_join_arena(arena, string8_list_to_slice(arena, original), false)) && valid;
+                                  string_join_arena(arena, string8_list_to_slice(arena, original_raw), false)) && valid;
         // Length-prefixed argv cannot confuse whitespace inside a define/path.
         String8List raw = {0};
         for (u64 i = 0; i < argv.length; i += 1)
@@ -224,6 +230,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
             }
         }
         valid = userspace_save_command(arena, action, ran) && valid;
+        String8 source_hash = {0};
+        if (target_c)
+        {
+            ByteSlice bytes = file_read(arena, source, (FileReadOptions){0});
+            valid = bytes.pointer && bytes.length && valid;
+            if (bytes.pointer && bytes.length)
+            {
+                source_hash = stage_object_sha256_bytes(arena, bytes.pointer, bytes.length);
+            }
+        }
         String8 object_hash = {0};
         if (ran.result == PROCESS_RESULT_SUCCESS && output.length && !string_equal(output, S8("/dev/null")))
         {
@@ -234,9 +250,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
                 object_hash = stage_object_sha256_bytes(arena, bytes.pointer, bytes.length);
             }
         }
-        String8 record = string_format(arena, S8("role={S8}\ncompiler={S8}\nsource={S8}\noutput={S8}\nobject_sha256={S8}\nstatus={S8}\n"),
+        String8 record = string_format(arena, S8("role={S8}\ncompiler={S8}\nsource={S8}\nsource_sha256={S8}\noutput={S8}\nobject_sha256={S8}\nstatus={S8}\n"),
                                        target_c ? S8("target-c") : preprocess || query ? S8("external-generator") : link ? S8("external-link") : S8("compiler-probe"),
-                                       buster ? S8("buster") : S8("clang"), source, output, object_hash,
+                                       buster ? S8("buster") : S8("clang"), source, source_hash, output, object_hash,
                                        ran.result == PROCESS_RESULT_SUCCESS && valid ? S8("pass") : S8("fail"));
         valid = clang_suite_write(arena, path_join(arena, action, S8("record.txt")), record) && valid;
         os_file_write(os_get_standard_stream(STANDARD_STREAM_OUTPUT), BUSTER_SLICE_TO_BYTE_SLICE(ran.output));
@@ -245,6 +261,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
     }
     return result;
 }
+
+#include "userspace_actions.c"
 
 BUSTER_GLOBAL_LOCAL bool userspace_make(Arena* arena, String8 source, String8 directory, String8 cc, String8 target, String8 evidence)
 {
@@ -497,6 +515,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
                 if (valid)
                 {
                     stages[side] = userspace_make(arena, source, build, compiler, S8("busybox"), build);
+                    bool inventory = userspace_inventory(arena, directory, side != 0);
+                    stages[side] = stages[side] && inventory;
                     // Keep attempting the independent candidate after a
                     // reference failure only in a later run with a valid reference.
                     valid = stages[side];

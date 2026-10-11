@@ -5,7 +5,7 @@ on:
       - codex/3179-musl-busybox-qualification
     paths:
       - '.github/workflows/userspace-qualification.yml'
-      - 'tools/userspace_qualification.c'
+      - 'tools/userspace*.c'
       - 'tests/userspace/**'
   workflow_dispatch:
 permissions:
@@ -64,6 +64,21 @@ jobs:
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/userspace-build" test_userspace "$RUNNER_TEMP/userspace-inputs/busybox" "$RUNNER_TEMP/userspace-inputs/musl" "$RUNNER_TEMP/userspace-inputs/libc-test" "$RUNNER_TEMP/userspace-evidence/joint" 2>&1 | tee "$RUNNER_TEMP/userspace-evidence/userspace.log"
+      - name: Source-size report
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/userspace-build" source_size --base abb1c5afbcf55e120d83283ffbad402fc75bd80a 2>&1 | tee "$RUNNER_TEMP/userspace-evidence/source-size.txt"
+      - name: Generate reviewable source-size acknowledgement
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/userspace-build" source_size --write-baseline
+          cp docs/source-size-baseline.txt "$RUNNER_TEMP/userspace-evidence/source-size-baseline.txt"
+          cat "$RUNNER_TEMP/userspace-evidence/source-size-baseline.txt"
       - name: Retain machine records
         if: ${{ !cancelled() }}
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768

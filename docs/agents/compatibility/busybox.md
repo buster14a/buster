@@ -88,18 +88,21 @@ A zero exit status without the exact transcript fails.
 
 `reference-actions/` and `buster-actions/` retain one directory per CC action:
 effective length-prefixed argv, upstream argv, stdout/stderr, OS status and
-timeout/capture/cleanup facts, source/output names and object SHA-256.
+timeout/capture/cleanup facts, source/output names and source/object SHA-256.
 A failed make uses `-k` to expose independent failures. Its logs and attempted
 actions must be read together: action count is not proof that all required
-actions were attempted. Complete required/attempted/pass/fail/skip inventories,
-source/header closure and all applicable BusyBox upstream tests remain
+actions were attempted. The native action inventory records target-C attempted/pass/fail counts and
+matches candidate object names against a successful reference build, reporting
+required, attempted, passed, failed, not-attempted and unmatched actions.
+Full source/header closure and all applicable BusyBox upstream tests remain
 completion work under [#3179](https://github.com/buster14a/buster/issues/3179).
 
 The opt-in [workflow](../../../.github/workflows/userspace-qualification.yml)
 runs only on its explicitly named development branch or manual dispatch. It
 does not add a PR/merge-group/main workload or a required check. Each job reports
 machine specifications and retains logs, outputs and compiler build metadata,
-including failures. Commands and the receipt report cloud correctness only.
+including failures. Hidden `.config` and upstream dependency `.cmd` files are
+included in the retained evidence. Commands and the receipt report cloud correctness only.
 All clean/edit/header cost, process-tree memory, code-size and runtime performance
 acceptance remains incomplete until the existing approved 9700X service supplies
 the relevant exact-candidate/configuration evidence.
