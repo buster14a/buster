@@ -65,7 +65,10 @@ With the trusted Release compiler built, run on authorized cloud infrastructure:
 ```
 
 The action refuses a wrong pin, tracked edits, extra untracked/ignored input,
-hidden index flags and sparse checkout. Each dependency is verified separately;
+hidden index flags and sparse checkout. Immutable Git probes disable replacement
+objects and compare the index to the immutable HEAD tree. A native control
+creates a replacement ref with a clean-looking altered checkout and requires
+rejection before any compiler runs. Each dependency is verified separately;
 the three known dependency directories are the only root ignored-directory
 exceptions. Meson's `subprojects/.wraplock` is admitted only as an empty regular
 file at its canonical path; arbitrary untracked/ignored files remain refused.

@@ -30,26 +30,32 @@ BUSTER_GLOBAL_LOCAL bool qemu_status_allowed(String8 text, String8 expected)
 
 BUSTER_GLOBAL_LOCAL bool qemu_git_verify(Arena* arena, String8 git, String8 source, String8 expected, bool* stopped)
 {
-    String8 root_args[] = {git, S8("-c"), S8("core.fsmonitor=false"), S8("rev-parse"), S8("--show-toplevel")};
+    String8 root_args[] = {git, S8("--no-replace-objects"), S8("-c"), S8("core.fsmonitor=false"), S8("rev-parse"), S8("--show-toplevel")};
     RaddebuggerCommandResult root = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(root_args), source, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
     String8 actual_root = os_path_absolute(arena, compat_trim_ascii_space(root.output), true);
     bool valid = raddebugger_command_ok(root) && actual_root.length && string_equal(actual_root, source);
     if (valid)
     {
-        String8 head_args[] = {git, S8("rev-parse"), S8("HEAD")};
+        String8 head_args[] = {git, S8("--no-replace-objects"), S8("rev-parse"), S8("HEAD")};
         RaddebuggerCommandResult head = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_args), source, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
         valid = raddebugger_command_ok(head) && string_equal(compat_trim_ascii_space(head.output), expected);
     }
     if (valid)
     {
-        String8 status_args[] = {git, S8("-c"), S8("core.fsmonitor=false"), S8("status"), S8("--porcelain"), S8("--untracked-files=normal"), S8("--ignored=matching"), S8("--ignore-submodules=none")};
+        String8 status_args[] = {git, S8("--no-replace-objects"), S8("-c"), S8("core.fsmonitor=false"), S8("status"), S8("--porcelain"), S8("--untracked-files=normal"), S8("--ignored=matching"), S8("--ignore-submodules=none")};
         RaddebuggerCommandResult status = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_args), source, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
         valid = raddebugger_command_ok(status) && qemu_status_allowed(status.output, expected);
         if (!valid) { string_print(S8("QEMU_SOURCE_STATUS path={S8}\n{S8}"), source, status.output); }
     }
     if (valid)
     {
-        String8 index_args[] = {git, S8("-c"), S8("core.fsmonitor=false"), S8("ls-files"), S8("-v"), S8("--stage"), S8("-z")};
+        String8 immutable[] = {git, S8("--no-replace-objects"), S8("-c"), S8("core.fsmonitor=false"),
+                               S8("diff-index"), S8("--cached"), S8("--quiet"), S8("--no-ext-diff"), S8("HEAD"), S8("--")};
+        valid = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(immutable), source, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped));
+    }
+    if (valid)
+    {
+        String8 index_args[] = {git, S8("--no-replace-objects"), S8("-c"), S8("core.fsmonitor=false"), S8("ls-files"), S8("-v"), S8("--stage"), S8("-z")};
         RaddebuggerCommandResult index = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(index_args), source, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
         valid = raddebugger_command_ok(index) && index.output.length;
         for (u64 offset = 0; valid && offset < index.output.length;)
@@ -66,7 +72,7 @@ BUSTER_GLOBAL_LOCAL bool qemu_git_verify(Arena* arena, String8 git, String8 sour
     }
     if (valid)
     {
-        String8 sparse_args[] = {git, S8("config"), S8("--bool"), S8("--default=false"), S8("--get"), S8("core.sparseCheckout")};
+        String8 sparse_args[] = {git, S8("--no-replace-objects"), S8("config"), S8("--bool"), S8("--default=false"), S8("--get"), S8("core.sparseCheckout")};
         RaddebuggerCommandResult sparse = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(sparse_args), source, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
         valid = raddebugger_command_ok(sparse) && string_equal(compat_trim_ascii_space(sparse.output), S8("false"));
     }
@@ -178,12 +184,30 @@ BUSTER_GLOBAL_LOCAL ProcessResult qemu_self_test(Arena* arena)
                               !qemu_status_allowed(S8("!! ignored-input.c\n"), S8(BUSTER_QEMU_COMMIT)) &&
                               qemu_status_allowed(S8("?? meson.build\n?? meson_options.txt\n"), S8(BUSTER_QEMU_SOFTFLOAT_COMMIT)) &&
                               !qemu_status_allowed(S8("?? extra.c\n"), S8(BUSTER_QEMU_SOFTFLOAT_COMMIT));
-            passed = exceptions && pristine && wrong_revision && dirty && restored && untracked_rejected && untracked_removed && ignored_rejected && ignored_removed &&
+            // Reproduce a clean-looking replaced pin, then require immutable
+            // provenance to refuse its altered index and worktree.
+            String8 clear_skip[] = {git, S8("update-index"), S8("--no-skip-worktree"), S8("fixture.txt")};
+            bool replacement_setup = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(clear_skip), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped)) &&
+                file_write(fixture, BUSTER_SLICE_TO_BYTE_SLICE(S8("replaced\n"))) &&
+                raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(add), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped)) &&
+                raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(commit), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped));
+            RaddebuggerCommandResult altered_head = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped);
+            String8 replace[] = {git, S8("replace"), fixture_commit, compat_trim_ascii_space(altered_head.output)};
+            String8 checkout[] = {git, S8("checkout"), S8("--quiet"), S8("--detach"), S8("--force"), fixture_commit};
+            String8 shadow_status[] = {git, S8("status"), S8("--porcelain")};
+            replacement_setup = replacement_setup && raddebugger_command_ok(altered_head) &&
+                raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(replace), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped)) &&
+                raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(checkout), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped));
+            RaddebuggerCommandResult shadow = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(shadow_status), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped);
+            ByteSlice altered_bytes = file_read(arena, fixture, (FileReadOptions){.map_required = 0});
+            bool replacement_rejected = replacement_setup && raddebugger_command_ok(shadow) && !shadow.output.length &&
+                string_equal(BYTE_SLICE_TO_STRING(8, altered_bytes), S8("replaced\n")) && !qemu_git_verify(arena, git, directory, fixture_commit, &stopped);
+            passed = replacement_rejected && exceptions && pristine && wrong_revision && dirty && restored && untracked_rejected && untracked_removed && ignored_rejected && ignored_removed &&
                      assume_rejected && normal_restored && skip_rejected;
             string_print(S8("QEMU_SELF_TEST pristine={u32} wrong_revision={u32} dirty={u32} untracked={u32} ignored={u32} "
-                            "assume_unchanged={u32} skip_worktree={u32} compiler_invocations=0 status={S8}\n"),
+                            "assume_unchanged={u32} skip_worktree={u32} replacement={u32} compiler_invocations=0 status={S8}\n"),
                          (u32)pristine, (u32)wrong_revision, (u32)dirty, (u32)untracked_rejected, (u32)ignored_rejected, (u32)assume_rejected,
-                         (u32)skip_rejected, passed ? S8("pass") : S8("fail"));
+                         (u32)skip_rejected, (u32)replacement_rejected, passed ? S8("pass") : S8("fail"));
         }
     }
     bool removed = !created.created || os_directory_delete(directory);
