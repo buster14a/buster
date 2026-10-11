@@ -134,14 +134,20 @@ BUSTER_GLOBAL_LOCAL bool userspace_workload(Arena* arena, String8 program_path, 
     if (valid)
     {
         // Noninteractive ash opens /dev/null for a background child.
-        String8 device_args[] = {S8("sudo"), S8("-n"), S8("mknod"), S8("-m"), S8("666"),
+        String8 device_args[] = {S8("mknod"), S8("-m"), S8("666"),
                                  path_join(arena, root, S8("dev/null")), S8("c"), S8("1"), S8("3")};
         ClangSuiteCommand device = userspace_command(arena, S8("."), (SliceString8)BUSTER_ARRAY_TO_SLICE(device_args), 60);
         String8 device_evidence = path_join(arena, root, S8("device-node"));
         make_directory_recursive(arena, device_evidence);
         valid = userspace_save_command(arena, device_evidence, device) && device.result == PROCESS_RESULT_SUCCESS;
+        if (!valid)
+        {
+            string_print(S8("USERSPACE_DEVICE result={u32} status={u32} timeout={u32} capture={u32} cleanup={u32}\n"),
+                         (u32)device.result, device.platform_status, (u32)device.timed_out, (u32)device.capture_failed, (u32)device.cleanup_failed);
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(device.error));
+        }
     }
-    String8 run_args[] = {S8("sudo"), S8("-n"), S8("env"), S8("-i"), S8("PATH=/bin"), S8("LC_ALL=C"), S8("TZ=UTC"),
+    String8 run_args[] = {S8("env"), S8("-i"), S8("PATH=/bin"), S8("LC_ALL=C"), S8("TZ=UTC"),
                           S8("/usr/sbin/chroot"), root, S8("/bin/busybox"), S8("ash"), S8("/workload.sh")};
     ClangSuiteCommand ran = {.result = PROCESS_RESULT_FAILED};
     if (valid)
@@ -245,6 +251,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
         bool valid = arguments.length == 4;
 #if !BUSTER_LINUX || !BUSTER_CPU_ARCH_X86_64
         valid = false;
+#else
+        if (geteuid() != 0)
+        {
+            string_print(S8("error: userspace chroot supervision requires root on the isolated cloud runner; use sudo -n for the native driver\n"));
+            valid = false;
+        }
 #endif
         if (valid)
         {

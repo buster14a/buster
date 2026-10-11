@@ -65,7 +65,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/userspace-build" test_userspace "$RUNNER_TEMP/userspace-inputs/busybox" "$RUNNER_TEMP/userspace-inputs/musl" "$RUNNER_TEMP/userspace-inputs/libc-test" "$RUNNER_TEMP/userspace-evidence/joint" 2>&1 | tee "$RUNNER_TEMP/userspace-evidence/userspace.log"
+          sudo -n env "PATH=$PATH" "$RUNNER_TEMP/userspace-build" test_userspace "$RUNNER_TEMP/userspace-inputs/busybox" "$RUNNER_TEMP/userspace-inputs/musl" "$RUNNER_TEMP/userspace-inputs/libc-test" "$RUNNER_TEMP/userspace-evidence/joint" 2>&1 | tee "$RUNNER_TEMP/userspace-evidence/userspace.log"
       - name: Source-size report
         if: ${{ !cancelled() && steps.bootstrap.outcome == 'success' }}
         continue-on-error: true

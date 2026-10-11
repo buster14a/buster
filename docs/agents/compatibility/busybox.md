@@ -7,13 +7,17 @@ The opt-in native command reuses [musl](musl.md) and
 
 ```sh
 ./build.sh build --config Release -t ide
-./build.sh test_userspace /path/to/busybox /path/to/musl /path/to/libc-test /existing/parent/fresh-results
+sudo -n ./build.sh test_userspace /path/to/busybox /path/to/musl /path/to/libc-test /existing/parent/fresh-results
 ```
 
 The implementation lives in [tools/userspace_qualification.c](../../../tools/userspace_qualification.c),
 included by the native build driver. Initial execution is Linux x86-64 on
 GitHub-hosted Ubuntu; it requires existing Clang, GNU make/binutils, Git,
-installed Linux UAPI headers, cp, and noninteractive sudo/chroot. No external
+installed Linux UAPI headers, cp, mknod and chroot. Run the native driver with
+noninteractive sudo on the isolated cloud runner: its process supervisor must
+own the privileged children directly. Nested sudo commands cannot provide the
+same process-group ownership/cleanup contract. Compiler bootstrap/build remains
+unprivileged; no physical host execution is part of this workflow. No external
 source is vendored or patched. Results must be outside the input checkouts;
 the command refuses an existing output directory and unsafe paths in upstream
 make's CC expansion. Keep the repository and every external input unchanged
