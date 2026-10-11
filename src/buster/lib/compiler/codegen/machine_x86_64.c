@@ -11865,6 +11865,8 @@ struct MachineX64PreparedExactOpcode
     u8 single_gpr_encoding_table;
     u16 variant_valid_mask;
     u8 plan_valid;
+    // Set once machine_x64_exact_prepare_entry has prepared this row.
+    u8 prepared;
 };
 
 #define MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_FORM(category, index) MACHINE_X64_EXACT_OPCODE_DESCRIPTOR_EXACT_FORM_##category(index)
@@ -11915,6 +11917,21 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_exact_opcode_map_ready;
 // serial operation exceed that limit.  The key/plan helpers write caller-owned
 // scratch storage, while the row helper stages the global map before the
 // ready bit is published by the entry point.
+// Each opcode row is prepared on its first lookup (#1295): its plans, tokens,
+// dense-table registrations and template rows.  Prewarm used to prepare all
+// of them -- 296 plan preparations, each normalizing and validating a form --
+// while a small compile looks up a few dozen rows.  Plans are shared between
+// rows, so each plan id is prepared once, on the first row that needs it.
+// machine_x86_64_exact_prewarm_all prepares every row, in row order, before
+// a gang may emit.
+#define MACHINE_X64_EXACT_PLAN_PENDING 0u
+#define MACHINE_X64_EXACT_PLAN_VALID 1u
+#define MACHINE_X64_EXACT_PLAN_INVALID 2u
+BUSTER_GLOBAL_LOCAL BusterX86MetadataFormKey machine_x64_exact_plan_keys[MACHINE_X64_EXACT_PLAN_COUNT];
+BUSTER_GLOBAL_LOCAL bool machine_x64_exact_plan_key_found[MACHINE_X64_EXACT_PLAN_COUNT];
+BUSTER_GLOBAL_LOCAL BusterX86MetadataExactPlan machine_x64_exact_plans[MACHINE_X64_EXACT_PLAN_COUNT];
+BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_plan_states[MACHINE_X64_EXACT_PLAN_COUNT];
+
 BUSTER_GLOBAL_LOCAL void machine_x64_exact_collect_plan_keys(BusterX86MetadataFormKey* keys, bool* key_found)
 {
     for (u32 recipe_index = 0; recipe_index < BUSTER_ARRAY_LENGTH(machine_x64_exact_recipe_table); recipe_index += 1)
@@ -11946,16 +11963,25 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_collect_plan_keys(BusterX86MetadataFo
     }
 }
 
-BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_plans(BusterX86MetadataFormKey const* keys, bool const* key_found,
-                                                          BusterX86MetadataExactPlan* prepared, bool* plan_valid)
+// Prepares plan `plan_id` on its first use, with the checks the eager walk
+// made; false refuses every variant that names it.
+BUSTER_GLOBAL_LOCAL bool machine_x64_exact_plan_resolve(u32 plan_id)
 {
-    for (u32 plan_id = 0; plan_id < MACHINE_X64_EXACT_PLAN_COUNT; plan_id += 1)
+    bool result = false;
+    if (plan_id < MACHINE_X64_EXACT_PLAN_COUNT)
     {
-        plan_valid[plan_id] = key_found[plan_id] &&
-                              buster_x86_metadata_exact_plan_prepare(keys[plan_id], &prepared[plan_id]) &&
-                              prepared[plan_id].form_id == keys[plan_id].form_id &&
-                              prepared[plan_id].stable_hash == keys[plan_id].stable_hash;
+        if (machine_x64_exact_plan_states[plan_id] == MACHINE_X64_EXACT_PLAN_PENDING)
+        {
+            BUSTER_CHECK_SERIAL_INITIALIZATION();
+            BusterX86MetadataFormKey key = machine_x64_exact_plan_keys[plan_id];
+            BusterX86MetadataExactPlan* plan = machine_x64_exact_plans + plan_id;
+            bool valid = machine_x64_exact_plan_key_found[plan_id] && buster_x86_metadata_exact_plan_prepare(key, plan) &&
+                         plan->form_id == key.form_id && plan->stable_hash == key.stable_hash;
+            machine_x64_exact_plan_states[plan_id] = valid ? MACHINE_X64_EXACT_PLAN_VALID : MACHINE_X64_EXACT_PLAN_INVALID;
+        }
+        result = machine_x64_exact_plan_states[plan_id] == MACHINE_X64_EXACT_PLAN_VALID;
     }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL u32 machine_x64_condition_checked_bindings;
@@ -11985,7 +12011,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_exact_check_condition_binding(u32 family, u
 #if BUSTER_INCLUDE_TESTS
 MachineX64ConditionBindingAudit machine_x64_test_condition_binding_audit(void)
 {
-    machine_x86_64_exact_prewarm();
+    machine_x86_64_exact_prewarm_all();
     return (MachineX64ConditionBindingAudit){
         .checked_bindings = machine_x64_condition_checked_bindings,
         .mismatched_bindings = machine_x64_condition_mismatched_bindings,
@@ -12602,8 +12628,7 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_variable_memory_encoding_table(
 }
 
 BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64PreparedExactOpcode* entry,
-                                                               MachineX64EmitRegistryEntry const* registry_entry,
-                                                               BusterX86MetadataExactPlan const* prepared, bool const* plan_valid)
+                                                               MachineX64EmitRegistryEntry const* registry_entry)
 {
     MachineX64ExactRecipe const* descriptor = entry->descriptor;
     MachineEmitRecipeCategory category = descriptor ? machine_emit_recipe_category(descriptor->recipe) : MACHINE_EMIT_RECIPE_CATEGORY_COUNT;
@@ -12619,12 +12644,12 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64Prepared
     {
         MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(descriptor, variant_index);
         u8 plan_id = machine_x64_exact_plan_id_for_recipe_variant(category, recipe_index, variant_index);
-        bool variant_valid = plan_id < MACHINE_X64_EXACT_PLAN_COUNT && plan_valid[plan_id] &&
-                             prepared[plan_id].form_id == variant.key.form_id && prepared[plan_id].stable_hash == variant.key.stable_hash;
+        bool variant_valid = machine_x64_exact_plan_resolve(plan_id) && machine_x64_exact_plans[plan_id].form_id == variant.key.form_id &&
+                             machine_x64_exact_plans[plan_id].stable_hash == variant.key.stable_hash;
         if (variant_valid)
         {
             variant_valid = buster_x86_metadata_machine_exact_token_for_plan(
-                prepared[plan_id],
+                machine_x64_exact_plans[plan_id],
                 (BusterX86MetadataFeatureInput){.names = variant.features, .count = variant.feature_count},
                 &entry->metadata_tokens[variant_index]);
         }
@@ -12661,6 +12686,52 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64Prepared
         }
         entry->variant_valid_mask = 0;
         entry->plan_valid = false;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_entry_templates(MachineX64PreparedExactOpcode* entry);
+
+// Prepares one opcode row: its plans and tokens, its dense-table
+// registrations, then its template rows.  Serial only; worker lanes read
+// rows machine_x64_exact_prepare_all_entries has already prepared.
+BUSTER_GLOBAL_LOCAL BUSTER_COLD void machine_x64_exact_prepare_entry(u32 ordinal)
+{
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
+    MachineX64PreparedExactOpcode* entry = machine_x64_exact_opcode_map + ordinal;
+    if (entry->exact_required)
+    {
+        MachineX64EmitRegistryEntry const* registry_entry = machine_x86_64_emit_registry_entry(ordinal);
+        if (entry->sequence_required)
+        {
+            machine_x64_exact_prepare_sequence_entry(entry, registry_entry);
+        }
+        else
+        {
+            machine_x64_exact_prepare_form_entry(entry, registry_entry);
+        }
+    }
+    machine_x64_exact_prepare_entry_templates(entry);
+    entry->prepared = 1;
+}
+
+// The row of `ordinal`, prepared on its first lookup.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE MachineX64PreparedExactOpcode* machine_x64_exact_prepared_entry(u32 ordinal)
+{
+    MachineX64PreparedExactOpcode* entry = machine_x64_exact_opcode_map + ordinal;
+    if (BUSTER_UNLIKELY(!entry->prepared))
+    {
+        machine_x64_exact_prepare_entry(ordinal);
+    }
+    return entry;
+}
+
+// The complete preparation: every row, in row order.
+BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_all_entries(void)
+{
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
+    for (u32 ordinal = 0; ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT; ordinal += 1)
+    {
+        (void)machine_x64_exact_prepared_entry(ordinal);
     }
 }
 
@@ -12717,9 +12788,9 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_chunk_memory_tables(void)
         u32 load_ordinal = (u32)(load_opcodes[width_slot] - MACHINE_X64_MOV_RI);
         u32 store_ordinal = (u32)(store_opcodes[width_slot] - MACHINE_X64_MOV_RI);
         MachineX64PreparedExactOpcode const* load_entry =
-            load_ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT ? machine_x64_exact_opcode_map + load_ordinal : 0;
+            load_ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT ? machine_x64_exact_prepared_entry(load_ordinal) : 0;
         MachineX64PreparedExactOpcode const* store_entry =
-            store_ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT ? machine_x64_exact_opcode_map + store_ordinal : 0;
+            store_ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT ? machine_x64_exact_prepared_entry(store_ordinal) : 0;
         machine_x64_chunk_memory_tables[MACHINE_X64_CHUNK_DIRECTION_LOAD][width_slot] =
             load_entry && load_entry->plan_valid && load_entry->variant_count ? load_entry->variable_memory_encoding_tables[0] : 0;
         machine_x64_chunk_memory_tables[MACHINE_X64_CHUNK_DIRECTION_STORE][width_slot] =
@@ -12746,30 +12817,6 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_chunk_memory_tables(void)
     }
 }
 
-BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_opcode_map(BusterX86MetadataExactPlan const* prepared, bool const* plan_valid)
-{
-    for (u32 ordinal = 0; ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT; ordinal += 1)
-    {
-        // The dense map is only observed after the ready bit is published, so
-        // its static rows are safe serial staging storage.  Mutating each row
-        // in place avoids a large aggregate scratch array (and its generated
-        // zeroing/copying MIR) in the self-hosted prewarm function.
-        MachineX64PreparedExactOpcode* entry = machine_x64_exact_opcode_map + ordinal;
-        if (entry->exact_required)
-        {
-            MachineX64EmitRegistryEntry const* registry_entry = machine_x86_64_emit_registry_entry(ordinal);
-            if (entry->sequence_required)
-            {
-                machine_x64_exact_prepare_sequence_entry(entry, registry_entry);
-            }
-            else
-            {
-                machine_x64_exact_prepare_form_entry(entry, registry_entry, prepared, plan_valid);
-            }
-        }
-    }
-}
-
 // Prepare the immutable metadata plans once on the serial prewarm thread.
 // Width variants and projection variants deliberately share a plan identity;
 // workers only read the published value table after the ready bit is set.  The
@@ -12781,39 +12828,36 @@ void machine_x86_64_exact_prewarm(void)
     if (machine_x64_exact_opcode_map_ready) return;
     BUSTER_CHECK_SERIAL_INITIALIZATION();
 
-    BusterX86MetadataFormKey keys[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
-    bool key_found[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
-    BusterX86MetadataExactPlan prepared[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
-    bool plan_valid[MACHINE_X64_EXACT_PLAN_COUNT] = {0};
     machine_x64_gpr_encoding_table_count = 0;
     machine_x64_variable_memory_encoding_table_count = 0;
     machine_x64_condition_checked_bindings = 0;
     machine_x64_condition_mismatched_bindings = 0;
-    machine_x64_exact_collect_plan_keys(keys, key_found);
-    machine_x64_exact_prepare_plans(keys, key_found, prepared, plan_valid);
+    machine_x64_exact_collect_plan_keys(machine_x64_exact_plan_keys, machine_x64_exact_plan_key_found);
     machine_x64_exact_prepare_fcmp_alternate_tokens();
-    machine_x64_exact_prepare_opcode_map(prepared, plan_valid);
+    // The static template rows go first: every row prepared from here on
+    // allots its dynamic template rows after them.
+    machine_x64_exact_prepare_fixed_templates();
     machine_x64_exact_prepare_chunk_memory_tables();
     machine_x64_metadata_shape_cache_prewarm();
-    // Template rows are allotted last; each is encoded through the shape
-    // cache or its staged token on its first emit.
-    machine_x64_exact_prepare_fixed_templates();
 
     // Every row was staged serially above.  The ready bit is written last;
     // codegen_prewarm() completes before any worker lane can observe globals.
-    // Closed-set shapes stay registered but unresolved, dense tables,
-    // template rows and variable-memory cells outside the frame-chunk rows
-    // stay unencoded: a serial compile prepares the few it emits on first use.
+    // Opcode rows other than the chunk rows stay unprepared, closed-set
+    // shapes registered but unresolved, and dense tables, template rows and
+    // variable-memory cells outside the frame-chunk rows unencoded: a serial
+    // compile prepares the few it emits on first use.
     machine_x64_exact_opcode_map_ready = true;
 }
 
-// The gang form of the prewarm: also resolves every registered shape and
-// encodes every dense table, variable-memory cell and template row, so a
+// The gang form of the prewarm: also prepares every opcode row, resolves
+// every registered shape and encodes every dense table, variable-memory cell
+// and template row, so a
 // worker lane's bridge lookups and table reads are plain reads.  Call it serially before any lane_run that may
 // emit x86-64 code, like buster_x86_metadata_prewarm_all_forms.
 void machine_x86_64_exact_prewarm_all(void)
 {
     machine_x86_64_exact_prewarm();
+    machine_x64_exact_prepare_all_entries();
     machine_x64_metadata_shape_cache_resolve_all();
     machine_x64_gpr_encoding_tables_fill_all();
     machine_x64_variable_memory_fill_all_cells();
@@ -14662,60 +14706,61 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_fixed_templates(void)
     {
         machine_x64_fixed_templates[template_id] = (MachineX64FixedTemplate){.valid = MACHINE_X64_FIXED_TEMPLATE_PENDING};
     }
-    for (u32 ordinal = 0; ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT; ordinal += 1)
+}
+
+// Allots one prepared row's dynamic template rows.
+BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_entry_templates(MachineX64PreparedExactOpcode* entry)
+{
+    for (u32 variant_index = 0; variant_index < BUSTER_ARRAY_LENGTH(entry->fixed_templates); variant_index += 1)
     {
-        MachineX64PreparedExactOpcode* entry = machine_x64_exact_opcode_map + ordinal;
-        for (u32 variant_index = 0; variant_index < BUSTER_ARRAY_LENGTH(entry->fixed_templates); variant_index += 1)
+        entry->fixed_templates[variant_index] = 0;
+        entry->fixed_template_slots[variant_index] = MACHINE_X64_FIXED_TEMPLATE_NO_SLOT;
+    }
+    for (u32 step_slot = 0; step_slot < BUSTER_ARRAY_LENGTH(entry->sequence_templates); step_slot += 1)
+    {
+        entry->sequence_templates[step_slot] = 0;
+        entry->sequence_template_slots[step_slot] = MACHINE_X64_FIXED_TEMPLATE_NO_SLOT;
+    }
+    if (entry->exact_required && entry->plan_valid && entry->sequence_required && entry->sequence)
+    {
+        MachineX64ExactSequence const* sequence = entry->sequence;
+        for (u32 variant_index = 0; variant_index < sequence->variant_count; variant_index += 1)
         {
-            entry->fixed_templates[variant_index] = 0;
-            entry->fixed_template_slots[variant_index] = MACHINE_X64_FIXED_TEMPLATE_NO_SLOT;
-        }
-        for (u32 step_slot = 0; step_slot < BUSTER_ARRAY_LENGTH(entry->sequence_templates); step_slot += 1)
-        {
-            entry->sequence_templates[step_slot] = 0;
-            entry->sequence_template_slots[step_slot] = MACHINE_X64_FIXED_TEMPLATE_NO_SLOT;
-        }
-        if (entry->exact_required && entry->plan_valid && entry->sequence_required && entry->sequence)
-        {
-            MachineX64ExactSequence const* sequence = entry->sequence;
-            for (u32 variant_index = 0; variant_index < sequence->variant_count; variant_index += 1)
+            MachineX64ExactSequenceVariant const* variant = sequence->variants + variant_index;
+            for (u32 step_index = 0; step_index < variant->step_count; step_index += 1)
             {
-                MachineX64ExactSequenceVariant const* variant = sequence->variants + variant_index;
-                for (u32 step_index = 0; step_index < variant->step_count; step_index += 1)
+                MachineX64ExactSequenceStep const* step = variant->steps + step_index;
+                u32 step_slot = variant_index * MACHINE_X64_EXACT_SEQUENCE_MAX_STEPS + step_index;
+                // A parity step swaps tokens at emission time and stays
+                // on its token lane.
+                if (!(step->flags & ~(MACHINE_X64_EXACT_RECIPE_FLAG_BRANCH_FIXUP | MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32 |
+                                      MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_LOCK)))
                 {
-                    MachineX64ExactSequenceStep const* step = variant->steps + step_index;
-                    u32 step_slot = variant_index * MACHINE_X64_EXACT_SEQUENCE_MAX_STEPS + step_index;
-                    // A parity step swaps tokens at emission time and stays
-                    // on its token lane.
-                    if (!(step->flags & ~(MACHINE_X64_EXACT_RECIPE_FLAG_BRANCH_FIXUP | MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32 |
-                                          MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_LOCK)))
-                    {
-                        entry->sequence_templates[step_slot] = machine_x64_exact_prepare_fixed_template_family(
-                            step->operand_kinds, step->operand_slots, step->operand_widths, step->operand_count, true,
-                            (step->flags & MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32) != 0,
-                            (step->flags & MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_LOCK) != 0,
-                            step->mask_register_plus_one, step->zeroing, entry->sequence_tokens[step_slot],
-                            entry->sequence_template_slots + step_slot);
-                    }
+                    entry->sequence_templates[step_slot] = machine_x64_exact_prepare_fixed_template_family(
+                        step->operand_kinds, step->operand_slots, step->operand_widths, step->operand_count, true,
+                        (step->flags & MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32) != 0,
+                        (step->flags & MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_LOCK) != 0,
+                        step->mask_register_plus_one, step->zeroing, entry->sequence_tokens[step_slot],
+                        entry->sequence_template_slots + step_slot);
                 }
             }
         }
-        else if (entry->exact_required && entry->plan_valid && entry->descriptor)
+    }
+    else if (entry->exact_required && entry->plan_valid && entry->descriptor)
+    {
+        for (u32 variant_index = 0; variant_index < entry->variant_count; variant_index += 1)
         {
-            for (u32 variant_index = 0; variant_index < entry->variant_count; variant_index += 1)
+            MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, variant_index);
+            // A variant with a dense table never reaches the tail, and
+            // the tail passes no lock, mask, or zeroing of its own.
+            if (!entry->gpr_encoding_tables[variant_index] && !entry->variable_memory_encoding_tables[variant_index] &&
+                !(variant.flags & ~(MACHINE_X64_EXACT_RECIPE_FLAG_BRANCH_FIXUP | MACHINE_X64_EXACT_RECIPE_FLAG_CALL_SITE |
+                                    MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32)))
             {
-                MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, variant_index);
-                // A variant with a dense table never reaches the tail, and
-                // the tail passes no lock, mask, or zeroing of its own.
-                if (!entry->gpr_encoding_tables[variant_index] && !entry->variable_memory_encoding_tables[variant_index] &&
-                    !(variant.flags & ~(MACHINE_X64_EXACT_RECIPE_FLAG_BRANCH_FIXUP | MACHINE_X64_EXACT_RECIPE_FLAG_CALL_SITE |
-                                        MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32)))
-                {
-                    entry->fixed_templates[variant_index] = machine_x64_exact_prepare_fixed_template_family(
-                        variant.operand_kinds, variant.operand_slots, variant.operand_widths, variant.operand_count, false,
-                        (variant.flags & MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32) != 0, false, 0, false,
-                        entry->metadata_tokens[variant_index], entry->fixed_template_slots + variant_index);
-                }
+                entry->fixed_templates[variant_index] = machine_x64_exact_prepare_fixed_template_family(
+                    variant.operand_kinds, variant.operand_slots, variant.operand_widths, variant.operand_count, false,
+                    (variant.flags & MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_DISP32) != 0, false, 0, false,
+                    entry->metadata_tokens[variant_index], entry->fixed_template_slots + variant_index);
             }
         }
     }
@@ -15362,7 +15407,7 @@ BUSTER_GLOBAL_LOCAL MachineX64PreparedExactOpcode const* machine_x64_exact_opcod
     else
     {
         u32 ordinal = opcode - MACHINE_X64_MOV_RI;
-        result = ordinal < BUSTER_ARRAY_LENGTH(machine_x64_exact_opcode_map) ? machine_x64_exact_opcode_map + ordinal : 0;
+        result = ordinal < BUSTER_ARRAY_LENGTH(machine_x64_exact_opcode_map) ? machine_x64_exact_prepared_entry(ordinal) : 0;
     }
 
     return result;
