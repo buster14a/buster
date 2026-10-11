@@ -106,6 +106,12 @@ jobs:
           .ci-tools/build generate --ci --cc clang --linker DEFAULT --no-sanitize --no-fuzz --no-lto
           .ci-tools/build build --config Release -t ide
           sha256sum .ci-tools/build build/Release/ide > evidence/compiler.sha256
+      - name: Generate native source-size acknowledgement for review
+        shell: bash
+        run: |
+          set -euo pipefail
+          .ci-tools/build source_size --write-baseline | tee evidence/source-size-generation.txt
+          cp docs/source-size-baseline.txt evidence/source-size-baseline.txt
       - name: Run bounded native reference and Buster frontier
         id: frontier
         shell: bash
@@ -167,6 +173,7 @@ jobs:
             evidence/*.config
             evidence/*.tar
             evidence/*.log
+            evidence/machine-specifications/
             evidence/licenses/
             evidence/frontier/*.argv
             evidence/frontier/*.result

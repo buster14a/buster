@@ -98,9 +98,10 @@ The first candidate attempt is pristine Kbuild configuration. A failure is
 retained as a blocker in `buster-configure.log` and `stages.txt`.
 Independent target-C replays then use reference-generated headers explicitly
 marked unqualified for a candidate kernel. They are diagnostic reductions,
-not a candidate build or boot. Every actual target C compile action is
-inventoried in `target-c.tsv`; at most 24 are selected in lexical object-path
-order. Their second rows record attempted/pass/fail status; all remaining
+not a candidate build or boot. Required target C-to-object and C-to-assembly generator actions are
+inventoried in `target-c.tsv`; compiler feature probes remain separately
+available in the raw command records. At most 24 required actions are selected
+in lexical output-path order. Their second rows record attempted/pass/fail status; all remaining
 actions stay unattempted.
 
 Only output and dependency-file destinations change during replay; all
@@ -128,3 +129,8 @@ upstream tests with pass/fail/skip counts, and explicit broader-config deltas.
 Integrate separately qualified #3179 userspace only after independent kernel
 and userspace controls pass. Keep #3186 open until its staged acceptance is
 actually satisfied.
+
+The harness and opt-in workflow add approximately 42 KiB of build-category
+code. The native driver's generated source-size baseline acknowledges this
+new reference/control/provenance capability; it changes no compiler behavior
+or native-retirement identity bindings.

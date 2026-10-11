@@ -278,14 +278,15 @@ BUSTER_GLOBAL_LOCAL bool kernel_target_c(size_t count)
     {
         char const* argument = kernel_arguments[i];
         size_t size = strlen(argument);
-        compile = compile || strcmp(argument, "-c") == 0;
+        compile = compile || strcmp(argument, "-c") == 0 || strcmp(argument, "-S") == 0;
         source = source || (size > 2 && strcmp(argument + size - 2, ".c") == 0 &&
                             strstr(argument, ".tmp") == 0);
         if (strcmp(argument, "-o") == 0 && i + 1 < count)
         {
             char const* destination = kernel_arguments[i + 1];
             size_t bytes = strlen(destination);
-            output = bytes > 2 && strcmp(destination + bytes - 2, ".o") == 0 &&
+            output = bytes > 2 && destination[bytes - 2] == '.' &&
+                     (destination[bytes - 1] == 'o' || destination[bytes - 1] == 's') &&
                      strstr(destination, ".tmp") == 0;
         }
     }
@@ -377,7 +378,8 @@ BUSTER_GLOBAL_LOCAL int kernel_replay(void)
         {
             char name[64], destination[KERNEL_PATH_BYTES], dependency[KERNEL_PATH_BYTES + 32], leaf[64];
             snprintf(name, sizeof(name), "replay-%u", row);
-            snprintf(leaf, sizeof(leaf), "replay-%u.o", row);
+            size_t size = strlen(kernel_selection[row].output);
+            snprintf(leaf, sizeof(leaf), "replay-%u.%c", row, kernel_selection[row].output[size - 1]);
             valid = kernel_path(destination, kernel_context.output, leaf);
             int bytes = snprintf(dependency, sizeof(dependency), "-Wp,-MMD,%s/replay-%u.d", kernel_context.output, row);
             valid = bytes > 0 && bytes < (int)sizeof(dependency) && valid;
@@ -535,7 +537,11 @@ BUSTER_GLOBAL_LOCAL int kernel_self_test(void)
             char* fixture[] = {temporary, "gcc", "-O2", "-c", "-o", "kernel.o", "kernel.c", 0};
             valid = valid && kernel_argv(path, temporary, fixture + 1) && kernel_read_record(path, &count) &&
                     kernel_target_c(count);
-            fixture[4] = "-E";
+            fixture[3] = "-S";
+            fixture[5] = "kernel.s";
+            valid = valid && kernel_argv(path, temporary, fixture + 1) && kernel_read_record(path, &count) &&
+                    kernel_target_c(count);
+            fixture[3] = "-E";
             valid = valid && kernel_argv(path, temporary, fixture + 1) && kernel_read_record(path, &count) &&
                     !kernel_target_c(count);
         }
