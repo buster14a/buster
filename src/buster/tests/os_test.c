@@ -1530,7 +1530,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission(UnitTestArgume
     ProcessWaitResult warm_wait = os_process_wait_deadline(arena, warm_spawn, 30000000);
     BUSTER_VALIDATE(warm_wait.result == PROCESS_RESULT_SUCCESS && !warm_wait.timed_out && !warm_wait.capture_failed &&
         !warm_wait.output_truncated && !warm_wait.capture_limit_exceeded && !warm_wait.process_tree_cleanup_failed &&
-        !warm_wait.process_group_reservation_retained && !warm_wait.process_group_ownership_lost);
+        !warm_wait.process_group_reservation_retained && !warm_wait.process_group_ownership_lost &&
+        warm_wait.streams[STANDARD_STREAM_OUTPUT].length == 5);
     // Direct ownership checks cover the cold launch too, before taking a
     // steady-state census that includes the native runtime's persistent state.
     HANDLE owned[] = {(HANDLE)warm_spawn.handle, (HANDLE)warm_spawn.process_tree,

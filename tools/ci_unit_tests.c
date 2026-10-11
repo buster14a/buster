@@ -478,7 +478,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_schedule_run(Arena* arena, String8 pat
         self_test ? S8("--self-test-module-child") : S8("--verbose=1"), S8("--ci=1")};
     ProcessSpawnResult spawn = os_process_spawn((SliceString8){command, self_test ? 3 : 4}, keys, values, ci_unit_spawn_options());
     ProcessWaitResult wait = {0};
-    if (spawn.handle) { wait = os_process_wait_deadline(arena, spawn, CI_UNIT_TIMEOUT_US); }
+    if (spawn.handle)
+    {
+        u64 elapsed = os_now_microseconds() - epoch;
+        u64 remaining = elapsed < CI_UNIT_TIMEOUT_US ? CI_UNIT_TIMEOUT_US - elapsed : 1;
+        wait = os_process_wait_deadline(arena, spawn, remaining);
+    }
     CiUnitSchedule* work = arena_allocate(arena, CiUnitSchedule, 1);
     memset(work, 0, sizeof(*work));
     bool valid = ci_unit_clean(spawn, wait);
