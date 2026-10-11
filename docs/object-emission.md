@@ -212,11 +212,16 @@ last of its dynamic relocations, so ld.so fills it while relocating the library,
 before any initializer runs, including an executable's `DT_PREINIT_ARRAY`
 callbacks that call into the library. On AArch64 the runner
 passes hwcap 0, so a resolver that dispatches on hwcap selects its baseline
-implementation. An undefined IFUNC, or one outside code, stays refused, and
-the C frontend's own `ifunc` attribute is still refused by name.
+implementation. An undefined IFUNC, or one outside code, stays refused. The
+C frontend's own `__attribute__((ifunc("resolver")))` writes the same symbol
+(an indirect `IrSymbolAlias` becomes `ObjectSymbol.indirect` at the
+resolver's address), and is refused by name for COFF and Mach-O output; see
+[linkage](agents/frontend/linkage.md).
 `compiler_driver_elf_ifunc_tests` checks single resolution and address identity
 against the host linker for static, dynamic, `-pie` and `-shared` images, and a
 host-linked executable whose preinit callback calls a `-shared` library's IFUNC.
+It also compiles the same C with `ide cc`, at `-O0` and `-O2`, and with a
+local (`static`) ifunc, and runs each image against the host-built oracle.
 `.ctors`/`.dtors` and `.init`/`.fini` inputs stay refused: GNU ld 2.42 folds
 `.ctors` into `.init_array` in reverse but emits a null `.fini_array` slot for
 `.dtors`, and lld 18 runs neither, so no consistent oracle exists, and the

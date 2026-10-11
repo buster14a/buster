@@ -443,6 +443,16 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
                 bool is_weakref_word = string_equal(attribute_name, S8("weakref")) || string_equal(attribute_name, S8("__weakref__"));
                 bool is_ifunc_word = string_equal(attribute_name, S8("ifunc")) || string_equal(attribute_name, S8("__ifunc__"));
                 binding->is_ifunc |= is_ifunc_word;
+                if (is_ifunc_word && item + 3 < end && c_token_is_punctuator(&preprocess.tokens[item + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                    preprocess.tokens[item + 2].kind == C_TOKEN_STRING_LITERAL &&
+                    c_token_is_punctuator(&preprocess.tokens[item + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                    c_ir_decode_quoted(arena, c_token_spelling(preprocess.spelling_base, preprocess.tokens[item + 2]), '"', &decoded) && decoded.length)
+                {
+                    binding->ifunc_resolver = (String8){
+                        .pointer = (char8*)decoded.pointer,
+                        .length = decoded.length,
+                    };
+                }
                 if (is_weakref_word)
                 {
                     binding->is_weakref = true;
@@ -62061,6 +62071,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     // body and no initializer, and its target has to survive to be aliased,
     // which for a static target nothing else names it would not.
     CEntityId* entity_alias_targets = arena_allocate(arena, CEntityId, parse.entity_count);
+    // __attribute__((ifunc("resolver"))) is an alias of the resolver whose
+    // symbol is indirect: a reference wants the function the resolver
+    // returns, not the resolver (IrSymbolAlias.is_indirect).
+    bool* entity_alias_indirect = arena_allocate_zeroed(arena, bool, parse.entity_count);
     bool* entity_weak = arena_allocate(arena, bool, parse.entity_count);
     // The visibility an entity's declarations state, as CSymbolVisibility. A
     // declaration states its attribute's, else the #pragma GCC visibility
@@ -62127,7 +62141,11 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             entity_weakref_targets[declaration.entity.value] = weakref_name;
             continue;
         }
-        if (!binding.alias_target.length)
+        // c_parse_validate_alias_targets has refused an ifunc without a
+        // defined function resolver, and one on an output with no indirect
+        // symbol.
+        String8 alias_name = binding.is_ifunc ? binding.ifunc_resolver : binding.alias_target;
+        if (!alias_name.length)
         {
             continue;
         }
@@ -62135,18 +62153,21 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                            (CScopeId){
                                                                                .value = 0,
                                                                            },
-                                                                           binding.alias_target)
+                                                                           alias_name)
                                                    : C_ENTITY_ID_INVALID;
         if (alias_target.value >= parse.entity_count || alias_target.value == declaration.entity.value)
         {
             *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
-                .message = string_format(arena, S8("alias target '{S8}' is not declared in this translation unit"), binding.alias_target),
+                .message = string_format(arena, binding.is_ifunc ? S8("ifunc resolver '{S8}' is not declared in this translation unit")
+                                                                  : S8("alias target '{S8}' is not declared in this translation unit"),
+                                         alias_name),
                 .location = c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
             continue;
         }
         entity_alias_targets[declaration.entity.value] = alias_target;
+        entity_alias_indirect[declaration.entity.value] |= binding.is_ifunc;
         // The target is named by an attribute, not by an identifier use, so
         // nothing else marks it live. A static one would otherwise be dropped
         // and the alias would point at an address the module never places.
@@ -63813,7 +63834,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                 .message = alias_defined_here
                                ? string_format(arena, S8("'{S8}' is both defined here and aliased to '{S8}'"), parse.entities[entity_index].name,
                                                parse.entities[alias_target.value].name)
-                               : string_format(arena, S8("alias '{S8}' names '{S8}', which is not defined in this translation unit"),
+                               : string_format(arena,
+                                               entity_alias_indirect[entity_index] ? S8("ifunc '{S8}' names '{S8}', which is not defined in this translation unit")
+                                                                                   : S8("alias '{S8}' names '{S8}', which is not defined in this translation unit"),
                                                parse.entities[entity_index].name, parse.entities[alias_target.value].name),
                 .location = c_preprocess_site_location(&preprocess, parse.entities[entity_index].location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
@@ -63824,6 +63847,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                             (IrSymbolAlias){
                                 .symbol = alias_symbol,
                                 .target = target_symbol,
+                                .is_indirect = entity_alias_indirect[entity_index],
                             });
     }
     // The initializer registrations go in beside the aliases and for the same
