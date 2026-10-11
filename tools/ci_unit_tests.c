@@ -878,6 +878,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_compare(Arena* arena, String8 pair_pat
         scheduled = ci_unit_observe(schedule_text, true);
         valid = ci_unit_observations_equal(&pair, &scheduled) && ci_unit_fixtures_equal(pair_text, schedule_text, &pair.proof);
     }
+    // Keep this bounded comparison readable through the check API even when
+    // full multi-pair logs exceed the forge's log-response limit.
+    if (string_equal(os_get_environment_variable(S8("GITHUB_ACTIONS")), S8("true")))
+    {
+        string_print(S8("::notice::"));
+    }
     string_print(S8("CI_UNIT_COMPARE_V1 source_revision={S8} binary_sha256={S8} workers={u64} modules={u64} assertions={u64} pair_elapsed_us={u64} schedule_elapsed_us={u64} status={S8}\n"),
         pair.revision, pair.digest, pair.workers, pair.proof.count, pair.proof.assertions, pair.elapsed, scheduled.elapsed,
         valid ? S8("pass") : S8("fail"));

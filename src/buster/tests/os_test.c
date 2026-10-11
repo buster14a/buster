@@ -1575,13 +1575,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission(UnitTestArgume
                 HANDLE handle = (HANDLE)(uintptr_t)(index * 4);
                 if (!handles_before[index] && GetHandleInformation(handle, &flags))
                 {
-                    struct {u16 length, maximum; u16* pointer;}* name;
+                    typedef struct OsTestHandleTypeName {u16 length, maximum; char16* pointer;} OsTestHandleTypeName;
+                    OsTestHandleTypeName* name;
                     u64 storage[128] = {0};
                     ULONG required = 0;
                     String8 type = S8("unknown");
                     if (query && query(handle, 2, storage, sizeof(storage), &required) >= 0)
                     {
-                        name = (void*)storage;
+                        name = (OsTestHandleTypeName*)storage;
                         if (name->length <= sizeof(storage) && name->pointer)
                         {
                             type = string8_from_string16(arena, (String16){name->pointer, name->length / 2});
