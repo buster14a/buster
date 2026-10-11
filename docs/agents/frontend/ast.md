@@ -772,6 +772,216 @@ the loop (with an `__builtin_offsetof` bail), and one tampered tree per
 fallback reason, in every layout. On the self-host unity input every body
 follows its plan, with no fallback and no bail.
 
+## Expression lowering from the tree
+
+**Status: design only.** Nothing in this section is implemented. The token
+path is the only path, and nothing in lowering reads the tree yet. This is
+slices 5 and 6 of the
+[lowering plan](https://github.com/buster14a/buster/issues/3102#issuecomment-6107599995).
+It depends on two pieces that slices 1–2 own:
+- the tree hand-off to lowering (`CIRLowerOptions.syntax_tree`);
+- a per-body index from token range to node.
+
+This section consumes both and does not rebuild them.
+
+### What the token path does
+
+The expression machine in `c_gen.c` lowers one token range in two stages.
+
+1. An `EXPRESSION` frame (`c_ir_lower_expression_step`) splits the range at
+   its root comma, assignment, conditional or logical operator. It pushes the
+   frames that own those operators and their operands.
+2. What is left goes to an `EXPRESSION_CORE` frame
+   (`c_ir_lower_expression_core_step`). Before it evaluates anything, it runs
+   two prepasses over its own range:
+   - `c_ir_prepare_control_expressions_step` finds parenthesized `?:`, `&&`,
+     `||`, assignment and comma groups, and evaluates each of them first;
+   - `c_ir_prepare_calls_step` finds calls and hoists them, so the evaluator
+     sees each call as one finished value.
+
+   It then sizes its stacks (`c_ir_expression_core_capacity`) and walks the
+   tokens shunting-yard style. At each operand it asks structure questions:
+   - `c_ir_unary_expression_end`, for a postfix `++`/`--`;
+   - `c_ir_matching_delimiter_cached`, for each `(`;
+   - `c_ir_group_type_name`, for a cast;
+   - `c_ir_group_fact` and `c_ir_has_root_comma`, for a nested control group.
+
+   Every call argument and every nested control group becomes another core,
+   which prepares its own range again.
+
+The census is audit
+[`2026-10-11T101741Z`](../../performance-audits/2026-10-11T101741Z.md): a
+hosted Callgrind count on the unity self-host, `-c`, with the pilot on. It is
+diagnostic only. It splits the evaluator's 1.88 G inclusive Ir three ways:
+
+| Part | Ir | What it is |
+|---|---:|---|
+| Structure questions | 676 M | Prepasses 465 M, postfix probe 102 M, capacity 39 M, operator and group classification about 70 M. They decide what is hoisted and where an operand ends, but append no row themselves. |
+| Emission and its lookups | 835 M | Places, operations, loads, constants, literals, enumerators, source ranges. A tree walk must do this too. |
+| The evaluator's own body | 371 M | Per-core setup and stacks, about 130 M; the per-token arms. This part is mixed. |
+
+About 296 M of the structure cost is a range that holds nothing to find:
+- 93.6% of control prepasses;
+- 72.4% of call prepasses;
+- 99.9% of postfix probes.
+
+An exact negative answer for those needs no tree: per-body prefix counts of
+the candidate tokens give it. That default-path change is
+[#3445](https://github.com/buster14a/buster/issues/3445). The tree slices
+below are budgeted net of it, so the tree is not credited with that saving.
+
+### Emission order
+
+Objects must stay byte-identical at `-g0` and `-g`. A walk over nodes must
+therefore append the same IR rows, with the same source tokens, in the same
+order as the token path. The token path's order for one core is:
+
+1. **Hoisted control groups**, in the token order of their `(`. These are
+   the parenthesized `?:`, `&&`, `||`, assignment and comma groups that the
+   control prepass records.
+2. **Hoisted calls**, in the order `c_ir_prepare_calls_discover` returns.
+   That order is the postorder of the hoisted calls' nesting forest: a call
+   nested in another call's callee or arguments comes first, and siblings
+   come in source order. That is the order in which `CALL` nodes occur in
+   the tree's postorder, restricted to the hoisted ones.
+3. **Everything else in postorder.** Shunting-yard appends each operand when
+   it reaches its first token, and each operator when it reduces it. That is
+   the postorder of the core's operator nodes: an operator follows its
+   operands, and operands come in source order. A hoisted node in that
+   postorder contributes its finished value and is skipped whole: the walk
+   jumps over its interval by its extent.
+
+Several constructs are lowered as one unit by an owner frame, which keeps
+its own internal order:
+- a postfix chain on a name (`a.b->c[i]`), through the place machine;
+- a cast, `sizeof`, a compound literal, a statement expression;
+- an operand of `++`/`--`.
+
+In the tree each of these is one subtree. The walk hands the owner frame
+that subtree instead of a token range.
+
+Postorder storage is therefore not eager evaluation. The walk decides what
+to hoist on enter events, before it visits any operand, and it emits in
+the order above.
+
+### Traversal frames and contexts
+
+The walk is one explicit stack of frames (`c_ast_walk_next` enter and exit
+events, or an equivalent private stack). Each frame holds:
+- the node;
+- its child cursor;
+- a context word.
+
+A frame for each kind sets its context on the enter event, before its first
+child is visited:
+
+- **Lazy.** These operands run only when a branch selects them:
+  - the right operand of `LOGICAL_AND` and `LOGICAL_OR`;
+  - the second and third operands of `CONDITIONAL`, and the last operand of
+    `CONDITIONAL_OMITTED`;
+  - the expressions of `GENERIC_ASSOCIATION` and `GENERIC_DEFAULT`;
+  - the arms of `__builtin_choose_expr`;
+  - a `STATEMENT_EXPRESSION` body.
+
+  Nothing inside a lazy operand is hoisted. Its owner frame
+  (`LOGICAL_VALUE`, `CONDITIONAL_VALUE`, the selection frames) lowers it
+  inside the block the branch selects, as today
+  (`tests/basic_c_lazy_operand_argument.c`).
+- **Unevaluated.** These operands emit nothing and hoist nothing:
+  - the operand of `SIZEOF_EXPRESSION` and `ALIGNOF_EXPRESSION`. A variably
+    modified operand is the exception: the `sizeof` owner lowers it in a
+    child frame;
+  - `TYPEOF` and `TYPEOF_UNQUAL`;
+  - the controlling expression of `GENERIC_SELECTION`;
+  - the type operands of `__builtin_types_compatible_p`.
+- **Sequenced.** A call to the right of a comma is lowered with its
+  expression, not hoisted past the left side. Today the prepass's
+  `comma_sequence_depth` rule does this. It records the depth of the first
+  comma it meets, counting parentheses, brackets and braces, and defers
+  every later call at that depth or deeper until the group closes. In the
+  tree the rule reads: every child after the first of a `COMMA`, of a
+  `CALL`'s argument list or of an `INITIALIZER_LIST`, with its whole
+  subtree. The differential must confirm that this matches the token rule's
+  depth form on every input, including a `;` inside a statement expression,
+  which also ends the rule.
+- **Scope.** A `STATEMENT_EXPRESSION` opens its block scope, and a
+  `COMPOUND_LITERAL` its temporary object, before their children are visited.
+
+**Exactly once.** Each node has one owner: the hoisting phase, an owner
+frame, or the postorder phase. The walk marks the nodes it hoisted in a bit
+array, private to lowering and offset from the core's first node. A nested
+core consumes a node hoisted by an enclosing core, and does not lower it
+again. Today `c_ir_prepared_control_expression_find` and
+`c_ir_prepared_call_find` record the same fact, keyed by token.
+
+**No recursion and no callbacks.** A nested core, a call argument or a lazy
+operand becomes a frame on the existing `CIrLowerMachine` with today's frame
+kinds. The tree walk is a loop with a `switch` over `CAstKind`.
+
+**No frontend identity in IR.** Node indices live only in the frames and in
+lowering's private scratch. Each row's source range comes from a token
+through `c_ir_token_source_range`, as today. Under `-g` that token must be
+the one the token path uses for the same row. For a binary operator that is
+the operator token, and for a cast its `(`: both are the nodes' anchors.
+Every other kind is listed when its slice is implemented, and the
+byte-for-byte comparison of `-g` objects checks it.
+
+### Delimiters (map row 8)
+
+In the B arm's census, lowering asks `c_ir_matching_delimiter_cached` 2.86 M
+times, for 68.6 M Ir:
+
+| Asking class | Ir | Owner |
+|---|---:|---|
+| root splits: `c_ir_root_conditional`, `c_ir_lower_expression_step`, `c_ir_lower_logical_value_step`, `c_ir_has_root_comma`, `c_ir_group_fact` | 37.7 M | slices 1–2 |
+| evaluator and prepasses: the core step, both prepasses, `c_ir_unary_expression_end`, `c_ir_postfix_suffix_end`, `c_ir_unevaluated_operand_end`, `c_ir_call_argument_separator`, the `sizeof` operand scans | 21.9 M | slice 5 |
+| query machine: `c_ir_query_execute`, `c_ir_sizeof_operand_*` and the static postfix and type-name bounds | 6.1 M | slice 4 |
+| statements: `c_ir_builder_controlled_body_range`, `c_ir_lower_body_advance`, `c_ir_lower_condition_step`, `c_ir_statement_span`, the assignment statement, jump targets | 2.9 M | slice 3 |
+
+The stream index these lookups read (`stream_matching_delimiters_plus_one`)
+is built during semantic analysis, for the parser as much as for lowering.
+Retiring the lowering lookups therefore removes at most their own 68.6 M,
+and not the index build.
+
+Parentheses have no nodes. A walk that moves from node to node never needs a
+`)`: where the token path jumps to the closing delimiter, the walk skips an
+interval by its extent. Token ranges are still needed wherever a node walk
+hands work to a token-range consumer: the place machine, the query machine
+and the initializer walkers. There the end comes from nodes, as in the
+[statement plan](#statement-plan-from-the-tree):
+- a node's last token is the greatest anchor on its rightmost chain;
+- a `CALL` or `INDEX` adds its closer;
+- wrapping parentheses are counted outward, each checked against the token
+  the grammar puts there.
+
+That costs the wrapping depth, not the range length. A failed check sends
+the core back to the token path.
+
+Row 8 retires from lowering only when none of the four classes asks a
+delimiter question. That happens after slices 1–5, so it is the last step.
+If the outward checks prove too costly, the measured alternative is a sparse
+side table, written by the builder when it commits a node: for each node
+that ends at a closer, the closer's token. It must be charged to the tree's
+retained bytes. The builder already knows that token when it appends the
+node.
+
+### Order of slices
+
+Each slice gets its own budgets in [Measurement plan](#measurement-plan)
+before its measured runs. Ceilings are from the census, net of #3445.
+
+| Slice | Replaces | Ceiling, net of #3445 |
+|---|---|---:|
+| 5a | both prepasses, for a core that maps to a node: the hoist set comes from one enter-event walk of the core's subtree | ≈ 280 M (the non-empty prepasses) |
+| 5b | `c_ir_expression_core_capacity` and the postfix probe: an interval's node count and a `POST_INCREMENT`/`POST_DECREMENT` kind test | ≈ 39 M |
+| 5c | the operand loop: classification and shunting-yard become the postorder walk | part of the 371 M body, plus about 30 M of classification |
+| 6 | delimiter questions from lowering, after slices 1–5c | ≤ 68.6 M |
+
+Slice 5a is first because it is the largest structure cost that #3445 leaves.
+It changes no emission, so its differential compares one ordered list per
+core. Its first implementable revision is the one where slices 1–2 have
+landed; until then nothing in this section ships.
+
 ## Corpus differential
 
 `c_ast_test_corpus` (`c_ast_tests`; like `c_test.c`'s fixture suites it does not run on Android or iOS, whose test runs carry no repository tree) builds every `tests/**/*.c` file the
@@ -857,9 +1067,9 @@ differential tests pass.
 | `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Not migrated. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Not migrated. |
-| `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | Not migrated. |
+| `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | Not migrated. The evaluator's walk is designed in [Expression lowering from the tree](#expression-lowering-from-the-tree). |
 | `c_ir_predict_expression_type*`, `c_ir_query_*` | type-name probes, operand types over token ranges | `TYPE_NAME` / `CAST` / `SIZEOF_*` nodes plus retained semantic facts | Not migrated. |
-| `c_ir_build_delimiter_index`, `CTokenPositionIndex` matching delimiters | bracket matching for every structural query | subtree extents | Not migrated. |
+| `c_ir_build_delimiter_index`, `CTokenPositionIndex` matching delimiters | bracket matching for every structural query | subtree extents | Not migrated. Lowering's retirement plan is in [Delimiters (map row 8)](#delimiters-map-row-8). |
 
 Under `-fc-ast-pilot`, the first row's three walkers no longer run for a unit
 whose records the split publishes. Their consumer, semantic analysis's
@@ -1476,5 +1686,67 @@ without `-fc-ast-pilot`:
 `compare-pull` profile for this measurement. Until it merges and one owner
 request runs it, the budget is neither passed nor failed. The hosted counts
 above are not acceptance, and the default stays off.
+
+For slice 5a of [expression lowering](#expression-lowering-from-the-tree),
+the hoist set from one walk of the core's subtree, these budgets are
+declared before any measured run of a candidate. That candidate does not
+exist yet. Its base is the main revision where slices 1–2 (the hand-off and
+the range-to-node index) have landed. If
+[#3445](https://github.com/buster14a/buster/issues/3445) has landed by then,
+the base carries it, so the tree is measured net of the tree-free negative
+tests. Inputs and arms: the unity self-host, `-g0 -c`, with four Callgrind
+arms (`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3`
+builds: A base default, B base with `-fc-ast-pilot`, C candidate with
+`-fc-ast-pilot`, D candidate default. The budgets:
+- **Correctness.**
+  - A test-only verify mode computes every core's hoist set both ways and
+    compares the ordered lists: each hoisted group's `(` and `)`, and each
+    hoisted call's `(`, `)`, `deferred_calls` and emission position. It
+    must show 0 differences over the corpus, the frontend sources and the
+    self-host input.
+  - Mutation checks must each fail the differential: dropping the lazy
+    context of a `LOGICAL_OR` right operand, dropping the sequenced context
+    of a second argument, and reversing two sibling calls.
+  - `-c` objects (`-g0` and `-g`) must be byte-identical across the four
+    arms.
+  - Diagnostics must be identical with and without the flag.
+- **Coverage.** Every core that falls back is counted under `-v` with a
+  named reason (no tree, no node for the range, a shape the walk declines),
+  and the corpus has one test per reason. On the self-host input at most 5%
+  of cores may fall back.
+- **The slice's own effect (C against B).**
+  - `c_ir_lower_expression_core_step`'s inclusive instructions fall by at
+    least 100 M, with the walk charged.
+  - The whole compile falls by at least that saving less 5 M, so the saving
+    is not moved elsewhere.
+
+  The ceiling is about 280 M, the non-empty prepasses in audit
+  [`2026-10-11T101741Z`](../../performance-audits/2026-10-11T101741Z.md),
+  and the gate leaves room for the walk's own cost. If the measured saving
+  is below the gate, the audit records a negative result and the code does
+  not ship.
+- **The default path (D against A).** The slice adds one pointer test per
+  core there. The difference must stay within ±0.05% Ir. If it misses that
+  band, the
+  [owner's work-equivalence criterion](#measurement-plan) may replace it,
+  but only when the evaluator's callees and their call counts are identical
+  apart from inlining. That criterion was set for the body walk, and this
+  budget adopts it only on those terms.
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete (#2761) and
+  the hook stays opt-in.
+
+The census behind these budgets is
+[`2026-10-11T101741Z`](../../performance-audits/2026-10-11T101741Z.md),
+taken on base `4e5d563f` with the base binary and a throwaway counter build,
+and diagnostic only:
+- Of the evaluator's 1.88 G inclusive Ir, 676 M answers structure
+  questions, 835 M is emission and its lookups, and 371 M is its own body.
+- About 296 M of the structure cost is a range with nothing to find, which
+  [#3445](https://github.com/buster14a/buster/issues/3445) can answer without
+  a tree.
+- No tree slice was built. Slices 1–2, which this one consumes, have not
+  landed, and building their hand-off and index here would duplicate claimed
+  work.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
