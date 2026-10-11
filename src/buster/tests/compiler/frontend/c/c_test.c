@@ -39878,7 +39878,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_literal_expression_queries(UnitTestArg
 // their member rows already follow the aggregate's row; were one defined
 // inside the window, interning a member's row would make lowering resolve the
 // aggregate a pass earlier and the `-g` type entries would come out in another
-// order, which CTypeInterning.suspended guards against (#3102).
+// order, which CTypeInterning.suspended guards against (#3102). The third
+// source does the same in file-scope initializers, whose queries the window
+// spans too: `S8()`'s `(char8*)("text")` casts, `&` of objects, and aggregates
+// defined inside initializer type names.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -39903,6 +39906,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArgumen
            "    use((const struct { char *p; } (*)[3])0);\n"
            "    use((void *)(volatile union { char *a; int *b; } [4]){ { q } });\n"
            "}\n"),
+        S8("typedef char char8;\n"
+           "typedef struct { char8 *pointer; unsigned long length; } String8;\n"
+           "struct H { char *p; int **q; } harr[2];\n"
+           "int g, *gp = &g, **gpp = &gp;\n"
+           "char *names[] = { (char *)(\"a\"), (char *)(\"bc\"), (char8 *)(\"d\") };\n"
+           "String8 s8 = { (char8 *)(\"text\"), sizeof(\"text\") - 1 };\n"
+           "long lv = (long)(unsigned char)7;\n"
+           "const void *cl = &(const struct { char *s; int *x; }){ 0, 0 };\n"
+           "const void *cp = (const struct { char *p; long *l; } *)0;\n"
+           "void use(const void *p);\n"
+           "void f(char *q) { use((char *)q); use((char **)&q); use(&gp); use(names[1]); use(&harr[1]); }\n"),
     };
     String8 debug[] = {S8("-g0"), S8("-g")};
     for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
