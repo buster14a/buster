@@ -113,14 +113,26 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   keep their virtual sizes without allocating serialized storage (GitHub #303).
 - **AMD64 COFF TLS-index REL32 fields use the ordinary inline addend convention.**
   The reader normalizes the signed inline displacement B to canonical A=B-4,
-  including references named `__tls_index`. The writer restores B=A+4 for
+  including references to `_tls_index`. The writer restores B=A+4 for
   `OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32`, just as for ordinary PC32.
   The registered object regression constructs raw COFF bytes independently,
   checks both signed boundaries and a near-name ordinary-symbol control,
-  and inspects serialized fields across repeated read/write cycles. This
-  preserves addends within the current TLS model; platform TLS symbol spelling,
-  section conventions and runtime interoperability remain separate contracts
-  tracked by GitHub #1323.
+  and inspects serialized fields across repeated read/write cycles.
+- **COFF TLS index loads name the platform's `_tls_index`.** Codegen attaches
+  every Windows TLS relocation to the variable so the in-memory PE linker can
+  resolve it; `object_coff_bind_tls_index` rebinds only the serialized index
+  load (x86-64 REL32, ARM64 ADRP/LDR pair) to an undefined global DATA
+  `_tls_index` (`OBJECT_COFF_TLS_INDEX_NAME`), the spelling the MSVC CRT
+  defines and `link.exe`/`lld-link` resolve. The reader maps an x86-64 REL32
+  against that undefined symbol back to the index kind, rejects REL32_1..5
+  against it, and keeps a defined `_tls_index` an ordinary PC32 target.
+  `link_pe_tls_index_symbol` lets the PE linker resolve that symbol to its
+  synthesized index slot on both architectures when every reference is an
+  index load. `link_test_pe_x64_tls_index_object` checks that an image linked
+  from the written object loads `AddressOfIndex`, as a direct link does
+  (GitHub #1323 W1/W3 spelling). COFF TLS data still uses `.tdata`/`.tbss`
+  rather than `.tls$`, and Mach-O objects still lack `__thread_vars`
+  descriptors; both remain tracked by GitHub #1323.
 - **COFF section alignment is a linker placement contract.** A nonzero
   `ObjectSection.alignment` is preserved in `IMAGE_SCN_ALIGN_*`; zero resolves
   through `object_section_default_alignment` for that kind. COFF represents
@@ -682,7 +694,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   SUB, ADDS and unrelated instructions. Type 7 ordinarily accepts the scaled
   unsigned-immediate load/store and PRFM encodings, preserving the operation
   and registers while clearing or restoring the immediate. Reserved,
-  unscaled and register-offset forms fail closed. The exact `__tls_index`
+  unscaled and register-offset forms fail closed. The exact `_tls_index`
   symbol remains a distinct DATA-symbol contract restricted to a 32-bit
   unsigned-immediate LDR; the writer binds index-pair relocations to that
   loader symbol. TLS section offsets use shifted ADD type 10
