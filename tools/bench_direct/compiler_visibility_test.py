@@ -9,6 +9,7 @@ without the network.
 
 from __future__ import annotations
 
+import base64
 import copy
 import io
 import json
@@ -537,6 +538,8 @@ class RecoveryApi(FakeGitHub):
     def __init__(self, compare: str = "success", artifacts: int = 1, run_path: str = compiler_github.BENCH_WORKFLOW):
         super().__init__()
         self.compare, self.artifacts, self.run_path = compare, artifacts, run_path
+        # The original run's bench workflow; this default predates machine-record retention.
+        self.workflow = "jobs:\n  compare:\n"
         self.payload = archive({"receipt.json": json.dumps(self.recorded()), "lab/summary.json": json.dumps(summary()), **corpus_members()})
         self.add_check(HEAD, compiler_receipt.check_marker(HEAD), status="completed")
 
@@ -580,6 +583,11 @@ class RecoveryApi(FakeGitHub):
             return copy.deepcopy(answers["/actions/runs/91"])
         if bare == f"/compare/{TRUSTED}...main":
             return {"status": "ahead"}
+        if bare == "/contents/" + compiler_github.BENCH_WORKFLOW:
+            if urllib.parse.parse_qs(urllib.parse.urlsplit(path).query) != {"ref": [TRUSTED]}:
+                raise urllib.error.HTTPError(path, 404, "not the original run revision", {}, None)
+            raw = self.workflow.encode()
+            return {"type": "file", "encoding": "base64", "size": len(raw), "content": base64.b64encode(raw).decode()}
         if bare in ("/contents/docs/compiler-main-profile-routing-v1.tsv",
                     "/contents/tools/compiler_main_profile_policy.c"):
             raise urllib.error.HTTPError(path, 404, "historical policy absence", {}, None)
@@ -642,6 +650,26 @@ class RecoveryTest(unittest.TestCase):
         with mock.patch.object(api, "request", routed):
             code, published = self.run_recovery(api)
         self.assertEqual((code, published), (1, {}))
+
+    def test_recovery_waives_the_machine_record_only_for_a_legacy_workflow_revision(self) -> None:
+        modern = "jobs:\n  compare:\n    steps:\n      - name: Retain the machine-specification record\n"
+        record = machine_bytes(run_id={"value": "37486885378", "status": "available", "reason": ""})
+        for label, workflow, machine, conclusion in (
+                ("legacy revision without a record", "jobs:\n  compare:\n", None, "success"),
+                ("modern revision without a record", modern, None, "failure"),
+                ("modern revision with its record", modern, record, "success"),
+                ("legacy revision with a stale record", "jobs:\n  compare:\n", machine_bytes(), "failure")):
+            with self.subTest(label=label):
+                api = RecoveryApi()
+                api.workflow = workflow
+                if machine is not None:
+                    api.payload = archive({"receipt.json": json.dumps(api.recorded()), "lab/summary.json": json.dumps(summary()),
+                                           **corpus_members(), compiler_publish.MACHINE_RECORD: machine})
+                code, published = self.run_recovery(api)
+                self.assertEqual((code, published["conclusion"]), (0, conclusion))
+                if conclusion == "failure":
+                    self.assertIn("machine-specification record", published["markdown"])
+                self.assertEqual(api.writes, [])
 
     def test_recovered_failure_keeps_its_meaning(self) -> None:
         code, published = self.run_recovery(RecoveryApi(compare="failure"))

@@ -545,8 +545,9 @@ captures (#2741).
   receipt's observed CPU, or when its run, attempt or job is not the attempt
   being published. Optional facts keep the collector's own `unknown` or
   `unavailable` status in the published check and are never filled in. Only
-  publication-only recovery of an attempt from before the record was retained
-  may lack it. The record is collected by the same job, so it corroborates the
+  publication-only recovery may lack it, and only when the bench workflow at
+  the original run's authenticated revision has no record retention step
+  (`machine_record_required`); an unreadable workflow still requires it. The record is collected by the same job, so it corroborates the
   receipt rather than proving the host independently. The direct workload
   harness, which uploads no artifact, reads the same observed CPU
   model, prints it in its report, and on any other host compiles and runs

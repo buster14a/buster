@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import unittest
 import warnings
@@ -2166,6 +2167,48 @@ class MachineRecordTest(unittest.TestCase):
         files = compiler_publish.main_archive_files(archive({"evidence/receipt.json": "{}",
                                                              "evidence/" + compiler_publish.MACHINE_RECORD: machine_bytes()}))
         self.assertEqual(files[compiler_publish.MACHINE_RECORD], machine_bytes())
+
+
+def contents_record(text: str) -> dict:
+    raw = text.encode()
+    return {"type": "file", "encoding": "base64", "size": len(raw), "content": base64.b64encode(raw).decode()}
+
+
+class MachineRecordRequiredTest(unittest.TestCase):
+    """Recovery waives the record only for a bench workflow revision that never retained it."""
+
+    REVISION = "7" * 40
+    WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "9700x-direct-bench.yml"
+
+    def required(self, answer: object, revision: str = REVISION) -> tuple[bool, list[str]]:
+        paths: list[str] = []
+
+        class Contents:
+            def request(self, path: str, data: dict | None = None) -> object:
+                paths.append(path)
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+        return compiler_publish.machine_record_required(Contents(), revision), paths
+
+    def test_current_workflow_retains_the_record_in_every_compare_upload(self) -> None:
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(text.count(compiler_publish.MACHINE_RETENTION_STEP), 3)
+        self.assertEqual(self.required(contents_record(text))[0], True)
+
+    def test_only_a_readable_legacy_revision_waives_the_record(self) -> None:
+        legacy = self.WORKFLOW.read_text(encoding="utf-8").replace(compiler_publish.MACHINE_RETENTION_STEP, "x\n")
+        required, paths = self.required(contents_record(legacy))
+        self.assertEqual(required, False)
+        self.assertEqual(urllib.parse.urlsplit(paths[0]).path, "/contents/.github/workflows/9700x-direct-bench.yml")
+        self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(paths[0]).query), {"ref": [self.REVISION]})
+        for label, answer in (("absent file", urllib.error.HTTPError("u", 404, "absent", {}, None)),
+                              ("server error", urllib.error.HTTPError("u", 502, "bad gateway", {}, None)),
+                              ("network", OSError("reset")), ("malformed record", {"type": "dir"}),
+                              ("size mismatch", dict(contents_record(legacy), size=1))):
+            with self.subTest(label=label):
+                self.assertEqual(self.required(answer)[0], True)
+        self.assertEqual(self.required(contents_record(legacy), revision="main"), (True, []))
 
 
 class EvidenceTest(unittest.TestCase):

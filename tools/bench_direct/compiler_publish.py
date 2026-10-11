@@ -43,11 +43,13 @@ re-derives a past main attempt's identity from GitHub's records
 (recovered_identity, bind_request), re-reads that attempt's retained
 evidence, and emits only the comment entry. It writes no check and runs no
 measurement; expired or unverifiable evidence is reported and not published.
-Like the corpus leg, a recovered attempt from before the machine record was
-retained may lack it; a record that is present is still checked.
+Only an attempt whose authenticated workflow revision has no record retention
+step may lack the machine record (machine_record_required); a record that is
+present is still checked.
 
 Map: validate_inline_bundle and validate_ast_pilot_bundle (opt-in flag pairs),
-decide (pure decision), machine_record (#2758 host facts), read_evidence, verify_analyzer_request_freshness
+decide (pure decision), machine_record and machine_record_required (#2758
+host facts), read_evidence, verify_analyzer_request_freshness
 (fresh request selectors), queue_delay, links,
 commit_report, recovered_identity, bind_request, report_check_url, main.
 Api lives in compiler_github.
@@ -98,6 +100,8 @@ MACHINE_SCHEMA = "buster-machine-specifications-v1"
 MACHINE_JOBS = {"main": "compare", "pull": "compare-pull"}
 MACHINE_STATUSES = ("available", "partial", "unknown", "unavailable", "not_applicable")
 MACHINE_REQUIRED = ("schema", "run_id", "run_attempt", "job", "cpu_model", "machine_arch")
+# A bench workflow revision retains the record exactly when one of its steps is named this.
+MACHINE_RETENTION_STEP = "machine-specification record\n"
 MACHINE_OPTIONAL = ("cpu_vendor", "cpu_logical_online", "cpu_process_available", "cpu_affinity",
                     "memory_total_bytes", "kernel_release", "execution_context")
 
@@ -747,9 +751,9 @@ def machine_record(raw: object, receipt: object, mode: str, run_id: str, attempt
     Required facts must be `available` and agree with the approved host, the
     receipt's observed CPU model and the attempt being published. Optional
     facts are reported with the collector's own status and reason, never
-    filled in. Only publication-only recovery of an attempt from before the
-    record was retained passes require=False; a record that is present is
-    always checked.
+    filled in. Only publication-only recovery of an attempt whose authenticated
+    workflow revision predates retention (machine_record_required) passes
+    require=False; a record that is present is always checked.
     """
     problems: list[str] = []
     facts: dict = {}
@@ -799,6 +803,19 @@ def machine_record(raw: object, receipt: object, mode: str, run_id: str, attempt
                 if not wanted or value[key] != wanted:
                     problems.append(f"machine-specification record {key} {value[key]!r} is not this attempt's {wanted!r}")
     return problems, facts
+
+
+def machine_record_required(api: Api, revision: str) -> bool:
+    """Whether the bench workflow at an authenticated run revision retains the machine record.
+
+    Only a readable workflow without the retention step is a legacy revision
+    whose recovered attempt may lack the record; a malformed revision, an
+    unreadable or absent file and every later revision require it.
+    """
+    content = None
+    if isinstance(revision, str) and SHA.fullmatch(revision):
+        content, unused_problem = _github_file(api, revision, BENCH_WORKFLOW)
+    return not content or MACHINE_RETENTION_STEP in content.decode("utf-8", errors="replace")
 
 
 def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict | None = None) -> tuple[object, object, str, dict, dict]:
@@ -948,9 +965,9 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
     return receipt, summary, problem, artifact, throughput
 
 
-def _github_file(api: Api, revision: str) -> tuple[bytes | None, str]:
-    """Read the exact request file at a commit from GitHub's immutable contents API."""
-    path = urllib.parse.quote(ANALYZER_REQUEST_PATH, safe="/")
+def _github_file(api: Api, revision: str, name: str = ANALYZER_REQUEST_PATH) -> tuple[bytes | None, str]:
+    """Read one exact file (the request file by default) at a commit from GitHub's immutable contents API."""
+    path = urllib.parse.quote(name, safe="/")
     try:
         value = api.request(f"/contents/{path}?{urllib.parse.urlencode({'ref': revision})}")
     except urllib.error.HTTPError as error:
@@ -5095,10 +5112,13 @@ def main() -> int:
     else:
         api = Api(repository, get("GH_TOKEN"))
         notes: list[str] = []
+        workflow_revision = ""
         if recover:
             expected, authorize_result, compare_result, problems = recovered_identity(api, repository, run_id, attempt)
             head = expected["head"]
             authorized = authorize_result == "success" and not problems
+            # The original run's own workflow revision, before the Main route rebinds trusted_revision.
+            workflow_revision = expected["trusted_revision"]
         else:
             expected = {"mode": mode, "repository": repository, "ref": get("BQ_REF"), "pull": get("BQ_PULL"),
                         "pull_head": get("BQ_PULL_HEAD"), "base": get("BQ_BASE_COMMIT"),
@@ -5139,8 +5159,9 @@ def main() -> int:
                 notes.extend(problems)
                 authorized = not problems
             if isinstance(receipt, dict):
+                require = not recover or machine_record_required(api, workflow_revision)
                 machine_problems, machine_facts = machine_record(throughput.get("machine"), receipt, mode, run_id,
-                                                                 attempt, require=not recover)
+                                                                 attempt, require=require)
         conclusion, title, reasons = decide(expected, authorized, compare_result, receipt, summary,
                                             get("BQ_REGRESSION_POLICY"), throughput, not recover,
                                             ([problem] if problem else []) + machine_problems,
