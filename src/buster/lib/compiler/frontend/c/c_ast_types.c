@@ -146,8 +146,10 @@
 //   binary       `* / % + - << >> < > <= >= == != & ^ | && ||`: the operation
 //                switch of c_type_parse_sizeof_step (c_ast_types_binary), with
 //                c_parse_expression_arithmetic_type, the bit-field widths it
-//                reads (c_ast_types_operand_width) and the checked-mode operand
-//                rule (c_ast_types_binary_safe).
+//                reads (c_ast_types_operand_width; an operand that ends in
+//                `. name` without being a member is 0 only where the machine's
+//                width probe provably fails, c_ast_types_probe_fails) and the
+//                checked-mode operand rule (c_ast_types_binary_safe).
 //   unary        `+ - ~ !`: promotion with the operand's bit-field width;
 //                complex and suitable vector operands keep their type.
 //   assignment   `=` and every compound form: the left operand's unqualified
@@ -202,6 +204,8 @@
 //   c_ast_types_waiting
 //   c_ast_types_looked_up_entity                 an initializer's unbound names
 //   c_ast_types_span, c_ast_types_expand         span rules
+//   c_ast_types_probe_fails,                      bit-field widths of operands
+//   c_ast_types_operand_width
 //   c_ast_types_type_body, c_ast_types_type_node the eager pass and its rules
 //   c_ast_types_member_lookup                    the pass's member memo
 //   c_ast_types_builtin_call                     void builtins, failing calls
@@ -724,12 +728,126 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_types_decayed_row(CParseResult const* result, CTyp
     return kind == C_TYPE_ARRAY || kind == C_TYPE_FUNCTION ? C_AST_TYPE_NONE : row;
 }
 
+// Whether c_parse_direct_expression_type fails on [start, end) without
+// appending a row, read from the tokens and the nodes already typed. Its
+// descent first strips enclosing parentheses, leading `*` and `&` and the
+// `++`/`--` it treats as type-preserving, exactly as below. Its base is then
+// the tokens before the first `[`, `.` or `->` outside parentheses:
+// - When that base is one identifier, the machine walks the postfix steps
+//   after it and fails at the first token that is no step. The steps it
+//   takes span an accepted INDEX, MEMBER or MEMBER_ARROW node here, so each
+//   reads an unqualified array or aggregate, or a qualified aggregate whose
+//   member copy is already shared, as the machine's walk does, and appends
+//   no qualified copy (c_parse_direct_expression_postfix,
+//   c_parse_intern_qualified_type).
+// - Any other base that holds no `,` or `{` outside parentheses is not
+//   descended into. One that starts with none of a string literal, `(` or a
+//   call's callee is typed to nothing by c_parse_direct_expression_base
+//   before any row is made, and no step runs on nothing. The first two are
+//   tested before the scan, since casts lead most of the declined operands.
+// Every other range is left to the machine, even when it would fail too.
+BUSTER_GLOBAL_LOCAL bool c_ast_types_probe_fails(CAstTypeBody const* body, u32 start, u32 end)
+{
+    bool normalize = true;
+    while (normalize && start < end)
+    {
+        normalize = false;
+        while (start < end && c_ast_types_punctuator_at(body, start, C_PUNCTUATOR_LEFT_PARENTHESIS) && c_ast_types_match(body, start) == end - 1)
+        {
+            start += 1;
+            end -= 1;
+            normalize = true;
+        }
+        if (start < end && (c_ast_types_punctuator_at(body, start, C_PUNCTUATOR_STAR) || c_ast_types_punctuator_at(body, start, C_PUNCTUATOR_AMPERSAND)))
+        {
+            start += 1;
+            normalize = true;
+        }
+        if (start + 1 < end &&
+            (c_ast_types_punctuator_at(body, start, C_PUNCTUATOR_PLUS_PLUS) || c_ast_types_punctuator_at(body, start, C_PUNCTUATOR_MINUS_MINUS)))
+        {
+            start += 1;
+            normalize = true;
+        }
+        if (start + 1 < end &&
+            (c_ast_types_punctuator_at(body, end - 1, C_PUNCTUATOR_PLUS_PLUS) || c_ast_types_punctuator_at(body, end - 1, C_PUNCTUATOR_MINUS_MINUS)))
+        {
+            end -= 1;
+            normalize = true;
+        }
+    }
+    // The base: up to the first postfix step outside parentheses. A base
+    // that starts with `(` or a string literal is left to the machine.
+    CToken first = start < end ? body->tokens[start] : (CToken){0};
+    bool clean = start < end && first.kind != C_TOKEN_STRING_LITERAL && !c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_PARENTHESIS);
+    bool loose = false;
+    u32 base_end = end;
+    for (u32 index = start; clean && base_end == end && index < end; index += 1)
+    {
+        CToken token = body->tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_ast_types_match(body, index);
+            clean = close < end;
+            index = clean ? close : index;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_DOT) ||
+                 c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW))
+        {
+            base_end = index;
+        }
+        else
+        {
+            loose |= c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA);
+        }
+    }
+    bool fails = false;
+    if (clean && first.kind == C_TOKEN_IDENTIFIER && base_end == start + 1)
+    {
+        // The steps the machine's walk takes, to the first token that is none.
+        u32 index = base_end;
+        bool stepping = true;
+        while (clean && stepping && index < end)
+        {
+            if (c_ast_types_punctuator_at(body, index, C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                u32 close = c_ast_types_match(body, index);
+                clean = close < end;
+                index = clean ? close + 1 : index;
+            }
+            else
+            {
+                stepping = (c_ast_types_punctuator_at(body, index, C_PUNCTUATOR_DOT) || c_ast_types_punctuator_at(body, index, C_PUNCTUATOR_ARROW)) &&
+                           index + 1 < end && body->tokens[index + 1].kind == C_TOKEN_IDENTIFIER;
+                index += stepping ? 2 : 0;
+            }
+        }
+        u32 hit = clean && index < end ? body->start_head[start - body->token_start] : 0;
+        while (hit && body->end[hit - 1] != index)
+        {
+            hit = body->link[hit - 1];
+        }
+        u32 kind = hit ? body->ast->kinds[body->begin + hit - 1] : C_AST_IDENTIFIER;
+        fails = (kind == C_AST_INDEX || kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW) && (body->flags[hit - 1] & C_AST_TYPE_FLAG_ACCEPTED);
+    }
+    else if (clean && base_end > start)
+    {
+        bool callee = first.kind == C_TOKEN_IDENTIFIER && c_ast_types_punctuator_at(body, start + 1, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                      c_ast_types_punctuator_at(body, base_end - 1, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        fails = !loose && !callee;
+    }
+    return fails;
+}
+
 // The bit-field width c_parse_expression_bit_field_width reads from an
 // operand's tokens, or C_AST_TYPE_NONE. It looks only at a range ending in
 // `. name` or `-> name`: for a member node that is the member's own width,
-// recorded when the member was typed, and any other node that ends that way
-// (`x, s.f`, `(T)s.f`) is left to the machine.
-BUSTER_GLOBAL_LOCAL u32 c_ast_types_operand_width(CAstTypeBody const* body, u32 node)
+// recorded when the member was typed. Any other node that ends that way
+// (`a + s.f`, `c ? x : s.f`) has the machine re-type the tokens before the
+// final `.` or `->`. That probe is 0 when it provably fails without a new row
+// (c_ast_types_probe_fails), and every other such node (`x, s.f`, `(T)s.f`)
+// is left to the machine.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 c_ast_types_operand_width(CAstTypeBody const* body, u32 node)
 {
     u32 relative = node - body->begin;
     u32 kind = body->ast->kinds[node];
@@ -737,7 +855,8 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_types_operand_width(CAstTypeBody const* body, u32 
     u32 end = body->end[relative];
     bool member_tail = end >= first + 3 && body->tokens[end - 1].kind == C_TOKEN_IDENTIFIER &&
                        (c_ast_types_punctuator_at(body, end - 2, C_PUNCTUATOR_DOT) || c_ast_types_punctuator_at(body, end - 2, C_PUNCTUATOR_ARROW));
-    return kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW ? body->widths[relative] : member_tail ? C_AST_TYPE_NONE : 0;
+    bool member = kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW;
+    return member ? body->widths[relative] : member_tail && !c_ast_types_probe_fails(body, first, end - 2) ? C_AST_TYPE_NONE : 0;
 }
 
 // Whether a subtree holds a type name. The machine's operator scan reads every

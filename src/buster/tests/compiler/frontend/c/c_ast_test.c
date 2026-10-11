@@ -3935,6 +3935,36 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
      C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
     {S8_INITIALIZER("struct S { unsigned bits : 3; }; int f(struct S s) { return s.bits + 1; }"), S8_INITIALIZER("s"), 1, 5,
      C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    // An operand that ends in `. name` without being a member node: the
+    // machine re-types the tokens before the final `.` for a bit-field width
+    // (c_ast_types_operand_width). On `a + s`, `c ? a : s` and `a + s` under
+    // a unary operator that probe fails without a new row, so the width is 0
+    // and `unsigned` stays unsigned; a width of 3 would promote it to int.
+    {S8_INITIALIZER("struct S { unsigned bits : 3; }; unsigned f(struct S s, unsigned a) { return (a + s.bits) << 1; }"), S8_INITIALIZER("("), 1, 9,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
+    {S8_INITIALIZER("struct S { unsigned bits : 3; }; unsigned f(struct S s, unsigned a) { return -(a + s.bits); }"), S8_INITIALIZER("-"), 0, 8,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
+    {S8_INITIALIZER("struct S { unsigned bits : 3; }; unsigned f(struct S s, int c, unsigned a) { return (c ? a : s.bits) + 1u; }"),
+     S8_INITIALIZER("("), 1, 11, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
+    // On `t.n + s` the probe walks `t.n`, an accepted member over an
+    // unqualified aggregate, and fails at `+` without a new row.
+    {S8_INITIALIZER("struct S { unsigned bits : 3; unsigned n; }; unsigned f(struct S s, struct S t) { return (t.n + s.bits) << 1; }"),
+     S8_INITIALIZER("("), 1, 11, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
+    // On `t->n + s` over a const aggregate the probe's member step reads the
+    // member's shared qualified copy (c_parse_intern_qualified_type), which
+    // the accepted `t->n` node vouches for, and appends nothing before `+`
+    // fails it.
+    {S8_INITIALIZER("struct S { unsigned bits : 3; unsigned n; }; unsigned f(struct S s, struct S const* t) { return (t->n + s.bits) << 1; }"),
+     S8_INITIALIZER("("), 1, 11, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
+    // The probe on `x, s` succeeds through the comma and reads width 3, and
+    // on `t->n + s` with an aligned member type the member step appends a
+    // qualified copy that may not be shared before `+` fails it: both stay
+    // with the machine.
+    {S8_INITIALIZER("struct S { unsigned bits : 3; }; int f(struct S s, int x) { return (x, s.bits) << 1; }"), S8_INITIALIZER("("), 1, 9,
+     C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("typedef unsigned A16 __attribute__((aligned(16))); struct S { unsigned bits : 3; A16 n; }; "
+                    "unsigned f(struct S s, struct S const* t) { return (t->n + s.bits) << 1; }"),
+     S8_INITIALIZER("("), 4, 11, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
     {S8_INITIALIZER("int f(long a, long b) { return a < b; }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("int f(int* p) { return p != 0; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("int f(int* p, int n) { return p && n; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},

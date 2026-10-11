@@ -36333,6 +36333,117 @@ BUSTER_C_INTERNAL void c_parse_validate_file_scope_statement_expressions(CParseR
     }
 }
 
+// The end of the unevaluated unary operand of a sizeof or _Alignof starting at
+// start. c_parse_update_prefix_operand_end takes a keyword for a whole operand,
+// so the prefix chain is consumed here first: nested sizeof/_Alignof,
+// __extension__, __real__/__imag__, unary punctuators and casts, as in
+// `sizeof sizeof +({ ... })` or `sizeof -(int)+({ ... })`. A parenthesized
+// type right after sizeof/_Alignof is its operand, not a cast, so the scan
+// stops there and `sizeof (int) + ({ ... })` still reaches the evaluated `({`.
+BUSTER_C_INTERNAL u32 c_parse_unevaluated_unary_operand_end(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start,
+                                                             u32 end)
+{
+    u64 prefix_punctuators = C_PUNCTUATOR_BIT(C_PUNCTUATOR_PLUS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_MINUS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_STAR) |
+                             C_PUNCTUATOR_BIT(C_PUNCTUATOR_AMPERSAND) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_EXCLAMATION) |
+                             C_PUNCTUATOR_BIT(C_PUNCTUATOR_TILDE) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_PLUS_PLUS) |
+                             C_PUNCTUATOR_BIT(C_PUNCTUATOR_MINUS_MINUS);
+    u32 operand = start;
+    bool after_size_keyword = true;
+    bool prefix = true;
+    while (prefix && operand < end)
+    {
+        CToken token = preprocess.tokens[operand];
+        bool size_keyword = false;
+        bool keyword = false;
+        if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            String8 name = c_token_spelling(preprocess.spelling_base, token);
+            size_keyword = string_equal(name, S8("sizeof")) || c_parse_alignof_word(name);
+            keyword = size_keyword || c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_EXTENSION) ||
+                      string_equal(name, S8("__real__")) || string_equal(name, S8("__imag__"));
+        }
+        bool punctuator = token.kind == C_TOKEN_PUNCTUATOR && (prefix_punctuators & C_PUNCTUATOR_BIT(token.punctuator)) != 0;
+        bool cast = false;
+        if (!after_size_keyword && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && operand + 1 < end)
+        {
+            CToken first = preprocess.tokens[operand + 1];
+            bool type_name = c_parse_type_name_start_word_token(preprocess, first);
+            if (!type_name && first.kind == C_TOKEN_IDENTIFIER)
+            {
+                CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &first);
+                type_name = entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF;
+            }
+            u32 close = type_name ? c_parse_matching_delimiter_indexed(result, preprocess, operand) : end;
+            // `(T){ ... }` is a compound literal, the operand itself.
+            cast = close + 1 < end && !c_token_is_punctuator(&preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACE);
+            operand = cast ? close + 1 : operand;
+        }
+        prefix = keyword || punctuator || cast;
+        operand += keyword || punctuator ? 1 : 0;
+        after_size_keyword = size_keyword;
+    }
+    u32 operand_end = c_parse_update_prefix_operand_end(result, preprocess, operand, end);
+    return operand_end;
+}
+
+// The `(` of the first evaluated GNU statement expression in a block-scope
+// static initializer [start, end), or end. Such a static is initialized before
+// the function runs, so GCC and Clang reject the `({` as "initializer element is
+// not constant" (#3415), while a sizeof or _Alignof unary operand, or a typeof
+// operand, stays unevaluated and constant. The position index answers the
+// common case, a static without one; only a hit walks the range to skip those
+// operands.
+BUSTER_C_INTERNAL u32 c_parse_block_static_statement_expression(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                                 u32 start, u32 end)
+{
+    u32 found = end;
+    // Any `({` at all? The candidates are positions where one may begin; the
+    // walk below confirms them and skips the unevaluated operands.
+    bool present = false;
+    for (u32 index = start < end ? c_parse_statement_expression_next(result, preprocess, start + 1, end) : end; !present && index < end;
+         index = c_parse_statement_expression_next(result, preprocess, index + 1, end))
+    {
+        present = c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE) &&
+                  c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+    }
+    u32 cursor = present ? start : end;
+    while (found == end && cursor < end)
+    {
+        CToken token = preprocess.tokens[cursor];
+        bool parenthesized = cursor + 1 < end && c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        bool size_or_alignment = false;
+        bool type_of = false;
+        if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            String8 name = c_token_spelling(preprocess.spelling_base, token);
+            size_or_alignment = string_equal(name, S8("sizeof")) || c_parse_alignof_word(name);
+            type_of = parenthesized && (string_equal(name, S8("typeof")) || string_equal(name, S8("typeof_unqual")) ||
+                                        string_equal(name, S8("__typeof")) || string_equal(name, S8("__typeof__")));
+        }
+        if (size_or_alignment)
+        {
+            // The operand is a whole unary expression, parenthesized or not:
+            // `sizeof *({ int x; &x; })` evaluates nothing either.
+            cursor = c_parse_unevaluated_unary_operand_end(result, preprocess, scope, cursor + 1, end);
+        }
+        else if (type_of)
+        {
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor + 1);
+            cursor = close < end ? close + 1 : end;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && cursor + 1 < end &&
+                 c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_BRACE))
+        {
+            found = cursor;
+        }
+        else
+        {
+            cursor += 1;
+        }
+    }
+    return found;
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                              CPreprocessResult preprocess)
 {
@@ -36660,9 +36771,15 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
                 String8 conversion_message = {0};
                 bool braced = initializer_start < initializer_end &&
                               c_token_is_punctuator(&preprocess.tokens[initializer_start], C_PUNCTUATOR_LEFT_BRACE);
-                bool incompatible = !braced && c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type,
-                                                                                     initializer_start, initializer_end, true, &conversion_message);
-                if (incompatible)
+                u32 statement_expression = c_parse_block_static_statement_expression(result, preprocess, entity->scope, initializer_start, initializer_end);
+                bool incompatible = statement_expression == initializer_end && !braced &&
+                                    c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type,
+                                                                         initializer_start, initializer_end, true, &conversion_message);
+                if (statement_expression < initializer_end)
+                {
+                    c_parse_lowering_constraint_consider(diagnostic, S8("initializer element is not constant"), start, statement_expression);
+                }
+                else if (incompatible)
                 {
                     c_parse_lowering_constraint_consider(diagnostic,
                         conversion_message.length ? conversion_message : S8("initializer has an incompatible type"),
