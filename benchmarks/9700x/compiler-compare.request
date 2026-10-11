@@ -148,3 +148,4 @@ request: PR #3157 issue #2717 guard optional published CFG; compare the final ex
 request: PR #3157 issue #2717 ready-head Apple/macOS/iOS CI and fresh compiler-compare-v1 after marker-only push from ee52b190; source-identical code
 request: PR #3321 issue #3102 owner-requested exact-head comparison after the readiness hold; tree typer stage 3 with type-row interning narrowed to opt-in -fc-ast-pilot (default compile path interns nothing); merge of current main f6e8d25ffd1768a37107dccf1bfe4f8bc56a0667; fresh compiler-compare-v1 and throughput-corpus-v2 qualification
 canonical-inline-self-host-v1
+request: PR #3111 issue #48 per-function inline validation fix (f33940ae) after compiler-compare-v1 measured +4.51% at 15227131, and #3539 stage-2 harness repair (3a1b5a53); fresh exact-head compiler-compare-v1 and canonical-inline-self-host-v1 qualification
