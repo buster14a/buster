@@ -17,6 +17,7 @@ FILES = (
     "cmake-profile.json",
     ".ninja_log",
 )
+RETAINED_NAMES = {".ninja_log": "ninja_log.txt"}
 TREE_PREFIXES = (
     "build-ci_on-cc_",
     "build-release-ci_on-cc_",
@@ -157,6 +158,7 @@ def collect(build_root, output, *, profile_requested=False, environment=None,
     for tree in sorted(trees):
         for name in FILES:
             relative = f"{tree}/{name}"
+            retained_relative = f"{tree}/{RETAINED_NAMES.get(name, name)}"
             record = {"path": relative}
             try:
                 source = regular_path(build_root, relative)
@@ -167,12 +169,13 @@ def collect(build_root, output, *, profile_requested=False, environment=None,
                     data = stream.read(available + 1)
                 if len(data) > available:
                     raise ValueError("evidence grew beyond byte limit")
-                destination = output / relative
+                destination = output / retained_relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with destination.open("xb") as stream:
                     stream.write(data)
                 report["captured_bytes"] += len(data)
-                record.update(status="captured", bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+                record.update(status="captured", retained_path=retained_relative,
+                              bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
             except FileNotFoundError:
                 record["status"] = "missing"
             except (OSError, ValueError) as error:

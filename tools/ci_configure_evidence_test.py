@@ -46,7 +46,8 @@ class ConfigureEvidenceTests(unittest.TestCase):
         captured = [item for item in result["files"] if item["status"] == "captured"]
         cache = next(item for item in captured if item["path"].endswith("CMakeCache.txt"))
         self.assertEqual(cache["sha256"], hashlib.sha256(data).hexdigest())
-        self.assertEqual((self.output / cache["path"]).read_bytes(), data)
+        self.assertEqual(cache["retained_path"], cache["path"])
+        self.assertEqual((self.output / cache["retained_path"]).read_bytes(), data)
         self.assertEqual(result["identity"], {"GITHUB_RUN_ID": "17"})
         self.assertEqual(result["configure_logs_captured"], 1)
         self.assertEqual(result["profiles_captured"], 1)
@@ -59,8 +60,11 @@ class ConfigureEvidenceTests(unittest.TestCase):
         result = self.collect()
         record = next(item for item in result["files"] if item["path"].endswith("/.ninja_log"))
         self.assertEqual(record["status"], "captured")
+        self.assertEqual(record["path"], f"{self.tree}/.ninja_log")
+        self.assertEqual(record["retained_path"], f"{self.tree}/ninja_log.txt")
         self.assertEqual(record["sha256"], hashlib.sha256(data).hexdigest())
-        self.assertEqual((self.output / record["path"]).read_bytes(), data)
+        self.assertEqual((self.output / record["retained_path"]).read_bytes(), data)
+        self.assertFalse((self.output / self.tree / ".ninja_log").exists())
         summary = {"tree": self.tree, "version": 5, "edges": 1, "malformed_lines": 0,
                    "edge_duration_sum_ms": 10,
                    "top": [{"output": "obj.o", "start_ms": 0, "end_ms": 10, "duration_ms": 10}],
@@ -70,6 +74,22 @@ class ConfigureEvidenceTests(unittest.TestCase):
         self.assertEqual(json.loads((self.output / self.tree / "ninja-log-summary.json").read_text()),
                          {key: value for key, value in summary.items() if key != "tree"})
         self.assertEqual(json.loads((self.output / "manifest.json").read_text()), result)
+
+    def test_artifact_paths_are_nonhidden_and_hash_match_manifest(self):
+        for name in evidence.FILES:
+            data = b"# ninja log v7\n" if name == ".ninja_log" else b"diagnostic\n"
+            self.write(f"{self.tree}/{name}", data)
+        result = self.collect()
+        self.assertEqual(result["errors"], [])
+        captured = [item for item in result["files"] if item["status"] == "captured"]
+        self.assertEqual(len(captured), len(evidence.FILES))
+        for path in self.output.rglob("*"):
+            relative = path.relative_to(self.output)
+            self.assertFalse(any(part.startswith(".") for part in relative.parts), str(relative))
+        for record in captured:
+            retained = self.output / record["retained_path"]
+            self.assertTrue(retained.is_file(), record["retained_path"])
+            self.assertEqual(hashlib.sha256(retained.read_bytes()).hexdigest(), record["sha256"])
 
     def test_summarize_ninja_v7_across_invocations_uses_per_edge_durations(self):
         data = (
@@ -126,6 +146,7 @@ class ConfigureEvidenceTests(unittest.TestCase):
         result = self.collect()
         record = next(item for item in result["files"] if item["path"].endswith("/.ninja_log"))
         self.assertEqual(record["status"], "missing")
+        self.assertNotIn("retained_path", record)
         self.assertEqual(result["errors"], [])
         self.assertEqual(result["ninja_logs_captured"], 0)
         self.assertEqual(result["ninja_log_summaries"], [])
@@ -213,7 +234,8 @@ class ConfigureEvidenceTests(unittest.TestCase):
                 self.assertEqual(result["profiles_captured"], 0)
                 record = next(item for item in result["files"] if item["path"].endswith("CMakeCache.txt"))
                 self.assertEqual(record["sha256"], hashlib.sha256(data).hexdigest())
-                self.assertEqual((output / record["path"]).read_bytes(), data)
+                self.assertEqual(record["retained_path"], record["path"])
+                self.assertEqual((output / record["retained_path"]).read_bytes(), data)
                 self.assertFalse(any("superbuild" in item["path"] for item in result["files"]))
 
     def test_split_superbuilds_alone_are_not_empty_success(self):
@@ -261,6 +283,9 @@ class ConfigureEvidenceTests(unittest.TestCase):
         result = self.collect(file_limit=4)
         self.assertTrue(result["errors"])
         self.assertEqual(result["captured_bytes"], 0)
+        record = next(item for item in result["files"] if item["path"].endswith("CMakeCache.txt"))
+        self.assertEqual(record["status"], "error")
+        self.assertNotIn("retained_path", record)
 
     def test_total_limit_and_exact_boundary(self):
         self.write(f"{self.tree}/CMakeCache.txt", b"1234")

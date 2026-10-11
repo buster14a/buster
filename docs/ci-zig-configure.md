@@ -36,8 +36,10 @@ The source, driver, compiler, target, and coverage identities remain in the
 adjacent authoritative `coverage.json`; exact commands and native timings remain
 in `combinations.log`. The manifest is diagnostic-only: it neither certifies
 successful compiler probes nor replaces the coverage/result consumers.
-Each tree's `.ninja_log` and `ninja-log-summary.json` are retained, with per-edge
-breakdowns printed as `NINJA_LOG_*` lines; this remains diagnostic-only (#2816).
+Each tree's raw `.ninja_log` is retained as `<tree>/ninja_log.txt` (a nonhidden
+name kept by artifact upload), alongside `ninja-log-summary.json`. Manifest
+`retained_path` identifies each file's location in the artifact. Per-output
+summaries are printed as `NINJA_LOG_*` lines; this remains diagnostic-only (#2816).
 The summary reports per-output durations only: `.ninja_log` may append build,
 `test_all`, and analyzer invocations with independently zeroed clocks, so it
 provides no elapsed or phase timing; use [matrix phase records](ci-matrix-phases.md)
