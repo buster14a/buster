@@ -236,8 +236,14 @@ either selector do not replay the profile; the selected line must increase
 exactly once against every GitHub parent while the other recognized selector
 count stays unchanged. The publisher checks the exact head request bytes and
 hash. Analyzer profiles run in place of compiler timing/corpus profiles;
-`scaling.request` and a newly requested inline-acceptance selector cannot be
-combined with them.
+`scaling.request`, a newly requested inline-acceptance selector and a fresh
+ast-pilot selector cannot be combined with them.
+
+A fresh exact `profile: ast-pilot-acceptance-v1` line, added once against
+every parent, adds issue #3397's fixed `-fc-ast-pilot` adoption profile to
+the ordinary comparison: the candidate binary without and with the flag on
+`-fsyntax-only` and `-c` cells. Its method, budget and evidence are in
+[benchmarking.md](../../docs/agents/benchmarking.md).
 
 V1 preserves its historical fixed 182-row qualification and 135-execution,
 47-alias candidate profile. V2 independently derives the ordered Release
