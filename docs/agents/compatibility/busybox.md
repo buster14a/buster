@@ -42,7 +42,7 @@ license decision remains [unselected](../../../LICENSES/README.md).
 
 [busybox.config](../../../tools/userspace/fixtures/busybox.config) is an explicit seed:
 ash, file/directory and process/exit-status operations, text utilities,
-uncompressed tar and SHA-256. Upstream `allnoconfig` first supplies a complete
+tar (including gzip extraction and command extraction) and SHA-256. Upstream `allnoconfig` first supplies a complete
 disabled basis. The native driver overlays the seed and upstream `defconfig`
 resolves that basis; this version resets boolean seeds in `allnoconfig`.
 The candidate starts from the exact resolved `.config` and runs `silentoldconfig`.
@@ -50,9 +50,11 @@ The candidate starts from the exact resolved `.config` and runs `silentoldconfig
 out of the comparison and give generators the same declared epoch.
 Different resolved configurations fail instead of silently reducing features.
 The seed requests debug information and static output with upstream's normal
-optimization. `DEBUG_PESSIMIZE` is disabled: this upstream tar configuration
-requires constant unreachable branches to be eliminated when optional
-implementations are disabled. It is a bounded userspace,
+optimization. `DEBUG_PESSIMIZE` is disabled. Tar's command/transformer
+implementations are explicitly enabled, so the configuration does not rely
+on optimization eliminating references to omitted archive implementations.
+Upstream probes compiler flags with `-S`; these run with the actual selected
+compiler and remain compiler probes, never final links. It is a bounded userspace,
 not defconfig, networking, init, privileged device management or a complete OS.
 
 The command first calls the existing full `test_musl` gate with libc-test,

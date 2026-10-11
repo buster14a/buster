@@ -23,6 +23,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
         String8 musl_output = arguments.pointer[4];
         String8 evidence = arguments.pointer[5];
         bool compile = false;
+        bool assembly = false;
         bool preprocess = false;
         bool query = false;
         bool relocatable = false;
@@ -32,6 +33,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
         {
             String8 arg = arguments.pointer[i];
             compile = compile || string_equal(arg, S8("-c"));
+            assembly = assembly || string_equal(arg, S8("-S"));
             preprocess = preprocess || string_equal(arg, S8("-E"));
             relocatable = relocatable || string_equal(arg, S8("-r")) || string_equal(arg, S8("-Wl,-r"));
             query = query || string_equal(arg, S8("--version")) || string_equal(arg, S8("-dumpmachine")) ||
@@ -47,8 +49,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
         }
         bool target_c = !host && compile && source.length && output.length && string_ends_with_sequence(output, S8(".o")) &&
                         !string_starts_with_sequence(source, S8("tmp.")) && !string_equal(source, S8("bb_libtest.c"));
-        bool buster = candidate && compile;
-        bool link = !compile && !preprocess && !query && !relocatable;
+        bool buster = candidate && (compile || assembly);
+        bool link = !compile && !assembly && !preprocess && !query && !relocatable;
         String8 action = path_join(arena, evidence, string_format(arena, S8("action-{u64}"), os_get_current_process_id()));
         valid = summary_self_test_directory_claim(action) == SUMMARY_DIRECTORY_CLAIMED;
         String8List command = {0};
