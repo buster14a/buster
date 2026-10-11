@@ -137,13 +137,15 @@ BUSTER_F_DECL void c_test_scratch_end(TemporalArena temporary);
 // it made. The reading is taken inside the fixture's scope, before the scope's
 // end releases the units it left, so a unit kept alive across the fixture
 // fails here instead of being released silently. On failure it reports both
-// readings (GitHub #3306, #3431).
+// readings (GitHub #3306, #3431). Like BUSTER_TEST_FIXTURE, it calls through a
+// volatile pointer to keep the fixture out of line (#2816).
 #define C_TEST_BOUNDED_FIXTURE(arguments, function) \
     do \
     { \
         TestArenaScope fixture_scope_ = buster_test_arena_begin((arguments), (arguments)->arena, S8(#function), false); \
+        TestFunction* volatile fixture_function_ = function; \
         u64 live_ = arena_test_live_reserved_bytes(); \
-        UnitTestResult fixture_result_ = function(arguments); \
+        UnitTestResult fixture_result_ = fixture_function_(arguments); \
         u64 left_ = arena_test_live_reserved_bytes(); \
         result.test_count += fixture_result_.test_count; \
         result.succeeded_test_count += fixture_result_.succeeded_test_count; \
