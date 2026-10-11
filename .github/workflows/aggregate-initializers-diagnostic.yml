@@ -74,7 +74,7 @@ jobs:
               echo "error: Buster accepted invalid fixture $fixture"
               exit 1
             fi
-            rg -q 'could not form an indexed place' "$RUNNER_TEMP/aggregate-evidence/buster-$fixture.log"
+            grep -Fq 'could not form an indexed place' "$RUNNER_TEMP/aggregate-evidence/buster-$fixture.log"
           done
       - name: Self-host fixed point
         shell: bash
