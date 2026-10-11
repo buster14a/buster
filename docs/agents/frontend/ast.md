@@ -1297,4 +1297,39 @@ the same way and diagnostic only:
 - The default path is within +0.006%.
 - Zen 5 validation stays incomplete (#2761).
 
+For the block-declaration declarator split (map row 3's first slice;
+`c_parse_local_declarations` reads its storage-class set, the auto-inference
+precheck and each later declarator's `,` from the declaration's nodes), these
+budgets were declared before its measured runs. The input and flags are
+stage 2's, and the four Callgrind arms are counted on tests-off
+`-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `a6705764`, which the candidate branches from. On it, B
+spends 336 M Ir inclusive in `c_parse_local_declarations`. About 15 M of that
+is the storage, `,` and `=` scans, and 19 M is `c_parse_auto_declaration_info`.
+The budgets:
+- **Type rows.** Every type-machine call runs on the walker's token ranges,
+  so the rows keep the walker's order and contents. A field-by-field
+  differential of the analysis model with and without the tree must show 0
+  differences over the corpus and the four hosted frontend sources. It
+  compares the types, entities, scopes, array bounds, alignment records and
+  diagnostics. Its floor requires most block declarations to take the tree
+  path. `-c` objects (`-g0` and `-g`) must be byte-identical across the four
+  arms.
+- **Fallbacks.** Each `CParserLocalFallback` reason has one test shape in every
+  layout. The self-host's fallback counts are reported.
+- **The slice's own effect (C against B).** `c_parse_local_declarations`'
+  inclusive cost falls, with the node index and the lookups charged. The
+  whole compile falls by at least 5 M Ir. A smaller gain, or a loss, is
+  recorded as a negative result, and the code does not ship.
+- **Default path (D against A).** The split runs only with the tree, so the
+  difference stays within ±0.05% Ir on `-fsyntax-only` and on `-c` (`-g0`).
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete (#2761) and
+  the hook stays opt-in.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
