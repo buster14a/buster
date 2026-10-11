@@ -1498,19 +1498,14 @@ typedef enum CAstExtentFallback
     // header keyword, the `else` before an else-branch, the `goto` before a
     // label) is not that token; the whole body goes to the walker.
     C_AST_EXTENT_FALLBACK_ANCHOR,
-    // The query does not start at a controlled substatement the table holds
-    // (a statement-expression interior, a label shape the walker reads
-    // differently, a statement no rule measures), or its bound is shorter
-    // than the statement.
+    // The query is not an entry, or its bound is shorter than the entry.
     C_AST_EXTENT_FALLBACK_SHAPE,
     C_AST_EXTENT_FALLBACK_COUNT,
 } CAstExtentFallback;
 
-// What the extent table did over one lowering. A table is built for a body
-// the first time lowering asks it for a controlled body range; its entries
-// are the body's controlled substatements. `walked` counts the queries the
-// token walker answered, by reason; `body_fallbacks` counts the bodies whose
-// table was refused, by reason.
+// What the extent table did over one lowering: tables built (one per body
+// that asks), entries, queries answered, queries the walker answered by
+// reason (`walked`), and bodies whose table was refused (`body_fallbacks`).
 typedef struct CAstExtentStatistics CAstExtentStatistics;
 struct CAstExtentStatistics
 {
@@ -1969,12 +1964,9 @@ struct CIRLowerOptions
     // in its frame slot unless its one write is the entry initializer and an
     // instruction result names it (see IrProgram pin_debug_locals).
     bool pin_debug_locals;
-    // The unit's complete syntax tree when the caller built one (the driver's
-    // -fc-ast-pilot): lowering reads statement extents from it where it can
-    // (c_ir_statement_extents in c_gen.c) and walks tokens for the rest. Null
-    // means no tree, and lowering behaves exactly as it always has. The tree
-    // and the preprocessing result must outlive lowering; nothing lowering
-    // publishes holds a node id or a pointer into it.
+    // The unit's syntax tree under the driver's -fc-ast-pilot: lowering reads
+    // statement extents from it (c_gen.c). Null leaves lowering unchanged. It
+    // must outlive lowering; nothing lowering publishes points into it.
     CAst const* syntax_tree;
     // Optional: receives the extent table's counts, added to what it holds.
     CAstExtentStatistics* syntax_tree_extent_statistics;

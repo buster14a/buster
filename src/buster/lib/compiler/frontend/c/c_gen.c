@@ -3385,20 +3385,11 @@ struct CIrErrorAttributeCall
     u32 attribute_token;
 };
 
-// Statement extents read from the syntax tree (GitHub #3102). Under
-// -fc-ast-pilot (CIRLowerOptions.syntax_tree) a function body gets a table of
-// its controlled substatements -- the then- and else-branches of `if`, and the
-// bodies of `while`, `for`, `switch` and `do` -- the first time lowering asks
-// for a controlled body range (c_ir_controlled_body_range). Entries are in
-// token order of the substatement's first token, which a query searches for,
-// and hold what the token walker
-// (c_ir_statement_labels_end, c_ir_statement_end) would measure: the first
-// token past its label and attribute prefix, one past its end, and whether
-// the statement there is a compound statement. Only token indices are kept,
-// in a private arena reset per body, so no node id or tree pointer reaches
-// anything lowering publishes. A body the table cannot cover, and every query
-// it does not hold, is answered by the walker, which stays the default path;
-// CAstExtentFallback names why.
+// Statement extents from the syntax tree (#3102; docs/agents/frontend/ast.md,
+// "Statement extents in lowering"). Under -fc-ast-pilot each body that asks
+// gets a table of its controlled substatements, in token order of their first
+// token, holding what the token walker would measure. Token indices only, in
+// a private arena; CAstExtentFallback names why the walker answers instead.
 typedef struct CIrExtentEntry CIrExtentEntry;
 struct CIrExtentEntry
 {
