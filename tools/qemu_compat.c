@@ -21,7 +21,7 @@ BUSTER_GLOBAL_LOCAL bool qemu_status_allowed(String8 text, String8 expected)
         String8 line = string_slice(text, offset, end);
         valid = (root && (string_equal(line, S8("!! subprojects/keycodemapdb/")) ||
                           string_equal(line, S8("!! subprojects/berkeley-softfloat-3/")) ||
-                          string_equal(line, S8("!! subprojects/berkeley-testfloat-3/")))) ||
+                          string_equal(line, S8("!! subprojects/berkeley-testfloat-3/")) || string_equal(line, S8("?? subprojects/.wraplock")))) ||
                 (generated && (string_equal(line, S8("?? meson.build")) || string_equal(line, S8("?? meson_options.txt"))));
         offset = end + 1;
     }
@@ -79,6 +79,10 @@ BUSTER_GLOBAL_LOCAL bool qemu_inputs_verify(Arena* arena, String8 git, String8 s
     String8 names[] = {S8("keycodemapdb"), S8("berkeley-softfloat-3"), S8("berkeley-testfloat-3")};
     String8 commits[] = {S8(BUSTER_QEMU_KEYMAP_COMMIT), S8(BUSTER_QEMU_SOFTFLOAT_COMMIT), S8(BUSTER_QEMU_TESTFLOAT_COMMIT)};
     bool valid = qemu_git_verify(arena, git, source, S8(BUSTER_QEMU_COMMIT), stopped);
+    String8 lock = path_join(arena, source, S8("subprojects/.wraplock"));
+    FileStats lock_stats = os_path_followed_stats(lock);
+    valid = valid && lock_stats.valid && (lock_stats.kind == OS_FILE_KIND_MISSING ||
+            (lock_stats.kind == OS_FILE_KIND_REGULAR && !lock_stats.size && string_equal(os_path_absolute(arena, lock, true), lock)));
     for (u64 index = 0; valid && index < BUSTER_ARRAY_LENGTH(names); index += 1)
     {
         String8 dependency = string_format_z(arena, S8("{S8}/subprojects/{S8}"), source, names[index]);
@@ -170,7 +174,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult qemu_self_test(Arena* arena)
             bool normal_restored = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(normal), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped));
             bool skip_rejected = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(skip), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped)) &&
                                  !qemu_git_verify(arena, git, directory, fixture_commit, &stopped);
-            passed = pristine && wrong_revision && dirty && restored && untracked_rejected && untracked_removed && ignored_rejected && ignored_removed &&
+            bool exceptions = qemu_status_allowed(S8("!! subprojects/keycodemapdb/\n!! subprojects/berkeley-softfloat-3/\n!! subprojects/berkeley-testfloat-3/\n"), S8(BUSTER_QEMU_COMMIT)) &&
+                              !qemu_status_allowed(S8("!! ignored-input.c\n"), S8(BUSTER_QEMU_COMMIT)) &&
+                              qemu_status_allowed(S8("?? meson.build\n?? meson_options.txt\n"), S8(BUSTER_QEMU_SOFTFLOAT_COMMIT)) &&
+                              !qemu_status_allowed(S8("?? extra.c\n"), S8(BUSTER_QEMU_SOFTFLOAT_COMMIT));
+            passed = exceptions && pristine && wrong_revision && dirty && restored && untracked_rejected && untracked_removed && ignored_rejected && ignored_removed &&
                      assume_rejected && normal_restored && skip_rejected;
             string_print(S8("QEMU_SELF_TEST pristine={u32} wrong_revision={u32} dirty={u32} untracked={u32} ignored={u32} "
                             "assume_unchanged={u32} skip_worktree={u32} compiler_invocations=0 status={S8}\n"),
@@ -183,6 +191,18 @@ BUSTER_GLOBAL_LOCAL ProcessResult qemu_self_test(Arena* arena)
     return result;
 }
 
+
+// Suppress source-tree Python cache writes without changing any feature probe.
+BUSTER_GLOBAL_LOCAL RaddebuggerCommandResult qemu_upstream_command(Arena* arena, SliceString8 arguments, String8 directory, String8 prefix, bool* stopped)
+{
+    String8* wrapped = arena_allocate(arena, String8, arguments.length + 2);
+    wrapped[0] = executable_resolve_in_path(arena, S8("env"));
+    wrapped[1] = S8("PYTHONDONTWRITEBYTECODE=1");
+    for (u64 index = 0; index < arguments.length; index += 1) { wrapped[index + 2] = arguments.pointer[index]; }
+    RaddebuggerCommandResult result = raddebugger_command(arena, (SliceString8){.pointer = wrapped, .length = arguments.length + 2},
+                                                        directory, prefix, RADDEBUGGER_ENVIRONMENT_INHERIT, stopped);
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL ProcessResult qemu_compat_main(Arena* arena, SliceString8 arguments)
 {
@@ -201,9 +221,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult qemu_compat_main(Arena* arena, SliceString8 ar
         String8 clang = executable_resolve_in_path(arena, S8("clang"));
         String8 ninja = executable_resolve_in_path(arena, S8("ninja"));
         String8 meson = executable_resolve_in_path(arena, S8("meson"));
+        String8 guest_cc = executable_resolve_in_path(arena, S8("x86_64-linux-gnu-gcc"));
         String8 parent = os_path_absolute(arena, S8("build"), true);
         FileStats ide_stats = os_path_followed_stats(ide);
-        bool admitted = ide_stats.valid && source.length && ide.length && git.length && clang.length && ninja.length && meson.length && parent.length &&
+        bool admitted = ide_stats.valid && source.length && ide.length && git.length && clang.length && ninja.length && meson.length && guest_cc.length && parent.length &&
                         ide_stats.kind == OS_FILE_KIND_REGULAR && !string_equal(parent, source) && !string_starts_with_sequence(parent, string_format(arena, S8("{S8}/"), source));
         if (admitted) { admitted = qemu_inputs_verify(arena, git, source, &stopped); }
         if (admitted)
@@ -217,43 +238,45 @@ BUSTER_GLOBAL_LOCAL ProcessResult qemu_compat_main(Arena* arena, SliceString8 ar
             String8 variants[] = {S8("reference"), S8("buster")};
             bool prepared = created.created && qemu_packagefiles_prepare(arena, source, output, &stopped) && qemu_inputs_verify(arena, git, source, &stopped);
             bool all_passed = prepared;
-            for (u64 variant = 0; prepared && variant < BUSTER_ARRAY_LENGTH(variants); variant += 1)
+            for (u64 variant = 0; created.created && variant < BUSTER_ARRAY_LENGTH(variants); variant += 1)
             {
                 String8 directory = path_join(arena, output, variants[variant]);
+                bool variant_admitted = prepared && qemu_inputs_verify(arena, git, source, &stopped);
                 bool directory_created = os_make_directory_exclusive(directory).created;
                 String8 configure[] = {path_join(arena, source, S8("configure")), string_format(arena, S8("--cc={S8}"), compilers[variant]),
+                    string_format(arena, S8("--host-cc={S8}"), compilers[variant]), string_format(arena, S8("--cross-cc-x86_64={S8}"), guest_cc),
                     S8("--target-list=x86_64-softmmu"), S8("--enable-tcg"), S8("--disable-kvm"), S8("--without-default-features"),
                     S8("--disable-download"), S8("--disable-docs"), S8("--disable-guest-agent"), S8("--disable-tools"), S8("--disable-fdt"),
                     S8("--disable-strip"), S8("--disable-install-blobs"), S8("--disable-rust"), S8("--extra-cflags=-O0 -g")};
                 String8 prefix = string_format(arena, S8("{S8}/{S8}-configure"), output, variants[variant]);
-                bool configured = directory_created && raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(configure), directory, prefix, RADDEBUGGER_ENVIRONMENT_INHERIT, &stopped));
+                bool configured = variant_admitted && directory_created && raddebugger_command_ok(qemu_upstream_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(configure), directory, prefix, &stopped));
                 bool built = false;
                 bool unit = false;
                 bool qtest = false;
                 if (configured)
                 {
                     String8 commands[] = {ninja, S8("-t"), S8("commands"), S8("qemu-system-x86_64")};
-                    retained = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(commands), directory,
-                        string_format(arena, S8("{S8}/{S8}-planned-actions"), output, variants[variant]), RADDEBUGGER_ENVIRONMENT_INHERIT, &stopped)) && retained;
+                    retained = raddebugger_command_ok(qemu_upstream_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(commands), directory,
+                        string_format(arena, S8("{S8}/{S8}-planned-actions"), output, variants[variant]), &stopped)) && retained;
                     String8 build[] = {ninja, S8("-j2"), S8("-v"), S8("qemu-system-x86_64")};
-                    built = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(build), directory,
-                        string_format(arena, S8("{S8}/{S8}-build"), output, variants[variant]), RADDEBUGGER_ENVIRONMENT_INHERIT, &stopped));
+                    built = raddebugger_command_ok(qemu_upstream_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(build), directory,
+                        string_format(arena, S8("{S8}/{S8}-build"), output, variants[variant]), &stopped));
                 }
                 if (built)
                 {
-                    String8 inventory[] = {meson, S8("introspect"), S8("--tests"), directory};
-                    retained = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(inventory), directory,
-                        string_format(arena, S8("{S8}/{S8}-test-inventory"), output, variants[variant]), RADDEBUGGER_ENVIRONMENT_INHERIT, &stopped)) && retained;
+                    String8 inventory[] = {path_join(arena, directory, S8("pyvenv/bin/meson")), S8("introspect"), S8("--tests"), directory};
+                    retained = raddebugger_command_ok(qemu_upstream_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(inventory), directory,
+                        string_format(arena, S8("{S8}/{S8}-test-inventory"), output, variants[variant]), &stopped)) && retained;
                     String8 unit_args[] = {executable_resolve_in_path(arena, S8("make")), S8("-j2"), S8("check-unit")};
-                    unit = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unit_args), directory,
-                        string_format(arena, S8("{S8}/{S8}-unit"), output, variants[variant]), RADDEBUGGER_ENVIRONMENT_INHERIT, &stopped));
+                    unit = raddebugger_command_ok(qemu_upstream_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unit_args), directory,
+                        string_format(arena, S8("{S8}/{S8}-unit"), output, variants[variant]), &stopped));
                     String8 qtest_args[] = {executable_resolve_in_path(arena, S8("make")), S8("-j2"), S8("check-qtest")};
-                    qtest = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(qtest_args), directory,
-                        string_format(arena, S8("{S8}/{S8}-qtest"), output, variants[variant]), RADDEBUGGER_ENVIRONMENT_INHERIT, &stopped));
+                    qtest = raddebugger_command_ok(qemu_upstream_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(qtest_args), directory,
+                        string_format(arena, S8("{S8}/{S8}-qtest"), output, variants[variant]), &stopped));
                 }
                 string8_list_push(arena, &summary, string_format(arena,
                     S8("{S8}\t{S8}\t{S8}\t{S8}\t{S8}\tpending\tpending\tpending\n"), variants[variant],
-                    configured ? S8("pass") : S8("fail"), !configured ? S8("not-attempted:configure") : built ? S8("pass") : S8("fail"),
+                    !variant_admitted ? S8("not-attempted:inputs") : configured ? S8("pass") : S8("fail"), !variant_admitted ? S8("not-attempted:inputs") : !configured ? S8("not-attempted:configure") : built ? S8("pass") : S8("fail"),
                     !built ? S8("not-attempted:build") : unit ? S8("pass") : S8("fail"),
                     !built ? S8("not-attempted:build") : qtest ? S8("pass") : S8("fail")));
                 all_passed = configured && built && unit && qtest && all_passed;

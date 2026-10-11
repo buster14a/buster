@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   linux-x86-64:
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
@@ -28,7 +28,7 @@ jobs:
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           requested-runner: >-
-            ubuntu-26.04
+            ubuntu-24.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         id: checkout
         with:
@@ -101,6 +101,7 @@ jobs:
           clang --version > evidence/clang.txt
           meson --version > evidence/meson.txt
           ninja --version > evidence/ninja.txt
+          x86_64-linux-gnu-gcc --version > evidence/guest-gcc.txt
           pkg-config --modversion glib-2.0 pixman-1 zlib > evidence/library-versions.txt
           cp external/qemu/LICENSE external/qemu/COPYING external/qemu/COPYING.LIB evidence/
           cp external/qemu/subprojects/keycodemapdb/LICENSE.BSD evidence/keycodemapdb-LICENSE.BSD

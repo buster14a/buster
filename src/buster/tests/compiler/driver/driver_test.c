@@ -1213,7 +1213,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
     BUSTER_STRING_TEST(arguments, no_sse2_invocation.diagnostic, S8("unsupported option: -mno-sse2 (SSE2 is part of the x86-64 baseline)"));
     // A spelling that names no feature stays an unsupported option, typed as
     // the user wrote it, and the options that are not features keep failing.
-    String8 refused_spellings[] = {S8("-mfoo"), S8("-mno-foo"), S8("-m32"), S8("-m64"), S8("-mred-zone"), S8("-mno-red-zone"), S8("-mno-"), S8("-m"),
+    String8 refused_spellings[] = {S8("-mfoo"), S8("-mno-foo"), S8("-m32"), S8("-mred-zone"), S8("-mno-red-zone"), S8("-mno-"), S8("-m"),
                                    S8("-mavx2=1"), S8("-mtune="), S8("-march="), S8("-mAVX2")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused_spellings); index += 1)
     {

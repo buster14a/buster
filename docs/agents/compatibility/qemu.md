@@ -14,6 +14,10 @@ its [GitHub mirror pin](https://github.com/qemu/qemu/tree/b2995afed254e4804611df
 is QEMU v9.2.4, commit `b2995afed254e4804611df52210067a4d5dbdf0b`.
 This is a bounded compatibility pin, not a recommendation to deploy this version.
 
+The reference intake host is GitHub-hosted Ubuntu 24.04 Linux x86-64,
+with actual package/compiler identities retained. Ubuntu 26.04 was rejected
+at intake because its newer string header caused unchanged QEMU 9.2.4 to fail
+its Clang reference build; that attempt is not a qualified cell.
 The cell is Linux x86-64 host, `x86_64-softmmu`, TCG enabled and KVM disabled.
 The same explicit configure options are used for Clang and Buster:
 `--without-default-features --disable-download --disable-docs
@@ -26,9 +30,12 @@ debug/debug census. Check the retained actual compiler arguments before making
 a debug configuration claim.
 
 External prerequisites are Git, Clang, Meson >=1.5, Ninja, make, pkg-config,
-Python/venv and the development files for GLib, pixman and zlib. Upstream
+Python/venv, coreutils, the independent `x86_64-linux-gnu-gcc` guest compiler,
+and the development files for GLib, pixman and zlib. Upstream
 Python scripts are used unchanged; the Buster harness adds no Python.
-The workflow records package versions and compiler identities. This diagnostic
+The workflow records package versions and compiler identities. QEMU's bundled
+Meson wheel is its normal offline bootstrap when the installed Meson is too old;
+the action introspects with the Meson selected in each build's upstream venv. This diagnostic
 environment is not yet an immutable SDK closure; package, header, linker and
 object digests remain a separate full-qualification requirement.
 
@@ -60,13 +67,21 @@ With the trusted Release compiler built, run on authorized cloud infrastructure:
 The action refuses a wrong pin, tracked edits, extra untracked/ignored input,
 hidden index flags and sparse checkout. Each dependency is verified separately;
 the three known dependency directories are the only root ignored-directory
-exceptions. The source/dependency guards run again after both compiler attempts.
+exceptions. Meson's `subprojects/.wraplock` is admitted only as an empty regular
+file at its canonical path; arbitrary untracked/ignored files remain refused.
+Upstream commands inherit `PYTHONDONTWRITEBYTECODE=1` through recorded `env`
+invocations to prevent Python generators from writing source-tree caches.
+The guards run before each variant and after both compiler attempts.
 Output belongs to a fresh `build/qemu-<pid>-<time>` directory outside QEMU.
 
 The native action runs unmodified upstream `configure`, then
 `ninja -j2 -v qemu-system-x86_64`. Buster is supplied as `ide cc`; there is
 no Clang fallback for candidate C compilations or feature probes. Clang is an
-independent reference in a separate build directory. Planned Ninja actions are
+independent reference in a separate build directory. `--host-cc` also selects
+the variant compiler for host C build tools. The independent GNU x86-64 compiler
+is explicitly selected with `--cross-cc-x86_64` for upstream guest-side test
+compiler probes; those are separate from Buster host C actions and are not a
+Buster guest-code-generation claim. Planned Ninja actions are
 retained separately from executed verbose logs. Neither planned actions nor
 `compile_commands.json` prove successful compiler/object coverage.
 
