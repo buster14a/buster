@@ -1421,6 +1421,272 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_scaling(UnitTestArgument
     return result;
 }
 
+// Expected-model writers for the internal-label boundary fixture (#2363): an
+// independent spelling of the assembly a jump-target label layout produces,
+// not a copy of the printer's own emission path.
+BUSTER_GLOBAL_LOCAL char8* object_test_assembly_expected_append(char8* cursor, String8 text)
+{
+    memcpy(cursor, text.pointer, text.length);
+    return cursor + text.length;
+}
+
+BUSTER_GLOBAL_LOCAL char8* object_test_assembly_expected_u64(char8* cursor, u64 value)
+{
+    char8 digits[24];
+    u64 count = 0;
+    do
+    {
+        digits[count] = (char8)('0' + value % 10);
+        value /= 10;
+        count += 1;
+    } while (value);
+    while (count)
+    {
+        count -= 1;
+        *cursor = digits[count];
+        cursor += 1;
+    }
+    return cursor;
+}
+
+BUSTER_GLOBAL_LOCAL char8* object_test_assembly_expected_label(char8* cursor, u32 section, u64 offset, bool definition)
+{
+    cursor = object_test_assembly_expected_append(cursor, S8(".Lbuster_"));
+    cursor = object_test_assembly_expected_u64(cursor, section);
+    cursor = object_test_assembly_expected_append(cursor, S8("_"));
+    cursor = object_test_assembly_expected_u64(cursor, offset);
+    if (definition)
+    {
+        cursor = object_test_assembly_expected_append(cursor, S8(":"));
+    }
+    cursor = object_test_assembly_expected_append(cursor, S8("\n"));
+    return cursor;
+}
+
+BUSTER_GLOBAL_LOCAL char8* object_test_assembly_expected_bytes(char8* cursor, ByteSlice data, u64 start, u64 end)
+{
+    char8 hexadecimal[] = "0123456789abcdef";
+    while (start < end)
+    {
+        u64 line_end = BUSTER_MIN(end, start + 16);
+        cursor = object_test_assembly_expected_append(cursor, S8("\t.byte "));
+        for (u64 index = start; index < line_end; index += 1)
+        {
+            if (index != start)
+            {
+                cursor = object_test_assembly_expected_append(cursor, S8(", "));
+            }
+            cursor = object_test_assembly_expected_append(cursor, S8("0x"));
+            *cursor = (char8)hexadecimal[data.pointer[index] >> 4];
+            cursor += 1;
+            *cursor = (char8)hexadecimal[data.pointer[index] & 15];
+            cursor += 1;
+        }
+        cursor = object_test_assembly_expected_append(cursor, S8("\n"));
+        start = line_end;
+    }
+    return cursor;
+}
+
+BUSTER_GLOBAL_LOCAL u64 object_test_count_occurrences(ByteSlice bytes, String8 value)
+{
+    u64 count = 0;
+    if (value.length && value.length <= bytes.length)
+    {
+        for (u64 index = 0; index + value.length <= bytes.length; index += 1)
+        {
+            if (memcmp(bytes.pointer + index, value.pointer, value.length) == 0)
+            {
+                count += 1;
+            }
+        }
+    }
+    return count;
+}
+
+// One x86-64 layout: leading `jmp rel8` rows at offsets 0,2,..., each jumping
+// forward to one of `targets` (all >= 2 * target_count), then filler bytes the
+// printer cannot decode. The model is a leading directive, one `jmp` line per
+// row, then the raw tail split exactly at the sorted unique jump targets.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_label_case(UnitTestArguments* arguments, u64 length, const u64* targets,
+                                                                   u64 target_count, u8 filler, bool dirty_scratch)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    u8* data = arena_allocate(arguments->arena, u8, length);
+    if (BUSTER_REQUIRE(arguments, data != 0))
+    {
+        memset(data, filler, length);
+        u64 jump_count = target_count;
+        for (u64 index = 0; index < jump_count; index += 1)
+        {
+            u64 target = targets[index];
+            BUSTER_TEST(arguments, target >= 2 * jump_count && target < length);
+            s64 displacement = (s64)target - (s64)(2 * index + 2);
+            BUSTER_TEST(arguments, displacement >= 0 && displacement <= INT8_MAX);
+            data[2 * index] = 0xeb;
+            data[2 * index + 1] = (u8)displacement;
+        }
+        ObjectSection section = {.kind = OBJECT_SECTION_TEXT, .data = (ByteSlice){.pointer = data, .length = length}};
+        ObjectFile object = {.target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                             .sections = &section, .section_count = 1};
+        if (dirty_scratch)
+        {
+            u64 position = arguments->arena->position;
+            u8* dirt = arena_allocate(arguments->arena, u8, BUSTER_MB(1));
+            BUSTER_TEST(arguments, dirt != 0);
+            if (dirt)
+            {
+                memset(dirt, 0xff, BUSTER_MB(1));
+            }
+            arena_set_position(arguments->arena, position);
+        }
+        char8 expected_bytes[8192] = {0};
+        char8* cursor = expected_bytes;
+        cursor = object_test_assembly_expected_append(cursor, S8("\t.intel_syntax noprefix\n\t.text\n"));
+        for (u64 index = 0; index < jump_count; index += 1)
+        {
+            cursor = object_test_assembly_expected_append(cursor, S8("\tjmp "));
+            cursor = object_test_assembly_expected_label(cursor, 0, targets[index], false);
+        }
+        u64 raw_start = 2 * jump_count;
+        for (u64 target_index = 0; target_index < jump_count; target_index += 1)
+        {
+            u64 target = targets[target_index];
+            if (target_index && target == targets[target_index - 1])
+            {
+                continue;
+            }
+            cursor = object_test_assembly_expected_bytes(cursor, (ByteSlice){.pointer = data, .length = length}, raw_start, target);
+            cursor = object_test_assembly_expected_label(cursor, 0, target, true);
+            raw_start = target;
+        }
+        cursor = object_test_assembly_expected_bytes(cursor, (ByteSlice){.pointer = data, .length = length}, raw_start, length);
+        cursor = object_test_assembly_expected_append(cursor, S8("\t.section .note.GNU-stack,\"\",@progbits\n"));
+        BUSTER_TEST(arguments, (u64)(cursor - expected_bytes) < sizeof(expected_bytes));
+        String8 expected = {.pointer = expected_bytes, .length = (u64)(cursor - expected_bytes)};
+        String8 assembly = object_print_assembly(arguments->arena, &object);
+        BUSTER_STRING_TEST(arguments, assembly, expected);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// Internal-label offsets bound the raw-byte successor scan in
+// object_assembly_emit_section; these layouts pin where each `.Lbuster_<s>_<o>`
+// definition lands relative to 16-byte .byte line splits and section edges.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_internal_label_boundaries(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    static const u64 case_7[] = {6};
+    static const u64 case_8[] = {6, 7};
+    static const u64 case_63[] = {7, 8, 62};
+    static const u64 case_64[] = {8, 63};
+    static const u64 case_65[] = {63, 64};
+    static const u64 case_66[] = {64, 65, 65};
+    static const u64 case_129a[] = {7, 8, 63};
+    static const u64 case_129b[] = {64, 65, 128};
+    u64 dense_targets[32];
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(dense_targets); index += 1)
+    {
+        dense_targets[index] = 64 + index;
+    }
+    struct
+    {
+        u64 length;
+        const u64* targets;
+        u64 target_count;
+    } cases[] = {
+        {1, 0, 0},
+        {7, case_7, BUSTER_ARRAY_LENGTH(case_7)},
+        {8, case_8, BUSTER_ARRAY_LENGTH(case_8)},
+        {63, case_63, BUSTER_ARRAY_LENGTH(case_63)},
+        {64, case_64, BUSTER_ARRAY_LENGTH(case_64)},
+        {65, case_65, BUSTER_ARRAY_LENGTH(case_65)},
+        {66, case_66, BUSTER_ARRAY_LENGTH(case_66)},
+        {129, case_129a, BUSTER_ARRAY_LENGTH(case_129a)},
+        {129, case_129b, BUSTER_ARRAY_LENGTH(case_129b)},
+        {160, dense_targets, BUSTER_ARRAY_LENGTH(dense_targets)},
+    };
+    for (u32 pass = 0; pass < 2; pass += 1)
+    {
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            UnitTestResult one =
+                object_test_assembly_label_case(arguments, cases[index].length, cases[index].targets, cases[index].target_count, 0x06, pass != 0);
+            result.test_count += one.test_count;
+            result.succeeded_test_count += one.succeeded_test_count;
+        }
+    }
+    // A label name embeds its section index, so identical targets in two text
+    // sections stay in their own namespaces.
+    for (u32 reverse = 0; reverse < 2; reverse += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        u8 data_long[65];
+        u8 data_short[7];
+        memset(data_long, 0x06, sizeof(data_long));
+        memset(data_short, 0x06, sizeof(data_short));
+        data_long[0] = 0xeb;
+        data_long[1] = 61;
+        data_long[2] = 0xeb;
+        data_long[3] = 60;
+        data_short[0] = 0xeb;
+        data_short[1] = 4;
+        ObjectSection sections[2] = {
+            {.kind = OBJECT_SECTION_TEXT, .data = (ByteSlice){.pointer = reverse ? data_short : data_long, .length = reverse ? sizeof(data_short) : sizeof(data_long)}},
+            {.kind = OBJECT_SECTION_TEXT, .data = (ByteSlice){.pointer = reverse ? data_long : data_short, .length = reverse ? sizeof(data_long) : sizeof(data_short)}},
+        };
+        u32 long_section = reverse ? 1 : 0;
+        u32 short_section = 1 - long_section;
+        ObjectFile object = {.target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                             .sections = sections, .section_count = BUSTER_ARRAY_LENGTH(sections)};
+        String8 assembly = object_print_assembly(arguments->arena, &object);
+        ByteSlice bytes = BUSTER_SLICE_TO_BYTE_SLICE(assembly);
+        if (BUSTER_REQUIRE(arguments, assembly.length != 0))
+        {
+            char8 label[64];
+            u32 long_targets[] = {63, 64};
+            for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(long_targets); index += 1)
+            {
+                char8* cursor = label;
+                cursor = object_test_assembly_expected_label(cursor, long_section, long_targets[index], true);
+                String8 definition = {.pointer = label, .length = (u64)(cursor - label)};
+                BUSTER_TEST(arguments, object_test_count_occurrences(bytes, definition) == 1);
+            }
+            char8* cursor = label;
+            cursor = object_test_assembly_expected_label(cursor, short_section, 6, true);
+            String8 short_definition = {.pointer = label, .length = (u64)(cursor - label)};
+            BUSTER_TEST(arguments, object_test_count_occurrences(bytes, short_definition) == 1);
+            cursor = label;
+            cursor = object_test_assembly_expected_label(cursor, long_section, 6, true);
+            String8 wrong_long = {.pointer = label, .length = (u64)(cursor - label)};
+            BUSTER_TEST(arguments, !object_bytes_contain(bytes, wrong_long));
+            cursor = label;
+            cursor = object_test_assembly_expected_label(cursor, short_section, 63, true);
+            String8 wrong_short = {.pointer = label, .length = (u64)(cursor - label)};
+            BUSTER_TEST(arguments, !object_bytes_contain(bytes, wrong_short));
+        }
+        scratch_end(temporary);
+    }
+    // AArch64 pre-marks branch targets in a prepare scan: `b .` and a backward
+    // `cbz` share one definition at offset 0, a forward `b` defines the last
+    // word, and a tail shorter than a word stays raw.
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        u8 data[] = {0x00, 0x00, 0x00, 0x14, 0x02, 0x00, 0x00, 0x14, 0xc3, 0xff, 0xff, 0xb4, 0xef, 0xbe, 0xad, 0xde, 0xaa, 0xbb, 0xcc};
+        ObjectSection section = {.kind = OBJECT_SECTION_TEXT, .data = BUSTER_ARRAY_TO_SLICE(data)};
+        ObjectFile object = {.target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+                             .sections = &section, .section_count = 1};
+        String8 assembly = object_print_assembly(arguments->arena, &object);
+        String8 expected = S8("\t.text\n.Lbuster_0_0:\n\tb .Lbuster_0_0\n\tb .Lbuster_0_12\n\tcbz x3, .Lbuster_0_0\n"
+                              ".Lbuster_0_12:\n\t.word 0xdeadbeef\n\t.byte 0xaa, 0xbb, 0xcc\n\t.section .note.GNU-stack,\"\",@progbits\n");
+        BUSTER_STRING_TEST(arguments, assembly, expected);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // COFF merges aligned same-kind contributions, including empty final ones.
 // Poisoned reader storage must not leak into the resulting gaps or tail.
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_merged_padding(UnitTestArguments* arguments)
@@ -5349,6 +5615,9 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     UnitTestResult scaling = object_test_assembly_scaling(arguments);
     result.test_count += scaling.test_count;
     result.succeeded_test_count += scaling.succeeded_test_count;
+    UnitTestResult label_boundaries = object_test_assembly_internal_label_boundaries(arguments);
+    result.test_count += label_boundaries.test_count;
+    result.succeeded_test_count += label_boundaries.succeeded_test_count;
     UnitTestResult alignment_capacity = object_test_writer_alignment_capacity(arguments);
     result.test_count += alignment_capacity.test_count;
     result.succeeded_test_count += alignment_capacity.succeeded_test_count;
