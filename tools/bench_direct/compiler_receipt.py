@@ -3229,9 +3229,10 @@ def inventory_leg_record(receipt: dict, leg: str) -> tuple[bool | None, str]:
     elif leg == "scaling":
         if "scaling_profile" in receipt:
             series = receipt.get("scaling") if isinstance(receipt.get("scaling"), dict) else {}
-            statuses = {row.get("status") if isinstance(row, dict) else None
-                        for row in (series.get(name) for name in SCALING_PROFILE["series"])}
-            ran, recorded = True, "valid" if statuses == {"valid"} else "failed"
+            # Compare, never hash: a malformed status (an object or list) is a failure, not a crash.
+            valid = all(isinstance(row, dict) and row.get("status") == "valid"
+                        for row in (series.get(name) for name in SCALING_PROFILE["series"]))
+            ran, recorded = True, "valid" if valid else "failed"
         else:
             ran, recorded = False, "not requested"
     elif leg in INVENTORY_OPT_IN_RECORDS:

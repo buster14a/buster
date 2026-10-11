@@ -4084,6 +4084,30 @@ class InventoryCoverageTest(unittest.TestCase):
         # A row both scaling and the corpus discharge is not covered while either requested leg is not.
         self.assertEqual(coverage["rows"]["build:bench_throughput"], "not discharged: evidence refused by the publisher")
 
+    def test_malformed_leg_values_are_not_discharged_and_never_raise(self) -> None:
+        # Valid JSON can hold an object or a list where a string belongs; none may stop publication.
+        for bad in ({}, [], None, 3, "pending"):
+            with self.subTest(value=bad):
+                scaling = {name: {"status": bad} for name in compiler_receipt.SCALING_PROFILE["series"]}
+                record = self.pull(**dict(self.opt_ins(), scaling=scaling, inline_acceptance={"requested": True, "status": bad},
+                                          throughput_real_source={"requested": bad, "status": "complete"}),
+                                   throughput=dict(self.pull()["throughput"], valid=bad, exit=bad), state=bad)
+                for conclusion in ("success", "failure", "neutral"):
+                    coverage = compiler_receipt.covered_inventory_rows(record, conclusion, "pull")
+                    if conclusion != "success":
+                        self.assertEqual(coverage["discharged"], [])
+                self.assertEqual(compiler_receipt.inventory_leg_record(record, "scaling"), (True, "failed"))
+                self.assertEqual(compiler_receipt.inventory_leg_record(record, "corpus"), (True, "failed"))
+                failed = compiler_receipt.covered_inventory_rows(record, "failure", "pull")
+                self.assertEqual(self.legs(failed)["scaling"], "not discharged: leg failed")
+        for bad in ({}, [], 3):
+            with self.subTest(record=bad):
+                coverage = compiler_receipt.covered_inventory_rows(self.pull(production_profile=bad), "failure", "pull")
+                self.assertEqual(self.legs(coverage)["production-profile"],
+                                 "not discharged: no production-profile record (malformed)")
+                coverage = compiler_receipt.covered_inventory_rows(self.pull(scaling_profile={}, scaling=bad), "failure", "pull")
+                self.assertEqual(self.legs(coverage)["scaling"], "not discharged: leg failed")
+
     def test_missing_legs_discharge_nothing(self) -> None:
         for conclusion in ("success", "failure"):
             coverage = compiler_receipt.covered_inventory_rows(None, conclusion, "pull")
