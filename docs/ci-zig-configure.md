@@ -40,10 +40,12 @@ Each tree's raw `.ninja_log` is retained as `<tree>/ninja_log.txt` (a nonhidden
 name kept by artifact upload), alongside `ninja-log-summary.json`. Manifest
 `retained_path` identifies each file's location in the artifact. Per-edge
 summaries are printed as `NINJA_LOG_*` lines; this remains diagnostic-only (#2816).
-The summary reports per-edge durations only. Relative/absolute aliases are
-reported once only when the absolute path equals the tree's build directory
-plus the relative path and their start, end, and hash match; outputs of distinct
-edges are never merged, even when their command and times match.
+The summary rows are per-output groups after merging relative/absolute aliases.
+Each row's duration is that output's edge duration. The
+`output_group_duration_sum_seconds` sum is an upper bound on executed-edge
+time: the Ninja log cannot distinguish one multi-output edge from distinct
+edges that share a command and interval. Such groups are counted in
+`ambiguous_output_groups`; exact edge membership requires the build graph.
 `.ninja_log` may append build,
 `test_all`, and analyzer invocations with independently zeroed clocks, so it
 provides no elapsed or phase timing; use [matrix phase records](ci-matrix-phases.md)

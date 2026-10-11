@@ -66,12 +66,14 @@ class ConfigureEvidenceTests(unittest.TestCase):
         self.assertEqual(record["sha256"], hashlib.sha256(data).hexdigest())
         self.assertEqual((self.output / record["retained_path"]).read_bytes(), data)
         self.assertFalse((self.output / self.tree / ".ninja_log").exists())
-        summary = {"tree": self.tree, "version": 5, "edges": 1, "malformed_lines": 0,
-                   "edge_duration_sum_ms": 10,
+        summary = {"tree": self.tree, "version": 5, "output_groups": 1,
+                   "ambiguous_output_groups": 0, "malformed_lines": 0,
+                   "output_group_duration_sum_ms": 10,
                    "top": [{"output": "obj.o", "outputs": ["obj.o"], "start_ms": 0, "end_ms": 10,
-                            "duration_ms": 10}],
-                   "all_edges": [{"output": "obj.o", "outputs": ["obj.o"], "start_ms": 0, "end_ms": 10,
-                                  "duration_ms": 10}]}
+                            "duration_ms": 10, "shared_interval_hash": False}],
+                   "all_output_groups": [{"output": "obj.o", "outputs": ["obj.o"],
+                                         "start_ms": 0, "end_ms": 10, "duration_ms": 10,
+                                         "shared_interval_hash": False}]}
         self.assertEqual(result["ninja_logs_captured"], 1)
         self.assertEqual(result["ninja_log_summaries"], [summary])
         self.assertEqual(json.loads((self.output / self.tree / "ninja-log-summary.json").read_text()),
@@ -104,17 +106,18 @@ class ConfigureEvidenceTests(unittest.TestCase):
         )
         result = evidence.summarize_ninja_log(data)
         self.assertEqual(result["version"], 7)
-        self.assertEqual(result["edges"], 4)
+        self.assertEqual(result["output_groups"], 4)
         self.assertEqual(result["malformed_lines"], 0)
-        self.assertEqual(result["edge_duration_sum_ms"], 40 + 55 + 15 + 202)
+        self.assertEqual(result["ambiguous_output_groups"], 0)
+        self.assertEqual(result["output_group_duration_sum_ms"], 40 + 55 + 15 + 202)
         self.assertNotIn("wall_ms", result)
         self.assertNotIn("tail", result)
         self.assertEqual([edge["output"] for edge in result["top"]],
                          ["CMakeFiles/test_all", "b.c.obj", "a.c.obj", "ide.exe"])
-        self.assertEqual([edge["output"] for edge in result["all_edges"]],
+        self.assertEqual([edge["output"] for edge in result["all_output_groups"]],
                          ["CMakeFiles/test_all", "b.c.obj", "a.c.obj", "ide.exe"])
-        self.assertEqual(len({edge["output"] for edge in result["all_edges"]}), 4)
-        link = next(edge for edge in result["all_edges"] if edge["output"] == "ide.exe")
+        self.assertEqual(len({edge["output"] for edge in result["all_output_groups"]}), 4)
+        link = next(edge for edge in result["all_output_groups"] if edge["output"] == "ide.exe")
         self.assertEqual(link["duration_ms"], 15)
 
     def test_only_build_directory_aliases_are_merged(self):
@@ -130,9 +133,10 @@ class ConfigureEvidenceTests(unittest.TestCase):
         data = ("\n".join(lines) + "\n").encode()
 
         result = evidence.summarize_ninja_log(data, build_directory)
-        self.assertEqual(result["edges"], 3)
-        self.assertEqual(result["edge_duration_sum_ms"], 3 * 15)
-        for index, edge in enumerate(result["all_edges"], 1):
+        self.assertEqual(result["output_groups"], 3)
+        self.assertEqual(result["output_group_duration_sum_ms"], 3 * 15)
+        self.assertEqual(result["ambiguous_output_groups"], 3)
+        for index, edge in enumerate(result["all_output_groups"], 1):
             relative = f"CMakeFiles/edge{index}"
             absolute = f"{build_directory}/{relative}"
             self.assertEqual(edge, {
@@ -141,13 +145,33 @@ class ConfigureEvidenceTests(unittest.TestCase):
                 "start_ms": 1,
                 "end_ms": 16,
                 "duration_ms": 15,
+                "shared_interval_hash": True,
             })
 
         without_build_directory = evidence.summarize_ninja_log(data)
-        self.assertEqual(without_build_directory["edges"], 6)
-        self.assertEqual(without_build_directory["edge_duration_sum_ms"], 6 * 15)
+        self.assertEqual(without_build_directory["output_groups"], 6)
+        self.assertEqual(without_build_directory["output_group_duration_sum_ms"], 6 * 15)
+        self.assertEqual(without_build_directory["ambiguous_output_groups"], 6)
         self.assertTrue(all(len(edge["outputs"]) == 1
-                            for edge in without_build_directory["all_edges"]))
+                            for edge in without_build_directory["all_output_groups"]))
+        self.assertTrue(all(edge["shared_interval_hash"]
+                            for edge in without_build_directory["all_output_groups"]))
+
+    def test_distinct_outputs_sharing_an_interval_hash_are_ambiguous(self):
+        data = (
+            b"# ninja log v7\n"
+            b"1\t1023\t8134371059249091\ta.txt\t35ac50d1984a72a1\n"
+            b"1\t1023\t8134371059249091\tb.txt\t35ac50d1984a72a1\n"
+            b"2\t9\t8134371059249091\tc.txt\t74a94d333aafb5ff\n"
+        )
+        result = evidence.summarize_ninja_log(data)
+        self.assertEqual(result["output_groups"], 3)
+        self.assertEqual(result["output_group_duration_sum_ms"], 2 * 1022 + 7)
+        self.assertEqual(result["ambiguous_output_groups"], 2)
+        groups = {group["output"]: group for group in result["all_output_groups"]}
+        self.assertTrue(groups["a.txt"]["shared_interval_hash"])
+        self.assertTrue(groups["b.txt"]["shared_interval_hash"])
+        self.assertFalse(groups["c.txt"]["shared_interval_hash"])
 
     def test_absolute_output_under_another_directory_is_not_merged(self):
         build_directory = "/x/build/t"
@@ -157,9 +181,13 @@ class ConfigureEvidenceTests(unittest.TestCase):
             b"1\t16\t8134371059249091\t/other/CMakeFiles/edge1\t35ac50d1984a72a1\n"
         )
         result = evidence.summarize_ninja_log(data, build_directory)
-        self.assertEqual(result["edges"], 2)
-        self.assertEqual(result["edge_duration_sum_ms"], 2 * 15)
-        self.assertTrue(all(len(edge["outputs"]) == 1 for edge in result["all_edges"]))
+        self.assertEqual(result["output_groups"], 2)
+        self.assertEqual(result["output_group_duration_sum_ms"], 2 * 15)
+        self.assertEqual(result["ambiguous_output_groups"], 2)
+        self.assertTrue(all(len(group["outputs"]) == 1
+                            for group in result["all_output_groups"]))
+        self.assertTrue(all(group["shared_interval_hash"]
+                            for group in result["all_output_groups"]))
 
     @unittest.skipUnless(os.name == "nt", "Windows path normalization")
     def test_windows_style_absolute_alias_is_merged(self):
@@ -172,13 +200,15 @@ class ConfigureEvidenceTests(unittest.TestCase):
             + f"1\t16\t8134371059249091\t{absolute}\t35ac50d1984a72a1\n".encode()
         )
         result = evidence.summarize_ninja_log(data, build_directory)
-        self.assertEqual(result["edges"], 1)
-        self.assertEqual(result["all_edges"], [{
+        self.assertEqual(result["output_groups"], 1)
+        self.assertEqual(result["ambiguous_output_groups"], 0)
+        self.assertEqual(result["all_output_groups"], [{
             "output": relative,
             "outputs": sorted([relative, absolute]),
             "start_ms": 1,
             "end_ms": 16,
             "duration_ms": 15,
+            "shared_interval_hash": False,
         }])
 
     @unittest.skipUnless(os.name == "posix", "POSIX path normalization")
@@ -192,13 +222,15 @@ class ConfigureEvidenceTests(unittest.TestCase):
             + f"1\t16\t8134371059249091\t{absolute}\t35ac50d1984a72a1\n".encode()
         )
         result = evidence.summarize_ninja_log(data, build_directory)
-        self.assertEqual(result["edges"], 1)
-        self.assertEqual(result["all_edges"], [{
+        self.assertEqual(result["output_groups"], 1)
+        self.assertEqual(result["ambiguous_output_groups"], 0)
+        self.assertEqual(result["all_output_groups"], [{
             "output": relative,
             "outputs": sorted([relative, absolute]),
             "start_ms": 1,
             "end_ms": 16,
             "duration_ms": 15,
+            "shared_interval_hash": False,
         }])
 
     def test_hashless_ninja_lines_remain_per_output(self):
@@ -208,11 +240,14 @@ class ConfigureEvidenceTests(unittest.TestCase):
             b"0\t10\t8134371059249091\tb.txt\n"
         )
         result = evidence.summarize_ninja_log(data)
-        self.assertEqual(result["edges"], 2)
-        self.assertEqual(result["edge_duration_sum_ms"], 20)
-        self.assertEqual(result["all_edges"], [
-            {"output": "a.txt", "outputs": ["a.txt"], "start_ms": 0, "end_ms": 10, "duration_ms": 10},
-            {"output": "b.txt", "outputs": ["b.txt"], "start_ms": 0, "end_ms": 10, "duration_ms": 10},
+        self.assertEqual(result["output_groups"], 2)
+        self.assertEqual(result["output_group_duration_sum_ms"], 20)
+        self.assertEqual(result["ambiguous_output_groups"], 0)
+        self.assertEqual(result["all_output_groups"], [
+            {"output": "a.txt", "outputs": ["a.txt"], "start_ms": 0, "end_ms": 10,
+             "duration_ms": 10, "shared_interval_hash": False},
+            {"output": "b.txt", "outputs": ["b.txt"], "start_ms": 0, "end_ms": 10,
+             "duration_ms": 10, "shared_interval_hash": False},
         ])
 
     def test_duplicate_outputs_keep_last_invocation_edge(self):
@@ -223,21 +258,24 @@ class ConfigureEvidenceTests(unittest.TestCase):
             b"not a ninja edge\n"
         )
         result = evidence.summarize_ninja_log(data)
-        self.assertEqual(result["edges"], 1)
+        self.assertEqual(result["output_groups"], 1)
         self.assertEqual(result["malformed_lines"], 1)
-        self.assertEqual(result["edge_duration_sum_ms"], 7)
-        self.assertEqual(result["all_edges"],
+        self.assertEqual(result["ambiguous_output_groups"], 0)
+        self.assertEqual(result["output_group_duration_sum_ms"], 7)
+        self.assertEqual(result["all_output_groups"],
                          [{"output": "a.c.obj", "outputs": ["a.c.obj"],
-                           "start_ms": 0, "end_ms": 7, "duration_ms": 7}])
+                           "start_ms": 0, "end_ms": 7, "duration_ms": 7,
+                           "shared_interval_hash": False}])
 
     def test_summarize_empty_and_headers_only_ninja_logs(self):
         for data in (b"", b"# ninja log v6\n\n"):
             with self.subTest(data=data):
                 result = evidence.summarize_ninja_log(data)
-                self.assertEqual(result["edges"], 0)
-                self.assertEqual(result["edge_duration_sum_ms"], 0)
+                self.assertEqual(result["output_groups"], 0)
+                self.assertEqual(result["ambiguous_output_groups"], 0)
+                self.assertEqual(result["output_group_duration_sum_ms"], 0)
                 self.assertEqual(result["top"], [])
-                self.assertEqual(result["all_edges"], [])
+                self.assertEqual(result["all_output_groups"], [])
                 self.assertNotIn("wall_ms", result)
                 self.assertNotIn("tail", result)
         self.assertIsNone(evidence.summarize_ninja_log(b"")["version"])
@@ -267,13 +305,15 @@ class ConfigureEvidenceTests(unittest.TestCase):
                              capture_output=True, text=True, check=False, cwd=self.root)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertTrue(run.stdout.startswith("CMake evidence: 1 trees, 0 configure logs, "))
-        self.assertIn(f"NINJA_LOG_SUMMARY tree={self.tree} edges=2 "
-                      "edge_duration_sum_seconds=2.000 malformed=0", run.stdout)
+        self.assertIn(f"NINJA_LOG_SUMMARY tree={self.tree} output_groups=2 "
+                      "output_group_duration_sum_seconds=2.000 "
+                      "ambiguous_output_groups=0 malformed=0", run.stdout)
         self.assertIn(f"NINJA_LOG_EDGE tree={self.tree} rank=1 "
                       "seconds=1.500 output=compile.obj outputs=2", run.stdout)
         self.assertIn(f"NINJA_LOG_EDGE tree={self.tree} rank=2 "
                       "seconds=0.500 output=link.exe", run.stdout)
         self.assertNotIn("outputs=1", run.stdout)
+        self.assertNotIn("shared_interval_hash", run.stdout)
         self.assertNotIn("NINJA_LOG_TAIL", run.stdout)
         self.assertNotIn("wall_seconds=", run.stdout)
         self.assertNotIn("start_seconds=", run.stdout)
