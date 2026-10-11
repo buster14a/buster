@@ -200,7 +200,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $env:BUSTER_UNIT_DRIVER test_units_partitioned --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" generate --build-directory build/ci-unit-tree --cc clang --ci --sanitize $env:BUSTER_UNIT_FUZZ --config $env:BUSTER_UNIT_CONFIG 2>&1"
+          cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" generate --build-directory build/ci-unit-tree --cc clang --ci --sanitize --fuzz --config $env:BUSTER_UNIT_CONFIG 2>&1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmd /d /s /c "`"$env:BUSTER_UNIT_DRIVER`" build --build-directory build/ci-unit-tree --config $env:BUSTER_UNIT_CONFIG -t ide 2>&1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
