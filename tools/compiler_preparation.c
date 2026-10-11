@@ -14,6 +14,7 @@
 #define COMPILER_CLOSURE_QUALIFICATION_STAGE_LIMIT 96ull
 #define COMPILER_CLOSURE_QUALIFICATION_LOG_LIMIT (1ull << 20)
 #define COMPILER_CLOSURE_QUALIFICATION_START_LIMIT_US (85ull * 60 * 1000000)
+#define COMPILER_CLOSURE_LINKER_FLAGS "-DCMAKE_EXE_LINKER_FLAGS=-Wl,--no-fork"
 
 typedef struct CompilerClosurePreparation CompilerClosurePreparation;
 struct CompilerClosurePreparation
@@ -397,7 +398,11 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_build(CompilerClosurePrepa
 {
     TemporalArena temporary = scratch_begin(&preparation->arena, 1);
     String8 wrapper = path_join(temporary.arena, preparation->root, S8("build.sh"));
-    String8 generate[] = {wrapper, S8("generate"), S8("--cc"), S8("clang"), S8("--no-include-tests")};
+    // Linux generate selects mold, whose default --fork leaves a finished link
+    // child for the phase subreaper to adopt, which invalidates the phase
+    // (#3372). --no-fork keeps the same linker and output bytes.
+    String8 generate[] = {wrapper, S8("generate"), S8("--cc"), S8("clang"), S8("--no-include-tests"),
+        S8("--"), S8(COMPILER_CLOSURE_LINKER_FLAGS)};
     String8 build[] = {wrapper, S8("build"), S8("--config"), S8("Release"), S8("-t"), S8("ide")};
     bool result = compiler_closure_preparation_checkout(preparation,
             string_format(temporary.arena, S8("{S8}-checkout"), role), commit) &&
