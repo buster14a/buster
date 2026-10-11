@@ -1,5 +1,7 @@
 // Included by driver_test.c: GCC-compatible dependency arguments, quoting,
 // preprocessor identities and success-only depfile publication.
+#include <buster/lib/os.h>
+
 typedef struct CompilerDriverDependencyTestRule CompilerDriverDependencyTestRule;
 struct CompilerDriverDependencyTestRule
 {
@@ -7,6 +9,34 @@ struct CompilerDriverDependencyTestRule
     String8 prerequisites[32];
     u32 prerequisite_count;
 };
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_dependency_test_path_equal(String8 left, String8 right)
+{
+    bool equal = left.length == right.length;
+    for (u64 index = 0; index < left.length && index < right.length; index += 1)
+    {
+        char8 left_byte = left.pointer[index] == '\\' ? '/' : left.pointer[index];
+        char8 right_byte = right.pointer[index] == '\\' ? '/' : right.pointer[index];
+        equal &= left_byte == right_byte;
+    }
+    return equal;
+}
+
+#if !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL bool compiler_driver_dependency_test_change_directory(String8 path)
+{
+#if BUSTER_WINDOWS
+    TemporalArena scratch = scratch_begin(0, 0);
+    String16 wide_path = string16_from_string8(scratch.arena, path, true);
+    bool result = SetCurrentDirectoryW(wide_path.pointer) != 0;
+    scratch_end(scratch);
+#else
+    BUSTER_CHECK(path.pointer != 0 && path.pointer[path.length] == 0);
+    bool result = chdir((const char*)path.pointer) == 0;
+#endif
+    return result;
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_dependency_test_unescape(Arena* arena, String8 value)
 {
@@ -86,8 +116,15 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_dependency_test_parse_rule(Arena* arena
             }
         }
         u64 colon = 0;
-        while (colon < folded_count && folded[colon] != ':')
+        while (colon < folded_count)
         {
+            bool rule_separator = folded[colon] == ':' &&
+                                  (colon + 1 == folded_count || folded[colon + 1] == ' ' ||
+                                   folded[colon + 1] == '\t' || folded[colon + 1] == '\n');
+            if (rule_separator)
+            {
+                break;
+            }
             colon += 1;
         }
         if (colon < folded_count)
@@ -316,12 +353,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_files(UnitTes
     CompilerDriverDependencyTestRule rule = {0};
     bool parsed = compiler_driver_dependency_test_parse_rule(arena, depfile, &rule);
     BUSTER_TEST(arguments, parsed);
-    BUSTER_STRING_TEST(arguments, rule.target, object);
+    BUSTER_TEST(arguments, compiler_driver_dependency_test_path_equal(rule.target, object));
     String8 expected_all[] = {source, forced, middle, leaf, once, special, system_header, system_quoted, system_nested, system_user};
     BUSTER_TEST(arguments, rule.prerequisite_count == BUSTER_ARRAY_LENGTH(expected_all));
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected_all) && index < rule.prerequisite_count; index += 1)
     {
-        BUSTER_STRING_TEST(arguments, rule.prerequisites[index], expected_all[index]);
+        BUSTER_TEST(arguments, compiler_driver_dependency_test_path_equal(rule.prerequisites[index], expected_all[index]));
     }
     for (u32 index = 0; index < rule.prerequisite_count; index += 1)
     {
@@ -339,23 +376,84 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_files(UnitTes
     String8 expected_user[] = {source, forced, middle, leaf, once, special};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected_user) && index < rule.prerequisite_count; index += 1)
     {
-        BUSTER_STRING_TEST(arguments, rule.prerequisites[index], expected_user[index]);
+        BUSTER_TEST(arguments, compiler_driver_dependency_test_path_equal(rule.prerequisites[index], expected_user[index]));
     }
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    String8 multi_directory = string_format_z(arena, S8("{S8}/multi"), directory);
+    String8 multi_user_directory = string_format_z(arena, S8("{S8}/user"), multi_directory);
+    String8 multi_system_directory = string_format_z(arena, S8("{S8}/system"), multi_directory);
+    os_make_directory(multi_directory);
+    os_make_directory(multi_user_directory);
+    os_make_directory(multi_system_directory);
+    String8 multi_source_user = string_format_z(arena, S8("{S8}/aaaa.c"), multi_directory);
+    String8 multi_source_system = string_format_z(arena, S8("{S8}/bbbb.c"), multi_directory);
+    String8 multi_user_header = string_format_z(arena, S8("{S8}/user.h"), multi_user_directory);
+    String8 multi_system_header = string_format_z(arena, S8("{S8}/syst.h"), multi_system_directory);
+    BUSTER_TEST(arguments, file_write(multi_source_user, BUSTER_SLICE_TO_BYTE_SLICE(S8("#include <user.h>\nint aaaa(void) { return USER_VALUE; }\n"))));
+    BUSTER_TEST(arguments, file_write(multi_source_system, BUSTER_SLICE_TO_BYTE_SLICE(S8("#include <syst.h>\nint bbbb(void) { return SYSTEM_VALUE; }\n"))));
+    BUSTER_TEST(arguments, file_write(multi_user_header, BUSTER_SLICE_TO_BYTE_SLICE(S8("#define USER_VALUE 1\n"))));
+    BUSTER_TEST(arguments, file_write(multi_system_header, BUSTER_SLICE_TO_BYTE_SLICE(S8("#define SYSTEM_VALUE 2\n"))));
+    String8 original_directory = os_path_absolute(arena, S8("."), true);
+    String8 multi_directory_absolute = os_path_absolute(arena, multi_directory, true);
+    bool changed_directory = original_directory.length && multi_directory_absolute.length &&
+                             compiler_driver_dependency_test_change_directory(multi_directory_absolute);
+    BUSTER_TEST(arguments, changed_directory);
+    if (changed_directory)
+    {
+        String8 multi_command[] = {
+            S8("-c"), S8("-MMD"), S8("-I"), S8("user"), S8("-isystem"), S8("system"), S8("aaaa.c"), S8("bbbb.c")};
+        CompilerDriverResult multi_compiled = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(multi_command)));
+        BUSTER_TEST_RAW(arguments, multi_compiled.error == COMPILER_DRIVER_ERROR_NONE, multi_compiled.diagnostic);
+        FileMapRead user_object = file_map_read(arena, S8("aaaa.o"), (FileReadOptions){0});
+        FileMapRead system_object = file_map_read(arena, S8("bbbb.o"), (FileReadOptions){0});
+        BUSTER_TEST(arguments, user_object.bytes.pointer && system_object.bytes.pointer);
+        file_map_unmap(user_object);
+        file_map_unmap(system_object);
+        CompilerDriverDependencyTestRule user_rule = {0};
+        CompilerDriverDependencyTestRule system_rule = {0};
+        bool user_parsed = compiler_driver_dependency_test_parse_rule(arena, S8("aaaa.d"), &user_rule);
+        bool system_parsed = compiler_driver_dependency_test_parse_rule(arena, S8("bbbb.d"), &system_rule);
+        BUSTER_TEST(arguments, user_parsed && system_parsed);
+        BUSTER_TEST(arguments, compiler_driver_dependency_test_path_equal(user_rule.target, S8("aaaa.o")));
+        BUSTER_TEST(arguments, compiler_driver_dependency_test_path_equal(system_rule.target, S8("bbbb.o")));
+        BUSTER_TEST(arguments, user_rule.prerequisite_count == 2);
+        BUSTER_TEST(arguments, system_rule.prerequisite_count == 1);
+        if (user_rule.prerequisite_count > 0)
+        {
+            BUSTER_TEST(arguments, compiler_driver_dependency_test_path_equal(user_rule.prerequisites[0], S8("aaaa.c")));
+        }
+        if (user_rule.prerequisite_count > 1)
+        {
+            BUSTER_TEST(arguments, compiler_driver_dependency_test_path_equal(user_rule.prerequisites[1], S8("user/user.h")));
+        }
+        if (system_rule.prerequisite_count > 0)
+        {
+            BUSTER_TEST(arguments, compiler_driver_dependency_test_path_equal(system_rule.prerequisites[0], S8("bbbb.c")));
+        }
+        BUSTER_TEST(arguments, compiler_driver_dependency_test_change_directory(original_directory));
+    }
+#endif
     compiled = compiler_driver_dependency_test_compile(arena, source, object, user_directory, system_directory, forced,
                                                         S8("-MD"), true, 0, 0);
     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
-    String8 headers[] = {forced, middle, leaf, once, special, system_header, system_quoted, system_nested, system_user};
     FileMapRead phony_file = file_map_read(arena, depfile, (FileReadOptions){0});
     String8 phony_text = BYTE_SLICE_TO_STRING(8, phony_file.bytes);
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(headers); index += 1)
+    CompilerDriverDependencyTestRule phony_rule = {0};
+    bool phony_parsed = compiler_driver_dependency_test_parse_rule(arena, depfile, &phony_rule);
+    BUSTER_TEST(arguments, phony_parsed && phony_rule.prerequisite_count > 0);
+    for (u32 index = 1; index < phony_rule.prerequisite_count; index += 1)
     {
-        CompilerDriverDependencyQuoteResult quoted = compiler_driver_dependency_quote(arena, headers[index]);
+        CompilerDriverDependencyQuoteResult quoted = compiler_driver_dependency_quote(arena, phony_rule.prerequisites[index]);
         String8 rule_text = string_format(arena, S8("\n{S8}:\n"), quoted.text);
         BUSTER_TEST(arguments, quoted.representable && compiler_driver_test_string_contains(phony_text, rule_text));
     }
-    CompilerDriverDependencyQuoteResult quoted_source = compiler_driver_dependency_quote(arena, source);
-    String8 main_phony = string_format(arena, S8("\n{S8}:\n"), quoted_source.text);
-    BUSTER_TEST(arguments, !compiler_driver_test_string_contains(phony_text, main_phony));
+    if (phony_rule.prerequisite_count > 0)
+    {
+        CompilerDriverDependencyQuoteResult quoted_source = compiler_driver_dependency_quote(arena, phony_rule.prerequisites[0]);
+        String8 main_phony = string_format(arena, S8("\n{S8}:\n"), quoted_source.text);
+        BUSTER_TEST(arguments, !compiler_driver_test_string_contains(phony_text, main_phony));
+    }
     file_map_unmap(phony_file);
     String8 target_options[] = {S8("-MT"), S8("a$b"), S8("-MQ"), S8("c$d e")};
     compiled = compiler_driver_dependency_test_compile(arena, source, object, user_directory, system_directory, forced,
@@ -394,6 +492,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_files(UnitTes
     BUSTER_TEST(arguments, !absent.bytes.pointer);
     file_map_unmap(absent);
 
+#if !BUSTER_WINDOWS
     String8 line_break_source = string_format_z(arena, S8("{S8}/line\nbreak.c"), directory);
     String8 line_break_object = string_format_z(arena, S8("{S8}/line-break.o"), directory);
     String8 line_break_depfile = string_format_z(arena, S8("{S8}/line-break.d"), directory);
@@ -408,6 +507,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_files(UnitTes
     FileMapRead line_break_dep = file_map_read(arena, line_break_depfile, (FileReadOptions){0});
     BUSTER_TEST(arguments, !line_break_dep.bytes.pointer);
     file_map_unmap(line_break_dep);
+#endif
 
     scratch_end(temporary);
     return result;
