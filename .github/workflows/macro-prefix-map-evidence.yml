@@ -1,0 +1,32 @@
+name: Macro prefix map exact-source evidence
+on:
+  push:
+    branches: ['codex/3628-prefix-map-evidence']
+    paths: ['.github/workflows/macro-prefix-map-evidence.yml']
+permissions:
+  contents: read
+concurrency:
+  group: macro-prefix-map-evidence-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  baseline:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 6ed0aac8e5c431f420be10132a4485fc944109e9
+          persist-credentials: false
+      - uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: ubuntu-26.04
+      - name: Baseline self-host fixed point
+        run: |
+          mkdir -p .ci-tools
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o .ci-tools/build
+          .ci-tools/build generate --ci --cc clang --linker DEFAULT --no-sanitize --no-fuzz --no-lto
+          .ci-tools/build build --config Release -t ide
+          .ci-tools/build test_self_host --config Release
