@@ -15667,7 +15667,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_linker_scripts(UnitT
         S8_INITIALIZER("INPUT(libactual.so))"), S8_INITIALIZER("INPUT(libactual.so) garbage"),
         S8_INITIALIZER("INPUT(-l:)"), S8_INITIALIZER("INPUT(-l)"), S8_INITIALIZER("INPUT(libbad.a)"),
         S8_INITIALIZER("INPUT(libactual.so) SEARCH_DIR(/tmp)"), S8_INITIALIZER("INPUT(\"unterminated)"),
-        S8_INITIALIZER("INPUT(lib*.so)"), S8_INITIALIZER("INPUT(libactual.so\0)"),
+        S8_INITIALIZER("INPUT(libbad.o)"), S8_INITIALIZER("INPUT(lib*.so)"), S8_INITIALIZER("INPUT(libactual.so\0)"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
     {
@@ -15703,7 +15703,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_linker_scripts(UnitT
     String8 exported_name = S8("script_provider");
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
     {
-        for (u32 scenario = 0; scenario < 23; scenario += 1)
+        for (u32 scenario = 0; scenario < 29; scenario += 1)
         {
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             Arena* arena = temporary.arena;
@@ -15737,6 +15737,34 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_linker_scripts(UnitT
                 if (scenario == 20) { script = S8("INPUT(\"libactual.so\")"); }
                 if (scenario == 21) { script = S8("INPUT(=libactual.so)"); }
                 if (scenario == 22) { script = S8("INPUT($SYSROOT/libactual.so)"); }
+                if (scenario == 23)
+                {
+                    u8* bytes = arena_allocate(arena, u8, COMPILER_DRIVER_ELF_SCRIPT_BYTES + 1);
+                    memset(bytes, ' ', COMPILER_DRIVER_ELF_SCRIPT_BYTES + 1);
+                    memcpy(bytes, "INPUT(libactual.so)", 19);
+                    script = (String8){.pointer = (char8*)bytes, .length = COMPILER_DRIVER_ELF_SCRIPT_BYTES + 1};
+                }
+                if (scenario == 24) { script = S8("GROUP(/libactual.so -lncursesw)"); }
+                if (scenario == 25) { script = S8("AS_NEEDED(/libactual.so -lncursesw)"); }
+                if (scenario == 26) { script = S8("INPUT(libnested.so)"); }
+                if (scenario == 27)
+                {
+                    // This script is outside the supplied sysroot. Its literal
+                    // absolute member must not acquire a second sysroot prefix.
+                    inputs_written &= file_write(path, actual);
+                    String8 external = string_format_z(arena, S8("{S8}/libexternal.so"), later);
+                    String8 absolute_member = os_path_absolute(arena, path, false);
+                    inputs_written &= file_write(external, BUSTER_SLICE_TO_BYTE_SLICE(string_format(arena, S8("INPUT({S8})"), absolute_member)));
+                }
+                if (scenario == 28)
+                {
+                    // DT_SONAME must terminate inside the linked string table.
+                    u64 table = compiler_driver_test_pe_read_u64(actual, 40);
+                    u64 strings = compiler_driver_test_pe_read_u64(actual, table + 128 + 24);
+                    u64 size = compiler_driver_test_pe_read_u64(actual, table + 128 + 32);
+                    actual.pointer[strings + size - 1] = 'x';
+                    inputs_written &= file_write(path, actual);
+                }
                 if (script.length)
                 {
                     inputs_written &= file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(script));
@@ -15748,7 +15776,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_linker_scripts(UnitT
                     inputs_written &= file_write(path, actual);
                     if (scenario == 8) { inputs_written &= file_write(later_path, BUSTER_SLICE_TO_BYTE_SLICE(scripts[0])); }
                 }
-                if (scenario == 11)
+                if (scenario == 11 || scenario == 26)
                 {
                     inputs_written &= file_write(string_format_z(arena, S8("{S8}/libnested.so"), directory),
                                                  BUSTER_SLICE_TO_BYTE_SLICE(S8("/* nested */ INPUT(libactual.so)")));
@@ -15786,17 +15814,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_linker_scripts(UnitT
                             command[count++] = S8("-g0"); command[count++] = source_path;
                             if (multi) { command[count++] = anchor_path; }
                             if (scenario == 7) { command[count++] = S8("-lmissing_script_control"); }
-                            command[count++] = multi ? S8("-l:libscriptcheck.so") : S8("-lscriptcheck");
+                            command[count++] = scenario == 27 ? (multi ? S8("-l:libexternal.so") : S8("-lexternal"))
+                                                    : multi ? S8("-l:libscriptcheck.so") : S8("-lscriptcheck");
                             CompilerDriverResult linked = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena,
                                 (SliceString8){.pointer = command, .length = count}));
                             String8 description = string_format(arena, S8("GNU script target={S8} scenario={u32} multi={u32}: {S8}"),
                                 targets[target], scenario, multi, linked.diagnostic);
                             bool success = scenario == 0 || scenario == 1 || scenario == 3 || scenario == 6 || scenario == 8 ||
-                                           (scenario >= 9 && scenario <= 12) || scenario >= 19;
+                                           (scenario >= 9 && scenario <= 12) || (scenario >= 19 && scenario <= 22) || (scenario >= 24 && scenario <= 27);
                             BUSTER_TEST_RAW(arguments, linked.error == (success ? COMPILER_DRIVER_ERROR_NONE : COMPILER_DRIVER_ERROR_LINK), description);
                             if (!success)
                             {
-                                bool unsupported = scenario == 2 || (scenario >= 13 && scenario <= 18);
+                                bool unsupported = scenario == 2 || (scenario >= 13 && scenario <= 18) || scenario == 23;
                                 if (unsupported)
                                 {
                                     BUSTER_TEST_RAW(arguments, string_first_sequence(linked.diagnostic, S8("unsupported GNU linker script ")) == 0, description);

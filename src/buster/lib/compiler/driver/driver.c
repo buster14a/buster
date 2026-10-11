@@ -4531,6 +4531,7 @@ bool compiler_driver_elf_linker_script(ByteSlice bytes)
     bool result = false;
     if (bytes.pointer)
     {
+        bytes.length = BUSTER_MIN(bytes.length, (u64)COMPILER_DRIVER_ELF_SCRIPT_BYTES);
         u64 cursor = compiler_driver_linker_script_skip_trivia(bytes, 0);
         u64 start = cursor;
         while (cursor < bytes.length && ((bytes.pointer[cursor] >= 'A' && bytes.pointer[cursor] <= 'Z') || bytes.pointer[cursor] == '_'))
@@ -4623,7 +4624,7 @@ bool compiler_driver_elf_script_members(ByteSlice bytes, String8* members, u32* 
             else if (valid)
             {
                 valid = depth && token.length && member_count < COMPILER_DRIVER_ELF_SCRIPT_MEMBERS &&
-                        !compiler_driver_archive_input(token) &&
+                        !compiler_driver_archive_input(token) && !compiler_driver_object_input(token) &&
                         !(token.pointer[0] == '-' && (!string_starts_with_sequence(token, S8("-l")) || token.length <= 2 || string_equal(token, S8("-l:"))));
                 for (u64 index = 0; valid && index < token.length; index += 1)
                 {
@@ -4704,12 +4705,10 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_requested_libraries(Arena* arena, C
                                                                  NativeDynamicLibrary* seeds, String8* requests, u32 seed_count,
                                                                  CompilerDriverDynamicLibraries* result)
 {
-    u32 capacity = seed_count + 1;
-    NativeDynamicLibrary* libraries = arena_allocate(arena, NativeDynamicLibrary, capacity);
-    FileMapRead* maps = arena_allocate(arena, FileMapRead, capacity + 1);
+    NativeDynamicLibrary* libraries = seeds;
+    FileMapRead* maps = result->export_maps;
     u32 count = 0;
     u32 map_count = result->export_map_count;
-    memcpy(maps, result->export_maps, (u64)map_count * sizeof(*maps));
     CompilerDriverElfScriptWork* stack = 0;
     String8* members = 0;
     u32 expanded_members = 0;
@@ -4733,7 +4732,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_requested_libraries(Arena* arena, C
                     stack = arena_allocate(arena, CompilerDriverElfScriptWork, COMPILER_DRIVER_ELF_SCRIPT_MEMBERS);
                     members = arena_allocate(arena, String8, COMPILER_DRIVER_ELF_SCRIPT_MEMBERS);
                     work = stack;
-                    capacity = seed_count + COMPILER_DRIVER_ELF_SCRIPT_MEMBERS + 1;
+                    u32 capacity = seed_count + COMPILER_DRIVER_ELF_SCRIPT_MEMBERS + 1;
                     NativeDynamicLibrary* grown_libraries = arena_allocate(arena, NativeDynamicLibrary, capacity);
                     FileMapRead* grown_maps = arena_allocate(arena, FileMapRead, capacity + 1);
                     memcpy(grown_libraries, libraries, (u64)count * sizeof(*libraries));
