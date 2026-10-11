@@ -1189,8 +1189,9 @@ fixture as well as compiling both architectures.
   position-independent planner uses `LINK_ELF_PIC_GOT_ADDRESS_ZERO`. AArch64
   `ADR_GOT_PAGE`/`LD64_GOT_LO12_NC` already become `MOVZ #0`/`ADD #0` in
   `object_aarch64_elf_page_relocate`. `compiler_driver_elf_weak_got_tests`
-  links host PIE objects as PIE and `-no-pie` against a host-linker oracle
-  (#3414).
+  links host `-fPIE` objects against a host-linker oracle (#3414): as PIE and
+  `-no-pie` on x86-64, and `-no-pie` only on AArch64 Linux, which writes only
+  fixed-address executables.
   It relaxes the two indirect
   thread-local models back to local-exec for the same reason
   (`link_elf_relax_thread_local`), and a foreign object's local-dynamic
