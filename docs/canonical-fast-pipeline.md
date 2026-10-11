@@ -47,22 +47,18 @@ control wins, independently of whether it precedes or follows `-O`. An explicit
 `-fregister-allocator=fast|quality` is likewise independent of `-O`; the last
 allocator option wins. Timing requests never enable a pass.
 
-No level changes canonical inlining. Mandatory `always_inline` sites are
-always expanded, and tiny-leaf inlining stays off unless `-fcanonical-inline`
-is given; see [bounded direct-call inlining](#bounded-direct-call-inlining-48).
+No level changes canonical inlining. The inliner from
+[#48 / PR #3111](https://github.com/buster14a/buster/pull/3111) runs before
+shared promotion and FAST cleanup: mandatory `always_inline` sites are always
+expanded, and tiny-leaf inlining stays off unless `-fcanonical-inline` is given.
+Explicit inliner controls are independent of `-O`; see
+[bounded direct-call inlining](#bounded-direct-call-inlining-48).
 
 Direct SSA, shared local promotion and target placement remain independent
 throughput mechanisms at every level. `-O0` skips optional cleanup and its
 scratch/validation work. Debug information remains opt-in with `-g`;
 `-fpinned-debug-locals` retains readable named scalar locals as documented in
 [the driver guide](agents/driver.md#source-debug-information).
-
-[#48 / PR #3111](https://github.com/buster14a/buster/pull/3111) owns inlining
-before shared promotion and FAST cleanup. Its integration contract enables
-bounded tiny inlining at positive levels, preserves mandatory source directives
-at every level, and keeps explicit inliner controls independent. That PR's
-implementation and qualified acceptance are prerequisites for claiming the
-inliner part of #47 complete; this policy change introduces no inliner body.
 
 `ide cc -v` reports each `IR_FAST_PASS` in execution order, including
 `enabled=0` at `-O0`. Work/change counters distinguish selected passes from
