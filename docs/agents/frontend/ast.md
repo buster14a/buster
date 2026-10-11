@@ -1297,4 +1297,35 @@ the same way and diagnostic only:
 - The default path is within +0.006%.
 - Zen 5 validation stays incomplete (#2761).
 
+For a cheaper query-time name check (`c_ast_types_lookups_agree`, the
+repeat of the machine's by-spelling lookups that the
+[tree expression typer](#tree-expression-typer) makes before it answers),
+these budgets were declared before its measured runs. They use the stage-2
+input, flags and four Callgrind arms on tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `a6705764`, which the candidate branches from. A throwaway
+census build of the base (not committed) found 138,804 checks, 712,144 nodes
+walked, 191,184 lookups and no disagreement on the self-host. The budgets:
+- **Correctness.** The check may decline more, never less, and on the
+  self-host no answer changes:
+  - no verify mismatch over the corpus, with probes for any new rule;
+  - the typer's `-v` counters on the self-host are identical in B and C;
+  - identical diagnostics with and without the flag;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **The check's own cost (C against B).** `c_ast_types_lookups_agree`'s
+  inclusive instructions, plus any increase in `c_ast_types_type_body`'s,
+  fall by at least 30%, and the whole compile falls by at least 10 M Ir.
+  Otherwise the result is recorded as negative and the code does not ship.
+- **Default path (D against A).** Within ±0.05% Ir on `-fsyntax-only` and on
+  `-c` (`-g0`). A change outside that band whose callees and call counts are
+  identical, with byte-identical objects, passes on work equivalence, as for
+  the statement plan (#3370).
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete (#2761) and
+  the hook stays opt-in.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
