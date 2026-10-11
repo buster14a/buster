@@ -155,9 +155,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult curl_compat_census(Arena* arena, SliceString8 
                     version = raddebugger_command_ok(version_run) && string_starts_with_sequence(version_run.output, S8("curl 8.16.0 ")) &&
                               string_first_sequence(version_run.output, S8("OpenSSL/")) != BUSTER_STRING_NO_MATCH &&
                               string_first_sequence(version_run.output, S8("https")) != BUSTER_STRING_NO_MATCH;
-                    String8 ctest = executable_resolve_in_path(arena, S8("ctest"));
-                    String8 tests[] = {ctest, S8("--test-dir"), directory, S8("--output-on-failure"), S8("--no-tests=error")};
-                    tested = ctest.length && curl_compat_step(arena, output, directory, S8("upstream-tests"), (SliceString8)BUSTER_ARRAY_TO_SLICE(tests), &stopped);
+                    String8 tests[] = {cmake, S8("--build"), directory, S8("--parallel"), S8("2"), S8("--target"), S8("test-nonflaky")};
+                    tested = curl_compat_step(arena, output, directory, S8("upstream-tests"), (SliceString8)BUSTER_ARRAY_TO_SLICE(tests), &stopped);
                 }
                 String8 configure_status = configured ? S8("pass") : S8("fail");
                 String8 build_status = configured ? (built ? S8("pass") : S8("fail")) : S8("not-run");
