@@ -85,7 +85,8 @@ separate validation gates.
 
 [#309](https://github.com/buster14a/buster/issues/309) owns the specialized backend
 capability/conformance catalogue. Extend that work rather than implementing a
-second matrix here. Implementation, evidence and advertised support are separate.
+second matrix here. See the [backend capability catalogue](../backend-capabilities.md).
+Implementation, evidence and advertised support are separate.
 A performance candidate also needs its applicable acceptance evidence; SIMD code
 or a merged implementation alone is not a speedup.
 
