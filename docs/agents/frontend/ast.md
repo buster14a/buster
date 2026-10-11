@@ -8,13 +8,15 @@ appends a complete syntax tree as it goes. The tree covers declarations and
 declarators, statements, expressions, initializers and designators,
 attributes, assembly and the supported GNU/C23 forms, function bodies
 included. **Status: pilot.** The default pipeline does not build it. The
-opt-in [driver hook](#driver-pilot-hook) builds it, and three consumers read it:
+opt-in [driver hook](#driver-pilot-hook) builds it, and four consumers read it:
 - the [declaration split](#declaration-split-from-the-tree) publishes
   `c_parse_ast`'s top-level records from its declaration nodes;
 - the [tree expression typer](#tree-expression-typer) answers function-body
   and file-scope initializer expression-type queries during semantic analysis;
 - the [statement plan](#statement-plan-from-the-tree) gives the body binder
-  each function body's statement boundaries and block declaration ends.
+  each function body's statement boundaries and block declaration ends;
+- lowering's [extent table](#statement-extents-in-lowering) gives
+  `c_ir_controlled_body_range` each controlled substatement's extent.
 
 Otherwise `c_analyze_semantics_only` and `c_lower_to_ir_with_options` still
 rediscover syntax from token ranges, as described in the
@@ -772,6 +774,65 @@ the loop (with an `__builtin_offsetof` bail), and one tampered tree per
 fallback reason, in every layout. On the self-host unity input every body
 follows its plan, with no fallback and no bail.
 
+## Statement extents in lowering
+
+Lowering asks `c_ir_controlled_body_range` (`c_gen.c`) where each controlled
+substatement starts and ends: the then and else branches of `if`, and the
+bodies of `while`, `for`, `switch` and `do`. The token walker answers by
+skipping the label and `[[...]]` prefix (`c_ir_statement_labels_end`). It
+then matches the braces of a compound statement, or measures the statement
+(`c_ir_statement_end`, `c_ir_statement_span`, `c_ir_statement_do_tail_end`),
+walking `if`/`else` chains with explicit frames. The driver passes the
+pilot's tree to lowering as `CIRLowerOptions.syntax_tree`. Under
+`-fc-ast-pilot`, a body's **extent table** (`CIrStatementExtents`) then
+answers first. The table is built the first time lowering asks about the
+body, by one preorder walk over the body's statement nodes on an explicit
+stack. Each controlled substatement gets an entry keyed by its first token:
+- **The statement past its prefix.** A `LABELED` node without attributes, a
+  `CASE`, `CASE_RANGE` or `DEFAULT` with a statement, and an
+  `ATTRIBUTED_STATEMENT` whose groups are all `[[...]]` are peeled. Those are
+  the prefixes the walker skips.
+- **One past its end.** This comes from the [statement plan](#statement-plan-from-the-tree)'s
+  rule (`c_parse_plan_statement_last`, shared with the body binder).
+- **Whether the statement there is a compound statement.** An unlabelled
+  one hands over its interior, as in the walker.
+
+A statement's first token is its anchor. Two kinds differ: a `goto`'s anchor
+is its label, so its first token is the token before it. An expression
+statement's anchor is its `;`, so its first token is the least anchor of its
+expression, widened over the wrapping parentheses. The anchor checks follow
+the statement plan: a header keyword is followed by `(`, a header's
+substatement follows a `)`, an else branch follows `else`, and a `do` body
+follows its `do`. If any of these fails, the whole body is refused.
+
+The table holds token indices only, in a private arena reset for each body.
+No node id or `CAst` pointer reaches anything lowering publishes. The token
+walkers stay the default path, and they also answer as the fallback.
+`CAstExtentFallback` names why the walker answered:
+- **`input`:** the body has no tree, no function definition owns it, or its
+  delimiters do not nest.
+- **`anchor`:** an anchor check failed, and the whole body is refused.
+- **`shape`:** the query does not start at an entry. That covers statement-expression
+  interiors, which the walk does not enter, a label shape the walker reads
+  differently, and a statement no rule measures, such as `asm`, or a
+  `return` whose expression holds a statement expression. It also covers a
+  bound shorter than the entry's end, because the walker does not see an
+  `else` at its bound.
+
+The [corpus differential](#corpus-differential) lowers each input with the
+tree in a test-only verify mode (`c_test_ir_extent_verify_set`). The walker
+answers every query too, its answer is the one used, and the two must agree
+on the result, `content_start`, `content_end` and `after`.
+`c_ast_test_extents` covers four things in every layout:
+- one body with every controlled-substatement shape, lowered to the same IR
+  with and without the tree;
+- the two test-only mutations (`c_test_ir_extent_mutation_set`), a `do`
+  statement's end one token short and an `if ... else` measured without its
+  `else`, which the differential must report;
+- a tampered tree for `input`;
+- a tampered tree for `anchor`.
+`-v` prints `C_AST_EXTENTS`.
+
 ## Corpus differential
 
 `c_ast_test_corpus` (`c_ast_tests`; like `c_test.c`'s fixture suites it does not run on Android or iOS, whose test runs carry no repository tree) builds every `tests/**/*.c` file the
@@ -837,6 +898,14 @@ designator probe the const-assignment walk skips (about 1,400 in the
 fixtures, 27,600 in all), and each must fail without a diagnostic or a new
 table row.
 
+Every input whose analysis completes is also lowered with the tree in extent
+verify mode (`c_ast_corpus_extents`). Every controlled body range the
+[extent table](#statement-extents-in-lowering) answers must equal the token
+walker's answer, field by field. There are floors on the answers: about 3,000
+from the fixtures, and about 19,100 with the frontend sources. Today there are
+0 differences, and no corpus body's table is refused. On the whole corpus,
+the `do` mutation gives 1 difference and the dropped-`else` mutation 1,088.
+
 The compiler sources are preprocessed against the host's C library, so the
 differential also covers glibc's headers. It caught `__float128`, which glibc
 2.43 uses in `typedef __float128 _Float128;` for the compiler identity this
@@ -856,7 +925,7 @@ differential tests pass.
 | `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, and plain segments bound in one pass. The token loop stays the engine, the default path and the per-body fallback; `c_parse_local_declarations` still reads each declaration's declarators from tokens (next row), and the switch and control-statement validators still call `c_parse_statement_end`. |
 | `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Not migrated. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
-| `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Not migrated. |
+| `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Controlled-body extents (`c_ir_controlled_body_range`, and through it `c_ir_statement_end*` and `c_ir_statement_labels_end`) are read under `-fc-ast-pilot` from the [extent table](#statement-extents-in-lowering). The walkers stay the default path and the per-body and per-query fallback. `c_ir_lower_body_advance`'s first-token classification is not migrated. |
 | `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | Not migrated. |
 | `c_ir_predict_expression_type*`, `c_ir_query_*` | type-name probes, operand types over token ranges | `TYPE_NAME` / `CAST` / `SIZEOF_*` nodes plus retained semantic facts | Not migrated. |
 | `c_ir_build_delimiter_index`, `CTokenPositionIndex` matching delimiters | bracket matching for every structural query | subtree extents | Not migrated. |
@@ -879,6 +948,16 @@ that falls back; `c_parse_local_declarations` still splits declarators and
 initializers by tokens; and `c_parse_validate_one_switch` and
 `c_parse_validate_control_statements` still find statement ends with
 `c_parse_statement_end`.
+
+Under `-fc-ast-pilot`, lowering's controlled-body extents come from the
+[extent table](#statement-extents-in-lowering), and the verify-mode
+differential passes. The row is not retired, for three reasons:
+- the walkers still run without the flag, for every query the table does
+  not hold, and for every refused body;
+- `c_ir_lower_body_advance` still classifies statements by their first
+  token;
+- `c_ir_control_substatement_position`, the switch's label scan, still reads
+  tokens.
 
 The [tree expression typer](#tree-expression-typer) is the first consumer of
 the fourth row's replacement. Under `-fc-ast-pilot` it answers most of semantic
@@ -1462,5 +1541,44 @@ the same way and diagnostic only:
 - The memo answers 58% of the pass's member lookups.
 - The default path is within +0.006%.
 - Zen 5 validation stays incomplete (#2761).
+
+For lowering's [extent table](#statement-extents-in-lowering), these budgets
+were declared before its measured runs. The input is the self-host unity
+input, at `-g0 -c` (the instruction counts) and at `-g -c` (objects). The
+four Callgrind arms (`--cache-sim=no --branch-sim=no`) are counted on
+tests-off `-march=x86-64-v3` Release builds, with the driver built by Clang
+(no TCC on the host):
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `4e5d563f`, which the candidate branches from. The slice is
+a migration step, not a speedup. The walkers it replaces cost about 20 M Ir
+(0.09%) on this input, so it is gated on exactness and work equivalence,
+not on an instruction gain. The budgets:
+- **Correctness.**
+  - 0 differences over the corpus and the hosted frontend sources, above the
+    floors;
+  - a one-off verify-mode run on the self-host unity input, also with 0
+    differences;
+  - both mutations reported by the differential;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **Coverage.** No self-host body's table is refused (`input` and `anchor`
+  are 0). The queries the walker answers for `shape` are reported.
+- **The default path (D against A), by work equivalence.** The table is
+  never built without a tree. The callees of `c_ir_builder_controlled_body_range`
+  (`c_ir_statement_end`, `c_ir_statement_span`, `c_ir_statement_labels_end`,
+  `c_ir_statement_do_tail_end`, `c_ir_matching_delimiter_cached`) and their
+  call counts must equal the base's, apart from helpers the compiler inlines
+  differently. The objects must be byte-identical. The whole compile's Ir is
+  reported against the ±0.05% band, but it does not gate.
+- **The slice's own effect (C against B).** Reported, not gated. The
+  report gives the inclusive Ir of `c_ir_builder_controlled_body_range` with
+  the table's construction charged, the walkers' Ir in B, and the whole
+  compile. A loss is recorded as one, and the slice still ships on exactness,
+  because the owner wants the walker retired.
+- **Acceptance.** Hosted counts are diagnostic. Zen 5 validation (#2761)
+  stays incomplete, no benchmark request is made, and the hook stays opt-in.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
