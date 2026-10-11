@@ -390,11 +390,20 @@ fixture as well as compiling both architectures.
   register target when no resident source occupies that register, otherwise
   through the free register into its tile cell. On unity `ide.c` (x86-64
   `-march=native -g0`) this kept 45 FAST edges off the staged form and
-  removed about 680 stack-referencing instructions per mode. An edge with a
-  vector or mask assignment, or with no free register, still stages its
-  resident sources through the tile; the same input has no vector or mask
-  edge, and its no-free-register edges stage about 600 (FAST) and 2.4k
-  (QUALITY scan) sources. Either way a source with a rematerialization recipe (constant or
+  removed about 680 stack-referencing instructions per mode. When no
+  register is free across the whole edge, which happens on wide edges when
+  the targets, sources and unsaved callee-saved registers cover the register
+  file, a target that no copy reads and that is not loaded early stages
+  instead (`machine_fast_edge_staging_register`): its value is dead until
+  its own copy. That register is overwritten by the copies, so a copy cycle
+  instead saves one value in its first copy's tile cell and reloads it at
+  the end of the cycle. On unity `ide.c` every no-free-register edge had
+  such a target and cycles were rare (none in FAST, two in the QUALITY
+  scan); 52 of 53 FAST edges left the staged form, removing 5.1 KB of
+  `.text` and about 780 stack-referencing instructions per mode. An edge
+  with a vector or mask assignment, or with neither register, still stages
+  its resident sources through the tile; the same input has no vector or
+  mask edge. Either way a source with a rematerialization recipe (constant or
   frame address) reads no register and rematerializes straight into its
   destination (`MACHINE_FAST_EDGE_SOURCE_RECREATED`). On unity `ide.c` the
   parallel move removed about 46 k stack-referencing instructions and 2% of
