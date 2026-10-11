@@ -481,12 +481,146 @@ BUSTER_GLOBAL_LOCAL UnitTestResult jit_test_binding_resolution_semantics(UnitTes
 }
 #endif
 
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE && !BUSTER_MACOS && !BUSTER_IOS && !BUSTER_ANDROID
+BUSTER_GLOBAL_LOCAL UnitTestResult jit_test_imported_data_pc32(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Independent raw MOV/RET fixture: this is a direct memory access, not
+    // an address-materializing LEA that could be redirected to a pointer slot.
+    u8 bytes[] = {0x48, 0x8b, 0x05, 0, 0, 0, 0, 0xc3};
+    ObjectSection section = {.name = S8(".text"), .data = BUSTER_ARRAY_TO_SLICE(bytes),
+                             .kind = OBJECT_SECTION_TEXT, .alignment = 8};
+    ObjectSymbol symbols[] = {
+        {.name = S8("host_data"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        {.name = S8("read"), .section = 0, .size = sizeof(bytes), .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+    };
+    ObjectRelocation relocation = {.offset = 3, .symbol = 0, .addend = -4, .kind = OBJECT_RELOCATION_X86_64_PC32};
+    ObjectFile object = jit_test_object(&section, 1);
+    object.symbols = symbols;
+    object.symbol_count = BUSTER_ARRAY_LENGTH(symbols);
+    object.relocations = &relocation;
+    object.relocation_count = 1;
+    u64 host_data = 71;
+    JitHostBinding binding = {.name = symbols[0].name, .address = &host_data, .kind = OBJECT_SYMBOL_DATA};
+    JitProgram program = jit_link_object(&object, (JitOptions){.bindings = &binding, .binding_count = 1});
+    BUSTER_TEST(arguments, program.error == JIT_ERROR_NONE);
+    if (program.error == JIT_ERROR_NONE)
+    {
+        void* address = jit_program_symbol(&program, symbols[1].name);
+        u64 (*read)(void) = 0;
+        BUSTER_CT_CHECK(sizeof(read) == sizeof(address));
+        memcpy(&read, &address, sizeof(read));
+        if (BUSTER_REQUIRE(arguments, read != 0))
+        {
+            BUSTER_TEST(arguments, read() == 71);
+            host_data = 93;
+            BUSTER_TEST(arguments, read() == 93);
+        }
+    }
+    jit_program_release(&program);
+    BUSTER_TEST(arguments, !program.allocation_base && !program.object);
+
+    // Data and read-only PC32 fields must reconstruct the real host address.
+    ObjectSectionKind kinds[] = {OBJECT_SECTION_DATA, OBJECT_SECTION_READ_ONLY_DATA};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(kinds); index += 1)
+    {
+        section.kind = kinds[index];
+        relocation.offset = 0;
+        relocation.addend = 1;
+        program = jit_link_object(&object, (JitOptions){.bindings = &binding, .binding_count = 1});
+        BUSTER_TEST(arguments, program.error == JIT_ERROR_NONE);
+        if (program.error == JIT_ERROR_NONE)
+        {
+            s32 displacement = 0;
+            memcpy(&displacement, program.section_addresses[0], sizeof(displacement));
+            u64 target = (u64)(uintptr_t)program.section_addresses[0] + (u64)(s64)displacement - 1;
+            BUSTER_TEST(arguments, target == (u64)(uintptr_t)&host_data);
+            BUSTER_TEST(arguments, ((u8*)program.section_addresses[0])[4] == bytes[4]);
+        }
+        jit_program_release(&program);
+    }
+    // Two PC32 targets separated by more than 4 GiB have no common placement.
+    // They are never dereferenced: admission must fail before allocation.
+    ObjectSymbol separated_symbols[] = {symbols[0], symbols[0]};
+    separated_symbols[1].name = S8("far_data");
+    ObjectRelocation separated_relocations[] = {
+        {.offset = 0, .symbol = 0, .kind = OBJECT_RELOCATION_X86_64_PC32},
+        {.offset = 4, .symbol = 1, .kind = OBJECT_RELOCATION_X86_64_PC32},
+    };
+    JitHostBinding separated_bindings[] = {
+        {.name = symbols[0].name, .address = (void*)(uintptr_t)UINT64_C(0x100000000), .kind = OBJECT_SYMBOL_DATA},
+        {.name = separated_symbols[1].name, .address = (void*)(uintptr_t)UINT64_C(0x300000000), .kind = OBJECT_SYMBOL_DATA},
+    };
+    object.symbols = separated_symbols;
+    object.relocations = separated_relocations;
+    object.relocation_count = BUSTER_ARRAY_LENGTH(separated_relocations);
+    program = jit_link_object(&object, (JitOptions){.bindings = separated_bindings,
+                                                   .binding_count = BUSTER_ARRAY_LENGTH(separated_bindings)});
+    BUSTER_TEST(arguments, program.error == JIT_ERROR_CAPACITY);
+    BUSTER_STRING_TEST(arguments, program.failing_symbol, separated_symbols[1].name);
+    BUSTER_TEST(arguments, !program.allocation_base && !program.auxiliary_allocation_base);
+    jit_program_release(&program);
+    return result;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult jit_test_address_ranges(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Enumerate actual admissible bases independently of the interval formula.
+    for (u64 target = 0; target < 8; target += 1)
+    {
+        for (u64 offset = 0; offset < 8; offset += 1)
+        {
+            for (u64 backward = 0; backward < 3; backward += 1)
+            {
+                for (u64 forward = 0; forward < 3; forward += 1)
+                {
+                    JitAddressRange range = {.minimum = 2, .maximum = 6};
+                    u64 expected_minimum = UINT64_MAX;
+                    u64 expected_maximum = 0;
+                    for (u64 base = 2; base <= 6; base += 1)
+                    {
+                        s64 displacement = (s64)target - (s64)(base + offset);
+                        if (displacement >= -(s64)forward && displacement <= (s64)backward)
+                        {
+                            expected_minimum = BUSTER_MIN(expected_minimum, base);
+                            expected_maximum = base;
+                        }
+                    }
+                    bool expected = expected_minimum != UINT64_MAX;
+                    bool valid = jit_address_range_intersect(&range, target, offset, backward, forward);
+                    BUSTER_TEST(arguments, valid == expected);
+                    BUSTER_TEST(arguments, range.minimum == (expected ? expected_minimum : 2) &&
+                                           range.maximum == (expected ? expected_maximum : 6));
+                }
+            }
+        }
+    }
+    JitAddressRange range = {.minimum = 0, .maximum = UINT64_MAX};
+    BUSTER_TEST(arguments, jit_address_range_intersect(&range, 0, 0, INT32_MAX, (u64)INT32_MAX + 1));
+    BUSTER_TEST(arguments, range.minimum == 0 && range.maximum == UINT64_C(0x80000000));
+    range = (JitAddressRange){.minimum = 0, .maximum = UINT64_MAX};
+    BUSTER_TEST(arguments, jit_address_range_intersect(&range, UINT64_MAX, 0, INT32_MAX, (u64)INT32_MAX + 1));
+    BUSTER_TEST(arguments, range.minimum == UINT64_MAX - INT32_MAX && range.maximum == UINT64_MAX);
+    JitAddressRange retained = range;
+    BUSTER_TEST(arguments, !jit_address_range_intersect(&range, 1, 0, INT32_MAX, (u64)INT32_MAX + 1));
+    BUSTER_TEST(arguments, range.minimum == retained.minimum && range.maximum == retained.maximum);
+    range = (JitAddressRange){.minimum = 9, .maximum = 8};
+    BUSTER_TEST(arguments, !jit_address_range_intersect(&range, 10, 0, 1, 1));
+    BUSTER_TEST(arguments, range.minimum == 9 && range.maximum == 8);
+    BUSTER_TEST(arguments, !jit_address_range_intersect(0, 10, 0, 1, 1));
+    return result;
+}
+
 UnitTestResult jit_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, jit_test_address_ranges);
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE && !BUSTER_MACOS && !BUSTER_IOS && !BUSTER_ANDROID
     BUSTER_TEST_FIXTURE(arguments, jit_test_imported_function_data_pc32);
+    BUSTER_TEST_FIXTURE(arguments, jit_test_imported_data_pc32);
 #endif
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_SANITIZE && !BUSTER_IOS && !BUSTER_ANDROID
     BUSTER_TEST_FIXTURE(arguments, jit_test_binding_resolution_cost);
@@ -782,17 +916,12 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
     external_data_object.symbols = &imported_data;
     external_data_object.relocations = &absolute_import;
     JitProgram external_data_program = jit_link_object(&external_data_object, (JitOptions){0});
-#if BUSTER_CPU_ARCH_X86_64
     BUSTER_TEST(arguments, external_data_program.error == JIT_ERROR_UNRESOLVED_IMPORT);
-#else
-    BUSTER_TEST(arguments, external_data_program.error == JIT_ERROR_EXTERNAL_DATA);
-#endif
     BUSTER_STRING_TEST(arguments, external_data_program.failing_symbol, imported_data.name);
     BUSTER_TEST(arguments, !external_data_program.allocation_base);
     jit_program_release(&external_data_program);
     BUSTER_TEST(arguments, !external_data_program.allocation_base && !external_data_program.object);
 
-#if BUSTER_CPU_ARCH_X86_64
     u64 external_data_value = UINT64_C(0x1122334455667788);
     JitHostBinding external_data_binding = {
         .name = imported_data.name,
@@ -800,6 +929,11 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
         .kind = OBJECT_SYMBOL_DATA,
     };
     ObjectRelocation unsupported_data_relocation = imported_relocation;
+#if BUSTER_CPU_ARCH_X86_64
+    unsupported_data_relocation.kind = OBJECT_RELOCATION_X86_64_ABSOLUTE32S;
+#else
+    unsupported_data_relocation.kind = OBJECT_RELOCATION_AARCH64_CALL26;
+#endif
     ObjectFile unsupported_data_object = external_data_object;
     unsupported_data_object.relocations = &unsupported_data_relocation;
     JitProgram unsupported_data_program =
@@ -899,7 +1033,6 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
     jit_program_release(&underflow_data_program);
     BUSTER_TEST(arguments, !underflow_data_program.allocation_base && !underflow_data_program.object);
     absolute_import.addend = 0;
-#endif
 #endif
 
 #if BUSTER_CPU_ARCH_AARCH64
