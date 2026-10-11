@@ -23810,9 +23810,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pic_argument_policy(Unit
         BUSTER_TEST(arguments, invocation.position_independent_level == (image_cases[case_index].kind != NATIVE_IMAGE_EXECUTABLE ? 2 : 0));
         BUSTER_TEST(arguments, !invocation.position_independent_executable);
     }
-    // Only x86-64 Linux has a writer for either image. Elsewhere a link that
-    // asks for one is refused by name, while compiling alone ignores the
-    // link option as GCC does.
+    // x86-64 Linux has both image writers; Android has only PIE writers.
+    // Elsewhere a link that asks for one is refused by name, while compiling
+    // alone ignores the link option as GCC does.
     String8 image_options[] = {S8("-shared"), S8("-pie")};
     String8 image_targets[] = {S8("aarch64-linux"), S8("x86_64-windows"), S8("x86_64-macos"), S8("x86_64-uefi"), S8("aarch64-linux-android")};
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(image_targets); target_index += 1)
@@ -23820,9 +23820,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pic_argument_policy(Unit
         for (u32 option_index = 0; option_index < BUSTER_ARRAY_LENGTH(image_options); option_index += 1)
         {
             String8 link_line[] = {S8("-target"), image_targets[target_index], image_options[option_index], S8("tests/basic_c_pic.c")};
-            CompilerDriverInvocation refused = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_line));
-            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_ARGUMENT);
-            BUSTER_STRING_TEST(arguments, refused.diagnostic, option_index ? S8("unsupported option: -pie") : S8("unsupported option: -shared"));
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_line));
+            bool android_aarch64_pie = string_equal(image_targets[target_index], S8("aarch64-linux-android")) && option_index == 1;
+            if (android_aarch64_pie)
+            {
+                BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+                BUSTER_TEST(arguments, invocation.image_kind == NATIVE_IMAGE_PIE);
+                BUSTER_TEST(arguments, invocation.position_independent && invocation.position_independent_level == 2);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                BUSTER_STRING_TEST(arguments, invocation.diagnostic, option_index ? S8("unsupported option: -pie") : S8("unsupported option: -shared"));
+            }
             String8 compile_line[] = {S8("-target"), image_targets[target_index], S8("-c"), image_options[option_index], S8("tests/basic_c_pic.c")};
             CompilerDriverInvocation compiled = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_line));
             BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
@@ -24065,8 +24075,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_pic_arguments(Un
                                      orders[order].second, S8("pic-model-input.c")};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
                     arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                // An Android x86-64 link is always a PIE, compiled for one.
-                bool android_link = string_equal(targets[target].triple, S8("x86_64-linux-android")) && string_equal(actions[action], S8("-g0"));
+                // Android executable links are always PIEs, compiled for one.
+                bool android_arch = string_equal(targets[target].triple, S8("x86_64-linux-android")) ||
+                                    string_equal(targets[target].triple, S8("aarch64-linux-android"));
+                bool android_link = android_arch && string_equal(actions[action], S8("-g0"));
                 BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
                 BUSTER_TEST(arguments, invocation.position_independent == (android_link || orders[order].surviving.length != 0));
                 BUSTER_TEST(arguments, invocation.image_kind == (android_link ? NATIVE_IMAGE_PIE : NATIVE_IMAGE_EXECUTABLE));

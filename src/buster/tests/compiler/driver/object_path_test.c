@@ -2776,6 +2776,59 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_android_preinit_field(ByteSlice bytes, 
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_android_symbol_value(ByteSlice bytes, String8 wanted, u64* value)
+{
+    u64 section_table = 0;
+    u64 section_stride = 0;
+    u64 section_count = 0;
+    bool valid = compiler_driver_android_preinit_field(bytes, 40, 8, &section_table) &&
+                 compiler_driver_android_preinit_field(bytes, 58, 2, &section_stride) &&
+                 compiler_driver_android_preinit_field(bytes, 60, 2, &section_count) && section_stride >= 64 &&
+                 section_table <= bytes.length && section_count <= (bytes.length - section_table) / section_stride;
+    bool found = false;
+    for (u64 section = 0; valid && !found && section < section_count; section += 1)
+    {
+        u64 header = section_table + section * section_stride;
+        u64 type = 0;
+        u64 offset = 0;
+        u64 size = 0;
+        u64 strings_index = 0;
+        u64 entry_size = 0;
+        valid = compiler_driver_android_preinit_field(bytes, header + 4, 4, &type) &&
+                compiler_driver_android_preinit_field(bytes, header + 24, 8, &offset) &&
+                compiler_driver_android_preinit_field(bytes, header + 32, 8, &size) &&
+                compiler_driver_android_preinit_field(bytes, header + 40, 4, &strings_index) &&
+                compiler_driver_android_preinit_field(bytes, header + 56, 8, &entry_size);
+        if (valid && type == 2)
+        {
+            valid = strings_index < section_count && entry_size >= 24 && offset <= bytes.length && size <= bytes.length - offset;
+            u64 strings_header = section_table + strings_index * section_stride;
+            u64 strings_offset = 0;
+            u64 strings_size = 0;
+            valid = valid && compiler_driver_android_preinit_field(bytes, strings_header + 24, 8, &strings_offset) &&
+                    compiler_driver_android_preinit_field(bytes, strings_header + 32, 8, &strings_size) &&
+                    strings_offset <= bytes.length && strings_size <= bytes.length - strings_offset;
+            for (u64 entry = 0; valid && !found && entry + entry_size <= size; entry += entry_size)
+            {
+                u64 name_offset = 0;
+                u64 symbol_value = 0;
+                valid = compiler_driver_android_preinit_field(bytes, offset + entry, 4, &name_offset) &&
+                        compiler_driver_android_preinit_field(bytes, offset + entry + 8, 8, &symbol_value) && name_offset < strings_size;
+                u64 name_length = 0;
+                while (valid && name_offset + name_length < strings_size &&
+                       bytes.pointer[strings_offset + name_offset + name_length] != 0)
+                {
+                    name_length += 1;
+                }
+                found = valid && name_offset + name_length < strings_size && name_length == wanted.length &&
+                        memcmp(bytes.pointer + strings_offset + name_offset, wanted.pointer, wanted.length) == 0;
+                if (found) *value = symbol_value;
+            }
+        }
+    }
+    return found;
+}
+
 // The DT_PREINIT_ARRAY/DT_PREINIT_ARRAYSZ tags (bits 0 and 1 of the result)
 // that precede the first DT_NULL, which is where the loader stops reading.
 BUSTER_GLOBAL_LOCAL u32 compiler_driver_android_preinit_dynamic(ByteSlice bytes, u64 offset, u64 size, u64* address, u64* length)
@@ -2837,16 +2890,11 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_android_address_offset(ByteSlice bytes,
     return found;
 }
 
-// Issue 1243: an Android executable is staged through the Linux dynamic
-// writers, so it publishes `.preinit_array` through DT_PREINIT_ARRAY for the
-// bionic linker too. The emulator suite cannot execute a freshly linked file
-// from its app sandbox, so this link-only control checks the image itself on
+// Issue 1243: Android PIEs publish `.preinit_array` through DT_PREINIT_ARRAY
+// for the bionic linker. This link-only control checks the image itself on
 // every host: both tags are present, the array is one 8-byte entry inside a
 // writable load, and that entry addresses code inside an executable load.
-// The kernel places the executable at a load bias, so on x86-64, whose
-// Android images are PIEs, the entry must also carry an R_X86_64_RELATIVE and
-// the image must name bionic's loader; android/runtime_order.sh executes such
-// an image on the emulator.
+// Both architectures require a relative relocation and bionic's linker.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2878,10 +2926,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTest
         ByteSlice bytes = compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
         u64 program_table = 0;
         u64 program_count = 0;
+        u64 image_type = 0;
         bool valid = bytes.length >= 64 && memcmp(bytes.pointer, "\177ELF\2\1", 6) == 0 &&
+                     compiler_driver_android_preinit_field(bytes, 16, 2, &image_type) &&
                      compiler_driver_android_preinit_field(bytes, 32, 8, &program_table) &&
                      compiler_driver_android_preinit_field(bytes, 56, 2, &program_count);
-        BUSTER_TEST(arguments, valid);
+        u64 lowest_load = UINT64_MAX;
         u64 dynamic_offset = 0;
         u64 dynamic_size = 0;
         u64 preinit_address = 0;
@@ -2891,13 +2941,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTest
         {
             u64 base = program_table + header * 56;
             u64 type = 0;
-            valid = compiler_driver_android_preinit_field(bytes, base, 4, &type);
+            u64 address = 0;
+            valid = compiler_driver_android_preinit_field(bytes, base, 4, &type) &&
+                    compiler_driver_android_preinit_field(bytes, base + 16, 8, &address);
             if (valid && type == 2)
             {
                 valid = compiler_driver_android_preinit_field(bytes, base + 8, 8, &dynamic_offset) &&
                         compiler_driver_android_preinit_field(bytes, base + 32, 8, &dynamic_size);
             }
+            if (valid && type == 1) lowest_load = BUSTER_MIN(lowest_load, address);
         }
+        BUSTER_TEST(arguments, valid && image_type == 3 && lowest_load == 0);
         if (valid) tags = compiler_driver_android_preinit_dynamic(bytes, dynamic_offset, dynamic_size, &preinit_address, &preinit_size);
         BUSTER_TEST(arguments, valid && tags == 3 && preinit_size == 8);
         // Map the array through the load that holds it, then the entry
@@ -2933,7 +2987,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTest
             }
         }
         BUSTER_TEST(arguments, valid && writable && function != 0 && executable);
-        if (valid && target == 0)
+        if (valid)
         {
             u64 flags = 0;
             u64 relocations = 0;
@@ -2953,7 +3007,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTest
                 relocated = compiler_driver_android_preinit_field(bytes, relocation_offset + entry, 8, &slot) &&
                             compiler_driver_android_preinit_field(bytes, relocation_offset + entry + 8, 8, &information) &&
                             compiler_driver_android_preinit_field(bytes, relocation_offset + entry + 16, 8, &addend) &&
-                            slot == preinit_address && information == 8 && addend == function;
+                            slot == preinit_address && information == (target == 0 ? 8u : 1027u) && addend == function;
             }
             bool interpreter = false;
             for (u64 header = 0; header < program_count; header += 1)
@@ -2969,6 +3023,74 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTest
             BUSTER_TEST(arguments, pie && relocated && interpreter);
         }
     }
+    String8 pointer_source = buster_test_temporary_path(arena, S8("buster-android-relative"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(pointer_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+        "static int x;\n"
+        "int *p = &x;\n"
+        "int main(void) { return *p; }\n"))));
+    String8 pointer_output = buster_test_temporary_path(arena, S8("buster-android-relative"), S8(""));
+    String8 pointer_command[] = {S8("-target"), S8("aarch64-linux-android"), S8("-nostdinc"), S8("-g0"), pointer_source, S8("-o"), pointer_output};
+    CompilerDriverResult pointer_compiled =
+        compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pointer_command)));
+    BUSTER_TEST(arguments, pointer_compiled.error == COMPILER_DRIVER_ERROR_NONE);
+    ByteSlice pointer_bytes = pointer_compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, pointer_output, (FileReadOptions){0}) : (ByteSlice){0};
+    u64 pointer_table = 0;
+    u64 pointer_count = 0;
+    u64 pointer_entry = 0;
+    u64 pointer_type = 0;
+    bool pointer_valid = pointer_bytes.length >= 64 &&
+                         compiler_driver_android_preinit_field(pointer_bytes, 16, 2, &pointer_type) && pointer_type == 3 &&
+                         compiler_driver_android_preinit_field(pointer_bytes, 24, 8, &pointer_entry) &&
+                         compiler_driver_android_preinit_field(pointer_bytes, 32, 8, &pointer_table) &&
+                         compiler_driver_android_preinit_field(pointer_bytes, 56, 2, &pointer_count);
+    u64 entry_offset = 0;
+    u64 entry_word = 0;
+    bool no_loader_finalizer = pointer_valid &&
+                               compiler_driver_android_address_offset(pointer_bytes, pointer_table, pointer_count, pointer_entry, &entry_offset) &&
+                               compiler_driver_android_preinit_field(pointer_bytes, entry_offset + 4 * sizeof(u32), 4, &entry_word) &&
+                               entry_word != UINT32_C(0xb4000080);
+    BUSTER_TEST(arguments, no_loader_finalizer);
+    u64 x_address = 0;
+    bool x_symbol = pointer_valid && compiler_driver_android_symbol_value(pointer_bytes, S8("x"), &x_address);
+    BUSTER_TEST(arguments, x_symbol);
+    u64 dynamic_offset = 0;
+    u64 dynamic_size = 0;
+    u64 relocations = 0;
+    u64 relocation_size = 0;
+    u64 relocation_offset = 0;
+    bool listed = pointer_valid && compiler_driver_android_address_offset(pointer_bytes, pointer_table, pointer_count,
+                                                                           pointer_entry, &entry_offset);
+    for (u64 header = 0; pointer_valid && header < pointer_count; header += 1)
+    {
+        u64 base = pointer_table + header * 56;
+        u64 type = 0;
+        if (compiler_driver_android_preinit_field(pointer_bytes, base, 4, &type) && type == 2)
+        {
+            listed = compiler_driver_android_preinit_field(pointer_bytes, base + 8, 8, &dynamic_offset) &&
+                     compiler_driver_android_preinit_field(pointer_bytes, base + 32, 8, &dynamic_size);
+        }
+    }
+    listed = listed && compiler_driver_android_dynamic_value(pointer_bytes, dynamic_offset, dynamic_size, 7, &relocations) &&
+             compiler_driver_android_dynamic_value(pointer_bytes, dynamic_offset, dynamic_size, 8, &relocation_size) &&
+             compiler_driver_android_address_offset(pointer_bytes, pointer_table, pointer_count, relocations, &relocation_offset);
+    bool relative_pointer = false;
+    for (u64 entry = 0; listed && !relative_pointer && entry + 24 <= relocation_size; entry += 24)
+    {
+        u64 slot = 0;
+        u64 information = 0;
+        u64 addend = 0;
+        u64 slot_offset = 0;
+        if (compiler_driver_android_preinit_field(pointer_bytes, relocation_offset + entry, 8, &slot) &&
+            compiler_driver_android_preinit_field(pointer_bytes, relocation_offset + entry + 8, 8, &information) &&
+            compiler_driver_android_preinit_field(pointer_bytes, relocation_offset + entry + 16, 8, &addend) &&
+            information == 1027 && addend == x_address &&
+            compiler_driver_android_address_offset(pointer_bytes, pointer_table, pointer_count, slot, &slot_offset))
+        {
+            u64 initial_pointer = 0;
+            relative_pointer = compiler_driver_android_preinit_field(pointer_bytes, slot_offset, 8, &initial_pointer) && initial_pointer == addend;
+        }
+    }
+    BUSTER_TEST(arguments, relative_pointer);
     scratch_end(temporary);
     return result;
 }

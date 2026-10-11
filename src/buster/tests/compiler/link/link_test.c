@@ -4568,9 +4568,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_copy_symbol_table(UnitTestArgum
                              : (ByteSlice){.pointer = (u8*)aarch64_text, .length = sizeof(aarch64_text)};
         for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
         {
-            // An x86-64 Android executable is the PIE, whose copy slots follow
-            // the references that need them; this text makes none.
-            if (architectures[architecture] == CPU_ARCH_X86_64 && systems[system] == OPERATING_SYSTEM_ANDROID)
+            // Android executables use the PIE copy-slot layout rather than
+            // the fixed-address symbol-table layout covered here.
+            if (systems[system] == OPERATING_SYSTEM_ANDROID)
             {
                 continue;
             }
@@ -9857,6 +9857,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                            (NativeExecutableLinkOptions){
                                                                                .output_path = android_output_path,
                                                                                .entry_symbol = S8("main"),
+                                                                               .image_kind = NATIVE_IMAGE_PIE,
                                                                            });
     BUSTER_TEST(arguments, android_executable.error == LINK_ERROR_NONE);
     bool android_header_valid =
