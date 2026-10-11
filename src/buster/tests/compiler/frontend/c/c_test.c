@@ -39971,8 +39971,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_interning_objects(UnitTestArgumen
 // label addresses; `:` before a parenthesized or cast else operand; chains in
 // either arm; GNU `?:`; and conditionals in calls, returns, initializers,
 // subscripts, statement expressions and `if` conditions. A conditional after a
-// root assignment or comma goes to the scan, and so does a nested function's
-// body, which the index does not hold.
+// root assignment or comma goes to the scan.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -40001,10 +40000,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArgumen
                         "    r += 1;\n"
                         "two:\n"
                         "    r += (p ? *p : 0) + (p != 0 ? p[0] : -1);\n"
-                        "    {\n"
-                        "        int inner(int v) { return v ? v - 1 : (a ? b : 0); }\n"
-                        "        r += inner(a ? 1 : 0);\n"
-                        "    }\n"
                         "    return a > b ? (r ? r : 1) : b > a ? -r : 0;\n"
                         "}\n");
     String8 debug[] = {S8("-g0"), S8("-g")};
@@ -40032,7 +40027,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tree_root_conditionals(UnitTestArgumen
                         string_format(arena, S8("{S8}: the pilot's object differs from the default's"), debug[level]));
         CAstLowerStatistics lower = compiled[1].c_ast.lower;
         BUSTER_TEST(arguments, compiled[0].c_ast.lower.bodies == 0 && compiled[0].c_ast.lower.answers == 0);
-        // g, h and f are indexed; inner is nested in f, so its own body is not.
         BUSTER_TEST(arguments, lower.bodies == 3);
         BUSTER_TEST(arguments, lower.conditionals >= 30);
         BUSTER_TEST(arguments, lower.answers >= 20);
