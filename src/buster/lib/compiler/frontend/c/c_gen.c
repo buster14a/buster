@@ -36986,7 +36986,14 @@ c_ir_expression_core_loop:
             {
                 if (!builder->failure_message.length)
                 {
-                    builder->failure_message = S8("could not form an indexed place");
+                    string_print(S8("INDEX_REFUSAL_TRACE start={u32} end={u32} index={u32} first={S8} frames={u32}\n"),
+                             start, end, index, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start]), machine->frame_count);
+                for (u32 trace_frame = 0; trace_frame < machine->frame_count; trace_frame += 1)
+                {
+                    string_print(S8("INDEX_FRAME_TRACE slot={u32} kind={u32} stage={u32}\n"), trace_frame,
+                                 (u32)machine->frames[trace_frame].kind, (u32)machine->frames[trace_frame].stage);
+                }
+                builder->failure_message = S8("could not form an indexed place");
                 }
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;

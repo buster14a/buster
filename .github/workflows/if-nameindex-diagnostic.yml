@@ -49,7 +49,7 @@ jobs:
           set +e
           set -uo pipefail
           failures=0
-          for case_id in $(seq 0 15); do
+          for case_id in $(seq 0 31); do
             clang -E -P -DCASE="$case_id" .github/diagnostics/if-nameindex-probe.c -o "$RUNNER_TEMP/probe-$case_id.c"
             clang -std=c99 -O0 "$RUNNER_TEMP/probe-$case_id.c" -o "$RUNNER_TEMP/reference-$case_id"
             "$RUNNER_TEMP/reference-$case_id"
