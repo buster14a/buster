@@ -924,7 +924,14 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    profile runtime (`libclang_rt.profile`); a missing one fails the build
    leg with its log.
 
-   COST_PLACEHOLDER
+   Cost: on a hosted 4-vCPU 2.8 GHz Xeon with three build lanes (diagnostic,
+   not Zen 5), `production_profile --no-benchmark` passed all 23 phases in
+   1200 s. Each of the seven tree builds took 300 to 480 s, both trainings
+   about 11 s each, and `test_all` 159 s. The corpus run on its two
+   compilers then took 55 s, with identical outputs. The build leg has its
+   own 40-minute timeout and the corpus run the ordinary 30-minute one, so
+   the leg fits inside the unchanged 90-minute `compare-pull` job next to the
+   roughly 14-minute ordinary comparison. No job timeout changed.
 
    **Without perf (#2768).** Before the first timed run the lab runs
    `perf stat -- true` once (`probe_counters`). If perf is missing, exits
