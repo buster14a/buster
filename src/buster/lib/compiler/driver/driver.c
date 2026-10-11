@@ -10141,6 +10141,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.types.declines += unit.c_ast.types.declines;
         result.c_ast.types.misses += unit.c_ast.types.misses;
         result.c_ast.types.gated += unit.c_ast.types.gated;
+        result.c_ast.types.lookups_settled += unit.c_ast.types.lookups_settled;
+        result.c_ast.types.lookups_walked += unit.c_ast.types.lookups_walked;
         result.c_ast.statements.bodies += unit.c_ast.statements.bodies;
         result.c_ast.statements.fallbacks += unit.c_ast.statements.fallbacks;
         for (u32 reason = 0; reason < C_AST_STATEMENT_FALLBACK_COUNT; reason += 1)

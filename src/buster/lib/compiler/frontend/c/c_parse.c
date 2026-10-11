@@ -1661,6 +1661,8 @@ BUSTER_C_INTERNAL bool c_type_parse_record_mutation(CTypeParseMachine* machine, 
     return true;
 }
 
+BUSTER_C_INTERNAL void c_parse_lookup_generation_bump(CParseResult* result);
+
 BUSTER_C_SHARED void c_type_parse_rollback(CTypeParseMachine* machine, CParseResult* result, CParseResult const* checkpoint, u32 mutation_mark)
 {
     WORK_LEDGER_RECORD(SNAPSHOT_ROLLBACKS, 1);
@@ -1672,7 +1674,18 @@ BUSTER_C_SHARED void c_type_parse_rollback(CTypeParseMachine* machine, CParseRes
         // before this point may be trusted after it.
         checkpoint->member_lookup->generation += 1;
     }
+    // A rollback that takes entities, scopes or identifier uses away changes
+    // what a lookup, or a binding it is compared with, reads
+    // (c_parse_lookup_generation). One that takes none away leaves those
+    // tables as they were: an entity added since the checkpoint has already
+    // moved the generation on, and uses are only ever appended.
+    bool lookup_tables = result->entity_count != checkpoint->entity_count || result->scope_count != checkpoint->scope_count ||
+                         result->identifier_use_count != checkpoint->identifier_use_count;
     *result = *checkpoint;
+    if (lookup_tables)
+    {
+        c_parse_lookup_generation_bump(result);
+    }
     while (machine->mutation_count > mutation_mark)
     {
         CTypeMutation mutation = machine->mutations[--machine->mutation_count];
@@ -22547,6 +22560,10 @@ struct CParseScopeCursor
     u32 symbol_capacity;
     u32 entity_capacity;
     u32 scope_capacity;
+    // Bumped by every entity added and every rollback while the cursor
+    // exists, so it changes whenever a by-spelling lookup's answer could
+    // (c_parse_lookup_generation).
+    u64 generation;
     u32 stack_count;
     u32 path_count;
     u32 entity_count;
@@ -22717,6 +22734,30 @@ BUSTER_C_SHARED void c_parse_scope_add_entity(CParseResult* result, CScopeId sco
     {
         result->scope_cursor->stale = true;
     }
+    c_parse_lookup_generation_bump(result);
+}
+
+BUSTER_C_INTERNAL void c_parse_lookup_generation_bump(CParseResult* result)
+{
+    if (result->scope_cursor)
+    {
+        result->scope_cursor->generation += 1;
+    }
+}
+
+// A stamp of the tables a by-spelling lookup reads (c_parse_lookup_entity_chain
+// and its two shortcuts): entities reach the lookup chains only through
+// c_parse_scope_add_entity, and entities and scopes leave them, or come back
+// under a reused id, only through c_type_parse_rollback, and both bump the
+// cursor's generation. While the stamp is unchanged, a lookup of the same
+// symbol in the same scope gives the same answer, and so does a binding
+// (identifier_uses, which only grows) while identifier_use_count is unchanged
+// too. False when no cursor exists, outside the validation families.
+BUSTER_C_SHARED bool c_parse_lookup_generation(CParseResult const* result, u64* generation_out)
+{
+    bool available = result->scope_cursor != 0;
+    *generation_out = available ? result->scope_cursor->generation : 0;
+    return available;
 }
 
 // The scope-and-symbol chains, walked from `scope` outwards: the definition
