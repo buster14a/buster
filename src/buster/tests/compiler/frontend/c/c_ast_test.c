@@ -2106,6 +2106,12 @@ enum
     // each checked against the machine: about 1,400 (1,370 for
     // aarch64-windows).
     C_AST_CORPUS_TYPE_PROBE_FLOOR = 1200,
+    // Verified answers to members of const or volatile aggregates, whose row
+    // is a shared qualified copy (c_parse_intern_qualified_type): 6 from the
+    // fixtures on Linux x86-64, and 776 in all with the frontend's own
+    // sources.
+    C_AST_CORPUS_TYPE_SHARED_MEMBER_FLOOR = 4,
+    C_AST_CORPUS_HOSTED_TYPE_SHARED_MEMBER_FLOOR = 620,
     // Statement-plan segments the body binder bound in one pass, and the
     // identifier uses they bound, in the analyses with the tree: about 6,800
     // segments and 25,700 uses from the fixtures on Linux x86-64, and about
@@ -2166,6 +2172,8 @@ struct CAstCorpusTally
     // Designator probes the const-assignment walk skipped and verify mode
     // checked against the machine.
     u64 type_probes;
+    // Verified answers to member queries whose row is a shared qualified copy.
+    u64 type_shared_members;
     // The declaration split from the tree (c_parse_ast_from_tree) over the
     // same inputs: units it published, records and body assertion ranges it
     // published, units it handed to the token walker and why, and every
@@ -2329,6 +2337,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
             tally->type_answers += statistics.answers;
             tally->type_compared += verify.compared;
             tally->type_probes += verify.probes;
+            tally->type_shared_members += verify.shared_members;
             arena_destroy(arena, 1);
         }
     }
@@ -2715,6 +2724,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_sources(UnitTestArguments* argum
     BUSTER_TEST(arguments, !hosted || tally->split_units == split_units_before + BUSTER_ARRAY_LENGTH(paths));
     BUSTER_TEST(arguments, !hosted || tally->split_records >= C_AST_CORPUS_HOSTED_SPLIT_RECORD_FLOOR);
     BUSTER_TEST(arguments, !hosted || tally->type_answers >= C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR);
+    BUSTER_TEST_RAW(arguments, !hosted || tally->type_shared_members >= C_AST_CORPUS_HOSTED_TYPE_SHARED_MEMBER_FLOOR,
+                    string_format(arguments->arena, S8("{u64} shared qualified member answers with the frontend's sources, below the floor"),
+                                  tally->type_shared_members));
     BUSTER_TEST(arguments, !hosted || (tally->statement_segments >= C_AST_CORPUS_HOSTED_STATEMENT_SEGMENT_FLOOR &&
                                        tally->statement_uses >= C_AST_CORPUS_HOSTED_STATEMENT_USE_FLOOR));
     BUSTER_TEST(arguments, !hosted || (tally->statement_declarators >= C_AST_CORPUS_HOSTED_STATEMENT_DECLARATOR_FLOOR &&
@@ -2755,6 +2767,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
     BUSTER_TEST(arguments, tally.pinned == BUSTER_ARRAY_LENGTH(c_ast_corpus_pins));
     BUSTER_TEST(arguments, tally.type_answers >= C_AST_CORPUS_TYPE_ANSWER_FLOOR && tally.type_compared == tally.type_answers);
     BUSTER_TEST(arguments, tally.type_probes >= C_AST_CORPUS_TYPE_PROBE_FLOOR);
+    BUSTER_TEST_RAW(arguments, tally.type_shared_members >= C_AST_CORPUS_TYPE_SHARED_MEMBER_FLOOR,
+                    string_format(arguments->arena, S8("{u64} shared qualified member answers, below the floor"), tally.type_shared_members));
     BUSTER_TEST(arguments, tally.split_records >= C_AST_CORPUS_SPLIT_RECORD_FLOOR && tally.split_compared >= tally.split_records);
     BUSTER_TEST(arguments, tally.statement_segments >= C_AST_CORPUS_STATEMENT_SEGMENT_FLOOR && tally.statement_uses >= C_AST_CORPUS_STATEMENT_USE_FLOOR &&
                                tally.statement_compared >= tally.statement_uses && tally.statement_hints);
@@ -3806,13 +3820,21 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     // unqualified aggregate, and fails at `+` without a new row.
     {S8_INITIALIZER("struct S { unsigned bits : 3; unsigned n; }; unsigned f(struct S s, struct S t) { return (t.n + s.bits) << 1; }"),
      S8_INITIALIZER("("), 1, 11, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
+    // On `t->n + s` over a const aggregate the probe's member step reads the
+    // member's shared qualified copy (c_parse_intern_qualified_type), which
+    // the accepted `t->n` node vouches for, and appends nothing before `+`
+    // fails it.
+    {S8_INITIALIZER("struct S { unsigned bits : 3; unsigned n; }; unsigned f(struct S s, struct S const* t) { return (t->n + s.bits) << 1; }"),
+     S8_INITIALIZER("("), 1, 11, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
     // The probe on `x, s` succeeds through the comma and reads width 3, and
-    // on `t->n + s` over a const aggregate its member step appends a
-    // qualified copy before `+` fails it: both stay with the machine.
+    // on `t->n + s` with an aligned member type the member step appends a
+    // qualified copy that may not be shared before `+` fails it: both stay
+    // with the machine.
     {S8_INITIALIZER("struct S { unsigned bits : 3; }; int f(struct S s, int x) { return (x, s.bits) << 1; }"), S8_INITIALIZER("("), 1, 9,
      C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
-    {S8_INITIALIZER("struct S { unsigned bits : 3; unsigned n; }; unsigned f(struct S s, struct S const* t) { return (t->n + s.bits) << 1; }"),
-     S8_INITIALIZER("("), 1, 11, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("typedef unsigned A16 __attribute__((aligned(16))); struct S { unsigned bits : 3; A16 n; }; "
+                    "unsigned f(struct S s, struct S const* t) { return (t->n + s.bits) << 1; }"),
+     S8_INITIALIZER("("), 4, 11, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
     {S8_INITIALIZER("int f(long a, long b) { return a < b; }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("int f(int* p) { return p != 0; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("int f(int* p, int n) { return p && n; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
@@ -3902,32 +3924,49 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
      false, C_TYPE_INVALID, false, true},
     {S8_INITIALIZER("unsigned short const* f(void) { return u\"text\"; }"), S8_INITIALIZER("u\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_ANSWER,
      C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
-    // A member of a const or volatile aggregate over an accepted base: the
-    // answer is the qualified copy of the member's row that the replay of
-    // the machine's two calls appends, through `->` or `.`, in parentheses,
-    // and for a member that is itself an aggregate.
+    // A member of a const or volatile struct or union: the machine's answer is
+    // the member's qualified copy, which the analysis's own queries shared
+    // before the probe (c_parse_intern_qualified_type), so the tree accepts
+    // the node and answers with it: through `->` and `.`, in parentheses,
+    // nested, for a member of aggregate or array type, and under a parent.
     {S8_INITIALIZER("struct S { int a; }; int f(struct S const* p) { return p->a; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER,
-     C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
-    {S8_INITIALIZER("struct S { char* name; }; char* f(struct S const s) { return s.name; }"), S8_INITIALIZER("s"), 1, 3,
-     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
+     C_TYPE_INT},
+    {S8_INITIALIZER("struct S { long a; }; long f(struct S volatile* p) { return p->a; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_LONG},
     {S8_INITIALIZER("union U { long a; }; long f(union U volatile* p) { return (p->a); }"), S8_INITIALIZER("("), 1, 5,
-     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    {S8_INITIALIZER("struct S { char* name; }; char* f(struct S const s) { return s.name; }"), S8_INITIALIZER("s"), 1, 3,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("struct S { char* name; }; char* f(void) { const struct S s = { 0 }; return s.name; }"), S8_INITIALIZER("s"), 1, 3,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
     {S8_INITIALIZER("struct T { int x; }; struct S { struct T t; }; int f(struct S const* p) { return p->t.x; }"), S8_INITIALIZER("p"), 1, 3,
-     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
-    // Declined: whatever would make the machine append a type row (a
-    // qualified member that is not the queried node, a member of a member of
-    // a qualified aggregate, a string, a cast to a type name with a qualified
-    // typedef, a tag, a qualified or restrict pointer or a declarator other
-    // than `*`, an array operand of `+`, a pointer conditional), a builtin
-    // call, a parenthesized callee, and a conditional whose middle operand
-    // holds an assignment, which the machine splits there instead. A string
-    // literal of several tokens is left to the machine.
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_STRUCT},
+    {S8_INITIALIZER("struct T { int a; }; struct S { struct T t; }; int f(struct S const* p) { return p->t.a; }"), S8_INITIALIZER("p"), 1, 5,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("struct S { int v[4]; }; int f(struct S const* p) { return p->v[1]; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_ARRAY},
     {S8_INITIALIZER("struct S { int a; }; int f(struct S const* p) { return p->a + 1; }"), S8_INITIALIZER("p"), 1, 5,
-     C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
-    {S8_INITIALIZER("struct T { int x; }; struct S { struct T t; }; int f(struct S const* p) { return p->t.x; }"), S8_INITIALIZER("p"), 1, 5,
-     C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("struct S { int a; }; long f(struct S const* p) { return (long)p->a; }"), S8_INITIALIZER("("), 1, 6,
-     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, true},
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    // A copy that may not be shared, here because it would inherit an
+    // alignment record: the node alone is answered by replaying the machine's
+    // step (c_ast_types_decline), which appends the copy, but the node is not
+    // accepted, so its parent declines.
+    {S8_INITIALIZER("typedef int A16 __attribute__((aligned(16))); struct S { A16 a; }; int f(struct S const* p) { return p->a; }"),
+     S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
+    {S8_INITIALIZER("typedef int A16 __attribute__((aligned(16))); struct S { A16 a; }; int f(struct S const* p) { return p->a + 1; }"),
+     S8_INITIALIZER("p"), 1, 5, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    // Declined: whatever would make the machine append a type row (a
+    // qualified array element, a string, a cast to a type name with a
+    // qualified typedef, a tag, a qualified or restrict pointer or a
+    // declarator other than `*`, an array operand of `+`, a pointer
+    // conditional), a builtin call, a parenthesized callee, and a conditional
+    // whose middle operand holds an assignment, which the machine splits
+    // there instead. A string literal of several tokens is left to the
+    // machine.
+    {S8_INITIALIZER("struct S { int v[4]; }; int f(struct S const* p) { return p->v[1]; }"), S8_INITIALIZER("p"), 1, 6, C_TEST_AST_TYPE_PROBE_DECLINE,
+     C_TYPE_INVALID},
     {S8_INITIALIZER("char const* f(void) { return \"te\" \"xt\"; }"), S8_INITIALIZER("\"te\""), 0, 2, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
     {S8_INITIALIZER("typedef int T; T const* f(void* p) { return (const T*)p; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_DECLINE,
      C_TYPE_INVALID},
@@ -4066,6 +4105,29 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
     }
     c_ast_release(&built.ast);
     BUSTER_TEST(arguments, arena_test_live_reserved_bytes() == reserved);
+    c_test_scratch_end(temporary);
+    // A late row: when no query has shared the member's qualified copy yet,
+    // here because the analysis ran without interned rows, the machine would
+    // append the copy, so the typer does not accept the member of a const
+    // struct. The node alone is answered by the replay; its parent declines.
+    temporary = scratch_begin(&arguments->arena, 1);
+    preprocess = c_ast_test_preprocess(temporary.arena, S8("struct S { int a; }; int f(struct S const* p) { return p->a + 1; }"),
+                                       C_PREPROCESS_DIALECT_GNU17);
+    analysis = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+    built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+    u32 member = c_ast_test_token_index(preprocess, S8("p"), 1);
+    if (BUSTER_REQUIRE(arguments, built.complete && !analysis.diagnostic_count && member != UINT32_MAX))
+    {
+        for (u32 checked = 0; checked < 2; checked += 1)
+        {
+            CTestAstTypeProbe probe = c_test_ast_type_probe(temporary.arena, preprocess, &analysis, &built.ast, S8("f"), member, member + 3,
+                                                            checked != 0);
+            BUSTER_TEST(arguments, probe.status == C_TEST_AST_TYPE_PROBE_ANSWER && probe.replay_answer);
+            probe = c_test_ast_type_probe(temporary.arena, preprocess, &analysis, &built.ast, S8("f"), member, member + 5, checked != 0);
+            BUSTER_TEST(arguments, probe.status == C_TEST_AST_TYPE_PROBE_DECLINE);
+        }
+    }
+    c_ast_release(&built.ast);
     c_test_scratch_end(temporary);
     // The const-assignment walk does not ask about the designator probes of
     // `{ .f = 1, .g = 2 }`: the `{` and the `,` it would take for the bases of
