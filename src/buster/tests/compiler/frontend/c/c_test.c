@@ -5326,6 +5326,89 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_initializer_cursor_depth_runtim
     return result;
 }
 
+// One function holding a 5,000-entry local table: about 555,000 machine rows
+// in a single block. QUALITY placement and scheduling took more than the
+// 256 MiB thread scratch for it and aborted in arena validation (#3413);
+// machine scratch is now planned per function from its IR counts. Compile it
+// under both allocators and check every entry at run time.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_large_function_machine_scratch_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    u32 const entry_count = 5000;
+    String8 prefix = S8("typedef struct Text { const char* pointer; unsigned long length; } Text;\n"
+                        "struct Case { _Bool flag; Text text; unsigned char count; unsigned char bytes[12]; };\n"
+                        "static unsigned long check(struct Case const* cases, unsigned long count)\n{\n"
+                        "    unsigned long bad = 0;\n"
+                        "    for (unsigned long i = 0; i < count; i += 1)\n    {\n"
+                        "        bad += cases[i].flag != (_Bool)(i & 1) || cases[i].text.length != 2 || cases[i].text.pointer[0] != 'c' ||\n"
+                        "               cases[i].text.pointer[1] != (char)('0' + i % 10) || cases[i].count != 2 ||\n"
+                        "               cases[i].bytes[0] != (unsigned char)(i & 255) || cases[i].bytes[1] != 7 || cases[i].bytes[11] != 0;\n"
+                        "    }\n    return bad;\n}\n"
+                        "int main(void)\n{\n    struct Case const cases[] = {\n");
+    String8 entry_open = S8("        {");
+    String8 entry_text = S8(", (Text){\"c");
+    String8 entry_bytes = S8("\", 2}, 2, {");
+    String8 entry_close = S8(", 7}},\n");
+    String8 suffix_open = S8("    };\n    return sizeof(cases) / sizeof(cases[0]) != ");
+    String8 suffix_close = S8(" || check(cases, sizeof(cases) / sizeof(cases[0])) != 0;\n}\n");
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u64 source_capacity = prefix.length + (u64)entry_count * (entry_open.length + entry_text.length + entry_bytes.length + entry_close.length + 16) +
+                          suffix_open.length + suffix_close.length + 16;
+    char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+    u64 source_length = 0;
+    c_test_append_source(source_bytes, source_capacity, &source_length, prefix);
+    for (u32 entry = 0; entry < entry_count; entry += 1)
+    {
+        c_test_append_source(source_bytes, source_capacity, &source_length, entry_open);
+        c_test_append_u32(source_bytes, source_capacity, &source_length, entry & 1);
+        c_test_append_source(source_bytes, source_capacity, &source_length, entry_text);
+        c_test_append_u32(source_bytes, source_capacity, &source_length, entry % 10);
+        c_test_append_source(source_bytes, source_capacity, &source_length, entry_bytes);
+        c_test_append_u32(source_bytes, source_capacity, &source_length, entry & 255);
+        c_test_append_source(source_bytes, source_capacity, &source_length, entry_close);
+    }
+    c_test_append_source(source_bytes, source_capacity, &source_length, suffix_open);
+    c_test_append_u32(source_bytes, source_capacity, &source_length, entry_count);
+    c_test_append_source(source_bytes, source_capacity, &source_length, suffix_close);
+    String8 source_text = {.pointer = source_bytes, .length = source_length};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("large-function-machine-scratch"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=quality"), S8("-fregister-allocator=fast")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            TemporalArena run_temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(run_temporary.arena, S8("large-function-machine-scratch-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], S8("-o"), output, source};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(run_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(run_temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                string_format(run_temporary.arena, S8("large function machine scratch {S8}: {S8}"), modes[mode], compiled.diagnostic));
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(run_temporary.arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                        string_format(run_temporary.arena, S8("large function machine scratch runtime {S8}: status={u32} timed_out={u32}"),
+                            modes[mode], execution.platform_status, (u32)execution.timed_out));
+                }
+            }
+            c_test_scratch_end(run_temporary);
+        }
+    }
+    c_test_scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // A definition may omit a parameter's name (C23 N3007; GCC and Clang accept it
 // before C23 and diagnose only under -pedantic). The unnamed parameter binds
 // nothing but still occupies its ABI slot, so every named parameter around it
@@ -61931,6 +62014,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_redefinition_names_previous_site);
     C_TEST_FIXTURE(arguments, c_test_empty_scalar_initializer_runtime);
     C_TEST_FIXTURE(arguments, c_test_nested_initializer_cursor_depth_runtime);
+    C_TEST_FIXTURE(arguments, c_test_large_function_machine_scratch_runtime);
     C_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
     C_TEST_FIXTURE(arguments, c_test_enum_bool_conversion);
     C_TEST_FIXTURE(arguments, c_test_enum_lowering);
