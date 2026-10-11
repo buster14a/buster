@@ -24065,9 +24065,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_pic_arguments(Un
                                      orders[order].second, S8("pic-model-input.c")};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
                     arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                // An Android x86-64 link is always a PIE, compiled for one.
+                bool android_link = string_equal(targets[target].triple, S8("x86_64-linux-android")) && string_equal(actions[action], S8("-g0"));
                 BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
-                BUSTER_TEST(arguments, invocation.position_independent == (orders[order].surviving.length != 0));
-                BUSTER_TEST(arguments, invocation.image_kind == NATIVE_IMAGE_EXECUTABLE);
+                BUSTER_TEST(arguments, invocation.position_independent == (android_link || orders[order].surviving.length != 0));
+                BUSTER_TEST(arguments, invocation.image_kind == (android_link ? NATIVE_IMAGE_PIE : NATIVE_IMAGE_EXECUTABLE));
                 scratch_end(scope);
             }
         }

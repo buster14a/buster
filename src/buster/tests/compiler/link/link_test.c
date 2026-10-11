@@ -4568,6 +4568,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_copy_symbol_table(UnitTestArgum
                              : (ByteSlice){.pointer = (u8*)aarch64_text, .length = sizeof(aarch64_text)};
         for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
         {
+            // An x86-64 Android executable is the PIE, whose copy slots follow
+            // the references that need them; this text makes none.
+            if (architectures[architecture] == CPU_ARCH_X86_64 && systems[system] == OPERATING_SYSTEM_ANDROID)
+            {
+                continue;
+            }
             ObjectSymbol symbols[] = {
                 {.name = S8("main"), .size = text.length, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
                 {.name = S8("local_zero"), .value = 1, .size = 4, .section = OBJECT_SECTION_ZERO, .kind = OBJECT_SYMBOL_DATA},
