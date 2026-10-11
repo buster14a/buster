@@ -6818,8 +6818,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_mach_got_loads(UnitTestArguments* a
 }
 
 // Finds the single `mov eax, [rip + disp32]; ret` in .text and returns the
-// absolute address it loads together with the TLS directory's AddressOfIndex.
-BUSTER_GLOBAL_LOCAL bool link_test_pe_x64_tls_index_load(ByteSlice image, u64* load_address, u64* address_of_index)
+// absolute address it loads together with the TLS directory's AddressOfIndex
+// and the file bytes of its StartAddressOfRawData..EndAddressOfRawData template.
+BUSTER_GLOBAL_LOCAL bool link_test_pe_x64_tls_index_load(ByteSlice image, u64* load_address, u64* address_of_index, ByteSlice* tls_template)
 {
     bool result = false;
     u32 pe_offset = image.length >= 0x40 && image.pointer[0] == 'M' && image.pointer[1] == 'Z' ? link_read_u32(image.pointer, 0x3c) : 0;
@@ -6835,7 +6836,11 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_x64_tls_index_load(ByteSlice image, u64* l
         u32 tls_rva = link_read_u32(image.pointer, optional + 184);
         u32 load_count = 0;
         bool index_found = false;
-        if (optional_size >= 192 && section_table <= image.length && (u64)section_count <= (image.length - section_table) / 40)
+        u64 template_start = 0;
+        u64 template_end = 0;
+        bool template_found = false;
+        bool headers_valid = optional_size >= 192 && section_table <= image.length && (u64)section_count <= (image.length - section_table) / 40;
+        if (headers_valid)
         {
             for (u16 section_index = 0; section_index < section_count; section_index += 1)
             {
@@ -6849,7 +6854,10 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_x64_tls_index_load(ByteSlice image, u64* l
                 }
                 if (tls_rva >= virtual_address && tls_rva - virtual_address <= raw_size && raw_size - (tls_rva - virtual_address) >= 40)
                 {
-                    *address_of_index = link_read_u64(image.pointer, raw_offset + (tls_rva - virtual_address) + 16);
+                    u64 directory = raw_offset + (tls_rva - virtual_address);
+                    template_start = link_read_u64(image.pointer, directory);
+                    template_end = link_read_u64(image.pointer, directory + 8);
+                    *address_of_index = link_read_u64(image.pointer, directory + 16);
                     index_found = true;
                 }
                 if (memcmp(image.pointer + header, ".text\0", 6) == 0)
@@ -6867,14 +6875,28 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_x64_tls_index_load(ByteSlice image, u64* l
                 }
             }
         }
-        result = tls_rva && index_found && load_count == 1;
+        for (u16 section_index = 0; headers_valid && index_found && section_index < section_count; section_index += 1)
+        {
+            u64 header = section_table + (u64)section_index * 40;
+            u64 start = image_base + link_read_u32(image.pointer, header + 12);
+            u32 raw_size = link_read_u32(image.pointer, header + 16);
+            u32 raw_offset = link_read_u32(image.pointer, header + 20);
+            if (template_start >= start && template_end >= template_start && template_end - start <= raw_size && raw_offset <= image.length &&
+                raw_size <= image.length - raw_offset)
+            {
+                *tls_template = (ByteSlice){.pointer = image.pointer + raw_offset + (template_start - start), .length = template_end - template_start};
+                template_found = true;
+            }
+        }
+        result = tls_rva && index_found && template_found && load_count == 1;
     }
     return result;
 }
 
-// GitHub #1323 W1: an x86-64 COFF object must bind the TLS index load to the
-// loader's _tls_index, so linking that object (here, or with lld-link/link.exe)
-// resolves the load to AddressOfIndex rather than to the TLS template.
+// GitHub #1323 W1/W3: an x86-64 COFF object must bind the TLS index load to
+// the loader's _tls_index and carry its thread-local data in .tls$, so linking
+// that object (here, or with lld-link/link.exe) resolves the load to
+// AddressOfIndex and builds the same TLS template as a direct link.
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_pe_x64_tls_index_object(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6886,6 +6908,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_pe_x64_tls_index_object(UnitTestArg
         {.name = S8("main"), .size = sizeof(code), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
         {.name = S8("tls_a"), .size = 4, .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
         {.name = S8("tls_b"), .value = 4, .size = 4, .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        {.name = S8("tls_zero"), .value = 8, .size = 24, .section = OBJECT_SECTION_THREAD_LOCAL_ZERO, .kind = OBJECT_SYMBOL_DATA, .global = true},
     };
     // Codegen's canonical form: the index load names the variable it serves.
     ObjectRelocation relocations[] = {
@@ -6895,15 +6918,47 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_pe_x64_tls_index_object(UnitTestArg
                                               BUSTER_ARRAY_LENGTH(symbols), relocations, BUSTER_ARRAY_LENGTH(relocations));
     object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data = (ByteSlice){.pointer = (u8*)tls_values, .length = sizeof(tls_values)};
     object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].virtual_size = sizeof(tls_values);
+    object.sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size = 32;
+    object.sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment = 16;
     NativeExecutableLinkOptions options = {.entry_symbol = S8("main")};
 
     NativeExecutableLinkResult direct = link_native_executable(arguments->arena, &object, options);
     u64 direct_load = 0;
     u64 direct_index = 0;
+    ByteSlice direct_template = {0};
     BUSTER_TEST(arguments, direct.error == LINK_ERROR_NONE &&
-                               link_test_pe_x64_tls_index_load(direct.executable, &direct_load, &direct_index) && direct_load == direct_index);
+                               link_test_pe_x64_tls_index_load(direct.executable, &direct_load, &direct_index, &direct_template) &&
+                               direct_load == direct_index);
 
     ObjectArtifact artifact = object_write(arguments->arena, &object, OBJECT_FORMAT_COFF);
+    // W3b: MSVC and Clang place all thread-local data, zero-initialized
+    // included, in initialized .tls$ sections; platform linkers build the
+    // loader's template only from those. No .tdata/.tbss may remain.
+    u32 tls_sections = 0;
+    u32 other_tls_sections = 0;
+    if (artifact.error == OBJECT_ERROR_NONE && artifact.bytes.length >= 20)
+    {
+        u16 section_count = 0;
+        memcpy(&section_count, artifact.bytes.pointer + 2, sizeof(section_count));
+        for (u16 section_index = 0; section_index < section_count && 20 + ((u64)section_index + 1) * 40 <= artifact.bytes.length; section_index += 1)
+        {
+            u8 const* header = artifact.bytes.pointer + 20 + (u64)section_index * 40;
+            u32 raw_size = link_read_u32(header, 16);
+            u32 raw_offset = link_read_u32(header, 20);
+            u32 characteristics = link_read_u32(header, 36);
+            if (memcmp(header, ".tls$\0\0\0", 8) == 0)
+            {
+                bool zeros = raw_offset <= artifact.bytes.length && raw_size <= artifact.bytes.length - raw_offset;
+                for (u32 offset = 0; zeros && raw_size == 32 && offset < raw_size; offset += 1)
+                {
+                    zeros = artifact.bytes.pointer[raw_offset + offset] == 0;
+                }
+                tls_sections += (characteristics & 0xc00000e0) == 0xc0000040 && raw_offset && zeros;
+            }
+            other_tls_sections += memcmp(header, ".tdata", 6) == 0 || memcmp(header, ".tbss", 5) == 0;
+        }
+    }
+    BUSTER_TEST(arguments, tls_sections == 2 && other_tls_sections == 0);
     ObjectFile roundtrip = object_read(arguments->arena, artifact.bytes, target);
     bool bound = artifact.error == OBJECT_ERROR_NONE && roundtrip.error == OBJECT_ERROR_NONE && roundtrip.relocation_count == 1 &&
                  roundtrip.relocations[0].symbol < roundtrip.symbol_count;
@@ -6915,12 +6970,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_pe_x64_tls_index_object(UnitTestArg
                                    relocation->offset == 2 && index_symbol->section == OBJECT_SECTION_UNDEFINED && index_symbol->global &&
                                    index_symbol->kind == OBJECT_SYMBOL_DATA);
         BUSTER_STRING_TEST(arguments, index_symbol->name, S8("_tls_index"));
+        u32 zero_symbol = UINT32_MAX;
+        for (u32 index = 0; index < roundtrip.symbol_count; index += 1)
+        {
+            zero_symbol = string_equal(roundtrip.symbols[index].name, S8("tls_zero")) ? index : zero_symbol;
+        }
+        BUSTER_TEST(arguments, zero_symbol != UINT32_MAX && roundtrip.symbols[zero_symbol].section == OBJECT_SECTION_THREAD_LOCAL_DATA);
         NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &roundtrip, options);
         u64 linked_load = 0;
         u64 linked_index = 0;
+        ByteSlice linked_template = {0};
         BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE &&
-                                   link_test_pe_x64_tls_index_load(linked.executable, &linked_load, &linked_index) &&
+                                   link_test_pe_x64_tls_index_load(linked.executable, &linked_load, &linked_index, &linked_template) &&
                                    linked_load == linked_index);
+        // The template the loader copies is unchanged by the round trip.
+        BUSTER_TEST(arguments, direct_template.length >= 48 && direct_template.length == linked_template.length &&
+                                   memcmp(direct_template.pointer, linked_template.pointer, direct_template.length) == 0);
 
         // Any other use of the loader symbol is not an index load; the PE
         // linker must not quietly resolve it to the index slot.

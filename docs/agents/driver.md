@@ -786,8 +786,9 @@ remains open for unrelated encoding defects and further proof.
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
 suffixes (so `.init_array.00101` keeps its priority; `.preinit_array` takes
-none, as `ld` runs only that exact name), exact `.init`/`.fini`,
-and the existing DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`,
+none, as `ld` runs only that exact name), exact `.init`/`.fini`, exact
+`.tls$` (PE thread-local data, which Windows assembly output prints for both
+TLS kinds), and the existing DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`,
 `.debug_str`, `.debug_loc`, `.debug_ranges`, `.debug_addr`,
 `.debug_str_offsets`, `.debug_line_str`, `.debug_rnglists`,
 `.debug_loclists`). DWARF sections retain nonallocated object identities

@@ -348,6 +348,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_section_kind_for_name(String8 name, Assem
         {S8_INITIALIZER(".fini_array"), ASSEMBLY_UNIT_SECTION_FINI_ARRAY, true},
         {S8_INITIALIZER(".tdata"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA, true},
         {S8_INITIALIZER(".tbss"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO, true},
+        // PE thread-local data: one initialized template (object_coff_place_tls).
+        {S8_INITIALIZER(".tls$"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA, false},
         {S8_INITIALIZER(".debug_info"), ASSEMBLY_UNIT_SECTION_DEBUG_INFO, false},
         {S8_INITIALIZER(".debug_abbrev"), ASSEMBLY_UNIT_SECTION_DEBUG_ABBREV, false},
         {S8_INITIALIZER(".debug_line"), ASSEMBLY_UNIT_SECTION_DEBUG_LINE, false},
