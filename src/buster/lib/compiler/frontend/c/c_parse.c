@@ -17858,7 +17858,7 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_list_complete(CTypeParseMachin
         frame->inner_parameter_start = frame->parameter_start;
         frame->inner_parameter_count = frame->written_parameter_count;
         frame->inner_variadic = frame->variadic;
-        frame->inner_unprototyped = c_parse_parameter_list_unprototyped(preprocess, list_close);
+        frame->inner_unprototyped = c_parse_parameter_list_unprototyped(preprocess, list_close) || list_close == machine->identifier_list_close;
         frame->has_inner_parameters = true;
         frame->scanning_inner_parameters = false;
         frame->variadic = false;
@@ -17875,7 +17875,8 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_list_complete(CTypeParseMachin
                                              .parameter_count = frame->written_parameter_count,
                                              .kind = C_TYPE_FUNCTION,
                                              .is_variadic = frame->variadic,
-                                             .is_unprototyped = c_parse_parameter_list_unprototyped(preprocess, list_close),
+                                             .is_unprototyped = c_parse_parameter_list_unprototyped(preprocess, list_close) ||
+                                                                list_close == machine->identifier_list_close,
                                          }) : C_TYPE_ID_INVALID;
     frame->has_function_suffix = true;
     frame->stage = C_TYPE_PARSE_STAGE_FINISH;
@@ -18124,6 +18125,23 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
                     c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
                     return;
                 }
+            }
+            else if (segment_count == 1 && frame->segment_start > machine->identifier_list_open && frame->scan_index <= machine->identifier_list_close)
+            {
+                // An old-style definition's identifier list names its
+                // parameters: each is an int until the declaration list binds
+                // it (c_parse_bind_identifier_list_parameter_declarations),
+                // as the unparenthesized path in
+                // c_parse_declaration_type_derive builds them (GitHub #3368).
+                CToken name = preprocess.tokens[frame->segment_start];
+                result->parameters[frame->parameter_start + frame->written_parameter_count] = (CParameter){
+                    .name = c_token_spelling(preprocess.spelling_base, name),
+                    .location = c_preprocess_token_site(&preprocess, name),
+                    .type = c_parse_expression_scalar_type(result, C_TYPE_INT),
+                    .entity = C_ENTITY_ID_INVALID,
+                    .symbol = name.symbol,
+                };
+                frame->written_parameter_count += 1;
             }
             else if (!(list_end && !frame->written_parameter_count && segment_count == 1 &&
                        string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[frame->segment_start]), S8("void"))))
@@ -19762,7 +19780,10 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult p
 // and is redundant otherwise. `(f)(int)`, `((h))(void)`, `(gd(int a))` and
 // `(*f(int))[3]` declare functions; `(*f)(int)`, `((*pq))(int)`, `(*(f))(int)`
 // and `((x))[3]` declare objects (GitHub #3215).
-BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_is_function(CPreprocessResult preprocess, u32 start, u32 end, u32* name_index)
+// `list_open` receives the `(` of the function's parameter list, inside the
+// group for `(k(a))` and after it for `(k)(a)`, which the whole-declaration
+// scan records as parameter_list_open for an old-style definition.
+BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_parameter_list(CPreprocessResult preprocess, u32 start, u32 end, u32* name_index, u32* list_open)
 {
     u32 depth = 0;
     u32 pointer_depth = 0;
@@ -19779,8 +19800,49 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_is_function(CPreprocessR
             depth -= walking;
             index += walking;
         }
+        *list_open = index;
     }
     return function;
+}
+
+BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_is_function(CPreprocessResult preprocess, u32 start, u32 end, u32* name_index)
+{
+    u32 list_open = 0;
+    return c_parse_parenthesized_declarator_parameter_list(preprocess, start, end, name_index, &list_open);
+}
+
+// Where an old-style declaration list may begin after a parameter list that
+// closes at `close` inside `depth` declarator groups: past the `)` of each
+// group and any suffix written after one, as the `(void)` of
+// `int (*k(a))(void) int a; {...}`. A group left open makes no list
+// (C_ID_UNDERLYING_INVALID).
+BUSTER_C_INTERNAL u32 c_parse_declarator_groups_end(CPreprocessResult preprocess, u32 close, u32 depth, u32 end)
+{
+    u32 index = close + 1;
+    bool walking = index < end;
+    while (walking)
+    {
+        CToken token = preprocess.tokens[index];
+        if (depth && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            depth -= 1;
+            index += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            index = c_parse_matching_delimiter(preprocess, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) + 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            index = c_parse_matching_delimiter(preprocess, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET) + 1;
+        }
+        else
+        {
+            walking = false;
+        }
+        walking = walking && index < end;
+    }
+    return depth ? C_ID_UNDERLYING_INVALID : index;
 }
 
 // Return the name of a parenthesized function declarator (`(f)(...)` or
@@ -20355,7 +20417,10 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
         // of its declarator.  Bound every declarator reader at the identifier
         // list's ')' and let the dedicated parameter pass consume the tokens
         // between it and the body.
-        end = declaration->identifier_list_start + declaration->identifier_list_token_count + 1;
+        // A parenthesized name, `int (k(a)) int a; {...}`, closes its
+        // groups after the list's ')', so the bound is where the declaration
+        // list (or the body) begins (GitHub #3368).
+        end = declaration->parameter_declaration_token_count ? declaration->parameter_declaration_start : declaration->body_start - 1;
     }
     u32 auto_declaration_end = declaration->body_start && !declaration->is_identifier_list_definition ? declaration->body_start - 1 : end;
     u32 auto_token_index = UINT32_MAX;
@@ -20593,9 +20658,22 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                 // it cannot parse; a typedef, prototype or extern declaration
                 // stays lenient, as c_parse_declaration_declares_no_storage says.
                 bool reports_parameter_types = !c_parse_declaration_declares_no_storage(preprocess, declaration);
+                if (declaration->is_identifier_list_definition && c_preprocess_dialect_is_c23(preprocess.dialect))
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[declaration->identifier_list_start]),
+                                       C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("identifier-list function definitions were removed in C23"));
+                    return;
+                }
                 machine->member_declarator_depth += reports_parameter_types;
+                if (declaration->is_identifier_list_definition)
+                {
+                    machine->identifier_list_open = declaration->identifier_list_start - 1;
+                    machine->identifier_list_close = declaration->identifier_list_start + declaration->identifier_list_token_count;
+                }
                 declaration->type =
                     c_parse_parenthesized_declaration_type(machine, result, preprocess, base, declarator_start, name_index, suffix_end, true);
+                machine->identifier_list_open = 0;
+                machine->identifier_list_close = 0;
                 machine->member_declarator_depth -= reports_parameter_types;
                 // The parenthesized declarator parser owns the parameter
                 // records it creates, but the declaration still needs to
@@ -29363,9 +29441,14 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                         {
                             name_token = parenthesized_name_token;
                             u32 function_name = 0;
-                            if (c_parse_parenthesized_declarator_is_function(preprocess, index, token_count, &function_name))
+                            u32 list_open = 0;
+                            if (c_parse_parenthesized_declarator_parameter_list(preprocess, index, token_count, &function_name, &list_open))
                             {
+                                // The name's own list opens the old-style
+                                // identifier list, inside the group or after
+                                // it: `int (k(a)) int a; {...}` (GitHub #3368).
                                 function_name_token = parenthesized_name_token;
+                                parameter_list_open = list_open;
                             }
                         }
                         else if (ordinary_function)
@@ -29460,15 +29543,16 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                     else
                     {
                         is_variadic |= c_parser_parameter_list_is_variadic(preprocess, index, delimiter_count, top_level_parenthesis);
-                        if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS && delimiter_count == 1 &&
-                            parameter_list_open != C_ID_UNDERLYING_INVALID && delimiter_stack[0] == parameter_list_open)
+                        if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS && parameter_list_open != C_ID_UNDERLYING_INVALID &&
+                            delimiter_stack[delimiter_count - 1] == parameter_list_open)
                         {
                             parameter_list_close = index;
                             identifier_list_start = parameter_list_open + 1;
                             identifier_list_token_count = index - identifier_list_start;
                             identifier_list_candidate = c_parser_identifier_list(
                                 preprocess, identifier_list_start, identifier_list_start + identifier_list_token_count);
-                            old_style_declaration_cursor = index + 1;
+                            old_style_declaration_cursor = delimiter_count == 1 ? index + 1
+                                                                                : c_parse_declarator_groups_end(preprocess, index, delimiter_count - 1, token_count);
                         }
                         delimiter_count -= 1;
                     }
@@ -29763,8 +29847,9 @@ struct CParserTreeDeclarator
     // its parameter or identifier list.
     u32 open;
     u32 list;
-    // The walker reads a function name; and reads it as `name (`, with no
-    // group around it, so that this list is its identifier list.
+    // The walker reads a function name, whose list is then its identifier
+    // list, inside a group or not (GitHub #3368); and no `(` is written
+    // before the name, so that the list closes on the declarator's last `)`.
     bool function;
     bool ordinary;
     // A function derivation stands outside every group. It is the last
@@ -30190,6 +30275,16 @@ BUSTER_C_INTERNAL bool c_parser_tree_declarator_end(CParserTreeSplit* split, CPa
     return shaped || c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_TOKENS, after);
 }
 
+// The `)` of a function declarator's own list: the token before `after`,
+// the token after the declarator, unless a group closes after the list, as
+// in `int (k(a))` (GitHub #3368).
+BUSTER_C_INTERNAL u32 c_parser_tree_list_close(CParserTreeSplit const* split, CParserTreeDeclarator const* declarator, u32 after)
+{
+    return declarator->ordinary ? after - 1
+                                : c_parse_matching_delimiter(split->preprocess, declarator->open, after, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                             C_PUNCTUATOR_RIGHT_PARENTHESIS);
+}
+
 // One DECLARATION: c_parse_ast_run's whole-declaration scan, then its split
 // into one record per declarator when a top-level comma separates them.
 BUSTER_C_INTERNAL bool c_parser_tree_declaration(CParserTreeSplit* split, u32 node, u32 start, u32 end)
@@ -30252,13 +30347,12 @@ BUSTER_C_INTERNAL bool c_parser_tree_declaration(CParserTreeSplit* split, u32 no
         }
         segment_starts[count] = end;
         // The walker's parameter_list_open: the first declarator whose
-        // function name it reads, before any `=`, and only when that name is
-        // read as `name (`.
+        // function name it reads, before any `=`.
         u32 list_owner = UINT32_MAX;
         bool list_closed = false;
         for (u32 index = 0; shaped && index < count && !list_closed; index += 1)
         {
-            list_owner = declarators[index].ordinary ? index : list_owner;
+            list_owner = declarators[index].function ? index : list_owner;
             list_closed = declarators[index].function || parts[index].initializer != C_AST_NODE_INVALID;
         }
         u32 identifier_list_start = 0;
@@ -30274,7 +30368,7 @@ BUSTER_C_INTERNAL bool c_parser_tree_declaration(CParserTreeSplit* split, u32 no
             if (shaped && index == list_owner)
             {
                 identifier_list_start = declarators[index].open + 1;
-                identifier_list_count = after - 1 - identifier_list_start;
+                identifier_list_count = c_parser_tree_list_close(split, &declarators[index], after) - identifier_list_start;
             }
         }
         bool split_list = count > 1;
@@ -30338,15 +30432,15 @@ BUSTER_C_INTERNAL bool c_parser_tree_definition(CParserTreeSplit* split, u32 nod
                   c_parser_tree_declarator_end(split, &declarator, brace);
     if (shaped)
     {
-        bool candidate = declarator.ordinary && c_parser_tree_identifier_list(split, declarator.list);
+        bool candidate = c_parser_tree_identifier_list(split, declarator.list);
         CParserDeclaration* declaration = arena_allocate(split->arena, CParserDeclaration, 1);
         *declaration = (CParserDeclaration){
             .token_start = start,
             .token_count = end - start,
             .body_start = brace + 1,
             .body_token_count = (end - 1) - (brace + 1),
-            .identifier_list_start = declarator.ordinary ? declarator.open + 1 : 0,
-            .identifier_list_token_count = declarator.ordinary ? (brace - 1) - (declarator.open + 1) : 0,
+            .identifier_list_start = declarator.open + 1,
+            .identifier_list_token_count = c_parser_tree_list_close(split, &declarator, brace) - (declarator.open + 1),
             .name_token = declarator.name,
             .function_name_token = declarator.name,
             .kind = specifiers.typedef_word ? C_PARSER_DECLARATION_TYPEDEF : C_PARSER_DECLARATION_FUNCTION,
