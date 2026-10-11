@@ -34022,12 +34022,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
 #endif
                 // GCC 14 added the -std=gnu23 spelling; GCC 11 through 13 refuse it with the same
                 // diagnostic (observed on 11.5, 12.4 and 13.3). The macro and version line must agree.
+                // Bind the final release token; the package description may name another release.
+                u64 release_offset = 0;
+                for (u64 index = 0; index < version_line.length; index += 1)
+                {
+                    release_offset = version_line.pointer[index] == ' ' ? index + 1 : release_offset;
+                }
+                String8 release = string_slice(version_line, release_offset, version_line.length);
                 bool pre_gnu23_release = false;
                 for (u32 major = 11; major <= 13; major += 1)
                 {
                     pre_gnu23_release |= string_first_sequence(profile_output,
                             string_format(identity_temporary.arena, S8("#define __GNUC__ {u32}\n"), major)) != BUSTER_STRING_NO_MATCH &&
-                        string_first_sequence(version_line, string_format(identity_temporary.arena, S8(" {u32}."), major)) != BUSTER_STRING_NO_MATCH;
+                        string_first_sequence(release, string_format(identity_temporary.arena, S8("{u32}."), major)) == 0;
                 }
                 bool non_clang_macro = string_first_sequence(profile_output, S8("#define __clang__")) == BUSTER_STRING_NO_MATCH;
                 bool linux_macro = string_first_sequence(profile_output, S8("#define __linux__ 1\n")) != BUSTER_STRING_NO_MATCH;

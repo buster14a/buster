@@ -26509,6 +26509,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_guard(Uni
     return result;
 }
 
+#if BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_oracle_object_valid(Arena* arena, String8 path)
 {
     bool result = false;
@@ -26579,6 +26580,9 @@ BUSTER_GLOBAL_LOCAL TestProcessObservation compiler_driver_test_type_specifier_p
     return observation;
 }
 
+#endif
+
+#if BUSTER_LINUX && !BUSTER_ANDROID && !BUSTER_IOS
 // GCC 12 added x86-64 _Float16. For an identified native GCC 11 whose
 // known-valid integer control compiles, its exact `_Float16` refusal makes the
 // GCC rows of a _Float16 fixture NOT_RUN (#2579). Any other GCC, and every
@@ -26643,6 +26647,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_gcc11_float16_not_run(UnitTestArgu
 #endif
     return result;
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identity(UnitTestArguments* arguments)
 {
