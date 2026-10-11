@@ -436,6 +436,25 @@ unchanged.
   constraint checks, a `sizeof` expression) must therefore hold no type name
   the tree did not accept. The typer also declines a `?:` whose range holds a
   top-level comma or assignment, which the machine splits at instead.
+
+  It also declines shapes whose machine answers append few or no rows, but
+  for which it has no rule:
+  - `++` and `--`, prefix and postfix;
+  - an arithmetic, shift or `?:` operand that ends in `. name` or `-> name`
+    without being a member node, such as `a + s.f`. The machine reads the
+    bit-field width from those tokens, so `c_ast_types_operand_width` leaves
+    them to it.
+  - a member access over any other base kind, such as a cast or a compound
+    literal;
+  - a call whose callee is not a plain identifier, and a call of an unbound
+    builtin other than a void one with no arguments;
+  - an identifier with no binding in a body;
+  - `_Generic`, a statement expression, a braced initializer list,
+    `__real__` and `__imag__`, `true`, `false` and `nullptr`, and `&&label`.
+
+  The census in audit
+  [`2026-10-11T093336Z`](../../performance-audits/2026-10-11T093336Z.md)
+  charges each declined shape its machine Ir on the unity self-host.
 - **The replay.** With constraint checks the machine types a cast's operand.
   When that operand is one string-literal token, alone or in parentheses
   (`(char8*)("text")`, as `S8()` spells it), its typing appends the literal's
