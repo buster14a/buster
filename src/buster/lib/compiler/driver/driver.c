@@ -63,6 +63,8 @@
 // The test-only compiler_driver_test_setup_order observer checks completed
 // setup against real serial unit boundaries without comparing wall times.
 // archive.c owns indexed archive extraction and its pass-ordered worklist.
+// compiler_driver_archive_read_failure formats archive read refusals with the
+// reader's member attribution.
 // compiler_driver_elf_library_roots and compiler_driver_mach_library_roots
 // share target/sysroot search roots with static-library lookup; explicit -L
 // roots come first. compiler_driver_mach_library_locate resolves Apple dylibs
@@ -5855,6 +5857,15 @@ struct CompilerDriverCpuRuntime
     u32 reserved;
 };
 
+// An archive refused while reading its descriptors names the failing member
+// when the reader attributed one, such as an unindexed member whose symbol
+// table cannot be read.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_archive_read_failure(Arena* arena, String8 path, ObjectArchive* archive)
+{
+    return archive->diagnostic.length ? string_format(arena, S8("could not read archive {S8}: {S8}"), path, archive->diagnostic)
+                                      : string_format(arena, S8("could not read archive {S8}: error {u32}"), path, (u32)archive->error);
+}
+
 // Like `-lgcc` at the end of GCC's link line, but narrower: only a remaining
 // strong reference to the target's CPU-feature runtime reads libgcc.a, and
 // only the members defining those names are selected, so every other link and
@@ -5885,7 +5896,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverCpuRuntime compiler_driver_elf_cpu_runtime(Are
         else if (archive.error != OBJECT_ERROR_NONE || archive.object_count > UINT32_MAX - object_count)
         {
             result.symbol = missing;
-            result.diagnostic = string_format(arena, S8("could not read archive {S8}: error {u32}"), path, (u32)archive.error);
+            result.diagnostic = compiler_driver_archive_read_failure(arena, path, &archive);
         }
         else
         {
@@ -9749,7 +9760,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         if (input_archives[input_index].error != OBJECT_ERROR_NONE || input_archives[input_index].object_count > UINT32_MAX - object_capacity)
         {
             compiler_driver_fail_input(&result, inputs, input_index, COMPILER_DRIVER_ERROR_OBJECT, input_archives[input_index].error,
-                                          string_format(arena, S8("could not read archive {S8}: error {u32}"), input_path, (u32)input_archives[input_index].error));
+                                          compiler_driver_archive_read_failure(arena, input_path, &input_archives[input_index]));
             goto finish;
         }
         object_capacity += input_archives[input_index].object_count;
@@ -9781,7 +9792,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             result.error = COMPILER_DRIVER_ERROR_OBJECT;
             result.object_error = archive.error;
-            result.diagnostic = string_format(arena, S8("could not read archive {S8}: error {u32}"), archive_path, (u32)archive.error);
+            result.diagnostic = compiler_driver_archive_read_failure(arena, archive_path, &archive);
             goto finish;
         }
         object_capacity += archive.object_count;
