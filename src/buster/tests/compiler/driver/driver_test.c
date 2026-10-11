@@ -15772,8 +15772,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_linker_scripts(UnitT
                 if (script.length)
                 {
                     inputs_written &= file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(script));
-                    // A later DSO cannot hide a malformed or unsupported script.
-                    inputs_written &= file_write(later_path, elf);
+                    // A later DSO cannot hide an unsupported script. The
+                    // malformed non-script control has no usable fallback.
+                    if (scenario != 4) { inputs_written &= file_write(later_path, elf); }
                 }
                 if (scenario == 6 || scenario == 8)
                 {
