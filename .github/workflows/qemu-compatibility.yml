@@ -92,7 +92,7 @@ jobs:
       - name: Install external upstream build prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends meson ninja-build pkg-config libglib2.0-dev libpixman-1-dev zlib1g-dev python3-venv python3-setuptools python3-tomli
+          sudo apt-get install -y --no-install-recommends meson ninja-build pkg-config libglib2.0-dev libpixman-1-dev zlib1g-dev python3-venv python3-setuptools python3-tomli socat xorriso
       - name: Freeze diagnostic environment and license inputs
         run: |
           mkdir -p evidence
@@ -102,6 +102,11 @@ jobs:
           meson --version > evidence/meson.txt
           ninja --version > evidence/ninja.txt
           x86_64-linux-gnu-gcc --version > evidence/guest-gcc.txt
+          socat -V > evidence/socat.txt
+          xorrisofs -version > evidence/xorrisofs.txt 2>&1
+          sha256sum "$(command -v socat)" "$(command -v xorrisofs)" > evidence/test-tool-identities.sha256
+          cp /usr/share/doc/socat/copyright evidence/socat-copyright.txt
+          cp /usr/share/doc/xorriso/copyright evidence/xorriso-copyright.txt
           pkg-config --modversion glib-2.0 pixman-1 zlib > evidence/library-versions.txt
           cp external/qemu/LICENSE external/qemu/COPYING external/qemu/COPYING.LIB evidence/
           cp external/qemu/pc-bios/README evidence/firmware-README.txt

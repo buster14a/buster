@@ -37,9 +37,14 @@ a debug configuration claim.
 
 External prerequisites are Git, Clang, Meson >=1.5, Ninja, make, pkg-config,
 Python/venv, coreutils, the independent `x86_64-linux-gnu-gcc` guest compiler,
+socat for I/O command tests, xorriso/xorrisofs for CD-ROM fixtures,
 and the development files for GLib, pixman and zlib. Upstream
 Python scripts are used unchanged; the Buster harness adds no Python.
-The workflow records package versions and compiler identities. QEMU's bundled
+The workflow records package versions, compiler identities and test-tool hashes/notices.
+Missing socat or xorrisofs produces upstream skips of applicable tests; the hosted
+cell provisions both before either variant runs. Architecture-inapplicable tests,
+disabled optional crypto backends and unavailable host kernel facilities retain
+their actual upstream skip reasons. QEMU's bundled
 Meson wheel is its normal offline bootstrap when the installed Meson is too old;
 the action introspects with the Meson selected in each build's upstream venv. This diagnostic
 environment is not yet an immutable SDK closure; package, header, linker and
