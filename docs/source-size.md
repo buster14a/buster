@@ -105,22 +105,18 @@ retained for the later current-main integration. This acknowledgment adds no
 9700X benchmark request or performance claim;
 `benchmarks/9700x/compiler-compare.request` remains unchanged from main.
 
-PR #3483 acknowledges +40,593 production bytes against `main` `9dd0984f`.
+PR #3483 acknowledges +40,773 production bytes against `main` `33e54467`.
 It reads plain declaration specifier runs from the syntax tree under
 `-fc-ast-pilot` (#3102): about 25,200 bytes in `c_parse.c`, `c.h`,
 `c_internal.h`, `c_parse_internal.h`, the driver and `ide.c`. It also
-carries two PRs admitted ahead of it in the merge queue, merged on the
-branch so that the queue composes:
-- #3494 (queued head `5087bbf4`), the typer's qualified-member replay:
-  8,471 bytes in `c_ast_types.c`, `c_parse.c` and the internal headers;
-- #3568, the statement plan's braced segments: 6,925 bytes in `c_parse.c`,
-  `c.h` and the driver.
+carries #3575 (queued head `584daed1`), admitted ahead of it in the merge
+queue and merged on the branch so that the queue composes: shared qualified
+member copies under the pilot, about 15,500 bytes in `c_parse.c`,
+`c_ast_types.c` and the internal headers.
 
-Two more admitted predecessors are merged on the branch but add no
-production bytes: #3138, whose +64,472 build bytes (the AArch64 assembly
-census tool) its own baseline refresh acknowledged, and #3452, which changes
-documentation only. Each production change is under 32 KiB alone. The
-baseline is regenerated at `90ed2bbd` over the combined source.
+Each production change is under 32 KiB alone. #3568, #3138, #3452 and
+#3494, merged here earlier, have since landed on main. The baseline is
+regenerated at `e41a5721` over the combined source.
 
 Categories are independent. Deleting tests, fixtures, generated tables or
 documentation never earns room for production or build code, and only the

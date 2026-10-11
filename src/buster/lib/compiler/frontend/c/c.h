@@ -1217,6 +1217,9 @@ typedef enum CEntityKind
     C_ENTITY_COUNT,
 } CEntityKind;
 
+#define C_ENTITY_INLINE_HINT_ALWAYS 1u
+#define C_ENTITY_INLINE_HINT_NOINLINE 2u
+
 typedef struct CEntity CEntity;
 struct CEntity
 {
@@ -1262,6 +1265,8 @@ struct CEntity
     // The file-scope entity's first declaration was written `static`, so it
     // has internal linkage (C17 6.2.2p3) and later declarations must agree.
     bool has_internal_linkage;
+    // Function optimization requests merged from compatible declarations.
+    u8 inline_hints;
     CEntityId cleanup_function;
     u32 cleanup_attribute_token;
     u32 cleanup_attribute_end;
@@ -2010,6 +2015,8 @@ struct CParseResult
     // The live entries of the interning log (CAggregateLookup.type_interning),
     // checkpointed with type_count so a rollback forgets the rows it removes.
     u32 interned_type_count;
+    // The same for its log of shared qualified member copies.
+    u32 interned_qualified_count;
     u32 bfloat16_builtin_call_count;
     u32 bfloat16_builtin_call_capacity;
     // Phase-arena bytes semantic analysis released (logical) and the releases

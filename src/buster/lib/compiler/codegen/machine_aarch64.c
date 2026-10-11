@@ -25,6 +25,10 @@
 // Darwin page pair or GOT load, or under ELF -fPIC the GOT or page pair that the
 // MACHINE_A64_LEA_SYMBOL encoder case emits (thread-locals are refused there in
 // machine_a64_select_global_address).
+// machine_a64_cast_copies_constant lets a register-copy cast of an integer
+// constant (a C null pointer) define itself with MOV_RI, which the allocators
+// rematerialize; the classification pass counts those reads and constants
+// only such casts read are marked fused_dead after branch fusion.
 //
 // Register conventions: values live zero-extended in X registers exactly
 // like the x86-64 register model. X28 is the frame base (the canonical
@@ -1273,6 +1277,47 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_to_float(MachineA64Selector* se
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_float_to_f128(MachineA64Selector* selector, IrInstruction* instruction,
                                                          IrType* source_type, IrType* target_type);
 
+// A register-copy cast changes no bits, so a chain of them over an integer
+// constant still holds that constant. Such a cast defines its own register
+// with MOV_RI, which the allocator rematerializes instead of spilling: a C
+// null pointer is CAST(INTEGER_TO_POINTER) of zero. Both ends must be
+// general-register scalars, which keeps floats and 128-bit integers out.
+#define MACHINE_A64_COPY_CAST_CHAIN_LIMIT 4u
+BUSTER_GLOBAL_LOCAL bool machine_a64_cast_copies_constant(MachineA64Selector* selector, IrInstruction const* cast, u64* immediate)
+{
+    IrProgram* program = selector->program;
+    IrFunction* function = selector->function;
+    bool found = false;
+    bool searching = cast->result.value < function->value_count &&
+                     machine_a64_type_is_scalar_register(ir_type_from_id(&program->types, function->values[cast->result.value].canonical_type));
+    IrInstruction const* row = cast;
+    for (u32 step = 0; searching && step < MACHINE_A64_COPY_CAST_CHAIN_LIMIT; step += 1)
+    {
+        searching = false;
+        if (row->opcode == IR_OPCODE_CAST && row->operand_count == 1 && row->operands[0].value < function->value_count &&
+            (row->conversion_operation == IR_CONVERSION_INTEGER_TO_POINTER || row->conversion_operation == IR_CONVERSION_POINTER_REINTERPRET ||
+             row->conversion_operation == IR_CONVERSION_INTEGER_REINTERPRET) &&
+            machine_a64_type_is_scalar_register(ir_type_from_id(&program->types, function->values[row->operands[0].value].canonical_type)))
+        {
+            IrInstructionId definition = function->values[row->operands[0].value].definition;
+            if (definition.value < function->instruction_count)
+            {
+                row = function->instructions + definition.value;
+                if (row->opcode == IR_OPCODE_CONSTANT_INTEGER && row->immediate_count == 1 && row->immediates)
+                {
+                    *immediate = row->immediate_is_negative ? 0 - row->immediates[0] : row->immediates[0];
+                    found = true;
+                }
+                else
+                {
+                    searching = true;
+                }
+            }
+        }
+    }
+    return found;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
@@ -1286,7 +1331,18 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast(MachineA64Selector* selector, I
     IrType* early_target_type = ir_type_from_id(&program->types, instruction->canonical_type);
     bool source_is_integer128 = early_source_type && early_source_type->kind == IR_TYPE_INTEGER && early_source_type->bit_width == 128;
     bool target_is_integer128 = early_target_type && early_target_type->kind == IR_TYPE_INTEGER && early_target_type->bit_width == 128;
-    if (instruction->conversion_operation == IR_CONVERSION_IDENTITY && early_source_type && early_target_type &&
+    u64 constant = 0;
+    if (result_register != UINT32_MAX && machine_a64_cast_copies_constant(selector, instruction, &constant))
+    {
+        u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                    machine_ref_make(MACHINE_REF_IMMEDIATE, machine_a64_append_immediate(selector, constant))},
+                                                       .opcode = MACHINE_A64_MOV_RI,
+                                                   });
+        machine_a64_define(selector, result_register, row);
+        selected = true;
+    }
+    else if (instruction->conversion_operation == IR_CONVERSION_IDENTITY && early_source_type && early_target_type &&
         function->values[instruction->operands[0].value].canonical_type.value == instruction->canonical_type.value &&
         (early_target_type->kind == IR_TYPE_STRUCT || early_target_type->kind == IR_TYPE_UNION))
     {
@@ -4273,7 +4329,16 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_member_write(MachineA64Selector* sel
     bool selected;
     u32 value_register = selector->value_virtual_registers[operand.value];
     u32 value_slot = selector->value_stack_slots[operand.value];
-    if (value_register != UINT32_MAX || value_slot == UINT32_MAX)
+    if (!member_size)
+    {
+        IrType* value_type = ir_type_from_id(&selector->program->types, selector->function->values[operand.value].canonical_type);
+        // Resolved empty members capture their value but write no bytes.
+        // This includes the omitted flexible-array tail of a local struct.
+        selected = value_type && value_type->layout.resolved && !value_type->layout.size &&
+                   (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_ARRAY) &&
+                   value_slot != UINT32_MAX;
+    }
+    else if (value_register != UINT32_MAX || value_slot == UINT32_MAX)
     {
         u16 store_opcode = member_size == 1   ? MACHINE_A64_STORE_FRAME8
                            : member_size == 2 ? MACHINE_A64_STORE_FRAME16
@@ -4515,7 +4580,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_aggregate(MachineA64Selector* select
                 // left no room for a declared-type unit of carries a narrower
                 // one, and every other field reads its own size back.
                 u64 field_size = ir_field_access_size(&program->types, type->fields + field_index);
-                if (!field_size || field_offset > INT32_MAX)
+                if (field_offset > INT32_MAX || (!field_size && type->fields[field_index].is_bit_field))
                 {
                     selected = false;
                 }
@@ -6592,6 +6657,14 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 candidate_base += block_candidate_count;
             }
         }
+        // Reads by casts that copy a constant, counted over the same rows as
+        // value_use_counts; each read value is listed once for the marking
+        // after branch fusion.
+        u32* copy_cast_reads = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+        u32* copy_cast_sources = arena_allocate(arena, u32, function->value_count ? function->value_count : 1);
+        memset(copy_cast_reads, 0, sizeof(u32) * (function->value_count ? function->value_count : 1));
+        u32 copy_cast_source_count = 0;
+        u64 copied_constant = 0;
         // Classification pass: direct locals become stack slots, every other
         // scalar result becomes a virtual register, in stable value-id order.
         for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
@@ -6611,6 +6684,16 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                     instruction->immediates[0] < selector.parameter_count)
                 {
                     selector.argument_values[instruction->immediates[0]] = instruction->result.value;
+                }
+                if (instruction->opcode == IR_OPCODE_CAST && machine_a64_cast_copies_constant(&selector, instruction, &copied_constant))
+                {
+                    u32 source = instruction->operands[0].value;
+                    if (!copy_cast_reads[source])
+                    {
+                        copy_cast_sources[copy_cast_source_count] = source;
+                        copy_cast_source_count += 1;
+                    }
+                    copy_cast_reads[source] += 1;
                 }
                 if (instruction->opcode == IR_OPCODE_LOCAL)
                 {
@@ -6948,6 +7031,18 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             }
             fused_rows += function->published_cfg->blocks[block_index].instruction_count;
             fusion_candidate_base += block_candidate_count;
+        }
+        // A cast that copies a constant materializes it itself, so a value
+        // every use of which is such a cast selects into nothing. Edge
+        // arguments are uses no cast accounts for, so a value reaching a block
+        // parameter stays live.
+        for (u32 source_index = 0; source_index < copy_cast_source_count; source_index += 1)
+        {
+            u32 source = copy_cast_sources[source_index];
+            if (copy_cast_reads[source] == value_use_counts[source])
+            {
+                selector.fused_dead[source] = 1;
+            }
         }
         selector.virtual_register_count = selector.builder.virtual_registers.total_count;
         selector.virtual_register_definitions = arena_allocate(arena, u32, selector.virtual_register_count);

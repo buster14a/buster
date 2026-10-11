@@ -3,7 +3,7 @@
 // ir_instruction_is_pure is the semantic DCE authority. ir_fast_fold performs
 // one forward pass; ir_fast_dce uses counts plus a deletion queue (no use CSR);
 // ir_fast_parameters has a hard sweep cap. ir_prepare_canonical_module owns
-// input, promotion-output and FAST-output certification boundaries, then
+// input, inlining-output, promotion-output and FAST-output certification boundaries, then
 // publishes the final canonical CFG after all selected transformations.
 // ir_validate_promotion_output leaves out of the promotion-output check any
 // function whose certified input already failed the strict validator.
@@ -541,6 +541,27 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             result = ir_validate_canonical_module(program, module);
             result.boundary = IR_VALIDATION_BOUNDARY_CANONICAL_INPUT;
             validated = result.error == IR_VALIDATION_NONE;
+        }
+        if (result.error == IR_VALIDATION_NONE && !module->inline_complete)
+        {
+            bool inline_requested = program->inline_options.tiny;
+            for (u32 symbol = 0; !inline_requested && symbol < program->symbols.count; symbol += 1)
+            {
+                inline_requested = program->symbols.symbols[symbol].always_inline;
+            }
+            if (inline_requested)
+            {
+                // Expansion checks each caller and callee it reads, and each
+                // caller it rewrites, against the strict canonical form; a
+                // legacy certified shape stays a call when optional and
+                // reports its call when required. A module-wide scan here
+                // would repeat the FAST input guard on every default compile.
+                // Rewritten callers pass that check, so `validated` still
+                // describes the module.
+                module->inlining = (IrInlineStatistics){0};
+                result = ir_inline_module(program, module);
+            }
+            module->inline_complete = result.error == IR_VALIDATION_NONE;
         }
         if (result.error == IR_VALIDATION_NONE && !program->disable_local_promotion && !module->local_promotion_complete)
         {

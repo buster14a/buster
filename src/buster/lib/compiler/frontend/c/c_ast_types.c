@@ -13,16 +13,18 @@
 // doubt a node is declined. The eager pass mints no type rows: it returns ids
 // that already exist (entity, member, element, return and typedef types,
 // operand rows, the immutable scalar rows in
-// CParseResult.expression_scalar_types, and the primitive and pointer rows the
-// machine interns, CTypeInterning in c_internal.h), so an accepted node's
-// machine run appends nothing. Stage 3 adds the shapes whose rows are interned:
-// `&`, and a cast or compound literal whose type name is a typedef name or a
-// run of primitive specifier words under plain `*`s, each accepted only once
-// every row it reads is interned. It declines every shape whose machine answer
-// appends a row: a qualified member or array element, a string literal, an
-// array operand that decays, a pointer conditional, a qualified operand losing
-// its qualifiers without a recorded unqualified row, and a cast or compound
-// literal to any other type name (a qualified typedef, a tag, another
+// CParseResult.expression_scalar_types, and the rows the machine interns,
+// CTypeInterning in c_internal.h: primitive and pointer rows and the qualified
+// member copies it shares), so an accepted node's machine run appends nothing.
+// Stage 3 adds the shapes whose rows are interned: `&`, a cast or compound
+// literal whose type name is a typedef name or a run of primitive specifier
+// words under plain `*`s, and `.`/`->` over a const or volatile aggregate,
+// each accepted only once every row it reads is interned. It declines every
+// shape whose machine answer appends a row: a qualified member whose copy is
+// not shared yet or may not be, a qualified array element, a string literal,
+// an array operand that decays, a pointer conditional, a qualified operand
+// losing its qualifiers without a recorded unqualified row, and a cast or
+// compound literal to any other type name (a qualified typedef, a tag, another
 // declarator). The exceptions are replays of one string-literal token, whose
 // array row the machine appends. A checked query of a cast whose operand is
 // that token, perhaps parenthesized as `S8()` writes it, types the literal
@@ -119,10 +121,15 @@
 //   MEMBER,      a struct or union member through c_parse_member_type (which
 //   MEMBER_ARROW also searches anonymous members), as c_parse_direct_expression_postfix
 //                does, over a base of a kind listed here before CALL (the
-//                machine types any other base in its leaf); declined when the
-//                aggregate is qualified, because the machine then appends a
-//                qualified copy of the member type. A query of that node
-//                alone replays the append (c_ast_types_decline).
+//                machine types any other base in its leaf). Over a const or
+//                volatile aggregate the machine's answer is a qualified copy
+//                of the member type, which it shares under the pilot's
+//                interning window (c_parse_intern_qualified_type): accepted
+//                with that copy when it already exists, declined when it does
+//                not or may not be shared, and declined for a restrict or
+//                atomic aggregate. A query of a declined node alone replays
+//                the machine's step, which shares or appends the copy
+//                (c_ast_types_decline).
 //   INDEX        an array or pointer base with an integer index, as the
 //                machine's subscript operation; declined for a qualified array
 //                (a qualified element row), a vector base and the reversed
@@ -139,8 +146,10 @@
 //   binary       `* / % + - << >> < > <= >= == != & ^ | && ||`: the operation
 //                switch of c_type_parse_sizeof_step (c_ast_types_binary), with
 //                c_parse_expression_arithmetic_type, the bit-field widths it
-//                reads (c_ast_types_operand_width) and the checked-mode operand
-//                rule (c_ast_types_binary_safe).
+//                reads (c_ast_types_operand_width; an operand that ends in
+//                `. name` without being a member is 0 only where the machine's
+//                width probe provably fails, c_ast_types_probe_fails) and the
+//                checked-mode operand rule (c_ast_types_binary_safe).
 //   unary        `+ - ~ !`: promotion with the operand's bit-field width;
 //                complex and suitable vector operands keep their type.
 //   assignment   `=` and every compound form: the left operand's unqualified
@@ -195,6 +204,8 @@
 //   c_ast_types_waiting
 //   c_ast_types_looked_up_entity                 an initializer's unbound names
 //   c_ast_types_span, c_ast_types_expand         span rules
+//   c_ast_types_probe_fails,                      bit-field widths of operands
+//   c_ast_types_operand_width
 //   c_ast_types_type_body, c_ast_types_type_node the eager pass and its rules
 //   c_ast_types_member_lookup                    the pass's member memo
 //   c_ast_types_builtin_call                     void builtins, failing calls
@@ -717,12 +728,126 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_types_decayed_row(CParseResult const* result, CTyp
     return kind == C_TYPE_ARRAY || kind == C_TYPE_FUNCTION ? C_AST_TYPE_NONE : row;
 }
 
+// Whether c_parse_direct_expression_type fails on [start, end) without
+// appending a row, read from the tokens and the nodes already typed. Its
+// descent first strips enclosing parentheses, leading `*` and `&` and the
+// `++`/`--` it treats as type-preserving, exactly as below. Its base is then
+// the tokens before the first `[`, `.` or `->` outside parentheses:
+// - When that base is one identifier, the machine walks the postfix steps
+//   after it and fails at the first token that is no step. The steps it
+//   takes span an accepted INDEX, MEMBER or MEMBER_ARROW node here, so each
+//   reads an unqualified array or aggregate, or a qualified aggregate whose
+//   member copy is already shared, as the machine's walk does, and appends
+//   no qualified copy (c_parse_direct_expression_postfix,
+//   c_parse_intern_qualified_type).
+// - Any other base that holds no `,` or `{` outside parentheses is not
+//   descended into. One that starts with none of a string literal, `(` or a
+//   call's callee is typed to nothing by c_parse_direct_expression_base
+//   before any row is made, and no step runs on nothing. The first two are
+//   tested before the scan, since casts lead most of the declined operands.
+// Every other range is left to the machine, even when it would fail too.
+BUSTER_GLOBAL_LOCAL bool c_ast_types_probe_fails(CAstTypeBody const* body, u32 start, u32 end)
+{
+    bool normalize = true;
+    while (normalize && start < end)
+    {
+        normalize = false;
+        while (start < end && c_ast_types_punctuator_at(body, start, C_PUNCTUATOR_LEFT_PARENTHESIS) && c_ast_types_match(body, start) == end - 1)
+        {
+            start += 1;
+            end -= 1;
+            normalize = true;
+        }
+        if (start < end && (c_ast_types_punctuator_at(body, start, C_PUNCTUATOR_STAR) || c_ast_types_punctuator_at(body, start, C_PUNCTUATOR_AMPERSAND)))
+        {
+            start += 1;
+            normalize = true;
+        }
+        if (start + 1 < end &&
+            (c_ast_types_punctuator_at(body, start, C_PUNCTUATOR_PLUS_PLUS) || c_ast_types_punctuator_at(body, start, C_PUNCTUATOR_MINUS_MINUS)))
+        {
+            start += 1;
+            normalize = true;
+        }
+        if (start + 1 < end &&
+            (c_ast_types_punctuator_at(body, end - 1, C_PUNCTUATOR_PLUS_PLUS) || c_ast_types_punctuator_at(body, end - 1, C_PUNCTUATOR_MINUS_MINUS)))
+        {
+            end -= 1;
+            normalize = true;
+        }
+    }
+    // The base: up to the first postfix step outside parentheses. A base
+    // that starts with `(` or a string literal is left to the machine.
+    CToken first = start < end ? body->tokens[start] : (CToken){0};
+    bool clean = start < end && first.kind != C_TOKEN_STRING_LITERAL && !c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_PARENTHESIS);
+    bool loose = false;
+    u32 base_end = end;
+    for (u32 index = start; clean && base_end == end && index < end; index += 1)
+    {
+        CToken token = body->tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_ast_types_match(body, index);
+            clean = close < end;
+            index = clean ? close : index;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_DOT) ||
+                 c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW))
+        {
+            base_end = index;
+        }
+        else
+        {
+            loose |= c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA);
+        }
+    }
+    bool fails = false;
+    if (clean && first.kind == C_TOKEN_IDENTIFIER && base_end == start + 1)
+    {
+        // The steps the machine's walk takes, to the first token that is none.
+        u32 index = base_end;
+        bool stepping = true;
+        while (clean && stepping && index < end)
+        {
+            if (c_ast_types_punctuator_at(body, index, C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                u32 close = c_ast_types_match(body, index);
+                clean = close < end;
+                index = clean ? close + 1 : index;
+            }
+            else
+            {
+                stepping = (c_ast_types_punctuator_at(body, index, C_PUNCTUATOR_DOT) || c_ast_types_punctuator_at(body, index, C_PUNCTUATOR_ARROW)) &&
+                           index + 1 < end && body->tokens[index + 1].kind == C_TOKEN_IDENTIFIER;
+                index += stepping ? 2 : 0;
+            }
+        }
+        u32 hit = clean && index < end ? body->start_head[start - body->token_start] : 0;
+        while (hit && body->end[hit - 1] != index)
+        {
+            hit = body->link[hit - 1];
+        }
+        u32 kind = hit ? body->ast->kinds[body->begin + hit - 1] : C_AST_IDENTIFIER;
+        fails = (kind == C_AST_INDEX || kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW) && (body->flags[hit - 1] & C_AST_TYPE_FLAG_ACCEPTED);
+    }
+    else if (clean && base_end > start)
+    {
+        bool callee = first.kind == C_TOKEN_IDENTIFIER && c_ast_types_punctuator_at(body, start + 1, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                      c_ast_types_punctuator_at(body, base_end - 1, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        fails = !loose && !callee;
+    }
+    return fails;
+}
+
 // The bit-field width c_parse_expression_bit_field_width reads from an
 // operand's tokens, or C_AST_TYPE_NONE. It looks only at a range ending in
 // `. name` or `-> name`: for a member node that is the member's own width,
-// recorded when the member was typed, and any other node that ends that way
-// (`x, s.f`, `(T)s.f`) is left to the machine.
-BUSTER_GLOBAL_LOCAL u32 c_ast_types_operand_width(CAstTypeBody const* body, u32 node)
+// recorded when the member was typed. Any other node that ends that way
+// (`a + s.f`, `c ? x : s.f`) has the machine re-type the tokens before the
+// final `.` or `->`. That probe is 0 when it provably fails without a new row
+// (c_ast_types_probe_fails), and every other such node (`x, s.f`, `(T)s.f`)
+// is left to the machine.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 c_ast_types_operand_width(CAstTypeBody const* body, u32 node)
 {
     u32 relative = node - body->begin;
     u32 kind = body->ast->kinds[node];
@@ -730,7 +855,8 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_types_operand_width(CAstTypeBody const* body, u32 
     u32 end = body->end[relative];
     bool member_tail = end >= first + 3 && body->tokens[end - 1].kind == C_TOKEN_IDENTIFIER &&
                        (c_ast_types_punctuator_at(body, end - 2, C_PUNCTUATOR_DOT) || c_ast_types_punctuator_at(body, end - 2, C_PUNCTUATOR_ARROW));
-    return kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW ? body->widths[relative] : member_tail ? C_AST_TYPE_NONE : 0;
+    bool member = kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW;
+    return member ? body->widths[relative] : member_tail && !c_ast_types_probe_fails(body, first, end - 2) ? C_AST_TYPE_NONE : 0;
 }
 
 // Whether a subtree holds a type name. The machine's operator scan reads every
@@ -900,18 +1026,23 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_member(CAstTypeBody* body, CTypeParseMachin
         }
         if (aggregate.value != C_ID_UNDERLYING_INVALID)
         {
-            // A qualified aggregate makes the machine append a qualified copy
-            // of the member type.
             value = result->types + aggregate.value;
-            bool plain = (value->kind == C_TYPE_STRUCT || value->kind == C_TYPE_UNION) && !value->is_const && !value->is_volatile &&
-                         !value->is_restrict && !value->is_atomic;
-            aggregate = plain ? aggregate : C_TYPE_ID_INVALID;
+            bool record = (value->kind == C_TYPE_STRUCT || value->kind == C_TYPE_UNION) && !value->is_restrict && !value->is_atomic;
+            aggregate = record ? aggregate : C_TYPE_ID_INVALID;
         }
     }
     if (aggregate.value != C_ID_UNDERLYING_INVALID)
     {
         u32 width = 0;
+        CType const* value = result->types + aggregate.value;
+        CType qualifiers = {.is_const = value->is_const, .is_volatile = value->is_volatile};
         CTypeId type = c_ast_types_member_lookup(body, machine, preprocess, aggregate, member_token, &width);
+        if (type.value < result->type_count && (qualifiers.is_const || qualifiers.is_volatile))
+        {
+            // The machine's answer is the member's qualified copy: accepted
+            // only once it is shared, so the machine's run appends nothing.
+            type = c_parse_interned_qualified_type(result, type, qualifiers);
+        }
         if (type.value < result->type_count && width <= UINT8_MAX)
         {
             body->widths[relative] = (u8)width;
@@ -1939,9 +2070,12 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_agree(CAstTypeBody const* body, CPr
 // const or volatile, over a base it accepts.
 // The machine types that base as the tree does, then makes two calls,
 // c_parse_member_type on the qualified aggregate and
-// c_parse_add_qualified_type on the member it finds
-// (c_parse_direct_expression_postfix). The second appends the member's
-// qualified copy, and that row is its answer. c_parse_expression_tree_query
+// c_parse_intern_qualified_type on the member it finds
+// (c_parse_direct_expression_postfix). The second shares or appends the
+// member's qualified copy, and that row is its answer. The member rule
+// accepts the node once the copy is shared before the body is typed, so the
+// replay answers the copies first shared later in the body and the ones that
+// may not be shared. c_parse_expression_tree_query
 // makes the same two calls. A checked query needs a safe base, as the member
 // rule does. The answer is C_AST_TYPE_STRING's replay with this node's kind.
 // Every other node the answer path does not vouch for declines here. Out of
@@ -2111,6 +2245,7 @@ BUSTER_C_SHARED CAstTypeVerifyMark c_ast_types_verify_begin(CParseResult const* 
         .diagnostics = result->diagnostic_count,
         .array_bounds = result->array_bound_count,
         .type_alignments = result->type_alignment_count,
+        .interned_qualified = result->interned_qualified_count,
         .members = result->member_count,
         .enum_members = result->enum_member_count,
         .entities = result->entity_count,
@@ -2255,6 +2390,7 @@ BUSTER_C_SHARED void c_ast_types_verify_hold_replay(CParseResult* result, CAstTy
     result->type_count = mark.types;
     result->array_bound_count = mark.array_bounds;
     result->type_alignment_count = mark.type_alignments;
+    result->interned_qualified_count = mark.interned_qualified;
 }
 
 BUSTER_C_SHARED void c_ast_types_verify_end(CTypeParseMachine* machine, CParseResult* result, CAstTypePending const* pending, u32 start, u32 end,
@@ -2311,6 +2447,8 @@ BUSTER_C_SHARED void c_ast_types_verify_end(CTypeParseMachine* machine, CParseRe
     }
     CTestAstTypeVerify* state = &c_ast_types_verify_state;
     state->compared += 1;
+    state->shared_members += (answer.node_kind == C_AST_MEMBER || answer.node_kind == C_AST_MEMBER_ARROW) &&
+                             c_parse_qualified_copy_shared(result, answer.type.value);
     if (reasons)
     {
         state->mismatches += 1;

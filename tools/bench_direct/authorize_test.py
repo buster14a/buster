@@ -420,7 +420,10 @@ class SchedulingPolicyTest(unittest.TestCase):
 
     def test_postmerge_checks_cannot_become_required(self) -> None:
         for context in ("9700X compiler benchmark", "9700X compiler benchmark (pull request)",
-                        "RAD Debugger compatibility", "linux-x86-64"):
+                        "RAD Debugger compatibility", "linux-x86-64",
+                        "External projects after merge", "Linux x86-64 external projects",
+                        "macOS AArch64 inventory (qualification pending)",
+                        "Windows x86-64 inventory (qualification pending)"):
             with self.subTest(context=context):
                 errors: list[str] = []
                 policy.check_premerge_checks(errors, {"rules": [{"parameters": {

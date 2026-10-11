@@ -152,6 +152,12 @@ def compare(arguments: list[str]) -> None:
             "workload": workload, "compiler_executed": False})
         with (output / key / "commands.log").open("x", encoding="utf-8") as handle:
             handle.write("Hosted synthetic fixture: no compiler command was executed.\n")
+        # The real lab leaves its compiled workload beside the records; the
+        # packet must prune these before export (campaign 6 pilot packet 0).
+        for name, mode in (("out.exe", 0o755), ("reference.exe", 0o644)):
+            with (output / key / name).open("xb") as handle:
+                handle.write(b"hosted synthetic compiled output; never executed\n")
+            os.chmod(output / key / name, mode)
     pair_directory = output / "pairs"
     pair_directory.mkdir()
     for row in data["pairs"]:

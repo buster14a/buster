@@ -117,6 +117,19 @@
   depend on run order; inline assertions follow that block. Define a new test
   function next to the tests of the feature it covers, not after the most
   recently added one. Names that sort adjacently can still conflict.
+- The `direct-ssa-census` job in `compiler-throughput.yml` builds and tests
+  the immutable event/workflow revision (`github.sha`), including the PR test
+  merge, so its diagnostic flags and compiler come from the same source.
+  Reusable calls use a same-commit local `./.github/workflows/` caller; the
+  caller workflow SHA must equal the event SHA.
+  `direct-ssa-census-evidence/source.txt` retains the event, workflow, PR head
+  and base, actual checkout/tree and workflow blob identities; mismatched source
+  fails before any proof runs. The timing comparison and native harness retain
+  their separate PR-head checkout policy. The three-arm production tiny-helper
+  proof remains mandatory when its direct/reference prerequisites succeed.
+  `python3 tools/compiler_throughput_workflow_test.py` exercises old-base Git
+  fixtures across an option-adding main change, source mismatches and proof
+  failure controls. These fixtures validate orchestration, not compiler semantics.
 - Active CI is defined under `.github/workflows/`; the current tree has no
   Forgejo workflow definitions. The source-free broker retirement record is
   documented in `docs/ci-github-hosted-runners.md`. `.github/workflows/ci.yml`
@@ -921,6 +934,9 @@ separate from both live arena bytes and reserved address space.
 Use `BUSTER_TEST_FIXTURE(arguments, function)` for a direct fixture function that
 returns only `UnitTestResult` counts. It preserves call order, consumes counts,
 and rewinds the primary arena after the last assertion and diagnostic consumer.
+The macro calls the fixture through a volatile function pointer so it is not
+inlined into the dispatcher (a compile-time bound for sanitized builds, #2816);
+fixture functions must have exactly the `TestFunction` signature.
 For inline fixture groups, pair `buster_test_arena_begin` and
 `buster_test_arena_end` around the complete set of consumers. Names must be
 static, whitespace-free tokens; the ordinal distinguishes repeated invocations.
