@@ -34173,9 +34173,14 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
     {
         CToken token = preprocess.tokens[index];
         bool direct_identifier_assignment = c_parse_assignment_punctuator(token) && c_parse_assignment_identifier_is_operand(preprocess, start, index);
+        // A tag's array suffix is an abstract declarator, even when an
+        // ordinary function shares its spelling. Keep walking the bound:
+        // its own expression subscripts must still satisfy constraints.
         bool expression_subscript = index > start && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) &&
                                     !(array_declarator_openers && (array_declarator_openers[index >> 6] & (UINT64_C(1) << (index & 63)))) &&
-                                    c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]);
+                                    c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]) &&
+                                    !(index > start + 1 && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 2],
+                                        C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM)));
         // A declarator may contain a bound expression. Its expression
         // subscripts remain constraints even when the declaration mask
         // covers the whole range; only parsed declarator openers are exempt.
