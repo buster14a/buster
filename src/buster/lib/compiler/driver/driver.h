@@ -503,6 +503,10 @@ struct CompilerDriverCAstPilotResult
     // The declaration split read from the tree (c_parse_ast_from_tree):
     // records published, and units handed to the token walker and why.
     CParserTreeStatistics split;
+    // The statement plans the body binder followed (c_parse.c): bodies,
+    // segments and hints read from the tree, and bodies left to the token
+    // walk and why. Zero when the analysis had no tree to use.
+    CAstStatementStatistics statements;
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;
