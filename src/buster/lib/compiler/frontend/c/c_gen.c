@@ -63315,6 +63315,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         // Match the builder initializer's carve order before allocating its
         // first array. Capacity failure is a source diagnostic, never a bump
         // allocator assertion after reserving only part of the builder.
+#if BUSTER_REFERENCE_CHECKS
+        Arena* carve_arena = lowering_arena;
+#endif
         bool scratch_fits =
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrLowerFrame), lower_frame_capacity, BUSTER_ALIGN_OF(CIrLowerFrame)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIntegerIrLocal), local_array_capacity, BUSTER_ALIGN_OF(CIntegerIrLocal)) &&
@@ -63343,7 +63346,11 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u8), body_array_capacity, BUSTER_ALIGN_OF(u8)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrGroupFactsEntry), prepared_control_expression_capacity + 1,
                                           BUSTER_ALIGN_OF(CIrGroupFactsEntry)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity + 1, BUSTER_ALIGN_OF(u32)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32));
+#if BUSTER_REFERENCE_CHECKS
+        u64 carve_end = position;
+#endif
         if (scratch_fits && lowering_capacity <= UINT32_MAX && local_capacity <= UINT32_MAX && local_slot_capacity <= UINT32_MAX &&
             prepared_call_capacity <= UINT32_MAX && prepared_control_expression_capacity <= UINT32_MAX && lower_frame_capacity <= UINT32_MAX &&
             !function_reservation_limit)
@@ -63517,6 +63524,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         builder.group_facts_stack = arena_allocate(lowering_temporary.arena, CIrGroupFactsEntry, prepared_control_expression_capacity + 1);
         builder.question_prefix = arena_allocate(lowering_temporary.arena, u32, body_array_capacity + 1);
         builder.statement_ends_plus_one = arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
+#if BUSTER_REFERENCE_CHECKS
+        // The carve above must end exactly where the preflight's carve list
+        // said it would, or an explicit budget could approve a body whose
+        // scratch then overflows it (#3467). A grown arena starts elsewhere.
+        BUSTER_CHECK(lowering_temporary.arena != carve_arena || lowering_temporary.arena->position == carve_end);
+#endif
         memset(builder.prepared_control_open_slots, 0, sizeof(u32) * control_token_array_capacity);
         memset(builder.prepared_control_emitted_marks, 0, sizeof(u32) * control_token_array_capacity);
         memset(builder.local_entity_slots, 0xff, sizeof(*builder.local_entity_slots) * (u64)local_slot_capacity);
