@@ -48,13 +48,27 @@ jobs:
           mode: source
           source-directory: trusted
           source-repository: ${{ github.repository }}
-      - name: Check out exact tested source as data
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ github.sha }}
-          path: candidate
-          fetch-depth: 0
-          persist-credentials: false
+      # The classifier reads only commits and trees (raw diff modes/OIDs,
+      # merge-base, parents), so the candidate is a bare blobless repository
+      # holding just the tested and policy histories: no working tree, no
+      # other branches or tags, and no credentials left behind.
+      - name: Fetch exact tested source as data
+        shell: bash
+        env:
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+          SOURCE_TOKEN: ${{ github.token }}
+          TESTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          policy=$(git -C trusted rev-parse --verify 'HEAD^{commit}')
+          git init --quiet --bare candidate
+          authorization=$(printf 'x-access-token:%s' "$SOURCE_TOKEN" | base64 -w0)
+          echo "::add-mask::$authorization"
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.$SOURCE_URL/.extraheader" \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $authorization" \
+            git -C candidate fetch --quiet --no-tags --no-write-fetch-head --filter=blob:none \
+            "$SOURCE_URL" "$TESTED_SHA" "$policy"
+          git -C candidate update-ref --no-deref HEAD "$TESTED_SHA"
       - name: Record actual checkout identity
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
@@ -70,6 +84,9 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
           TESTED_SHA: ${{ github.sha }}
+          # A missing commit or tree must fail the bounded Git capture and
+          # select full validation, never be fetched lazily mid-classification.
+          GIT_NO_LAZY_FETCH: '1'
         run: |
           set -euo pipefail
           if [[ "$EVENT_NAME" != pull_request && "$EVENT_NAME" != merge_group ]] ||
@@ -79,7 +96,6 @@ jobs:
             echo 'Full validation: explicit full route, trusted rollout pending, or trusted rollback.' >> "$GITHUB_STEP_SUMMARY"
           else
             policy=$(git -C trusted rev-parse HEAD)
-            git -C candidate fetch --quiet --no-tags origin "$policy"
             (
               cd trusted
               clang -Isrc -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/no-code-driver"

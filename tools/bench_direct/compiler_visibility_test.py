@@ -552,7 +552,13 @@ class RecoveryApi(FakeGitHub):
         tree = lambda sha, tree_sha: {"sha": sha, "commit": {"tree": {"sha": tree_sha}}}  # noqa: E731
         answers = {
             "/actions/runs/37486885378": {"id": 37486885378, "path": self.run_path, "event": "workflow_run",
-                                          "run_attempt": 1, "head_sha": TRUSTED},
+                                          "run_attempt": 1, "head_sha": TRUSTED, "head_branch": "main",
+                                          "repository": {"full_name": REPO}, "head_repository": {"full_name": REPO},
+                                          "display_title": f"9700X request 91.1 head {HEAD}"},
+            "/actions/runs/37486885378/attempts/1": {"id": 37486885378, "path": self.run_path, "event": "workflow_run",
+                                          "run_attempt": 1, "head_sha": TRUSTED, "head_branch": "main",
+                                          "repository": {"full_name": REPO}, "head_repository": {"full_name": REPO},
+                                          "display_title": f"9700X request 91.1 head {HEAD}"},
             "/actions/runs/37486885378/attempts/1/jobs": {"jobs": [
                 {"name": "Authorize the main commit comparison", "conclusion": "success", "run_attempt": 1},
                 {"name": "Compare the main commit compiler", "conclusion": self.compare, "run_attempt": 1,
@@ -561,7 +567,7 @@ class RecoveryApi(FakeGitHub):
                 {"id": 7, "name": f"buster-9700x-compiler-{HEAD}-1", "expired": False, "size_in_bytes": 100,
                  "archive_download_url": "https://api.invalid/zip", "expires_at": "2027-01-04T00:00:00Z"}
             ] * self.artifacts},
-            "/actions/runs/91": {"id": 91, "path": ".github/workflows/9700x-compiler-request.yml", "event": "push",
+            "/actions/runs/91": {"id": 91, "run_attempt": 1, "path": ".github/workflows/9700x-compiler-request.yml", "event": "push",
                                  "head_branch": "main", "status": "completed", "conclusion": "success",
                                  "head_sha": HEAD, "repository": {"full_name": REPO},
                                  "head_repository": {"full_name": REPO}},
@@ -570,6 +576,13 @@ class RecoveryApi(FakeGitHub):
             f"/compare/{HEAD}...main": {"status": "ahead"},
             f"/commits/{HEAD}/pulls": [],
         }
+        if bare == "/actions/runs/91/attempts/1":
+            return copy.deepcopy(answers["/actions/runs/91"])
+        if bare == f"/compare/{TRUSTED}...main":
+            return {"status": "ahead"}
+        if bare in ("/contents/docs/compiler-main-profile-routing-v1.tsv",
+                    "/contents/tools/compiler_main_profile_policy.c"):
+            raise urllib.error.HTTPError(path, 404, "historical policy absence", {}, None)
         return answers[bare] if bare in answers else super().request(path, data, method)
 
     def download(self, url: str) -> bytes:
@@ -655,8 +668,18 @@ class PublishTest(unittest.TestCase):
                       "BQ_COMPARE_RESULT": "success", "BQ_FIRST_PARENT": "b" * 40, "BQ_RANGE": "1",
                       "GH_TOKEN": "t", "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": os.devnull}
             original = api.request
-            routed = lambda path, data=None, method="": listing if "/runs/92/artifacts" in path else \
-                {"jobs": []} if path.startswith("/actions/runs/92/") else original(path, data, method)  # noqa: E731
+            def routed(path, data=None, method=""):
+                bare = urllib.parse.urlsplit(path).path
+                if bare == "/actions/runs/92/attempts/1":
+                    return {"id": 92, "run_attempt": 1, "path": compiler_github.BENCH_WORKFLOW,
+                            "event": "workflow_run", "head_branch": "main", "head_sha": TRUSTED,
+                            "repository": {"full_name": REPO}, "head_repository": {"full_name": REPO},
+                            "display_title": f"9700X request 91.1 head {HEAD}"}
+                if "/runs/92/artifacts" in path:
+                    return listing
+                if bare == "/actions/runs/92/attempts/1/jobs":
+                    return {"jobs": []}
+                return original(path, data, method)
             with mock.patch.dict(os.environ, values, clear=True), \
                     mock.patch.object(api, "request", routed), \
                     mock.patch.object(compiler_publish, "Api", lambda repository, token: api), \

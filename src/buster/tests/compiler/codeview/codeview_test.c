@@ -459,6 +459,128 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_scope_growth(UnitTestArguments*
 }
 
 
+// A local's location list becomes one S_DEFRANGE_* record per range, so a
+// variable with many ranges (per-block locations in a large function, #2717)
+// must not overflow a fixed per-variable symbol reserve.
+BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_many_location_ranges(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { RANGE_COUNT = 4096, CODE_SIZE = RANGE_COUNT * 2 };
+    String8 path = S8("ranges.c");
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4, .is_signed = true},
+        {.kind = DEBUG_TYPE_FUNCTION, .return_type = 0},
+    };
+    DebugLocationRange* ranges = arena_allocate(arguments->arena, DebugLocationRange, RANGE_COUNT);
+    for (u32 index = 0; index < RANGE_COUNT; index += 1)
+    {
+        ranges[index] = (DebugLocationRange){
+            .start = index * 2,
+            .end = index * 2 + 1,
+            .location = {.kind = (index & 1) ? DEBUG_LOCATION_FRAME : DEBUG_LOCATION_REGISTER, .frame_offset = -8},
+        };
+    }
+    DebugVariable variables[] = {
+        {.name = S8("later"), .type = 0, .kind = DEBUG_VARIABLE_LOCAL, .locations = ranges, .location_count = RANGE_COUNT},
+    };
+    DebugVariableId scope_variables[] = {0};
+    DebugScope scopes[] = {
+        {.kind = DEBUG_SCOPE_FUNCTION, .parent = DEBUG_SCOPE_INVALID, .start = 0, .end = CODE_SIZE, .variables = scope_variables,
+         .variable_count = 1},
+    };
+    DebugFunction model_functions[] = {
+        {.name = S8("branchy"), .symbol = {.value = 1}, .type = 1, .scope = 0, .code_size = CODE_SIZE},
+    };
+    DwarfFunction functions[] = {
+        {.name = S8("branchy"), .code_size = CODE_SIZE, .line = 1},
+    };
+    DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .variables = variables,
+                        .variable_count = BUSTER_ARRAY_LENGTH(variables), .functions = model_functions,
+                        .function_count = BUSTER_ARRAY_LENGTH(model_functions), .scopes = scopes, .scope_count = BUSTER_ARRAY_LENGTH(scopes),
+                        .root_scope = 0, .valid = true};
+    CodeviewResult built = codeview_build(arguments->arena, (CodeviewInput){.model = &model, .file_paths = &path, .file_count = 1,
+        .functions = functions, .function_count = BUSTER_ARRAY_LENGTH(functions), .producer = S8("buster"), .machine = CODEVIEW_MACHINE_X64});
+    BUSTER_TEST(arguments, built.valid && built.symbols.length > (u64)RANGE_COUNT * 16 && built.relocation_count >= RANGE_COUNT * 2);
+    return result;
+}
+
+// S_DEFRANGE_* lengths are 16-bit: a location range longer than 0xffff bytes
+// (a merged or long-lived range in a large function) must be split into
+// consecutive records that cover all of it, not clamped to its first 64 KiB.
+BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_long_location_range(UnitTestArguments* arguments)
+{
+    enum { TEST_S_DEFRANGE_FRAMEPOINTER_REL = 0x1142, CODE_SIZE = 140000, MAX_RECORDS = 8 };
+    UnitTestResult result = {0};
+    String8 path = S8("long.c");
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4, .is_signed = true},
+        {.kind = DEBUG_TYPE_FUNCTION, .return_type = 0},
+    };
+    DebugLocationRange ranges[] = {
+        {.start = 0, .end = CODE_SIZE, .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = -8}},
+    };
+    DebugVariable variables[] = {
+        {.name = S8("value"), .type = 0, .kind = DEBUG_VARIABLE_LOCAL, .locations = ranges, .location_count = 1},
+    };
+    DebugVariableId scope_variables[] = {0};
+    DebugScope scopes[] = {
+        {.kind = DEBUG_SCOPE_FUNCTION, .parent = DEBUG_SCOPE_INVALID, .start = 0, .end = CODE_SIZE, .variables = scope_variables,
+         .variable_count = 1},
+    };
+    DebugFunction model_functions[] = {
+        {.name = S8("large"), .symbol = {.value = 1}, .type = 1, .scope = 0, .code_size = CODE_SIZE},
+    };
+    DwarfFunction functions[] = {
+        {.name = S8("large"), .code_size = CODE_SIZE, .line = 1},
+    };
+    DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .variables = variables,
+                        .variable_count = BUSTER_ARRAY_LENGTH(variables), .functions = model_functions,
+                        .function_count = BUSTER_ARRAY_LENGTH(model_functions), .scopes = scopes, .scope_count = BUSTER_ARRAY_LENGTH(scopes),
+                        .root_scope = 0, .valid = true};
+    CodeviewResult built = codeview_build(arguments->arena, (CodeviewInput){.model = &model, .file_paths = &path, .file_count = 1,
+        .functions = functions, .function_count = BUSTER_ARRAY_LENGTH(functions), .producer = S8("buster"), .machine = CODEVIEW_MACHINE_X64});
+    bool valid = built.valid && built.symbols.length >= 4 && codeview_test_u32(built.symbols.pointer) == CODEVIEW_TEST_SIGNATURE_C13;
+    u32 starts[MAX_RECORDS] = {0};
+    u32 lengths[MAX_RECORDS] = {0};
+    u32 record_count = 0;
+    u64 subsection = 4;
+    while (valid && subsection + 8 <= built.symbols.length)
+    {
+        u32 kind = codeview_test_u32(built.symbols.pointer + subsection);
+        u32 length = codeview_test_u32(built.symbols.pointer + subsection + 4);
+        u64 payload = subsection + 8;
+        valid = length <= built.symbols.length - payload;
+        u64 cursor = payload;
+        while (valid && kind == CODEVIEW_TEST_SYMBOLS && cursor + 4 <= payload + length)
+        {
+            u16 record_length = codeview_test_u16(built.symbols.pointer + cursor);
+            u16 record_kind = codeview_test_u16(built.symbols.pointer + cursor + 2);
+            valid = record_length >= 2 && (u64)record_length + 2 <= payload + length - cursor;
+            if (valid && record_kind == TEST_S_DEFRANGE_FRAMEPOINTER_REL)
+            {
+                valid = record_length + 2u >= 16u && record_count < MAX_RECORDS;
+                if (valid)
+                {
+                    starts[record_count] = codeview_test_u32(built.symbols.pointer + cursor + 8);
+                    lengths[record_count] = codeview_test_u16(built.symbols.pointer + cursor + 14);
+                    record_count += 1;
+                }
+            }
+            cursor += (u64)record_length + 2;
+        }
+        subsection = payload + ((length + 3u) & ~3u);
+    }
+    // Consecutive records must tile [0, CODE_SIZE) exactly.
+    u64 covered = 0;
+    for (u32 index = 0; valid && index < record_count; index += 1)
+    {
+        valid = starts[index] == covered && lengths[index] != 0;
+        covered += lengths[index];
+    }
+    BUSTER_TEST(arguments, valid && record_count == 3 && covered == CODE_SIZE);
+    return result;
+}
+
 // COFF object producers leave scope pointers as zero placeholders.  Linkers
 // rebuild them only after concatenating the DEBUG_S_SYMBOLS payloads into the
 // final module stream, where subsection headers and line data no longer exist.
@@ -860,6 +982,12 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     UnitTestResult floats = codeview_test_float_base_types(arguments);
     result.test_count += floats.test_count;
     result.succeeded_test_count += floats.succeeded_test_count;
+    UnitTestResult long_range = codeview_test_long_location_range(arguments);
+    result.test_count += long_range.test_count;
+    result.succeeded_test_count += long_range.succeeded_test_count;
+    UnitTestResult many_ranges = codeview_test_many_location_ranges(arguments);
+    result.test_count += many_ranges.test_count;
+    result.succeeded_test_count += many_ranges.succeeded_test_count;
     UnitTestResult growth = codeview_test_scope_growth(arguments);
     result.test_count += growth.test_count;
     result.succeeded_test_count += growth.succeeded_test_count;

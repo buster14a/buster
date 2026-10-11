@@ -6080,9 +6080,14 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 {
                     continue;
                 }
-                // NOTYPE, OBJECT, FUNC, SECTION and TLS are represented. IFUNC
-                // resolves through a resolver, never a direct call to its value.
-                if (read_ok && symbol_type != 0 && symbol_type != 1 && symbol_type != 2 && symbol_type != 3 && symbol_type != 6)
+                // NOTYPE, OBJECT, FUNC, SECTION and TLS are represented. GNU
+                // IFUNC is represented as an indirect function when it is
+                // defined in code: the linker calls its resolver and binds every
+                // reference to the result (link_elf_indirect_functions_rebind).
+                bool indirect_code = symbol_type == 10 && section_index != 0 && section_index < section_count &&
+                                     section_kinds[section_index] != UINT32_MAX &&
+                                     result.sections[section_kinds[section_index]].kind == OBJECT_SECTION_TEXT;
+                if (read_ok && symbol_type != 0 && symbol_type != 1 && symbol_type != 2 && symbol_type != 3 && symbol_type != 6 && !indirect_code)
                 {
                     result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                     if (object_reader_arena_can_allocate_bytes(arena, name.length + 128, BUSTER_ALIGN_OF(char8)))
@@ -6175,7 +6180,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     .value = symbol_value,
                     .size = size,
                     .section = section_index ? section_kinds[section_index] : OBJECT_SECTION_UNDEFINED,
-                    .kind = symbol_type == 2 || untyped_code ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
+                    .kind = symbol_type == 2 || symbol_type == 10 || untyped_code ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
                     .global = binding != 0,
                     .weak = binding == 2,
                     .thread_local_state = symbol_type == 6 || section_thread_local ? OBJECT_SYMBOL_THREAD_LOCAL_YES
@@ -6187,6 +6192,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     // but not preemptible; ObjectSymbol cannot record that, so
                     // it imports as default visibility (#1291).
                     .hidden = (other & 3) == 1 || (other & 3) == 2,
+                    .indirect = symbol_type == 10,
                 };
                 symbol_map[source_index] = result.symbol_count++;
             }
@@ -7220,6 +7226,28 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                         }
                     }
                 }
+            }
+            // An external absolute (IMAGE_SYM_ABSOLUTE) or common definition
+            // (an undefined external whose value is its size) has no
+            // ObjectSymbol form. Skipping the first left references to it
+            // unresolved, and reading the second as undefined made it vanish
+            // (issue 1243), so both are refused by name. Static absolutes such
+            // as `@comp.id` and `@feat.00` are producer metadata and stay ignored.
+            if (read_ok && storage == OBJECT_COFF_STORAGE_EXTERNAL && (section_number == -1 || (section_number == 0 && value != 0)))
+            {
+                bool name_valid = false;
+                String8 name = object_read_coff_name(bytes, source, string_offset, string_size, false, &name_valid);
+                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                String8 diagnostic_name = name_valid && name.length ? name : S8("<unnamed>");
+                if (diagnostic_name.length <= UINT64_MAX - 128 &&
+                    object_reader_arena_can_allocate_bytes(arena, diagnostic_name.length + 128, BUSTER_ALIGN_OF(char8)))
+                {
+                    result.diagnostic = section_number ? string_format(arena, S8("unsupported COFF symbol {S8} (index {u32}): IMAGE_SYM_ABSOLUTE"),
+                                                                       diagnostic_name, source_index)
+                                                       : string_format(arena, S8("unsupported COFF symbol {S8} (index {u32}): common, size {u32}"),
+                                                                       diagnostic_name, source_index, value);
+                }
+                read_ok = false;
             }
             if (read_ok)
             {
@@ -8458,6 +8486,30 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     read_ok = false;
                 }
             }
+            // An external N_ABS or N_INDR definition, or a common one (N_UNDF
+            // with its size in n_value), has no ObjectSymbol form. Skipping the
+            // first two left references to them unresolved, and reading a
+            // common as undefined made it vanish (issue 1243), so all three
+            // are refused by name.
+            if (read_ok && (symbol_type & 1) && (kind == 0x02 || kind == 0x0a || (kind == 0 && value != 0)))
+            {
+                String8 name = {0};
+                bool name_valid = object_read_string_checked(bytes, string_offset, string_size, name_offset, &name);
+                if (name_valid && name.length && name.pointer[0] == '_')
+                {
+                    name.pointer += 1;
+                    name.length -= 1;
+                }
+                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                String8 diagnostic_name = name_valid && name.length ? name : S8("<unnamed>");
+                String8 form = kind == 0x02 ? S8("N_ABS") : kind == 0x0a ? S8("N_INDR") : S8("common");
+                if (diagnostic_name.length <= UINT64_MAX - 128 &&
+                    object_reader_arena_can_allocate_bytes(arena, diagnostic_name.length + 128, BUSTER_ALIGN_OF(char8)))
+                {
+                    result.diagnostic = string_format(arena, S8("unsupported Mach-O symbol {S8} (index {u32}): {S8}"), diagnostic_name, source_index, form);
+                }
+                read_ok = false;
+            }
             if (read_ok)
             {
                 if (kind == 0x0e && section_kinds[section_number - 1] == UINT32_MAX)
@@ -9653,7 +9705,9 @@ BUSTER_GLOBAL_LOCAL ObjectError object_archive_index_members(Arena* arena, Objec
 // A global with any non-zero section index, reserved SHN_ABS, SHN_COMMON and
 // SHN_XINDEX included, is a definition here, as in a ranlib index: the member
 // is then selected in archive order and object_read refuses it with
-// attribution instead of the link skipping it.
+// attribution instead of the link skipping it. The Mach-O and COFF forms of
+// the same definitions -- N_ABS, N_INDR and IMAGE_SYM_ABSOLUTE externals, and
+// a common (an undefined external with a non-zero value) -- count the same way.
 BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteSlice bytes, Target target)
 {
     ObjectFile result = {.target = target, .error = OBJECT_ERROR_INVALID_INPUT};
@@ -9800,10 +9854,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteS
                 valid = object_read_u32(bytes, source, &name_offset) && object_read_u16(bytes, source + 6, &description) &&
                         object_read_u64(bytes, source + 8, &value);
                 u8 type = bytes.pointer[source + 4];
-                global = (type & 1) && !(type & 0xe0) && ((type & 0x0e) == 0 || (type & 0x0e) == 0x0e);
-                defined = (type & 0x0e) == 0x0e;
-                weak = defined && (description & 0x80) != 0;
-                BUSTER_UNUSED(value);
+                u8 kind = type & 0x0e;
+                global = (type & 1) && !(type & 0xe0) && (kind == 0 || kind == 0x0e || kind == 0x02 || kind == 0x0a);
+                defined = kind != 0 || value != 0;
+                weak = kind == 0x0e && (description & 0x80) != 0;
             }
             else if (format == OBJECT_FORMAT_COFF)
             {
@@ -9815,10 +9869,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteS
                 u8 storage = bytes.pointer[source + 16];
                 u8 auxiliaries = bytes.pointer[source + 17];
                 valid = valid && auxiliaries < symbol_count - index;
-                global = (storage == 2 || storage == 105) && (s16)section >= 0;
+                global = ((storage == 2 || storage == 105) && (s16)section >= 0) || (storage == 2 && (s16)section == -1);
                 weak = false;
-                defined = section != 0;
-                BUSTER_UNUSED(value);
+                defined = section != 0 || (storage == 2 && value != 0);
                 if (prefix)
                 {
                     name = (String8){.pointer = (char8*)bytes.pointer + source, .length = 0};
@@ -13672,7 +13725,7 @@ BUSTER_GLOBAL_LOCAL u8 object_elf64_symbol_type(ObjectSymbol const* source, bool
 {
     bool untyped = !is_defined && source->kind == OBJECT_SYMBOL_DATA && source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN;
     bool labeled = is_defined && source->untyped;
-    return is_thread_local ? 6 : labeled ? 0 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : untyped ? 0 : 1;
+    return is_thread_local ? 6 : labeled ? 0 : source->indirect ? 10 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : untyped ? 0 : 1;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_elf64_section_is_thread_local(ObjectSection const* section)
@@ -15025,6 +15078,17 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
 // Validates the object for `format` and dispatches to its writer.
 // `borrow_payloads` lets the planned ELF64 writer name large payloads in
 // place (object_write_borrowing).
+BUSTER_GLOBAL_LOCAL bool object_symbols_have_indirect(ObjectFile* object)
+{
+    u32 index = 0;
+    while (index < object->symbol_count && !object->symbols[index].indirect)
+    {
+        index += 1;
+    }
+
+    return index < object->symbol_count;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* object, ObjectFormat format, bool borrow_payloads)
 {
     ObjectArtifact result = {
@@ -15041,8 +15105,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
         return result;
     }
     // A section of its own name (issue 1276) is an ELF writer's alone; the
-    // COFF and Mach-O writers lay out one section per kind.
-    if (format != OBJECT_FORMAT_ELF64 && (object->section_count > OBJECT_SECTION_COUNT || object->requires_executable_stack))
+    // COFF and Mach-O writers lay out one section per kind. A GNU IFUNC
+    // (ObjectSymbol.indirect, issue 1243) has no COFF or Mach-O form either.
+    if (format != OBJECT_FORMAT_ELF64 &&
+        (object->section_count > OBJECT_SECTION_COUNT || object->requires_executable_stack || object_symbols_have_indirect(object)))
     {
         result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
         return result;

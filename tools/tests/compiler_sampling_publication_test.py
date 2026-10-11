@@ -242,6 +242,20 @@ def physical_files(authority, context, prepared, packet_wall, prep_us):
     return files
 
 
+def physical_clock_fixture(authority, job, kind):
+    # Synthetic API controls bind a synthetic observation; native hosted proofs
+    # do not acquire physical authority from this fixture.
+    start = round(datetime.fromisoformat(job["started_at"].replace("Z", "+00:00")).timestamp() * 1000000)
+    return tsv_bytes({
+        "schema": "buster-compiler-physical-job-clock-v1", "kind": kind, "repository": authority["repository"],
+        "run_id": authority["run_id"], "run_attempt": "1", "policy_trusted_revision": authority["executor"]["head_sha"],
+        "job_id": str(job["id"]), "job_name": job["name"], "runner_id": str(job["runner_id"]),
+        "runner_name": job["runner_name"], "started_at": job["started_at"], "started_unix_us": str(start),
+        "start_lower_unix_us": str(start - 1000000), "observer_started_unix_us": str(start + 1000000),
+        "observer_finished_unix_us": str(start + 1100000), "observer_monotonic_elapsed_us": "100000",
+        "timestamp_precision_us": "1000000", "observation_scope": "public-platform-job-start"})
+
+
 def publication_fixture(phase="pilot", packet=0):
     expected, actual_prepared, producer = preparation_fixture.fixture(False, 3)
     expected = dict(expected)
@@ -289,11 +303,14 @@ def publication_fixture(phase="pilot", packet=0):
         "parent_freeze": {} if phase == "acquire" else plan if phase == "pilot" else
             dict(freeze, phase="pilot", campaign_parent=plan_sha, campaign_parent_revision="1" * 40),
         "facts": {"actor_login": "davidgmbb", "owner_login": "davidgmbb"},
-        "history": [], "executor": {"head_sha": "6" * 40}, "request": {}}
+        "history": [], "executor": {"id": 201, "run_attempt": 1, "head_sha": "6" * 40},
+        "request": {"id": 200, "run_attempt": 1, "head_sha": "7" * 40}}
     context = publisher.sampling_plan(authority)
     prepared_context = {"record": producer["prepared"], "files": producer["files"], "bytes": producer["files"]["prepared.json"],
         "sha256": prepared_sha, "expected": expected, "bundle": producer}
-    old = dict(authority, head="0" * 40, request_id="100", run_id="101", executor={"head_sha": "3" * 40},
+    old = dict(authority, head="0" * 40, request_id="100", run_id="101",
+        executor={"id": 101, "run_attempt": 1, "head_sha": "3" * 40},
+        request={"id": 100, "run_attempt": 1, "head_sha": "0" * 40},
         admitted=dict(authority["admitted"], sampling_phase="acquire", sampling_packet="0", sampling_family="acquire",
                       sampling_freeze_sha256=plan_sha, sampling_freeze_revision="1" * 40, sampling_reservation_seconds="1800"))
     old_context = dict(context, phase="acquire", packet=0, schedule=sampling.schedule("acquire", 0))
@@ -359,7 +376,8 @@ def publication_fixture(phase="pilot", packet=0):
             for previous_packet in range(total):
                 number = str(110 + len(preceding) * 2)
                 prior = dict(authority, request_id=number, run_id=str(int(number) + 1), head=("%040x" % int(number)),
-                             executor={"head_sha": "3" * 40})
+                             executor={"id": int(number) + 1, "run_attempt": 1, "head_sha": "3" * 40},
+                             request={"id": int(number), "run_attempt": 1, "head_sha": ("%040x" % int(number))})
                 preceding.append((previous_phase, previous_packet, prior))
                 old_records.append((prior, {}))
         for previous_phase, previous_packet, prior in preceding:
@@ -397,6 +415,7 @@ def publication_fixture(phase="pilot", packet=0):
                     "created_at": stamp.isoformat(), "started_at": (stamp + timedelta(seconds=60)).isoformat(),
                     "completed_at": (stamp + timedelta(seconds=60 + duration)).isoformat()}
                 if raw_files:
+                    raw_files["physical-job-clock.tsv"] = physical_clock_fixture(item, self.jobs[run_id], "sampling")
                     self.payloads[run_id] = archive([(name, value, stat.S_IFREG) for name, value in raw_files.items()])
         def request(self, path):
             if path.startswith("/git/commits/"):
@@ -739,7 +758,9 @@ def preparation_publication_fixture():
            "facts.tsv": b"fixture\ttrusted-api-facts\n",
            "history.tsv": b"phase\tpacket\trequest_run_id\trequest_run_attempt\texecutor_run_id\texecutor_run_attempt\tstate\tphysical_wall_us\tcampaign\tfreeze_revision\tactor_login\tactor_id\ttriggering_login\ttriggering_id\tpull_author_login\tpull_author_id\n"}
     authority = {"repository": "buster14a/buster", "head": "7" * 40, "request_id": "200", "run_id": "201",
-                 "executor": {"head_sha": "6" * 40}, "request": {}, "admitted": admitted, "plan": plan, "raw": raw, "history": []}
+                 "executor": {"id": 201, "run_attempt": 1, "head_sha": "6" * 40},
+                 "request": {"id": 200, "run_attempt": 1, "head_sha": "7" * 40},
+                 "admitted": admitted, "plan": plan, "raw": raw, "history": []}
     files = dict(raw)
     # The contract's synthetic preparation producer supplies actual inventory,
     # closure, child argv/cleanup and costs. Use the existing trusted paired
@@ -789,6 +810,17 @@ def preparation_publication_fixture():
             files[prefix + "-lab/" + side + "/lab.json"] = json_bytes({"fixture": "saved native lab metadata"})
         files[prefix + "-throughput/metadata.json"] = json_bytes(data[name]["metadata"])
         files[prefix + "-throughput/summary.json"] = json_bytes(data[name]["throughput"])
+        # Provenance edits above change the exact corpus bytes. Rebind only
+        # their hashes in the modern synthetic native cleanup receipt; retain
+        # the fixture's truthful raw exit, launch and terminal-wait proof.
+        data[name]["metadata_raw"] = files[prefix + "-throughput/metadata.json"]
+        data[name]["throughput_raw"] = files[prefix + "-throughput/summary.json"]
+        ordinal = preparation_fixture.native_phases(arm).index(name + "-throughput") + 1
+        cleanup_name = f"{ordinal}-{name}-throughput.cleanup.json"
+        cleanup = json.loads(data["files"][cleanup_name])
+        cleanup["corpus_summary_sha256"] = hashlib.sha256(data[name]["throughput_raw"]).hexdigest()
+        cleanup["corpus_metadata_sha256"] = hashlib.sha256(data[name]["metadata_raw"]).hexdigest()
+        data["files"][cleanup_name] = json_bytes(cleanup)
         for name in ("samples.csv", "telemetry.csv", "jobs.tsv", "commands.jsonl", "capabilities.jsonl", "complete.txt"):
             files[prefix + "-throughput/" + name] = b"retained complete synthetic raw log\n"
     # Native complete costs include initialization/execute/finalize and the
@@ -866,6 +898,9 @@ def preparation_publication_fixture():
                 "runner_name": "fixture-9700x", "labels": ["self-hosted", "9700x"],
                 "created_at": start.isoformat(), "started_at": (start + timedelta(seconds=10)).isoformat(),
                 "completed_at": (start + timedelta(seconds=40)).isoformat()}
+            files["physical-job-clock.tsv"] = physical_clock_fixture(authority, self.job, "preparation")
+            claim["physical_job_clock_sha256"] = hashlib.sha256(files["physical-job-clock.tsv"]).hexdigest()
+            files["claim.tsv"] = tsv_bytes(claim)
             self.payload = archive([(name, value, stat.S_IFREG) for name, value in files.items()])
         def request(self, path):
             if path.startswith("/git/commits/"):
@@ -1187,6 +1222,18 @@ class PreparationNativeExportReplay(unittest.TestCase):
             unused_root, phases = preparation.parse_ledger(bundles[arm]["prepared"], bundles[arm]["ledger"])
             phase = next(item for item in phases if item["phase"] == name + "-lab")
             self.assertLessEqual(sum(item["span_s"] for item in pairs) * 1000000, phase["elapsed"] + 2)
+            if marker.get("diagnostic_case") == "regression":
+                corpus_phase = next(item for item in phases if item["phase"] == name + "-throughput")
+                self.assertEqual(corpus_phase["status"], 256)
+                cleanup = json.loads(bundles[arm]["files"][f"{corpus_phase['stage']}-{name}-throughput.cleanup.json"])
+                self.assertEqual(cleanup["exit_policy"], "corpus-report-only-v1")
+                self.assertEqual(cleanup["exit_status_encoding"], "posix-wait-status")
+                self.assertEqual(cleanup["exit_status"], 256)
+                self.assertEqual(cleanup["state"], "failed")
+                self.assertEqual(cleanup["corpus_summary_sha256"], hashlib.sha256(row["throughput_raw"]).hexdigest())
+                self.assertEqual(cleanup["corpus_metadata_sha256"], hashlib.sha256(row["metadata_raw"]).hexdigest())
+                self.assertEqual(row["throughput"]["confirmed_regressions"], 12)
+                self.assertTrue(cleanup["cleanup_proven"])
             cost_raw = bundles[arm]["files"]["preparation-cost.json"]
             cost = preparation.preparation_cost(bundles[arm]["prepared"],
                 bundles[arm]["files"]["prepared.json"], cost_raw, phases)
@@ -1199,6 +1246,117 @@ class PreparationNativeExportReplay(unittest.TestCase):
             publisher.preparation_validate(None, {}, files)
 
 
+
+class PreparationNativeNegativeReplay(unittest.TestCase):
+    def test_actual_failed_native_corpus_never_advances_or_becomes_complete(self):
+        directory_label = os.environ.get("BUSTER_PREPARATION_NATIVE_NEGATIVE_EXPORT")
+        if not directory_label:
+            self.skipTest("run --preparation-native-negative-export DIR after an expected failed native writer fixture")
+        directory = Path(directory_label)
+        members = {}
+        for path in directory.rglob("*"):
+            self.assertFalse(path.is_symlink(), str(path))
+            if path.is_dir():
+                continue
+            self.assertTrue(path.is_file(), str(path))
+            self.assertLessEqual(path.stat().st_size, publisher.PREPARATION_MEMBER_LIMIT)
+            members[path.relative_to(directory).as_posix()] = path.read_bytes()
+        self.assertLessEqual(len(members), publisher.PREPARATION_FILE_LIMIT)
+        self.assertLessEqual(sum(map(len, members.values())), publisher.PREPARATION_ARCHIVE_LIMIT)
+        payload = archive([(name, raw, stat.S_IFREG) for name, raw in members.items()])
+        with mock.patch.object(zipfile.ZipFile, "extract", side_effect=AssertionError("extraction")), \
+                mock.patch.object(zipfile.ZipFile, "extractall", side_effect=AssertionError("extraction")):
+            files = publisher.preparation_archive(payload)
+        marker, status = json.loads(files["fixture-plan.json"]), json.loads(files["fixture-status.json"])
+        self.assertEqual(marker["schema"], "buster-compiler-preparation-fixture-v1")
+        self.assertIs(marker["diagnostic_fixture"], True)
+        self.assertEqual(marker["qualification_state"], "unqualified")
+        case = marker["diagnostic_case"]
+        self.assertIn(case, ("invalid", "missing", "bad-exit", "partial-numeric", "inconsistent-regression"))
+        self.assertEqual(status["diagnostic_case"], case)
+        self.assertEqual(status["operation_state"], "failed")
+        self.assertIs(status["physical_qualification"], False)
+        receipt = json.loads(files["qualification/qualification.json"])
+        self.assertEqual(receipt["state"], "failed")
+        self.assertIs(receipt["default_activated"], False)
+        self.assertIsNone(receipt["qualification_publication_us"])
+        self.assertGreater(receipt["duration_us"], 0)
+        for key in ("base", "base_tree", "head", "head_tree"):
+            self.assertEqual(receipt[key], marker["expected"][key])
+        # The public typed adapter and publisher must retain failure. Neither
+        # process completion nor a nominal successful summary can upgrade it.
+        self.assertTrue(preparation.validate(marker["expected"], receipt, {}))
+        with self.assertRaisesRegex(ValueError, "diagnostic preparation fixture"):
+            publisher.preparation_validate(None, {}, files)
+        ledgers = {}
+        for arm in ("legacy", "snapshot"):
+            raw = files[f"qualification/{arm}/phases.tsv"]
+            prepared = json.loads(files[f"qualification/{arm}/prepared.json"])
+            self.assertEqual(prepared["ledger_sha256"], hashlib.sha256(raw).hexdigest())
+            lines = raw.decode("ascii").splitlines()
+            self.assertEqual(lines[0], "BUSTER_COMPILER_PREPARATION_LEDGER_V1")
+            finishes = [line.split("\t") for line in lines if line.startswith("finish\t")]
+            starts = [line.split("\t") for line in lines if line.startswith("start\t")]
+            self.assertEqual(len(starts), len(finishes))
+            self.assertEqual(prepared["stage_count"], len(finishes))
+            for index, (start, finish) in enumerate(zip(starts, finishes), 1):
+                self.assertEqual(len(start), 4)
+                self.assertEqual(len(finish), 7)
+                self.assertEqual(start[1:3], finish[1:3])
+                self.assertEqual(int(start[1]), index)
+                self.assertGreater(int(start[3]), 0)
+                self.assertEqual(int(finish[4]), int(finish[3]) - int(start[3]))
+                self.assertGreaterEqual(int(finish[4]), 0)
+            ledgers[arm] = finishes
+        legacy, snapshot = ledgers["legacy"], ledgers["snapshot"]
+        self.assertIn(len(legacy), (26, 27))
+        self.assertEqual(legacy[25][2], "ab-throughput")
+        self.assertEqual(legacy[25][5], "failed")
+        self.assertEqual(int(legacy[25][6]), 256)
+        if len(legacy) == 27:
+            self.assertEqual(legacy[26][2], "ab-throughput-binaries-after")
+        self.assertEqual([row[2] for row in snapshot], ["pins"])
+        # The last optional binary identity observation is read-only; there is
+        # no following lab, corpus, build, restore or post-inventory child.
+        for arm in ("legacy", "snapshot"):
+            allowed = {int(row[1]) for row in ledgers[arm]}
+            for name in files:
+                prefix = f"qualification/{arm}/"
+                relative = name[len(prefix):] if name.startswith(prefix) else ""
+                if relative.endswith((".argv", ".cleanup.json")) and relative.split("-", 1)[0].isdigit():
+                    ordinal = int(relative.split("-", 1)[0])
+                    self.assertIn(ordinal, allowed)
+                    self.assertLessEqual(ordinal, 26 if arm == "legacy" else 1)
+        self.assertFalse(any("/immutable-aa-" in name or "/cross-build-aa-" in name or "/ab-post." in name for name in files))
+        cleanup = json.loads(files["qualification/legacy/26-ab-throughput.cleanup.json"])
+        self.assertTrue(cleanup["cleanup_proven"])
+        self.assertEqual(cleanup["state"], "failed")
+        self.assertEqual(cleanup["exit_status_encoding"], "posix-wait-status")
+        self.assertEqual(cleanup["exit_status"], 256)
+        self.assertEqual(cleanup["exit_policy"], "corpus-report-only-v1")
+        for key in ("timed_out", "cancelled", "capture_failed", "output_truncated", "tree_cleanup_failed",
+                    "reservation_retained", "ownership_lost", "signalled", "reaped"):
+            self.assertEqual(cleanup[key], 0)
+        if case == "missing":
+            self.assertNotIn("qualification/legacy/ab-throughput/summary.json", files)
+        else:
+            raw = files["qualification/legacy/ab-throughput/summary.json"]
+            summary = json.loads(raw)
+            self.assertEqual(cleanup["corpus_summary_sha256"], hashlib.sha256(raw).hexdigest())
+            if case == "invalid":
+                self.assertIs(summary["valid"], False)
+            elif case == "bad-exit":
+                self.assertEqual(summary["confirmed_regressions"], 0)
+                self.assertIs(summary["valid"], True)
+            from compiler_receipt import classify_throughput_exit
+            metadata = json.loads(files["qualification/legacy/ab-throughput/metadata.json"])
+            declared = {role: {"sha256": binary["sha256"]} for role, binary in
+                        zip(("baseline", "candidate"), metadata["compiler_provenance"])}
+            self.assertTrue(classify_throughput_exit(1, summary, metadata, declared))
+        print("PREPARATION_NATIVE_NEGATIVE_REPLAY case=" + case +
+              " qualification_state=unqualified operation_state=failed next_child=false")
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--native-export":
         os.environ["BUSTER_SAMPLING_NATIVE_EXPORT"] = sys.argv[2]
@@ -1206,5 +1364,8 @@ if __name__ == "__main__":
     elif len(sys.argv) == 3 and sys.argv[1] == "--preparation-native-export":
         os.environ["BUSTER_PREPARATION_NATIVE_EXPORT"] = sys.argv[2]
         unittest.main(argv=[sys.argv[0]], defaultTest="PreparationNativeExportReplay")
+    elif len(sys.argv) == 3 and sys.argv[1] == "--preparation-native-negative-export":
+        os.environ["BUSTER_PREPARATION_NATIVE_NEGATIVE_EXPORT"] = sys.argv[2]
+        unittest.main(argv=[sys.argv[0]], defaultTest="PreparationNativeNegativeReplay")
     else:
         unittest.main()

@@ -718,6 +718,113 @@ class IntegrationTests(unittest.TestCase):
                          self.repository.base)
 
 
+class CatchUpPublicationTests(unittest.TestCase):
+    """A catch-up still publishes for its base after harmless main movement (#1893)."""
+
+    def setUp(self):
+        import native_retirement_automation as automation
+        import native_retirement_automation_test as fixture
+        self.automation, self.fixture = automation, fixture
+        download = mock.patch.object(automation, "download_archive",
+                                     side_effect=lambda api, number: api.raw_archive)
+        download.start()
+        self.addCleanup(download.stop)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.repository = Repository(self.root)
+        repo = self.repository.repo
+        self.base = self.repository.base
+        # The opener's empty request predates the writer's expected base.
+        git(repo, "checkout", "-q", "--detach", self.base)
+        git(repo, "commit", "--allow-empty", "-m", "catch-up request")
+        self.request = git(repo, "rev-parse", "HEAD")
+        git(repo, "push", "-q", "origin", self.request + ":refs/heads/" + integration.CATCH_UP_BRANCH)
+        self.bound = self.repository.branch("bound", {"src/buster/lib/value.c": "int value = 3;\n"})
+        git(repo, "checkout", "-q", "--detach", self.base)
+        # Later main revisions exist only on the remote, as on a real writer
+        # runner, so the predicate must fetch the live main it judges.
+        self.main = self.root / "main"
+        git(self.root, "clone", "-q", os.fspath(self.repository.remote), os.fspath(self.main))
+        git(self.main, "config", "user.name", "Test User")
+        git(self.main, "config", "user.email", "test@example.invalid")
+        self.later = self.advance(self.base, "README.md", "later\n")
+        self.generated = self.advance(
+            self.later, "tools/native_retirement_dependency_binding.generated.h", "/* newer */\n")
+        # A rewritten main that no longer contains the expected base.
+        git(self.main, "checkout", "-q", "--orphan", "rewritten", self.base)
+        self.fork = self.advance(None, "README.md", "fork\n")
+
+    def advance(self, parent: str | None, relative: str, content: str) -> str:
+        if parent is not None:
+            git(self.main, "checkout", "-q", "--detach", parent)
+        (self.main / relative).write_text(content)
+        git(self.main, "add", relative)
+        git(self.main, "commit", "-qm", "main " + relative)
+        commit = git(self.main, "rev-parse", "HEAD")
+        git(self.main, "push", "-q", "origin", commit + ":refs/heads/main-" + commit[:12])
+        return commit
+
+    def authorize(self, live_main: str, *, source: str | None = None, bot: bool = True,
+                  ref: str = integration.CATCH_UP_BRANCH) -> dict:
+        fixture, automation = self.fixture, self.automation
+        source = source or self.request
+        api = fixture.API()
+        api.base = live_main
+        api.pr["head"].update(sha=source, ref=ref)
+        api.pr["user"] = dict(fixture.BOT) if bot else {"login": "author", "id": 5, "type": "User"}
+        request = automation.new_request(fixture.REPOSITORY, 1791, self.base, source, source,
+                                         "ordinary", api.policy_digest, 100)
+        api.request_data, api.raw_archive = request, fixture.archive(request)
+        api.artifact.update(size_in_bytes=len(api.raw_archive),
+                            digest="sha256:" + automation.digest(api.raw_archive))
+        for run in api.runs.values():
+            run["head_sha"] = self.base
+        api.runs[200]["display_title"] = automation.writer_title(request["key"])
+        context = {**api.context, "expected_base": self.base, "source_head": source,
+                   "workflow_sha": self.base,
+                   "request_json": automation.canonical(request).decode(),
+                   "request_key": request["key"]}
+        return integration.authorize(api, 1791, source, "ordinary", automation.BOT_LOGIN,
+                                     authorization_mode="automation",
+                                     repo_root=self.repository.repo, automation_context=context)
+
+    def catch_up_main(self, live_main: str, source: str | None = None) -> int:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return integration.main([
+                "catch-up-main", "--repo-root", os.fspath(self.repository.repo),
+                "--base", self.base, "--source-head", source or self.request,
+                "--live-main", live_main])
+
+    def test_catch_up_publishes_for_its_base_after_main_moves_without_generated_state(self):
+        for live_main in (self.base, self.later):
+            with self.subTest(live_main=live_main):
+                report = self.authorize(live_main)
+                self.assertEqual(report["authorization"]["request"]["base"], self.base)
+                self.assertEqual(report["authorization"]["workflow_sha"], self.base)
+                self.assertEqual(self.catch_up_main(live_main), 0)
+
+    def test_catch_up_is_superseded_when_main_published_generated_state_or_diverged(self):
+        for live_main in (self.generated, self.fork):
+            with self.subTest(live_main=live_main):
+                with self.assertRaises(integration.StaleMain):
+                    self.authorize(live_main)
+                self.assertEqual(self.catch_up_main(live_main), integration.STALE_MAIN_EXIT)
+
+    def test_non_catch_up_requests_still_need_exact_current_main(self):
+        cases = (
+            ("human owner", {"bot": False}),
+            ("other branch", {"ref": "feature"}),
+            ("non-empty candidate", {"source": self.bound}),
+        )
+        for label, options in cases:
+            with self.subTest(label=label):
+                with self.assertRaises(integration.StaleMain):
+                    self.authorize(self.later, **options)
+        self.assertEqual(self.catch_up_main(self.later, self.bound), integration.STALE_MAIN_EXIT)
+        self.assertEqual(self.authorize(self.base, source=self.bound)["head"], self.bound)
+
+
 class WorkflowPolicyTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(__file__).resolve().parents[1]
@@ -745,7 +852,12 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('commit-tree "$final_tree" -p "$base" -p "$source_head"', publish)
         self.assertIn('--force-with-lease="refs/heads/$head_ref:$head"', publish)
         self.assertIn('--force-with-lease="refs/heads/$head_ref:$head"', publish)
-        self.assertIn('test "$main_remote" = "$base"', publish)
+        self.assertIn('main_admissible "$main_remote"', publish)
+        self.assertEqual(publish.count('main_admissible "$('), 1)
+        # Only an automatic bot-owned catch-up relaxes the exact-main check.
+        self.assertIn('if [[ "$catch_up_pr" == true && "$AUTHORIZATION_MODE" == automation ]]',
+                      publish)
+        self.assertIn("native_retirement_integration.py catch-up-main", publish)
         self.assertIn('test "$pull_remote" = "$head"', publish)
         self.assertLess(publish.index("Native retirement trusted integration"),
                         publish.index('--force-with-lease="refs/heads/$head_ref:$head"'))

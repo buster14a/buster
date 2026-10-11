@@ -158,10 +158,15 @@ of another name is ordinary data, as the host linkers leave it, and the
 assembler refuses a `@preinit_array` section of another name. A preinit entry
 in a `-shared` output is refused with a named diagnostic, as `ld` does.
 
-The linker still folds the preinit entries, sorted first, into `DT_INIT_ARRAY`
-rather than emitting a `DT_PREINIT_ARRAY` the loader runs before the
-constructors of dependencies; that loader-facing phase remains open under
-[#1243](https://github.com/buster14a/buster/issues/1243). See the
+A dynamic executable (x86-64 fixed-address or `-pie`, AArch64, and the
+Android images staged through them) publishes its preinit entries through
+`DT_PREINIT_ARRAY`/`DT_PREINIT_ARRAYSZ`, so the loader runs them with argc,
+argv and envp before the constructors of the shared objects it loads, as for
+`ld` and `lld` (#1243). `link_elf_preinit_array_split` moves the leading
+preinit run of the merged constructor array onto the end of the writable data
+with its relocations, so the entry stub calls only the constructors. A static
+executable has no loader and no dependency constructors; its entry stub still
+calls the preinit entries first. See the
 [ELF initialization contract](https://gabi.xinuos.com/v42/elf/08-dynamic.html#initialization-and-termination-functions).
 
 The bounded refusal repair for #1243 rejects unsupported allocated section
@@ -190,9 +195,39 @@ skip policy. Supported DWARF payloads still pass through without DIE decoding.
 Ordinary NOTYPE/OBJECT/FUNC/SECTION/TLS symbols keep their existing mapping.
 STT_FILE records are metadata and may use SHN_ABS. Other reserved section
 definitions (including absolute/common values and extended indexes) and
-unsupported runtime symbol types, including GNU IFUNC, are refused. Calling an
-IFUNC resolver as a normal function or dropping a weak absolute definition
-would produce a successful link with different behavior.
+unsupported runtime symbol types are refused. Dropping a weak absolute
+definition would produce a successful link with different behavior.
+
+A GNU IFUNC (`STT_GNU_IFUNC`) defined in code is represented: the reader marks
+the symbol `indirect`, and `link_elf_indirect_functions_rebind` rewrites it
+before any writer runs, the way `ld` and `lld` give it a PLT entry and an
+`IRELATIVE` slot. The name defines a thunk that jumps through a writable slot,
+so calls, address-taken references and GOT loads all reach one canonical
+address and never the resolver. A runner calls each resolver once and fills the
+slots. In an executable it is the first `.preinit_array` entry, which a dynamic
+image publishes as `DT_PREINIT_ARRAY`, so the loader runs it after relocation
+and before every constructor; a static image's stub calls it first. A
+`-shared` object has no runner: each slot carries an `R_X86_64_IRELATIVE`, the
+last of its dynamic relocations, so ld.so fills it while relocating the library,
+before any initializer runs, including an executable's `DT_PREINIT_ARRAY`
+callbacks that call into the library. On AArch64 the runner
+passes hwcap 0, so a resolver that dispatches on hwcap selects its baseline
+implementation. An undefined IFUNC, or one outside code, stays refused, and
+the C frontend's own `ifunc` attribute is still refused by name.
+`compiler_driver_elf_ifunc_tests` checks single resolution and address identity
+against the host linker for static, dynamic, `-pie` and `-shared` images, and a
+host-linked executable whose preinit callback calls a `-shared` library's IFUNC.
+`.ctors`/`.dtors` and `.init`/`.fini` inputs stay refused: GNU ld 2.42 folds
+`.ctors` into `.init_array` in reverse but emits a null `.fini_array` slot for
+`.dtors`, and lld 18 runs neither, so no consistent oracle exists, and the
+fragments need the crti/crtn prologue Buster's entry stub does not link.
+
+The Mach-O and COFF
+readers refuse the same definitions in their own forms: an external `N_ABS` or
+`N_INDR` symbol or a Mach-O common (`N_UNDF` with a size), and an external
+`IMAGE_SYM_ABSOLUTE` symbol or a COFF common (section 0 with a size). Local
+absolutes such as COFF `@comp.id`/`@feat.00` remain ignored producer metadata
+(`compiler_driver_archive_test_foreign_reserved_symbols`).
 
 These failures return `OBJECT_ERROR_UNSUPPORTED_TARGET` with a diagnostic naming
 the section or symbol and its numeric type/index. Reserved symbol section
@@ -209,7 +244,8 @@ the host linker/runtime to preserve each input's meaning. A same-image
 preinit/constructor control continues to link and run through both linkers, as
 does a canonical optional GNU property control. `compiler_driver_elf_preinit_tests`
 covers a preinit entry against a dependency's `constructor(0)` in both link
-orders, the data-only sections above and the shared-output refusal, against
+orders, against a host-built shared library's constructor in a dynamic
+executable, the data-only sections above and the shared-output refusal, against
 the host linker; `link_test` and `object_test` cover the merge order and the
 writer mappings. Raw note controls cover every known feature combination,
 unknown/required properties, malformed shape, and payload bounds;

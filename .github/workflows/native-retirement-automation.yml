@@ -54,20 +54,28 @@ jobs:
       - name: Resolve and persist one eligible exact request
         id: plan
         run: python3 tools/native_retirement_controller.py plan --repo-root . --request "$RUNNER_TEMP/native-retirement-request/request.json"
-      - name: Retain machine records in existing evidence
-        if: ${{ steps.plan.outputs.ready == 'true' }}
-        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
-        with:
-          mode: retain
-          retention-directory: ${{ runner.temp }}/native-retirement-request
+      # The writer accepts a sealed request artifact holding exactly one
+      # request.json; machine records travel in their own artifact (#1893).
       - name: Seal the trusted request before dispatch
         if: ${{ steps.plan.outputs.ready == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: native-retirement-automation-request-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/native-retirement-request/request.json
-            ${{ runner.temp }}/native-retirement-request/machine-specifications/
+          path: ${{ runner.temp }}/native-retirement-request/request.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain machine records beside the sealed request
+        if: ${{ steps.plan.outputs.ready == 'true' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/native-retirement-machine
+      - name: Upload machine records separately from the request
+        if: ${{ steps.plan.outputs.ready == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-retirement-automation-machine-${{ github.run_id }}
+          path: ${{ runner.temp }}/native-retirement-machine/machine-specifications/
           if-no-files-found: error
           retention-days: 7
       - name: Dispatch the existing single writer once

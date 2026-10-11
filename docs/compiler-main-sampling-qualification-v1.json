@@ -19,7 +19,16 @@
     ],
     "simultaneous_confidence": 0.95,
     "per_claim_alpha": 0.016666666666666666,
-    "assumption": "Independent trial classifications conditional on the declared frozen binaries, workload, host and blocked schedule; unresolved serial dependence prevents probability qualification"
+    "assumption": "Independent trial classifications conditional on the declared frozen binaries, workload, host and blocked schedule; unresolved serial dependence prevents probability qualification",
+    "pair_assumption": "Independent same-target pair ratios for the historical median/sign confidence interval; this is distinct from trial-classification independence.",
+    "execution_order": "Fixed deterministic AB/BA schedule. Seed20261003 controls bootstrap resampling, not execution order.",
+    "model_review": {
+      "predeclared": "Freeze qualitative questions and conditional mechanistic noise assumptions before acquisition; flags, completion, narrow intervals and fresh directories alone cannot accept either model.",
+      "pilot": "After all nine pilot streams, review every original stream chronologically, original AB/BA and half-series confidence intervals, second_position_factor, per-tenth ratio and baseline wall medians, CPU/wall/RSS, available page-fault/cycle observations and environment snapshots, exact slot order, complete API/attempt history and supervision.",
+      "assessment": "Record separate pair-level and trial-classification accepted-provisionally/rejected/unresolved narratives with mechanistic or independently existing evidence basis and artifact/member citations. One40pilot per family cannot empirically establish four adjacent short streams per confirmation packet or campaign-long stability; an unexplained common packet term leaves trial independence unresolved.",
+      "confirmation": "Reassess the same unchanged model against all confirmation chronology, four short positions within each packet, family locations and long-first/last positions before certificate approval. Unresolved model prevents probability qualification. No new autocorrelation statistic, p-value, threshold, omitted pair, changed spacing/order, retry, replacement or exploratory80prefix split.",
+      "claim_family": "Bonferroni requires no independence between families, but does not repair within-family classification dependence."
+    }
   },
   "profiles": [
     {

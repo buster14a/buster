@@ -239,6 +239,37 @@ class AdmissionTests(unittest.TestCase):
             gate.check_pull_request(repo, fork, later_head, fork,
                                     status_file(self.root, later_head, later_evidence), False)
 
+    def test_catch_up_published_after_main_moved_during_the_writer_run(self):
+        # The opener's empty request predates the writer's expected base, and
+        # main moves again while the writer runs; the writer still publishes
+        # for its expected base unless main published generated state (#1893).
+        repo, base = self.repository.repo, self.repository.base
+        git(repo, "checkout", "-B", gate.CATCH_UP_BRANCH, base)
+        git(repo, "commit", "--allow-empty", "-m", "catch-up request")
+        request = git(repo, "rev-parse", "HEAD")
+        expected = self.repository.advance("expected", {"README.md": "expected\n"})
+        head, evidence = self.repository.integration(request, base=expected)
+        status = status_file(self.root, head, evidence)
+        moved = self.repository.advance("moved", {"src/buster/lib/value.c": "int value = 4;\n"},
+                                        parent=expected)
+        self.assertTrue(gate.integration.catch_up_main_admissible(repo, expected, request, moved))
+        report = gate.check_pull_request(repo, moved, head, moved, status, False)
+        self.assertTrue(report["catch_up"])
+        self.assertEqual(report["recorded_base"], expected)
+        generated = self.repository.advance("generated", {
+            "tools/native_retirement_dependency_binding.generated.h": "#define NEWER 1\n"},
+            parent=moved)
+        self.assertFalse(gate.integration.catch_up_main_admissible(repo, expected, request, generated))
+        with self.assertRaisesRegex(gate.AdmissionError, "newer generated state"):
+            gate.check_pull_request(repo, generated, head, generated, status, False)
+        # A non-catch-up integration published for the same base stays stale.
+        bound = self.repository.branch("bound", {"src/buster/lib/value.c": "int value = 6;\n"})
+        self.assertFalse(gate.integration.catch_up_main_admissible(repo, base, bound, moved))
+        bound_head, bound_evidence = self.repository.integration(bound, base=expected)
+        with self.assertRaisesRegex(gate.AdmissionError, "not based on"):
+            gate.check_pull_request(repo, moved, bound_head, moved,
+                                    status_file(self.root, bound_head, bound_evidence), False)
+
     def test_catch_up_must_publish_generated_state_and_nothing_else(self):
         repo, base = self.repository.repo, self.repository.base
         git(repo, "checkout", "-B", gate.CATCH_UP_BRANCH, base)

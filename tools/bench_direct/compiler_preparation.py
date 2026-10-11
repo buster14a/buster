@@ -15,7 +15,7 @@ import hashlib
 import json
 import math
 import re
-from compiler_receipt import PROFILE, THROUGHPUT_PROFILE, classify, classify_throughput, validate_closure
+from compiler_receipt import PROFILE, THROUGHPUT_PROFILE, classify, classify_throughput, classify_throughput_exit, validate_closure
 
 SELECTOR = "compiler-baseline-closure-qualification-v1"
 REQUEST_LINE = "profile: " + SELECTOR
@@ -27,6 +27,9 @@ OWNERSHIP_SCHEMA = "buster-native-qualification-supervisor-v1"
 IDENTITY = ("base", "base_tree", "head", "head_tree")
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 COMMIT = re.compile(r"[a-f0-9]{40}\Z")
+# Matches compiler_closure_preparation_build: mold --no-fork keeps link children
+# from outliving the phase and being adopted by its subreaper (#3372).
+GENERATE = ["generate", "--cc", "clang", "--no-include-tests", "--", "-DCMAKE_EXE_LINKER_FLAGS=-Wl,--no-fork"]
 UINT = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 MEMBER_LIMIT = 8 * 1024 * 1024
 LOG_LIMIT = 1 * 1024 * 1024
@@ -191,10 +194,11 @@ def parse_ledger(record: dict, raw: object, wanted: tuple[str, ...] | None = Non
             ordinal, finished, elapsed, status = (int(fields[index]) for index in (1, 3, 4, 6))
             if ordinal != pending["stage"] or fields[2] != pending["phase"] or finished < pending["start"] or \
                     finished > (1 << 64) - 1 or elapsed != finished - pending["start"] or \
-                    fields[5] != "complete" or status != 0 or \
+                    fields[5] != "complete" or (status != 0 and not (status == 256 and
+                        pending["phase"] in {name + "-throughput" for _, name, _ in SERIES})) or \
                     (pending["phase"] == "secondary-pins" and (not three or secondary != 2)):
                 raise ValueError("phase ledger finish failed or mismatched")
-            stages.append(dict(pending, finish=finished, elapsed=elapsed))
+            stages.append(dict(pending, finish=finished, elapsed=elapsed, status=status))
             previous = finished
             pending = None
         else:
@@ -371,11 +375,11 @@ def child_commands(arm: str, expected: dict, prepared: dict, qualification: bool
         roles.append(("candidate2", expected["secondary_head"]))
     for role, commit in roles:
         result[role + "-checkout"] = [*git, "checkout", "--quiet", "--detach", commit]
-        result[role + "-generate"] = [wrapper, "generate", "--cc", "clang", "--no-include-tests"]
+        result[role + "-generate"] = [wrapper, *GENERATE]
         result[role + "-build"] = [wrapper, "build", "--config", "Release", "-t", "ide"]
     if arm == "legacy":
         result["baseline-closure-checkout"] = [*git, "checkout", "--quiet", "--detach", expected["base"]]
-        result["baseline-closure-generate"] = [wrapper, "generate", "--cc", "clang", "--no-include-tests"]
+        result["baseline-closure-generate"] = [wrapper, *GENERATE]
         result["baseline-closure-build"] = [wrapper, "build", "--config", "Release", "-t", "ide"]
         result["baseline-corpus-prepare"] = [wrapper, "bench_throughput", "help"]
     else:
@@ -617,6 +621,31 @@ def preparation_reasons(expected: dict, arm_name: str, arm: object, wanted_phase
                     reasons.append(arm_name + "/" + phase + " child argv changed the pinned recipe")
                 cleanup = json_object(files.get(stem + ".cleanup.json"))
                 reasons.extend(arm_name + "/" + phase + ": " + item for item in cleanup_reasons(cleanup))
+                if phase in {name + "-throughput" for _, name, _ in SERIES}:
+                    pair = arm.get(phase[:-len("-throughput")])
+                    pair = pair if isinstance(pair, dict) else {}
+                    corpus_raw, metadata_raw = pair.get("throughput_raw"), pair.get("metadata_raw")
+                    corpus_report, metadata_report = json_object(corpus_raw), json_object(metadata_raw)
+                    if not exact(corpus_report, pair.get("throughput")) or not exact(metadata_report, pair.get("metadata")) or \
+                            cleanup.get("exit_policy") != "corpus-report-only-v1" or \
+                            cleanup.get("exit_status_encoding") != "posix-wait-status" or \
+                            not exact(cleanup.get("exit_status"), stage["status"]) or \
+                            cleanup.get("state") != ("complete" if stage["status"] == 0 else "failed") or \
+                            cleanup.get("corpus_summary_sha256") != sha(corpus_raw) or \
+                            cleanup.get("corpus_metadata_sha256") != sha(metadata_raw) or \
+                            any(not exact(cleanup.get(key), 0) for key in ("capture_failed", "output_truncated", "tree_cleanup_failed")) or \
+                            any(not exact(cleanup.get(key), 1) for key in ("launch_attempted", "manager_launched", "manager_terminal")):
+                        raise ValueError("corpus native status/report policy/raw hash classification mismatch")
+                    provenance = metadata_report.get("compiler_provenance")
+                    if not isinstance(provenance, list) or len(provenance) != 2:
+                        raise ValueError("corpus native status binary provenance missing")
+                    declared = {role: {"sha256": row.get("sha256") if isinstance(row, dict) else None}
+                                for role, row in zip(("baseline", "candidate"), provenance)}
+                    errors = classify_throughput_exit(stage["status"] // 256, corpus_report, metadata_report, declared)
+                    if errors:
+                        raise ValueError("corpus native exit classification incomplete: " + "; ".join(errors))
+                elif stage["status"] != 0 or cleanup.get("exit_policy") == "corpus-report-only-v1":
+                    raise ValueError("nonzero or corpus policy belongs to a non-corpus phase")
                 for stream in ("stdout", "stderr"):
                     raw_stream = files.get(stem + "." + stream)
                     if not isinstance(raw_stream, bytes) or len(raw_stream) > LOG_LIMIT:

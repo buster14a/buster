@@ -33,6 +33,59 @@ RADDEBUGGER = WORKFLOWS / "raddebugger-compatibility.yml"
 ATTEMPT_BINDING = "needs.authorize.outputs.attempt == format('{0}', github.run_attempt)"
 REQUEST_BINDING = "needs.authorize.outputs.request_head == github.event.workflow_run.head_sha"
 
+CLEANUP_GUARD_SCRIPT = (
+    "          set -euo pipefail",
+    "          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||",
+    "                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then",
+    "            echo '::error::Native cleanup ownership is retained; manual review is required before host admission.'",
+    "            exit 1",
+    "          fi",
+)
+
+# Fixed execution-step reservation precedes bootstrap; native exec preserves
+# its PID/start identity. No shell path removes or clears this owner record.
+PREENTRY_RESERVATION_SCRIPT = (
+    "          # A hard stop before native exec keeps this fixed reservation.",
+    "          [[ \"${BQ_RUN_ID:-}\" == \"$GITHUB_RUN_ID\" ]]",
+    "          [[ \"${BQ_REQUEST_RUN_ID:-}\" =~ ^[1-9][0-9]*$ ]]",
+    "          [[ \"$GITHUB_RUN_ID\" =~ ^[1-9][0-9]*$ && \"$GITHUB_RUN_ATTEMPT\" =~ ^[1-9][0-9]*$ ]]",
+    "          [[ \"${BQ_HEAD_COMMIT:-}\" =~ ^[0-9a-f]{40}$ && \"$GITHUB_SHA\" =~ ^[0-9a-f]{40}$ ]]",
+    "          [[ \"$GITHUB_REPOSITORY\" == buster14a/buster ]]",
+    "          [[ \"$GITHUB_JOB\" == compare || \"$GITHUB_JOB\" == preparation ||",
+    "             \"$GITHUB_JOB\" == utility || \"$GITHUB_JOB\" == sampling ]]",
+    "          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||",
+    "                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then",
+    "            echo '::error::Native cleanup ownership is retained before bootstrap.'",
+    "            exit 1",
+    "          fi",
+    "          read -r process_stat < \"/proc/$$/stat\"",
+    "          [[ \"$process_stat\" == \"$$ (\"* ]]",
+    "          read -r -a process_fields <<< \"${process_stat##*) }\"",
+    "          [[ \"${#process_fields[@]}\" -ge 20 && \"${process_fields[19]}\" =~ ^[1-9][0-9]*$ ]]",
+    "          read -r boot_id < /proc/sys/kernel/random/boot_id",
+    "          [[ \"$boot_id\" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]",
+    "          umask 077",
+    "          mkdir -m 0700 /tmp/buster-9700x-cleanup-active-v1",
+    "          (",
+    "            set -o noclobber",
+    "            printf 'schema\\tbuster-9700x-preentry-active-v1\\nowner_pid\\t%s\\nowner_start_ticks\\t%s\\nboot_id\\t%s\\nrequest_run_id\\t%s\\nexecutor_run_id\\t%s\\nexecutor_attempt\\t%s\\nrequest_head\\t%s\\nrepository\\t%s\\njob\\t%s\\npolicy_revision\\t%s\\n' \\",
+    "              \"$$\" \"${process_fields[19]}\" \"$boot_id\" \"$BQ_REQUEST_RUN_ID\" \"$GITHUB_RUN_ID\" \\",
+    "              \"$GITHUB_RUN_ATTEMPT\" \"$BQ_HEAD_COMMIT\" \"$GITHUB_REPOSITORY\" \"$GITHUB_JOB\" \"$GITHUB_SHA\" \\",
+    "              > /tmp/buster-9700x-cleanup-active-v1/owner.tsv",
+    "          )",
+    "          sync /tmp/buster-9700x-cleanup-active-v1/owner.tsv",
+    "          sync /tmp/buster-9700x-cleanup-active-v1",
+    "          sync /tmp",
+)
+
+PREENTRY_DRIVER_SCRIPT = (
+    "          transport=\"$RUNNER_TEMP/compiler-preentry-driver\"",
+    "          mkdir \"$transport\"",
+    "          trusted/build.sh compiler_closure driver-path > \"$transport/driver.txt\"",
+    "          mapfile -t drivers < \"$transport/driver.txt\"",
+    "          [[ \"${#drivers[@]}\" == 1 && \"${drivers[0]}\" == /* ]]",
+)
+
 # The direct workload path (#2704): main's definition, started by the request
 # workflow's completion and run only for the owner's own same-repository pull
 # requests. The gate reads the request run from the workflow_run payload; the
@@ -95,7 +148,7 @@ DIRECT_AUTHORIZER_MARKERS = (
     'COMPARE_REQUEST = "benchmarks/9700x/compiler-compare.request"',
     "delta, problems = request_delta(head, request_commit, compared_parents)",
     "workloads, compare = workloads and fresh_workloads, compare and fresh_compare",
-    'f"request_head={head}\\ncompare={str(compare).lower()}\\nsampling_requested={str(sampling_requested).lower()}\\npreparation_requested={str(preparation_requested).lower()}\\nmerge_base={extra[\'merge_base\']}\\n"',
+    'f"request_head={head}\\ncompare={str(compare).lower()}\\nsampling_requested={str(sampling_requested).lower()}\\npreparation_requested={str(preparation_requested).lower()}\\nutility_requested={str(utility_requested).lower()}\\nmerge_base={extra[\'merge_base\']}\\n"',
     '("comparison merge base", isinstance(base_sha, str) and bool(COMMIT.fullmatch(base_sha)) and base_sha != head)',
 )
 DIRECT_RUN_LINES = (
@@ -174,11 +227,88 @@ TRUSTED_TOOLS_CHECKOUT = (
     "          sparse-checkout: tools/bench_direct",
     "          persist-credentials: false",
 )
+MAIN_TINYCC_SCRIPT = (
+    "          set -euo pipefail",
+    "          ./configure --prefix=\"$RUNNER_TEMP/main-policy-tcc\" --cc=gcc",
+    "          make -j2",
+    "          make install",
+    "          echo \"$RUNNER_TEMP/main-policy-tcc/bin\" >> \"$GITHUB_PATH\"",
+)
+
+MAIN_TINYCC_CHECKOUT = (
+    "        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+    "        with:",
+    "          repository: TinyCC/tinycc",
+    "          ref: 0fb54300b56512754221d80adda85ddb9815bceb",
+    "          path: .tools/tinycc",
+    "          persist-credentials: false",
+)
+
+MAIN_ROUTE_FIELDS = (
+    "main_owned",
+    "main_profile",
+    "main_preparation_policy",
+    "main_phase_schema",
+    "main_measurement_revision",
+    "main_certificate_revision",
+    "main_certificate_sha256",
+    "lab_sha256",
+    "python_path",
+    "python_sha256",
+    "driver_sha256",
+    "compare_sha256",
+    "receipt_sha256",
+    "owned_phase_sha256",
+    "owned_plan_sha256",
+    "trusted_root",
+    "candidate_root",
+    "work_root",
+    "evidence_root",
+    "main_policy_revision",
+)
+
+MAIN_ROUTE_DATA_FIELDS = (
+    "main_route_data",
+    "main_facts_data",
+    "main_identity_data",
+)
+
 COMPILER_AUTHORIZE_BLOCKS = (
-    ("    runs-on: ubuntu-24.04",),
-    ("    permissions:", "      contents: read", "      pull-requests: read", "      actions: read",
-     "      checks: read", "    timeout-minutes: 5"),
-    TRUSTED_TOOLS_CHECKOUT,
+    (
+        "    runs-on: ubuntu-24.04",
+    ),
+    (
+        "    permissions:",
+        "      contents: read",
+        "      pull-requests: read",
+        "      actions: read",
+        "      checks: read",
+        "    timeout-minutes: 5",
+    ),
+    (
+        "        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+        "        with:",
+        "          ref: ${{ github.sha }}",
+        "          persist-credentials: false",
+    ),
+    (
+        "        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+        "        with:",
+        "          repository: TinyCC/tinycc",
+        "          ref: 0fb54300b56512754221d80adda85ddb9815bceb",
+        "          path: .tools/tinycc",
+        "          persist-credentials: false",
+    ),
+    (
+        "        working-directory: .tools/tinycc",
+        "        shell: bash",
+        "        run: |",
+        "          set -euo pipefail",
+        "          ./configure --prefix=\"$RUNNER_TEMP/main-policy-tcc\" --cc=gcc",
+        "          make -j2",
+        "          make install",
+        "          echo \"$RUNNER_TEMP/main-policy-tcc/bin\" >> \"$GITHUB_PATH\"",
+    ),
     (
         "        id: verify",
         "        shell: bash",
@@ -191,6 +321,22 @@ COMPILER_AUTHORIZE_BLOCKS = (
         "        run: python3 -B tools/bench_direct/authorize_compiler.py",
     ),
 )
+
+MAIN_MEASUREMENT_CHECKOUT = (
+    "        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+    "        with:",
+    "          ref: ${{ needs.authorize-compiler.outputs.main_measurement_revision }}",
+    "          path: trusted",
+    "          persist-credentials: false",
+)
+
+MAIN_PUBLISH_CHECKOUT = (
+    "        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+    "        with:",
+    "          ref: ${{ needs.authorize-compiler.outputs.main_measurement_revision || github.sha }}",
+    "          persist-credentials: false",
+)
+
 COMPILER_AUTHORIZER_MARKERS = (
     "from authorize import COMMIT, DECIMAL, REPOSITORY, fetch, full_name",
     'REQUEST_WORKFLOW = ".github/workflows/9700x-compiler-request.yml"',
@@ -249,6 +395,104 @@ COMPILER_RUN_SCRIPT = [
     "            --head \"$BQ_HEAD_COMMIT\" --head-tree \"$BQ_HEAD_TREE\" --trusted-revision \"$BQ_TRUSTED_REVISION\" \\",
     "            --request-run-id \"$BQ_REQUEST_RUN_ID\" --run-id \"$BQ_RUN_ID\" --run-attempt \"$BQ_RUN_ATTEMPT\"",
 ]
+
+# MAIN keeps the historical literal recipe above for disabled routing and pull
+
+# mode; supported owned routing consumes only the exact authenticated transport.
+
+MAIN_OWNED_SCRIPT = (
+    "          set -euo pipefail",
+    *PREENTRY_RESERVATION_SCRIPT,
+    "          transport=\"$RUNNER_TEMP/compiler-main-route\"",
+    "          mkdir \"$transport\"",
+    "          printf '%s' \"$BQ_MAIN_ROUTE_DATA\" | base64 --decode > \"$transport/route.tsv\"",
+    "          printf '%s' \"$BQ_MAIN_FACTS_DATA\" | base64 --decode > \"$transport/facts.tsv\"",
+    "          printf '%s' \"$BQ_MAIN_IDENTITY_DATA\" | base64 --decode > \"$transport/identity.tsv\"",
+    "          trusted/build.sh compiler_closure driver-path > \"$transport/driver.txt\"",
+    "          mapfile -t drivers < \"$transport/driver.txt\"",
+    "          [[ \"${#drivers[@]}\" == 1 && \"${drivers[0]}\" == /* ]]",
+    "          exec \"${drivers[0]}\" compiler_profile_qualification --execute-main \\",
+    "            --route \"$transport/route.tsv\" --facts \"$transport/facts.tsv\" \\",
+    "            --identity \"$transport/identity.tsv\" --driver \"${drivers[0]}\"",
+)
+
+MAIN_COMPARE_BLOCKS = (
+    (
+        "        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+        "        with:",
+        "          ref: ${{ needs.authorize-compiler.outputs.main_measurement_revision }}",
+        "          path: trusted",
+        "          persist-credentials: false",
+    ),
+    (
+        "        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+        "        with:",
+        "          ref: ${{ github.event.workflow_run.head_sha }}",
+        "          path: candidate",
+        "          fetch-depth: 0",
+        "          filter: blob:none",
+        "          persist-credentials: false",
+    ),
+    (
+        "      - name: Build and compare both compilers",
+        "        if: ${{ needs.authorize-compiler.outputs.main_owned != 'true' }}",
+        "        shell: bash",
+        "        run: |",
+    ),
+    (
+        "      - name: Observe the actual owned MAIN physical job start",
+        "        if: ${{ needs.authorize-compiler.outputs.main_owned == 'true' }}",
+        "        shell: bash",
+        "        env:",
+        "          BQ_PHYSICAL_CLOCK_KIND: main",
+        "        run: |",
+        "          set -euo pipefail",
+        "          python3 -B trusted/tools/bench_direct/compiler_publish.py physical-clock",
+    ),
+    (
+        "      - name: Execute the pinned owned MAIN comparison",
+        "        if: ${{ needs.authorize-compiler.outputs.main_owned == 'true' }}",
+        "        shell: bash",
+        "        env:",
+        "          BQ_MAIN_ROUTE_DATA: ${{ needs.authorize-compiler.outputs.main_route_data }}",
+        "          BQ_MAIN_FACTS_DATA: ${{ needs.authorize-compiler.outputs.main_facts_data }}",
+        "          BQ_MAIN_IDENTITY_DATA: ${{ needs.authorize-compiler.outputs.main_identity_data }}",
+        "        run: |",
+        "          set -euo pipefail",
+        *PREENTRY_RESERVATION_SCRIPT,
+        "          transport=\"$RUNNER_TEMP/compiler-main-route\"",
+        "          mkdir \"$transport\"",
+        "          printf '%s' \"$BQ_MAIN_ROUTE_DATA\" | base64 --decode > \"$transport/route.tsv\"",
+        "          printf '%s' \"$BQ_MAIN_FACTS_DATA\" | base64 --decode > \"$transport/facts.tsv\"",
+        "          printf '%s' \"$BQ_MAIN_IDENTITY_DATA\" | base64 --decode > \"$transport/identity.tsv\"",
+        "          trusted/build.sh compiler_closure driver-path > \"$transport/driver.txt\"",
+        "          mapfile -t drivers < \"$transport/driver.txt\"",
+        "          [[ \"${#drivers[@]}\" == 1 && \"${drivers[0]}\" == /* ]]",
+        "          exec \"${drivers[0]}\" compiler_profile_qualification --execute-main \\",
+        "            --route \"$transport/route.tsv\" --facts \"$transport/facts.tsv\" \\",
+        "            --identity \"$transport/identity.tsv\" --driver \"${drivers[0]}\"",
+    ),
+    (
+        "        if: ${{ always() && needs.authorize-compiler.outputs.main_owned != 'true' }}",
+        "        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2",
+        "        with:",
+        "          name: buster-9700x-compiler-${{ github.event.workflow_run.head_sha }}-${{ github.run_attempt }}",
+        "          path: ${{ runner.temp }}/compiler-bench/evidence",
+        "          if-no-files-found: warn",
+        "          retention-days: 90",
+    ),
+    (
+        "        if: ${{ always() && needs.authorize-compiler.outputs.main_owned == 'true' }}",
+        "        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "        with:",
+        "          name: buster-9700x-compiler-${{ github.event.workflow_run.head_sha }}-${{ github.run_attempt }}",
+        "          path: |",
+        "            ${{ needs.authorize-compiler.outputs.evidence_root }}",
+        "            ${{ needs.authorize-compiler.outputs.evidence_root }}.native",
+        "          if-no-files-found: warn",
+        "          retention-days: 90",
+    ),
+)
 PULL_RUN_SCRIPT = [line.replace("--mode main", "--mode pull")
                    .replace("--ref refs/heads/main", "--ref \"refs/pull/$BQ_PULL/head\"")
                    .replace("^[0-9]+$", "^[1-9][0-9]*$")
@@ -294,14 +538,50 @@ PULL_PUBLISH_BLOCKS = (
     ("        run: python3 -B tools/bench_direct/compiler_publish.py",),
 )
 COMPILER_PUBLISH_BLOCKS = (
-    ("    needs: [authorize-compiler, compare]", COMPILER_PUBLISH_IF, "    runs-on: ubuntu-24.04",
-     "    permissions:", "      actions: read", "      checks: write", "    timeout-minutes: 10"),
-    TRUSTED_TOOLS_CHECKOUT,
-    ("          BQ_AUTHORIZE_RESULT: ${{ needs.authorize-compiler.result }}",
-     "          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize-compiler.outputs.attempt }}",
-     "          BQ_COMPARE_RESULT: ${{ needs.compare.result }}"),
-    ("        run: python3 -B tools/bench_direct/compiler_publish.py",),
+    (
+        "    needs: [authorize-compiler, compare]",
+        COMPILER_PUBLISH_IF,
+        "    runs-on: ubuntu-24.04",
+        "    permissions:",
+        "      contents: read",
+        "      actions: read",
+        "      checks: write",
+        "    timeout-minutes: 10",
+    ),
+    (
+        "        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+        "        with:",
+        "          ref: ${{ needs.authorize-compiler.outputs.main_measurement_revision || github.sha }}",
+        "          persist-credentials: false",
+    ),
+    (
+        "        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+        "        with:",
+        "          repository: TinyCC/tinycc",
+        "          ref: 0fb54300b56512754221d80adda85ddb9815bceb",
+        "          path: .tools/tinycc",
+        "          persist-credentials: false",
+    ),
+    (
+        "        working-directory: .tools/tinycc",
+        "        shell: bash",
+        "        run: |",
+        "          set -euo pipefail",
+        "          ./configure --prefix=\"$RUNNER_TEMP/main-policy-tcc\" --cc=gcc",
+        "          make -j2",
+        "          make install",
+        "          echo \"$RUNNER_TEMP/main-policy-tcc/bin\" >> \"$GITHUB_PATH\"",
+    ),
+    (
+        "          BQ_AUTHORIZE_RESULT: ${{ needs.authorize-compiler.result }}",
+        "          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize-compiler.outputs.attempt }}",
+        "          BQ_COMPARE_RESULT: ${{ needs.compare.result }}",
+    ),
+    (
+        "        run: python3 -B tools/bench_direct/compiler_publish.py",
+    ),
 )
+
 COMPILER_REQUEST_TRIGGER = (
     "on:",
     "  push:",
@@ -385,7 +665,10 @@ REPORT_BLOCKS = {
     "validate": (
         ("    if: ${{ " + REPORT_OWNER + " }}", "    runs-on: ubuntu-24.04", "    permissions:", "      actions: read",
          "      checks: read", "      contents: read", "      pull-requests: read", "    timeout-minutes: 10"),
-        TRUSTED_TOOLS_CHECKOUT,
+        ("        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683", "        with:",
+         "          ref: ${{ github.sha }}", "          persist-credentials: false"),
+        MAIN_TINYCC_CHECKOUT,
+        ("        working-directory: .tools/tinycc", "        shell: bash", "        run: |", *MAIN_TINYCC_SCRIPT),
         ("          BQ_RECOVER_RUN_ID: ${{ inputs.run_id }}", "          BQ_RECOVER_ATTEMPT: ${{ inputs.run_attempt }}",
          "          BQ_REGRESSION_POLICY: ${{ vars.BENCH_COMPILER_REGRESSION_POLICY }}",
          "        run: python3 -B tools/bench_direct/compiler_publish.py"),
@@ -529,6 +812,7 @@ def main() -> int:
     check_direct_workflow(errors)
     check_sampling_path(errors)
     check_preparation_path(errors)
+    check_utility_path(errors)
     check_compiler_path(errors)
     return report(errors)
 
@@ -575,6 +859,12 @@ def check_runner_routes(errors: list[str], texts: dict[Path, str]) -> None:
 
 
 
+PHYSICAL_CLOCK_SCRIPT = (
+    "          set -euo pipefail",
+    "          python3 -B trusted/tools/bench_direct/compiler_publish.py physical-clock",
+)
+
+
 def check_sampling_path(errors: list[str], direct: str | None = None) -> None:
     """Experimental admission precedes physical assignment; no ordinary short route."""
     direct = DIRECT.read_text(encoding="utf-8") if direct is None else direct
@@ -616,13 +906,18 @@ def check_sampling_path(errors: list[str], direct: str | None = None) -> None:
         errors.append("sampling physical job carries a token, extra permissions or host mutation")
     expected_script = [
         "          set -euo pipefail",
-        "          trusted/build.sh compiler_profile_qualification --execute \\",
+        *PREENTRY_RESERVATION_SCRIPT,
+        *PREENTRY_DRIVER_SCRIPT,
+        "          exec \"${drivers[0]}\" compiler_profile_qualification --execute \\",
         "            --phase \"$BQ_SAMPLING_PHASE\" --packet \"$BQ_SAMPLING_PACKET\" \\",
         "            --trusted-root \"$PWD/trusted\" --cleanup-root \"$RUNNER_TEMP\" \\",
         "            --evidence \"$RUNNER_TEMP/compiler-sampling-evidence\"",
     ]
-    if run_scripts(physical) != [expected_script]:
+    if run_scripts(physical) != [list(CLEANUP_GUARD_SCRIPT), list(PHYSICAL_CLOCK_SCRIPT), expected_script]:
         errors.append("sampling must execute only the bounded native controller")
+    if not contains_block(physical, ("      - name: Observe the actual physical job start",
+            "        shell: bash", "        env:", "          BQ_PHYSICAL_CLOCK_KIND: sampling")):
+        errors.append("sampling must bind the public tokenless job-start observation before native entry")
     if "    timeout-minutes: ${{ fromJSON(needs.authorize.outputs.sampling_timeout_minutes) }}" not in physical:
         errors.append("sampling timeout must come from the immutable native reservation")
     if "          ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}" not in physical:
@@ -676,12 +971,17 @@ def check_preparation_path(errors: list[str], direct: str | None = None) -> None
         errors.append("preparation physical job carries a token, extra permissions or host mutation")
     expected_script = [
         "          set -euo pipefail",
-        "          trusted/build.sh compiler_profile_qualification --execute-preparation \\",
+        *PREENTRY_RESERVATION_SCRIPT,
+        *PREENTRY_DRIVER_SCRIPT,
+        "          exec \"${drivers[0]}\" compiler_profile_qualification --execute-preparation \\",
         "            --trusted-root \"$PWD/trusted\" --cleanup-root \"$RUNNER_TEMP\" \\",
         "            --evidence \"$RUNNER_TEMP/compiler-preparation-evidence\"",
     ]
-    if run_scripts(physical) != [expected_script]:
+    if run_scripts(physical) != [list(CLEANUP_GUARD_SCRIPT), list(PHYSICAL_CLOCK_SCRIPT), expected_script]:
         errors.append("preparation must execute only the bounded native controller")
+    if not contains_block(physical, ("      - name: Observe the actual physical job start",
+            "        shell: bash", "        env:", "          BQ_PHYSICAL_CLOCK_KIND: preparation")):
+        errors.append("preparation must bind the public tokenless job-start observation before native entry")
     if "    timeout-minutes: ${{ fromJSON(needs.authorize.outputs.preparation_timeout_minutes) }}" not in physical:
         errors.append("preparation timeout must come from the immutable native reservation")
     if "          ref: ${{ needs.authorize.outputs.preparation_trusted_revision }}" not in physical:
@@ -692,6 +992,73 @@ def check_preparation_path(errors: list[str], direct: str | None = None) -> None
             errors.append(f"preparation lacks bounded authenticated {key} data")
     if any("compiler_compare.py" in line or "compiler-compare-v1" in line for line in physical):
         errors.append("preparation cannot silently prepend an ordinary long comparison")
+
+def check_utility_path(errors: list[str], direct: str | None = None) -> None:
+    """Experimental admission precedes physical assignment; no ordinary short route."""
+    direct = DIRECT.read_text(encoding="utf-8") if direct is None else direct
+    jobs = job_blocks(direct)
+    extra = (ATTEMPT_BINDING, REQUEST_BINDING, "github.run_attempt == 1",
+             "github.event.workflow_run.run_attempt == 1", "needs.authorize.outputs.utility_admitted == 'true'")
+    condition = "    if: ${{ " + " && ".join((*DIRECT_TERMS, *extra)) + " }}"
+    physical_condition = condition[:-3] + " && needs.utility-queue.result == 'success' }}"
+    publish_condition = condition.replace("${{ ", "${{ always() && ")
+    for name, expected in (("utility-queue", condition), ("utility", physical_condition),
+                           ("utility-publish", publish_condition)):
+        job = jobs.get(name, [])
+        if not job or [line for line in job if line.startswith("    if:")] != [expected]:
+            errors.append(f"{name} lacks exact owner, every-attempt and native frozen admission")
+        if any("workflow_dispatch" in line or "secrets." in line or "environment:" in line for line in job):
+            errors.append(f"{name} contains unreviewed authority")
+    for name, command in (("utility-queue", "utility-queue"), ("utility-publish", "utility-publish")):
+        job = jobs.get(name, [])
+        if not contains_block(job, ("    concurrency:", "      group: buster-9700x-check-writer",
+                                    "      cancel-in-progress: false", "      queue: max")):
+            errors.append(f"{name} must retain the shared check writer queue")
+        if not contains_block(job, ("    permissions:", "      contents: read", "      actions: read",
+                                    "      pull-requests: read", "      checks: write")):
+            errors.append(f"{name} must keep writes at the hosted check boundary")
+        if "    runs-on: ubuntu-24.04" not in job or any("self-hosted" in line for line in job):
+            errors.append(f"{name} must be hosted only")
+        if f"        run: python3 -B tools/bench_direct/compiler_publish.py {command}" not in job:
+            errors.append(f"{name} must use the existing trusted publisher")
+        if "          ref: ${{ needs.authorize.outputs.utility_trusted_revision }}" not in job or \
+                "          persist-credentials: false" not in job:
+            errors.append(f"{name} must pin its reviewed consumer implementation")
+    physical = jobs.get("utility", [])
+    if "    needs: [authorize, utility-queue]" not in physical or not contains_block(physical, (
+            "    runs-on:", "      group: buster-9700x-service-dispatch",
+            "      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]")):
+        errors.append("utility physical assignment must follow the hosted queue/admission")
+    if any(marker in line for line in physical for marker in (
+            "GH_TOKEN", "github.token", "permissions:", "sudo", "api.github.com", "curl ", "wget ", "ssh ")):
+        errors.append("utility physical job carries a token, extra permissions or host mutation")
+    expected_script = [
+        "          set -euo pipefail",
+        *PREENTRY_RESERVATION_SCRIPT,
+        *PREENTRY_DRIVER_SCRIPT,
+        "          exec \"${drivers[0]}\" compiler_profile_qualification --execute-utility \\",
+        "            --trusted-root \"$PWD/trusted\" --cleanup-root \"$RUNNER_TEMP\" \\",
+        "            --evidence \"$RUNNER_TEMP/compiler-utility-evidence\"",
+    ]
+    if run_scripts(physical) != [list(CLEANUP_GUARD_SCRIPT), list(PHYSICAL_CLOCK_SCRIPT), expected_script]:
+        errors.append("utility must execute only the bounded native controller")
+    if not contains_block(physical, ("      - name: Observe the actual physical job start",
+            "        shell: bash", "        env:", "          BQ_PHYSICAL_CLOCK_KIND: utility")):
+        errors.append("utility must bind the public tokenless job-start observation before native entry")
+    if "    timeout-minutes: ${{ fromJSON(needs.authorize.outputs.utility_timeout_minutes) }}" not in physical:
+        errors.append("utility timeout must come from the immutable native reservation")
+    if "          ref: ${{ needs.authorize.outputs.utility_trusted_revision }}" not in physical:
+        errors.append("utility measurement implementation is not frozen")
+    for key in ("request", "plan", "allowlist", "facts", "history"):
+        expected = "      BQ_UTILITY_" + key.upper() + "_DATA: ${{ needs.authorize.outputs.utility_" + key + "_data }}"
+        if expected not in physical:
+            errors.append(f"utility lacks bounded authenticated {key} data")
+    if any("compiler_compare.py" in line for line in physical):
+        errors.append("utility must enter ordinary measurements through the fixed native controller")
+    for key in ("pull_head", "worker_seconds", "reservation_seconds", "plan_revision", "plan_sha256"):
+        expected = "      BQ_UTILITY_" + key.upper() + ": ${{ needs.authorize.outputs.utility_" + key + " }}"
+        if expected not in physical:
+            errors.append(f"utility lacks the exact admitted {key} binding")
 
 def check_postmerge_diagnostics(errors: list[str], text: str | None = None) -> None:
     """RAD Debugger tests every triggering main SHA without a pre-merge path."""
@@ -736,7 +1103,7 @@ def check_direct_workflow(errors: list[str]) -> None:
     direct = remove_reviewed_machine_steps(DIRECT.read_text(encoding="utf-8"))
     lines = direct.splitlines()
     jobs = job_blocks(direct)
-    if list(jobs) != ["authorize", "preparation-queue", "preparation", "preparation-publish", "sampling-queue", "sampling", "sampling-publish", "bench", "compare-pull", "start-pull", "publish-pull", "authorize-compiler",
+    if list(jobs) != ["authorize", "utility-queue", "utility", "utility-publish", "preparation-queue", "preparation", "preparation-publish", "sampling-queue", "sampling", "sampling-publish", "bench", "compare-pull", "start-pull", "publish-pull", "authorize-compiler",
                       "start-compiler", "compare", "publish-compiler", "comment-compiler"]:
         errors.append(f"direct workflow jobs must be authorize, bench, compare-pull, start-pull, publish-pull, "
                       f"authorize-compiler, start-compiler, compare, publish-compiler, comment-compiler: {list(jobs)}")
@@ -745,8 +1112,15 @@ def check_direct_workflow(errors: list[str]) -> None:
     # The trigger block is exact: no other event or workflow may start it.
     if trigger_block("\n".join(lines)) != DIRECT_TRIGGER:
         errors.append("direct workflow trigger must be exactly the reviewed workflow_run block")
+    for name in ("bench", "compare-pull", "compare", "sampling", "preparation", "utility"):
+        job = jobs.get(name, [])
+        scripts = run_scripts(job)
+        first_step = job.index("    steps:") + 1 if "    steps:" in job else -1
+        if not scripts or scripts[0] != list(CLEANUP_GUARD_SCRIPT) or first_step < 0 or \
+                job[first_step] != "      - name: Refuse retained native cleanup uncertainty":
+            errors.append(f"{name} must refuse durable UNKNOWN/ACTIVE before any checkout or work")
     declarations = [line.rstrip() for line in lines if line.lstrip().startswith("permissions:")]
-    if declarations != ["permissions: {}"] + ["    permissions:"] * 11:
+    if declarations != ["permissions: {}"] + ["    permissions:"] * 13:
         errors.append("direct workflow must grant GITHUB_TOKEN permissions only to its hosted authorize, "
                       "start, publish and comment jobs")
 
@@ -756,7 +1130,7 @@ def check_direct_workflow(errors: list[str]) -> None:
         if not contains_block(authorize, block):
             errors.append(f"direct authorize job is missing exact block starting: {block[0].strip()}")
     if len([line for line in authorize if "uses:" in line]) != 2 or \
-            len([line for line in authorize if "run:" in line]) != 4:
+            len([line for line in authorize if "run:" in line]) != 5:
         errors.append("direct authorize job must contain only reviewed checkouts, the authorizer and native admission bootstrap")
     for marker in ("buster-zen5", "ryzen-9700x", "self-hosted", "workflow_run.head_branch", "path: candidate"):
         if any(marker in line for line in authorize):
@@ -781,7 +1155,7 @@ def check_direct_workflow(errors: list[str]) -> None:
     uses = [line for line in run if "uses:" in line]
     if len(uses) != len(DIRECT_CHECKOUTS) or not all(contains_block(run, block) for block in DIRECT_CHECKOUTS):
         errors.append("direct bench job must use exactly the two reviewed credential-free checkouts")
-    if run_scripts(run) != [DIRECT_RUN_SCRIPT]:
+    if run_scripts(run) != [list(CLEANUP_GUARD_SCRIPT), DIRECT_RUN_SCRIPT]:
         errors.append("direct bench job must run only main's harness with validated commit IDs")
 
     for number, line in expression_lines_in_scripts(direct):
@@ -853,15 +1227,33 @@ def check_compiler_path(errors: list[str]) -> None:
     for block in COMPILER_AUTHORIZE_BLOCKS:
         if not contains_block(authorize, block):
             errors.append(f"compiler authorize job is missing exact block starting: {block[0].strip()}")
-    if len([line for line in authorize if "uses:" in line]) != 1 or \
-            len([line for line in authorize if "run:" in line]) != 1:
-        errors.append("compiler authorize job must be one trusted checkout and one authorizer call")
+    if len([line for line in authorize if "uses:" in line]) != 2 or \
+            len([line for line in authorize if "run:" in line]) != 2 or \
+            run_scripts(authorize) != [list(MAIN_TINYCC_SCRIPT)] or \
+            any("sparse-checkout:" in line for line in authorize):
+        errors.append("compiler authorize job must use full policy P, pinned TinyCC bootstrap and one fixed authorizer")
+    expected_outputs = [f"      {name}: ${{{{ steps.verify.outputs.{name} }}}}"
+                        for name in (*MAIN_ROUTE_FIELDS, *MAIN_ROUTE_DATA_FIELDS)]
+    actual_outputs = [line for line in authorize
+                      if line.startswith("      ") and line.strip().split(":", 1)[0] in
+                      (*MAIN_ROUTE_FIELDS, *MAIN_ROUTE_DATA_FIELDS)]
+    if actual_outputs != expected_outputs:
+        errors.append("compiler authorize job must emit exactly the reviewed MAIN route and three data transports")
     source = authorizer.read_text(encoding="utf-8")
     for marker in COMPILER_AUTHORIZER_MARKERS:
         if marker not in source:
             errors.append(f"compiler authorizer is missing check: {marker}")
-    if source.count("GITHUB_OUTPUT") != 1 or source.count("stream.write(") != 1:
-        errors.append("compiler authorizer must write its outputs once, after every check")
+    for marker in (
+            "executor = api.request(f\"/actions/runs/{executor_id}/attempts/{attempt}\")",
+            "route = resolve_main_route(api, repository, executor, attempt)",
+            'if route["main_owned"]:',
+            "result.update(main_route_transport(api, repository, executor, attempt, route, dict(result, head=head)))",
+            'for name in (*MAIN_ROUTE_OUTPUT_FIELDS, "main_policy_revision", "main_route_data", "main_facts_data", "main_identity_data"):'):
+        if marker not in source:
+            errors.append(f"compiler authorizer lacks original-attempt native routing/transport: {marker}")
+    if source.count("GITHUB_OUTPUT") != 1 or source.count("stream.write(") != 2 or \
+            source.count('with open(output, "a", encoding="utf-8") as stream:') != 1:
+        errors.append("compiler authorizer must publish fixed identity and routing outputs once after every check")
 
     for line in COMPILER_RUN_LINES:
         if line not in compare:
@@ -870,23 +1262,56 @@ def check_compiler_path(errors: list[str]) -> None:
                    "environment:", "buster-bench", "secrets.", "--sudo", "--profile-steps"):
         if any(marker in line for line in compare):
             errors.append(f"compiler compare job must not use: {marker}")
-    uses = [line for line in compare if "uses:" in line]
-    if len(uses) != len(COMPILER_CHECKOUTS) or not all(contains_block(compare, block) for block in COMPILER_CHECKOUTS):
-        errors.append("compiler compare job must use exactly two credential-free checkouts and the evidence upload")
-    if run_scripts(compare) != [COMPILER_RUN_SCRIPT]:
-        errors.append("compiler compare job must run only main's harness with validated identities")
+    expected_env = [f"      BQ_MAIN_{name.removeprefix('main_').upper()}: ${{{{ needs.authorize-compiler.outputs.{name} }}}}"
+                    for name in MAIN_ROUTE_FIELDS]
+    expected_env.extend(f"          BQ_{name.upper()}: ${{{{ needs.authorize-compiler.outputs.{name} }}}}"
+                        for name in MAIN_ROUTE_DATA_FIELDS)
+    if [line for line in compare if line.strip().startswith("BQ_MAIN_")] != expected_env:
+        errors.append("compiler compare job must bind all twenty route fields and exactly three native data transports")
+    if len([line for line in compare if "uses:" in line]) != 4 or \
+            not all(contains_block(compare, block) for block in MAIN_COMPARE_BLOCKS) or \
+            any("sparse-checkout:" in line for line in compare):
+        errors.append("compiler compare job must use full pinned H, credential-free candidate and two conditional raw uploads")
+    if run_scripts(compare) != [list(CLEANUP_GUARD_SCRIPT), COMPILER_RUN_SCRIPT,
+                                list(PHYSICAL_CLOCK_SCRIPT), list(MAIN_OWNED_SCRIPT)]:
+        errors.append("compiler MAIN must keep the historical recipe or execute only the tokenless clock and exact native owned entry")
+    if "    timeout-minutes: 90" not in compare:
+        errors.append("compiler MAIN must retain the ninety-minute whole-job ceiling")
 
     for block in COMPILER_PUBLISH_BLOCKS:
         if not contains_block(publish, block):
             errors.append(f"compiler publish job is missing exact block starting: {block[0].strip()}")
-    if len([line for line in publish if "uses:" in line]) != 1 or \
-            len([line for line in publish if "run:" in line]) != 1:
-        errors.append("compiler publish job must be one trusted checkout and one publisher call")
+    if len([line for line in publish if "uses:" in line]) != 2 or \
+            len([line for line in publish if "run:" in line]) != 2 or \
+            run_scripts(publish) != [list(MAIN_TINYCC_SCRIPT)] or \
+            any("sparse-checkout:" in line for line in publish):
+        errors.append("compiler publish job must use full frozen H readers, pinned TinyCC and one trusted publisher call")
     for name, job in (("authorize-compiler", authorize), ("publish-compiler", publish)):
         for marker in ("buster-zen5", "ryzen-9700x", "self-hosted", "path: candidate", "contents: write",
                        "pull-requests: write", "actions: write", "statuses: write"):
             if any(marker in line for line in job):
                 errors.append(f"compiler {name} job must not use: {marker}")
+    native = ROOT / "tools" / "compiler_main_comparison_controller.c"
+    runtime = ROOT / "tools" / "compiler_main_profile_policy.c"
+    for path, markers in (
+            (native, ("#define BUSTER_MAIN_WHOLE_BUDGET_US 5400000000ull",
+                      "#define BUSTER_MAIN_WORKER_BUDGET_US 5280000000ull",
+                      "compiler_main_runtime_main(arena,",
+                      'compiler_experiment_job_clock_resolve(arena,S8("main"),facts[4],&state.clock)',
+                      "compiler_closure_owned_phase(arena,os_argument_builder_flush(&builder))",
+                      "bool copied=quiet && compiler_main_controller_copy(arena,state);",
+                      'S8("main-owner.json.bootstrap.complete")',
+                      'S8("main-runtime.tsv")', 'S8("main-clock.tsv")')),
+            (runtime, ('S8("buster-compiler-main-runtime-v1")', 'proof[33]',
+                       'S8("python_sha256")', 'S8("driver_sha256")', 'S8("lab_sha256")',
+                       'S8("measurement_revision")', 'S8("policy_revision")'))):
+        if not path.is_file():
+            errors.append(f"compiler MAIN native runtime/owner is missing: {path.relative_to(ROOT)}")
+        else:
+            native_source = path.read_text(encoding="utf-8")
+            for marker in markers:
+                if marker not in native_source:
+                    errors.append(f"compiler MAIN lacks fixed native runtime, cleanup or tail guard: {marker}")
 
     compare_pull, publish_pull = jobs.get("compare-pull", []), jobs.get("publish-pull", [])
     for line in PULL_RUN_LINES:
@@ -901,7 +1326,7 @@ def check_compiler_path(errors: list[str]) -> None:
     if len([line for line in compare_pull if "uses:" in line]) != len(PULL_CHECKOUTS) or \
             not all(contains_block(compare_pull, block) for block in PULL_CHECKOUTS):
         errors.append("pull compare job must use exactly two credential-free checkouts and the evidence upload")
-    if run_scripts(compare_pull) != [PULL_RUN_SCRIPT]:
+    if run_scripts(compare_pull) != [list(CLEANUP_GUARD_SCRIPT), PULL_RUN_SCRIPT]:
         errors.append("pull compare job must run only main's harness with validated identities")
     for block in PULL_PUBLISH_BLOCKS:
         if not contains_block(publish_pull, block):
@@ -1006,8 +1431,12 @@ def check_visibility(errors: list[str], jobs: dict[str, list[str]]) -> None:
         for block in blocks:
             if not contains_block(job, block):
                 errors.append(f"report recovery {name} job is missing exact block starting: {block[0].strip()}")
-        if len([line for line in job if "uses:" in line]) != 1 or len([line for line in job if "run:" in line]) != 1:
-            errors.append(f"report recovery {name} job must be one trusted checkout and one trusted script call")
+        # Validation adds only the pinned TinyCC checkout/install used by the native main-route resolver.
+        expected_steps = (2, 2) if name == "validate" else (1, 1)
+        if (len([line for line in job if "uses:" in line]), len([line for line in job if "run:" in line])) != expected_steps:
+            errors.append(f"report recovery {name} job must be its trusted checkouts and trusted script calls only")
+        if name == "validate" and any("sparse-checkout:" in line for line in job):
+            errors.append("report recovery validation needs the full trusted checkout for native main routing")
         for marker in (*HOSTED_FORBIDDEN, *(("actions: read", "checks:", "pull-requests:") if name == "comment"
                                             else ("contents: write", "checks: write"))):
             if any(marker in line for line in job):

@@ -3059,12 +3059,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_address_rematerialization(
     return result;
 }
 
-// A staged edge copy (three parameters on one jump) whose sources are a
-// constant, a frame address and a loaded value: the two recreatable sources
+// An edge copy (three parameters on one jump) whose sources are a constant,
+// a frame address and a loaded value: the two recreatable sources
 // rematerialize straight into their destinations
-// (`MACHINE_FAST_EDGE_SOURCE_RECREATED`), and only the loaded value passes
-// through the edge-copy tile as one temporary store and one reload. Each
-// rematerialization lands in the register the parameter's use reads.
+// (`MACHINE_FAST_EDGE_SOURCE_RECREATED`), and the loaded value moves between
+// registers in the parallel publication (`machine_fast_publish_edge_parallel`),
+// so the edge-copy tile is never touched. Each rematerialization lands in
+// the register the parameter's use reads.
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_recreated_edge_sources(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3168,7 +3169,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_recreated_edge_sources(UnitTestA
             String8 description = string_format(arena, S8("recreated edge sources {S8} {S8}: tile {u32}/{u32}, constant {u32}, frame {u32}"),
                 aarch64 ? S8("aarch64") : S8("x86_64"), mode == 0 ? S8("fast") : S8("quality"), temporary_spills, temporary_reloads,
                 constant_location, frame_location);
-            BUSTER_TEST_RAW(arguments, temporary_spills == 1 && temporary_reloads == 1, description);
+            BUSTER_TEST_RAW(arguments, temporary_spills == 0 && temporary_reloads == 0, description);
             BUSTER_TEST_RAW(arguments, constant_location != UINT32_MAX && frame_location != UINT32_MAX, description);
             BUSTER_TEST_RAW(arguments, constant_location == placement.operand_registers[(u64)first_use * 4u + 1u] &&
                                            frame_location == placement.operand_registers[(u64)(first_use + 1u) * 4u + 1u],
@@ -9443,6 +9444,211 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_capacity(UnitTestArg
     return result;
 }
 
+// Frame locals first written after the entry block (#2717): x is written on
+// both arms of a diamond, so it is available after each write and through the
+// whole join; y is written on one arm only and never reaches the join. Both
+// builders must produce the same ranges.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_initialized_blocks(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { INSTRUCTION_COUNT = 11, BLOCK_COUNT = 4, EDGE_COUNT = 4 };
+    IrValueId store_x_operands[2] = {{.value = 0}, {.value = 2}};
+    IrValueId store_y_operands[2] = {{.value = 1}, {.value = 2}};
+    IrInstruction instructions[INSTRUCTION_COUNT] = {
+        {.opcode = IR_OPCODE_LOCAL, .result = {.value = 0}, .canonical_local = {.value = 0}},
+        {.opcode = IR_OPCODE_LOCAL, .result = {.value = 1}, .canonical_local = {.value = 1}},
+        {.opcode = IR_OPCODE_CONSTANT_INTEGER, .result = {.value = 2}, .canonical_local = IR_LOCAL_ID_INVALID},
+        {.opcode = IR_OPCODE_BRANCH_IF, .result = IR_VALUE_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID},
+        {.opcode = IR_OPCODE_STORE, .result = IR_VALUE_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID,
+         .operands = store_x_operands, .operand_count = 2},
+        {.opcode = IR_OPCODE_STORE, .result = IR_VALUE_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID,
+         .operands = store_y_operands, .operand_count = 2},
+        {.opcode = IR_OPCODE_BRANCH, .result = IR_VALUE_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID},
+        {.opcode = IR_OPCODE_STORE, .result = IR_VALUE_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID,
+         .operands = store_x_operands, .operand_count = 2},
+        {.opcode = IR_OPCODE_BRANCH, .result = IR_VALUE_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID},
+        {.opcode = IR_OPCODE_CONSTANT_INTEGER, .result = IR_VALUE_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID},
+        {.opcode = IR_OPCODE_RETURN, .result = IR_VALUE_ID_INVALID, .canonical_local = IR_LOCAL_ID_INVALID},
+    };
+    IrValue values[3] = {
+        {.definition = {.value = 0}, .canonical_type = IR_TYPE_ID_INVALID, .category = IR_VALUE_PLACE},
+        {.definition = {.value = 1}, .canonical_type = IR_TYPE_ID_INVALID, .category = IR_VALUE_PLACE},
+        {.definition = {.value = 2}, .canonical_type = IR_TYPE_ID_INVALID},
+    };
+    IrValueId local_places[2] = {{.value = 0}, {.value = 1}};
+    IrBlock blocks[BLOCK_COUNT] = {
+        {.id = {.value = 0}, .first_instruction = {.value = 0}},
+        {.id = {.value = 1}, .first_instruction = {.value = 4}},
+        {.id = {.value = 2}, .first_instruction = {.value = 7}},
+        {.id = {.value = 3}, .first_instruction = {.value = 9}},
+    };
+    IrCfgBlock cfg_blocks[BLOCK_COUNT] = {
+        {.first_instruction = 0, .instruction_count = 4, .successor_offset = 0, .successor_count = 2},
+        {.first_instruction = 4, .instruction_count = 3, .successor_offset = 2, .successor_count = 1, .predecessor_offset = 0,
+         .predecessor_count = 1},
+        {.first_instruction = 7, .instruction_count = 2, .successor_offset = 3, .successor_count = 1, .predecessor_offset = 1,
+         .predecessor_count = 1},
+        {.first_instruction = 9, .instruction_count = 2, .successor_offset = 4, .predecessor_offset = 2, .predecessor_count = 2},
+    };
+    IrCfgEdge edges[EDGE_COUNT] = {
+        {.source = {.value = 0}, .destination = {.value = 1}},
+        {.source = {.value = 0}, .destination = {.value = 2}},
+        {.source = {.value = 1}, .destination = {.value = 3}},
+        {.source = {.value = 2}, .destination = {.value = 3}},
+    };
+    u32 predecessors[EDGE_COUNT] = {0, 1, 2, 3};
+    IrPublishedCfg published = {
+        .blocks = cfg_blocks,
+        .edges = edges,
+        .predecessors = predecessors,
+        .block_count = BLOCK_COUNT,
+        .instruction_count = INSTRUCTION_COUNT,
+        .edge_count = EDGE_COUNT,
+    };
+    IrDebugLocal locals[2] = {{.id = {.value = 0}}, {.id = {.value = 1}}};
+    IrFunction function = {
+        .instructions = instructions,
+        .values = values,
+        .blocks = blocks,
+        .debug_locals = locals,
+        .published_cfg = &published,
+        .local_places = local_places,
+        .instruction_count = INSTRUCTION_COUNT,
+        .value_count = BUSTER_ARRAY_LENGTH(values),
+        .block_count = BLOCK_COUNT,
+        .local_count = 2,
+        .debug_local_count = 2,
+    };
+    // {local, first instruction, instruction count}
+    u32 const expected[][3] = {{0, 5, 2}, {0, 8, 1}, {0, 9, 2}, {1, 6, 1}};
+    IrProgram program = {0};
+    MachineFunction indexed = {0};
+    MachineFunction dense = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    bool indexed_built = machine_test_debug_values_build(temporary.arena, &program, &function, &indexed, 0, 0);
+    bool dense_built = machine_test_debug_values_build_dense(temporary.arena, &program, &function, &dense, 0, 0);
+    bool counted = indexed_built && dense_built && indexed.debug_value_count == BUSTER_ARRAY_LENGTH(expected) &&
+                   dense.debug_value_count == BUSTER_ARRAY_LENGTH(expected);
+    BUSTER_TEST(arguments, counted);
+    for (u32 index = 0; counted && index < BUSTER_ARRAY_LENGTH(expected); index += 1)
+    {
+        MachineDebugValue indexed_value = indexed.debug_values[index];
+        MachineDebugValue dense_value = dense.debug_values[index];
+        BUSTER_TEST(arguments, indexed_value.local.value == expected[index][0] && indexed_value.first_instruction == expected[index][1] &&
+                                   indexed_value.instruction_count == expected[index][2] &&
+                                   dense_value.local.value == indexed_value.local.value &&
+                                   dense_value.first_instruction == indexed_value.first_instruction &&
+                                   dense_value.instruction_count == indexed_value.instruction_count && dense_value.kind == indexed_value.kind);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// The deferred-local output budget (#2717): in a straight chain of blocks, x
+// written in the second block would need one range per later block, which
+// exceeds MACHINE_DEBUG_INITIALIZED_RANGE_LIMIT, so it falls back to a single
+// unavailable row; y, written in the last block, still fits and keeps its range.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_initialized_budget(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { BLOCK_COUNT = (1 << 14) + 8, INSTRUCTION_COUNT = BLOCK_COUNT + 5 };
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    IrInstruction* instructions = arena_allocate(temporary.arena, IrInstruction, INSTRUCTION_COUNT);
+    IrBlock* blocks = arena_allocate(temporary.arena, IrBlock, BLOCK_COUNT);
+    IrCfgBlock* cfg_blocks = arena_allocate(temporary.arena, IrCfgBlock, BLOCK_COUNT);
+    IrCfgEdge* edges = arena_allocate(temporary.arena, IrCfgEdge, BLOCK_COUNT);
+    u32* predecessors = arena_allocate(temporary.arena, u32, BLOCK_COUNT);
+    IrValueId store_x_operands[2] = {{.value = 0}, {.value = 2}};
+    IrValueId store_y_operands[2] = {{.value = 1}, {.value = 2}};
+    // Entry: LOCAL x, LOCAL y, constant, branch. Block 1: store x, branch.
+    // Last block: store y, return. Every other block is a lone branch.
+    u32 cursor = 0;
+    for (u32 block_index = 0; block_index < BLOCK_COUNT; block_index += 1)
+    {
+        u32 first = cursor;
+        if (block_index == 0)
+        {
+            instructions[cursor++] = (IrInstruction){.opcode = IR_OPCODE_LOCAL, .result = {.value = 0}, .canonical_local = {.value = 0}};
+            instructions[cursor++] = (IrInstruction){.opcode = IR_OPCODE_LOCAL, .result = {.value = 1}, .canonical_local = {.value = 1}};
+            instructions[cursor++] = (IrInstruction){.opcode = IR_OPCODE_CONSTANT_INTEGER, .result = {.value = 2},
+                                                     .canonical_local = IR_LOCAL_ID_INVALID};
+        }
+        else if (block_index == 1 || block_index == BLOCK_COUNT - 1)
+        {
+            instructions[cursor++] = (IrInstruction){.opcode = IR_OPCODE_STORE, .result = IR_VALUE_ID_INVALID,
+                                                     .canonical_local = IR_LOCAL_ID_INVALID,
+                                                     .operands = block_index == 1 ? store_x_operands : store_y_operands, .operand_count = 2};
+        }
+        bool last = block_index == BLOCK_COUNT - 1;
+        instructions[cursor++] = (IrInstruction){.opcode = last ? IR_OPCODE_RETURN : IR_OPCODE_BRANCH, .result = IR_VALUE_ID_INVALID,
+                                                 .canonical_local = IR_LOCAL_ID_INVALID};
+        blocks[block_index] = (IrBlock){.id = {.value = block_index}, .first_instruction = {.value = first}};
+        cfg_blocks[block_index] = (IrCfgBlock){
+            .first_instruction = first,
+            .instruction_count = cursor - first,
+            .successor_offset = block_index,
+            .successor_count = last ? 0 : 1,
+            .predecessor_offset = block_index ? block_index - 1 : 0,
+            .predecessor_count = block_index ? 1 : 0,
+        };
+        edges[block_index] = (IrCfgEdge){.source = {.value = block_index}, .destination = {.value = last ? 0 : block_index + 1}};
+        predecessors[block_index] = block_index;
+    }
+    IrValue values[3] = {
+        {.definition = {.value = 0}, .canonical_type = IR_TYPE_ID_INVALID, .category = IR_VALUE_PLACE},
+        {.definition = {.value = 1}, .canonical_type = IR_TYPE_ID_INVALID, .category = IR_VALUE_PLACE},
+        {.definition = {.value = 2}, .canonical_type = IR_TYPE_ID_INVALID},
+    };
+    IrValueId local_places[2] = {{.value = 0}, {.value = 1}};
+    IrPublishedCfg published = {
+        .blocks = cfg_blocks,
+        .edges = edges,
+        .predecessors = predecessors,
+        .block_count = BLOCK_COUNT,
+        .instruction_count = cursor,
+        .edge_count = BLOCK_COUNT - 1,
+    };
+    IrDebugLocal locals[2] = {{.id = {.value = 0}}, {.id = {.value = 1}}};
+    IrFunction function = {
+        .instructions = instructions,
+        .values = values,
+        .blocks = blocks,
+        .debug_locals = locals,
+        .published_cfg = &published,
+        .local_places = local_places,
+        .instruction_count = cursor,
+        .value_count = BUSTER_ARRAY_LENGTH(values),
+        .block_count = BLOCK_COUNT,
+        .local_count = 2,
+        .debug_local_count = 2,
+    };
+    IrProgram program = {0};
+    MachineFunction indexed = {0};
+    MachineFunction dense = {0};
+    bool indexed_built = machine_test_debug_values_build(temporary.arena, &program, &function, &indexed, 0, 0);
+    bool dense_built = machine_test_debug_values_build_dense(temporary.arena, &program, &function, &dense, 0, 0);
+    bool counted = cursor == INSTRUCTION_COUNT && indexed_built && dense_built && indexed.debug_value_count == 2 &&
+                   dense.debug_value_count == 2;
+    BUSTER_TEST(arguments, counted);
+    if (counted)
+    {
+        MachineDebugValue x = indexed.debug_values[0];
+        MachineDebugValue y = indexed.debug_values[1];
+        u32 y_first = cfg_blocks[BLOCK_COUNT - 1].first_instruction + 1;
+        BUSTER_TEST(arguments, x.local.value == 0 && x.kind == MACHINE_DEBUG_VALUE_UNAVAILABLE && x.first_instruction == UINT32_MAX);
+        BUSTER_TEST(arguments, y.local.value == 1 && y.first_instruction == y_first && y.instruction_count == 1);
+        for (u32 index = 0; index < 2; index += 1)
+        {
+            MachineDebugValue left = indexed.debug_values[index];
+            MachineDebugValue right = dense.debug_values[index];
+            BUSTER_TEST(arguments, left.local.value == right.local.value && left.kind == right.kind &&
+                                       left.first_instruction == right.first_instruction && left.instruction_count == right.instruction_count);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_sparse_local_state(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -10039,6 +10245,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_line_mark_repair);
     BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_trace_equivalence);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_capacity);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_initialized_blocks);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_initialized_budget);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_differential);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_sparse_work);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);

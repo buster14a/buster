@@ -886,6 +886,9 @@ typedef enum CTypeKind
     C_TYPE_STRUCT,
     C_TYPE_UNION,
     C_TYPE_ENUM,
+    // Header admission only: bare __fp16 in __builtin_bit_cast's type slot.
+    // Keep its storage identity distinct; reachable lowering is refused.
+    C_TYPE_FP16_STORAGE,
     C_TYPE_COUNT,
 } CTypeKind;
 
@@ -1426,8 +1429,8 @@ typedef struct CNumberFacts CNumberFacts;
 typedef struct CAst CAst;
 
 // What the tree expression typer (c_ast_types.c, GitHub #3102) did over one
-// analysis: bodies it typed, expression nodes it typed, and how each type
-// query that reached it ended. An answer replaced the type machine; a decline
+// analysis: function bodies and file-scope initializers it typed, expression
+// nodes it typed, and how each type query that reached it ended. An answer replaced the type machine; a decline
 // mapped to a node the typer does not accept (or accepts only unchecked); a
 // miss mapped to no node; a gated query met a machine state the typer leaves
 // to the machine (nested frames, a constant-evaluation mode, no capacity).
@@ -1435,6 +1438,7 @@ typedef struct CAstTypeStatistics CAstTypeStatistics;
 struct CAstTypeStatistics
 {
     u64 bodies;
+    u64 initializers;
     // Expression nodes the eager pass visited, and the ones it gave a type.
     u64 nodes_typed;
     u64 nodes_accepted;
@@ -1469,6 +1473,12 @@ struct CParserResult
     u32 diagnostic_count;
     u32 declaration_capacity;
     u32 diagnostic_capacity;
+    // Share the primitive and pointer rows the file-scope initializer and
+    // function-body queries mint (CTypeInterning in c_internal.h), which the
+    // tree's answers for casts and `&` need. The driver asks for it with the
+    // tree (-fc-ast-pilot); without it every row is appended, as the default
+    // path always has.
+    bool type_interning;
 };
 
 // Definition token -> lowest type id ever given that definition_start.
@@ -1521,6 +1531,7 @@ struct CAggregateLookupSlot
     bool multiple;
 };
 
+typedef struct CTypeInterning CTypeInterning;
 typedef struct CAggregateLookup CAggregateLookup;
 struct CAggregateLookup
 {
@@ -1530,6 +1541,11 @@ struct CAggregateLookup
     // Only an exhausted arena or unrepresentable growth makes the index
     // incomplete. Duplicate scoped tags use the separate per-slot flag.
     bool incomplete;
+    // The interned primitive and pointer rows (CTypeInterning in c_internal.h),
+    // the other row index that must survive a rollback. It hangs off this
+    // header rather than CParseResult, whose every checkpoint copies it; a
+    // private query's own header has none, so it appends every row.
+    CTypeInterning* type_interning;
 #if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
     u64 probe_count;
     u64 rehash_slot_count;
@@ -1744,6 +1760,12 @@ struct CParseResult
     // Lazy worklist of typed BF16 target-builtin calls, checked before unused
     // definitions can disappear. Other translation units allocate no storage.
     u32* bfloat16_builtin_calls;
+    // Per-token semantic facts for storage-half expressions and generic calls.
+    // Null in ordinary translation units.
+    u8* storage_half_cast_calls;
+    u8* storage_half_bitcast_calls;
+    u8* storage_half_convertvector_calls;
+    bool storage_half_spelling_present;
     // Children of each scope in ascending token-interval order, built by
     // c_parse_index_scope_children once scopes are final; zero when absent.
     // c_parse_scope_for_token descends this index instead of scanning every
@@ -1817,6 +1839,9 @@ struct CParseResult
     u32 noreturn_function_type_capacity;
     u32 type_alignment_count;
     u32 type_alignment_capacity;
+    // The live entries of the interning log (CAggregateLookup.type_interning),
+    // checkpointed with type_count so a rollback forgets the rows it removes.
+    u32 interned_type_count;
     u32 bfloat16_builtin_call_count;
     u32 bfloat16_builtin_call_capacity;
     // Phase-arena bytes semantic analysis released (logical) and the releases
@@ -2016,8 +2041,9 @@ typedef enum CParserTreeFallback
     // A parenthesized specifier (typeof, _Atomic(T), _Alignas, _BitInt) or
     // an enum's fixed underlying type.
     C_PARSER_TREE_FALLBACK_SPECIFIERS,
-    // Redundant parentheses (#3215's family), attributes inside the
-    // declarator, a function derivation followed by a suffix, or no name.
+    // Redundant parentheses after a typedef or tag name (#3215's family),
+    // attributes inside the declarator, a function derivation followed by a
+    // suffix, or no name.
     C_PARSER_TREE_FALLBACK_DECLARATOR,
     // An old-style definition with a declaration list.
     C_PARSER_TREE_FALLBACK_OLD_STYLE,

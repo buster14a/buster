@@ -65,7 +65,7 @@ HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 MAX_API_PAGES = 10
 # The controller opens catch-up requests from this bot-owned branch only.
-CATCH_UP_BRANCH = "native-retirement/catch-up"
+CATCH_UP_BRANCH = integration.CATCH_UP_BRANCH
 # GitHub's compare API lists at most this many files; more means "unknown".
 COMPARE_FILE_LIMIT = 300
 
@@ -135,12 +135,8 @@ def classification_requires_writer(classification) -> bool:
     return classification.kind in ("bootstrap", "policy")
 
 
-def generated_changed_between(repo: Path, old: str, new: str) -> bool:
-    result = integration._git(
-        repo, "diff", "--name-only", "--no-renames", "-z", old, new, "--",
-        *sorted(integration.GENERATED_PATHS),
-    )
-    return any(path for path in result.stdout.split("\0"))
+# The writer shares this predicate when a catch-up publishes after main moved.
+generated_changed_between = integration.generated_changed_between
 
 
 def require_ancestor(repo: Path, old: str, new: str, message: str) -> None:

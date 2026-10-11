@@ -810,6 +810,7 @@ jobs:
         shell: powershell
         env:
           BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
+          BUSTER_TEST_PRESERVE_TEMPORARIES_ON_FAILURE: '1'
           BUSTER_CI_CHECKS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && '1' || '0' }}
           BUSTER_MATRIX_TEST_ADMISSION: ${{ github.event_name == 'workflow_dispatch' && matrix.arch == 'x86_64' && matrix.shard == 'checks' && (github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds') && 'all-builds' || 'overlap' }}
           VS_ARCH: ${{ matrix.vs_arch }}

@@ -1831,7 +1831,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_semantic_tests(UnitTestAr
             {S8("ifunc"), S8("static int implementation(int x) { return x * 3; }\n"
                 "static int (*resolve_scale(void))(int) { return implementation; }\n"
                 "int scale(int) __attribute__((ifunc(\"resolve_scale\")));\n"
-                "int main(void) { return scale(7) != 21; }\n"), S8("unsupported ELF symbol scale (type 10)")},
+                "int main(void) { return scale(7) != 21; }\n"), {0}},
             {S8("ctors"), S8("static int ran; static void hook(void) { ran = 1; }\n"
                 "__attribute__((section(\".ctors\"), used)) static void (*entry)(void) = hook;\n"
                 "int main(void) { return ran != 1; }\n"), S8("unsupported ELF section .ctors (type 1)")},
@@ -1921,13 +1921,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_semantic_tests(UnitTestAr
                     BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && compiled.error == COMPILER_DRIVER_ERROR_NONE);
                     if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
                 }
-                if (index == 0)
+                // An IFUNC-only member is selected from an archive and still
+                // resolves through its resolver (issue 1243).
+                String8 member_source = string_format_z(arena, S8("{S8}/ifunc-member.c"), root);
+                String8 member_object = string_format_z(arena, S8("{S8}/ifunc-member.o"), root);
+                String8 member_compile[] = {S8("-O2"), S8("-fno-pie"), S8("-c"), member_source, S8("-o"), member_object};
+                bool member_produced = index == 0 &&
+                    file_write(member_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("static int implementation(int x) { return x * 3; }\n"
+                        "static int (*resolve_scale(void))(int) { return implementation; }\n"
+                        "int scale(int) __attribute__((ifunc(\"resolve_scale\")));\n"))) &&
+                    compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(member_compile));
+                if (index == 0) BUSTER_TEST(arguments, member_produced);
+                if (member_produced)
                 {
-                    ByteSlice member = file_read(arena, object, (FileReadOptions){0});
+                    ByteSlice member = file_read(arena, member_object, (FileReadOptions){0});
                     ByteSlice archive_bytes = compiler_driver_elf_semantic_archive(arena, member);
                     ObjectArchive eager = object_archive_read(arena, archive_bytes, target_native);
-                    BUSTER_TEST(arguments, eager.error == OBJECT_ERROR_UNSUPPORTED_TARGET && eager.failed_member == 0);
-                    BUSTER_STRING_TEST(arguments, eager.diagnostic, S8("member semantic.o: unsupported ELF symbol scale (type 10)"));
+                    BUSTER_TEST(arguments, eager.error == OBJECT_ERROR_NONE && eager.object_count == 1);
                     ObjectArchive lazy = object_archive_read_link(arena, archive_bytes, target_native);
                     BUSTER_TEST(arguments, lazy.error == OBJECT_ERROR_NONE && lazy.object_count == 1);
                     String8 archive = string_format_z(arena, S8("{S8}/ifunc.a"), root);
@@ -1942,21 +1952,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_semantic_tests(UnitTestAr
                         String8 link[] = {S8("-no-pie"), caller, archive, S8("-o"), image};
                         invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link));
                         CompilerDriverResult archived = compiler_driver_execute_invocation(arena, invocation);
-                        if (selected)
-                        {
-                            BUSTER_TEST(arguments, archived.error == COMPILER_DRIVER_ERROR_OBJECT && archived.object_error == OBJECT_ERROR_UNSUPPORTED_TARGET);
-                            String8 cpu = cpu_arch_to_string_os(target_native.cpu_arch);
-                            String8 os = operating_system_to_string_os(target_native.os);
-                            BUSTER_STRING_TEST(arguments, archived.diagnostic, string_format(arena,
-                                S8("could not read archive {S8}: selected member semantic.o ({S8}-{S8}) for {S8}-{S8}: unsupported ELF symbol scale (type 10); error {u32}"),
-                                archive, cpu, os, cpu, os, (u32)OBJECT_ERROR_UNSUPPORTED_TARGET));
-                            BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(image));
-                        }
-                        else
-                        {
-                            BUSTER_TEST(arguments, archived.error == COMPILER_DRIVER_ERROR_NONE);
-                            if (archived.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, image));
-                        }
+                        BUSTER_TEST(arguments, archived.error == COMPILER_DRIVER_ERROR_NONE);
+                        if (archived.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, image));
                     }
                 }
             }
@@ -2134,8 +2131,370 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_preinit_tests(UnitTestArg
 #endif
             BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(shared_output));
         }
+        // A dynamic executable's preinit entries are the loader's: ld.so runs
+        // DT_PREINIT_ARRAY, with argc, argv and envp, before the constructors
+        // of the shared libraries it loads, and those before the executable's
+        // own. The trace is 9 (preinit), 2 (the library), 3 (the program);
+        // an entry stub call would give 293. `-pie` exists only on x86-64.
+        String8 library_source = string_format_z(arena, S8("{S8}/preinitdep.c"), root);
+        String8 library = string_format_z(arena, S8("{S8}/libpreinitdep.so"), root);
+        String8 dynamic_source = string_format_z(arena, S8("{S8}/dynamic.c"), root);
+        String8 dynamic_object = string_format_z(arena, S8("{S8}/dynamic.o"), root);
+        BUSTER_TEST(arguments, file_write(library_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "extern volatile int trace;\n"
+            "__attribute__((constructor)) static void library_constructor(void) { trace = trace * 10 + 2; }\n"
+            "int preinit_dependency_touch(void) { return 0; }\n"))));
+        BUSTER_TEST(arguments, file_write(dynamic_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "volatile int trace;\n"
+            "static void early(int argc, char **argv, char **envp) { trace = trace * 10 + (argc == 1 && argv[0] && envp ? 9 : 8); }\n"
+            "__attribute__((section(\".preinit_array\"), used)) static void (*entry)(int, char **, char **) = early;\n"
+            "__attribute__((constructor)) static void own(void) { trace = trace * 10 + 3; }\n"
+            "int preinit_dependency_touch(void);\n"
+            "int main(void) { return preinit_dependency_touch() + (trace != 923); }\n"))));
+        String8 library_compile[] = {S8("-w"), S8("-O2"), S8("-fPIC"), S8("-shared"), library_source, S8("-o"), library};
+        String8 dynamic_compile[] = {S8("-w"), S8("-O2"), S8("-fPIE"), S8("-c"), dynamic_source, S8("-o"), dynamic_object};
+        bool dynamic_produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(library_compile)) &&
+                                compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(dynamic_compile));
+        BUSTER_TEST(arguments, dynamic_produced);
+        if (dynamic_produced)
+        {
+            String8 library_directory = string_format_z(arena, S8("-L{S8}"), root);
+            String8 dynamic_oracle = string_format_z(arena, S8("{S8}/dynamic-oracle"), root);
+            String8 dynamic_host_link[] = {S8("-no-pie"), dynamic_object, library_directory, S8("-lpreinitdep"), S8("-o"), dynamic_oracle};
+            bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(dynamic_host_link));
+            BUSTER_TEST(arguments, linked);
+            if (linked) BUSTER_TEST(arguments, compiler_driver_tls_export_run(arguments, dynamic_oracle, root));
+#if BUSTER_CPU_ARCH_X86_64
+            String8 kinds[] = {S8("-no-pie"), S8("-pie")};
+#else
+            String8 kinds[] = {S8("-no-pie")};
+#endif
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(kinds); index += 1)
+            {
+                String8 output = string_format_z(arena, S8("{S8}/dynamic{S8}-buster"), root, kinds[index]);
+                String8 command[] = {kinds[index], dynamic_object, library_directory, S8("-lpreinitdep"), S8("-o"), output};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_tls_export_run(arguments, output, root));
+            }
+        }
         BUSTER_TEST(arguments, os_directory_delete(root));
     }
+    return result;
+}
+
+// Issue 1243: a GNU IFUNC from a host-compiled object resolves through its
+// resolver, exactly once, and every reference -- calls from either object, a
+// local function pointer, a pointer in initialized data and one taken inside
+// the defining object -- sees one address. The resolver returns a different
+// function on any later call, so a second call or a direct call of the
+// resolver changes the result. Both link orders are linked by this linker, as
+// a static image (no libc reference) and a dynamic one, `-pie` on x86-64, and
+// against the host linker as the oracle. On x86-64 the defining object is
+// also linked `-shared` by this linker and loaded by a host-linked program.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_ifunc_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 compiler = S8(BUSTER_HOST_C_COMPILER_ID);
+    bool supported = string_equal(compiler, S8("GNU")) || string_equal(compiler, S8("Clang"));
+    if (supported)
+    {
+        String8 root = buster_test_temporary_path(arena, S8("buster-elf-ifunc"), S8(""));
+        OsDirectoryCreateResult created = os_make_directory(root);
+        BUSTER_TEST(arguments, created.error.v == 0);
+        String8 library_source = string_format_z(arena, S8("{S8}/scale.c"), root);
+        String8 library_object = string_format_z(arena, S8("{S8}/scale.o"), root);
+        String8 shared_object = string_format_z(arena, S8("{S8}/scale-pic.o"), root);
+        BUSTER_TEST(arguments, file_write(library_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "static int twice(int x) { return x * 2; }\n"
+            "static int thrice(int x) { return x * 3; }\n"
+            "static int resolutions;\n"
+            "static int (*resolve_scale(void))(int) { resolutions += 1; return resolutions == 1 ? thrice : twice; }\n"
+            "int scale(int) __attribute__((ifunc(\"resolve_scale\")));\n"
+            "int (*library_pointer(void))(int) { return scale; }\n"
+            "int library_call(int x) { return scale(x); }\n"))));
+        String8 mains[] = {S8("static"), S8("dynamic")};
+        // The dynamic program differs only in the libc call that makes the image dynamic.
+        String8 main_programs[] = {
+            S8("int scale(int);\n"
+               "int (*library_pointer(void))(int);\n"
+               "int library_call(int);\n"
+               "int (*volatile data_pointer)(int) = scale;\n"
+               "int main(void)\n"
+               "{\n"
+               "    int (*local)(int) = scale;\n"
+               "    int ok = scale(7) == 21 && library_call(7) == 21 && local(7) == 21 && data_pointer(7) == 21 &&\n"
+               "             local == library_pointer() && local == data_pointer;\n"
+               "    return !ok;\n"
+               "}\n"),
+            S8("int puts(const char *);\n"
+               "int scale(int);\n"
+               "int (*library_pointer(void))(int);\n"
+               "int library_call(int);\n"
+               "int (*volatile data_pointer)(int) = scale;\n"
+               "int main(void)\n"
+               "{\n"
+               "    int (*local)(int) = scale;\n"
+               "    int ok = scale(7) == 21 && library_call(7) == 21 && local(7) == 21 && data_pointer(7) == 21 &&\n"
+               "             local == library_pointer() && local == data_pointer;\n"
+               "    puts(ok ? \"ifunc ok\" : \"ifunc wrong\");\n"
+               "    return !ok;\n"
+               "}\n"),
+        };
+        String8 main_sources[2];
+        String8 main_objects[2];
+        for (u32 index = 0; index < 2; index += 1)
+        {
+            main_sources[index] = string_format_z(arena, S8("{S8}/main-{S8}.c"), root, mains[index]);
+            main_objects[index] = string_format_z(arena, S8("{S8}/main-{S8}.o"), root, mains[index]);
+            BUSTER_TEST(arguments, file_write(main_sources[index], BUSTER_SLICE_TO_BYTE_SLICE(main_programs[index])));
+        }
+        String8 library_compile[] = {S8("-w"), S8("-O2"), S8("-fPIE"), S8("-c"), library_source, S8("-o"), library_object};
+        String8 shared_compile[] = {S8("-w"), S8("-O2"), S8("-fPIC"), S8("-c"), library_source, S8("-o"), shared_object};
+        bool produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(library_compile)) &&
+                        compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(shared_compile));
+        for (u32 index = 0; produced && index < 2; index += 1)
+        {
+            String8 main_compile[] = {S8("-w"), S8("-O2"), S8("-fPIE"), S8("-c"), main_sources[index], S8("-o"), main_objects[index]};
+            produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(main_compile));
+        }
+        BUSTER_TEST(arguments, produced);
+#if BUSTER_CPU_ARCH_X86_64
+        String8 kinds[] = {S8("-no-pie"), S8("-pie")};
+#else
+        String8 kinds[] = {S8("-no-pie")};
+#endif
+        for (u32 index = 0; produced && index < 2; index += 1)
+        {
+            String8 oracle = string_format_z(arena, S8("{S8}/{S8}-oracle"), root, mains[index]);
+            String8 host_link[] = {S8("-no-pie"), main_objects[index], library_object, S8("-o"), oracle};
+            bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
+            BUSTER_TEST(arguments, linked);
+            if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, oracle));
+            for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+            {
+                for (u32 order = 0; order < 2; order += 1)
+                {
+                    String8 output = string_format_z(arena, S8("{S8}/{S8}{S8}-{u32}-buster"), root, mains[index], kinds[kind], order);
+                    String8 first = order ? library_object : main_objects[index];
+                    String8 second = order ? main_objects[index] : library_object;
+                    String8 command[] = {kinds[kind], first, second, S8("-o"), output};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
+                }
+            }
+        }
+#if BUSTER_CPU_ARCH_X86_64
+        if (produced)
+        {
+            // The shared object's slots are R_X86_64_IRELATIVE, and the
+            // exported name is the thunk the host program binds to.
+            String8 library = string_format_z(arena, S8("{S8}/libbusterifunc.so"), root);
+            String8 shared_command[] = {S8("-shared"), shared_object, S8("-o"), library};
+            CompilerDriverResult shared = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(shared_command)));
+            BUSTER_TEST(arguments, shared.error == COMPILER_DRIVER_ERROR_NONE);
+            String8 consumer = string_format_z(arena, S8("{S8}/shared-consumer"), root);
+            String8 library_directory = string_format_z(arena, S8("-L{S8}"), root);
+            String8 host_link[] = {main_objects[1], library_directory, S8("-lbusterifunc"), S8("-o"), consumer};
+            bool linked = shared.error == COMPILER_DRIVER_ERROR_NONE &&
+                          compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
+            BUSTER_TEST(arguments, linked);
+            if (linked) BUSTER_TEST(arguments, compiler_driver_tls_export_run(arguments, consumer, root));
+            // An executable's DT_PREINIT_ARRAY runs before its dependencies'
+            // DT_INIT_ARRAY, so a preinit callback that calls a library's
+            // IFUNC needs the slot filled during relocation: the library's
+            // R_X86_64_IRELATIVE. The resolver here is idempotent, so the
+            // host-built library, which resolves at each binding, is the oracle.
+            String8 simple_source = string_format_z(arena, S8("{S8}/simple.c"), root);
+            String8 simple_object = string_format_z(arena, S8("{S8}/simple-pic.o"), root);
+            String8 preinit_source = string_format_z(arena, S8("{S8}/preinit-consumer.c"), root);
+            String8 preinit_object = string_format_z(arena, S8("{S8}/preinit-consumer.o"), root);
+            BUSTER_TEST(arguments, file_write(simple_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+                "static int thrice(int x) { return x * 3; }\n"
+                "static int (*resolve_scale(void))(int) { return thrice; }\n"
+                "int scale(int) __attribute__((ifunc(\"resolve_scale\")));\n"))));
+            BUSTER_TEST(arguments, file_write(preinit_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+                "int scale(int);\n"
+                "static volatile int early;\n"
+                "static void before_constructors(void) { early = scale(7); }\n"
+                "__attribute__((section(\".preinit_array\"), used)) static void (*entry)(void) = before_constructors;\n"
+                "int main(void) { return early != 21; }\n"))));
+            String8 simple_compile[] = {S8("-w"), S8("-O2"), S8("-fPIC"), S8("-c"), simple_source, S8("-o"), simple_object};
+            String8 preinit_compile[] = {S8("-w"), S8("-O2"), S8("-fPIE"), S8("-c"), preinit_source, S8("-o"), preinit_object};
+            bool preinit_produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(simple_compile)) &&
+                                    compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(preinit_compile));
+            BUSTER_TEST(arguments, preinit_produced);
+            for (u32 linker = 0; preinit_produced && linker < 2; linker += 1)
+            {
+                // A directory per library, so each consumer loads its own libpreinitifunc.so.
+                String8 directory = string_format_z(arena, S8("{S8}/preinit-{S8}"), root, linker ? S8("buster") : S8("host"));
+                OsDirectoryCreateResult made = os_make_directory(directory);
+                BUSTER_TEST(arguments, made.error.v == 0);
+                String8 preinit_library = string_format_z(arena, S8("{S8}/libpreinitifunc.so"), directory);
+                bool built = false;
+                if (linker)
+                {
+                    String8 command[] = {S8("-shared"), simple_object, S8("-o"), preinit_library};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    built = compiled.error == COMPILER_DRIVER_ERROR_NONE;
+                }
+                else
+                {
+                    String8 command[] = {S8("-shared"), simple_object, S8("-o"), preinit_library};
+                    built = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                }
+                BUSTER_TEST(arguments, built);
+                String8 program = string_format_z(arena, S8("{S8}/preinit-consumer"), directory);
+                String8 search = string_format_z(arena, S8("-L{S8}"), directory);
+                String8 link[] = {preinit_object, search, S8("-lpreinitifunc"), S8("-o"), program};
+                bool program_linked = built && compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(link));
+                BUSTER_TEST(arguments, program_linked);
+                if (program_linked) BUSTER_TEST(arguments, compiler_driver_tls_export_run(arguments, program, directory));
+            }
+        }
+#endif
+        BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+    return result;
+}
+#endif
+
+#if !BUSTER_ANDROID && !BUSTER_IOS
+// Reads `width` little-endian bytes of an ELF image the test does not trust.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_android_preinit_field(ByteSlice bytes, u64 offset, u32 width, u64* value)
+{
+    bool result = width <= sizeof(*value) && offset <= bytes.length && width <= bytes.length - offset;
+    *value = 0;
+    for (u32 index = 0; result && index < width; index += 1) *value |= (u64)bytes.pointer[offset + index] << (index * 8);
+    return result;
+}
+
+// The DT_PREINIT_ARRAY/DT_PREINIT_ARRAYSZ tags (bits 0 and 1 of the result)
+// that precede the first DT_NULL, which is where the loader stops reading.
+BUSTER_GLOBAL_LOCAL u32 compiler_driver_android_preinit_dynamic(ByteSlice bytes, u64 offset, u64 size, u64* address, u64* length)
+{
+    u32 tags = 0;
+    bool terminated = false;
+    for (u64 entry = 0; !terminated && entry + 16 <= size; entry += 16)
+    {
+        u64 tag = 0;
+        u64 value = 0;
+        terminated = !compiler_driver_android_preinit_field(bytes, offset + entry, 8, &tag) ||
+                     !compiler_driver_android_preinit_field(bytes, offset + entry + 8, 8, &value) || tag == 0;
+        if (!terminated && tag == 32)
+        {
+            *address = value;
+            tags |= 1;
+        }
+        else if (!terminated && tag == 33)
+        {
+            *length = value;
+            tags |= 2;
+        }
+    }
+    return tags;
+}
+
+// Issue 1243: an Android executable is staged through the Linux dynamic
+// writers, so it publishes `.preinit_array` through DT_PREINIT_ARRAY for the
+// bionic linker too. The emulator suite cannot execute a freshly linked file
+// from its app sandbox, so this link-only control checks the image itself on
+// every host: both tags are present, the array is one 8-byte entry inside a
+// writable load, and that entry addresses code inside an executable load.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_android_preinit_tags(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = buster_test_temporary_path(arena, S8("buster-android-preinit"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+        "int puts(const char *);\n"
+        "static void early(int argc, char **argv, char **envp) { (void)argc; (void)argv; (void)envp; }\n"
+        "__attribute__((section(\".preinit_array\"), used)) static void (*entry)(int, char **, char **) = early;\n"
+        "int main(void) { return puts(\"x\") < 0; }\n"))));
+    // Tags past the first DT_NULL are invisible to the loader and must not count.
+    u8 tail[48] = {0};
+    tail[16] = 32;
+    tail[32] = 33;
+    tail[40] = 8;
+    u64 tail_address = 0;
+    u64 tail_size = 0;
+    BUSTER_TEST(arguments, compiler_driver_android_preinit_dynamic((ByteSlice)BUSTER_ARRAY_TO_SLICE(tail), 0, sizeof(tail), &tail_address, &tail_size) == 0);
+    tail[0] = 32;
+    BUSTER_TEST(arguments, compiler_driver_android_preinit_dynamic((ByteSlice)BUSTER_ARRAY_TO_SLICE(tail), 0, sizeof(tail), &tail_address, &tail_size) == 3);
+    String8 targets[] = {S8("x86_64-linux-android"), S8("aarch64-linux-android")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        String8 output = buster_test_temporary_path(arena, S8("buster-android-preinit"), S8(""));
+        String8 command[] = {S8("-target"), targets[target], S8("-nostdinc"), S8("-g0"), source, S8("-o"), output};
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+        ByteSlice bytes = compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
+        u64 program_table = 0;
+        u64 program_count = 0;
+        bool valid = bytes.length >= 64 && memcmp(bytes.pointer, "\177ELF\2\1", 6) == 0 &&
+                     compiler_driver_android_preinit_field(bytes, 32, 8, &program_table) &&
+                     compiler_driver_android_preinit_field(bytes, 56, 2, &program_count);
+        BUSTER_TEST(arguments, valid);
+        u64 dynamic_offset = 0;
+        u64 dynamic_size = 0;
+        u64 preinit_address = 0;
+        u64 preinit_size = 0;
+        u32 tags = 0;
+        for (u64 header = 0; valid && header < program_count; header += 1)
+        {
+            u64 base = program_table + header * 56;
+            u64 type = 0;
+            valid = compiler_driver_android_preinit_field(bytes, base, 4, &type);
+            if (valid && type == 2)
+            {
+                valid = compiler_driver_android_preinit_field(bytes, base + 8, 8, &dynamic_offset) &&
+                        compiler_driver_android_preinit_field(bytes, base + 32, 8, &dynamic_size);
+            }
+        }
+        if (valid) tags = compiler_driver_android_preinit_dynamic(bytes, dynamic_offset, dynamic_size, &preinit_address, &preinit_size);
+        BUSTER_TEST(arguments, valid && tags == 3 && preinit_size == 8);
+        // Map the array through the load that holds it, then the entry
+        // through the load that executes it.
+        u64 function = 0;
+        bool writable = false;
+        bool executable = false;
+        for (u32 pass = 0; pass < 2; pass += 1)
+        {
+            for (u64 header = 0; valid && header < program_count; header += 1)
+            {
+                u64 base = program_table + header * 56;
+                u64 type = 0;
+                u64 flags = 0;
+                u64 offset = 0;
+                u64 address = 0;
+                u64 file_size = 0;
+                valid = compiler_driver_android_preinit_field(bytes, base, 4, &type) && compiler_driver_android_preinit_field(bytes, base + 4, 4, &flags) &&
+                        compiler_driver_android_preinit_field(bytes, base + 8, 8, &offset) &&
+                        compiler_driver_android_preinit_field(bytes, base + 16, 8, &address) &&
+                        compiler_driver_android_preinit_field(bytes, base + 32, 8, &file_size);
+                u64 wanted = pass ? function : preinit_address;
+                u64 width = pass ? 1 : preinit_size;
+                if (valid && type == 1 && wanted >= address && wanted - address <= file_size && width <= file_size - (wanted - address))
+                {
+                    if (pass) executable = executable || (flags & 1) != 0;
+                    else
+                    {
+                        writable = writable || (flags & 2) != 0;
+                        valid = compiler_driver_android_preinit_field(bytes, offset + (preinit_address - address), 8, &function);
+                    }
+                }
+            }
+        }
+        BUSTER_TEST(arguments, valid && writable && function != 0 && executable);
+    }
+    scratch_end(temporary);
     return result;
 }
 #endif
@@ -2153,9 +2512,13 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_tls_export_tests);
 #endif
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_aarch64_printer_roundtrip);
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_android_preinit_tags);
+#endif
 #if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_semantic_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_preinit_tests);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_ifunc_tests);
 #endif
 #if BUSTER_ANDROID || BUSTER_IOS
     BUSTER_UNUSED(arguments);

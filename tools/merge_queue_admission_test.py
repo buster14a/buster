@@ -1314,6 +1314,57 @@ class NoCodeResultsTests(unittest.TestCase):
                 with self.assertRaises(gate.AdmissionError):
                     gate.check_results(runs, jobs, dict(candidate(), no_code=True))
 
+    def test_own_published_admission_checks_are_not_workloads(self):
+        # Live #3343 group cf9831f6: GitHub listed both reconciler checks among
+        # the benchmark policy run's jobs, rejecting a genuine no-code group.
+        fixture = dict(candidate(), no_code=True)
+        for name, status, conclusion in ((gate.CONTEXT, "in_progress", None),
+                                         (gate.RETIREMENT_CONTEXT, "completed", "success")):
+            runs, jobs = self.fixture()
+            jobs[(2, 1)].append({"id": 9100, "name": name, "status": status,
+                                 "conclusion": conclusion, "runner_id": None, "steps": []})
+            with self.subTest(name=name):
+                evidence, pending = gate.check_results(runs, jobs, fixture,
+                                                       publications=frozenset({9100}))
+                self.assertFalse(pending)
+                self.assertEqual(sum(row["disposition"] == "not-applicable-no-code"
+                                     for row in evidence), 4)
+                # Unbound, same-named or allocated rows remain workloads.
+                with self.assertRaises(gate.AdmissionError):
+                    gate.check_results(runs, jobs, fixture)
+                jobs[(2, 1)][-1].update(runner_id=7)
+                with self.assertRaises(gate.AdmissionError):
+                    gate.check_results(runs, jobs, fixture, publications=frozenset({9100}))
+                jobs[(2, 1)][-1].update(runner_id=None, steps=[{"name": "work"}])
+                with self.assertRaises(gate.AdmissionError):
+                    gate.check_results(runs, jobs, fixture, publications=frozenset({9100}))
+
+    def test_collect_binds_publications_to_exact_markers(self):
+        head = candidate()["head"]
+        reads = []
+        class Reader:
+            def pages(self, path, key, **query):
+                reads.append((path, query.get("check_name")))
+                if path.endswith("/check-runs"):
+                    marker = (gate.check_marker(head) if query["check_name"] == gate.CONTEXT
+                              else gate.native_marker(head))
+                    return [{"id": 9100 if query["check_name"] == gate.CONTEXT else 9101,
+                             "name": query["check_name"], "head_sha": head, "external_id": marker,
+                             "app": {"id": gate.GITHUB_ACTIONS_APP_ID}},
+                            {"id": 9102, "name": query["check_name"], "head_sha": head,
+                             "external_id": "foreign", "app": {"id": gate.GITHUB_ACTIONS_APP_ID}}]
+                return []
+        seen = {}
+        def results(_runs, _jobs, _candidate, _checks, publications=frozenset()):
+            seen["publications"] = publications
+            return [], []
+        with patch.object(gate, "check_results", side_effect=results):
+            gate.collect(Reader(), dict(candidate(), no_code=True))
+            self.assertEqual(seen["publications"], frozenset({9100, 9101}))
+            gate.collect(Reader(), candidate())
+            self.assertEqual(seen["publications"], frozenset())
+        self.assertEqual(sum(path.endswith("/check-runs") for path, _ in reads), 2)
+
     def test_native_adapter_rejects_stale_and_failed_plans(self):
         fixture = candidate()
         arguments = SimpleNamespace(repo_root=ROOT)

@@ -83,6 +83,21 @@ PROFILE = {
     "profile_steps": [],
     "corpus": "not included in compiler-compare-v1",
 }
+# Supported automatic-main profiles are selected by the authenticated route.
+# The historical PROFILE remains frozen; arbitrary sample overrides are absent.
+MAIN40_PROFILE = dict(PROFILE, name="compiler-main-40pairs-v1", pairs=40, seed=20261003,
+                      min_effect_percent=0.5, confidence=0.95, bootstrap_resamples=2000,
+                      fresh_copy=True, order="ABBA")
+MAIN_PROFILES = {PROFILE["name"]: PROFILE, MAIN40_PROFILE["name"]: MAIN40_PROFILE}
+
+
+def named_main_profile(token: object) -> dict:
+    """Return only a named fixed MAIN recipe; never derive authority from a receipt."""
+    if not isinstance(token, str) or token not in MAIN_PROFILES:
+        raise ValueError("unsupported trusted main profile")
+    return MAIN_PROFILES[token]
+
+
 # The throughput corpus run after the self-host comparison (#2761), frozen per
 # name like PROFILE. The harness is tools/throughput at the base revision (a
 # main commit), built by its own build.c command; `arguments` follow the
@@ -2019,8 +2034,27 @@ def is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def validate_closure(receipt: dict, bundle: object, expected_policy: str | None = None) -> list[str]:
+def validate_closure(receipt: dict, bundle: object, expected_policy: str | None = None,
+                     expected_phase_driver_sha256: str | None = None, expected_trusted_revision: str | None = None,
+                     require_owned_phases: bool = False, expected_phase_schema: str | None = None,
+                     require_owned_preflight: bool = False, expected_profile: str | None = None) -> list[str]:
     """Replay native producer/consumer identities as bounded data, including the frozen baseline executable."""
+    if type(require_owned_phases) is not bool or type(require_owned_preflight) is not bool or \
+            expected_phase_schema not in (None, "buster-compiler-snapshot-phases-v1", "buster-compiler-utility-phases-v1",
+                                          "buster-compiler-main-owned-phases-v1"):
+        return ["native ownership requirements do not match a supported trusted route"]
+    if expected_phase_schema == "buster-compiler-main-owned-phases-v1" and \
+            (expected_policy is None or expected_profile is None or not require_owned_phases or not require_owned_preflight):
+        return ["MAIN ownership requires explicit trusted profile, preparation policy and complete preflight"]
+    if expected_profile is not None:
+        try:
+            selected_profile = named_main_profile(expected_profile)
+        except ValueError:
+            return ["native ownership profile does not match a supported trusted route"]
+        if receipt.get("mode") != "main" or receipt.get("profile") != selected_profile:
+            return ["ordinary main profile differs from the trusted named recipe"]
+        if expected_phase_schema != "buster-compiler-main-owned-phases-v1" and expected_profile != PROFILE["name"]:
+            return ["the short main profile requires its explicit trusted MAIN-owned route"]
     closure = receipt.get("closure")
     declared = receipt.get("preparation_policy", "legacy-rebuild" if closure is None else "snapshot-v1")
     if expected_policy not in (None, "legacy-rebuild", "snapshot-v1") or declared not in ("legacy-rebuild", "snapshot-v1") or \
@@ -2029,6 +2063,12 @@ def validate_closure(receipt: dict, bundle: object, expected_policy: str | None 
     if closure is None:
         if declared == "snapshot-v1" or expected_policy == "snapshot-v1":
             return ["requested frozen baseline closure receipt is missing"]
+        if require_owned_phases or expected_phase_schema is not None or require_owned_preflight:
+            from compiler_owned_phase import validate_population
+            raw = bundle if isinstance(bundle, dict) else {}
+            return validate_population(receipt, raw.get("owned_phases"), expected_phase_driver_sha256,
+                expected_trusted_revision, raw.get("owned_throughput"), expected_phase_schema=expected_phase_schema,
+                require_owned_preflight=require_owned_preflight, expected_profile=expected_profile)
         return []  # historical and default legacy-rebuild receipts
     if declared != "snapshot-v1" or not isinstance(closure, dict) or closure.get("policy") != "snapshot-v1" or closure.get("fallback") is not None:
         return ["frozen baseline closure policy/fallback is unsupported"]
@@ -2124,12 +2164,24 @@ def validate_closure(receipt: dict, bundle: object, expected_policy: str | None 
                     raise ValueError("manifest configured compiler/linker/tool/resource identity missing")
         except (UnicodeError, ValueError, IndexError, TypeError):
             reasons.append("frozen baseline manifest source/toolchain/configuration/closure mismatch")
+    if require_owned_phases or require_owned_preflight or expected_phase_schema is not None or "phase_ownership" in receipt:
+        from compiler_owned_phase import validate_population
+        reasons.extend(validate_population(receipt, raw.get("owned_phases"), expected_phase_driver_sha256,
+                                           expected_trusted_revision, raw.get("owned_throughput"),
+                                           expected_phase_schema=expected_phase_schema,
+                                           require_owned_preflight=require_owned_preflight, expected_profile=expected_profile))
     return reasons
 
 
-def classify(summary: object, binaries: object) -> list[str]:
+def classify(summary: object, binaries: object, *, expected_profile: str | None = None) -> list[str]:
     """Reasons the lab summary is not a valid core measurement; empty when valid."""
     reasons: list[str] = []
+    selected_profile = None
+    if expected_profile is not None:
+        try:
+            selected_profile = named_main_profile(expected_profile)
+        except ValueError:
+            return ["lab profile does not match a supported trusted named recipe"]
     if not isinstance(summary, dict):
         summary = {}
         reasons.append("summary.json is missing or not an object")
@@ -2173,7 +2225,16 @@ def classify(summary: object, binaries: object) -> list[str]:
                            "the experiment did not complete as declared")
     if type(pairs) is int and type(planned) is int and pairs != planned:
         reasons.append(f"{pairs} complete pairs do not match the {planned} planned pairs")
+    if selected_profile is MAIN40_PROFILE:
+        facts = {"pairs": 40, "complete_pairs": 40, "seed": 20261003, "confidence": 0.95,
+                 "bootstrap_resamples": 2000, "fresh_copy": True, "order": "ABBA"}
+        if any(type(plan.get(key)) is not type(value) or plan[key] != value for key, value in facts.items()) or \
+                any(type(count) is not int or count != 40 for count in counts.values()):
+            reasons.append("main forty-pair lab did not complete its exact frozen plan")
     verdict = summary.get("verdict") if isinstance(summary.get("verdict"), dict) else {}
+    if selected_profile is MAIN40_PROFILE and (type(verdict.get("n")) is not int or verdict["n"] != 40 or
+            type(verdict.get("min_effect_percent")) not in (int, float) or verdict["min_effect_percent"] != 0.5):
+        reasons.append("main forty-pair verdict count/floor differs from the frozen recipe")
     metrics = summary.get("metrics")
     if verdict.get("metric") != "wall" or verdict.get("outcome") not in MEASURED_OUTCOMES:
         reasons.append(f"wall-time verdict {verdict.get('outcome')!r} is not a complete measurement")
@@ -2235,6 +2296,98 @@ def classify_throughput(summary: object, metadata: object, binaries: object) -> 
                 reasons.append(f"throughput summary has no integer {key}")
             elif value != actual:
                 reasons.append(f"throughput summary {key} {value} does not match its {actual} {decision!r} cases")
+    return reasons
+
+
+def classify_throughput_exit(status: object, summary: object, metadata: object, binaries: object) -> list[str]:
+    """Permit report-only exits only after complete normal producer fields and decisions."""
+    reasons = classify_throughput(summary, metadata, binaries)
+    summary = summary if isinstance(summary, dict) else {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    profile = THROUGHPUT_PROFILE
+    pairs, rounds = profile["pairs_per_round"], profile["rounds"]
+
+    def finite(value: object, *, positive: bool = False) -> bool:
+        try:
+            return type(value) in (int, float) and math.isfinite(value) and (value > 0 if positive else value >= 0)
+        except OverflowError:
+            return False
+
+    def integer(value: object, *, positive: bool = False) -> bool:
+        return type(value) is int and (value > 0 if positive else value >= 0)
+
+    facts = {"schema": 2, "seed": 20260907, "pairs_per_round": pairs, "rounds": rounds,
+             "warmups": profile["warmups"], "cpu": profile["cpu"], "scale": 1, "input_schema": 1}
+    if type(summary.get("schema")) is not int or any(type(metadata.get(key)) is not int or metadata[key] != value
+                                                      for key, value in facts.items()):
+        reasons.append("throughput report-only schema/profile facts must be exact integers")
+    if metadata.get("cache_policy") != "warm-filesystem-new-process" or metadata.get("clock") != "monotonic":
+        reasons.append("throughput report-only cache/clock facts are missing")
+    for key, wanted in (("family_alpha", 0.01), ("per_test_alpha", 0.01 / (12 * 2))):
+        if not finite(summary.get(key), positive=True) or summary[key] != wanted:
+            reasons.append(f"throughput report-only {key} does not match the original gate")
+    provenance = metadata.get("compiler_provenance")
+    if not isinstance(provenance, list) or len(provenance) != 2 or any(
+            not isinstance(row, dict) or not integer(row.get("bytes"), positive=True) for row in provenance):
+        reasons.append("throughput report-only compiler byte counts are missing")
+    jobs = metadata.get("jobs")
+    expected = [(name, mode) for name in profile["workloads"] for mode in profile["modes"]]
+    if not isinstance(jobs, list) or len(jobs) != len(expected):
+        reasons.append("throughput report-only workload input population is incomplete")
+    else:
+        for index, (job, (name, mode)) in enumerate(zip(jobs, expected)):
+            if (not isinstance(job, dict) or type(job.get("job")) is not int or job["job"] != index or
+                    job.get("name") != name or job.get("mode") != mode or job.get("artifact") != "object" or
+                    not isinstance(job.get("source"), str) or not job["source"].startswith("/") or
+                    any(byte in job["source"] for byte in ("\x00", "\n", "\r")) or
+                    not isinstance(job.get("sha256"), str) or not SHA256.fullmatch(job["sha256"]) or
+                    any(not integer(job.get(key), positive=True) for key in ("bytes", "physical_lines", "defined_functions"))):
+                reasons.append(f"throughput report-only workload input {index} is incomplete")
+    regressions, inconclusive = 0, 0
+    rows = summary.get("comparisons", [])
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        name, medians = row.get("name"), row.get("medians")
+        for metric in THROUGHPUT_TEST_METRICS:
+            values = medians.get(metric) if isinstance(medians, dict) else None
+            if not isinstance(values, list) or len(values) != 2 or any(not finite(value, positive=True) for value in values):
+                reasons.append(f"throughput report-only {name!r} has incomplete {metric} medians")
+        tests = row.get("tests")
+        valid_tests = isinstance(tests, list)
+        for test in tests if isinstance(tests, list) else []:
+            valid = (isinstance(test, dict) and type(test.get("round")) is int and
+                     type(test.get("pairs")) is int and test["pairs"] == pairs and
+                     type(test.get("regression")) is bool and finite(test.get("median_ratio"), positive=True) and
+                     finite(test.get("ci_low"), positive=True) and finite(test.get("ci_high"), positive=True) and
+                     test["ci_low"] <= test["ci_high"] and
+                     finite(test.get("baseline_relative_mad")) and finite(test.get("candidate_relative_mad")) and
+                     integer(test.get("margin_exceedances")) and test["margin_exceedances"] <= pairs and
+                     finite(test.get("p_value")) and test["p_value"] <= 1 and
+                     test["regression"] == (test["p_value"] <= 0.01 / 24))
+            valid_tests = valid_tests and valid
+        if not valid_tests:
+            reasons.append(f"throughput report-only {name!r} has incomplete normal test fields")
+        else:
+            confirmed, uncertain = False, False
+            for metric, margin in (("wall_seconds", 1.15), ("peak_rss_bytes", 1.20)):
+                metric_tests = [test for test in tests if test.get("metric") == metric]
+                count = sum(test["regression"] for test in metric_tests)
+                confirmed = confirmed or count == rounds
+                uncertain = uncertain or 0 < count < rounds or any(
+                    not test["regression"] and test["ci_high"] > margin for test in metric_tests)
+            decision = "regression" if confirmed else "inconclusive" if uncertain else "no substantial regression detected"
+            if row.get("decision") != decision:
+                reasons.append(f"throughput report-only {name!r} decision contradicts normal per-round tests")
+            regressions += int(confirmed)
+            inconclusive += int(not confirmed and uncertain)
+    if type(summary.get("confirmed_regressions")) is not int or summary["confirmed_regressions"] != regressions or \
+            type(summary.get("inconclusive_cases")) is not int or summary["inconclusive_cases"] != inconclusive:
+        reasons.append("throughput report-only decision totals contradict normal per-round tests")
+    if type(status) is not int or status not in (0, 1):
+        reasons.append(f"bench_throughput run exited {status} (see throughput.log)")
+    elif status == 1 and regressions <= 0:
+        reasons.append("bench_throughput exit 1 has no counted confirmed corpus regression")
     return reasons
 
 

@@ -67,11 +67,15 @@
 // CAstStatistics. Navigation goes through the accessors below, which give the
 // same answer in every layout.
 //
-// Ownership: the published CAst lives in the caller's arena for the
-// translation unit. Builder frames, stacks, bindings and growth chunks live in
-// the phase arena (CAstOptions.phase_arena, else a private one created and
-// retired by the build) and are released before return; the sealed columns are
-// exact-sized. The tree references the preprocessing result's tokens and
+// Ownership: the four node columns are written once, in place, where the
+// published tree keeps them: each grows in its own private arena (CAstStorage)
+// that reserves address space and commits it as the builder appends, so no
+// node is staged and copied. The tree owns those arenas until c_ast_release;
+// the storage record, the diagnostics and the HYBRID/EXPLICIT slices live in
+// the caller's arena. Builder frames, stacks and bindings live in the phase
+// arena (CAstOptions.phase_arena, else a private one created and retired by
+// the build) and are released before return. A failed build releases its
+// columns itself. The tree references the preprocessing result's tokens and
 // symbols by index and requires that result to stay alive.
 //
 // Scope: the builder resolves the names that change the parse at their
@@ -80,10 +84,9 @@
 // visibility (a declarator's name is visible from the end of its declarator).
 // It decides no types and binds no other uses; semantic completion owns that.
 //
-// Entry points: c_ast_build, c_ast_validate, c_ast_dump, c_ast_child_count,
-// c_ast_list_count, c_ast_child_at, c_ast_children, c_ast_walk_begin /
-// c_ast_walk_next, c_ast_kind_name, c_ast_word_name. Private test seams are
-// in c_ast_internal.h.
+// Entry points: c_ast_build, c_ast_release, c_ast_validate, c_ast_dump,
+// c_ast_child_count, c_ast_list_count, c_ast_child_at, c_ast_children,
+// c_ast_walk_begin / c_ast_walk_next, c_ast_kind_name, c_ast_word_name.
 
 #include <buster/lib/compiler/frontend/c/c.h>
 
@@ -95,6 +98,17 @@
 #define C_AST_LOOKAHEAD 3
 
 #define C_AST_NODE_INVALID UINT32_MAX
+
+// Nodes a column reservation holds before the columns move to reservations of
+// twice the capacity. It is address space, not memory: 13 bytes per node across
+// the four columns (3.25 GiB), committed only as the builder appends. It is
+// not a bound on any tree: a larger one moves, and the move is the only copy a
+// build makes (CAstStatistics.column_copy_bytes). The unity self-host tree is
+// about 1% of it.
+#define C_AST_COLUMN_CAPACITY (1u << 28)
+// Nodes every column commits at a time; the one predictable branch per append
+// is reaching the committed end. C_AST_NODE_LIMIT is a multiple of it.
+#define C_AST_COLUMN_STEP (1u << 16)
 
 #define C_AST_PRESENCE_MASK 0xffu
 
@@ -359,6 +373,10 @@ struct CAstOptions
     // window of that many tokens (at least C_AST_LOOKAHEAD), the setting tests
     // use to prove refill-boundary invariance.
     u32 refill_batch;
+    // Nodes the first column reservations hold. 0 is the production setting,
+    // C_AST_COLUMN_CAPACITY; tests set a small value so ordinary trees outgrow
+    // it and move.
+    u32 column_capacity;
 };
 
 // Work counts. Counters are live only when C_AST_COUNTERS is nonzero (test
@@ -369,9 +387,9 @@ struct CAstStatistics
 {
     // Always reported.
     u64 node_count;
-    u64 retained_bytes;      // sealed columns, plus children/slices in HYBRID and EXPLICIT
-    u64 transient_high_water; // peak builder bytes in the phase arena
-    u64 sealed_copy_bytes;   // bytes copied from build chunks into sealed columns
+    u64 retained_bytes;      // the columns (13 bytes per node), plus children/slices in HYBRID and EXPLICIT
+    u64 transient_high_water; // peak builder bytes in the phase arena: frames, stacks, bindings, refill ring
+    u64 column_copy_bytes;   // bytes copied moving the columns to larger reservations; 0 below C_AST_COLUMN_CAPACITY
     u64 finalize_child_entries; // slice entries written by HYBRID/EXPLICIT finalization
     // Counted only under C_AST_COUNTERS.
     u64 tokens_consumed;
@@ -384,8 +402,14 @@ struct CAstStatistics
     u64 bindings_published;
 };
 
+// The private arenas that hold a built tree's kinds, extents, tokens and data
+// columns. One record per build, in the caller's arena; every copy of the CAst
+// points at it, so c_ast_release through any copy retires them once.
+typedef struct CAstStorage CAstStorage;
+
 struct CAst
 {
+    // In the arenas of `storage`, not in the caller's arena.
     u8* kinds;
     u32* extents;
     u32* tokens;
@@ -398,6 +422,8 @@ struct CAst
     // node_count - 1 when complete: the TRANSLATION_UNIT.
     u32 root;
     CAstLayout layout;
+    // Null for an empty tree, a failed build or a released one.
+    CAstStorage* storage;
 };
 
 typedef struct CAstResult CAstResult;
@@ -413,6 +439,14 @@ struct CAstResult
 };
 
 BUSTER_F_DECL CAstResult c_ast_build(Arena* arena, CPreprocessResult preprocess, CAstOptions options);
+// Ends the use of a built tree's column arenas. Each returns every committed
+// page beyond C_PHASE_ARENA_RETAINED_SIZE to the OS and parks its reservation
+// in the calling thread's reuse pool, which must be the thread that built the
+// tree (docs/agents/parallelism.md). Afterwards `ast` is empty and the columns
+// every other copy points at are gone; the caller's arena keeps the storage
+// record and any HYBRID/EXPLICIT slices. Idempotent through any copy, and a
+// no-op for an empty tree.
+BUSTER_F_DECL void c_ast_release(CAst* ast);
 
 // Checks every node's contract, extent tiling and containment, layout slices
 // against the implicit topology, and that the root spans the tree. Returns

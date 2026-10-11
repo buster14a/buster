@@ -1,0 +1,535 @@
+// Bounded stock-header LZCNT conformance lane, included by clang_suite.c.
+// clang_suite_intrinsics is the entry point; capture writes argv/stdout/stderr/status,
+// resource verification hashes every pinned clang/lib/Headers worktree blob, and
+// disassembly checks baseline safety or Clang native lowering. This is not a full census.
+#define BUSTER_CLANG_SUITE_LZCNT_POLICY_PROBES_ONLY 0
+#define BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID 1
+#define BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH 2
+
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_process_success(ClangSuiteCommand command)
+{
+    bool result = command.result == PROCESS_RESULT_SUCCESS && !command.launch_failed && !command.timed_out &&
+                  !command.output_truncated && !command.capture_failed && !command.cleanup_failed;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_version_matches(String8 output)
+{
+    u64 end = 0;
+    while (end < output.length && output.pointer[end] != '\n')
+    {
+        end += 1;
+    }
+    String8 line = string_slice(output, 0, end);
+    String8 expected = S8("clang version 23.1.2");
+    bool valid = string_starts_with_sequence(line, expected) && line.length > expected.length;
+    if (valid)
+    {
+        char8 boundary = line.pointer[expected.length];
+        valid = boundary == ' ' || boundary == '(';
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_capture(Arena* arena, String8 directory, String8 results, String8 label,
+                                                         SliceString8 arguments, ClangSuiteCommand* command_out)
+{
+    *command_out = clang_suite_command(arena, directory, arguments);
+    String8List argument_lines = {0};
+    for (u64 i = 0; i < arguments.length; i += 1)
+    {
+        string8_list_push(arena, &argument_lines, arguments.pointer[i]);
+        string8_list_push(arena, &argument_lines, S8("\n"));
+    }
+    String8 argument_text = string_join_arena(arena, string8_list_to_slice(arena, argument_lines), true);
+    String8 status = string_format(arena, S8("status={S8}\nportable_result={u32}\nplatform_status={u32}\nlaunch_failed={u32}\n"
+                                             "timed_out={u32}\noutput_truncated={u32}\ncapture_failed={u32}\ncleanup_failed={u32}\n"),
+                                   clang_suite_smoke_status(*command_out), (u32)command_out->result, command_out->platform_status,
+                                   (u32)command_out->launch_failed, (u32)command_out->timed_out, (u32)command_out->output_truncated,
+                                   (u32)command_out->capture_failed, (u32)command_out->cleanup_failed);
+    bool recorded = clang_suite_write(arena, path_join(arena, results, string_format(arena, S8("{S8}.argv"), label)), argument_text) &&
+                    clang_suite_write(arena, path_join(arena, results, string_format(arena, S8("{S8}.stdout"), label)), command_out->output) &&
+                    clang_suite_write(arena, path_join(arena, results, string_format(arena, S8("{S8}.stderr"), label)), command_out->error) &&
+                    clang_suite_write(arena, path_join(arena, results, string_format(arena, S8("{S8}.status"), label)), status);
+    if (!clang_suite_intrinsics_process_success(*command_out))
+    {
+        string_print(S8("intrinsic command failed: {S8}\n{S8}\n"), label, command_out->error);
+    }
+    return recorded;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_verify_resource_headers(Arena* arena, String8 checkout, String8 results,
+                                                                        u64* file_count_out, String8* manifest_digest_out)
+{
+    *file_count_out = 0;
+    *manifest_digest_out = (String8){0};
+    String8 tree_arguments[] = {S8("git"), S8("--no-replace-objects"), S8("ls-tree"), S8("-r"), S8("-z"), S8("--full-tree"),
+                                S8(BUSTER_CLANG_SUITE_COMMIT), S8("--"), S8("clang/lib/Headers")};
+    ClangSuiteCommand tree;
+    bool recorded = clang_suite_intrinsics_capture(arena, checkout, results, S8("resource-header-tree"),
+                                                    (SliceString8)BUSTER_ARRAY_TO_SLICE(tree_arguments), &tree);
+    bool valid = recorded && clang_suite_intrinsics_process_success(tree) && tree.output.length != 0;
+    String8List rows = {0};
+    string8_list_push(arena, &rows, S8("BUSTER_CLANG_SUITE_RESOURCE_HEADERS_V1\nmode\tblob\tworktree_blob\tpath\tstatus\n"));
+    String8 previous = {0};
+    u64 cursor = 0;
+    while (valid && cursor < tree.output.length)
+    {
+        u64 end = cursor;
+        while (end < tree.output.length && tree.output.pointer[end] != '\0')
+        {
+            end += 1;
+        }
+        String8 record = string_slice(tree.output, cursor, end);
+        bool record_valid = end < tree.output.length && record.length > 53 && record.pointer[6] == ' ' &&
+                            string_equal(string_slice(record, 7, 11), S8("blob")) && record.pointer[11] == ' ' &&
+                            record.pointer[52] == '\t';
+        if (record_valid)
+        {
+            String8 mode = string_slice(record, 0, 6);
+            String8 expected = string_slice(record, 12, 52);
+            String8 path = string_slice(record, 53, record.length);
+            bool mode_valid = string_equal(mode, S8("100644")) || string_equal(mode, S8("100755")) ||
+                              string_equal(mode, S8("120000"));
+            record_valid = mode_valid && clang_suite_sha_valid(expected) &&
+                           string_starts_with_sequence(path, S8("clang/lib/Headers/")) && clang_suite_safe_path(path);
+            if (record_valid && previous.length)
+            {
+                u64 length = previous.length < path.length ? previous.length : path.length;
+                int order = memcmp(previous.pointer, path.pointer, (size_t)length);
+                record_valid = order < 0 || (order == 0 && previous.length < path.length);
+            }
+            if (record_valid)
+            {
+                String8 hash_arguments[] = {S8("git"), S8("--no-replace-objects"), S8("hash-object"), S8("--no-filters"),
+                                            S8("--"), path};
+                ClangSuiteCommand hash = clang_suite_command(arena, checkout, (SliceString8)BUSTER_ARRAY_TO_SLICE(hash_arguments));
+                String8 actual = quickjs_trim_ascii_space(hash.output);
+                bool hash_valid = clang_suite_intrinsics_process_success(hash) && string_equal(actual, expected);
+                string8_list_push(arena, &rows,
+                                  string_format(arena, S8("{S8}\t{S8}\t{S8}\t{S8}\t{S8}\n"), mode, expected, actual, path,
+                                                clang_suite_smoke_status(hash)));
+                *file_count_out += 1;
+                previous = path;
+                valid = hash_valid && valid;
+            }
+            else
+            {
+                valid = false;
+            }
+        }
+        else
+        {
+            valid = false;
+        }
+        cursor = end + 1;
+    }
+    valid = *file_count_out != 0 && valid;
+    if (valid)
+    {
+        String8 manifest = string_join_arena(arena, string8_list_to_slice(arena, rows), true);
+        *manifest_digest_out = stage_object_sha256_bytes(arena, (u8*)manifest.pointer, manifest.length);
+        valid = clang_suite_write(arena, path_join(arena, results, S8("resource-headers.tsv")), manifest) && valid;
+    }
+    else
+    {
+        string_print(S8("error: pinned Clang resource-header worktree verification failed after scanning {u64} source blobs\n"),
+                     *file_count_out);
+        String8 partial = string_join_arena(arena, string8_list_to_slice(arena, rows), true);
+        clang_suite_write(arena, path_join(arena, results, S8("resource-headers.partial.tsv")), partial);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_hex_digit(char8 value)
+{
+    bool result = (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') ||
+                  (value >= 'A' && value <= 'F');
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_space(char8 value)
+{
+    bool result = value == ' ' || value == '\t';
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_symbol_label(String8 line)
+{
+    u64 cursor = 0;
+    while (cursor < line.length && clang_suite_intrinsics_space(line.pointer[cursor]))
+    {
+        cursor += 1;
+    }
+    u64 address_start = cursor;
+    while (cursor < line.length && clang_suite_intrinsics_hex_digit(line.pointer[cursor]))
+    {
+        cursor += 1;
+    }
+    bool valid = cursor > address_start && cursor < line.length &&
+                 clang_suite_intrinsics_space(line.pointer[cursor]);
+    while (valid && cursor < line.length && clang_suite_intrinsics_space(line.pointer[cursor]))
+    {
+        cursor += 1;
+    }
+    valid = valid && cursor < line.length && line.pointer[cursor] == '<';
+    while (valid && cursor < line.length && line.pointer[cursor] != '>')
+    {
+        cursor += 1;
+    }
+    valid = valid && cursor < line.length && line.pointer[cursor] == '>';
+    cursor += valid;
+    valid = valid && cursor < line.length && line.pointer[cursor] == ':';
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_lzcnt_instruction(String8 line)
+{
+    u64 cursor = 0;
+    while (cursor < line.length && clang_suite_intrinsics_space(line.pointer[cursor]))
+    {
+        cursor += 1;
+    }
+    u64 address_start = cursor;
+    while (cursor < line.length && clang_suite_intrinsics_hex_digit(line.pointer[cursor]))
+    {
+        cursor += 1;
+    }
+    bool valid = cursor > address_start && cursor < line.length && line.pointer[cursor] == ':';
+    if (valid)
+    {
+        cursor += 1;
+        while (cursor < line.length && clang_suite_intrinsics_space(line.pointer[cursor]))
+        {
+            cursor += 1;
+        }
+    }
+    u64 mnemonic_start = cursor;
+    while (cursor < line.length && !clang_suite_intrinsics_space(line.pointer[cursor]))
+    {
+        cursor += 1;
+    }
+    String8 mnemonic = string_slice(line, mnemonic_start, cursor);
+    bool result = valid && (string_equal(mnemonic, S8("lzcnt")) || string_equal(mnemonic, S8("lzcntw")) ||
+                            string_equal(mnemonic, S8("lzcntl")) || string_equal(mnemonic, S8("lzcntq")));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_disassembly_has_lzcnt(String8 output, u32 policy)
+{
+    bool valid = false;
+    if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_PROBES_ONLY ||
+        policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID ||
+        policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH)
+    {
+        String8 symbols[] = {S8("<zen5_lzcnt_probe_u16_macro>:"), S8("<zen5_lzcnt_probe_u32_function>:"),
+                             S8("<zen5_lzcnt_probe_u32_alias>:"), S8("<zen5_lzcnt_probe_u64_macro>:"),
+                             S8("<zen5_lzcnt_probe_u64_alias>:")};
+        bool symbols_seen[BUSTER_ARRAY_LENGTH(symbols)] = {0};
+        bool instructions_seen[BUSTER_ARRAY_LENGTH(symbols)] = {0};
+        u64 cursor = 0;
+        u32 current = UINT32_MAX;
+        valid = output.length != 0;
+        while (valid && cursor < output.length)
+        {
+            u64 line_end = cursor;
+            while (line_end < output.length && output.pointer[line_end] != '\n')
+            {
+                line_end += 1;
+            }
+            String8 line = string_slice(output, cursor, line_end);
+            bool label = clang_suite_intrinsics_symbol_label(line);
+            if (label)
+            {
+                current = UINT32_MAX;
+                for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(symbols); i += 1)
+                {
+                    if (string_first_sequence(line, symbols[i]) != BUSTER_STRING_NO_MATCH)
+                    {
+                        current = i;
+                        symbols_seen[i] = true;
+                    }
+                }
+            }
+            else if (clang_suite_intrinsics_lzcnt_instruction(line))
+            {
+                if (current < BUSTER_ARRAY_LENGTH(symbols))
+                {
+                    instructions_seen[current] = true;
+                }
+                else if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID)
+                {
+                    valid = false;
+                }
+            }
+            cursor = line_end + 1;
+        }
+        if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH)
+        {
+            for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(symbols); i += 1)
+            {
+                valid = symbols_seen[i] && instructions_seen[i] && valid;
+            }
+        }
+        else if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID)
+        {
+            for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(symbols); i += 1)
+            {
+                valid = symbols_seen[i] && !instructions_seen[i] && valid;
+            }
+        }
+        else if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_PROBES_ONLY)
+        {
+            for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(symbols); i += 1)
+            {
+                valid = symbols_seen[i] && valid;
+            }
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_disassemble(Arena* arena, String8 directory, String8 results, String8 objdump,
+                                                             String8 label, String8 object_path, u32 policy)
+{
+    String8 arguments[] = {objdump, S8("-d"), S8("--no-show-raw-insn"), object_path};
+    ClangSuiteCommand command;
+    bool recorded = clang_suite_intrinsics_capture(arena, directory, results, label,
+                                                    (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), &command);
+    bool valid = recorded && clang_suite_intrinsics_process_success(command) && command.output.length != 0 &&
+                 clang_suite_intrinsics_disassembly_has_lzcnt(command.output, policy);
+    if (!valid)
+    {
+        string_print(S8("error: LZCNT object inspection failed for {S8}\n"), label);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics(Arena* arena, String8 checkout, String8 results, String8 ide, String8 clang)
+{
+    String8 directory = clang_suite_directory(arena, S8("."));
+    String8 header_directory = path_join(arena, checkout, S8("clang/lib/Headers"));
+    String8 fixture_source = os_path_absolute(arena, S8("tools/fixtures/zen5_lzcnt.c"), true);
+    String8 fixture_copy = path_join(arena, results, S8("zen5_lzcnt.c"));
+    String8 stock_header = path_join(arena, results, S8("stock-immintrin.c"));
+    String8 stock_text = S8("#include <immintrin.h>\n");
+    String8 objdump = path_join(arena, path_parent(arena, clang), S8("llvm-objdump"));
+    bool valid = directory.length && header_directory.length && fixture_source.length &&
+                 clang_suite_verify_checkout(arena, checkout) && !string_starts_with_sequence(results, path_join(arena, checkout, S8("")));
+    String8 fixture = valid ? clang_suite_read(arena, fixture_source) : (String8){0};
+    valid = fixture.length && clang_suite_write(arena, fixture_copy, fixture) && valid;
+    valid = clang_suite_write(arena, stock_header, stock_text) && valid;
+
+    u64 header_count = 0;
+    String8 header_digest = {0};
+    bool headers_valid = false;
+    if (valid)
+    {
+        headers_valid = clang_suite_intrinsics_verify_resource_headers(arena, checkout, results, &header_count, &header_digest);
+        valid = headers_valid && valid;
+    }
+
+    String8 version_arguments[] = {clang, S8("--version")};
+    ClangSuiteCommand version;
+    bool version_recorded = clang_suite_intrinsics_capture(arena, directory, results, S8("clang-version"),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(version_arguments), &version);
+    bool version_valid = version_recorded && clang_suite_intrinsics_process_success(version) &&
+                         clang_suite_intrinsics_version_matches(version.output);
+    valid = version_valid && valid;
+
+    String8 resource_arguments[] = {clang, S8("-print-resource-dir")};
+    ClangSuiteCommand resource;
+    bool resource_recorded = clang_suite_intrinsics_capture(arena, directory, results, S8("clang-resource-dir"),
+                                                             (SliceString8)BUSTER_ARRAY_TO_SLICE(resource_arguments), &resource);
+    String8 resource_path = quickjs_trim_ascii_space(resource.output);
+    String8 resolved_resource_path = resource_path.length ? clang_suite_directory(arena, resource_path) : (String8){0};
+    bool resource_valid = resource_recorded && clang_suite_intrinsics_process_success(resource) && resolved_resource_path.length;
+    valid = resource_valid && valid;
+
+    bool trace_valid = false;
+    bool macros_valid = false;
+    bool ast_valid = false;
+    bool buster_stock_valid = false;
+    bool clang_baseline_safe = false;
+    bool clang_baseline_ran = false;
+    bool native_valid = false;
+    u32 native_objects_checked = 0;
+    u64 buster_runs = 0;
+    if (valid)
+    {
+        String8 header_arguments[] = {clang, S8("-std=gnu11"), S8("-march=znver5"), S8("-I"), header_directory,
+                                      S8("-H"), S8("-fsyntax-only"), stock_header};
+        ClangSuiteCommand header_trace;
+        bool header_recorded = clang_suite_intrinsics_capture(arena, directory, results, S8("clang-header-trace"),
+                                                               (SliceString8)BUSTER_ARRAY_TO_SLICE(header_arguments), &header_trace);
+        String8 immintrin_path = path_join(arena, header_directory, S8("immintrin.h"));
+        String8 lzcnt_path = path_join(arena, header_directory, S8("lzcntintrin.h"));
+        trace_valid = header_recorded && clang_suite_intrinsics_process_success(header_trace) &&
+                      string_first_sequence(header_trace.error, immintrin_path) != BUSTER_STRING_NO_MATCH &&
+                      string_first_sequence(header_trace.error, lzcnt_path) != BUSTER_STRING_NO_MATCH;
+        valid = trace_valid && valid;
+
+        String8 macro_arguments[] = {clang, S8("-std=gnu11"), S8("-march=znver5"), S8("-I"), header_directory,
+                                     S8("-dM"), S8("-E"), stock_header};
+        ClangSuiteCommand macro_dump;
+        bool macro_recorded = clang_suite_intrinsics_capture(arena, directory, results, S8("clang-znver5-macros"),
+                                                              (SliceString8)BUSTER_ARRAY_TO_SLICE(macro_arguments), &macro_dump);
+        macros_valid = macro_recorded && clang_suite_intrinsics_process_success(macro_dump) &&
+                      string_first_sequence(macro_dump.output, S8("#define __lzcnt16(")) != BUSTER_STRING_NO_MATCH &&
+                      string_first_sequence(macro_dump.output, S8("#define __lzcnt64(")) != BUSTER_STRING_NO_MATCH;
+        valid = macros_valid && valid;
+
+        String8 ast_arguments[] = {clang, S8("-std=gnu11"), S8("-march=znver5"), S8("-I"), header_directory,
+                                   S8("-Xclang"), S8("-ast-list"), S8("-fsyntax-only"), fixture_copy};
+        ClangSuiteCommand ast;
+        bool ast_recorded = clang_suite_intrinsics_capture(arena, directory, results, S8("clang-znver5-ast-list"),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(ast_arguments), &ast);
+        ast_valid = ast_recorded && clang_suite_intrinsics_process_success(ast) &&
+                      string_first_sequence(ast.output, S8("__lzcnt32")) != BUSTER_STRING_NO_MATCH &&
+                      string_first_sequence(ast.output, S8("_lzcnt_u32")) != BUSTER_STRING_NO_MATCH &&
+                      string_first_sequence(ast.output, S8("_lzcnt_u64")) != BUSTER_STRING_NO_MATCH &&
+                      string_first_sequence(ast.output, S8("zen5_lzcnt_probe_u16_macro")) != BUSTER_STRING_NO_MATCH;
+        valid = ast_valid && valid;
+
+        String8 buster_stock_arguments[] = {ide, S8("cc"), S8("-std=gnu11"), S8("-march=znver5"), S8("-I"), header_directory,
+                                            S8("-fsyntax-only"), fixture_copy};
+        ClangSuiteCommand buster_stock;
+        bool buster_stock_recorded = clang_suite_intrinsics_capture(arena, directory, results, S8("buster-stock-header-and-calls"),
+                                                                     (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_stock_arguments), &buster_stock);
+        buster_stock_valid = buster_stock_recorded && clang_suite_intrinsics_process_success(buster_stock);
+        valid = buster_stock_valid && valid;
+
+        if (valid)
+        {
+            String8 clang_baseline_executable = path_join(arena, results, S8("clang-lzcnt-baseline"));
+            String8 clang_baseline_arguments[] = {clang, S8("-std=gnu11"), S8("-O0"), S8("-march=x86-64"), S8("-I"), header_directory,
+                                                  fixture_copy, S8("-o"), clang_baseline_executable};
+            ClangSuiteCommand clang_baseline_build;
+            bool clang_baseline_recorded = clang_suite_intrinsics_capture(arena, directory, results, S8("clang-baseline-build"),
+                                                                           (SliceString8)BUSTER_ARRAY_TO_SLICE(clang_baseline_arguments),
+                                                                           &clang_baseline_build);
+            bool clang_baseline_built = clang_baseline_recorded && clang_suite_intrinsics_process_success(clang_baseline_build);
+            valid = clang_baseline_built && valid;
+            if (clang_baseline_built)
+            {
+                clang_baseline_safe = clang_suite_intrinsics_disassemble(arena, directory, results, objdump,
+                                                                         S8("clang-baseline-objdump"), clang_baseline_executable, BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID);
+                if (clang_baseline_safe)
+                {
+                    String8 run_arguments[] = {clang_baseline_executable};
+                    ClangSuiteCommand run;
+                    clang_baseline_ran = clang_suite_intrinsics_capture(arena, directory, results, S8("clang-baseline-run"),
+                                                                         (SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), &run) &&
+                                         clang_suite_intrinsics_process_success(run) &&
+                                         string_first_sequence(run.output, S8("ZEN5_LZCNT_CONFORMANCE status=pass")) != BUSTER_STRING_NO_MATCH;
+                }
+            }
+            valid = clang_baseline_safe && clang_baseline_ran && valid;
+
+            String8 clang_object = path_join(arena, results, S8("clang-lzcnt-znver5.o"));
+            String8 clang_object_arguments[] = {clang, S8("-std=gnu11"), S8("-O2"), S8("-march=znver5"), S8("-I"), header_directory,
+                                                S8("-c"), fixture_copy, S8("-o"), clang_object};
+            ClangSuiteCommand clang_object_build;
+            bool clang_object_recorded = clang_suite_intrinsics_capture(arena, directory, results, S8("clang-znver5-object-build"),
+                                                                         (SliceString8)BUSTER_ARRAY_TO_SLICE(clang_object_arguments),
+                                                                         &clang_object_build);
+            native_valid = clang_object_recorded && clang_suite_intrinsics_process_success(clang_object_build) &&
+                                clang_suite_intrinsics_disassemble(arena, directory, results, objdump,
+                                                                  S8("clang-znver5-object-objdump"), clang_object,
+                                                                  BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH);
+            native_objects_checked = native_valid ? 1 : 0;
+            String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+            String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+            String8 phases[] = {S8("baseline"), S8("znver5")};
+            String8List native_records = {0};
+            for (u32 phase = 0; phase < BUSTER_ARRAY_LENGTH(phases); phase += 1)
+            {
+                for (u32 ssa = 0; ssa < BUSTER_ARRAY_LENGTH(frontends); ssa += 1)
+                {
+                    for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+                    {
+                        String8 label = string_format(arena, S8("buster-{S8}-{u32}-{u32}"), phases[phase], ssa, allocator);
+                        String8 output = path_join(arena, results, string_format(arena, S8("{S8}{S8}"), label,
+                                                                                phase ? S8(".o") : S8("")));
+                        String8 arguments[] = {ide, S8("cc"), S8("-std=gnu11"), phase ? S8("-O2") : S8("-O0"),
+                                               phase ? S8("-march=znver5") : S8("-march=x86-64"),
+                                               S8("-I"), header_directory, allocators[allocator], frontends[ssa],
+                                               S8("-fno-machine-fallback"), S8("-fverify-codegen"), fixture_copy,
+                                               S8("-o"), output, S8("-c")};
+                        // The baseline recipe links; the Zen 5 recipe emits an object only.
+                        SliceString8 command_arguments = BUSTER_ARRAY_TO_SLICE(arguments);
+                        command_arguments.length -= phase == 0;
+                        ClangSuiteCommand build;
+                        bool recorded = clang_suite_intrinsics_capture(arena, directory, results, label, command_arguments, &build);
+                        bool emitted = recorded && clang_suite_intrinsics_process_success(build);
+                        u32 policy = phase ? BUSTER_CLANG_SUITE_LZCNT_POLICY_PROBES_ONLY : BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID;
+                        bool inspected = emitted && clang_suite_intrinsics_disassemble(arena, directory, results, objdump,
+                                                                                        string_format(arena, S8("{S8}-objdump"), label),
+                                                                                        output, policy);
+                        if (phase)
+                        {
+                            native_objects_checked += inspected;
+                            native_valid = inspected && native_valid;
+                            string8_list_push(arena, &native_records,
+                                              string_format(arena, S8("{S8}\t{S8}\n"), label,
+                                                            inspected ? S8("pass") : emitted ? S8("fail") : S8("not-emitted")));
+                        }
+                        else
+                        {
+                            String8 run_arguments[] = {output};
+                            ClangSuiteCommand run;
+                            bool ran = inspected && clang_suite_intrinsics_capture(arena, directory, results,
+                                                                                    string_format(arena, S8("{S8}-run"), label),
+                                                                                    (SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), &run) &&
+                                       clang_suite_intrinsics_process_success(run) &&
+                                       string_first_sequence(run.output, S8("ZEN5_LZCNT_CONFORMANCE status=pass")) != BUSTER_STRING_NO_MATCH;
+                            buster_runs += ran;
+                            valid = ran && valid;
+                        }
+                    }
+                }
+            }
+            String8 native_manifest = string_join_arena(arena, string8_list_to_slice(arena, native_records), true);
+            native_valid = clang_suite_write(arena, path_join(arena, results, S8("buster-znver5-object-status.tsv")), native_manifest) &&
+                           native_valid;
+            valid = native_valid && valid;
+
+        }
+    }
+
+    bool final_checkout_clean = clang_suite_verify_checkout(arena, checkout);
+    valid = final_checkout_clean && valid;
+    bool gates[] = {headers_valid, version_valid, resource_valid, trace_valid, macros_valid, ast_valid,
+                    buster_stock_valid, clang_baseline_safe && clang_baseline_ran,
+                    buster_runs == 4, native_valid, final_checkout_clean};
+    String8 gate_names[] = {S8("pinned resource-header blobs"), S8("Clang 23.1.2 version"), S8("resource directory"),
+                           S8("stock include trace"), S8("public macros"), S8("public declarations"),
+                           S8("Buster stock-header calls"), S8("Clang baseline runtime"),
+                           S8("four Buster baseline configurations"), S8("five native objects"), S8("final clean checkout")};
+    _Static_assert(BUSTER_ARRAY_LENGTH(gates) == BUSTER_ARRAY_LENGTH(gate_names), "intrinsic gate names");
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(gates); i += 1)
+    {
+        if (!gates[i])
+        {
+            string_print(S8("error: intrinsic lane gate failed: {S8}; inspect the retained command and summary artifacts\n"),
+                         gate_names[i]);
+        }
+    }
+    String8 summary = string_format(arena, S8("BUSTER_CLANG_SUITE_LZCNT_CONFORMANCE_V1\n"
+                                               "upstream_version={S8}\nupstream_commit={S8}\n"
+                                               "profile=gnu-c-x86_64-linux-sysv\nheader_source_root=clang/lib/Headers\n"
+                                               "header_files_hashed={u64}\nheader_manifest_sha256={S8}\nresource_headers_verified={u32}\n"
+                                               "clang_version_23_1_2={u32}\nresource_dir_resolved={u32}\nheader_trace_valid={u32}\npreprocessor_macros_valid={u32}\nast_listing_valid={u32}\nclang_stock_calls_valid={u32}\nbuster_stock_calls_valid={u32}\nclang_baseline_runtime_passed={u32}\n"
+                                               "public_api_count=5\nbuiltin_count=3\nimmediate_domain_count=0\n"
+                                               "runtime_target=x86-64\nruntime_unsafe_instruction_gate=baseline_objects_must_not_contain_lzcnt\n"
+                                               "buster_runtime_configurations_passed={u64}\n"
+                                               "native_target=znver5\nnative_objects_expected=5\nnative_objects_checked={u32}\n"
+                                               "full_immintrin_census=outstanding\nstatus={S8}\n"),
+                                  S8(BUSTER_CLANG_SUITE_VERSION), S8(BUSTER_CLANG_SUITE_COMMIT), header_count, header_digest, (u32)headers_valid,
+                                  (u32)version_valid, (u32)resource_valid, (u32)trace_valid, (u32)macros_valid, (u32)ast_valid,
+                                  (u32)ast_valid, (u32)buster_stock_valid, (u32)(clang_baseline_safe && clang_baseline_ran),
+                                  buster_runs, native_objects_checked,
+                                  valid ? S8("pass") : S8("fail"));
+    valid = clang_suite_write(arena, path_join(arena, results, S8("lzcnt-summary.txt")), summary) && valid;
+    return valid;
+}
