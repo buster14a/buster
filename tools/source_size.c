@@ -7,8 +7,8 @@
 // source_size_baseline_parse own the committed SOURCE_SIZE_BASELINE_PATH
 // snapshot, which source_size_baseline_read takes from the measured revision
 // rather than the working tree. Growth past the limit is acknowledged by the
-// per-change files under SOURCE_SIZE_ACK_DIRECTORY: source_size_ack_paths_added
-// finds the ones a change adds, source_size_ack_parse checks one and
+// per-change files under SOURCE_SIZE_ACK_DIRECTORY: source_size_ack_delta
+// finds the ones a change adds and any change to the append-only records, source_size_ack_parse checks one and
 // source_size_acks_read sums them. source_size_verdict is the ratchet decision;
 // source_size_report prints the human tables and the SOURCE_SIZE_*_V1
 // records; source_size_self_test covers the pure pieces without running Git.
@@ -111,6 +111,7 @@ typedef struct SourceSizeEntry SourceSizeEntry;
 struct SourceSizeEntry
 {
     String8 path;
+    String8 object;
     u64 bytes;
     SourceSizeCategory category;
 };
@@ -139,12 +140,15 @@ struct SourceSizeBaseline
     bool present;
 };
 
-// The sum of the acknowledgement files one change adds.
+// The acknowledgement files one change adds and their sum, and the existing
+// records it removes, changes or copies, which make the change fail.
 typedef struct SourceSizeAcks SourceSizeAcks;
 struct SourceSizeAcks
 {
     String8* paths;
     u64 count;
+    String8* violations;
+    u64 violation_count;
     u64 bytes[SOURCE_SIZE_CATEGORY_COUNT];
 };
 
@@ -336,7 +340,7 @@ BUSTER_GLOBAL_LOCAL bool source_size_inventory_parse(Arena* arena, String8 listi
                 if (result)
                 {
                     SourceSizeCategory category = source_size_classify(path);
-                    inventory->entries[inventory->count] = (SourceSizeEntry){.path = path, .bytes = bytes, .category = category};
+                    inventory->entries[inventory->count] = (SourceSizeEntry){.path = path, .object = fields[2], .bytes = bytes, .category = category};
                     inventory->count += 1;
                     inventory->totals.files[category] += 1;
                     inventory->totals.bytes[category] += bytes;
@@ -511,27 +515,60 @@ BUSTER_GLOBAL_LOCAL bool source_size_ack_path(String8 path)
 
 // Merges two bytewise-ordered inventories into the acknowledgement paths the
 // head adds. Only an added file acknowledges, so an acknowledgement covers
-// the one change that introduced it and is inert in every later one.
-BUSTER_GLOBAL_LOCAL u64 source_size_ack_paths_added(Arena* arena, SourceSizeInventory* base, SourceSizeInventory* head, String8** paths)
+// the one change that introduced it. Records are append-only: an existing
+// one that the head removes or changes is a violation, so a rename, which is
+// a removal plus an addition, cannot recycle an allowance, and neither can an
+// added file whose blob is identical to an existing record.
+BUSTER_GLOBAL_LOCAL void source_size_ack_delta(Arena* arena, SourceSizeInventory* base, SourceSizeInventory* head, SourceSizeAcks* acks)
 {
-    *paths = arena_allocate(arena, String8, head->count + 1);
-    u64 count = 0;
+    *acks = (SourceSizeAcks){0};
+    acks->paths = arena_allocate(arena, String8, head->count + 1);
+    acks->violations = arena_allocate(arena, String8, base->count + head->count + 1);
+    String8* existing = arena_allocate(arena, String8, base->count + 1);
+    u64 existing_count = 0;
     u64 base_index = 0;
-    for (u64 head_index = 0; head_index < head->count; head_index += 1)
+    u64 head_index = 0;
+    while (base_index < base->count || head_index < head->count)
     {
-        String8 path = head->entries[head_index].path;
-        while (base_index < base->count && source_size_path_compare(base->entries[base_index].path, path) < 0)
+        s32 order = base_index == base->count ? 1 : head_index == head->count ? -1
+            : source_size_path_compare(base->entries[base_index].path, head->entries[head_index].path);
+        if (order <= 0 && source_size_ack_path(base->entries[base_index].path))
         {
-            base_index += 1;
+            existing[existing_count] = base->entries[base_index].object;
+            existing_count += 1;
+            if (order < 0 || !string_equal(base->entries[base_index].object, head->entries[head_index].object))
+            {
+                acks->violations[acks->violation_count] = base->entries[base_index].path;
+                acks->violation_count += 1;
+            }
         }
-        bool existed = base_index < base->count && string_equal(base->entries[base_index].path, path);
-        if (!existed && source_size_ack_path(path))
+        if (order > 0 && source_size_ack_path(head->entries[head_index].path))
         {
-            (*paths)[count] = path;
-            count += 1;
+            acks->paths[acks->count] = head->entries[head_index].path;
+            acks->count += 1;
+        }
+        base_index += order <= 0;
+        head_index += order >= 0;
+    }
+    // Compare blobs only after every existing record is known.
+    u64 added_index = 0;
+    for (u64 i = 0; i < head->count && added_index < acks->count; i += 1)
+    {
+        if (string_equal(head->entries[i].path, acks->paths[added_index]))
+        {
+            bool copied = false;
+            for (u64 j = 0; !copied && j < existing_count; j += 1)
+            {
+                copied = string_equal(existing[j], head->entries[i].object);
+            }
+            if (copied)
+            {
+                acks->violations[acks->violation_count] = head->entries[i].path;
+                acks->violation_count += 1;
+            }
+            added_index += 1;
         }
     }
-    return count;
 }
 
 // "schema", one "reason <text>" line and at least one "<category> <bytes>"
@@ -589,12 +626,17 @@ BUSTER_GLOBAL_LOCAL bool source_size_ack_parse(String8 text, u64* bytes)
 }
 
 // Reads every acknowledgement the head adds relative to the base from the head
-// revision. A malformed one fails the report rather than being ignored.
+// revision. A malformed one, or any change to an existing record, fails the
+// report rather than being ignored.
 BUSTER_GLOBAL_LOCAL bool source_size_acks_read(Arena* arena, SourceSizeInventory* base, SourceSizeInventory* head, SourceSizeAcks* acks)
 {
-    *acks = (SourceSizeAcks){0};
-    acks->count = source_size_ack_paths_added(arena, base, head, &acks->paths);
-    bool result = true;
+    source_size_ack_delta(arena, base, head, acks);
+    bool result = acks->violation_count == 0;
+    for (u64 i = 0; i < acks->violation_count; i += 1)
+    {
+        string_print(S8("error: source_size: acknowledgement record {S8} is removed, changed or a copy of an existing record; records are "
+                        "append-only (docs/source-size.md)\n"), acks->violations[i]);
+    }
     for (u64 i = 0; result && i < acks->count; i += 1)
     {
         String8 text = {0};
@@ -1032,16 +1074,36 @@ BUSTER_GLOBAL_LOCAL bool source_size_self_test(Arena* arena)
 
     // Two independent changes over one base each add their own acknowledgement
     // file; neither touches a file the other changes, and each, and both
-    // merged together, admit only the acknowledgements they add.
+    // merged together, admit only the acknowledgements they add. Existing
+    // records are append-only: removing, changing, renaming or copying one
+    // grants nothing and is reported.
     String8 ack_a = S8(SOURCE_SIZE_ACK_DIRECTORY "a.txt");
     String8 ack_b = S8(SOURCE_SIZE_ACK_DIRECTORY "b.txt");
     String8 ack_old = S8(SOURCE_SIZE_ACK_DIRECTORY "old.txt");
+    String8 ack_new = S8(SOURCE_SIZE_ACK_DIRECTORY "renamed.txt");
+    String8 object_a = S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    String8 object_b = S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    String8 object_old = S8("cccccccccccccccccccccccccccccccccccccccc");
+    String8 object_edit = S8("dddddddddddddddddddddddddddddddddddddddd");
+    String8 nul = S8("\0");
     String8 ack_listings[] = {
-        string_format(arena, S8("100644 blob {S8} 1\t{S8}{S8}"), object, ack_old, S8("\0")),
-        string_format(arena, S8("100644 blob {S8} 1\t{S8}{S8}100644 blob {S8} 1\t{S8}{S8}"), object, ack_a, S8("\0"), object, ack_old, S8("\0")),
-        string_format(arena, S8("100644 blob {S8} 1\t{S8}{S8}100644 blob {S8} 1\t{S8}{S8}"), object, ack_b, S8("\0"), object, ack_old, S8("\0")),
-        string_format(arena, S8("100644 blob {S8} 1\t{S8}{S8}100644 blob {S8} 1\t{S8}{S8}100644 blob {S8} 1\t{S8}{S8}"), object, ack_a, S8("\0"), object,
-            ack_b, S8("\0"), object, ack_old, S8("\0")),
+        // 0: the base, holding one landed record.
+        string_format(arena, S8("100644 blob {S8} 1\t{S8}{S8}"), object_old, ack_old, nul),
+        // 1: change A.
+        string_format(arena, S8("100644 blob {S8} 1\t{S8}{S8}100644 blob {S8} 1\t{S8}{S8}"), object_a, ack_a, nul, object_old, ack_old, nul),
+        // 2: change B.
+        string_format(arena, S8("100644 blob {S8} 1\t{S8}{S8}100644 blob {S8} 1\t{S8}{S8}"), object_b, ack_b, nul, object_old, ack_old, nul),
+        // 3: A and B merged.
+        string_format(arena, S8("100644 blob {S8} 1\t{S8}{S8}100644 blob {S8} 1\t{S8}{S8}100644 blob {S8} 1\t{S8}{S8}"), object_a, ack_a, nul, object_b,
+            ack_b, nul, object_old, ack_old, nul),
+        // 4: the landed record renamed with its blob unchanged.
+        string_format(arena, S8("100644 blob {S8} 1\t{S8}{S8}"), object_old, ack_new, nul),
+        // 5: the landed record removed.
+        S8(""),
+        // 6: the landed record edited in place.
+        string_format(arena, S8("100644 blob {S8} 1\t{S8}{S8}"), object_edit, ack_old, nul),
+        // 7: the landed record copied to a new name.
+        string_format(arena, S8("100644 blob {S8} 1\t{S8}{S8}100644 blob {S8} 1\t{S8}{S8}"), object_old, ack_old, nul, object_old, ack_new, nul),
     };
     SourceSizeInventory ack_inventories[BUSTER_ARRAY_LENGTH(ack_listings)] = {0};
     bool ack_listed = true;
@@ -1049,19 +1111,48 @@ BUSTER_GLOBAL_LOCAL bool source_size_self_test(Arena* arena)
     {
         ack_listed = ack_listed && source_size_inventory_parse(arena, ack_listings[i], &ack_inventories[i]);
     }
-    String8* added = 0;
-    u64 added_base = ack_listed ? source_size_ack_paths_added(arena, &ack_inventories[0], &ack_inventories[0], &added) : 1;
-    u64 added_a = ack_listed ? source_size_ack_paths_added(arena, &ack_inventories[0], &ack_inventories[1], &added) : 0;
-    bool only_a = added_a == 1 && string_equal(added[0], ack_a);
-    u64 added_b = ack_listed ? source_size_ack_paths_added(arena, &ack_inventories[0], &ack_inventories[2], &added) : 0;
-    bool only_b = added_b == 1 && string_equal(added[0], ack_b);
-    u64 added_b_after_a = ack_listed ? source_size_ack_paths_added(arena, &ack_inventories[1], &ack_inventories[3], &added) : 0;
-    bool b_after_a = added_b_after_a == 1 && string_equal(added[0], ack_b);
-    u64 added_both = ack_listed ? source_size_ack_paths_added(arena, &ack_inventories[0], &ack_inventories[3], &added) : 0;
-    bool both = added_both == 2 && string_equal(added[0], ack_a) && string_equal(added[1], ack_b);
-    u64 added_removed = ack_listed ? source_size_ack_paths_added(arena, &ack_inventories[3], &ack_inventories[0], &added) : 1;
-    source_size_expect(ack_listed && added_base == 0 && only_a && only_b && b_after_a && both && added_removed == 0, S8("ack:independent-changes"), &checks,
-        &failures);
+    typedef struct SourceSizeAckCase SourceSizeAckCase;
+    struct SourceSizeAckCase
+    {
+        u8 base;
+        u8 head;
+        u8 added;
+        u8 violations;
+        String8 first_added;
+        String8 second_added;
+        String8 first_violation;
+        String8 second_violation;
+        String8 name;
+    };
+    SourceSizeAckCase ack_cases[] = {
+        {0, 0, 0, 0, {0}, {0}, {0}, {0}, S8_INITIALIZER("ack:unchanged")},
+        {0, 1, 1, 0, ack_a, {0}, {0}, {0}, S8_INITIALIZER("ack:change-a")},
+        {0, 2, 1, 0, ack_b, {0}, {0}, {0}, S8_INITIALIZER("ack:change-b")},
+        {1, 3, 1, 0, ack_b, {0}, {0}, {0}, S8_INITIALIZER("ack:b-after-a")},
+        {2, 3, 1, 0, ack_a, {0}, {0}, {0}, S8_INITIALIZER("ack:a-after-b")},
+        {0, 3, 2, 0, ack_a, ack_b, {0}, {0}, S8_INITIALIZER("ack:both")},
+        {0, 4, 1, 2, ack_new, {0}, ack_old, ack_new, S8_INITIALIZER("ack:renamed")},
+        {0, 5, 0, 1, {0}, {0}, ack_old, {0}, S8_INITIALIZER("ack:removed")},
+        {0, 6, 0, 1, {0}, {0}, ack_old, {0}, S8_INITIALIZER("ack:modified")},
+        {0, 7, 1, 1, ack_new, {0}, ack_new, {0}, S8_INITIALIZER("ack:copied")},
+        {3, 0, 0, 2, {0}, {0}, ack_a, ack_b, S8_INITIALIZER("ack:reverted")},
+    };
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(ack_cases); i += 1)
+    {
+        SourceSizeAckCase ack_case = ack_cases[i];
+        SourceSizeAcks delta = {0};
+        bool matched = ack_listed;
+        if (matched)
+        {
+            source_size_ack_delta(arena, &ack_inventories[ack_case.base], &ack_inventories[ack_case.head], &delta);
+            matched = delta.count == ack_case.added && delta.violation_count == ack_case.violations &&
+                (ack_case.added < 1 || string_equal(delta.paths[0], ack_case.first_added)) &&
+                (ack_case.added < 2 || string_equal(delta.paths[1], ack_case.second_added)) &&
+                (ack_case.violations < 1 || string_equal(delta.violations[0], ack_case.first_violation)) &&
+                (ack_case.violations < 2 || string_equal(delta.violations[1], ack_case.second_violation));
+        }
+        source_size_expect(matched, ack_case.name, &checks, &failures);
+    }
 
     SourceSizeInventory before = {0};
     SourceSizeInventory after = {0};

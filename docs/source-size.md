@@ -107,14 +107,19 @@ in the same merge-queue group, still pass. Record the measured growth, not a
 padded allowance; a reviewer compares it with the report.
 
 Only files the measured change adds count, found by comparing the file lists
-of the base and head revisions. A file already present at the base
-acknowledges nothing, so editing, renaming in place or reusing an
-acknowledgement already on `main` does not admit new growth; add a new file.
-When several acknowledged changes are measured together, such as a branch
-against its merge base, their acknowledgements add up per category. A malformed
-added acknowledgement fails the check instead of being ignored. Acknowledgement
-files are documentation and are never ratcheted; they are a permanent,
-append-only record and are not edited or removed after they land.
+of the base and head revisions; a file already present at the base
+acknowledges nothing. When several acknowledged changes are measured together,
+such as a branch against its merge base, their acknowledgements add up per
+category. A malformed added acknowledgement fails the check instead of being
+ignored. Acknowledgement files are documentation and are never ratcheted.
+
+Records are append-only, and the check enforces it so that a landed allowance
+cannot be recycled. It fails a change that removes an acknowledgement present
+at the base, changes its blob, or adds one whose blob is identical to an
+existing record. A rename is a removal plus an identical addition, so moving a
+landed record to a new name fails too. Reverting a change that added an
+acknowledgement reverts its code and keeps the file. To acknowledge new
+growth, add a new file with its own measured bytes and reason.
 
 The check still compares the PR merge revision with its first parent, so the
 measured growth is exactly what the change adds and is unaffected by other
