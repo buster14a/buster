@@ -38,6 +38,10 @@ in `combinations.log`. The manifest is diagnostic-only: it neither certifies
 successful compiler probes nor replaces the coverage/result consumers.
 Each tree's `.ninja_log` and `ninja-log-summary.json` are retained, with per-edge
 breakdowns printed as `NINJA_LOG_*` lines; this remains diagnostic-only (#2816).
+The summary reports per-output durations only: `.ninja_log` may append build,
+`test_all`, and analyzer invocations with independently zeroed clocks, so it
+provides no elapsed or phase timing; use [matrix phase records](ci-matrix-phases.md)
+for build-phase wall time.
 
 The collector performs no build or toolchain subprocesses and does not parse or
 sum profile events. It examines at most 4,096 build-root entries and 32 matching

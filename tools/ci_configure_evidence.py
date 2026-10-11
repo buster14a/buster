@@ -72,6 +72,8 @@ def summarize_ninja_log(data: bytes) -> dict:
             malformed_lines += 1
             continue
         output = fields[3]
+        # Ninja invocation clocks reset; these times are relative to each
+        # invocation and are not comparable across invocations.
         entries[output] = {
             "output": output,
             "start_ms": start_ms,
@@ -79,17 +81,14 @@ def summarize_ninja_log(data: bytes) -> dict:
             "duration_ms": end_ms - start_ms,
         }
     edges = list(entries.values())
-    top = sorted(edges, key=lambda edge: (-edge["duration_ms"], edge["output"]))[:15]
-    tail = sorted(edges, key=lambda edge: (-edge["end_ms"], edge["output"]))[:5]
+    all_edges = sorted(edges, key=lambda edge: (-edge["duration_ms"], edge["output"]))
     return {
         "version": version,
         "edges": len(edges),
         "malformed_lines": malformed_lines,
-        "wall_ms": (max(edge["end_ms"] for edge in edges) - min(edge["start_ms"] for edge in edges)
-                    if edges else 0),
-        "sum_ms": sum(edge["duration_ms"] for edge in edges),
-        "top": top,
-        "tail": tail,
+        "edge_duration_sum_ms": sum(edge["duration_ms"] for edge in edges),
+        "top": all_edges[:15],
+        "all_edges": all_edges,
     }
 
 
@@ -222,15 +221,11 @@ def main():
         for summary in report["ninja_log_summaries"]:
             tree = summary["tree"]
             print(f"NINJA_LOG_SUMMARY tree={tree} edges={summary['edges']} "
-                  f"wall_seconds={summary['wall_ms'] / 1000:.3f} "
-                  f"sum_seconds={summary['sum_ms'] / 1000:.3f} malformed={summary['malformed_lines']}")
+                  f"edge_duration_sum_seconds={summary['edge_duration_sum_ms'] / 1000:.3f} "
+                  f"malformed={summary['malformed_lines']}")
             for rank, edge in enumerate(summary["top"], 1):
                 print(f"NINJA_LOG_EDGE tree={tree} rank={rank} seconds={edge['duration_ms'] / 1000:.3f} "
-                      f"start_seconds={edge['start_ms'] / 1000:.3f} "
-                      f"end_seconds={edge['end_ms'] / 1000:.3f} output={edge['output']}")
-            for rank, edge in enumerate(summary["tail"], 1):
-                print(f"NINJA_LOG_TAIL tree={tree} rank={rank} "
-                      f"end_seconds={edge['end_ms'] / 1000:.3f} output={edge['output']}")
+                      f"output={edge['output']}")
         result = 1 if report["errors"] else 0
     except (OSError, ValueError) as error:
         print(f"CMake evidence collection failed: {error}", file=sys.stderr)
