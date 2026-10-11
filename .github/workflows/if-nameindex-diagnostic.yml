@@ -46,6 +46,7 @@ jobs:
       - name: Type-name probes
         shell: bash
         run: |
+          set +e
           set -uo pipefail
           failures=0
           for case_id in $(seq 0 15); do
