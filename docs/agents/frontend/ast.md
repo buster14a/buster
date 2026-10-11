@@ -1265,6 +1265,38 @@ allocation in one 500-line loop moves with its surroundings. The statement
 plan meets the replacement criterion. Every other budget in this plan keeps
 its own declared criterion.
 
+For the statement plan's [declarator hints](#statement-plan-from-the-tree),
+these budgets were declared before their measured runs. The input, flags and
+four Callgrind arms are the statement plan's (`-g0 -fsyntax-only`, the
+self-host unity input, `--cache-sim=no --branch-sim=no`, tests-off
+`-march=x86-64-v3` builds). The base is main `4317e0dd`, which carries the
+statement plan (#3370). A throwaway no-inline census of that base charged
+`c_parse_local_declarations` 337.1 M inclusive, of which the initializer
+loop's per-token tests are about 47 M, the `,` and `=` scans about 7 M, and
+the two auto-inference scans per declaration 36.4 M. The budgets:
+- **Correctness.**
+  - 0 binding differences over the corpus and the frontend sources (the
+    statement plan's differential, unchanged);
+  - a one-off comparison of the same fields on the self-host unity input,
+    also with 0 differences;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **Coverage** on the self-host unity input: no body falls back; no
+  declarator hint is refused (`declarator_declines=0`); at least 95% of
+  planned declarations skip the auto-inference scans and at least 90% of
+  hinted declarators' initializers are plain.
+- **The hints' own effect (C against B).** The whole compile costs at least
+  40 M fewer instructions (about 0.4%), with the hints' construction charged.
+- **The default path (D against A).** The split is one always-inline worker
+  with a hintless and a hinted caller, so the default path runs no hint code.
+  The difference stays within ±0.05% Ir.
+- **Adoption of the hook as the default.** Unchanged, with acceptance on the
+  Zen 5 route (#2761).
+
+The census also found that the switch and control-statement validators'
+`c_parse_statement_end` calls cost 1.05 M in total (7,586 calls) on that input.
+Reading their ends from the tree cannot repay its own lookup, so they stay
+with tokens; this is recorded as a negative result, not a budget.
+
 For the split's [diagnostic probe](#declaration-split-from-the-tree)
 (`c_parser_tree_probe`), these budgets were declared before its measured runs.
 The probe classifies identifier lanes from their interned ids instead of
