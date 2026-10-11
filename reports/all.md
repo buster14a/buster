@@ -48,8 +48,8 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 4 | 4 | [series](series-057da0f926e66c95.md) |
 | recover / non-matrix | Ubuntu 26.04.1 LTS / Intel&#40;R&#41; Xeon&#40;R&#41; 6973P-C | workflow&#95;run / main | 1 | 1 | [series](series-adb0ba29963bbb6d.md) |
 | Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | workflow&#95;run / main | 2 | 2 | [series](series-ab426dcbacdd44b3.md) |
-| watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 25 | 25 | [series](series-a5c935d7b52c9992.md) |
-| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 8 | 8 | [series](series-20369cc20c6b6e85.md) |
+| watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 26 | 26 | [series](series-a5c935d7b52c9992.md) |
+| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 11 | 11 | [series](series-20369cc20c6b6e85.md) |
 | watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | workflow&#95;run / main | 4 | 4 | [series](series-a5c500ec04fb6ce0.md) |
 | Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | schedule / main | 1 | 1 | [series](series-b3a133ad9ee03f39.md) |
 | watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | workflow&#95;run / main | 5 | 5 | [series](series-2920b31d99ae0d1d.md) |
@@ -80,8 +80,8 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | foundation / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | merge&#95;group / gh-readonly-queue/main/pr-3374-9516f631b6a30943b90a77816708407a0a04b904 | 1 | 1 | [series](series-94687c9ab2ec6747.md) |
 | Collect terminal Actions executions / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | schedule / main | 0 | 1 | [series](series-63158f378de5073b.md) |
 | Report required job step changes / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 4 | 4 | [series](series-dfba54a0e1caaff7.md) |
-| Native CI history controls /  | unknown OS / unknown CPU | schedule / main | 0 | 11 | [series](series-e460ad260f8a45e8.md) |
-| Authentic desktop architecture execution joins /  | unknown OS / unknown CPU | schedule / main | 0 | 11 | [series](series-f666f9001ca74394.md) |
+| Native CI history controls /  | unknown OS / unknown CPU | schedule / main | 0 | 12 | [series](series-e460ad260f8a45e8.md) |
+| Authentic desktop architecture execution joins /  | unknown OS / unknown CPU | schedule / main | 0 | 12 | [series](series-f666f9001ca74394.md) |
 | Publish advisory CI history / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 7 | 7 | [series](series-95301a08b54ea662.md) |
 | No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3374-9516f631b6a30943b90a77816708407a0a04b904 | 0 | 1 | [series](series-b60fce2a953ad14a.md) |
 | Main CI reuse decision /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3374-9516f631b6a30943b90a77816708407a0a04b904 | 0 | 1 | [series](series-f400248714a36d5f.md) |
