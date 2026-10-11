@@ -231,12 +231,63 @@ static void clean_environment(void)
     for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); ++i) unsetenv(names[i]);
 }
 
-static void pristine(const char* source, const char* phase)
+static void write_text(const char* path, const char* text)
+{
+    FILE* file = fopen(path, "wb");
+    size_t n = strlen(text);
+    if (!file || fwrite(text, 1, n, file) != n || fclose(file)) fail("fixture write");
+}
+
+static int pristine_status(const char* source, const char* phase)
 {
     const char* command = format("test \"$(git rev-parse HEAD)\" = %s && test \"$(git rev-parse --show-toplevel)\" = %s && "
         "test -z \"$(git status --porcelain=v1 --untracked-files=all --ignored)\" && "
         "test -z \"$(git ls-files -v | sed '/^H /d')\" && git ls-tree -r HEAD", quote(BUSTER_GIT_PIN), quote(source));
-    if (run_step(phase, source, command, 30)) fail("pin or pristine input");
+    return run_step(phase, source, command, 30);
+}
+
+static void pristine(const char* source, const char* phase)
+{
+    if (pristine_status(source, phase)) fail("pin or pristine input");
+}
+
+static void intake_controls(const char* source)
+{
+    const char* copy = format("%s/input-controls", evidence);
+    if (run_step("controls-clone", ".", format("git clone --no-local --no-hardlinks %s %s", quote(source), quote(copy)), 60))
+        fail("control clone");
+    pristine(copy, "control-accepted");
+    const char* readme = format("%s/README.md", copy);
+    const char* original = read_text(readme);
+    write_text(readme, "tracked input changed\n");
+    if (!pristine_status(copy, "control-tracked-dirty")) fail("dirty tracked input accepted");
+    write_text(readme, original);
+    const char* untracked = format("%s/buster-untracked-control", copy);
+    write_text(untracked, "untracked input\n");
+    if (!pristine_status(copy, "control-untracked")) fail("untracked input accepted");
+    if (unlink(untracked)) fail("untracked control cleanup");
+    write_text(format("%s/.git/info/exclude", copy), "buster-ignored-control\n");
+    const char* ignored = format("%s/buster-ignored-control", copy);
+    write_text(ignored, "ignored input\n");
+    if (!pristine_status(copy, "control-ignored")) fail("ignored input accepted");
+    if (unlink(ignored)) fail("ignored control cleanup");
+    const char* flags[] = {"assume-unchanged", "skip-worktree"};
+    for (unsigned i = 0; i < 2; ++i)
+    {
+        if (run_step("control-index-set", copy, format("git update-index --%s README.md", flags[i]), 30))
+            fail("index control set");
+        if (!pristine_status(copy, format("control-%s", flags[i]))) fail("hidden index flag accepted");
+        if (run_step("control-index-clear", copy, format("git update-index --no-%s README.md", flags[i]), 30))
+            fail("index control clear");
+    }
+    if (run_step("control-wrong-pin-set", copy, "git -c commit.gpgsign=false commit --allow-empty -m wrong-pin", 30))
+        fail("wrong pin control setup");
+    if (!pristine_status(copy, "control-wrong-pin")) fail("wrong revision accepted");
+    if (run_step("control-wrong-pin-clear", copy, format("git reset --hard %s", quote(BUSTER_GIT_PIN)), 30))
+        fail("wrong pin cleanup");
+    pristine(copy, "control-restored");
+    if (run_step("control-failure-status", ".", "exit 7", 10) != 7 ||
+        run_step("control-timeout-status", ".", "sleep 5", 0) != 124) fail("process failure scored as success");
 }
 
 static const char* make_command(const char* self, const char* target)
@@ -245,13 +296,6 @@ static const char* make_command(const char* self, const char* target)
         "NO_OPENSSL=YesPlease NO_TCLTK=YesPlease NO_GETTEXT=YesPlease NO_PERL=YesPlease "
         "NO_PYTHON=YesPlease COMPUTE_HEADER_DEPENDENCIES=yes %s",
         quote(self), quote("-O0 -g -Wall"), target);
-}
-
-static void write_text(const char* path, const char* text)
-{
-    FILE* file = fopen(path, "wb");
-    size_t n = strlen(text);
-    if (!file || fwrite(text, 1, n, file) != n || fclose(file)) fail("fixture write");
 }
 
 static int git_step(const char* name, const char* binary, const char* repository, const char* args, int expected)
@@ -353,6 +397,7 @@ static int campaign(const char* self, const char* source, const char* compiler, 
         setenv("GIT_AUTHOR_DATE", "2001-01-01T00:00:00+0000", 1) ||
         setenv("GIT_COMMITTER_DATE", "2001-01-01T00:00:00+0000", 1)) fail("identity");
     pristine(source, "pristine-before");
+    intake_controls(source);
     if (run_step("identities", ".", format("git rev-parse HEAD 'HEAD^{tree}'; sha256sum %s %s %s; "
         "%s --version; make --version; ld --version; dpkg-query -W; find /usr/include -type f -exec sha256sum {} +",
         quote(self), quote(compiler), quote(oracle), quote(oracle)), 60)) fail("identity capture");
