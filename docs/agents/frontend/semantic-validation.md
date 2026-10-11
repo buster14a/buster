@@ -741,3 +741,17 @@ released after validation; completed definitions reuse their source identity.
 The multidimensional constant/runtime pair pins a later array derivation that
 first materializes a member during retry, including its exact source diagnostic.
 A GNU17-only empty-record dimension pins completion without member-row growth.
+
+### Promoted-member workspace
+
+Initializer member paths keep the existing breadth-first search and generation-stamped
+visited table. The semantic machine starts with token-derived workspace capacity,
+but expression queries can append type rows beyond that estimate. A search grows
+its checked private workspace to cover the live type table before indexing it;
+scratch and phase rewinds cannot release those buffers. The next growth releases
+the previous private reservation, and semantic teardown releases the last one.
+Reservation failure produces a structured diagnostic rather than treating an intact
+record as if it lacked the requested member. The depth-16/32 later-assertion regression
+in `c_test_nested_designator_static_assert` covers this interaction in syntax-only
+validation, both frontend forms and the AST pilot; runtime controls check inferred
+array length and member values.

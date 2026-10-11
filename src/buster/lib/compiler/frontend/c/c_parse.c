@@ -11033,6 +11033,55 @@ BUSTER_C_INTERNAL CMember* c_parse_initializer_member_at(CParseInitializerSlotCa
     return member;
 }
 
+// Expression typing can append more rows than the token-derived initial
+// table estimate. The member search's indexed visited set follows that live
+// count; its private arena survives scratch/phase rewinds until the next
+// growth or semantic teardown.
+BUSTER_C_INTERNAL bool c_parse_promoted_member_workspace(CTypeParseMachine* machine, CParseResult* result)
+{
+    bool available = machine->promoted_member_capacity && machine->promoted_member_work && machine->promoted_member_visited;
+    if (available && result->type_count > machine->promoted_member_capacity)
+    {
+        u64 doubled = (u64)machine->promoted_member_capacity * 2;
+        u32 capacity = doubled <= UINT32_MAX && doubled >= result->type_count ? (u32)doubled : result->type_count;
+        u64 size = arena_minimum_position;
+        bool sized = c_type_parse_buffer_size_add(&size, capacity, sizeof(CParsePromotedMemberWork), BUSTER_ALIGN_OF(CParsePromotedMemberWork)) &&
+                     c_type_parse_buffer_size_add(&size, capacity, sizeof(u32), BUSTER_ALIGN_OF(u32)) &&
+                     size <= ARENA_MAX_RESERVATION - (BUSTER_KB(64) - 1);
+        if (sized)
+        {
+            size = (size + BUSTER_KB(64) - 1) & ~(BUSTER_KB(64) - 1);
+        }
+        Arena* workspace = sized ? c_frontend_arena_create((ArenaCreation){
+            .reserved_size = size,
+            .granularity = BUSTER_KB(64),
+            .initial_size = size,
+            .flags = {.no_pool = true},
+        }, C_FRONTEND_RESERVATION_ANALYSIS) : 0;
+        available = workspace != 0;
+        if (available)
+        {
+            CParsePromotedMemberWork* work = arena_allocate(workspace, CParsePromotedMemberWork, capacity);
+            u32* visited = arena_allocate_zeroed(workspace, u32, capacity);
+            if (machine->promoted_member_arena)
+            {
+                BUSTER_VALIDATE(arena_destroy(machine->promoted_member_arena, 1));
+            }
+            machine->promoted_member_arena = workspace;
+            machine->promoted_member_work = work;
+            machine->promoted_member_visited = visited;
+            machine->promoted_member_capacity = capacity;
+            machine->promoted_member_generation = 0;
+        }
+        else
+        {
+            c_parse_diagnostic(result, (CSourceLocation){0}, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                sized ? S8("could not reserve C promoted-member workspace") : S8("C promoted-member workspace size overflow"));
+        }
+    }
+    return available;
+}
+
 // The search keeps its queue in the machine's promoted_member_work, and a
 // found member leaves in found_work_out/found_field_out the queue row that
 // declares it and that row's field index. The rows' parent/via_field links
@@ -11045,11 +11094,11 @@ BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, 
     {
         *ambiguous_out = false;
     }
-    u32 capacity = machine->promoted_member_capacity;
-    if (!capacity || result->type_count > capacity || !machine->promoted_member_work || !machine->promoted_member_visited)
+    if (!c_parse_promoted_member_workspace(machine, result))
     {
         return false;
     }
+    u32 capacity = machine->promoted_member_capacity;
     CParsePromotedMemberWork* work = machine->promoted_member_work;
     u32* visited = machine->promoted_member_visited;
     machine->promoted_member_generation += 1;
@@ -41407,6 +41456,10 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     // The literal memo stays published: lowering reads the recorded bytes
     // and never records.
     scratch_end(machine_temporary);
+    if (machine.promoted_member_arena)
+    {
+        BUSTER_VALIDATE(arena_destroy(machine.promoted_member_arena, 1));
+    }
     BUSTER_VALIDATE(arena_destroy(machine_buffer_arena, 1));
     if (phase_arena)
     {

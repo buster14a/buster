@@ -5488,7 +5488,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_designator_static_assert(UnitTe
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[index],
-            (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU17});
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
         CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
         CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0);
