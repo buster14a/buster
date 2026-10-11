@@ -663,6 +663,57 @@ test_android_batch_status() (
     echo "Android batch status evidence passed: $case_name"
 )
 
+# The opt-in runtime-order probe (android/runtime_order.sh) is built before the
+# emulator wait and run once before the payloads. Its failure fails the batch
+# without skipping either configuration's payload.
+test_android_runtime_order_batch() (
+    set -euo pipefail
+    local case_name=$1
+    local expected_status=$2
+    local state="$test_root/android-runtime-order-$case_name"
+    local batch_status
+    setup_android_fixture "$state"
+    export BUSTER_ANDROID_RUNTIME_ORDER=1
+    export BUSTER_ANDROID_RUNTIME_ORDER_SCRIPT="$state/runtime_order.sh"
+    export BUSTER_ANDROID_RUNTIME_ORDER_DIRECTORY="$state/runtime-order"
+    cat >"$BUSTER_ANDROID_RUNTIME_ORDER_SCRIPT" <<'FAKE_RUNTIME_ORDER'
+#!/usr/bin/env bash
+printf '%s %s\n' "$1" "${@: -1}" >>"$FAKE_ANDROID_STATE_DIR/runtime-order.log"
+if [[ $1 == run && -n ${FAKE_RUNTIME_ORDER_RUN_STATUS:-} ]]; then
+    exit "$FAKE_RUNTIME_ORDER_RUN_STATUS"
+fi
+FAKE_RUNTIME_ORDER
+    if [[ $case_name == failure ]]; then
+        export FAKE_RUNTIME_ORDER_RUN_STATUS=1
+    fi
+    bash "$repo_root/android/start_emulator_ci.sh" start
+    set +e
+    timeout --kill-after=1s 15s bash "$repo_root/android/test_ci.sh" --all >"$state/run.log" 2>&1
+    batch_status=$?
+    set -e
+    assert_case_status "runtime-order-$case_name" "$batch_status" "$expected_status" "$state/run.log"
+    if [[ $(cat "$state/runtime-order.log") != "build $state/runtime-order"$'\n'"run $state/runtime-order" ]]; then
+        echo "assertion failed: runtime-order $case_name did not build once and run once" >&2
+        cat "$state/runtime-order.log" >&2
+        exit 1
+    fi
+    assert_file_contains 'ANDROID_CONFIG_RESULT config=Debug status=0' "$state/run.log"
+    assert_file_contains 'ANDROID_CONFIG_RESULT config=Release status=0' "$state/run.log"
+    assert_file_contains "ANDROID_RUNTIME_ORDER_CHECK status=$expected_status" "$state/run.log"
+    if [[ $expected_status -eq 0 ]]; then
+        assert_file_contains 'ANDROID_BATCH_RESULT phase=tests config=none status=0 cleanup_status=not-run' "$state/run.log"
+    else
+        assert_file_contains "ANDROID_BATCH_RESULT phase=tests config=runtime-order status=1 cleanup_status=0" "$state/run.log"
+        assert_file_contains 'Android runtime-order probe failed with status 1' "$state/run.log"
+    fi
+    if [[ -f $BUSTER_ANDROID_EMULATOR_STARTED_MARKER ]]; then
+        bash "$repo_root/android/start_emulator_ci.sh" stop
+    fi
+    [[ ! -f $BUSTER_ANDROID_EMULATOR_STARTED_MARKER ]]
+    assert_android_owned_process_stopped "$state/emulator.pid"
+    echo "Android runtime-order batch evidence passed: $case_name"
+)
+
 test_android_workflow_body() (
     set -euo pipefail
     local case_name=$1
@@ -1081,6 +1132,9 @@ test_android_batch_status all-pass 0 0 0
 test_android_batch_status payload-failure 1 1 0
 test_android_batch_status debug-timeout 1 1 0
 test_android_batch_status missing-marker 1 1 0
+test_android_runtime_order_batch pass 0
+test_android_runtime_order_batch failure 1
+bash "$repo_root/android/runtime_order_test.sh"
 for workflow_case in all-pass debug-failure debug-timeout missing-marker cleanup-exit7 \
     cleanup-timeout failure-and-cleanup7 already-stopped pid-reused interruption payload-23-cleanup7; do
     test_android_workflow_body "$workflow_case"

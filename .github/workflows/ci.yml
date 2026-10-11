@@ -1370,6 +1370,7 @@ jobs:
           BUSTER_ANDROID_EMULATOR_HEADLESS: "1"
           BUSTER_ANDROID_EMULATOR_LOG: ${{ runner.temp }}/buster-ci/android-emulator.log
           BUSTER_ANDROID_EMULATOR_STARTED_MARKER: ${{ runner.temp }}/buster-ci/android-emulator.started
+          BUSTER_ANDROID_RUNTIME_ORDER: "1"
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"

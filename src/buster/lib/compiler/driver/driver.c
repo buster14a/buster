@@ -2799,8 +2799,18 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     // Only the x86-64 Linux writer places a position-independent image. The
     // request is a link option, so a compile-only invocation carrying it in
     // shared flags is not refused for it, as GCC ignores it there.
+    // Bionic loads only position-independent executables, so an Android
+    // x86-64 link is a PIE whether or not -pie was given, and -no-pie cannot
+    // select another image there. Android has no shared-object writer.
+    bool android_executable_target =
+        !invocation.has_gpu_target && invocation.target.os == OPERATING_SYSTEM_ANDROID && invocation.target.cpu_arch == CPU_ARCH_X86_64;
+    if (android_executable_target && invocation.image_kind == NATIVE_IMAGE_EXECUTABLE)
+    {
+        invocation.image_kind = NATIVE_IMAGE_PIE;
+    }
     bool position_independent_image_target =
-        !invocation.has_gpu_target && invocation.target.os == OPERATING_SYSTEM_LINUX && invocation.target.cpu_arch == CPU_ARCH_X86_64;
+        !invocation.has_gpu_target && ((invocation.target.os == OPERATING_SYSTEM_LINUX && invocation.target.cpu_arch == CPU_ARCH_X86_64) ||
+                                       (android_executable_target && invocation.image_kind == NATIVE_IMAGE_PIE));
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.image_kind != NATIVE_IMAGE_EXECUTABLE &&
         invocation.action == COMPILER_DRIVER_ACTION_LINK && !position_independent_image_target)
     {

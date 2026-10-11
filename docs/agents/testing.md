@@ -536,6 +536,24 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   failure: always inspect every `ANDROID_CONFIG_RESULT` line — both Debug and
   Release — plus the batch line's `status=` field; a missing per-config line or
   `status=not-run` is itself evidence of an incomplete run.
+  With `BUSTER_ANDROID_RUNTIME_ORDER=1`, which the workflow's Android step
+  sets, `android/test_ci.sh` also executes a Buster-linked program on the
+  emulator (#1243). The APK payload cannot do this: Android 10+ app data is
+  W^X, so its sandbox cannot execute a freshly written file. While the
+  emulator boots, `android/runtime_order.sh build` builds a host `ide` (Debug,
+  no tests) and links `android/runtime_order/probe.c` against a shared library
+  and an IFUNC object built by the NDK's clang. After boot, `run` pushes the
+  probe to `/data/local/tmp`, runs it through `adb shell` with the
+  `BUSTER_ANDROID_ADB_COMMAND_TIMEOUT_SECONDS` adb bounds and a 30-second
+  probe bound (`BUSTER_ANDROID_RUNTIME_ORDER_TIMEOUT_SECONDS`), and requires
+  exit status 0 and the anchored record: both preinit entries in order, then
+  the library's constructor, then the program's, with the IFUNC resolved once
+  and callable from preinit. `ANDROID_RUNTIME_ORDER_RESULT` reports each mode
+  and `ANDROID_RUNTIME_ORDER_CHECK` the batch's view (`disabled` when not
+  requested). A failure fails the batch with `config=runtime-order` while both
+  payloads still run. `bash android/runtime_order_test.sh` (run by
+  `android/run_tests_test.sh`) covers the script with fake tools; the frozen
+  shared mobile suite keeps the check disabled.
   `android/run_tests.sh` bounds each complete suite with a 180-second monitor
   watchdog, independently of adb command/install/boot deadlines. Debug compiler
   fixtures exceeded the former 60-second budget while still reporting progress

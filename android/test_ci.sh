@@ -113,6 +113,19 @@ fi
 build_directory=${BUSTER_ANDROID_BUILD_DIRECTORY:-build/android-ci-${android_abi}}
 android_start_script=${BUSTER_ANDROID_START_SCRIPT:-android/start_emulator_ci.sh}
 android_run_tests_script=${BUSTER_ANDROID_RUN_TESTS_SCRIPT:-android/run_tests.sh}
+# The runtime-order probe executes a Buster-linked program through adb shell;
+# see android/runtime_order.sh. It needs the NDK clang and a host C compiler,
+# so it is opt-in: the CI workflow sets BUSTER_ANDROID_RUNTIME_ORDER=1.
+android_runtime_order=${BUSTER_ANDROID_RUNTIME_ORDER:-0}
+case "$android_runtime_order" in
+    0|1) ;;
+    *)
+        echo "error: BUSTER_ANDROID_RUNTIME_ORDER must be 0 or 1 (got '$android_runtime_order')" >&2
+        exit 1
+        ;;
+esac
+android_runtime_order_script=${BUSTER_ANDROID_RUNTIME_ORDER_SCRIPT:-android/runtime_order.sh}
+android_runtime_order_directory=${BUSTER_ANDROID_RUNTIME_ORDER_DIRECTORY:-build/android-runtime-order}
 android_emulator_started_marker=${BUSTER_ANDROID_EMULATOR_STARTED_MARKER:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/buster-android-emulator.started}
 android_cleanup_timeout_seconds=${BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS:-${BUSTER_ANDROID_COMMAND_TIMEOUT_SECONDS:-30}}
 
@@ -145,6 +158,10 @@ fi
 android_phase=configure
 android_config=none
 config_statuses=()
+runtime_order_status=not-run
+if [[ $android_execution != runtime || $android_runtime_order == 0 ]]; then
+    runtime_order_status=disabled
+fi
 
 cleanup_on_failure() {
     local status=$?
@@ -177,6 +194,7 @@ cleanup_on_failure() {
             printf 'ANDROID_CONFIG_RESULT config=%s status=%s\n' \
                 "${build_configs[$result_index]}" "${config_statuses[$result_index]:-not-run}"
         done
+        printf 'ANDROID_RUNTIME_ORDER_CHECK status=%s\n' "$runtime_order_status"
         printf 'ANDROID_BATCH_RESULT phase=%s config=%s status=%s cleanup_status=%s\n' \
             "$android_phase" "$android_config" "$status" "$cleanup_status"
         if [[ $status -ne 0 ]]; then
@@ -309,6 +327,15 @@ if [[ $android_aarch64_package == 1 ]]; then
     echo "TIMING_ANDROID aarch64_package_seconds=$((SECONDS - aarch64_started))"
 fi
 
+if [[ $android_runtime_order == 1 ]]; then
+    android_phase=runtime-order-build
+    android_config=none
+    runtime_order_started=$SECONDS
+    echo "Building the Android runtime-order probe while the emulator boots"
+    ANDROID_NDK_HOME="$android_ndk" bash "$android_runtime_order_script" build "$android_runtime_order_directory"
+    echo "TIMING_ANDROID runtime_order_build_seconds=$((SECONDS - runtime_order_started))"
+fi
+
 android_phase=boot-wait
 android_config=none
 wait_started=$SECONDS
@@ -338,6 +365,25 @@ android_test_args=${BUSTER_ANDROID_TEST_ARGUMENT_STRING:-"test --verbose=1 --ci=
 
 overall_status=0
 first_failed_config=none
+# A wrong start-up order is a failed batch, but the compiler payloads still run.
+if [[ $android_runtime_order == 1 ]]; then
+    android_phase=runtime-order
+    android_config=runtime-order
+    runtime_order_started=$SECONDS
+    if bash "$android_runtime_order_script" run "$adb_path" "$android_runtime_order_directory"; then
+        runtime_order_status=0
+    else
+        runtime_order_status=$?
+        echo "error: Android runtime-order probe failed with status $runtime_order_status" >&2
+        if [[ $runtime_order_status -eq 130 || $runtime_order_status -eq 143 ]]; then
+            exit "$runtime_order_status"
+        fi
+        overall_status=1
+        first_failed_config=runtime-order
+    fi
+    echo "TIMING_ANDROID runtime_order_seconds=$((SECONDS - runtime_order_started))"
+fi
+
 android_phase=tests
 for index in "${!build_configs[@]}"; do
     build_config=${build_configs[$index]}
