@@ -14589,13 +14589,24 @@ BUSTER_GLOBAL_LOCAL void object_coff_name_write(ObjectBuffer* buffer, u64 offset
     }
 }
 
+// Advances a planned arena position past one allocation of `count`
+// elements, as arena_allocate would place it; false once the arena's
+// reservation cannot hold it. The writers' platform TLS transforms plan
+// their whole demand this way before allocating, so a bounded arena refuses
+// with OBJECT_ERROR_CAPACITY instead of trapping.
+BUSTER_GLOBAL_LOCAL bool object_writer_scratch_plan(Arena* arena, u64* position, u64 count, u64 element_size, u64 alignment)
+{
+    bool result = !element_size || count <= UINT64_MAX / element_size;
+    return result && object_reader_arena_position_after(arena, *position, count * element_size, alignment, position);
+}
+
 // Codegen associates every Windows TLS address relocation with the TLS
 // variable so the in-memory linker can resolve the variable's final offset.
 // COFF's index load (the x86-64 REL32 and the ARM64 ADRP/LDR pair) instead
 // names the loader-provided _tls_index symbol, as link.exe and lld-link
 // expect. Rewrite only the serialized view; the SECREL offset relocations
 // continue to reference the variable itself.
-BUSTER_GLOBAL_LOCAL bool object_coff_bind_tls_index(Arena* arena, ObjectFile* object, ObjectWriteStatistics* statistics)
+BUSTER_GLOBAL_LOCAL ObjectError object_coff_bind_tls_index(Arena* arena, ObjectFile* object, ObjectWriteStatistics* statistics)
 {
     u32 pc32_count = 0;
     u32 page_count = 0;
@@ -14625,10 +14636,14 @@ BUSTER_GLOBAL_LOCAL bool object_coff_bind_tls_index(Arena* arena, ObjectFile* ob
         }
     }
     valid = valid && (symbol_index != UINT32_MAX || object->symbol_count != UINT32_MAX);
+    u32 output_symbol_count = object->symbol_count + (symbol_index == UINT32_MAX);
+    u64 planned = arena->position;
+    bool fits = !needed || !valid ||
+                (object_writer_scratch_plan(arena, &planned, output_symbol_count, sizeof(ObjectSymbol), BUSTER_ALIGN_OF(ObjectSymbol)) &&
+                 object_writer_scratch_plan(arena, &planned, object->relocation_count, sizeof(ObjectRelocation), BUSTER_ALIGN_OF(ObjectRelocation)));
 
-    if (needed && valid)
+    if (needed && valid && fits)
     {
-        u32 output_symbol_count = object->symbol_count + (symbol_index == UINT32_MAX);
         ObjectSymbol* symbols = arena_allocate(arena, ObjectSymbol, output_symbol_count);
         memcpy(symbols, object->symbols, (u64)object->symbol_count * sizeof(*symbols));
         if (symbol_index == UINT32_MAX)
@@ -14657,7 +14672,7 @@ BUSTER_GLOBAL_LOCAL bool object_coff_bind_tls_index(Arena* arena, ObjectFile* ob
         object->symbol_count = output_symbol_count;
         object->relocations = relocations;
     }
-    return !needed || valid;
+    return !needed ? OBJECT_ERROR_NONE : !valid ? OBJECT_ERROR_UNSUPPORTED_TARGET : !fits ? OBJECT_ERROR_CAPACITY : OBJECT_ERROR_NONE;
 }
 
 // The PE loader copies one .tls template and zero-fills only its tail;
@@ -14667,33 +14682,36 @@ BUSTER_GLOBAL_LOCAL bool object_coff_bind_tls_index(Arena* arena, ObjectFile* ob
 // do, so a platform linker places it inside the TLS directory. Section and
 // symbol indices are unchanged; the reader maps .tls$ back to
 // OBJECT_SECTION_THREAD_LOCAL_DATA.
-BUSTER_GLOBAL_LOCAL bool object_coff_place_tls(Arena* arena, ObjectFile* object, ObjectWriteStatistics* statistics)
+BUSTER_GLOBAL_LOCAL ObjectError object_coff_place_tls(Arena* arena, ObjectFile* object, ObjectWriteStatistics* statistics)
 {
     bool needed = false;
+    bool valid = true;
+    u64 planned = arena->position;
+    bool fits = object_writer_scratch_plan(arena, &planned, object->section_count, sizeof(ObjectSection), BUSTER_ALIGN_OF(ObjectSection));
     for (u32 index = 0; index < object->section_count; index += 1)
     {
-        ObjectSectionKind kind = object->sections[index].kind;
+        ObjectSection* section = object->sections + index;
         statistics->section_visits += 1;
-        needed = needed || kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+        needed = needed || section->kind == OBJECT_SECTION_THREAD_LOCAL_DATA || section->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+        if (section->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO)
+        {
+            valid = valid && section->virtual_size <= UINT32_MAX;
+            fits = fits && (!section->virtual_size || object_writer_scratch_plan(arena, &planned, section->virtual_size, 1, BUSTER_ALIGN_OF(u8)));
+        }
     }
-    bool valid = true;
-    if (needed)
+    if (needed && valid && fits)
     {
         ObjectSection* sections = arena_allocate(arena, ObjectSection, object->section_count);
         memcpy(sections, object->sections, (u64)object->section_count * sizeof(*sections));
-        for (u32 index = 0; valid && index < object->section_count; index += 1)
+        for (u32 index = 0; index < object->section_count; index += 1)
         {
             ObjectSection* section = sections + index;
             statistics->section_visits += 1;
             if (section->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO)
             {
-                valid = section->virtual_size <= UINT32_MAX;
-                if (valid)
-                {
-                    u8* zeros = section->virtual_size ? arena_allocate_zeroed(arena, u8, section->virtual_size) : 0;
-                    section->data = (ByteSlice){.pointer = zeros, .length = section->virtual_size};
-                    section->kind = OBJECT_SECTION_THREAD_LOCAL_DATA;
-                }
+                u8* zeros = section->virtual_size ? arena_allocate_zeroed(arena, u8, section->virtual_size) : 0;
+                section->data = (ByteSlice){.pointer = zeros, .length = section->virtual_size};
+                section->kind = OBJECT_SECTION_THREAD_LOCAL_DATA;
             }
             if (section->kind == OBJECT_SECTION_THREAD_LOCAL_DATA)
             {
@@ -14702,7 +14720,7 @@ BUSTER_GLOBAL_LOCAL bool object_coff_place_tls(Arena* arena, ObjectFile* object,
         }
         object->sections = sections;
     }
-    return valid;
+    return !needed ? OBJECT_ERROR_NONE : !valid ? OBJECT_ERROR_UNSUPPORTED_TARGET : !fits ? OBJECT_ERROR_CAPACITY : OBJECT_ERROR_NONE;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_coff_section_alignment_characteristics(ObjectSection* section, u32* characteristics)
@@ -14999,11 +15017,14 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
         if (split && object_writer_32_capacity(&split_object, OBJECT_FORMAT_COFF, &capacity, statistics) &&
             object_writer_32_arena_fits(arena, &split_object, OBJECT_FORMAT_COFF, capacity))
         {
-            bool tls_bound = object_coff_bind_tls_index(arena, &split_object, statistics) &&
-                             object_coff_place_tls(arena, &split_object, statistics);
-            if (!tls_bound)
+            ObjectError tls_error = object_coff_bind_tls_index(arena, &split_object, statistics);
+            if (tls_error == OBJECT_ERROR_NONE)
             {
-                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                tls_error = object_coff_place_tls(arena, &split_object, statistics);
+            }
+            if (tls_error != OBJECT_ERROR_NONE)
+            {
+                result.error = tls_error;
             }
             else if (object_writer_32_capacity(&split_object, OBJECT_FORMAT_COFF, &capacity, statistics) &&
                      object_writer_32_arena_fits(arena, &split_object, OBJECT_FORMAT_COFF, capacity))
@@ -15419,7 +15440,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64_with_capacity(Arena* ar
 // storage, as Clang does. Existing indices are unchanged, so every TLV/TLVP
 // relocation keeps naming the variable; object_mach_o_restore_thread_variables
 // is the reader's inverse.
-BUSTER_GLOBAL_LOCAL bool object_mach_o_place_thread_variables(Arena* arena, ObjectFile* object, ObjectWriteStatistics* statistics)
+BUSTER_GLOBAL_LOCAL ObjectError object_mach_o_place_thread_variables(Arena* arena, ObjectFile* object, ObjectWriteStatistics* statistics)
 {
     u32 variable_count = 0;
     u32 bootstrap = UINT32_MAX;
@@ -15436,7 +15457,25 @@ BUSTER_GLOBAL_LOCAL bool object_mach_o_place_thread_variables(Arena* arena, Obje
     bool valid = !variable_count || ((u64)object->symbol_count + added_symbols <= 0x00ffffff &&
                                      (u64)object->relocation_count + 2 * (u64)variable_count <= UINT32_MAX &&
                                      object->section_count < 255 && (u64)variable_count * OBJECT_MACH_THREAD_VARIABLE_SIZE <= UINT32_MAX);
-    if (valid && variable_count)
+    // Plan every allocation below, in order, before making any.
+    u64 planned = arena->position;
+    bool fits = !variable_count || !valid ||
+                (object_writer_scratch_plan(arena, &planned, (u64)object->symbol_count + added_symbols, sizeof(ObjectSymbol), BUSTER_ALIGN_OF(ObjectSymbol)) &&
+                 object_writer_scratch_plan(arena, &planned, (u64)object->section_count + 1, sizeof(ObjectSection), BUSTER_ALIGN_OF(ObjectSection)) &&
+                 object_writer_scratch_plan(arena, &planned, (u64)variable_count * OBJECT_MACH_THREAD_VARIABLE_SIZE, 1, BUSTER_ALIGN_OF(u8)) &&
+                 object_writer_scratch_plan(arena, &planned, (u64)object->relocation_count + 2 * (u64)variable_count, sizeof(ObjectRelocation),
+                                            BUSTER_ALIGN_OF(ObjectRelocation)));
+    for (u32 index = 0; variable_count && valid && fits && index < object->symbol_count; index += 1)
+    {
+        ObjectSymbol* symbol = object->symbols + index;
+        if (symbol->section < object->section_count && (object->sections[symbol->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                                                        object->sections[symbol->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO))
+        {
+            fits = object_writer_scratch_plan(arena, &planned, symbol->name.length + OBJECT_MACH_THREAD_STORAGE_SUFFIX.length, sizeof(char8),
+                                              BUSTER_ALIGN_OF(char8));
+        }
+    }
+    if (valid && fits && variable_count)
     {
         u32 descriptor_section = object->section_count;
         u32 symbol_count = object->symbol_count + added_symbols;
@@ -15474,8 +15513,12 @@ BUSTER_GLOBAL_LOCAL bool object_mach_o_place_thread_variables(Arena* arena, Obje
                                                                object->sections[variable->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO))
             {
                 u32 storage = object->symbol_count + entry;
+                String8 suffix = OBJECT_MACH_THREAD_STORAGE_SUFFIX;
+                char8* name = arena_allocate(arena, char8, variable->name.length + suffix.length);
+                memcpy(name, variable->name.pointer, variable->name.length);
+                memcpy(name + variable->name.length, suffix.pointer, suffix.length);
                 symbols[storage] = *variable;
-                symbols[storage].name = string_format(arena, S8("{S8}{S8}"), variable->name, OBJECT_MACH_THREAD_STORAGE_SUFFIX);
+                symbols[storage].name = (String8){.pointer = name, .length = variable->name.length + suffix.length};
                 symbols[storage].global = false;
                 symbols[storage].weak = false;
                 variable->section = descriptor_section;
@@ -15503,7 +15546,7 @@ BUSTER_GLOBAL_LOCAL bool object_mach_o_place_thread_variables(Arena* arena, Obje
         object->relocations = relocations;
         object->relocation_count = relocation_count;
     }
-    return valid;
+    return !valid ? OBJECT_ERROR_CAPACITY : !fits ? OBJECT_ERROR_CAPACITY : OBJECT_ERROR_NONE;
 }
 
 BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFile* object, ObjectWriteStatistics* statistics)
@@ -15515,9 +15558,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
     u64 arena_start = arena->position;
     u64 capacity = 0;
     ObjectFile placed = *object;
-    if (!object_mach_o_place_thread_variables(arena, &placed, statistics))
+    ObjectError tls_error = object_mach_o_place_thread_variables(arena, &placed, statistics);
+    if (tls_error != OBJECT_ERROR_NONE)
     {
-        result.error = OBJECT_ERROR_CAPACITY;
+        result.error = tls_error;
     }
     else if (object_writer_32_capacity(&placed, OBJECT_FORMAT_MACH_O64, &capacity, statistics) &&
              object_writer_32_arena_fits(arena, &placed, OBJECT_FORMAT_MACH_O64, capacity))

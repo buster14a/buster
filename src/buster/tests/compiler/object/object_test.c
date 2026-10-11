@@ -4656,6 +4656,110 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_x64_tls_index_addends(UnitTe
     return result;
 }
 
+// The writers' platform TLS transforms (_tls_index binding, .tls$ zero-fill
+// materialization, Mach-O __thread_vars descriptors) allocate scratch before
+// the image. Measure one successful write's exact arena demand, then lower
+// the arena's reservation to every smaller limit: each write must refuse with
+// OBJECT_ERROR_CAPACITY, publish nothing and restore the arena position.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_tls_writer_arena_limits(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct ObjectTestTlsWriter ObjectTestTlsWriter;
+    struct ObjectTestTlsWriter
+    {
+        Target target;
+        ObjectFormat format;
+        u32 code[2];
+        ObjectRelocationKind kinds[2];
+        s64 addends[2];
+        u32 relocation_count;
+    };
+    ObjectTestTlsWriter writers[] = {
+        // mov eax, [rip + _tls_index]; ret; padding
+        {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS}, OBJECT_FORMAT_COFF, {UINT32_C(0x0000058b), UINT32_C(0x90c30000)},
+         {OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32}, {-4}, 1},
+        // adrp x9, _tls_index; ldr w9, [x9, :lo12:_tls_index]
+        {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS}, OBJECT_FORMAT_COFF, {UINT32_C(0x90000009), UINT32_C(0xb9400129)},
+         {OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP, OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12}, {0, 0}, 2},
+        // mov rdi, [rip + tl@TLVP]; padding
+        {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS}, OBJECT_FORMAT_MACH_O64, {UINT32_C(0x003d8b48), UINT32_C(0x90000000)},
+         {OBJECT_RELOCATION_X86_64_MACH_TLV_PC32}, {-4}, 1},
+        // adrp x0, tl@TLVPPAGE; ldr x0, [x0, tl@TLVPPAGEOFF]
+        {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS}, OBJECT_FORMAT_MACH_O64, {UINT32_C(0x90000000), UINT32_C(0xf9400000)},
+         {OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21, OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12}, {0, 0}, 2},
+    };
+    for (u32 writer = 0; writer < BUSTER_ARRAY_LENGTH(writers); writer += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        ObjectTestTlsWriter* shape = writers + writer;
+        u32 tls_value = 5;
+        ObjectSection sections[OBJECT_SECTION_COUNT];
+        for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+        {
+            sections[kind] = (ObjectSection){
+                .name = object_section_name_for_kind((ObjectSectionKind)kind),
+                .kind = (ObjectSectionKind)kind,
+                .alignment = object_section_default_alignment((ObjectSectionKind)kind),
+            };
+        }
+        sections[OBJECT_SECTION_TEXT].data = (ByteSlice){.pointer = (u8*)shape->code, .length = sizeof(shape->code)};
+        sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data = (ByteSlice){.pointer = (u8*)&tls_value, .length = sizeof(tls_value)};
+        sections[OBJECT_SECTION_THREAD_LOCAL_DATA].virtual_size = sizeof(tls_value);
+        sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size = 24;
+        ObjectSymbol symbols[] = {
+            {.name = S8("get"), .size = sizeof(shape->code), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("tl"), .size = sizeof(tls_value), .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
+            {.name = S8("tz"), .size = 24, .section = OBJECT_SECTION_THREAD_LOCAL_ZERO, .kind = OBJECT_SYMBOL_DATA, .global = true},
+            {.name = S8("_tlv_bootstrap"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        };
+        ObjectRelocation relocations[2];
+        for (u32 index = 0; index < shape->relocation_count; index += 1)
+        {
+            relocations[index] = (ObjectRelocation){
+                .addend = shape->addends[index],
+                .offset = shape->format == OBJECT_FORMAT_COFF && shape->target.cpu_arch == CPU_ARCH_X86_64 ? 2 : shape->target.cpu_arch == CPU_ARCH_X86_64 ? 3 : 4 * index,
+                .section = OBJECT_SECTION_TEXT,
+                .symbol = 1,
+                .kind = shape->kinds[index],
+            };
+        }
+        ObjectFile object = {
+            .sections = sections,
+            .symbols = symbols,
+            .relocations = relocations,
+            .target = shape->target,
+            .section_count = OBJECT_SECTION_COUNT,
+            // COFF has no _tlv_bootstrap.
+            .symbol_count = shape->format == OBJECT_FORMAT_COFF ? 3 : 4,
+            .relocation_count = shape->relocation_count,
+        };
+        u64 position = temporary.arena->position;
+        ObjectArtifact written = object_write(temporary.arena, &object, shape->format);
+        u64 demand = temporary.arena->position - position;
+        BUSTER_TEST(arguments, written.error == OBJECT_ERROR_NONE && written.bytes.length && demand >= written.bytes.length);
+        arena_set_position(temporary.arena, position);
+        // The writers' up-front fit check is conservative, so the first
+        // accepted limit may exceed the measured demand; every limit below it,
+        // including the span between the two, must refuse cleanly.
+        u64 reserved_size = temporary.arena->reserved_size;
+        u64 refusals = 0;
+        u64 accepted = 0;
+        for (u64 limit = position; written.error == OBJECT_ERROR_NONE && !accepted && limit <= position + demand + 4096; limit += 1)
+        {
+            temporary.arena->reserved_size = limit;
+            ObjectArtifact attempt = object_write(temporary.arena, &object, shape->format);
+            temporary.arena->reserved_size = reserved_size;
+            refusals += attempt.error == OBJECT_ERROR_CAPACITY && !attempt.bytes.pointer && !attempt.bytes.length &&
+                        temporary.arena->position == position;
+            accepted = attempt.error == OBJECT_ERROR_NONE && attempt.bytes.length == written.bytes.length ? limit : 0;
+            arena_set_position(temporary.arena, position);
+        }
+        BUSTER_TEST(arguments, accepted >= position + demand && refusals == accepted - position);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 #include <buster/tests/compiler/object/executable_test.c>
 
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_arm64_tls_external(UnitTestArguments* arguments)
@@ -4805,6 +4909,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, object_test_elf_stack_contract);
     BUSTER_TEST_FIXTURE(arguments, object_test_relocation_properties);
     BUSTER_TEST_FIXTURE(arguments, object_test_coff_x64_tls_index_addends);
+    BUSTER_TEST_FIXTURE(arguments, object_test_tls_writer_arena_limits);
     UnitTestResult aarch64_printer = object_test_aarch64_printer_fields(arguments);
     result.test_count += aarch64_printer.test_count;
     result.succeeded_test_count += aarch64_printer.succeeded_test_count;

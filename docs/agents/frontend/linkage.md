@@ -165,6 +165,12 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   executable to equal a direct compile on AArch64 and x86-64, and links the
   objects with `ld64.lld` against a libSystem stub that only supplies
   `__tlv_bootstrap`, recording `status=unavailable` without it (GitHub #1323 M1).
+  These platform TLS transforms (`_tls_index` binding, `.tls$` zero-fill and
+  Mach-O descriptors) plan their exact scratch demand with
+  `object_writer_scratch_plan` before allocating, so a bounded arena refuses
+  with `OBJECT_ERROR_CAPACITY`, publishes nothing and is rewound;
+  `object_test_tls_writer_arena_limits` sweeps every limit below the first
+  accepted one.
 - **COFF section alignment is a linker placement contract.** A nonzero
   `ObjectSection.alignment` is preserved in `IMAGE_SCN_ALIGN_*`; zero resolves
   through `object_section_default_alignment` for that kind. COFF represents
