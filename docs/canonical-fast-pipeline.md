@@ -47,6 +47,10 @@ control wins, independently of whether it precedes or follows `-O`. An explicit
 `-fregister-allocator=fast|quality` is likewise independent of `-O`; the last
 allocator option wins. Timing requests never enable a pass.
 
+No level changes canonical inlining. Mandatory `always_inline` sites are
+always expanded, and tiny-leaf inlining stays off unless `-fcanonical-inline`
+is given; see [bounded direct-call inlining](#bounded-direct-call-inlining-48).
+
 Direct SSA, shared local promotion and target placement remain independent
 throughput mechanisms at every level. `-O0` skips optional cleanup and its
 scratch/validation work. Debug information remains opt-in with `-g`;
