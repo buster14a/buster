@@ -19878,6 +19878,44 @@ BUSTER_C_INTERNAL bool c_parse_declarator_group_may_open(CPreprocessResult prepr
     return may_open;
 }
 
+// The two places where the non-keyword identifier before the `(` at `open`
+// names a type, so the `(` opens a declarator group rather than that word's
+// parameter list (GitHub #3368). c_parse_declarator_group_may_open cannot see
+// either one, because it has no binding state.
+// A tag is lexical: `struct S (s)` writes `struct`, `union` or `enum` right
+// before the name.
+BUSTER_C_INTERNAL bool c_parse_tag_name_before_group(CPreprocessResult preprocess, u32 start, u32 open)
+{
+    bool tag = open >= start + 2 && preprocess.tokens[open - 1].kind == C_TOKEN_IDENTIFIER &&
+               !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[open - 1]);
+    if (tag)
+    {
+        CToken word = preprocess.tokens[open - 2];
+        tag = c_token_is_well_known(preprocess.spelling_base, word, C_SYMBOL_WELL_KNOWN_STRUCT) ||
+              c_token_is_well_known(preprocess.spelling_base, word, C_SYMBOL_WELL_KNOWN_UNION) ||
+              c_token_is_well_known(preprocess.spelling_base, word, C_SYMBOL_WELL_KNOWN_ENUM);
+    }
+    return tag;
+}
+
+// A typedef name needs binding state, which the caller supplies; this is the
+// position where one can stand as the type: the first word of [start, open),
+// or after storage-class, function-specifier and qualifier words only. After
+// a type word, `int T(x)`, the identifier is the declarator's name. A
+// decoration before it (`__attribute__((x)) T (y)`) ends the walk, and the
+// group stays that word's parameter list as before.
+BUSTER_C_INTERNAL bool c_parse_typedef_name_position(CPreprocessResult preprocess, u32 start, u32 open)
+{
+    u32 index = open > start ? open - 1 : start;
+    CType ignored = {0};
+    while (index > start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
+           c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[index - 1], &ignored))
+    {
+        index -= 1;
+    }
+    return open > start && index == start;
+}
+
 BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end)
 {
     u32 first_bound = result->array_bound_count;
@@ -28691,6 +28729,74 @@ BUSTER_C_INTERNAL bool c_parser_parameter_list_is_variadic(CPreprocessResult pre
     return delimiter_count == 1 && top_level_parenthesis && c_token_is_punctuator(&preprocess.tokens[close_index - 1], C_PUNCTUATOR_ELLIPSIS);
 }
 
+// The file-scope typedef names c_parse_ast_run has recorded so far, as an
+// open-addressed set of name token indices plus one. At file scope a typedef
+// name cannot be redeclared as anything else, so a name in the set is a type
+// for the rest of the unit; block-scope typedefs never reach these scans.
+// The scans ask it only in c_parse_typedef_name_position's position, so most
+// declarations pay one insert per typedef and no lookup (GitHub #3368).
+typedef struct CParserTypedefNames CParserTypedefNames;
+struct CParserTypedefNames
+{
+    u32* slots;
+    u32 capacity;
+    u32 count;
+};
+
+#define C_PARSER_TYPEDEF_NAMES_MINIMUM_CAPACITY 64u
+
+BUSTER_C_INTERNAL bool c_parser_same_name(CPreprocessResult preprocess, CToken left, CToken right)
+{
+    return left.symbol && right.symbol ? left.symbol == right.symbol
+                                       : string_equal(c_token_spelling(preprocess.spelling_base, left), c_token_spelling(preprocess.spelling_base, right));
+}
+
+BUSTER_C_INTERNAL u32 c_parser_typedef_name_slot(CPreprocessResult preprocess, u32 const* slots, u32 capacity, u32 token)
+{
+    CToken name = preprocess.tokens[token];
+    u32 slot = (u32)c_parse_name_hash(name.symbol, c_token_spelling(preprocess.spelling_base, name)) & (capacity - 1);
+    while (slots[slot] && !c_parser_same_name(preprocess, preprocess.tokens[slots[slot] - 1], name))
+    {
+        slot = (slot + 1) & (capacity - 1);
+    }
+    return slot;
+}
+
+BUSTER_C_INTERNAL bool c_parser_typedef_names_contains(CPreprocessResult preprocess, CParserTypedefNames const* names, u32 token)
+{
+    return names && names->count && names->slots[c_parser_typedef_name_slot(preprocess, names->slots, names->capacity, token)] != 0;
+}
+
+BUSTER_C_INTERNAL void c_parser_typedef_names_add(Arena* arena, CPreprocessResult preprocess, CParserTypedefNames* names, u32 token)
+{
+    if ((names->count + 1) * 2 > names->capacity)
+    {
+        u32 capacity = names->capacity ? names->capacity * 2 : C_PARSER_TYPEDEF_NAMES_MINIMUM_CAPACITY;
+        u32* slots = arena_allocate_zeroed(arena, u32, capacity);
+        for (u32 index = 0; index < names->capacity; index += 1)
+        {
+            if (names->slots[index])
+            {
+                slots[c_parser_typedef_name_slot(preprocess, slots, capacity, names->slots[index] - 1)] = names->slots[index];
+            }
+        }
+        names->slots = slots;
+        names->capacity = capacity;
+    }
+    u32 slot = c_parser_typedef_name_slot(preprocess, names->slots, names->capacity, token);
+    names->count += names->slots[slot] == 0;
+    names->slots[slot] = names->slots[slot] ? names->slots[slot] : token + 1;
+}
+
+// Whether the non-keyword identifier before the `(` at `open` names a type:
+// a tag, or a recorded typedef name standing where the type may.
+BUSTER_C_INTERNAL bool c_parser_type_name_before_group(CPreprocessResult preprocess, CParserTypedefNames const* typedef_names, u32 start, u32 open)
+{
+    return c_parse_tag_name_before_group(preprocess, start, open) ||
+           (typedef_names && typedef_names->count && c_parse_typedef_name_position(preprocess, start, open) &&
+            c_parser_typedef_names_contains(preprocess, typedef_names, open - 1));
+}
+
 // One declarator of a file-scope comma-separated list. `start`/`count` cover
 // the segment between two top-level separators; for the first declarator that
 // range still carries the declaration specifiers, which is why the name scan
@@ -28704,7 +28810,7 @@ struct CParserDeclarator
     bool is_variadic;
 };
 
-BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult preprocess, u32 start, u32 end)
+BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult preprocess, CParserTypedefNames const* typedef_names, u32 start, u32 end)
 {
     CParserDeclarator declarator = {
         .name_token = C_ID_UNDERLYING_INVALID,
@@ -28748,10 +28854,14 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
                 bool pointer_group = c_parse_pointer_declarator_group(preprocess, index, end);
                 bool ordinary_function = !pointer_group && index > start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
                                          !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[index - 1]);
+                // After a typedef or tag name the group is a declarator
+                // group, `T (x)` and `struct S (s)` (GitHub #3368).
+                bool type_name = ordinary_function && c_parser_type_name_before_group(preprocess, typedef_names, start, index);
+                ordinary_function &= !type_name;
                 // `int (gd(int a))` holds the name's own list inside the
                 // group; after a name candidate, `f(T (a))` is f's list.
                 parenthesized_function = parenthesized_function ||
-                                         (!ordinary_function && c_parse_declarator_group_may_open(preprocess, start, index, end) &&
+                                         (!ordinary_function && (type_name || c_parse_declarator_group_may_open(preprocess, start, index, end)) &&
                                           c_parse_parenthesized_declarator_is_function(preprocess, index, end, &parenthesized_name_token));
                 if (parenthesized_function)
                 {
@@ -28772,7 +28882,7 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
                     declarator.function_name_token = index - 1;
                     declarator.name_token = declarator.function_name_token;
                 }
-                else if ((declarator.name_token == C_ID_UNDERLYING_INVALID || pointer_group ||
+                else if ((declarator.name_token == C_ID_UNDERLYING_INVALID || pointer_group || type_name ||
                           c_parse_declarator_group_may_open(preprocess, start, index, end)) &&
                          c_parse_parenthesized_declarator_name(preprocess, index, end, &parenthesized_name_token))
                 {
@@ -28876,8 +28986,8 @@ BUSTER_C_INTERNAL bool c_parser_identifier_list_contains(CPreprocessResult prepr
 // One semicolon-terminated declaration-list row, with the semicolon excluded.
 // It is only a syntax disambiguator; the semantic pass uses the ordinary
 // block-declaration parser for the actual types and constraints.
-BUSTER_C_INTERNAL bool c_parser_old_style_parameter_declaration(CPreprocessResult preprocess, u32 identifier_start,
-                                                                  u32 identifier_end, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_parser_old_style_parameter_declaration(CPreprocessResult preprocess, CParserTypedefNames const* typedef_names,
+                                                                  u32 identifier_start, u32 identifier_end, u32 start, u32 end)
 {
     if (start >= end)
     {
@@ -28887,7 +28997,7 @@ BUSTER_C_INTERNAL bool c_parser_old_style_parameter_declaration(CPreprocessResul
     while (segment_start < end)
     {
         u32 segment_end = c_parser_declarator_list_segment_end(preprocess, segment_start, end);
-        CParserDeclarator declarator = c_parser_scan_declarator(preprocess, segment_start, segment_end);
+        CParserDeclarator declarator = c_parser_scan_declarator(preprocess, typedef_names, segment_start, segment_end);
         if (declarator.seen_equal || declarator.name_token == C_ID_UNDERLYING_INVALID ||
             !c_parser_identifier_list_contains(preprocess, identifier_start, identifier_end, declarator.name_token))
         {
@@ -28919,6 +29029,7 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
         result.number_facts = c_number_facts_build(arena, &preprocess);
         u32* delimiter_stack = arena_allocate(arena, u32, token_count + 1);
         CParserBodyFrames body_frames = {0};
+        CParserTypedefNames typedef_names = {0};
         u32 index = 0;
         u32 validated_specifier_end = 0;
         while (index < token_count && c_preprocess_token_shape_at(token_shapes, &preprocess, index) != C_TOKEN_END_OF_FILE)
@@ -29015,12 +29126,17 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                         bool ordinary_function = !pointer_group && index > start &&
                                                   c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
                                                   !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[index - 1]);
+                        // After a typedef or tag name the group is a
+                        // declarator group, `T (x)` and `struct S (s)`
+                        // (GitHub #3368).
+                        bool type_name = ordinary_function && c_parser_type_name_before_group(preprocess, &typedef_names, start, index);
+                        ordinary_function &= !type_name;
                         // `int (gd(int a))` holds the name's own list inside
                         // the group; after a name candidate, `f(T (a))` is
                         // f's list (GitHub #3215).
                         parenthesized_function =
                             parenthesized_function ||
-                            (!ordinary_function && c_parse_declarator_group_may_open(preprocess, start, index, token_count) &&
+                            (!ordinary_function && (type_name || c_parse_declarator_group_may_open(preprocess, start, index, token_count)) &&
                              c_parse_parenthesized_declarator_is_function(preprocess, index, token_count, &parenthesized_name_token));
                         if (parenthesized_function)
                         {
@@ -29037,7 +29153,7 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                             name_token = function_name_token;
                             parameter_list_open = index;
                         }
-                        else if ((name_token == C_ID_UNDERLYING_INVALID || pointer_group ||
+                        else if ((name_token == C_ID_UNDERLYING_INVALID || pointer_group || type_name ||
                                   (!seen_declarator_comma && c_parse_declarator_group_may_open(preprocess, start, index, token_count))) &&
                                  c_parse_parenthesized_declarator_name(preprocess, index, token_count, &parenthesized_name_token))
                         {
@@ -29142,7 +29258,7 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                 {
                     if (identifier_list_candidate && parameter_list_close != C_ID_UNDERLYING_INVALID &&
                         old_style_declaration_cursor < index &&
-                        c_parser_old_style_parameter_declaration(preprocess, identifier_list_start,
+                        c_parser_old_style_parameter_declaration(preprocess, &typedef_names, identifier_list_start,
                                                                  identifier_list_start + identifier_list_token_count,
                                                                  old_style_declaration_cursor, index))
                     {
@@ -29226,7 +29342,7 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                 };
                 if (split_declarators)
                 {
-                    CParserDeclarator declarator = c_parser_scan_declarator(preprocess, segment_start, segment_end);
+                    CParserDeclarator declarator = c_parser_scan_declarator(preprocess, &typedef_names, segment_start, segment_end);
                     declaration->name_token = declarator.name_token;
                     declaration->function_name_token = declarator.function_name_token;
                     declaration->seen_equal = declarator.seen_equal;
@@ -29238,6 +29354,10 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                     declaration->is_definition = declaration->kind == C_PARSER_DECLARATION_OBJECT && declarator.seen_equal;
                 }
                 c_parser_parse_declaration_expression(preprocess, declaration);
+                if (declaration->kind == C_PARSER_DECLARATION_TYPEDEF && declaration->name_token != C_ID_UNDERLYING_INVALID)
+                {
+                    c_parser_typedef_names_add(arena, preprocess, &typedef_names, declaration->name_token);
+                }
                 if (declaration->kind == C_PARSER_DECLARATION_FUNCTION && body_token_count)
                 {
                     c_parser_parse_function_body(arena, preprocess, declaration, &body_frames);
@@ -29313,7 +29433,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
 //   over a superset of the tokens it validates;
 // - its heuristics would read a shape differently from the grammar, or the
 //   rules here do not state what they read (CParserTreeFallback): redundant
-//   parentheses after a typedef or tag name, attributes inside a declarator, a parenthesized
+//   parentheses after a decorated typedef name, attributes inside a declarator, a parenthesized
 //   specifier, an old-style declaration list, a comma operator where the
 //   walker splits on commas, or a token next to an anchor that is not the
 //   one the shape requires.
@@ -29444,12 +29564,13 @@ struct CParserTreeDeclarator
 // the token run before the name counts the `(` and `*` actually written.
 // More `(` than boundaries is a redundant group, which the walker reads the
 // same way (c_parse_parenthesized_declarator_is_function walks out through
-// it, GitHub #3215), except after a typedef or tag name, where the walker
-// reads the group as that name's parameter list; that shape is refused.
+// it, GitHub #3215). After a typedef or tag name the walker reads a group
+// only where c_parser_type_name_before_group does (GitHub #3368); a group
+// it reads as that name's parameter list instead is refused.
 // Fewer `*` than pointers (an attribute list in the run)
 // refuses the shape, as do attributes on a pointer or opening a group, and a
 // function returning an array or a function.
-BUSTER_C_INTERNAL bool c_parser_tree_declarator(CParserTreeSplit* split, u32 root, u32 lower, CParserTreeDeclarator* declarator)
+BUSTER_C_INTERNAL bool c_parser_tree_declarator(CParserTreeSplit* split, u32 root, u32 lower, u32 typedef_name, CParserTreeDeclarator* declarator)
 {
     CAst const* ast = split->ast;
     CPreprocessResult const* preprocess = &split->preprocess;
@@ -29532,11 +29653,15 @@ BUSTER_C_INTERNAL bool c_parser_tree_declarator(CParserTreeSplit* split, u32 roo
             }
         }
         // A redundant group the walker does not read as a group is refused
-        // (c_parse_declarator_group_may_open): after a typedef or tag name,
-        // `T (x)` and `T (gd(int a))` name a function `T` there.
+        // (c_parse_declarator_group_may_open). After a tag or typedef name
+        // the walker reads one where c_parser_type_name_before_group does:
+        // after `struct S`, or after a typedef name in the type's position.
+        // Elsewhere, `__attribute__((a)) T (x)`, it names a function `T`.
         bool redundant = opens > boundaries;
         bool misread = redundant && c_parser_tree_punctuator_at(preprocess, index, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-                       !c_parse_declarator_group_may_open(*preprocess, lower, index, (u32)preprocess->token_count);
+                       !c_parse_declarator_group_may_open(*preprocess, lower, index, (u32)preprocess->token_count) &&
+                       !c_parse_tag_name_before_group(*preprocess, lower, index) &&
+                       !(index > lower && index - 1 == typedef_name && c_parse_typedef_name_position(*preprocess, lower, index));
         shaped = opens >= boundaries && stars == pointers && !misread && (!function || redundant || ast->tokens[first_derivation] == name + 1);
         *declarator = (CParserTreeDeclarator){
             .name = name,
@@ -29724,6 +29849,11 @@ struct CParserTreeSpecifiers
     // The last name the walker reads outside every delimiter: a typedef
     // name, a tag, or a word the dialect does not reserve.
     u32 last_name;
+    // The TYPEDEF_NAME the grammar reads as the type, else
+    // C_ID_UNDERLYING_INVALID. The walker binds the same file-scope name, so
+    // a redundant group after it is a declarator group on both sides
+    // (c_parser_type_name_before_group, GitHub #3368).
+    u32 typedef_name;
     // c_parse_type_only_declaration's shape, before the `;`: decorations and
     // the prefix words it skips, one struct, union or enum specifier, then
     // decorations.
@@ -29747,7 +29877,7 @@ BUSTER_C_INTERNAL bool c_parser_tree_specifiers(CParserTreeSplit* split, u32 spe
     bool shaped = true;
     bool after_aggregate = true;
     bool type_only = true;
-    *out = (CParserTreeSpecifiers){.last_name = C_ID_UNDERLYING_INVALID};
+    *out = (CParserTreeSpecifiers){.last_name = C_ID_UNDERLYING_INVALID, .typedef_name = C_ID_UNDERLYING_INVALID};
     while (shaped && item > begin)
     {
         item -= 1;
@@ -29778,6 +29908,7 @@ BUSTER_C_INTERNAL bool c_parser_tree_specifiers(CParserTreeSplit* split, u32 spe
             }
         }
         out->last_name = out->last_name == C_ID_UNDERLYING_INVALID ? name : out->last_name;
+        out->typedef_name = kind == C_AST_TYPEDEF_NAME ? token : out->typedef_name;
         out->typedef_word |= kind == C_AST_SPECIFIER_WORD && ast->data[item] == C_AST_WORD_TYPEDEF;
         out->constexpr_word |= kind == C_AST_SPECIFIER_WORD && ast->data[item] == C_AST_WORD_CONSTEXPR &&
                                c_preprocess_dialect_is_c23(preprocess->dialect);
@@ -29884,7 +30015,7 @@ BUSTER_C_INTERNAL bool c_parser_tree_declaration(CParserTreeSplit* split, u32 no
         for (u32 index = 0; shaped && index < count; index += 1)
         {
             parts[index] = c_parser_tree_init_declarator(ast, children[index + 1]);
-            shaped = c_parser_tree_declarator(split, parts[index].declarator, start, &declarators[index]);
+            shaped = c_parser_tree_declarator(split, parts[index].declarator, start, specifiers.typedef_name, &declarators[index]);
             segment_starts[index] = index == 0                                          ? start
                                     : parts[index].leading != C_ID_UNDERLYING_INVALID ? parts[index].leading
                                                                                        : declarators[index].first;
@@ -29979,7 +30110,7 @@ BUSTER_C_INTERNAL bool c_parser_tree_definition(CParserTreeSplit* split, u32 nod
     CParserTreeSpecifiers specifiers = {0};
     CParserTreeDeclarator declarator = {0};
     bool shaped = (c_ast_list_count(ast, node) == 0 || c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_OLD_STYLE, start)) &&
-                  c_parser_tree_specifiers(split, specifiers_root, &specifiers) && c_parser_tree_declarator(split, declarator_root, start, &declarator) &&
+                  c_parser_tree_specifiers(split, specifiers_root, &specifiers) && c_parser_tree_declarator(split, declarator_root, start, specifiers.typedef_name, &declarator) &&
                   ((declarator.function && c_parser_tree_punctuator_at(preprocess, end - 1, C_PUNCTUATOR_RIGHT_BRACE)) ||
                    c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_TOKENS, brace)) &&
                   c_parser_tree_declarator_end(split, &declarator, brace);
@@ -35748,8 +35879,128 @@ BUSTER_C_INTERNAL void c_parse_validate_switch_duplicates(CTypeParseMachine* mac
     arena_set_position(machine->scratch_arena, mark);
 }
 
+// The output an `ifunc` attribute cannot be honoured in, named for the
+// refusal, or empty where it can. Only an ELF object has an indirect-function
+// symbol (STT_GNU_IFUNC), and only the x86-64 and AArch64 ELF linkers rebind
+// one (link_elf_indirect_functions_rebind); COFF, Mach-O and the non-native
+// emitters have no such symbol, so the attribute is refused rather than left
+// to come out as a call to the resolver.
+BUSTER_C_INTERNAL String8 c_ifunc_attribute_unsupported_output(Target target)
+{
+    String8 result = {0};
+    if (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI)
+    {
+        result = S8("COFF");
+    }
+    else if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
+    {
+        result = S8("Mach-O");
+    }
+    else if ((target.cpu_arch != CPU_ARCH_X86_64 && target.cpu_arch != CPU_ARCH_AARCH64) ||
+             (target.os != OPERATING_SYSTEM_LINUX && target.os != OPERATING_SYSTEM_ANDROID && target.os != OPERATING_SYSTEM_FREESTANDING))
+    {
+        result = S8("this target");
+    }
+
+    return result;
+}
+
+// What the declarations of one entity say between them, which an `ifunc`
+// has to be checked against as a whole: GCC and Clang refuse an ifunc that
+// another declaration makes an alias, a weak symbol or the ifunc of a second
+// resolver, and the lowering would otherwise let the last of them win.
+#define C_PARSE_ENTITY_ATTRIBUTE_WEAK  ((u8)1)
+#define C_PARSE_ENTITY_ATTRIBUTE_ALIAS ((u8)2)
+#define C_PARSE_ENTITY_ATTRIBUTE_IFUNC ((u8)4)
+
+// The diagnostic an entity's first `ifunc` declaration earns, or an empty
+// string when its resolver is acceptable. `entity_attributes` is what every
+// declaration of the entity says, and `other_resolver` a second resolver one
+// of them names. Checked in the order a reader would fix them: the output
+// (no resolver fixes that), the declaration and its entity, then the
+// resolver's existence, kind, definition and return type.
+BUSTER_C_INTERNAL String8 c_parse_ifunc_resolver_message(Arena* arena, CParseResult* result, CPreprocessResult preprocess,
+                                                        CDeclaration declaration, CDeclarationBinding binding, u8 entity_attributes,
+                                                        String8 other_resolver)
+{
+    String8 message = {0};
+    CEntityId resolver = binding.ifunc_resolver.length && result->scope_count
+                             ? c_parse_lookup_entity(result, (CScopeId){.value = 0}, binding.ifunc_resolver)
+                             : C_ENTITY_ID_INVALID;
+    CEntity* entity = result->entities + declaration.entity.value;
+    String8 unsupported_output = c_ifunc_attribute_unsupported_output(preprocess.target);
+    if (unsupported_output.length)
+    {
+        message = c_parse_message(arena, S8("ifunc attribute on '{S8}' is not supported: {S8} output has no indirect function symbol"), declaration.name,
+                                  unsupported_output);
+    }
+    else if (declaration.kind != C_DECLARATION_FUNCTION || entity->kind != C_ENTITY_FUNCTION)
+    {
+        message = c_parse_message(arena, S8("ifunc attribute on '{S8}' requires a function declaration"), declaration.name);
+    }
+    else if (!binding.ifunc_resolver.length)
+    {
+        message = c_parse_message(arena, S8("ifunc attribute on '{S8}' must name a resolver"), declaration.name);
+    }
+    else if (other_resolver.length)
+    {
+        message = c_parse_message(arena, S8("ifunc '{S8}' names both '{S8}' and '{S8}' as its resolver"), declaration.name, binding.ifunc_resolver,
+                                  other_resolver);
+    }
+    else if (entity_attributes & C_PARSE_ENTITY_ATTRIBUTE_ALIAS)
+    {
+        message = c_parse_message(arena, S8("'{S8}' cannot be both an ifunc and an alias"), declaration.name);
+    }
+    else if (entity_attributes & C_PARSE_ENTITY_ATTRIBUTE_WEAK)
+    {
+        message = c_parse_message(arena, S8("'{S8}' cannot be both an ifunc and weak"), declaration.name);
+    }
+    else if (entity->is_definition)
+    {
+        message = c_parse_message(arena, S8("'{S8}' is both defined here and an ifunc resolved by '{S8}'"), declaration.name, binding.ifunc_resolver);
+    }
+    else if (resolver.value >= result->entity_count || resolver.value == declaration.entity.value)
+    {
+        message = c_parse_message(arena, S8("ifunc resolver '{S8}' is not declared in this translation unit"), binding.ifunc_resolver);
+    }
+    else if (result->entities[resolver.value].kind != C_ENTITY_FUNCTION)
+    {
+        message = c_parse_message(arena, S8("ifunc resolver '{S8}' for '{S8}' is not a function"), binding.ifunc_resolver, declaration.name);
+    }
+    else if (!result->entities[resolver.value].is_definition)
+    {
+        message = c_parse_message(arena, S8("ifunc '{S8}' names '{S8}', which is not defined in this translation unit"), declaration.name,
+                                  binding.ifunc_resolver);
+    }
+    else
+    {
+        CTypeId resolver_type = result->entities[resolver.value].type;
+        CTypeId returned = resolver_type.value < result->type_count ? result->types[resolver_type.value].return_type : C_TYPE_ID_INVALID;
+        CType* pointer = returned.value < result->type_count ? result->types + returned.value : 0;
+        CType* pointee = pointer && pointer->kind == C_TYPE_POINTER && pointer->element_type.value < result->type_count
+                             ? result->types + pointer->element_type.value
+                             : 0;
+        bool acceptable = pointee && (pointee->kind == C_TYPE_VOID ||
+                                      (pointee->kind == C_TYPE_FUNCTION && c_parse_types_compatible(arena, result, preprocess, pointer->element_type, entity->type)));
+        if (!acceptable)
+        {
+            message = c_parse_message(arena, S8("ifunc resolver '{S8}' must return 'void *' or a pointer to a function compatible with '{S8}'"),
+                                      binding.ifunc_resolver, declaration.name);
+        }
+    }
+    return message;
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_alias_targets(Arena* arena, CParseResult* result, CPreprocessResult preprocess)
 {
+    TemporalArena temporary = scratch_begin(&arena, 1);
+    u32 entity_capacity = result->entity_count ? result->entity_count : 1;
+    u8* entity_attributes = arena_allocate_zeroed(temporary.arena, u8, entity_capacity);
+    // The first `ifunc` declaration of each entity, and a second resolver
+    // another of its declarations names; read only for IFUNC entities.
+    u32* first_ifunc = arena_allocate(temporary.arena, u32, entity_capacity);
+    String8* other_resolver = arena_allocate_zeroed(temporary.arena, String8, entity_capacity);
+    bool any_ifunc = false;
     for (u32 index = 0; index < result->declaration_count; index += 1)
     {
         CDeclaration declaration = result->declarations[index];
@@ -35772,14 +36023,30 @@ BUSTER_C_INTERNAL void c_parse_validate_alias_targets(Arena* arena, CParseResult
                                    c_parse_message(arena, S8("visibility attribute on '{S8}' must name \"default\", \"hidden\", \"internal\" or \"protected\""),
                                                    declaration.name));
             }
-            // `ifunc` has no lowering, so it is refused here rather than left
-            // to come out as an undefined symbol; a `weakref` names its target
-            // itself or through the GCC `alias` spelling, and either way it is
-            // not an alias definition to validate below.
+            // A `weakref` names its target itself or through the GCC `alias`
+            // spelling, and either way it is not an alias definition to
+            // validate below.
+            u32 entity = declaration.entity.value;
+            u8 attributes = entity_attributes[entity];
+            entity_attributes[entity] |= (binding.is_weak ? C_PARSE_ENTITY_ATTRIBUTE_WEAK : 0) |
+                                         (binding.is_weakref || binding.alias_target.length ? C_PARSE_ENTITY_ATTRIBUTE_ALIAS : 0) |
+                                         (binding.is_ifunc ? C_PARSE_ENTITY_ATTRIBUTE_IFUNC : 0);
+            // An ifunc is checked below, once every declaration of its entity
+            // has been seen; here it only records its first declaration and
+            // a second resolver a later one names.
             if (binding.is_ifunc)
             {
-                c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration.location), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                                   S8("ifunc attribute is not supported"));
+                if (!(attributes & C_PARSE_ENTITY_ATTRIBUTE_IFUNC))
+                {
+                    first_ifunc[entity] = index;
+                    any_ifunc = true;
+                }
+                else if (!other_resolver[entity].length && binding.ifunc_resolver.length &&
+                         !string_equal(binding.ifunc_resolver,
+                                       c_declaration_binding(arena, preprocess, result->declarations[first_ifunc[entity]]).ifunc_resolver))
+                {
+                    other_resolver[entity] = binding.ifunc_resolver;
+                }
             }
             else if (binding.is_weakref)
             {
@@ -35814,6 +36081,28 @@ BUSTER_C_INTERNAL void c_parse_validate_alias_targets(Arena* arena, CParseResult
             }
         }
     }
+    // An `ifunc` names its resolver the way an alias names its target, so it
+    // obeys the same rules and more: the resolver returns the implementation,
+    // so it must be a function returning `void *` or a pointer to a function
+    // compatible with the declared one -- what Clang requires, and what GCC
+    // warns about -- and no other declaration of the entity may make it weak,
+    // an alias or another resolver's ifunc. One diagnostic per entity, at its
+    // first ifunc declaration.
+    for (u32 entity = 0; any_ifunc && entity < result->entity_count; entity += 1)
+    {
+        if (entity_attributes[entity] & C_PARSE_ENTITY_ATTRIBUTE_IFUNC)
+        {
+            CDeclaration declaration = result->declarations[first_ifunc[entity]];
+            CDeclarationBinding binding = c_declaration_binding(arena, preprocess, declaration);
+            String8 message =
+                c_parse_ifunc_resolver_message(arena, result, preprocess, declaration, binding, entity_attributes[entity], other_resolver[entity]);
+            if (message.length)
+            {
+                c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration.location), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, message);
+            }
+        }
+    }
+    scratch_end(temporary);
 }
 
 BUSTER_C_INTERNAL void c_parse_validate_deferred_assertions(CTypeParseMachine* machine, Arena* arena, CParseResult* result,

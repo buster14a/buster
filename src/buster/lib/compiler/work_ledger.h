@@ -86,6 +86,7 @@
     X(TARGET_X86_GPR_TABLES_BUILT, target, x86_gpr_tables_built) \
     X(TARGET_X86_GPR_TABLE_READS, target, x86_gpr_table_reads) \
     X(TARGET_X86_VARIABLE_MEMORY_TABLES_BUILT, target, x86_variable_memory_tables_built) \
+    X(TARGET_X86_VARIABLE_MEMORY_CELLS_BUILT, target, x86_variable_memory_cells_built) \
     X(TARGET_X86_VARIABLE_MEMORY_TABLE_READS, target, x86_variable_memory_table_reads) \
     X(MACHINE_FUNCTIONS_SELECTED, machine, functions_selected) \
     X(MACHINE_ROWS, machine, rows) \
