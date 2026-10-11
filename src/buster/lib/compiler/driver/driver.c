@@ -6185,7 +6185,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_dependency_render(Arena* arena, Comp
     String8 output = {0};
     String8 failure_path = {0};
     String8 targets = invocation.dependency_targets;
-    String8* prerequisites = arena_allocate(arena, String8, detail->dependency_count);
+    String8* prerequisites = arena_allocate_zeroed(arena, String8, detail->dependency_count);
     bool valid = true;
     u64 capacity = 0;
     if (!targets.length)
