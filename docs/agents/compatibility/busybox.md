@@ -50,8 +50,11 @@ not defconfig, networking, init, privileged device management or a complete OS.
 
 The command first calls the existing full `test_musl` gate with libc-test,
 retaining its architecture replacements, startup, static/shared probes and
-per-test classifications. Failure stops the BusyBox stage; it never authorizes
-a reduced/substituted archive merely because an archive file exists.
+per-test classifications. If the Buster gate fails, the independent BusyBox
+cells may still run when every reference musl object exists. The reference
+archive uses every applicable `src/` member from the same full manifest.
+Only a successful full Buster musl gate authorizes the joint link; no failed
+unit is replaced or removed to manufacture a candidate pass.
 
 BusyBox uses its normal external make/generator scripts. Host generators and
 CC preprocessing/version queries run with Clang and are labeled separately.

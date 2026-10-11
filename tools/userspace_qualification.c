@@ -258,6 +258,33 @@ BUSTER_GLOBAL_LOCAL bool userspace_make(Arena* arena, String8 source, String8 di
 }
 
 
+BUSTER_GLOBAL_LOCAL bool userspace_reference_archive(Arena* arena, String8 root, String8 output)
+{
+    MuslManifest manifest = {0};
+    bool valid = musl_collect_manifest(arena, root, output, &manifest);
+    String8* objects = arena_allocate(arena, String8, manifest.unit_count);
+    u64 count = 0;
+    for (u64 i = 0; valid && i < manifest.unit_count; i += 1)
+    {
+        MuslUnit unit = manifest.units[i];
+        // Every reference action completed before test_musl's inventory gate.
+        // Check the whole reference object set, including startup/loader.
+        valid = path_exists(arena, unit.clang_object);
+        if (string_starts_with_sequence(unit.relative, S8("src/")))
+        {
+            objects[count++] = unit.clang_object;
+        }
+    }
+    String8 ar = executable_resolve_in_path(arena, S8("ar"));
+    if (valid)
+    {
+        valid = ar.length && musl_archive(arena, ar, path_join(arena, output, S8("libc-clang.a")), objects, count,
+                                         path_join(arena, output, S8("userspace-reference.rsp")));
+    }
+    string_print(S8("USERSPACE_REFERENCE_LIBC units={u64} archive_members={u64} status={S8}\n"),
+                 manifest.unit_count, count, valid ? S8("complete-reference") : S8("fail"));
+    return valid;
+}
 
 BUSTER_GLOBAL_LOCAL bool userspace_workload(Arena* arena, String8 program_path, String8 root)
 {
@@ -381,7 +408,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
             driver = os_path_absolute(arena, driver, true);
             valid = source.length && musl.length && libc_test.length && parent.length && ide.length && driver.length &&
                     !string_equal(directory, source) && !string_starts_with_sequence(directory, path_join(arena, source, S8(""))) &&
-                    !string_equal(directory, musl) && !string_starts_with_sequence(directory, path_join(arena, musl, S8("")));
+                    !string_equal(directory, musl) && !string_starts_with_sequence(directory, path_join(arena, musl, S8(""))) &&
+                    !string_equal(directory, libc_test) && !string_starts_with_sequence(directory, path_join(arena, libc_test, S8("")));
             if (valid)
             {
                 valid = summary_self_test_directory_claim(directory) == SUMMARY_DIRECTORY_CLAIMED;
@@ -392,14 +420,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
                 valid = userspace_checkout(arena, source, S8(USERSPACE_BUSYBOX_COMMIT), path_join(arena, directory, S8("busybox.identity"))) &&
                         userspace_checkout(arena, musl, S8(MUSL_COMPATIBILITY_COMMIT), path_join(arena, directory, S8("musl.identity")));
             }
-            // Reuse the existing gate directly in this process. A receipt
-            // string or a reduced archive cannot authorize the joint stage.
+            // Reuse the existing gate directly in this process. If it fails,
+            // the complete independent reference can still expose BusyBox
+            // compiler gaps; only full musl success authorizes the joint link.
+            bool musl_passed = false;
             if (valid)
             {
                 TestMuslOptions options = {.source_directory = musl, .libc_test_directory = libc_test, .config = S8("Release")};
-                valid = test_musl_action(arena, &options) == PROCESS_RESULT_SUCCESS;
+                musl_passed = test_musl_action(arena, &options) == PROCESS_RESULT_SUCCESS;
                 musl_output = os_path_absolute(arena, string_format(arena, S8("build/musl-{S8}-{u64}"),
                                                   S8(MUSL_COMPATIBILITY_TAG), os_get_current_process_id()), true);
+                valid = musl_output.length && userspace_reference_archive(arena, musl, musl_output);
             }
             String8 config = clang_suite_read(arena, S8("tests/userspace/busybox.config"));
             valid = config.length && valid;
@@ -438,7 +469,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
                 }
                 if (valid)
                 {
-                    valid = userspace_make(arena, source, build, compiler, side ? S8("silentoldconfig") : S8("allnoconfig"), build);
+                    String8 configure = path_join(arena, build, S8("configure"));
+                    make_directory_recursive(arena, configure);
+                    valid = userspace_make(arena, source, build, compiler, side ? S8("silentoldconfig") : S8("allnoconfig"), configure);
                 }
                 String8 actual_config = clang_suite_read(arena, path_join(arena, build, S8(".config")));
                 if (!side)
@@ -460,7 +493,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
                 }
             }
             bool joint = false;
-            if (valid)
+            if (valid && musl_passed)
             {
                 joint = userspace_joint_link(arena, directory, musl_output) &&
                         userspace_workload(arena, path_join(arena, directory, S8("joint-busybox")), path_join(arena, directory, S8("joint-root")));
@@ -471,13 +504,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
             {
                 bool unchanged = userspace_checkout(arena, source, S8(USERSPACE_BUSYBOX_COMMIT), (String8){0}) &&
                                  userspace_checkout(arena, musl, S8(MUSL_COMPATIBILITY_COMMIT), (String8){0});
-                valid = unchanged && valid;
+                valid = unchanged && musl_passed && joint && valid;
                 String8 text = string_format(arena, S8("BUSTER_USERSPACE_RECEIPT_V1\nbusybox_commit={S8}\n"
-                                                      "reference_build={u32}\nbuster_build={u32}\njoint_workload={u32}\ninputs_pristine={u32}\n"
+                                                      "musl_full_gate={u32}\nreference_build={u32}\nbuster_build={u32}\njoint_workload={u32}\ninputs_pristine={u32}\n"
                                                       "linker=external-clang-and-ld\nconfiguration_sha256={S8}\n"
                                                       "performance_validation=incomplete\nupstream_tests=incomplete\n"
                                                       "busybox_dynamic=incomplete\nnative_buster_link=incomplete\nstatus={S8}\n"),
-                                             S8(USERSPACE_BUSYBOX_COMMIT), (u32)stages[0], (u32)stages[1], (u32)joint, (u32)unchanged,
+                                             S8(USERSPACE_BUSYBOX_COMMIT), (u32)musl_passed, (u32)stages[0], (u32)stages[1], (u32)joint, (u32)unchanged,
                                              stage_object_sha256_bytes(arena, (u8*)reference_config.pointer, reference_config.length),
                                              valid ? S8("workload-pass") : S8("fail"));
                 valid = clang_suite_write(arena, path_join(arena, directory, S8("receipt.txt")), text) && valid;
