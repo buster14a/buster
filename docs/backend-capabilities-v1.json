@@ -1,1108 +1,1838 @@
 {
- "schema": "buster-backend-capabilities-v1",
- "reviewed_revision": "2b90c52fcd8aa9d9dc59b23e7c02fdbc852e1aef",
- "owner_issue": 309,
- "levels": [
-  {
-   "id": "validate",
-   "name": "Parse/validate"
-  },
-  {
-   "id": "encode",
-   "name": "Exact encode"
-  },
-  {
-   "id": "object-link",
-   "name": "Object/link"
-  },
-  {
-   "id": "oracle",
-   "name": "Independent oracle"
-  },
-  {
-   "id": "execute",
-   "name": "Executed semantics"
-  },
-  {
-   "id": "integration",
-   "name": "Self-host/real project"
-  }
- ],
- "statuses": [
-  "supported",
-  "partial",
-  "unsupported-diagnostic",
-  "not-applicable",
-  "unknown"
- ],
- "backends": [
-  {
-   "id": "x86_64-native",
-   "name": "x86-64 native",
-   "kind": "direct-codegen",
-   "doc": "docs/compiler-pipeline.md"
-  },
-  {
-   "id": "aarch64-native",
-   "name": "AArch64 native",
-   "kind": "direct-codegen",
-   "doc": "docs/compiler-pipeline.md"
-  },
-  {
-   "id": "uefi-pe32plus",
-   "name": "UEFI PE32+ (x86-64, AArch64)",
-   "kind": "direct-codegen",
-   "doc": "docs/uefi-target.md"
-  },
-  {
-   "id": "wasm64",
-   "name": "Wasm64 Memory64 (wasm64-unknown-freestanding)",
-   "kind": "direct-codegen",
-   "doc": "WASM64.md"
-  },
-  {
-   "id": "wasm32-wasip1",
-   "name": "Wasm32 WASI Preview 1 (wasm32-wasip1)",
-   "kind": "direct-codegen",
-   "doc": "WASI.md"
-  },
-  {
-   "id": "ebpf",
-   "name": "eBPF (bpfel-unknown-linux)",
-   "kind": "direct-codegen",
-   "doc": "src/buster/lib/compiler/ebpf/ebpf.c"
-  },
-  {
-   "id": "llvm-bitcode",
-   "name": "LLVM bitcode (-emit-llvm)",
-   "kind": "direct-codegen",
-   "doc": "LLVM_BITCODE.md"
-  },
-  {
-   "id": "spirv-compute",
-   "name": "Direct Vulkan 1.2 SPIR-V compute",
-   "kind": "direct-codegen",
-   "doc": "docs/spirv-compute.md"
-  },
-  {
-   "id": "gpu-external",
-   "name": "External GPU toolchains (SPIR-V, PTX, AMDGCN, Metal, DXIL)",
-   "kind": "external-tool",
-   "doc": "docs/gpu-target-pipelines.md"
-  }
- ],
- "features": [
-  {
-   "id": "scalar-calls",
-   "name": "Scalar calls"
-  },
-  {
-   "id": "aggregate-calls",
-   "name": "Aggregate call ABI"
-  },
-  {
-   "id": "variadic-calls",
-   "name": "Variadic calls"
-  },
-  {
-   "id": "indirect-calls",
-   "name": "Indirect calls"
-  },
-  {
-   "id": "atomics",
-   "name": "Atomics"
-  },
-  {
-   "id": "simd",
-   "name": "SIMD/vectors"
-  },
-  {
-   "id": "tls",
-   "name": "TLS"
-  },
-  {
-   "id": "debug-info",
-   "name": "Debug info"
-  },
-  {
-   "id": "object-link",
-   "name": "Object/link"
-  },
-  {
-   "id": "execution",
-   "name": "Execution/independent oracle"
-  }
- ],
- "requirements": {
-  "node": {
-   "text": "Node.js with WebAssembly support on PATH",
-   "missing": "skip"
-  },
-  "clang": {
-   "text": "Clang on PATH as the independent LLVM bitcode consumer",
-   "missing": "skip"
-  },
-  "gcc-and-clang": {
-   "text": "Both GCC and Clang on PATH for the Linux scalar ABI oracle (mandatory on supported Linux)",
-   "missing": "fail"
-  },
-  "gpu-toolchains": {
-   "text": "Pinned toolchains for the selected profile in .github/workflows/gpu-toolchains.yml; an omitted profile reports SKIP_NOT_CONFIGURED and provides no evidence",
-   "missing": "fail"
-  }
- },
- "cells": [
-  {
-   "backend": "x86_64-native",
-   "feature": "scalar-calls",
-   "status": "supported",
-   "evidence": [
+  "schema": "buster-backend-capabilities-v1",
+  "reviewed_revision": "5029503fbdc74e361644c456a8f4de3046ff3155",
+  "owner_issue": 309,
+  "levels": [
     {
-     "file": "build.c",
-     "anchor": "S8_INITIALIZER(\"test_self_host\")",
-     "provides": [
-      "integration"
-     ]
-    }
-   ],
-   "note": "Self-host fixed point builds and reruns the compiler with itself."
-  },
-  {
-   "backend": "x86_64-native",
-   "feature": "aggregate-calls",
-   "status": "supported",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/codegen/machine_test.c",
-     "symbol": "machine_test_native_aggregate",
-     "provides": [
-      "encode"
-     ]
+      "id": "validate",
+      "name": "Parse/validate"
     },
     {
-     "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "symbol": "compiler_driver_test_sysv_empty_aggregates",
-     "provides": [
-      "object-link"
-     ]
-    }
-   ]
-  },
-  {
-   "backend": "x86_64-native",
-   "feature": "variadic-calls",
-   "status": "supported",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "symbol": "compiler_driver_test_sysv_indirect_variadic",
-     "provides": [
-      "object-link"
-     ]
+      "id": "encode",
+      "name": "Exact encode"
     },
     {
-     "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "symbol": "compiler_driver_test_sysv_wide_aggregate_va_arg",
-     "provides": [
-      "object-link"
-     ]
-    }
-   ]
-  },
-  {
-   "backend": "x86_64-native",
-   "feature": "indirect-calls",
-   "status": "supported",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "symbol": "compiler_driver_test_sysv_indirect_variadic",
-     "provides": [
-      "object-link"
-     ]
-    }
-   ]
-  },
-  {
-   "backend": "x86_64-native",
-   "feature": "atomics",
-   "status": "supported",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/frontend/c/c_test.c",
-     "symbol": "c_test_atomic_compound_assignment_runtime",
-     "provides": [
-      "execute"
-     ]
+      "id": "object-link",
+      "name": "Object/link"
     },
     {
-     "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "symbol": "compiler_driver_test_atomic_pair_contention",
-     "provides": [
-      "object-link",
-      "execute"
-     ]
-    }
-   ]
-  },
-  {
-   "backend": "x86_64-native",
-   "feature": "simd",
-   "status": "partial",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/codegen/machine_test.c",
-     "symbol": "machine_test_wide_vector_boundaries",
-     "provides": [
-      "encode"
-     ]
+      "id": "oracle",
+      "name": "Independent oracle"
     },
     {
-     "file": "src/buster/tests/compiler/codegen/machine_test.c",
-     "symbol": "machine_test_win64_vector_execute",
-     "provides": [
-      "execute"
-     ]
-    }
-   ],
-   "note": "Vector values and ABI boundaries are covered; this row does not claim every SIMD intrinsic form."
-  },
-  {
-   "backend": "x86_64-native",
-   "feature": "tls",
-   "status": "supported",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "symbol": "compiler_driver_test_native_tls",
-     "provides": [
-      "object-link"
-     ]
-    }
-   ]
-  },
-  {
-   "backend": "x86_64-native",
-   "feature": "debug-info",
-   "status": "supported",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "symbol": "compiler_driver_test_dwarf5_objects",
-     "provides": [
-      "object-link"
-     ]
+      "id": "execute",
+      "name": "Executed semantics"
     },
     {
-     "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "symbol": "compiler_driver_test_debug_scalar_local_locations",
-     "provides": [
-      "object-link"
-     ]
+      "id": "integration",
+      "name": "Self-host/real project"
     }
-   ],
-   "note": "DWARF evidence; CodeView/PDB are tracked by their own test modules."
-  },
-  {
-   "backend": "x86_64-native",
-   "feature": "object-link",
-   "status": "supported",
-   "evidence": [
+  ],
+  "statuses": [
+    "supported",
+    "partial",
+    "unsupported-diagnostic",
+    "not-applicable",
+    "unknown"
+  ],
+  "backends": [
     {
-     "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "symbol": "compiler_driver_test_dwarf5_objects",
-     "provides": [
-      "object-link"
-     ]
+      "id": "x86_64-native",
+      "name": "x86-64 native",
+      "kind": "direct-codegen",
+      "doc": "docs/compiler-pipeline.md"
     },
     {
-     "file": "build.c",
-     "anchor": "S8_INITIALIZER(\"test_self_host\")",
-     "provides": [
-      "integration"
-     ]
-    }
-   ]
-  },
-  {
-   "backend": "x86_64-native",
-   "feature": "execution",
-   "status": "supported",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/frontend/c/c_test.c",
-     "symbol": "c_test_atomic_compound_assignment_runtime",
-     "provides": [
-      "execute"
-     ]
+      "id": "aarch64-native",
+      "name": "AArch64 native",
+      "kind": "direct-codegen",
+      "doc": "docs/compiler-pipeline.md"
     },
     {
-     "file": "build.c",
-     "anchor": "S8_INITIALIZER(\"test_self_host\")",
-     "provides": [
-      "integration"
-     ]
-    }
-   ]
-  },
-  {
-   "backend": "aarch64-native",
-   "feature": "scalar-calls",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "aarch64-native",
-   "feature": "aggregate-calls",
-   "status": "partial",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/codegen/machine_test.c",
-     "symbol": "machine_test_a64_large_aggregate_copy",
-     "provides": [
-      "encode"
-     ]
-    }
-   ],
-   "note": "Large aggregate copy lowering only; AAPCS64 aggregate argument evidence not yet audited."
-  },
-  {
-   "backend": "aarch64-native",
-   "feature": "variadic-calls",
-   "status": "supported",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "symbol": "compiler_driver_test_aarch64_platform_variadic",
-     "provides": [
-      "object-link"
-     ]
-    }
-   ]
-  },
-  {
-   "backend": "aarch64-native",
-   "feature": "indirect-calls",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "aarch64-native",
-   "feature": "atomics",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "aarch64-native",
-   "feature": "simd",
-   "status": "partial",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/assembly/aarch64_direct_simd_test.c",
-     "symbol": "aarch64_direct_simd_tests",
-     "provides": [
-      "encode"
-     ]
-    }
-   ],
-   "note": "Assembler-level SIMD encoding; canonical vector codegen evidence not yet audited."
-  },
-  {
-   "backend": "aarch64-native",
-   "feature": "tls",
-   "status": "supported",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "symbol": "compiler_driver_test_aarch64_elf_tlsdesc",
-     "provides": [
-      "object-link"
-     ]
+      "id": "uefi-pe32plus",
+      "name": "UEFI PE32+ (x86-64, AArch64)",
+      "kind": "direct-codegen",
+      "doc": "docs/uefi-target.md"
     },
     {
-     "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "symbol": "compiler_driver_test_aarch64_elf_tls_initial_exec",
-     "provides": [
-      "object-link"
-     ]
-    }
-   ]
-  },
-  {
-   "backend": "aarch64-native",
-   "feature": "debug-info",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "aarch64-native",
-   "feature": "object-link",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "aarch64-native",
-   "feature": "execution",
-   "status": "unknown",
-   "note": "Routine Apple CI runs AArch64; per-feature execution evidence not yet mapped."
-  },
-  {
-   "backend": "uefi-pe32plus",
-   "feature": "scalar-calls",
-   "status": "unknown",
-   "note": "Shares native code generation; UEFI-specific evidence not yet audited."
-  },
-  {
-   "backend": "uefi-pe32plus",
-   "feature": "aggregate-calls",
-   "status": "unknown",
-   "note": "Shares native code generation; UEFI-specific evidence not yet audited."
-  },
-  {
-   "backend": "uefi-pe32plus",
-   "feature": "variadic-calls",
-   "status": "unknown",
-   "note": "Shares native code generation; UEFI-specific evidence not yet audited."
-  },
-  {
-   "backend": "uefi-pe32plus",
-   "feature": "indirect-calls",
-   "status": "unknown",
-   "note": "Shares native code generation; UEFI-specific evidence not yet audited."
-  },
-  {
-   "backend": "uefi-pe32plus",
-   "feature": "atomics",
-   "status": "unknown",
-   "note": "Shares native code generation; UEFI-specific evidence not yet audited."
-  },
-  {
-   "backend": "uefi-pe32plus",
-   "feature": "simd",
-   "status": "unknown",
-   "note": "Shares native code generation; UEFI-specific evidence not yet audited."
-  },
-  {
-   "backend": "uefi-pe32plus",
-   "feature": "tls",
-   "status": "unknown",
-   "note": "Shares native code generation; UEFI-specific evidence not yet audited."
-  },
-  {
-   "backend": "uefi-pe32plus",
-   "feature": "debug-info",
-   "status": "unknown",
-   "note": "Shares native code generation; UEFI-specific evidence not yet audited."
-  },
-  {
-   "backend": "uefi-pe32plus",
-   "feature": "object-link",
-   "status": "supported",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/link/link_test.c",
-     "symbol": "link_test_uefi_pe64",
-     "provides": [
-      "object-link"
-     ]
-    }
-   ],
-   "note": "x86-64 and AArch64 PE32+ images."
-  },
-  {
-   "backend": "uefi-pe32plus",
-   "feature": "execution",
-   "status": "unknown",
-   "note": "Firmware execution is a separate gate described in docs/uefi-target.md."
-  },
-  {
-   "backend": "wasm64",
-   "feature": "scalar-calls",
-   "status": "supported",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "symbol": "compiler_driver_test_wasm_integers",
-     "provides": [
-      "encode"
-     ]
-    }
-   ]
-  },
-  {
-   "backend": "wasm64",
-   "feature": "aggregate-calls",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
-    {
-     "file": "src/buster/lib/compiler/wasm/wasm.c",
-     "text": "aggregate or unsupported parameter ABI in WebAssembly function"
-    }
-   ],
-   "note": "Local aggregate copies are supported; aggregate parameter ABI is not."
-  },
-  {
-   "backend": "wasm64",
-   "feature": "variadic-calls",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "wasm64",
-   "feature": "indirect-calls",
-   "status": "supported",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "symbol": "compiler_driver_test_wasm64_function_tables",
-     "provides": [
-      "encode",
-      "oracle",
-      "execute"
-     ],
-     "requires": "node"
-    }
-   ],
-   "note": "Scalar function-pointer table ABI with typed indirect calls."
-  },
-  {
-   "backend": "wasm64",
-   "feature": "atomics",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
-    {
-     "file": "src/buster/lib/compiler/wasm/wasm.c",
-     "text": "atomic operations are unsupported by WebAssembly"
-    }
-   ]
-  },
-  {
-   "backend": "wasm64",
-   "feature": "simd",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
-    {
-     "file": "src/buster/lib/compiler/wasm/wasm.c",
-     "text": "exact SIMD intrinsics are unsupported by Wasm64; select an explicit source fallback"
-    }
-   ]
-  },
-  {
-   "backend": "wasm64",
-   "feature": "tls",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "wasm64",
-   "feature": "debug-info",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "wasm64",
-   "feature": "object-link",
-   "status": "unknown",
-   "note": "Emits a core module directly; no relocatable object/link contract is claimed."
-  },
-  {
-   "backend": "wasm64",
-   "feature": "execution",
-   "status": "supported",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "symbol": "compiler_driver_test_wasm64_function_tables",
-     "provides": [
-      "oracle",
-      "execute"
-     ],
-     "requires": "node"
-    }
-   ],
-   "note": "Node validates and executes the emitted table/typed-call module. compiler_driver_test_wasm_node_policy covers Node process-lifecycle policy only, not engine execution."
-  },
-  {
-   "backend": "wasm32-wasip1",
-   "feature": "scalar-calls",
-   "status": "supported",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "anchor": "3/3 wasm32 WASI Preview 1 command executions passed",
-     "provides": [
-      "execute"
-     ],
-     "requires": "node"
-    }
-   ]
-  },
-  {
-   "backend": "wasm32-wasip1",
-   "feature": "aggregate-calls",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
-    {
-     "file": "src/buster/lib/compiler/wasm/wasm.c",
-     "text": "aggregate or unsupported parameter ABI in WebAssembly function"
-    }
-   ]
-  },
-  {
-   "backend": "wasm32-wasip1",
-   "feature": "variadic-calls",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "wasm32-wasip1",
-   "feature": "indirect-calls",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
-    {
-     "file": "src/buster/lib/compiler/wasm/wasm.c",
-     "text": "indirect calls are unsupported by Wasm32"
+      "id": "wasm64",
+      "name": "Wasm64 Memory64 (wasm64-unknown-freestanding)",
+      "kind": "direct-codegen",
+      "doc": "WASM64.md"
     },
     {
-     "file": "src/buster/lib/compiler/wasm/wasm.c",
-     "text": "runtime function addresses are unsupported by Wasm32"
-    }
-   ]
-  },
-  {
-   "backend": "wasm32-wasip1",
-   "feature": "atomics",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
-    {
-     "file": "src/buster/lib/compiler/wasm/wasm.c",
-     "text": "atomic operations are unsupported by WebAssembly"
-    }
-   ]
-  },
-  {
-   "backend": "wasm32-wasip1",
-   "feature": "simd",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
-    {
-     "file": "src/buster/lib/compiler/wasm/wasm.c",
-     "text": "vector/SIMD unary operation is unsupported by WebAssembly"
-    }
-   ]
-  },
-  {
-   "backend": "wasm32-wasip1",
-   "feature": "tls",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "wasm32-wasip1",
-   "feature": "debug-info",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "wasm32-wasip1",
-   "feature": "object-link",
-   "status": "unknown",
-   "note": "Emits a WASI command module directly; no relocatable object/link contract is claimed."
-  },
-  {
-   "backend": "wasm32-wasip1",
-   "feature": "execution",
-   "status": "supported",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/driver/driver_test.c",
-     "anchor": "3/3 wasm32 WASI Preview 1 command executions passed",
-     "provides": [
-      "execute"
-     ],
-     "requires": "node"
-    }
-   ]
-  },
-  {
-   "backend": "ebpf",
-   "feature": "scalar-calls",
-   "status": "supported",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/codegen/ebpf_call_test_internal.h",
-     "symbol": "codegen_test_ebpf_local_calls",
-     "provides": [
-      "encode"
-     ]
+      "id": "wasm32-wasip1",
+      "name": "Wasm32 WASI Preview 1 (wasm32-wasip1)",
+      "kind": "direct-codegen",
+      "doc": "WASI.md"
     },
     {
-     "file": "src/buster/tests/compiler/codegen/ebpf_test_internal.h",
-     "symbol": "codegen_test_ebpf_scalars",
-     "provides": [
-      "encode"
-     ]
-    }
-   ]
-  },
-  {
-   "backend": "ebpf",
-   "feature": "aggregate-calls",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
-    {
-     "file": "src/buster/lib/compiler/ebpf/ebpf.c",
-     "text": "aggregate eBPF subprogram arguments are unsupported"
-    }
-   ]
-  },
-  {
-   "backend": "ebpf",
-   "feature": "variadic-calls",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
-    {
-     "file": "src/buster/lib/compiler/ebpf/ebpf.c",
-     "text": "variadic functions are unsupported by eBPF"
-    }
-   ]
-  },
-  {
-   "backend": "ebpf",
-   "feature": "indirect-calls",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
-    {
-     "file": "src/buster/lib/compiler/ebpf/ebpf.c",
-     "text": "indirect calls are unsupported by the eBPF backend"
-    }
-   ]
-  },
-  {
-   "backend": "ebpf",
-   "feature": "atomics",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
-    {
-     "file": "src/buster/lib/compiler/ebpf/ebpf.c",
-     "text": "atomic IR operations are not yet lowered by the eBPF backend"
-    }
-   ]
-  },
-  {
-   "backend": "ebpf",
-   "feature": "simd",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
-    {
-     "file": "src/buster/lib/compiler/ebpf/ebpf.c",
-     "text": "exact SIMD intrinsics are unsupported by eBPF; select an explicit source fallback"
-    }
-   ]
-  },
-  {
-   "backend": "ebpf",
-   "feature": "tls",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
-    {
-     "file": "src/buster/lib/compiler/ebpf/ebpf.c",
-     "text": "thread-local storage is unsupported by eBPF"
-    }
-   ]
-  },
-  {
-   "backend": "ebpf",
-   "feature": "debug-info",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "ebpf",
-   "feature": "object-link",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "ebpf",
-   "feature": "execution",
-   "status": "unknown",
-   "note": "Kernel verifier/loader evidence not yet mapped."
-  },
-  {
-   "backend": "llvm-bitcode",
-   "feature": "scalar-calls",
-   "status": "supported",
-   "evidence": [
-    {
-     "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
-     "symbol": "llvm_bitcode_test_scalar_abi_wire",
-     "provides": [
-      "encode"
-     ]
+      "id": "ebpf",
+      "name": "eBPF (bpfel-unknown-linux)",
+      "kind": "direct-codegen",
+      "doc": "src/buster/lib/compiler/ebpf/ebpf.c"
     },
     {
-     "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
-     "symbol": "llvm_bitcode_test_scalar_abi_runtime",
-     "provides": [
-      "oracle",
-      "execute"
-     ],
-     "requires": "gcc-and-clang"
-    }
-   ]
-  },
-  {
-   "backend": "llvm-bitcode",
-   "feature": "aggregate-calls",
-   "status": "partial",
-   "evidence": [
+      "id": "llvm-bitcode",
+      "name": "LLVM bitcode (-emit-llvm)",
+      "kind": "direct-codegen",
+      "doc": "LLVM_BITCODE.md"
+    },
     {
-     "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
-     "symbol": "llvm_bitcode_test_aggregate_va_arg",
-     "provides": [
-      "oracle"
-     ],
-     "requires": "clang"
-    }
-   ],
-   "diagnostics": [
+      "id": "spirv-compute",
+      "name": "Direct Vulkan 1.2 SPIR-V compute",
+      "kind": "direct-codegen",
+      "doc": "docs/spirv-compute.md"
+    },
     {
-     "file": "src/buster/lib/compiler/llvm/bitcode.c",
-     "text": "unsupported LLVM aggregate ABI part"
+      "id": "gpu-external",
+      "name": "External GPU toolchains (SPIR-V, PTX, AMDGCN, Metal, DXIL)",
+      "kind": "external-tool",
+      "doc": "docs/gpu-target-pipelines.md"
     }
-   ],
-   "note": "Only the documented aggregate ABI parts are lowered."
-  },
-  {
-   "backend": "llvm-bitcode",
-   "feature": "variadic-calls",
-   "status": "supported",
-   "evidence": [
+  ],
+  "features": [
     {
-     "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
-     "symbol": "llvm_bitcode_test_canonical_variadics",
-     "provides": [
-      "encode"
-     ]
-    }
-   ],
-   "note": "Canonical va_list operations are built directly in IR and encoded; no independent consumer is mapped for this row."
-  },
-  {
-   "backend": "llvm-bitcode",
-   "feature": "indirect-calls",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "llvm-bitcode",
-   "feature": "atomics",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "llvm-bitcode",
-   "feature": "simd",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "llvm-bitcode",
-   "feature": "tls",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "llvm-bitcode",
-   "feature": "debug-info",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "llvm-bitcode",
-   "feature": "object-link",
-   "status": "not-applicable",
-   "note": "Bitcode is consumed by external LLVM tools; Buster does not link it."
-  },
-  {
-   "backend": "llvm-bitcode",
-   "feature": "execution",
-   "status": "supported",
-   "evidence": [
+      "id": "scalar-calls",
+      "name": "Scalar calls"
+    },
     {
-     "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
-     "symbol": "llvm_bitcode_test_consumers",
-     "provides": [
-      "oracle"
-     ],
-     "requires": "clang"
-    }
-   ]
-  },
-  {
-   "backend": "spirv-compute",
-   "feature": "scalar-calls",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
+      "id": "aggregate-calls",
+      "name": "Aggregate call ABI"
+    },
     {
-     "file": "src/buster/lib/compiler/spirv/spirv.c",
-     "text": "SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported"
-    }
-   ]
-  },
-  {
-   "backend": "spirv-compute",
-   "feature": "aggregate-calls",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
+      "id": "variadic-calls",
+      "name": "Variadic calls"
+    },
     {
-     "file": "src/buster/lib/compiler/spirv/spirv.c",
-     "text": "SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported"
-    }
-   ]
-  },
-  {
-   "backend": "spirv-compute",
-   "feature": "variadic-calls",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
+      "id": "indirect-calls",
+      "name": "Indirect calls"
+    },
     {
-     "file": "src/buster/lib/compiler/spirv/spirv.c",
-     "text": "SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported"
-    }
-   ]
-  },
-  {
-   "backend": "spirv-compute",
-   "feature": "indirect-calls",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
+      "id": "atomics",
+      "name": "Atomics"
+    },
     {
-     "file": "src/buster/lib/compiler/spirv/spirv.c",
-     "text": "SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported"
-    }
-   ]
-  },
-  {
-   "backend": "spirv-compute",
-   "feature": "atomics",
-   "status": "unsupported-diagnostic",
-   "diagnostics": [
+      "id": "simd",
+      "name": "SIMD/vectors"
+    },
     {
-     "file": "src/buster/lib/compiler/spirv/spirv.c",
-     "text": "SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported"
-    }
-   ]
-  },
-  {
-   "backend": "spirv-compute",
-   "feature": "simd",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "spirv-compute",
-   "feature": "tls",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "spirv-compute",
-   "feature": "debug-info",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "spirv-compute",
-   "feature": "object-link",
-   "status": "unknown",
-   "note": "Not yet audited for this backend."
-  },
-  {
-   "backend": "spirv-compute",
-   "feature": "execution",
-   "status": "partial",
-   "evidence": [
+      "id": "tls",
+      "name": "TLS"
+    },
     {
-     "file": "src/buster/tests/compiler/spirv/spirv_test.c",
-     "symbol": "spirv_test_transform",
-     "provides": [
-      "encode"
-     ]
-    }
-   ],
-   "note": "Independent spirv-val validation and device execution are not mapped to a registered test here."
-  },
-  {
-   "backend": "gpu-external",
-   "feature": "scalar-calls",
-   "status": "not-applicable",
-   "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
-  },
-  {
-   "backend": "gpu-external",
-   "feature": "aggregate-calls",
-   "status": "not-applicable",
-   "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
-  },
-  {
-   "backend": "gpu-external",
-   "feature": "variadic-calls",
-   "status": "not-applicable",
-   "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
-  },
-  {
-   "backend": "gpu-external",
-   "feature": "indirect-calls",
-   "status": "not-applicable",
-   "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
-  },
-  {
-   "backend": "gpu-external",
-   "feature": "atomics",
-   "status": "not-applicable",
-   "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
-  },
-  {
-   "backend": "gpu-external",
-   "feature": "simd",
-   "status": "not-applicable",
-   "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
-  },
-  {
-   "backend": "gpu-external",
-   "feature": "tls",
-   "status": "not-applicable",
-   "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
-  },
-  {
-   "backend": "gpu-external",
-   "feature": "debug-info",
-   "status": "not-applicable",
-   "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
-  },
-  {
-   "backend": "gpu-external",
-   "feature": "object-link",
-   "status": "partial",
-   "evidence": [
+      "id": "debug-info",
+      "name": "Debug info"
+    },
     {
-     "file": "tools/gpu_toolchains.c",
-     "anchor": "spirv-dxc-2025.07",
-     "provides": [
-      "oracle"
-     ],
-     "requires": "gpu-toolchains"
+      "id": "object-link",
+      "name": "Object/link"
+    },
+    {
+      "id": "execution",
+      "name": "Execution/independent oracle"
     }
-   ],
-   "note": "Single-module SPIR-V passthrough is byte-identical and revalidated; no multi-module linking."
+  ],
+  "requirements": {
+    "node": {
+      "text": "Node.js with WebAssembly support on PATH",
+      "missing": "skip"
+    },
+    "clang": {
+      "text": "Clang on PATH as the independent LLVM bitcode consumer",
+      "missing": "skip"
+    },
+    "gcc-and-clang": {
+      "text": "Both GCC and Clang on PATH for the Linux scalar ABI oracle (mandatory on supported Linux)",
+      "missing": "fail"
+    },
+    "gpu-toolchains": {
+      "text": "Pinned toolchains for the selected profile in .github/workflows/gpu-toolchains.yml; an omitted profile reports SKIP_NOT_CONFIGURED and provides no evidence",
+      "missing": "fail"
+    },
+    "clang-native-reference": {
+      "missing": "fail",
+      "text": "Clang on PATH as an independent native reference compiler and link driver; a missing clang records a failure"
+    },
+    "gcc-or-clang-tls": {
+      "missing": "skip",
+      "text": "GCC and/or Clang on PATH to build foreign initial-exec TLS objects; each missing compiler is skipped with a message, so with neither present no foreign evidence is produced"
+    },
+    "host-c-compiler": {
+      "text": "A configured non-MSVC BUSTER_HOST_C_COMPILER on a matching native host (x86-64 Linux/macOS, or AArch64) acting as the independent caller/callee and link driver. When none is configured, or it is MSVC, the leg is compiled out and provides no oracle/execute evidence; a configured compiler whose compile, link or run fails records a failure.",
+      "missing": "skip"
+    },
+    "linux-bpf-kernel": {
+      "missing": "skip",
+      "text": "Linux kernel that permits BPF_PROG_LOAD/BPF_PROG_TEST_RUN of a sleepable BPF_PROG_TYPE_SYSCALL program (Linux 5.14+, CAP_BPF+CAP_PERFMON or root). Codegen fixtures report 'unavailable, VM only' and still pass without it. The Linux x86-64 CI ebpf_kernel step (tools/ci_ebpf_kernel_oracle.py) turns unavailability into a failure."
+    },
+    "uefi-firmware": {
+      "missing": "fail",
+      "text": "Pinned QEMU 8.2.2 (qemu-system-x86_64, qemu-system-aarch64) and EDK2 2024.02 OVMF/AAVMF code and variable images with matching SHA-256, plus sha256sum on PATH, as installed by the UEFI firmware boot CI job; absent prerequisites print status=unavailable runtime_validated=0 and fail test_uefi"
+    }
   },
-  {
-   "backend": "gpu-external",
-   "feature": "execution",
-   "status": "not-applicable",
-   "note": "Toolchain acceptance profiles are smoke tests, not shader execution."
-  }
- ]
+  "cells": [
+    {
+      "backend": "x86_64-native",
+      "diagnostics": [],
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "oracle",
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_scalar_argument_boundaries"
+        },
+        {
+          "anchor": "S8_INITIALIZER(\"test_self_host\")",
+          "file": "build.c",
+          "provides": [
+            "integration"
+          ]
+        }
+      ],
+      "feature": "scalar-calls",
+      "note": "Scalar boundary calls are exchanged in both directions with the configure-time host C compiler on x86-64 Linux/macOS hosts and executed with negative controls; MSVC and other hosts compile that leg out and print ABI_SCALAR_BOUNDARY_NATIVE_V1 status=pending.",
+      "status": "supported"
+    },
+    {
+      "backend": "x86_64-native",
+      "diagnostics": [],
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/codegen/machine_test.c",
+          "provides": [
+            "validate"
+          ],
+          "symbol": "machine_test_native_aggregate"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "oracle",
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_sysv_empty_aggregates"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "oracle",
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_sysv_padding_eightbytes"
+        }
+      ],
+      "feature": "aggregate-calls",
+      "note": "Executed and host-compiler-checked evidence covers SysV x86-64 (Linux/macOS); Win64, UEFI and macOS aggregate lowering in machine_test_native_aggregate is machine-verified only, not executed.",
+      "status": "supported"
+    },
+    {
+      "backend": "x86_64-native",
+      "diagnostics": [],
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "oracle",
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_sysv_indirect_variadic"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "oracle",
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_sysv_wide_aggregate_va_arg"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "oracle",
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_variadic_workspace"
+        }
+      ],
+      "feature": "variadic-calls",
+      "note": "Executed evidence is SysV x86-64 on Linux/macOS hosts with the configured host C compiler; Win64 variadics execute only in the AVX-512-gated machine_test_win64_vector JIT path.",
+      "status": "supported"
+    },
+    {
+      "backend": "x86_64-native",
+      "diagnostics": [],
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "oracle",
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_sysv_indirect_variadic"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "oracle",
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_sysv_empty_aggregates"
+        }
+      ],
+      "feature": "indirect-calls",
+      "note": "Indirect calls through function pointers into host-compiled callees are linked and executed on SysV x86-64 Linux/macOS hosts.",
+      "status": "supported"
+    },
+    {
+      "backend": "x86_64-native",
+      "diagnostics": [],
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/frontend/c/c_test.c",
+          "provides": [
+            "object-link",
+            "execute"
+          ],
+          "symbol": "c_test_atomic_compound_assignment_runtime"
+        },
+        {
+          "file": "src/buster/tests/compiler/frontend/c/c_test.c",
+          "provides": [
+            "object-link",
+            "execute"
+          ],
+          "symbol": "c_test_atomic_float_compare_exchange_runtime"
+        }
+      ],
+      "feature": "atomics",
+      "note": "Single-threaded _Atomic compound assignment and floating compare-exchange programs are built and executed for the host; no x86-64 multi-threaded contention test or independent oracle exists (compiler_driver_test_atomic_pair_contention is registered only on AArch64 hosts).",
+      "status": "partial"
+    },
+    {
+      "backend": "x86_64-native",
+      "diagnostics": [],
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/codegen/machine_test.c",
+          "provides": [
+            "validate"
+          ],
+          "symbol": "machine_test_wide_vector_boundaries"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "oracle",
+            "execute"
+          ],
+          "requires": "clang-native-reference",
+          "symbol": "compiler_driver_test_wide_vector_boundaries"
+        },
+        {
+          "file": "src/buster/tests/compiler/codegen/machine_test.c",
+          "provides": [
+            "execute"
+          ],
+          "symbol": "machine_test_win64_vector"
+        }
+      ],
+      "feature": "simd",
+      "note": "Evidence covers vector values at call/return ABI boundaries (baseline, Haswell, Zen 5) exchanged with Clang and executed on x86-64 Linux/macOS hosts, plus Win64 vector JIT execution on Clang-built AVX-512 hosts; vector arithmetic lowering breadth is not catalogued.",
+      "status": "partial"
+    },
+    {
+      "backend": "x86_64-native",
+      "diagnostics": [],
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "execute"
+          ],
+          "symbol": "compiler_driver_test_native_tls"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "oracle",
+            "execute"
+          ],
+          "requires": "clang-native-reference",
+          "symbol": "compiler_driver_test_elf_tls_cross_link"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "oracle",
+            "execute"
+          ],
+          "requires": "gcc-or-clang-tls",
+          "symbol": "compiler_driver_test_initial_exec_tls"
+        }
+      ],
+      "feature": "tls",
+      "note": "Native TLS programs are linked and executed for the host arch/OS; ELF TLS is cross-linked with Clang objects and initial-exec TLS with GCC/Clang objects, each executed.",
+      "status": "supported"
+    },
+    {
+      "backend": "x86_64-native",
+      "diagnostics": [],
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link"
+          ],
+          "symbol": "compiler_driver_test_debug_scalar_local_locations"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "execute"
+          ],
+          "symbol": "compiler_driver_test_dwarf5_objects"
+        }
+      ],
+      "feature": "debug-info",
+      "note": "Buster-emitted DWARF locations are checked only by Buster's own reader, and DWARF 5 linking is checked on host-compiled objects; no independent consumer (debugger, llvm-dwarfdump, DbgHelp) reads x86-64 debug info Buster emitted. The DbgHelp PDB check in pdb_test.c is Windows-only, uses a model-built PDB and reports unavailable when dbh is absent.",
+      "status": "partial"
+    },
+    {
+      "backend": "x86_64-native",
+      "diagnostics": [],
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "execute"
+          ],
+          "symbol": "compiler_driver_test_dwarf5_objects"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "execute"
+          ],
+          "symbol": "compiler_driver_test_native_tls"
+        },
+        {
+          "anchor": "S8_INITIALIZER(\"test_self_host\")",
+          "file": "build.c",
+          "provides": [
+            "integration"
+          ]
+        }
+      ],
+      "feature": "object-link",
+      "note": "Self-hosting runs on Linux and Windows x86-64 (and macOS); other hosts fail the test_self_host command.",
+      "status": "supported"
+    },
+    {
+      "backend": "x86_64-native",
+      "diagnostics": [],
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/frontend/c/c_test.c",
+          "provides": [
+            "execute"
+          ],
+          "symbol": "c_test_atomic_compound_assignment_runtime"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "oracle",
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_scalar_argument_boundaries"
+        },
+        {
+          "anchor": "S8_INITIALIZER(\"test_self_host\")",
+          "file": "build.c",
+          "provides": [
+            "integration"
+          ]
+        }
+      ],
+      "feature": "execution",
+      "note": "Programs are executed on the x86-64 host only; self-host executes the stage compilers to a byte-identical fixed point.",
+      "status": "supported"
+    },
+    {
+      "backend": "aarch64-native",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "validate"
+          ],
+          "symbol": "compiler_driver_test_scalar_argument_boundaries"
+        },
+        {
+          "anchor": "ABI_SCALAR_BOUNDARY_NATIVE_V1 target=",
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "oracle",
+            "execute"
+          ],
+          "requires": "host-c-compiler"
+        }
+      ],
+      "feature": "scalar-calls",
+      "note": "aarch64-linux/macos/windows caller and callee objects are built under both allocators and both frontend forms with machine fallback rejected, then verified. On a matching native AArch64 Linux/macOS/Windows host with a non-MSVC host compiler configured, Buster objects are linked against independent host-compiled references in both directions and executed. Without a configured host compiler, the test prints ABI_SCALAR_BOUNDARY_NATIVE_V1 status=pending instead.",
+      "status": "supported"
+    },
+    {
+      "backend": "aarch64-native",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/codegen/machine_test.c",
+          "provides": [
+            "encode",
+            "execute"
+          ],
+          "symbol": "machine_test_a64_large_aggregate_copy"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_aarch64_dynamic_calls"
+        }
+      ],
+      "feature": "aggregate-calls",
+      "note": "Covers a 16-byte pair passed and returned in registers and a 24-byte aggregate passed indirectly, both crossing a host-compiled callee and executed on the native AArch64 host. Also covers large-copy lowering, executed on native AArch64 Unix hosts. Neither cited fixture covers HFA/HVA floating-point aggregates or Darwin/Windows-specific aggregate rules.",
+      "status": "partial"
+    },
+    {
+      "backend": "aarch64-native",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "execute"
+          ],
+          "symbol": "compiler_driver_test_aarch64_platform_variadic"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_aarch64_dynamic_calls"
+        }
+      ],
+      "feature": "variadic-calls",
+      "note": "Darwin and Windows AArch64 variadic conventions are linked by Buster and executed on native macOS/Windows AArch64 hosts. With a host compiler, mixed Buster/host-object images are also executed. AAPCS64 Linux variadic calls into a host-compiled callee are executed by the dynamic-calls fixture.",
+      "status": "supported"
+    },
+    {
+      "backend": "aarch64-native",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "validate",
+            "object-link",
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_aarch64_dynamic_calls"
+        }
+      ],
+      "feature": "indirect-calls",
+      "note": "A volatile function pointer to a host-compiled 12-argument callee (eight register and four stack arguments) is called 17 times and the results are checked. This runs under both allocators, both frontend forms, and -fpic/-fno-pic, with machine fallback rejected and codegen verified, for all six AArch64 OS targets. Only the native Linux/macOS/Windows target links and executes.",
+      "status": "supported"
+    },
+    {
+      "backend": "aarch64-native",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/codegen/machine_test.c",
+          "provides": [
+            "validate",
+            "encode"
+          ],
+          "symbol": "machine_test_a64_atomic_pair_updates"
+        },
+        {
+          "file": "src/buster/tests/compiler/frontend/c/c_test.c",
+          "provides": [
+            "execute"
+          ],
+          "symbol": "c_test_atomic_compound_assignment_runtime"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_atomic_pair_contention"
+        }
+      ],
+      "feature": "atomics",
+      "note": "Pair atomics are checked for every fetch-op, exchange and compare-exchange form across memory orders: exact machine contracts and encoded loop bytes. Atomic compound assignments execute on native AArch64 hosts other than Android/iOS. Multi-threaded pair contention against a host harness executes on Linux/macOS AArch64 only.",
+      "status": "supported"
+    },
+    {
+      "backend": "aarch64-native",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/assembly/aarch64_direct_simd_test.c",
+          "provides": [
+            "encode"
+          ],
+          "symbol": "aarch64_direct_simd_tests"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "validate",
+            "object-link",
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_native_frame_vectors"
+        }
+      ],
+      "feature": "simd",
+      "note": "Covers assembler-level SIMD encoding plus canonical GNU vector-extension codegen: frame vectors, vector arguments, joins and arithmetic. That codegen is compiled for all six AArch64 targets and, on native AArch64 Linux/macOS, linked with host observers and executed. If the host compiler cannot be spawned, the run prints NATIVE_FRAME_VECTOR_OBSERVER status=skipped. NEON intrinsics and SVE are not covered.",
+      "status": "partial"
+    },
+    {
+      "backend": "aarch64-native",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "validate",
+            "object-link",
+            "execute"
+          ],
+          "symbol": "compiler_driver_test_native_tls"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "oracle",
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_aarch64_elf_tlsdesc"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "oracle",
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_aarch64_elf_tls_initial_exec"
+        }
+      ],
+      "feature": "tls",
+      "note": "TLS relocations for aarch64-linux, aarch64-windows (PE TLS index) and aarch64-macos are checked under every allocator and frontend form. On the matching native host the multi-object TLS program is linked by Buster and executed. Android/iOS are excluded. On Linux AArch64 ELF only, host-compiled TLSDESC and initial-exec objects are also relaxed by Buster, executed, and compared with a host-linked control.",
+      "status": "supported"
+    },
+    {
+      "backend": "aarch64-native",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "validate"
+          ],
+          "symbol": "compiler_driver_test_debug_options"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "validate"
+          ],
+          "symbol": "compiler_driver_test_debug_global_relocations"
+        },
+        {
+          "file": "src/buster/tests/compiler/dwarf/dwarf_test.c",
+          "provides": [
+            "validate"
+          ],
+          "symbol": "dwarf_tests"
+        }
+      ],
+      "feature": "debug-info",
+      "note": "Read back from Buster's own objects: aarch64-linux/macos/windows -g/-g0 debug-section presence and absence, and AArch64 ELF .debug_info global relocations to first definitions. AArch64 DWARF CFI is checked only for validity, minimum length and invalid-input rejection. No independent consumer (dwarfdump/debugger) or executed check covers Buster-generated AArch64 debug info.",
+      "status": "partial"
+    },
+    {
+      "backend": "aarch64-native",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/codegen/machine_test.c",
+          "provides": [
+            "encode"
+          ],
+          "symbol": "machine_test_aarch64_call_relocations"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "validate"
+          ],
+          "symbol": "compiler_driver_test_aarch64_symbolic_pages"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "oracle",
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_aarch64_elf_ldst"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link",
+            "execute"
+          ],
+          "symbol": "compiler_driver_test_aarch64_platform_variadic"
+        }
+      ],
+      "feature": "object-link",
+      "note": "CALL26 patching/rejection and ADRP/low-12 relocations are checked on ELF, Mach-O and COFF objects. The Buster linker links host-compiled Linux AArch64 ELF LD/ST relocations and the result runs the same as a host control. On native macOS/Windows AArch64, Buster also links and runs its own images.",
+      "status": "supported"
+    },
+    {
+      "backend": "aarch64-native",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/frontend/c/c_test.c",
+          "provides": [
+            "execute"
+          ],
+          "symbol": "c_test_atomic_compound_assignment_runtime"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "execute"
+          ],
+          "requires": "host-c-compiler",
+          "symbol": "compiler_driver_test_aarch64_dynamic_calls"
+        },
+        {
+          "anchor": "supported only on Linux and Windows x86-64, and macOS",
+          "file": "build.c",
+          "provides": [
+            "integration"
+          ]
+        }
+      ],
+      "feature": "execution",
+      "note": "Generated programs execute on native AArch64 Linux/macOS/Windows hosts (not Android/iOS/UEFI). Self-hosting is admitted on macOS, which routine Apple CI validates as AArch64 only. On Linux and Windows AArch64, self_host_add refuses to run.",
+      "status": "supported"
+    },
+    {
+      "backend": "uefi-pe32plus",
+      "evidence": [
+        {
+          "anchor": "firmware_call(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) == 5765",
+          "file": "tests/uefi_boot.c",
+          "provides": [
+            "execute"
+          ],
+          "requires": "uefi-firmware"
+        },
+        {
+          "file": "src/buster/tests/compiler/codegen/machine_test.c",
+          "provides": [
+            "validate"
+          ],
+          "symbol": "machine_test_win64_wide"
+        }
+      ],
+      "feature": "scalar-calls",
+      "note": "Firmware execution covers one direct noinline call with ten 64-bit integer arguments (register and stack slots on both ABIs) on x86-64 and AArch64 UEFI under FAST and QUALITY. Float, narrow-integer and mixed scalar signatures reach only x86-64 UEFI machine selection/verification; AArch64 UEFI has no scalar-signature fixture beyond the firmware one.",
+      "status": "partial"
+    },
+    {
+      "backend": "uefi-pe32plus",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/codegen/machine_test.c",
+          "provides": [
+            "validate"
+          ],
+          "symbol": "machine_test_native_aggregate"
+        },
+        {
+          "file": "src/buster/tests/compiler/codegen/machine_test.c",
+          "provides": [
+            "validate"
+          ],
+          "symbol": "machine_test_win64_aligned"
+        }
+      ],
+      "feature": "aggregate-calls",
+      "note": "x86-64 UEFI only: aggregate argument/result selection, machine verification, Win64 outgoing reservation and codegen without fallback. No UEFI fixture passes or returns a struct at runtime, and AArch64 UEFI aggregate call lowering has no fixture (tests/uefi_abi_contract.h only static-asserts record layout).",
+      "status": "partial"
+    },
+    {
+      "backend": "uefi-pe32plus",
+      "evidence": [
+        {
+          "anchor": "uefi_abi_contract_test()",
+          "file": "tests/uefi_boot.c",
+          "provides": [
+            "execute"
+          ],
+          "requires": "uefi-firmware"
+        },
+        {
+          "anchor": "uefi_abi_reference_caller:",
+          "file": "tests/uefi_abi_contract.h",
+          "provides": [
+            "oracle",
+            "execute"
+          ],
+          "requires": "uefi-firmware"
+        },
+        {
+          "file": "src/buster/tests/compiler/codegen/machine_test.c",
+          "provides": [
+            "validate"
+          ],
+          "symbol": "machine_test_x64_uefi_platform_variadic"
+        }
+      ],
+      "feature": "variadic-calls",
+      "note": "Firmware execution runs uefi_abi_variadic (13 unsigned long long arguments, va_copy, guard words) on both architectures; on AArch64 a hand-written AAPCS64 assembly caller/receiver is the independent producer/consumer. No floating-point or aggregate va_arg executes on a UEFI target; x86-64 platform variadic fixtures are validated without execution.",
+      "status": "partial"
+    },
+    {
+      "backend": "uefi-pe32plus",
+      "evidence": [
+        {
+          "anchor": "relocated_call(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) == 5765",
+          "file": "tests/uefi_boot.c",
+          "provides": [
+            "execute"
+          ],
+          "requires": "uefi-firmware"
+        },
+        {
+          "anchor": "table->console_out->output_string(table->console_out,",
+          "file": "tests/uefi_boot.c",
+          "provides": [
+            "oracle",
+            "execute"
+          ],
+          "requires": "uefi-firmware"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "validate"
+          ],
+          "symbol": "compiler_driver_test_aarch64_dynamic_calls"
+        }
+      ],
+      "feature": "indirect-calls",
+      "note": "Executed: a relocated function-pointer call with ten integer arguments, plus calls through EDK2 firmware tables (OutputString, ResetSystem), whose callee is independently built firmware. Only integer/pointer signatures; aarch64-uefi dynamic-call fixtures are compiled with -fverify-codegen but not run.",
+      "status": "partial"
+    },
+    {
+      "backend": "uefi-pe32plus",
+      "feature": "atomics",
+      "note": "No fixture compiles or runs atomics for x86_64-unknown-uefi or aarch64-unknown-uefi; native atomic coverage targets hosted OSes only and is not inherited here.",
+      "status": "unknown"
+    },
+    {
+      "backend": "uefi-pe32plus",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "validate"
+          ],
+          "symbol": "compiler_driver_test_native_frame_vectors"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "validate"
+          ],
+          "symbol": "compiler_driver_test_wide_vector_boundaries"
+        }
+      ],
+      "feature": "simd",
+      "note": "x86_64-uefi and aarch64-uefi vector fixtures compile to objects with expected function counts and zero machine fallback (both allocators, both frontends, PIC/no-PIC, baseline/haswell/znver5 on x86-64). Only native Linux/macOS/Windows cells link and run; no vector code executes on a UEFI target and no independent oracle checks it.",
+      "status": "partial"
+    },
+    {
+      "backend": "uefi-pe32plus",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/link/link.c",
+          "text": "UEFI thread-local storage relocation"
+        },
+        {
+          "file": "src/buster/lib/compiler/link/link.c",
+          "text": "UEFI thread-local storage"
+        }
+      ],
+      "feature": "tls",
+      "note": "link_test_uefi_pe64 rejects TLS sections (error code only) and Mach-O TLV relocations (error and symbol text) with LINK_ERROR_UNSUPPORTED_FEATURE and no image. No driver-level fixture compiles C _Thread_local for a UEFI target.",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "uefi-pe32plus",
+      "feature": "debug-info",
+      "note": "docs/uefi-target.md says -g writes CodeView plus a sibling PDB, but no UEFI fixture checks it. compiler_driver_test_windows_large_frame compiles x86_64-uefi/aarch64-uefi with -g yet asserts only .pdata/.xdata; every other UEFI fixture uses -g0; no codeview/pdb test uses OPERATING_SYSTEM_UEFI.",
+      "status": "unknown"
+    },
+    {
+      "backend": "uefi-pe32plus",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/driver/driver.c",
+          "text": "raw linker arguments are not supported for UEFI targets"
+        }
+      ],
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/link/link_test.c",
+          "provides": [
+            "object-link"
+          ],
+          "symbol": "link_test_uefi_pe64"
+        },
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "object-link"
+          ],
+          "symbol": "compiler_driver_tests"
+        },
+        {
+          "anchor": "passed = image_base == UINT64_C(0x140000000);",
+          "file": "tools/uefi_boot.c",
+          "provides": [
+            "oracle"
+          ],
+          "requires": "uefi-firmware"
+        }
+      ],
+      "feature": "object-link",
+      "note": "x86-64 and AArch64 PE32+ EFI applications: synthetic-object linker checks (DIR64 base relocations, PE AArch64 page relocations, entry, unresolved, BSS, dynamic-library refusal), end-to-end C-to-.efi driver images and static-archive linking. EDK2 independently loads the images and must rebase them from the 5 GiB preferred base.",
+      "status": "supported"
+    },
+    {
+      "backend": "uefi-pe32plus",
+      "evidence": [
+        {
+          "anchor": "UEFI_BOOT_RESULT checks={u64}/{u64} unavailable_targets={u64} status={S8}",
+          "file": "tools/uefi_boot.c",
+          "provides": [
+            "oracle",
+            "execute"
+          ],
+          "requires": "uefi-firmware"
+        }
+      ],
+      "feature": "execution",
+      "note": "test_uefi boots tests/uefi_boot.c under pinned QEMU 8.2.2 with EDK2 2024.02 (OVMF/AAVMF) for x86-64 and AArch64 under FAST and QUALITY, plus one negative FAST control per architecture. The required CI job is UEFI firmware boot. Scope: one fixture under TCG emulation, no physical firmware, no drivers (subsystem 11/12).",
+      "status": "supported"
+    },
+    {
+      "backend": "wasm64",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "encode"
+          ],
+          "symbol": "compiler_driver_test_wasm_integers"
+        }
+      ],
+      "feature": "scalar-calls",
+      "status": "supported"
+    },
+    {
+      "backend": "wasm64",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/wasm/wasm.c",
+          "text": "aggregate or unsupported parameter ABI in WebAssembly function"
+        }
+      ],
+      "feature": "aggregate-calls",
+      "note": "Local aggregate copies are supported; aggregate parameter ABI is not.",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "wasm64",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/wasm/wasm.c",
+          "text": "variadic functions are not supported by WebAssembly"
+        },
+        {
+          "file": "src/buster/lib/compiler/wasm/wasm.c",
+          "text": "aggregate or variadic WebAssembly operation is unsupported"
+        }
+      ],
+      "feature": "variadic-calls",
+      "note": "wasm64_function_signature rejects every variadic function type. The registered Wasm rejection test asserts that diagnostic and the VA opcode diagnostic for both targets, with failed compilation and no published output.",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "wasm64",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "encode",
+            "oracle",
+            "execute"
+          ],
+          "requires": "node",
+          "symbol": "compiler_driver_test_wasm64_function_tables"
+        }
+      ],
+      "feature": "indirect-calls",
+      "note": "Scalar function-pointer table ABI with typed indirect calls.",
+      "status": "supported"
+    },
+    {
+      "backend": "wasm64",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/wasm/wasm.c",
+          "text": "atomic operations are unsupported by WebAssembly"
+        }
+      ],
+      "feature": "atomics",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "wasm64",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/wasm/wasm.c",
+          "text": "aggregate WebAssembly SSA value is unsupported"
+        }
+      ],
+      "feature": "simd",
+      "status": "unsupported-diagnostic",
+      "note": "C vector values are rejected first by wasm64_fe_initialize with the aggregate SSA diagnostic asserted for both Wasm targets. The opcode-level SIMD diagnostics are unreachable from C and are excluded."
+    },
+    {
+      "backend": "wasm64",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/wasm/wasm.c",
+          "text": "TLS globals are not supported by WebAssembly"
+        }
+      ],
+      "feature": "tls",
+      "note": "wasm64_data_add_global refuses any thread-local data symbol, both file-scope and block-scope static _Thread_local; the registered Wasm rejection test asserts the exact diagnostic and verifies no output is published.",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "wasm64",
+      "feature": "debug-info",
+      "note": "No support evidence and no explicit diagnostic. The driver accepts -g without complaint for this target, and the -g and -g0 modules are byte-identical: no DWARF and no debug custom sections are emitted. The only custom section, from wasm64_build_name_payload, is the 'name' section's data-segment subsection 9, which carries section-attribute placement for data, not debug info.",
+      "status": "unknown"
+    },
+    {
+      "backend": "wasm64",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/driver/driver.c",
+          "text": "native objects and archives cannot be linked into a WebAssembly module"
+        },
+        {
+          "file": "src/buster/lib/compiler/driver/driver.c",
+          "text": "WebAssembly accepts one source program and no native objects, archives, libraries, frameworks, or linker arguments"
+        }
+      ],
+      "feature": "object-link",
+      "note": "-c writes the same final core module as a link action, with no relocatable object and no linking/reloc custom sections. Driver input validation rejects .o/.obj/.a/.lib inputs, more than one input, and libraries, frameworks or linker arguments; the registered driver test asserts both diagnostics and preserves an existing output.",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "wasm64",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "oracle",
+            "execute"
+          ],
+          "requires": "node",
+          "symbol": "compiler_driver_test_wasm64_function_tables"
+        }
+      ],
+      "feature": "execution",
+      "note": "Node validates and executes the emitted table/typed-call module. compiler_driver_test_wasm_node_policy covers Node process-lifecycle policy only, not engine execution.",
+      "status": "supported"
+    },
+    {
+      "backend": "wasm32-wasip1",
+      "evidence": [
+        {
+          "anchor": "3/3 wasm32 WASI Preview 1 command executions passed",
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "execute"
+          ],
+          "requires": "node"
+        }
+      ],
+      "feature": "scalar-calls",
+      "status": "supported"
+    },
+    {
+      "backend": "wasm32-wasip1",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/wasm/wasm.c",
+          "text": "aggregate or unsupported parameter ABI in WebAssembly function"
+        }
+      ],
+      "feature": "aggregate-calls",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "wasm32-wasip1",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/wasm/wasm.c",
+          "text": "variadic functions are not supported by WebAssembly"
+        },
+        {
+          "file": "src/buster/lib/compiler/wasm/wasm.c",
+          "text": "aggregate or variadic WebAssembly operation is unsupported"
+        }
+      ],
+      "feature": "variadic-calls",
+      "note": "wasm64_function_signature rejects every variadic function type. The registered Wasm rejection test asserts that diagnostic and the VA opcode diagnostic for both targets, with failed compilation and no published output.",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "wasm32-wasip1",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/wasm/wasm.c",
+          "text": "indirect calls are unsupported by Wasm32"
+        },
+        {
+          "file": "src/buster/lib/compiler/wasm/wasm.c",
+          "text": "runtime function addresses are unsupported by Wasm32"
+        }
+      ],
+      "feature": "indirect-calls",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "wasm32-wasip1",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/wasm/wasm.c",
+          "text": "atomic operations are unsupported by WebAssembly"
+        }
+      ],
+      "feature": "atomics",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "wasm32-wasip1",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/wasm/wasm.c",
+          "text": "aggregate WebAssembly SSA value is unsupported"
+        }
+      ],
+      "feature": "simd",
+      "status": "unsupported-diagnostic",
+      "note": "C vector values are rejected first by wasm64_fe_initialize with the aggregate SSA diagnostic asserted for both Wasm targets. The opcode-level SIMD diagnostics are unreachable from C and are excluded."
+    },
+    {
+      "backend": "wasm32-wasip1",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/wasm/wasm.c",
+          "text": "TLS globals are not supported by WebAssembly"
+        }
+      ],
+      "feature": "tls",
+      "note": "wasm64_data_add_global refuses any thread-local data symbol, both file-scope and block-scope static _Thread_local; the registered Wasm rejection test asserts the exact diagnostic and verifies no output is published.",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "wasm32-wasip1",
+      "feature": "debug-info",
+      "note": "No support evidence and no explicit diagnostic. The driver accepts -g without complaint for this target, and the -g and -g0 modules are byte-identical: no DWARF and no debug custom sections are emitted. The only custom section, from wasm64_build_name_payload, is the 'name' section's data-segment subsection 9, which carries section-attribute placement for data, not debug info.",
+      "status": "unknown"
+    },
+    {
+      "backend": "wasm32-wasip1",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/driver/driver.c",
+          "text": "native objects and archives cannot be linked into a WebAssembly module"
+        },
+        {
+          "file": "src/buster/lib/compiler/driver/driver.c",
+          "text": "WebAssembly accepts one source program and no native objects, archives, libraries, frameworks, or linker arguments"
+        }
+      ],
+      "feature": "object-link",
+      "note": "-c writes the same final core module as a link action, with no relocatable object and no linking/reloc custom sections. Driver input validation rejects .o/.obj/.a/.lib inputs, more than one input, and libraries, frameworks or linker arguments; the registered driver test asserts both diagnostics and preserves an existing output.",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "wasm32-wasip1",
+      "evidence": [
+        {
+          "anchor": "3/3 wasm32 WASI Preview 1 command executions passed",
+          "file": "src/buster/tests/compiler/driver/driver_test.c",
+          "provides": [
+            "execute"
+          ],
+          "requires": "node"
+        }
+      ],
+      "feature": "execution",
+      "status": "supported"
+    },
+    {
+      "backend": "ebpf",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/codegen/ebpf_test_internal.h",
+          "provides": [
+            "execute"
+          ],
+          "symbol": "codegen_test_ebpf_scalars"
+        },
+        {
+          "file": "src/buster/tests/compiler/codegen/ebpf_test_internal.h",
+          "provides": [
+            "oracle",
+            "execute"
+          ],
+          "requires": "linux-bpf-kernel",
+          "symbol": "codegen_test_ebpf_scalars"
+        },
+        {
+          "file": "src/buster/tests/compiler/codegen/ebpf_call_test_internal.h",
+          "provides": [
+            "validate"
+          ],
+          "symbol": "codegen_test_ebpf_local_calls"
+        },
+        {
+          "file": "src/buster/tests/compiler/codegen/ebpf_call_test_internal.h",
+          "provides": [
+            "oracle",
+            "execute"
+          ],
+          "requires": "linux-bpf-kernel",
+          "symbol": "codegen_test_ebpf_local_calls"
+        }
+      ],
+      "feature": "scalar-calls",
+      "note": "Single-function scalar ABI (R1/R2 arguments, R0 result) is executed by the in-repo test VM against host-computed results. bpf-to-bpf local calls are refused by that VM and are executed only through the Linux verifier/JIT; without the kernel the fixture checks loader structure only and prints EBPF_LOCAL_CALL_ORACLE available=0. No test compares exact instruction bytes for calls.",
+      "status": "supported"
+    },
+    {
+      "backend": "ebpf",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/ebpf/ebpf.c",
+          "text": "aggregate eBPF subprogram arguments are unsupported"
+        }
+      ],
+      "feature": "aggregate-calls",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "ebpf",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/ebpf/ebpf.c",
+          "text": "variadic functions are unsupported by eBPF"
+        }
+      ],
+      "feature": "variadic-calls",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "ebpf",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/ebpf/ebpf.c",
+          "text": "indirect calls are unsupported by the eBPF backend"
+        }
+      ],
+      "feature": "indirect-calls",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "ebpf",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/ebpf/ebpf.c",
+          "text": "atomic IR operations are not yet lowered by the eBPF backend"
+        }
+      ],
+      "feature": "atomics",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "ebpf",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/ebpf/ebpf.c",
+          "text": "exact SIMD intrinsics are unsupported by eBPF; select an explicit source fallback"
+        },
+        {
+          "file": "src/buster/lib/compiler/ebpf/ebpf.c",
+          "text": "aggregate eBPF SSA values are unsupported"
+        }
+      ],
+      "feature": "simd",
+      "status": "unsupported-diagnostic",
+      "note": "A used vector value is rejected as an aggregate SSA value; the exact SIMD-opcode diagnostic is reached only when the intrinsic result is discarded."
+    },
+    {
+      "backend": "ebpf",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/ebpf/ebpf.c",
+          "text": "thread-local storage is unsupported by eBPF"
+        }
+      ],
+      "feature": "tls",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "ebpf",
+      "feature": "debug-info",
+      "note": "No test covers eBPF debug info. The emitter writes no DWARF and no .BTF.ext func/line info. It writes .BTF only when the module defines SEC(\".maps\") globals (ebpf_build_btf returns early when map_count is zero). No fixture defines .maps or reads .BTF, and no independent BTF consumer (bpftool, libbpf, kernel BTF load) is run. The driver passes EBPF_OPTIONS_DEFAULT to the eBPF target whatever -g says, and -g is neither honored nor refused.",
+      "status": "unknown"
+    },
+    {
+      "backend": "ebpf",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/driver/driver.c",
+          "text": "native objects and archives cannot be linked into an eBPF object"
+        },
+        {
+          "file": "src/buster/lib/compiler/driver/driver.c",
+          "text": "eBPF accepts one source program and no native objects, archives, libraries, frameworks, or linker arguments"
+        }
+      ],
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/codegen/ebpf_test_internal.h",
+          "provides": [
+            "encode"
+          ],
+          "symbol": "codegen_test_ebpf_string_symbols"
+        },
+        {
+          "file": "src/buster/tests/compiler/codegen/ebpf_test_internal.h",
+          "provides": [
+            "encode"
+          ],
+          "symbol": "codegen_test_ebpf_global_symbols"
+        },
+        {
+          "file": "src/buster/tests/compiler/codegen/ebpf_call_test_internal.h",
+          "provides": [
+            "object-link"
+          ],
+          "symbol": "codegen_test_ebpf_local_calls"
+        },
+        {
+          "file": "src/buster/tests/compiler/codegen/ebpf_call_test_internal.h",
+          "provides": [
+            "oracle"
+          ],
+          "requires": "linux-bpf-kernel",
+          "symbol": "codegen_test_ebpf_local_calls"
+        }
+      ],
+      "feature": "object-link",
+      "note": "The ELF64 relocatable object (.symtab/.strtab, .rodata, .rel.text) is checked byte-for-byte only by in-repo test parsers. A test-only loader applies .text call relocations to a named entry, and the Linux verifier/JIT then executes that code when available. No independent ELF consumer (libbpf, bpftool, llvm-objdump/readelf) loads the object. The loader refuses every relocation except local calls, so global, .rodata and helper relocations are never loaded. Multi-input linking is refused.",
+      "status": "partial"
+    },
+    {
+      "backend": "ebpf",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/codegen/ebpf_test_internal.h",
+          "provides": [
+            "execute"
+          ],
+          "symbol": "codegen_test_ebpf_kernel_regressions"
+        },
+        {
+          "file": "src/buster/tests/compiler/codegen/ebpf_test_internal.h",
+          "provides": [
+            "oracle",
+            "execute"
+          ],
+          "requires": "linux-bpf-kernel",
+          "symbol": "codegen_test_ebpf_kernel_regressions"
+        },
+        {
+          "file": "src/buster/tests/compiler/codegen/ebpf_call_test_internal.h",
+          "provides": [
+            "oracle",
+            "execute"
+          ],
+          "requires": "linux-bpf-kernel",
+          "symbol": "codegen_test_ebpf_local_calls"
+        }
+      ],
+      "feature": "execution",
+      "note": "Two executors compare against host-computed results. The in-repo VM handles only one reloc-free function and runs unconditionally. The Linux verifier/JIT path (BPF_PROG_LOAD plus BPF_PROG_TEST_RUN) loads the emitted .text as a bpf-to-bpf callee of a BPF_PROG_TYPE_SYSCALL wrapper. Without the kernel, codegen fixtures print 'unavailable, VM only' and pass. tools/ci_ebpf_kernel_oracle.py fails closed on Linux x86-64 CI. Maps, helper calls, globals/.rodata and real program types/attach points are never executed, and nothing runs through libbpf.",
+      "status": "partial"
+    },
+    {
+      "backend": "llvm-bitcode",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
+          "provides": [
+            "encode"
+          ],
+          "symbol": "llvm_bitcode_test_scalar_abi_wire"
+        },
+        {
+          "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
+          "provides": [
+            "oracle",
+            "execute"
+          ],
+          "requires": "gcc-and-clang",
+          "symbol": "llvm_bitcode_test_scalar_abi_runtime"
+        }
+      ],
+      "feature": "scalar-calls",
+      "status": "supported"
+    },
+    {
+      "backend": "llvm-bitcode",
+      "diagnostics": [],
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
+          "provides": [
+            "oracle",
+            "execute"
+          ],
+          "requires": "clang",
+          "symbol": "llvm_bitcode_test_aggregate_va_arg"
+        },
+        {
+          "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
+          "provides": [
+            "oracle",
+            "execute"
+          ],
+          "requires": "clang",
+          "symbol": "llvm_bitcode_test_consumers"
+        }
+      ],
+      "feature": "aggregate-calls",
+      "note": "Only the documented aggregate ABI parts are lowered; Clang-consumed execution of aggregate signatures (aggregate_va_arg and the aggregate ABI caller/callee rows) is evidenced on x86-64 hosts. The `unsupported LLVM aggregate ABI part` fallback is an internal ABI invariant unreachable from valid C aggregate signatures and is excluded.",
+      "status": "partial"
+    },
+    {
+      "backend": "llvm-bitcode",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
+          "provides": [
+            "encode"
+          ],
+          "symbol": "llvm_bitcode_test_canonical_variadics"
+        },
+        {
+          "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
+          "provides": [
+            "oracle",
+            "execute"
+          ],
+          "requires": "clang",
+          "symbol": "llvm_bitcode_test_consumers"
+        }
+      ],
+      "feature": "variadic-calls",
+      "note": "Canonical va_list operations are built directly in IR and encoded; the basic_c_llvm_varargs consumer row executes through Clang on x86-64 Linux and Windows hosts only.",
+      "status": "supported"
+    },
+    {
+      "backend": "llvm-bitcode",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
+          "provides": [
+            "encode"
+          ],
+          "symbol": "llvm_bitcode_test_scalar_abi_wire"
+        },
+        {
+          "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
+          "provides": [
+            "oracle",
+            "execute"
+          ],
+          "requires": "gcc-and-clang",
+          "symbol": "llvm_bitcode_test_scalar_abi_runtime"
+        },
+        {
+          "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
+          "provides": [
+            "oracle",
+            "execute"
+          ],
+          "requires": "clang",
+          "symbol": "llvm_bitcode_test_consumers"
+        }
+      ],
+      "feature": "indirect-calls",
+      "note": "Scalar indirect calls are read back as CALL records with an explicit function type and executed through Clang on Linux x86-64/AArch64; indirect calls with aggregate arguments execute only on x86-64 hosts, as aggregate signatures are limited to the x86-64 ABIs.",
+      "status": "supported"
+    },
+    {
+      "backend": "llvm-bitcode",
+      "feature": "atomics",
+      "note": "The emitter writes LOADATOMIC, STOREATOMIC, ATOMICRMW, CMPXCHG and FENCE records (bitcode.c), but no fixture emits or consumes an atomic operation through LLVM bitcode. Tests only check the size of _Atomic aggregate types (type-table counts in llvm_bitcode_tests; magic and length of a declaration-only file in compiler_driver_tests). Atomic pointer arithmetic is a diagnostic with no test.",
+      "status": "unknown"
+    },
+    {
+      "backend": "llvm-bitcode",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/llvm/bitcode.c",
+          "text": "LLVM bitcode exact SIMD lowering is unavailable; select an explicit source fallback"
+        }
+      ],
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
+          "provides": [
+            "oracle",
+            "execute"
+          ],
+          "requires": "clang",
+          "symbol": "llvm_bitcode_test_consumers"
+        }
+      ],
+      "feature": "simd",
+      "note": "Only GCC vector_size values wrapped in aggregates are evidenced, passed and returned through the x86-64 ABI (basic_c_llvm_vector_abi, x86-64 hosts only). Exact SIMD intrinsics (IR_OPCODE_SIMD) are rejected with no bytes and the exact diagnostic is asserted by vector_contract_tests. Generic vector arithmetic and comparison lowering has no fixture.",
+      "status": "partial"
+    },
+    {
+      "backend": "llvm-bitcode",
+      "diagnostics": [],
+      "feature": "tls",
+      "note": "Thread-local globals and aliases are written with LLVM thread-local mode 1 (general dynamic), but no fixture emits a successful thread-local global or access, or consumes one. The TLS-address static initializer is rejected by C IR lowering before LLVM, so the LLVM initializer diagnostic is unreachable from C and excluded.",
+      "status": "unknown"
+    },
+    {
+      "backend": "llvm-bitcode",
+      "feature": "debug-info",
+      "note": "No debug metadata is emitted: LLVM_BITCODE.md puts source-level debug metadata outside the emitter, and LlvmBitcodeOptions has no debug field. The driver accepts -g together with -emit-llvm and produces no diagnostic, so this is neither tested support nor an unsupported diagnostic.",
+      "status": "unknown"
+    },
+    {
+      "backend": "llvm-bitcode",
+      "feature": "object-link",
+      "note": "Bitcode is consumed by external LLVM tools; Buster does not link it.",
+      "status": "not-applicable"
+    },
+    {
+      "backend": "llvm-bitcode",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
+          "provides": [
+            "oracle",
+            "execute"
+          ],
+          "requires": "clang",
+          "symbol": "llvm_bitcode_test_consumers"
+        }
+      ],
+      "feature": "execution",
+      "status": "supported"
+    },
+    {
+      "backend": "spirv-compute",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/spirv/spirv.c",
+          "text": "SPIR-V compute requires one defined kernel, no globals/assembly/aliases/initializers and the 32-bit compute data layout"
+        }
+      ],
+      "feature": "scalar-calls",
+      "note": "Any callee makes the module carry more than one function, so calls are rejected before kernel lowering; the registered call cases assert the exact module diagnostic.",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "spirv-compute",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/spirv/spirv.c",
+          "text": "SPIR-V compute requires one defined kernel, no globals/assembly/aliases/initializers and the 32-bit compute data layout"
+        }
+      ],
+      "feature": "aggregate-calls",
+      "note": "Rejected by the one-function module check; no dedicated aggregate-call rejection case, but the same reachable module diagnostic is asserted by registered call and global-module cases.",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "spirv-compute",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/spirv/spirv.c",
+          "text": "SPIR-V compute requires one defined kernel, no globals/assembly/aliases/initializers and the 32-bit compute data layout"
+        }
+      ],
+      "feature": "variadic-calls",
+      "note": "Rejected by the one-function module check; no dedicated variadic-call rejection case, but the same reachable module diagnostic is asserted by registered call and global-module cases.",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "spirv-compute",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/spirv/spirv.c",
+          "text": "SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported"
+        }
+      ],
+      "feature": "indirect-calls",
+      "note": "Rejected by the kernel row check; no registered indirect-call rejection case.",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "spirv-compute",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/spirv/spirv.c",
+          "text": "SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported"
+        },
+        {
+          "file": "src/buster/lib/compiler/spirv/spirv.c",
+          "text": "SPIR-V compute requires void kernel(unsigned *buffer, unsigned index) with 32-bit unsigned integers and pointers"
+        }
+      ],
+      "feature": "atomics",
+      "note": "Atomic builtins fail the row check; an _Atomic buffer parameter fails the kernel signature check, and the registered case asserts that exact diagnostic.",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "spirv-compute",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/spirv/spirv.c",
+          "text": "SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported"
+        },
+        {
+          "file": "src/buster/lib/compiler/spirv/spirv.c",
+          "text": "SPIR-V compute requires void kernel(unsigned *buffer, unsigned index) with 32-bit unsigned integers and pointers"
+        }
+      ],
+      "feature": "simd",
+      "note": "Only scalar 32-bit unsigned rows are accepted. Registered vector-operation and vector-buffer-parameter cases assert the row and kernel-signature diagnostics.",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "spirv-compute",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/spirv/spirv.c",
+          "text": "SPIR-V compute requires one defined kernel, no globals/assembly/aliases/initializers and the 32-bit compute data layout"
+        }
+      ],
+      "feature": "tls",
+      "note": "_Thread_local objects are globals and hit the no-globals check; the registered global-module case asserts that exact reachable diagnostic. The kernel-signature TLS diagnostic is not reached by C TLS objects.",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "spirv-compute",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/driver/driver.c",
+          "text": "native linking, allocation, debug/PIC, verification, and external GPU options are unsupported for direct SPIR-V compute"
+        }
+      ],
+      "feature": "debug-info",
+      "note": "-g is rejected at invocation validation with the exact diagnostic asserted by the registered test; the existing artifact is left unchanged, and no device debug info is emitted.",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "spirv-compute",
+      "diagnostics": [
+        {
+          "file": "src/buster/lib/compiler/driver/driver.c",
+          "text": "direct SPIR-V compute requires spirv-vulkan1.2-compute, one C input, and -c binary output"
+        },
+        {
+          "file": "src/buster/lib/compiler/driver/driver.c",
+          "text": "native linking, allocation, debug/PIC, verification, and external GPU options are unsupported for direct SPIR-V compute"
+        }
+      ],
+      "feature": "object-link",
+      "note": "Output is one self-contained SPIR-V module from -c with one C input. Linking, multiple inputs, and native object output are rejected with the exact driver diagnostics asserted by the registered test; no linkage decorations or multi-module linking.",
+      "status": "unsupported-diagnostic"
+    },
+    {
+      "backend": "spirv-compute",
+      "evidence": [
+        {
+          "file": "src/buster/tests/compiler/spirv/spirv_test.c",
+          "provides": [
+            "encode"
+          ],
+          "symbol": "spirv_test_transform"
+        },
+        {
+          "file": "src/buster/tests/compiler/spirv/spirv_test.c",
+          "provides": [
+            "encode"
+          ],
+          "symbol": "spirv_test_bitwise"
+        },
+        {
+          "anchor": "spirv-direct-vulkan1.2",
+          "file": "tools/gpu_toolchains.c",
+          "provides": [
+            "oracle"
+          ],
+          "requires": "gpu-toolchains"
+        }
+      ],
+      "feature": "execution",
+      "note": "spirv-val --target-env vulkan1.2 accepts the direct module, with malformed-header and ArrayStride negative controls, when the profile is selected. The unit tests check word structure and run the module on the test's own CPU interpreter, which is not device execution. No Vulkan runner exists; physical GPU execution is PENDING_NOT_CONFIGURED.",
+      "status": "partial"
+    },
+    {
+      "backend": "gpu-external",
+      "feature": "scalar-calls",
+      "status": "not-applicable",
+      "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
+    },
+    {
+      "backend": "gpu-external",
+      "feature": "aggregate-calls",
+      "status": "not-applicable",
+      "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
+    },
+    {
+      "backend": "gpu-external",
+      "feature": "variadic-calls",
+      "status": "not-applicable",
+      "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
+    },
+    {
+      "backend": "gpu-external",
+      "feature": "indirect-calls",
+      "status": "not-applicable",
+      "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
+    },
+    {
+      "backend": "gpu-external",
+      "feature": "atomics",
+      "status": "not-applicable",
+      "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
+    },
+    {
+      "backend": "gpu-external",
+      "feature": "simd",
+      "status": "not-applicable",
+      "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
+    },
+    {
+      "backend": "gpu-external",
+      "feature": "tls",
+      "status": "not-applicable",
+      "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
+    },
+    {
+      "backend": "gpu-external",
+      "feature": "debug-info",
+      "status": "not-applicable",
+      "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
+    },
+    {
+      "backend": "gpu-external",
+      "feature": "object-link",
+      "status": "partial",
+      "evidence": [
+        {
+          "file": "tools/gpu_toolchains.c",
+          "anchor": "spirv-dxc-2025.07",
+          "provides": [
+            "oracle"
+          ],
+          "requires": "gpu-toolchains"
+        }
+      ],
+      "note": "Single-module SPIR-V passthrough is byte-identical and revalidated; no multi-module linking."
+    },
+    {
+      "backend": "gpu-external",
+      "feature": "execution",
+      "status": "not-applicable",
+      "note": "Toolchain acceptance profiles are smoke tests, not shader execution."
+    }
+  ]
 }

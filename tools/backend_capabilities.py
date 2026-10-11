@@ -396,6 +396,10 @@ def validate_catalogue(data, root, label=CATALOGUE):
                 elif nonempty_string(text) and text not in file_text:
                     errors.append(catalogue_error(
                         label, f"{diagnostic_location}.text", f"literal diagnostic text not found in {file_name}"))
+            if nonempty_string(text) and not any(text in test_text for test_text in test_texts.values()):
+                errors.append(catalogue_error(
+                    label, f"{diagnostic_location}.text",
+                    f"diagnostic text is not asserted under src/buster/tests: {text!r}"))
 
         evidence_count = len(evidence)
         diagnostic_count = len(diagnostics)

@@ -375,6 +375,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult spirv_test_rejections(UnitTestArguments* argu
     String8 output = buster_test_temporary_path(arena, S8("buster-direct-rejection"), S8(".spv"));
     // spirv_check_rows reports this exact diagnostic for any unsupported canonical row.
     String8 instruction_rejection = S8("SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported");
+    String8 module_rejection = S8("SPIR-V compute requires one defined kernel, no globals/assembly/aliases/initializers and the 32-bit compute data layout");
+    String8 signature_rejection = S8("SPIR-V compute requires void kernel(unsigned *buffer, unsigned index) with 32-bit unsigned integers and pointers");
     SpirvTestRejection cases[] = {
         {S8("void kernel(unsigned *b,unsigned i){ b[i+1u]=b[i]; }"), true},
         {S8("void kernel(unsigned *b,unsigned i){ b[0u]=b[i]; }"), true},
@@ -390,9 +392,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult spirv_test_rejections(UnitTestArguments* argu
         {S8("void kernel(volatile unsigned *b,unsigned i){ b[i]=1u; }"), false},
         {S8("void kernel(_Atomic unsigned *b,unsigned i){ b[i]=1u; }"), false},
         {S8("unsigned global; void kernel(unsigned *b,unsigned i){ b[i]=global; }"), false},
-        {S8("void other(unsigned *b,unsigned i){ b[i]=1u; }"), false},
+        {S8("void other(unsigned *b,unsigned i){ b[i]=1u; } void kernel(unsigned *b,unsigned i){ b[i]=1u; }"), false},
         {S8("unsigned kernel(unsigned *b,unsigned i){ b[i]=1u; return i; }"), false},
         {S8("void kernel(unsigned *b,unsigned i){ (void)b; (void)i; }"), true},
+        {S8("typedef int V4 __attribute__((vector_size(16))); void kernel(unsigned *b,unsigned i){ V4 value={1,2,3,4}; V4 used=value+value; b[i]=used[0]; }"), true},
+        {S8("typedef unsigned V4 __attribute__((vector_size(16))); void kernel(V4 *b,unsigned i){ (void)b; (void)i; }"), false},
     };
     ByteSlice sentinel = BUSTER_SLICE_TO_BYTE_SLICE(S8("unchanged-existing-artifact"));
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
@@ -410,6 +414,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult spirv_test_rejections(UnitTestArguments* argu
                 if (!matched) arguments->show(arguments, S8("direct SPIR-V rejection case={u32} diagnostic: {S8}\n"), index, rejected.diagnostic);
                 BUSTER_TEST(arguments, matched);
             }
+            if (index == 7 || index == 8 || index == 13 || index == 14)
+            {
+                bool matched = string_first_sequence(rejected.diagnostic, module_rejection) != BUSTER_STRING_NO_MATCH;
+                if (!matched) arguments->show(arguments, S8("SPIR-V module rejection case={u32} expected={S8} got={S8}\n"),
+                                              index, module_rejection, rejected.diagnostic);
+                BUSTER_TEST(arguments, matched);
+            }
+            if (index == 10 || index == 12 || index == 15 || index == 18)
+            {
+                BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, signature_rejection) != BUSTER_STRING_NO_MATCH);
+            }
             ByteSlice after = file_read(arena, output, (FileReadOptions){0});
             BUSTER_TEST(arguments, after.pointer && after.length == sentinel.length && memory_compare(after.pointer, sentinel.pointer, sentinel.length));
         }
@@ -426,6 +441,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult spirv_test_invocation_rejections(UnitTestArgu
     String8 output = buster_test_temporary_path(arena, S8("buster-direct-options"), S8(".spv"));
     String8 options[] = {S8("-S"), S8("-emit-llvm"), S8("-g"), S8("-fPIC"), S8("-fregister-allocator=fast"),
                          S8("--gpu-clang=unavailable-external-compiler"), S8("--gpu-entry=other"), S8("-fverify-codegen")};
+    String8 direct_rejection = S8("direct SPIR-V compute requires spirv-vulkan1.2-compute, one C input, and -c binary output");
+    String8 option_rejection = S8("native linking, allocation, debug/PIC, verification, and external GPU options are unsupported for direct SPIR-V compute");
     ByteSlice sentinel = BUSTER_SLICE_TO_BYTE_SLICE(S8("unchanged-existing-artifact"));
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(options); index += 1)
     {
@@ -436,6 +453,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult spirv_test_invocation_rejections(UnitTestArgu
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
             CompilerDriverResult rejected = compiler_driver_execute_invocation(arena, invocation);
             BUSTER_TEST(arguments, rejected.error != COMPILER_DRIVER_ERROR_NONE && rejected.diagnostic.length && !rejected.has_spirv && !rejected.has_gpu);
+            if (index == 1)
+            {
+                bool matched = string_first_sequence(rejected.diagnostic, direct_rejection) != BUSTER_STRING_NO_MATCH;
+                if (!matched) arguments->show(arguments, S8("SPIR-V direct invocation option={S8} expected={S8} got={S8}\n"),
+                                              options[index], direct_rejection, rejected.diagnostic);
+                BUSTER_TEST(arguments, matched);
+            }
+            if (index == 2)
+            {
+                BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, option_rejection) != BUSTER_STRING_NO_MATCH);
+            }
             ByteSlice after = file_read(arena, output, (FileReadOptions){0});
             BUSTER_TEST(arguments, after.pointer && after.length == sentinel.length && memory_compare(after.pointer, sentinel.pointer, sentinel.length));
         }

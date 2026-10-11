@@ -1180,6 +1180,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_rejections(UnitTestArgument
          S8("indirect calls are unsupported by the eBPF backend"), EBPF_ERROR_INDIRECT_CALL},
         {S8("long probe(long* counter, long value) { return __atomic_fetch_add(counter, value, __ATOMIC_SEQ_CST); }"),
          S8("atomic IR operations are not yet lowered by the eBPF backend"), EBPF_ERROR_ATOMIC},
+        {S8("typedef int V4 __attribute__((vector_size(16))); int probe(void) { V4 value = {1, 2, 3, 4}; V4 used = value + value; return used[0]; }"),
+         S8("aggregate eBPF SSA values are unsupported"), EBPF_ERROR_UNSUPPORTED_AGGREGATE},
         // A used vector result is refused earlier as an aggregate SSA value, so
         // the discarded splat is what reaches the SIMD opcode itself.
         {S8("void probe(void) { __builtin_buster_simd_splat_u8(7); }"),

@@ -185,7 +185,7 @@ class BackendCapabilityTests(unittest.TestCase):
         report = capabilities.derived_report(self.data, self.root)
         self.assertTrue(report["cells"][0]["diagnostics"][0]["diagnostic_tested"])
         self.write_tests("UnitTestResult fixture_test(void) { }\nfixture_test();\n")
-        self.assertEqual([], self.errors())
+        self.assert_error(self.errors(), "diagnostic text is not asserted under src/buster/tests")
         self.assertFalse(
             capabilities.derived_report(self.data, self.root)["cells"][0]["diagnostics"][0]["diagnostic_tested"])
         for mutate, expected in (

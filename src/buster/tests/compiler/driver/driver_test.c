@@ -20307,6 +20307,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_rejection_diagnosti
          S8("atomic operations are unsupported by WebAssembly")},
         {S8("wasm32-wasip1"), S8("typedef int (*F)(void); int probe(F p) { return p(); } void _start(void) {}"),
          S8("indirect calls are unsupported by Wasm32")},
+        {S8("wasm32-wasip1"), S8("int probe(int count, ...) { return count; } void _start(void) {}"),
+         S8("variadic functions are not supported by WebAssembly")},
+        {S8("wasm64-unknown-freestanding"), S8("int probe(int count, ...) { return count; } void _start(void) {}"),
+         S8("variadic functions are not supported by WebAssembly")},
+        {S8("wasm32-wasip1"), S8("void probe(void) { __builtin_va_list ap; __builtin_va_end(ap); } void _start(void) {}"),
+         S8("aggregate or variadic WebAssembly operation is unsupported")},
+        {S8("wasm64-unknown-freestanding"), S8("void probe(void) { __builtin_va_list ap; __builtin_va_end(ap); } void _start(void) {}"),
+         S8("aggregate or variadic WebAssembly operation is unsupported")},
+        {S8("wasm32-wasip1"), S8("_Thread_local int counter; int probe(void) { return counter; } void _start(void) {}"),
+         S8("TLS globals are not supported by WebAssembly")},
+        {S8("wasm64-unknown-freestanding"), S8("_Thread_local int counter; int probe(void) { return counter; } void _start(void) {}"),
+         S8("TLS globals are not supported by WebAssembly")},
+        {S8("wasm32-wasip1"),
+         S8("typedef unsigned char V __attribute__((vector_size(16))); int probe(void) { V value = {1}; return value[0]; } void _start(void) {}"),
+         S8("aggregate WebAssembly SSA value is unsupported")},
+        {S8("wasm64-unknown-freestanding"),
+         S8("typedef unsigned char V __attribute__((vector_size(16))); int probe(void) { V value = {1}; return value[0]; } void _start(void) {}"),
+         S8("aggregate WebAssembly SSA value is unsupported")},
     };
     String8 forms[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
@@ -20359,6 +20377,76 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_rejection_diagnosti
                 BUSTER_TEST(arguments, os_file_delete(input));
             }
             scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_nonnative_link_rejection_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CompilerDriverNonnativeLinkRejection CompilerDriverNonnativeLinkRejection;
+    struct CompilerDriverNonnativeLinkRejection
+    {
+        String8 target;
+        String8 message;
+        bool multiple_inputs;
+    };
+    CompilerDriverNonnativeLinkRejection cases[] = {
+        {S8("wasm32-wasip1"), S8("native objects and archives cannot be linked into a WebAssembly module"), false},
+        {S8("wasm64-unknown-freestanding"), S8("native objects and archives cannot be linked into a WebAssembly module"), false},
+        {S8("wasm32-wasip1"), S8("WebAssembly accepts one source program and no native objects, archives, libraries, frameworks, or linker arguments"), true},
+        {S8("wasm64-unknown-freestanding"), S8("WebAssembly accepts one source program and no native objects, archives, libraries, frameworks, or linker arguments"), true},
+        {S8("bpfel-unknown-linux"), S8("native objects and archives cannot be linked into an eBPF object"), false},
+        {S8("bpfel-unknown-linux"), S8("eBPF accepts one source program and no native objects, archives, libraries, frameworks, or linker arguments"), true},
+    };
+    Arena* arena = arguments->arena;
+    String8 source = buster_test_temporary_path(arena, S8("buster-nonnative-link-rejection"), S8(".c"));
+    String8 object = buster_test_temporary_path(arena, S8("buster-nonnative-link-rejection"), S8(".o"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-nonnative-link-rejection"), S8(".bin"));
+    ByteSlice source_bytes = BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"));
+    ByteSlice object_bytes = BUSTER_SLICE_TO_BYTE_SLICE(S8("not an object"));
+    ByteSlice sentinel = BUSTER_SLICE_TO_BYTE_SLICE(S8("unchanged-existing-output"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, source_bytes) && file_write(object, object_bytes)))
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            if (BUSTER_REQUIRE(arguments, file_write(output, sentinel)))
+            {
+                String8 object_command[] = {S8("-target"), cases[index].target, S8("-nostdinc"), S8("-o"), output, object};
+                String8 multiple_command[] = {S8("-target"), cases[index].target, S8("-nostdinc"), S8("-o"), output, source, object};
+                SliceString8 command = {0};
+                if (cases[index].multiple_inputs)
+                {
+                    command.pointer = multiple_command;
+                    command.length = BUSTER_ARRAY_LENGTH(multiple_command);
+                }
+                else
+                {
+                    command.pointer = object_command;
+                    command.length = BUSTER_ARRAY_LENGTH(object_command);
+                }
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, command);
+                if (BUSTER_REQUIRE(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE))
+                {
+                    CompilerDriverResult rejected = compiler_driver_execute_invocation(arena, invocation);
+                    bool failed = rejected.error == COMPILER_DRIVER_ERROR_INVALID_INPUT &&
+                                  string_first_sequence(rejected.diagnostic, cases[index].message) != BUSTER_STRING_NO_MATCH;
+                    bool no_artifact = !rejected.has_wasm && !rejected.has_wasm64 && !rejected.has_ebpf && !rejected.has_spirv &&
+                                       !rejected.has_object && !rejected.has_llvm_bitcode && !rejected.has_gpu;
+                    ByteSlice after = file_read(arena, output, (FileReadOptions){0});
+                    bool unchanged = after.pointer && after.length == sentinel.length &&
+                                     memcmp(after.pointer, sentinel.pointer, sentinel.length) == 0;
+                    if (!failed)
+                    {
+                        arguments->show(arguments, S8("non-native link rejection case={u32} expected {S8}, got {S8}\n"),
+                                        index, cases[index].message, rejected.diagnostic);
+                    }
+                    BUSTER_TEST(arguments, failed);
+                    BUSTER_TEST(arguments, no_artifact);
+                    BUSTER_TEST(arguments, unchanged);
+                }
+            }
         }
     }
     return result;
@@ -32458,6 +32546,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_function_addresses);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_function_address_outputs);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_rejection_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_nonnative_link_rejection_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_function_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_stack);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_index_signedness);
