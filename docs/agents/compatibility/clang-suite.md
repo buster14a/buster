@@ -45,6 +45,7 @@ normally; do not run `generate` alongside a build or suite invocation.
 ./build.sh test_clang_suite --self-test
 ./build.sh test_clang_suite --inventory /absolute/llvm-project /existing/parent/fresh-inventory
 ./build.sh test_clang_suite --smoke /absolute/llvm-project /existing/parent/fresh-smoke /absolute/ide /absolute/clang
+./build.sh test_clang_suite --driver /absolute/llvm-project /existing/parent/fresh-driver /absolute/ide /absolute/clang
 ```
 
 The first execution lane is POSIX Linux/macOS. Windows builds retain the
@@ -57,7 +58,7 @@ bounded capture and a 60-second process-tree deadline.
 `git-ls-tree.bin` retains the exact NUL-delimited immutable Git-object census;
 `sources.tsv` records mode/blob/path/role/state. `receipt.txt` binds the pin,
 counts, SHA-256 digests, source-ledger execution count (always zero), requested
-smoke mode and final checkout status. The tool verifies HEAD and status before
+smoke/intrinsics/driver mode and final checkout status. The tool verifies HEAD and status before
 and after publication. Ignored/untracked files are rejected. A clean Git status
 is not a byte audit of every worktree file: source inventory reads Git objects,
 and execution verifies each selected fixture's actual unfiltered blob hash.
@@ -93,13 +94,64 @@ and `smoke-summary.txt`. Reference failure cannot make Buster pass. Source,
 launch, timeout, crash, nonzero exit, incomplete capture and assertion failures
 remain failed. Compilers run sequentially and both observations are retained.
 
+## Driver slice
+
+The `--driver` mode is the first slice of the Driver, Options, PCH, Modules,
+ClangScanDeps and VFS families
+([#2291](https://github.com/buster14a/buster/issues/2291)). It catalogues
+eight pristine `clang/test/Driver` tests with eleven RUN lines. Each fixture's
+blob is verified, and every original RUN line, with lit `\` continuations
+joined, must match its catalogue entry exactly. Each RUN maps explicitly to
+one reference argv (`clang ARGS`) and one Buster argv (`ide cc ARGS`), with
+`%s`/`%S` substituted. Upstream shell text is never executed. Children run in
+the fresh output directory, so no artifact can land in the checkout. RUNs
+piped with `2>&1` check stdout followed by stderr. Status-only RUNs require a
+zero exit.
+
+Assertions use the smoke slice's literal FileCheck subset with the RUN's
+`--check-prefix`. A `PREFIX:` only counts after a non-word character.
+`PREFIX-` modifiers, regex/variables, prefixes with no RUN, feature
+directives other than the catalogued `UNSUPPORTED:` expression, and stray
+`RUN:` text all fail closed. The only catalogued `UNSUPPORTED:` names z/OS,
+which a POSIX lane never matches. Its receipt records the expression and
+`unsupported_matches_host=0`.
+
+Clang 23.1.2 must pass every RUN. Each Buster RUN has an expectation and owning
+issue. `pass`, a `refusal` (nonzero exit whose stderr contains a named
+diagnostic), or a `check-mismatch` (zero exit whose output fails the original
+CHECK). An expected failure is reported as `expected-fail` and never counts as
+a pass. A Buster pass where a failure was expected is `unexpected-pass`, and a
+crash, timeout, launch or capture failure, or any other diagnostic is `fail`.
+Both make the mode fail.
+
+| Test | RUNs | Buster | Owner |
+| --- | ---: | --- | --- |
+| `preprocess-multiple.c` | 1 | pass | — |
+| `std-trigraph-override.c` | 2 | refuses `-trigraphs`, `-ftrigraphs` | [#3420](https://github.com/buster14a/buster/issues/3420) |
+| `nostdlibinc.c` | 1 | refuses target `x86_64-unknown-unknown` | [#3421](https://github.com/buster14a/buster/issues/3421), then `-nostdlibinc` in #3420 |
+| `redundant-args.c` | 1 | refuses target `x86_64-apple-darwin11` | [#3421](https://github.com/buster14a/buster/issues/3421) |
+| `working-directory-and-abs.c` | 1 | refuses `-working-directory=` | [#3420](https://github.com/buster14a/buster/issues/3420) |
+| `print-target-triple.c` | 1 | refuses `-print-target-triple` | [#3420](https://github.com/buster14a/buster/issues/3420) |
+| `dumpmachine.c` | 3 | prints `x86_64-linux-gnu`, refuses `-m32`, refuses `xxx-pc-freebsd` | [#3421](https://github.com/buster14a/buster/issues/3421), [#1418](https://github.com/buster14a/buster/issues/1418) |
+| `mg.c` | 1 | refuses `-M` | [#2293](https://github.com/buster14a/buster/issues/2293) |
+
+Each RUN retains per-compiler `.argv`, stdout, stderr and a receipt with
+process status, prefix, check count, expectation, issue and verdict, plus
+`driver-summary.txt`. When an owning capability lands, its row's expectation
+must move to `pass` in the same change. The receipt otherwise reports
+`unexpected-pass`. The remaining Driver tests (mostly `-###` command-line
+equivalence), PCH, Modules, ClangScanDeps, VFS and Windows execution remain
+open on #2291.
+
 ## Hosted validation
 
 `.github/workflows/clang-suite.yml` bootstraps the native driver and tests the
 parser/checker controls, complete inventory, repeated manifests, wrong pins,
 dirty/ignored inputs, occupied/aliased outputs and malformed CLI invocations.
 After building Release `ide`, it runs the five real preprocessing tests and
-controls for hidden fixture mutation and compiler launch failure.
+controls for hidden fixture mutation and compiler launch failure. The Driver
+slice runs with the pinned Clang 23.1.2, and an always-succeeding fake `ide`
+proves that unexpected passes fail.
 It also compares eighteen first-party macro boundary/stringification controls
 against both compilers, using generated temporary sources preserved in the
 hosted evidence. Tracked retirement support remains frozen. These regression
