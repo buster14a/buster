@@ -656,6 +656,75 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_section_switch(AssemblyUnitBuilder* build
     builder->current_stack_note = false;
 }
 
+// Mach-O segment/section pairs the object model and -S printer represent.
+// Normalize them to the model's names, so .text and __TEXT,__text reopen the
+// same section and unwind expressions referring to .text retain that identity.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_mach_section(AssemblyUnitBuilder* builder, String8* parts, u32 count,
+                                                     String8 directive, String8* name, AssemblyUnitSectionKind* kind)
+{
+    static const struct
+    {
+        String8 segment;
+        String8 section;
+        String8 name;
+        String8 type;
+        String8 attributes;
+        AssemblyUnitSectionKind kind;
+    } rows[] = {
+        {S8_INITIALIZER("__TEXT"), S8_INITIALIZER("__text"), S8_INITIALIZER(".text"), S8_INITIALIZER("regular"),
+         S8_INITIALIZER("pure_instructions"), ASSEMBLY_UNIT_SECTION_TEXT},
+        {S8_INITIALIZER("__TEXT"), S8_INITIALIZER("__const"), S8_INITIALIZER(".rodata"), S8_INITIALIZER("regular"),
+         {0}, ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA},
+        {S8_INITIALIZER("__DATA"), S8_INITIALIZER("__data"), S8_INITIALIZER(".data"), S8_INITIALIZER("regular"),
+         {0}, ASSEMBLY_UNIT_SECTION_DATA},
+        {S8_INITIALIZER("__DATA"), S8_INITIALIZER("__bss"), S8_INITIALIZER(".bss"), S8_INITIALIZER("zerofill"),
+         {0}, ASSEMBLY_UNIT_SECTION_ZERO},
+        {S8_INITIALIZER("__DATA"), S8_INITIALIZER("__thread_data"), S8_INITIALIZER(".tdata"), S8_INITIALIZER("thread_local_regular"),
+         {0}, ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA},
+        {S8_INITIALIZER("__DATA"), S8_INITIALIZER("__thread_bss"), S8_INITIALIZER(".tbss"), S8_INITIALIZER("thread_local_zerofill"),
+         {0}, ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO},
+        {S8_INITIALIZER("__DATA"), S8_INITIALIZER("__mod_init_func"), S8_INITIALIZER(".init_array"), S8_INITIALIZER("mod_init_funcs"),
+         {0}, ASSEMBLY_UNIT_SECTION_INIT_ARRAY},
+        {S8_INITIALIZER("__DATA"), S8_INITIALIZER("__mod_term_func"), S8_INITIALIZER(".fini_array"), S8_INITIALIZER("mod_term_funcs"),
+         {0}, ASSEMBLY_UNIT_SECTION_FINI_ARRAY},
+        {S8_INITIALIZER("__TEXT"), S8_INITIALIZER("__eh_frame"), S8_INITIALIZER(".eh_frame"), S8_INITIALIZER("coalesced"),
+         S8_INITIALIZER("no_toc+strip_static_syms+live_support"), ASSEMBLY_UNIT_SECTION_UNWIND},
+    };
+    bool matched = false;
+    bool valid = false;
+    String8 segment = assembly_unit_unquote(parts[0]);
+    String8 section = assembly_unit_unquote(parts[1]);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rows) && !matched; index += 1)
+    {
+        matched = string_equal(segment, rows[index].segment) && string_equal(section, rows[index].section);
+        if (matched)
+        {
+            valid = (count < 3 || string_equal(parts[2], rows[index].type)) &&
+                    (count < 4 || (rows[index].attributes.length && string_equal(parts[3], rows[index].attributes)));
+            if (valid)
+            {
+                *name = rows[index].name;
+                *kind = rows[index].kind;
+            }
+        }
+    }
+    if (!matched && string_equal(segment, S8("__DWARF")) && string_starts_with_sequence(section, S8("__debug_")))
+    {
+        String8 dwarf = string_equal(section, S8("__debug_str_offs")) ? S8(".debug_str_offsets")
+                         : string_format(builder->arena, S8(".{S8}"), string_slice(section, 2, section.length));
+        valid = assembly_unit_section_kind_for_name(dwarf, kind) && *kind >= ASSEMBLY_UNIT_SECTION_DEBUG_INFO &&
+                *kind <= ASSEMBLY_UNIT_SECTION_DEBUG_LOCLISTS && (count < 3 || string_equal(parts[2], S8("regular"))) &&
+                (count < 4 || string_equal(parts[3], S8("debug")));
+        if (valid) *name = dwarf;
+    }
+    if (!valid)
+    {
+        assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                        S8("unsupported Mach-O segment, section, type or attributes in the '{S8}' directive"), directive);
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section_regular(AssemblyUnitBuilder* builder, String8 operands, bool push)
 {
     String8 parts[4] = {0};
@@ -669,7 +738,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section_regular(AssemblyUnitBui
     bool classified = false;
     bool flags_valid = true;
     String8 directive = push ? S8(".pushsection") : S8(".section");
-    if (part_count > 1 && parts[1].length >= 2 && parts[1].pointer[0] == '"')
+    bool macho = builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS;
+    if (macho && part_count > 1 && string_starts_with_sequence(name, S8("__")))
+    {
+        flags_valid = assembly_unit_mach_section(builder, parts, part_count, directive, &name, &kind);
+        classified = flags_valid;
+    }
+    else if (part_count > 1 && parts[1].length >= 2 && parts[1].pointer[0] == '"')
     {
         String8 flags = string_slice(parts[1], 1, parts[1].length - 1);
         bool writable = false;
@@ -1702,15 +1777,17 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder
         }
         if (code_unit == '@' && builder->target.cpu_arch == CPU_ARCH_AARCH64)
         {
-            // Mach-O's `sym@PAGE` and `sym@PAGEOFF` belong to the instruction
-            // layer, which turns them into page relocations (#2933).
+            // Mach-O page and TLVP modifiers belong to the instruction
+            // layer, which turns them into page relocations (#2933, #3593).
             u64 suffix_end = index + 1;
             while (suffix_end < line.length && assembly_unit_name_character(line.pointer[suffix_end]))
             {
                 suffix_end += 1;
             }
             String8 suffix = string_slice(line, index + 1, suffix_end);
-            if (string_equal(suffix, S8("PAGE")) || string_equal(suffix, S8("PAGEOFF")))
+            if (string_equal(suffix, S8("PAGE")) || string_equal(suffix, S8("PAGEOFF")) ||
+                string_equal(suffix, S8("TLVPPAGE")) || string_equal(suffix, S8("TLVPPAGEOFF")) ||
+                string_equal(suffix, S8("GOTPAGE")) || string_equal(suffix, S8("GOTPAGEOFF")))
             {
                 text[length++] = code_unit;
                 index += 1;

@@ -3857,6 +3857,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_native_failure_publication);
     C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_expanded_label_initializers);
     C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_ebpf_kernel_regressions);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_ebpf_rejections);
     C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_verify_invariants);
     C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_machine_relocation_publication);
     C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_machine_publication_c);

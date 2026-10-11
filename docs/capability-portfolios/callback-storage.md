@@ -142,7 +142,8 @@ Build the Release `ide`, then invoke the unchanged existing commands:
 ./build.sh build --config Release -t test_all
 ```
 
-The isolated `External C capability portfolio` workflow reproduces pins,
+At the recorded revisions, the isolated `External C capability portfolio`
+workflow reproduced pins,
 records commit/tree/file-object identities, authenticates the Lua transport,
 copies license notices, hashes first-party fixtures and records compiler/tool
 identities. Generated wrappers, objects, archives, corpora, bytecode and logs
@@ -222,9 +223,11 @@ objects and logs. Amalgamation ZIP SHA-256:
 No `SQLITE_DEBUG`, Tcl testfixture, configure/make, other platforms, or optional
 Test262 execution is claimed.
 
-The workflow repeats the corpus on compiler source/test changes and supports
-manual dispatch. Documentation-only receipt updates use the PR's checks.
-This does not convert the recorded zlib/QuickJS failures to successful verdicts.
+Current scheduling is owned by [External projects after merge](../../.github/workflows/external-projects.yml)
+and its [migration map](../external-project-ci.md): full project harnesses run
+once per automatic push to `main`, bound to the event SHA. PR and manual routes
+were retired by #3501. The historical results above retain their original
+revision/run identities and do not become successful verdicts through migration.
 
 ## Licenses and fixture provenance
 

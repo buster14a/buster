@@ -51,3 +51,12 @@ options built that compiler.
 
 The musl and libc-test guides form one investigation in that order; references
 to preceding stages and later tests cross that boundary.
+
+## Ordinary post-merge scheduling
+
+Whole-project integration runs under the single [external-project owner](../external-project-ci.md)
+after each main push. Its assignment table records applicable Linux workloads
+and pending native macOS/Windows cells. Keep focused compiler regressions in
+pre-merge CI; add future pinned project recipes to the shared OS job rather than
+creating a project workflow or an arbitrary dispatch/reusable route. Project
+qualification and performance evidence contracts remain separate.

@@ -275,15 +275,68 @@ jobs:
           test -s direct-ssa-census-evidence/reference.metrics
           sha256sum build/unity-reference.o > direct-ssa-census-evidence/reference-output.sha256
           python3 tools/allocation_census.py --input direct-ssa-census-evidence/reference.stderr.log --output direct-ssa-census-evidence/reference-allocation --label 'current-head shared local promotion; diagnostic only'
+      - name: Verify production tiny helper call removal
+        id: tiny
+        if: ${{ !cancelled() && steps.direct.outcome == 'success' && steps.reference.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The native assembler path supports production SIMD and avoids intentionally unsupported LLVM SIMD records.
+          # Arms: tiny off, tiny on at the default budgets, and tiny on with only the
+          # documented module row cap lifted, which shows every sampled site is selectable.
+          for mode in off on lifted; do
+            selection=(-fno-canonical-inline)
+            if [[ "$mode" == on ]]; then selection=(-fcanonical-inline); fi
+            if [[ "$mode" == lifted ]]; then selection=(-fcanonical-inline -fcanonical-inline-module-growth=1048576); fi
+            ./build/Release/ide cc -v -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -O3 "${selection[@]}" -S src/buster/apps/ide/ide.c -o "direct-ssa-census-evidence/tiny-$mode.s" > "direct-ssa-census-evidence/tiny-$mode.stdout.log" 2> "direct-ssa-census-evidence/tiny-$mode.stderr.log"
+          done
+          records='['
+          proof_ok=1
+          for helper in c_ir_field_index_bucket machine_x64_reject; do
+            call_pattern="^[[:space:]]*call[[:space:]].*\\b${helper}\\b"
+            definition_pattern="^${helper}:[[:space:]]*(#.*)?$"
+            declare -A calls=() definitions=()
+            for mode in off on lifted; do
+              calls[$mode]=$(grep -Ec "$call_pattern" "direct-ssa-census-evidence/tiny-$mode.s" || true)
+              definitions[$mode]=$(grep -Ec "$definition_pattern" "direct-ssa-census-evidence/tiny-$mode.s" || true)
+              if (( definitions[$mode] != 1 )); then proof_ok=0; fi
+            done
+            # Every sampled helper is called without tiny inlining and fully inlined once
+            # the module row cap is lifted; machine_x64_reject also falls at default budgets.
+            if (( calls[off] == 0 || calls[lifted] != 0 )); then proof_ok=0; fi
+            if [[ "$helper" == machine_x64_reject ]] && (( calls[on] >= calls[off] )); then proof_ok=0; fi
+            record=$(printf '{"helper":"%s","calls":{"off":%s,"on":%s,"lifted":%s},"definitions":{"off":%s,"on":%s,"lifted":%s}}' "$helper" "${calls[off]}" "${calls[on]}" "${calls[lifted]}" "${definitions[off]}" "${definitions[on]}" "${definitions[lifted]}")
+            if [[ "$records" != "[" ]]; then records+=','; fi
+            records+="$record"
+          done
+          records+=']'
+          off_total_calls=$(grep -Ec '^[[:space:]]*call(q)?[[:space:]]' direct-ssa-census-evidence/tiny-off.s || true)
+          on_total_calls=$(grep -Ec '^[[:space:]]*call(q)?[[:space:]]' direct-ssa-census-evidence/tiny-on.s || true)
+          lifted_total_calls=$(grep -Ec '^[[:space:]]*call(q)?[[:space:]]' direct-ssa-census-evidence/tiny-lifted.s || true)
+          report=$(printf '{"total_calls":{"off":%s,"on":%s,"lifted":%s},"helpers":%s}' "$off_total_calls" "$on_total_calls" "$lifted_total_calls" "$records")
+          printf 'INLINE_PRODUCTION_CALLS %s\n' "$report"
+          printf '%s\n' "$report" > direct-ssa-census-evidence/production-tiny-helper-calls.json
+          if (( off_total_calls == 0 || on_total_calls >= off_total_calls || lifted_total_calls >= on_total_calls || proof_ok != 1 )); then
+            printf 'named production helpers were not removed or callable helper definitions were not retained: %s\n' "$report" >&2
+            exit 1
+          fi
+          grep '^IR_INLINE ' direct-ssa-census-evidence/tiny-*.stdout.log
+          sha256sum direct-ssa-census-evidence/tiny-*.s > direct-ssa-census-evidence/tiny-inputs.sha256
       - name: Report census scope without a performance verdict
         if: always()
         shell: bash
         env:
+          TINY_RESULT: ${{ steps.tiny.outcome }}
           TEST_RESULT: ${{ steps.tests.outcome }}
           DIRECT_RESULT: ${{ steps.direct.outcome }}
           REFERENCE_RESULT: ${{ steps.reference.outcome }}
         run: |
           printf '## Direct-SSA diagnostic census\n\nRegistered tests: **%s**. Direct SSA: **%s**. Shared local promotion: **%s**.\n\nArtifacts retain source metrics, raw allocation reports, compiler/input identities and failures. This instrumented job is not a timing comparison, a sanitizer or self-host gate, or dedicated Ryzen 9700X performance acceptance for #447.\n' "$TEST_RESULT" "$DIRECT_RESULT" "$REFERENCE_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          printf '\nProduction tiny-helper proof: **%s**. At -O3 on the same production source, total calls fall at default budgets, machine_x64_reject calls fall at default budgets, and every sampled helper call is removed once only the documented module row cap is lifted; sampled helper definitions are retained in every arm.\n' "$TINY_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          grep '^IR_INLINE ' direct-ssa-census-evidence/tiny-*.stdout.log || true
+          if [[ "$DIRECT_RESULT" != success || "$REFERENCE_RESULT" != success || "$TINY_RESULT" == failure ]]; then
+            grep -nE -m 20 'error|ir.inline-required|validation' direct-ssa-census-evidence/*.stderr.log || true
+          fi
       - name: Retain machine records in existing evidence
         if: always()
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
