@@ -2749,9 +2749,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_mach_tls_object_tests(UnitTes
             for (u32 index = 0; reread.error == OBJECT_ERROR_NONE && index < reread.symbol_count; index += 1)
             {
                 ObjectSymbol* symbol = reread.symbols + index;
-                bool thread_local = symbol->section < reread.section_count && (reread.sections[symbol->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                bool in_thread_local = symbol->section < reread.section_count && (reread.sections[symbol->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
                                                                               reread.sections[symbol->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO);
-                variables += thread_local && (string_equal(symbol->name, S8("tl")) || string_equal(symbol->name, S8("tz")) || string_equal(symbol->name, S8("ts")));
+                variables += in_thread_local && (string_equal(symbol->name, S8("tl")) || string_equal(symbol->name, S8("tz")) || string_equal(symbol->name, S8("ts")));
                 aliases += string_first_sequence(symbol->name, S8("$tlv$init")) < symbol->name.length;
             }
             BUSTER_TEST(arguments, reread.error == OBJECT_ERROR_NONE && variables == 3 && aliases == 0 &&
