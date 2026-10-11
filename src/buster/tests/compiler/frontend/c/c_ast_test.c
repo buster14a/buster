@@ -11,7 +11,7 @@
 // c_ast_test_columns covers the column arenas: step boundaries, moves, a
 // phase-arena peak that does not grow with the tree, and c_ast_release.
 // Every test releases the trees it builds, then the units they read through
-// c_test_scratch_end; C_AST_TEST_FIXTURE checks that each fixture returned
+// c_test_scratch_end; C_TEST_BOUNDED_FIXTURE checks that each fixture returned
 // every reservation it made (GitHub #3306). c_ast_test_corpus (see "corpus
 // differential" below) builds every tests/**/*.c file and the compiler's own
 // frontend sources and holds the tree to c_parse_ast's top-level declaration
@@ -4258,21 +4258,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_statements(UnitTestArguments* argu
     return result;
 }
 
-// C_TEST_FIXTURE, after checking that the fixture already returned every
-// reservation it made: each test ends its scratch with c_test_scratch_end, so
-// the module's address space is bounded by the units one fixture holds at
-// once, not by how many sources it preprocesses (GitHub #3306).
-#define C_AST_TEST_FIXTURE(arguments, function) \
-    do \
-    { \
-        u64 live_ = arena_test_live_reserved_bytes(); \
-        BUSTER_TEST_FIXTURE(arguments, function); \
-        u64 left_ = arena_test_live_reserved_bytes(); \
-        BUSTER_TEST_RAW(arguments, left_ == live_, \
-                        string_format(arguments->arena, S8("{S8}: {u64} reserved bytes live before, {u64} after"), S8(#function), live_, left_)); \
-        c_test_release_preprocess_arenas(); \
-    } while (0)
-
+// Each test ends its scratch with c_test_scratch_end, so the module's address
+// space is bounded by the units one fixture holds at once, not by how many
+// sources it preprocesses; C_TEST_BOUNDED_FIXTURE checks it (GitHub #3306).
 UnitTestResult c_ast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4283,27 +4271,27 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
         c_ast_test_preprocess(temporary.arena, S8(""), C_PREPROCESS_DIALECT_GNU17);
         c_test_scratch_end(temporary);
     }
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_expressions);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_declarations);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_dialects);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_failures);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_tables);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_navigation);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_validator);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_attribute_slots);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_options_and_statistics);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_columns);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_oracle);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_uninterned);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_types);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_split);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_statements);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_expressions);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_declarations);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_dialects);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_failures);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_tables);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_navigation);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_validator);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_attribute_slots);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_options_and_statistics);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_columns);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_oracle);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_uninterned);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_types);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_split);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_statements);
 #if !BUSTER_ANDROID && !BUSTER_IOS
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_fixture_sweep);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_corpus);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_fixture_sweep);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_corpus);
 #endif
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_truncations);
-    C_AST_TEST_FIXTURE(arguments, c_ast_test_deep);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_truncations);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_deep);
     return result;
 }
 #endif
