@@ -23903,13 +23903,42 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_probe_spellings(UnitTest
     String8 working_joined[] = {S8("-working-directory=/no/such/dir/"), S8("-working-directory=."), S8("-fsyntax-only"), S8("-x"), S8("c"), S8("basic_c_pic.c"), S8("-")};
     CompilerDriverInvocation working = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(working_joined));
     BUSTER_TEST(arguments, working.error == COMPILER_DRIVER_ERROR_NONE && working.input_count == 2);
-    BUSTER_STRING_TEST(arguments, working.input_paths[0], S8("./basic_c_pic.c"));
+    BUSTER_STRING_TEST(arguments, working.input_paths[0], BUSTER_WINDOWS ? S8(".\\basic_c_pic.c") : S8("./basic_c_pic.c"));
     BUSTER_STRING_TEST(arguments, working.input_paths[1], S8("-"));
-    String8 working_separated[] = {S8("-working-directory"), S8("/"), S8("-fsyntax-only"), S8("/abs/input.c"), S8("input.c")};
-    CompilerDriverInvocation working_absolute = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(working_separated));
-    BUSTER_TEST(arguments, working_absolute.error == COMPILER_DRIVER_ERROR_NONE);
-    BUSTER_STRING_TEST(arguments, working_absolute.input_paths[0], S8("/abs/input.c"));
-    BUSTER_STRING_TEST(arguments, working_absolute.input_paths[1], S8("/input.c"));
+#if BUSTER_WINDOWS
+    String8 working_separated[] = {S8("-working-directory"), S8("."), S8("-fsyntax-only"), S8("C:\\abs\\input.c"), S8("\\\\server\\share\\input.c"),
+                                   S8("C:drive.c"), S8("\\rooted.c")};
+    CompilerDriverInvocation working_host = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(working_separated));
+    BUSTER_TEST(arguments, working_host.error == COMPILER_DRIVER_ERROR_NONE && working_host.input_count == 4);
+    BUSTER_STRING_TEST(arguments, working_host.input_paths[0], S8("C:\\abs\\input.c"));
+    BUSTER_STRING_TEST(arguments, working_host.input_paths[1], S8("\\\\server\\share\\input.c"));
+    // Drive-relative and rooted-without-drive paths are not absolute.
+    String8 drive_relative = working_host.input_paths[2];
+    BUSTER_TEST(arguments, string_starts_with_sequence(drive_relative, S8("C:")) && !string_equal(drive_relative, S8("C:drive.c")) &&
+                               string_ends_with_sequence(drive_relative, S8("\\drive.c")));
+    String8 rooted = working_host.input_paths[3];
+    BUSTER_TEST(arguments, rooted.length > 2 && rooted.pointer[1] == ':' && string_ends_with_sequence(rooted, S8(":\\rooted.c")));
+#else
+    // A backslash or a colon is an ordinary POSIX filename byte, including at
+    // the end of the working directory.
+    String8 working_separated[] = {S8("-working-directory"), S8("/"), S8("-fsyntax-only"), S8("/abs/input.c"), S8("input.c"), S8("x:y.c"),
+                                   S8("\\name.c")};
+    CompilerDriverInvocation working_host = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(working_separated));
+    BUSTER_TEST(arguments, working_host.error == COMPILER_DRIVER_ERROR_NONE && working_host.input_count == 4);
+    BUSTER_STRING_TEST(arguments, working_host.input_paths[0], S8("/abs/input.c"));
+    BUSTER_STRING_TEST(arguments, working_host.input_paths[1], S8("/input.c"));
+    BUSTER_STRING_TEST(arguments, working_host.input_paths[2], S8("/x:y.c"));
+    BUSTER_STRING_TEST(arguments, working_host.input_paths[3], S8("/\\name.c"));
+    String8 backslash_directory = buster_test_temporary_path(arena, S8("driver-wd\\"), S8(""));
+    if (BUSTER_REQUIRE(arguments, os_make_directory_attempt(backslash_directory)))
+    {
+        String8 backslash_line[] = {S8("-working-directory"), backslash_directory, S8("-fsyntax-only"), S8("ordinary.c")};
+        CompilerDriverInvocation backslash = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(backslash_line));
+        BUSTER_TEST(arguments, backslash.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_STRING_TEST(arguments, backslash.input_paths[0], string_format(arena, S8("{S8}/ordinary.c"), backslash_directory));
+        (void)os_directory_delete(backslash_directory);
+    }
+#endif
     String8 working_missing[] = {S8("-working-directory=/no/such/dir/"), S8("-fsyntax-only"), S8("tests/basic_c_pic.c")};
     CompilerDriverInvocation missing_directory = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(working_missing));
     BUSTER_TEST(arguments, missing_directory.error == COMPILER_DRIVER_ERROR_ARGUMENT);

@@ -1695,9 +1695,56 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_query_target_triple(Arena* arena, Co
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_path_is_absolute(String8 path)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_path_separator(char8 byte)
 {
-    return path.length && (path.pointer[0] == '/' || path.pointer[0] == '\\' || (path.length >= 2 && path.pointer[1] == ':'));
+#if BUSTER_WINDOWS
+    return byte == '/' || byte == '\\';
+#else
+    return byte == '/';
+#endif
+}
+
+// Resolves an input against -working-directory with the host's path rules,
+// as LLVM's make_absolute does. On Windows a rooted path without a drive
+// ("\\x.c") takes the directory's drive, and a drive-relative path ("C:x.c")
+// takes the directory's root-relative part.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_working_directory_path(Arena* arena, String8 directory, String8 input)
+{
+    String8 result = input;
+    String8 separator = compiler_driver_path_separator(directory.pointer[directory.length - 1]) ? S8("") : BUSTER_WINDOWS ? S8("\\") : S8("/");
+#if BUSTER_WINDOWS
+    char8 letter = input.length >= 2 ? (char8)(input.pointer[0] | 0x20) : 0;
+    bool drive = input.length >= 2 && input.pointer[1] == ':' && letter >= 'a' && letter <= 'z';
+    bool rooted = drive ? input.length >= 3 && compiler_driver_path_separator(input.pointer[2])
+                        : input.length >= 1 && compiler_driver_path_separator(input.pointer[0]);
+    bool unc = input.length >= 2 && compiler_driver_path_separator(input.pointer[0]) && compiler_driver_path_separator(input.pointer[1]);
+    if (!drive && !rooted)
+    {
+        result = string_format(arena, S8("{S8}{S8}{S8}"), directory, separator, input);
+    }
+    else if (!unc && drive != rooted)
+    {
+        String8 absolute = os_path_absolute(arena, directory, false);
+        bool absolute_drive = absolute.length >= 2 && absolute.pointer[1] == ':';
+        if (absolute_drive && rooted)
+        {
+            result = string_format(arena, S8("{S8}{S8}"), (String8){.pointer = absolute.pointer, .length = 2}, input);
+        }
+        else if (absolute_drive)
+        {
+            String8 tail = {.pointer = absolute.pointer + 2, .length = absolute.length - 2};
+            String8 joiner = tail.length && compiler_driver_path_separator(tail.pointer[tail.length - 1]) ? S8("") : S8("\\");
+            result = string_format(arena, S8("{S8}{S8}{S8}{S8}"), (String8){.pointer = input.pointer, .length = 2}, tail, joiner,
+                                   (String8){.pointer = input.pointer + 2, .length = input.length - 2});
+        }
+    }
+#else
+    if (!input.length || input.pointer[0] != '/')
+    {
+        result = string_format(arena, S8("{S8}{S8}{S8}"), directory, separator, input);
+    }
+#endif
+    return result;
 }
 
 String8 compiler_driver_query_text(Arena* arena, CompilerDriverInvocation const* invocation)
@@ -2900,15 +2947,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         else
         {
-            String8 directory = invocation.working_directory;
-            char8 last = directory.pointer[directory.length - 1];
-            String8 separator = last == '/' || last == '\\' ? S8("") : S8("/");
             for (u32 input_index = 0; input_index < invocation.input_count; input_index += 1)
             {
                 String8 input = invocation.input_paths[input_index];
-                if (!string_equal(input, S8("-")) && !compiler_driver_path_is_absolute(input))
+                if (!string_equal(input, S8("-")))
                 {
-                    invocation.input_paths[input_index] = string_format(arena, S8("{S8}{S8}{S8}"), directory, separator, input);
+                    invocation.input_paths[input_index] = compiler_driver_working_directory_path(arena, invocation.working_directory, input);
                 }
             }
         }
