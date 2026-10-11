@@ -206,6 +206,23 @@
   with the same dependency-only support identity. It is historical input,
   not executed bridge coverage; see `docs/ci-github-hosted-runners.md`.
 
+### Just-run executable cleanup
+
+Driver runtime fixtures use `buster_test_executable_delete` after waiting for
+their executable. On Windows it retries only `ERROR_SHARING_VIOLATION` and
+`ERROR_ACCESS_DENIED`, for at most 500 ms and 51 delete attempts. It does not
+retry compilation, linking or execution; a persistent denial still fails.
+Other platforms make one checked delete attempt. An initial failure logs the
+path, first and final native error codes, attempt count and elapsed time, even
+if cleanup later succeeds.
+
+`compiler_driver_test_executable_cleanup` checks unchanged bytes and one
+attempt for an unrelated error; Windows additionally exercises two injected
+transient errors, a real handle opened without delete sharing, and a real
+read-only file. Both persistent native errors remain failures until the
+fixture releases its lock or restores the attribute. Missing paths are
+idempotent success, matching `os_file_delete_checked`.
+
 ### Native investigation source-size comparison
 
 The optional `.github/workflows/native-investigation.yml` report uses the checked-out PR merge revision's first parent only after verifying `HEAD == GITHUB_SHA`, exactly two parents, and the event PR head as parent 2. It never reads `pull_request.base.sha`. Manual dispatch deliberately compares its exact selected revision with itself; that is a same-revision zero-delta report, not a branch-delta gate. `CurrentWorkflowPolicyTests` in `tools/ci_workflow_tools_test.py` executes the selector on a synthetic merge with an advanced first parent and rejects a changed checkout, a wrong head or parent shape, and unsupported events; `tools/ci_workflow_policy_test.py` loads that class.
