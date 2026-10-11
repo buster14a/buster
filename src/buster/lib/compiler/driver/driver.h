@@ -607,7 +607,7 @@ BUSTER_F_DECL String8 compiler_driver_query_text(Arena* arena, CompilerDriverInv
 // takes the root name ("C:" or "\\\\server") of the absolute directory, and a
 // drive-relative "C:x.c" takes its root-relative part. Empty when the
 // directory has no root name.
-String8 compiler_driver_working_directory_path(Arena* arena, String8 directory, String8 input);
+BUSTER_F_DECL String8 compiler_driver_working_directory_path(Arena* arena, String8 directory, String8 input);
 BUSTER_F_DECL CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation);
 // The -fmetrics-out record text; docs/agents/driver.md is the schema.
 BUSTER_F_DECL String8 compiler_driver_metrics_format(Arena* arena, CompilerDriverInvocation const* invocation, CompilerDriverResult const* result,
