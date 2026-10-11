@@ -25,6 +25,7 @@
 // compiler_driver_pe_library_exports on Windows and
 // compiler_driver_elf_library_exports on Linux, and compiler_driver_mach_dylib_identity
 // / compiler_driver_mach_tbd_identity plus compiler_driver_mach_library_locate
+// and compiler_driver_mach_framework_locate
 // on macOS/iOS — and
 // compiler_driver_execute_gpu isolates the external shader-toolchain
 // orchestration in gpu.h. compiler_prewarm at the top fills every lazily
@@ -3437,6 +3438,7 @@ struct CompilerDriverDynamicLibraries
     // loader, and a configure script reads the successful link as the
     // library existing.  Empty when every requested library was found.
     String8 missing_request;
+    String8 missing_framework;
     String8 unsupported_script_path;
     String8 missing_runtime_symbol;
     String8 runtime_failure_library;
@@ -4381,18 +4383,21 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_tbd_arch_list(ByteSlice bytes, u64
                         }
                         String8 architecture = {.pointer = unquoted.pointer, .length = architecture_length};
                         String8 expected = target.cpu_arch == CPU_ARCH_AARCH64 ? S8("arm64") : S8("x86_64");
+                        // A dylib stub's ARM64 subtype shares the consumer CPU ABI; keep the platform check exact.
+                        bool architecture_matches = string_equal(architecture, expected) ||
+                                                    (target.cpu_arch == CPU_ARCH_AARCH64 && string_equal(architecture, S8("arm64e")));
                         if (targets && platform_start < unquoted.length)
                         {
                             String8 platform = {.pointer = unquoted.pointer + platform_start, .length = unquoted.length - platform_start};
                             String8 expected_platform = target.os == OPERATING_SYSTEM_MACOS ? S8("macos")
                                                         : target.os == OPERATING_SYSTEM_IOS ? S8("ios")
                                                                                            : (String8){0};
-                            *compatible |= string_equal(architecture, expected) && expected_platform.length &&
+                            *compatible |= architecture_matches && expected_platform.length &&
                                           string_equal(platform, expected_platform);
                         }
                         else if (!targets)
                         {
-                            *compatible |= string_equal(architecture, expected);
+                            *compatible |= architecture_matches;
                         }
                     }
                     else
@@ -5132,6 +5137,41 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_library_locate(Arena* arena, Compi
                                                            : exact || candidate_index == 0
                                                                  ? compiler_driver_mach_tbd_identity(arena, map.bytes, invocation.target, &candidate)
                                                                  : compiler_driver_mach_dylib_identity(map.bytes, invocation.target, &candidate);
+                if (status == COMPILER_DRIVER_MACH_DYLIB_USABLE)
+                {
+                    *identity = candidate;
+                    identity->install_name = string_duplicate_arena(arena, candidate.install_name, true);
+                    result = true;
+                }
+                file_map_unmap(map);
+            }
+        }
+    }
+    return result;
+}
+
+// Frameworks require a real compatible identity, including SDK-less cross links.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_framework_locate(Arena* arena, CompilerDriverInvocation invocation, String8 framework,
+                                                                CompilerDriverMachDylibIdentity* identity)
+{
+    bool result = false;
+    String8 system_root = invocation.sysroot.length
+                              ? string_format(arena, S8("{S8}/System/Library/Frameworks"), invocation.sysroot)
+                              : S8("/System/Library/Frameworks");
+    for (u32 path_index = 0; path_index <= invocation.framework_path_count && !result; path_index += 1)
+    {
+        String8 root = path_index < invocation.framework_path_count ? invocation.framework_paths[path_index] : system_root;
+        for (u32 candidate_index = 0; candidate_index < 2 && !result; candidate_index += 1)
+        {
+            String8 suffix = candidate_index == 0 ? S8(".tbd") : S8("");
+            String8 path = string_format_z(arena, S8("{S8}/{S8}.framework/{S8}{S8}"), root, framework, framework, suffix);
+            FileMapRead map = file_map_read(arena, path, (FileReadOptions){0});
+            if (map.bytes.pointer)
+            {
+                CompilerDriverMachDylibIdentity candidate = {0};
+                CompilerDriverMachDylibStatus status = candidate_index == 0
+                                                           ? compiler_driver_mach_tbd_identity(arena, map.bytes, invocation.target, &candidate)
+                                                           : compiler_driver_mach_dylib_identity(map.bytes, invocation.target, &candidate);
                 if (status == COMPILER_DRIVER_MACH_DYLIB_USABLE)
                 {
                     *identity = candidate;
@@ -6089,8 +6129,16 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
             {
                 continue;
             }
-            String8 root = invocation.framework_path_count ? invocation.framework_paths[0] : S8("/System/Library/Frameworks");
-            String8 name = string_format(arena, S8("{S8}/{S8}.framework/{S8}"), root, framework, framework);
+            CompilerDriverMachDylibIdentity identity = {0};
+            if (!compiler_driver_mach_framework_locate(arena, invocation, framework, &identity))
+            {
+                if (!result.missing_framework.length)
+                {
+                    result.missing_framework = framework;
+                }
+                continue;
+            }
+            String8 name = identity.install_name;
             bool duplicate = false;
             for (u32 previous = 0; previous < count; previous += 1)
             {
@@ -6100,6 +6148,9 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
             {
                 libraries[count++] = (NativeDynamicLibrary){
                     .name = name,
+                    .mach_current_version = identity.current_version,
+                    .mach_compatibility_version = identity.compatibility_version,
+                    .mach_versions_present = true,
                 };
             }
         }
@@ -7191,10 +7242,12 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
     {
         String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
         CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, 0, &linked.object);
-        if (dynamic_libraries.missing_request.length)
+        if (dynamic_libraries.missing_request.length || dynamic_libraries.missing_framework.length)
         {
             result->error = COMPILER_DRIVER_ERROR_LINK;
-            result->diagnostic = dynamic_libraries.unsupported_script_path.length
+            result->diagnostic = !dynamic_libraries.missing_request.length
+                                     ? string_format(arena, S8("framework not found: {S8}"), dynamic_libraries.missing_framework)
+                                     : dynamic_libraries.unsupported_script_path.length
                                      ? string_format(arena, S8("unsupported GNU linker script {S8} requested by -l{S8}"),
                                                      dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_request)
                                      : string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
@@ -10351,10 +10404,12 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     }
     String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
     CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, static_libraries, &linked.object);
-    if (dynamic_libraries.missing_request.length)
+    if (dynamic_libraries.missing_request.length || dynamic_libraries.missing_framework.length)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic = dynamic_libraries.unsupported_script_path.length
+        result.diagnostic = !dynamic_libraries.missing_request.length
+                                ? string_format(arena, S8("framework not found: {S8}"), dynamic_libraries.missing_framework)
+                                : dynamic_libraries.unsupported_script_path.length
                                 ? string_format(arena, S8("unsupported GNU linker script {S8} requested by -l{S8}"),
                                                 dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_request)
                                 : string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
