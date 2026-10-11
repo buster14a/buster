@@ -249,7 +249,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
 BUSTER_GLOBAL_LOCAL bool userspace_make(Arena* arena, String8 source, String8 directory, String8 cc, String8 target, String8 evidence)
 {
     String8 args[] = {S8("make"), S8("-C"), source, string_format(arena, S8("O={S8}"), directory),
-                     string_format(arena, S8("CC={S8}"), cc), S8("HOSTCC=clang"), S8("SKIP_STRIP=y"), S8("V=1"), S8("-j2"), S8("-k"), target};
+                     string_format(arena, S8("CC={S8}"), cc), string_format(arena, S8("KCONFIG_ALLCONFIG={S8}"), path_join(arena, directory, S8("seed.config"))), S8("HOSTCC=clang"), S8("SKIP_STRIP=y"), S8("V=1"), S8("-j2"), S8("-k"), target};
     ClangSuiteCommand ran = userspace_command(arena, S8("."), (SliceString8)BUSTER_ARRAY_TO_SLICE(args), USERSPACE_COMMAND_SECONDS);
     bool valid = userspace_save_command(arena, evidence, ran) && ran.result == PROCESS_RESULT_SUCCESS;
     os_file_write(os_get_standard_stream(STANDARD_STREAM_OUTPUT), BUSTER_SLICE_TO_BYTE_SLICE(ran.output));
@@ -452,7 +452,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
                 String8 actions = path_join(arena, directory, side ? S8("buster-actions") : S8("reference-actions"));
                 make_directory_recursive(arena, build);
                 make_directory_recursive(arena, actions);
-                valid = clang_suite_write(arena, path_join(arena, build, S8(".config")), side ? reference_config : config);
+                valid = clang_suite_write(arena, path_join(arena, build, S8(".config")), side ? reference_config : config) &&
+                        clang_suite_write(arena, path_join(arena, build, S8("seed.config")), config);
                 String8 compiler = string_format(arena, S8("{S8} test_userspace --cc {S8} {S8} {S8} {S8} {S8} --"),
                                                 driver, name, ide, musl, musl_output, actions);
                 // Upstream expands CC through its shell. Reject unsafe paths
@@ -479,6 +480,20 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
                     reference_config = actual_config;
                 }
                 valid = actual_config.length && string_equal(reference_config, actual_config) && valid;
+                // Every requested boolean must survive upstream dependency resolution.
+                u64 start = 0;
+                for (u64 i = 0; i <= config.length; i += 1)
+                {
+                    if (i == config.length || config.pointer[i] == '\n')
+                    {
+                        String8 line = string_slice(config, start, i);
+                        if (line.length)
+                        {
+                            valid = string_contains(actual_config, string_format(arena, S8("{S8}\n"), line)) && valid;
+                        }
+                        start = i + 1;
+                    }
+                }
                 if (valid)
                 {
                     stages[side] = userspace_make(arena, source, build, compiler, S8("busybox"), build);
