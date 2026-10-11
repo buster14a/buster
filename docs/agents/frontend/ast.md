@@ -1421,4 +1421,25 @@ The budgets:
   ([#2761](https://github.com/buster14a/buster/issues/2761)), and the hook
   stays opt-in.
 
+The root-conditional slice's hosted census is
+[`2026-10-11T132513Z`](../../performance-audits/2026-10-11T132513Z.md), taken
+the same way and diagnostic only:
+- **Budgets.** Every hosted budget passes on the third candidate. Objects are
+  byte-identical across the four arms at `-g0` and `-g`.
+- **Coverage.** The tree answers 810,535 of 827,414 root-conditional queries
+  (97.96%).
+- **The split's effect.** C against B is −61.72 M (−0.269%) on `-c`, and
+  +0.0031% on `-fsyntax-only`.
+- **Default path.** +0.0019% on `-fsyntax-only` and +0.0113% on `-c`.
+- **Failed candidates.** Two measured candidates failed first, and both are
+  recorded:
+  - One with lowering's own per-body span builds: +0.69% on `-c`.
+  - One that forced the shared span rule inline: +0.117% on
+    `-fsyntax-only`, from the eager pass's code generation.
+
+  So lowering reads only the spans the typer keeps.
+- **Memory.** Keeping them costs +28.8 MB (+4.1%) of the pilot's `-c` peak
+  RSS. No budget was declared for it.
+- **Acceptance.** Zen 5 validation stays incomplete (#2761).
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
