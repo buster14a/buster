@@ -105,6 +105,21 @@ retained for the later current-main integration. This acknowledgment adds no
 9700X benchmark request or performance claim;
 `benchmarks/9700x/compiler-compare.request` remains unchanged from main.
 
+PR #3483 acknowledges +87,258 production bytes against `main` `1f4a3e44`.
+It reads plain declaration specifier runs from the syntax tree under
+`-fc-ast-pilot` (#3102): about 25,200 bytes in `c_parse.c`, `c.h`,
+`c_internal.h`, `c_parse_internal.h`, the driver and `ide.c`. It also
+carries two PRs admitted ahead of it in the merge queue, merged on the branch
+so that the queue composes:
+- #3488, which reads root conditionals from the tree in lowering: 25,947
+  bytes in `c_gen.c`, plus its statistics in `c.h`, the driver and `ide.c`;
+- #3471, Mach-O library search: about 33,700 bytes in the driver and the
+  linker.
+
+Each change is under 32 KiB alone except #3471, which acknowledged its own
+growth. The baseline is regenerated at `1456ed44` over the combined source. It
+records 19,883,421 production bytes, which includes drift already on main.
+
 Categories are independent. Deleting tests, fixtures, generated tables or
 documentation never earns room for production or build code, and only the
 ratcheted totals are limited, so moving code between files or splitting a file
