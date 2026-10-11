@@ -362,7 +362,11 @@ unchanged.
 - **File-scope initializers.** `c_parse_validate_static_initializers` made
   nearly all of the queries outside a typed body: 77,545 of 79,035 on the unity
   self-host, at about 190 M machine Ir, against at most 3 M for any other
-  validator (audit `2026-10-09T213311Z`). Before it validates a file-scope
+  validator (audit `2026-10-09T213311Z`). The other phases are left to the
+  machine: together they run about 3 M machine Ir, and almost none of it
+  could be answered (audit
+  [`2026-10-11T093053Z`](../../performance-audits/2026-10-11T093053Z.md)).
+  Before it validates a file-scope
   object's initializer, `c_ast_types_initializer_begin` reserves the arrays
   for that initializer's subtree, over the initializer's tokens, and they are
   released afterwards. The subtree is typed the same way, but only when the
@@ -472,7 +476,9 @@ unchanged.
 
   The census in audit
   [`2026-10-11T093336Z`](../../performance-audits/2026-10-11T093336Z.md)
-  charges each declined shape its machine Ir on the unity self-host.
+  charges each declined shape its machine Ir on the unity self-host. It was
+  taken before the `++` and `--` rule above, which answers its third-ranked
+  shape.
 - **The replay.** With constraint checks the machine types a cast's operand.
   When that operand is one string-literal token, alone or in parentheses
   (`(char8*)("text")`, as `S8()` spells it), its typing appends the literal's
@@ -1502,6 +1508,56 @@ without `-fc-ast-pilot`:
 request runs it, the budget is neither passed nor failed. The hosted counts
 above are not acceptance, and the default stays off.
 
+For the typer's remaining out-of-body phases, these budgets were declared
+before any measured run. These are the queries outside a typed body or
+file-scope initializer that still run the machine under `-fc-ast-pilot`: file
+`_Static_assert`, deferred assertions, type alignments, variably modified
+checks, signatures, the binder and the like. The input and flags are stage
+2's. Four Callgrind arms (`--cache-sim=no --branch-sim=no`) are counted on
+tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `a6705764`, which the candidate branches from. The budgets:
+- **Census first.** A throwaway build of the base, not committed, routes each
+  machine run from a query through one noinline wrapper per analysis phase,
+  and Callgrind charges each phase's inclusive machine Ir under the pilot. A
+  phase is a candidate only if its machine Ir is at least 1 M and the typer can
+  answer its queries: it must run in the normal constant-evaluation mode, on
+  an idle machine. If the candidates total less than 1 M, no candidate is
+  built, and the audit records the negative result.
+- **Correctness.** No verify mismatch over the corpus, or in a one-off verify
+  run over the self-host input. Identical diagnostics and type-table sizes
+  with and without the tree. Byte-identical `-c` objects (`-g0` and `-g`)
+  across the four arms.
+- **Default path (D against A).** The new scopes exist only with the tree, so
+  the difference stays within ±0.05% Ir on `-fsyntax-only` and on `-c`
+  (`-g0`).
+- **The gain that ships it (C against B).** At least 1 M fewer instructions in
+  the whole compile, with the new scopes' passes and lookups charged, and
+  fewer machine runs from queries outside a typed region. A smaller gain, or
+  a loss, is recorded as a negative result, and the code does not ship.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761), and the hook stays
+  opt-in.
+
+The out-of-body census is
+[`2026-10-11T093053Z`](../../performance-audits/2026-10-11T093053Z.md),
+diagnostic only, and its result is negative. No candidate was built:
+- The phases outside a constant-evaluation mode run 3.00 M machine Ir in
+  all, not the 7 M listed earlier. File `_Static_assert` runs 0.90 M, and
+  deferred assertions, the validators after the body loop and variably
+  modified checks run 0.33 M or less each.
+- Only the binder reaches 1 M, at 1.41 M. 1.17 M of that is `S8()` compound
+  literals initializing locals. They are queried before the scalar rows are
+  published and while the interning window is shut, so the tree declines
+  them. The rest is 0.24 M.
+- The 17 constant-evaluation runs (3.22 M) are never the typer's.
+- 92% of the machine Ir still left under the pilot is declines and misses
+  inside typed bodies.
+
 For the typer's `++` and `--` rule (`c_ast_types_update`), proposed by the
 decline census in audit
 [`2026-10-11T093336Z`](../../performance-audits/2026-10-11T093336Z.md), these
@@ -1528,5 +1584,19 @@ candidate branches from. The budgets:
 
 If the gain budget fails, no code ships, and the audit and #3102 record the
 negative result.
+
+The `++` and `--` rule's hosted census is
+[`2026-10-11T101413Z`](../../performance-audits/2026-10-11T101413Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. Objects are byte-identical across the four
+  arms at `-g0` and `-g`.
+- On the pilot the rule removes 14.99 M instructions (−0.162%): machine runs
+  from queries fall from 28,054 to 23,760, and tree declines from 24,919 to
+  20,625. The eager pass grows by 0.83 M.
+- The default path is −0.0019% on `-fsyntax-only` and −0.0015% on `-c`.
+- The 17 machine runs touching `++` or `--` that append rows (23 rows) are
+  the same with and without the rule; each declines for a qualified member
+  or an array operand that decays.
+- Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
