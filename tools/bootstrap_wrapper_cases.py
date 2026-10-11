@@ -248,9 +248,18 @@ class CaseProcess(bootstrap.WrapperProcess):
                 self.cleaned = False
                 raise
             finally:
-                if tree is not None:
-                    tree.close()
-                self.cleanup_seconds += time.monotonic() - started
+                try:
+                    if tree is not None:
+                        tree.close()
+                except Exception as error:
+                    if self.descendant_cleanup_error is not None:
+                        error = RuntimeError("bootstrap descendant cleanup failures: " +
+                                             repr([self.descendant_cleanup_error, error]))
+                    self.descendant_cleanup_error = error
+                    self.cleaned = False
+                    raise error
+                finally:
+                    self.cleanup_seconds += time.monotonic() - started
 
     def finish(self, timeout_seconds=None):
         started = time.monotonic()

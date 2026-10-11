@@ -267,7 +267,10 @@ class SchedulerTests(unittest.TestCase):
     def test_windows_tree_capture_failure_still_reaps_direct_child(self):
         self.check_windows_cleanup_order(capture_error=RuntimeError("tree-capture-marker"))
 
-    def check_windows_cleanup_order(self, wait_error=None, capture_error=None):
+    def test_windows_handle_close_failure_keeps_the_owner_failed(self):
+        self.check_windows_cleanup_order(close_error=RuntimeError("handle-close-marker"))
+
+    def check_windows_cleanup_order(self, wait_error=None, capture_error=None, close_error=None):
         events = []
         tree = mock.Mock()
         tree.handles = [(24, "owned-descendant")]
@@ -277,7 +280,11 @@ class SchedulerTests(unittest.TestCase):
                 events.append(("wait", deadline))
                 raise wait_error
             tree.wait_until.side_effect = failed_wait
-        tree.close.side_effect = lambda: events.append(("close",))
+        def close_tree():
+            events.append(("close",))
+            if close_error is not None:
+                raise close_error
+        tree.close.side_effect = close_tree
         child = scheduler.CaseProcess.__new__(scheduler.CaseProcess)
         child.cleanup_lock = threading.RLock()
         child.cleanup_seconds = 0.0
@@ -296,7 +303,7 @@ class SchedulerTests(unittest.TestCase):
              mock.patch.object(scheduler, "WindowsFixtureTree", factory), \
              mock.patch.object(scheduler.bootstrap.WrapperProcess, "cleanup", direct_cleanup), \
              mock.patch.object(scheduler.time, "monotonic", return_value=100):
-            error = wait_error or capture_error
+            error = wait_error or capture_error or close_error
             if error is not None:
                 with self.assertRaisesRegex(RuntimeError, str(error)):
                     child.cleanup()
@@ -310,12 +317,12 @@ class SchedulerTests(unittest.TestCase):
             else:
                 child.cleanup()  # Already cleaned; do not recapture stale numeric PIDs.
         factory.assert_called_once_with(123, child.process._handle)
-        self.assertEqual(child.descendant_waited_pids, [] if error is not None else [24])
+        self.assertEqual(child.descendant_waited_pids, [] if wait_error or capture_error else [24])
         expected = [("direct",)]
         if capture_error is None:
             expected += [("wait", 100 + scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS), ("close",)]
         expected += [("fixture",)]
-        if wait_error is None and capture_error is None:
+        if error is None:
             expected += [("direct",)]
         self.assertEqual(events, expected)
 
