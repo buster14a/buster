@@ -10498,10 +10498,26 @@ BUSTER_GLOBAL_LOCAL ObjectArchive object_archive_read_core(Arena* arena, ByteSli
                             // Without a ranlib index, read only symbol/name
                             // metadata from each descriptor. Payload and
                             // invocation-target checks still wait for selection.
+                            // Unreadable metadata rejects the archive, naming the
+                            // member: skipping it could let a later member satisfy
+                            // a symbol the skipped one defines first (#1319).
                             for (u32 member = 0; member < result.object_count && result.error == OBJECT_ERROR_NONE; member += 1)
                             {
                                 result.objects[member] = object_archive_member_symbols(arena, result.member_bytes[member], result.objects[member].target);
                                 result.error = result.objects[member].error;
+                                String8 member_name = result.member_names[member];
+                                if (result.error != OBJECT_ERROR_NONE)
+                                {
+                                    result.failed_member = member;
+                                    if (member_name.length <= UINT64_MAX - 128 &&
+                                        object_reader_arena_can_allocate_bytes(arena, member_name.length + 128, BUSTER_ALIGN_OF(char8)))
+                                    {
+                                        String8 reason = result.error == OBJECT_ERROR_CAPACITY ? S8("symbol table exceeds reader capacity")
+                                                                                               : S8("unreadable symbol table");
+                                        result.diagnostic = string_format(arena, S8("member {S8}: {S8} in an archive without a symbol index"),
+                                                                          member_name, reason);
+                                    }
+                                }
                             }
                         }
                     }

@@ -1232,10 +1232,24 @@ and COFF members count their forms of the same definitions -- external `N_ABS`,
 `N_INDR` and `IMAGE_SYM_ABSOLUTE` symbols, and commons (an undefined external with a
 non-zero value) -- the same way (#1243).
 
+An unindexed archive is accepted, unlike GNU ld's "archive has no index", but
+every member's symbol table must be readable. Selection walks members in archive
+order, so skipping an unreadable member could let a later member satisfy a symbol
+the skipped one defines first and silently change the link. One unreadable
+member therefore rejects the whole archive, even when the link would select only
+other members: `object_archive_read_link` sets `failed_member` and a diagnostic
+naming the member, and the driver reports `could not read archive <path>: member
+<name>: unreadable symbol table in an archive without a symbol index`. Running
+`ranlib` over the archive defers the member's validation to selection, as for any
+indexed archive (#1319).
+
 `compiler_driver_archive_test_lazy` exercises all three object formats, 32/64-bit
 GNU and BSD indexes, BSD extended names, unindexed input, transitive dependencies,
 no-selected-member archives, a required incompatible member, duplicate providers,
-weak references and repeated occurrences. A separate valid ELF `R_X86_64_SIZE64`
+weak references and repeated occurrences.
+`compiler_driver_archive_test_unindexed_unreadable_member` covers the unindexed
+refusal through the reader and both positional and `-l` driver inputs, with an
+indexed control that selects the valid member and leaves the bad one unread. A separate valid ELF `R_X86_64_SIZE64`
 control verifies that an irrelevant same-target unsupported relocation is deferred
 and its selected member still fails.
 
