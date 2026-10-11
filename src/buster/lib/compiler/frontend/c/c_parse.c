@@ -25414,10 +25414,10 @@ BUSTER_C_INTERNAL bool c_parse_label_address_prefix_with_typedef_at(CParseResult
     {
         for (u32 scan = index - 1; scan >= body_start; scan -= 1)
         {
-    #if BUSTER_INCLUDE_TESTS
-        c_logical_label_type_work += 1;
+#if BUSTER_INCLUDE_TESTS
+            c_logical_label_type_work += 1;
 #endif
-        CToken token = preprocess->tokens[scan];
+            CToken token = preprocess->tokens[scan];
             if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
                 depth += 1;
@@ -25454,6 +25454,9 @@ BUSTER_C_INTERNAL bool c_parse_label_address_prefix_with_typedef_at(CParseResult
     bool tag_name = false;
     for (u32 scan = open + 1; scan < index - 1; scan += 1)
     {
+#if BUSTER_INCLUDE_TESTS
+        c_logical_label_type_work += 1;
+#endif
         CToken token = preprocess->tokens[scan];
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
@@ -25499,10 +25502,11 @@ BUSTER_C_SHARED bool c_test_parse_label_address_prefix_paths_agree(CParseResult*
                                                                     CScopeId scope, u32 body_start, u32 index)
 {
     u32 open = c_parse_label_address_opener(result, preprocess, body_start, index);
+    bool possible = c_parse_label_address_group_may_be_type(result, open, index - 1);
     bool proven_agrees = c_parse_label_address_prefix_proven_at(preprocess, body_start, index, UINT32_MAX) ==
-                         c_parse_label_address_prefix_proven_at(preprocess, body_start, index, open);
+                         (possible && c_parse_label_address_prefix_proven_at(preprocess, body_start, index, open));
     bool typedef_agrees = c_parse_label_address_prefix_with_typedef_at(result, preprocess, scope, body_start, index, UINT32_MAX) ==
-                          c_parse_label_address_prefix_with_typedef_at(result, preprocess, scope, body_start, index, open);
+                          (possible && c_parse_label_address_prefix_with_typedef_at(result, preprocess, scope, body_start, index, open));
     return proven_agrees && typedef_agrees;
 }
 #endif
