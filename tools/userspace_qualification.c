@@ -99,6 +99,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
         bool compile = false;
         bool preprocess = false;
         bool query = false;
+        bool relocatable = false;
         String8 output = {0};
         String8 source = {0};
         for (u64 i = 7; i < arguments.length; i += 1)
@@ -106,6 +107,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
             String8 arg = arguments.pointer[i];
             compile = compile || string_equal(arg, S8("-c"));
             preprocess = preprocess || string_equal(arg, S8("-E"));
+            relocatable = relocatable || string_equal(arg, S8("-r")) || string_equal(arg, S8("-Wl,-r"));
             query = query || string_equal(arg, S8("--version")) || string_equal(arg, S8("-dumpmachine")) ||
                     string_equal(arg, S8("-dumpversion")) || string_starts_with_sequence(arg, S8("-print-"));
             if (string_equal(arg, S8("-o")) && i + 1 < arguments.length)
@@ -120,7 +122,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
         bool target_c = !host && compile && source.length && output.length && string_ends_with_sequence(output, S8(".o")) &&
                         !string_starts_with_sequence(source, S8("tmp.")) && !string_equal(source, S8("bb_libtest.c"));
         bool buster = candidate && compile;
-        bool link = !compile && !preprocess && !query;
+        bool link = !compile && !preprocess && !query && !relocatable;
         String8 action = path_join(arena, evidence, string_format(arena, S8("action-{u64}"), os_get_current_process_id()));
         valid = summary_self_test_directory_claim(action) == SUMMARY_DIRECTORY_CLAIMED;
         String8List command = {0};
@@ -253,7 +255,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
             }
         }
         String8 record = string_format(arena, S8("role={S8}\ncompiler={S8}\nsource={S8}\nsource_sha256={S8}\noutput={S8}\nobject_sha256={S8}\nstatus={S8}\n"),
-                                       host ? S8("external-host-generator") : target_c ? S8("target-c") : preprocess || query ? S8("external-generator") : link ? S8("external-link") : S8("compiler-probe"),
+                                       host ? S8("external-host-generator") : target_c ? S8("target-c") : preprocess || query ? S8("external-generator") : link ? S8("external-link") : relocatable ? S8("external-relocatable-link") : S8("compiler-probe"),
                                        buster ? S8("buster") : S8("clang"), source, source_hash, output, object_hash,
                                        ran.result == PROCESS_RESULT_SUCCESS && valid ? S8("pass") : S8("fail"));
         valid = clang_suite_write(arena, path_join(arena, action, S8("record.txt")), record) && valid;
@@ -482,7 +484,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
                                                 driver, name, ide, musl, musl_output, actions);
                 // Upstream expands CC through its shell. Reject unsafe paths
                 // instead of treating them as shell code.
-                String8 paths[] = {driver, ide, musl, musl_output, actions};
+                String8 paths[] = {driver, ide, source, musl, musl_output, actions};
                 for (u64 i = 0; valid && i < BUSTER_ARRAY_LENGTH(paths); i += 1)
                 {
                     for (u64 j = 0; valid && j < paths[i].length; j += 1)
