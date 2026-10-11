@@ -992,7 +992,9 @@ fixture as well as compiling both architectures.
   natural alignment, and places anonymous arguments in aligned stack slots.
   Both platforms use public eight-byte pointer lists. `va_copy` copies eight
   bytes; `va_arg` selects ordinary MIR loads, alignment, cursor stores and
-  exact aggregate copies for the supported values through sixteen bytes.
+  exact aggregate copies. Values through sixteen bytes are read inline. Larger
+  indirect aggregates consume one pointer and copy the pointee; Darwin also
+  reads larger by-value HFAs/HVAs from aligned inline stack slots.
   `compiler_driver_test_aarch64_platform_variadic` requires zero fallback
   for every MIR allocator and frontend form, then executes native standalone
   and mixed-compiler callers, callees and public-list consumers on matching

@@ -60,9 +60,10 @@
   the same item at N and 16N copies and requires counted work to stay constant
   or linear. Use `c_type_layout_test_scales` for semantic validation passes;
   see [whole-unit pass scaling](frontend/semantic-validation.md#whole-unit-pass-scaling).
-- C frontend and driver fixtures live under `tests/` and use `.c`, `.h`, native
-  object, archive, and shell-script inputs. Keep fixture paths relative to the
-  repository root because tests intentionally exercise the real file loader.
+- Root-corpus C frontend and driver fixtures live under `tests/`; selected
+  source-tree fixtures live under `src/buster/tests/.../fixtures/`. Keep fixture
+  paths relative to the repository root because tests intentionally exercise
+  the real file loader.
 - The Linux x86-64 parameter-alignment driver regression uses a separately
   host-compiled caller and observer with the Buster-compiled callee at every
   registered optimization level and allocator. Its expanded caller, callee
