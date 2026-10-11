@@ -25218,6 +25218,14 @@ BUSTER_C_INTERNAL void c_parse_bind_function_static_asserts(CTypeParseMachine* m
 BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                             CScopeId root_scope, u32 start, u32 end, bool is_file_scope);
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_logical_label_type_work;
+u64 c_test_logical_label_type_work(void)
+{
+    return c_logical_label_type_work;
+}
+#endif
+
 BUSTER_C_INTERNAL bool c_parse_label_address_prefix_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 open)
 {
     if (body_start >= preprocess->token_count || index >= preprocess->token_count ||
@@ -25287,6 +25295,9 @@ BUSTER_C_INTERNAL bool c_parse_label_address_prefix_proven_at(CPreprocessResult 
             bool tag_name = false;
             for (u32 scan = open + 1; scan < index - 1; scan += 1)
             {
+#if BUSTER_INCLUDE_TESTS
+                c_logical_label_type_work += 1;
+#endif
                 CToken candidate = preprocess->tokens[scan];
                 if (candidate.kind == C_TOKEN_IDENTIFIER)
                 {
@@ -25368,7 +25379,10 @@ BUSTER_C_INTERNAL bool c_parse_label_address_prefix_with_typedef_at(CParseResult
     {
         for (u32 scan = index - 1; scan >= body_start; scan -= 1)
         {
-            CToken token = preprocess->tokens[scan];
+    #if BUSTER_INCLUDE_TESTS
+        c_logical_label_type_work += 1;
+#endif
+        CToken token = preprocess->tokens[scan];
             if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
                 depth += 1;

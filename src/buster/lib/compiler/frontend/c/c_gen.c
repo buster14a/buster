@@ -23383,6 +23383,14 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call(CIntegerIrBuilder* builder, u32 token
 // inner call by its first token follows that link outward before consuming.
 // A call still being emitted is its own callee's context and stays excluded,
 // which is what keeps the callee lowering consuming the inner value.
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_logical_call_reference_work;
+u64 c_test_logical_call_reference_work(void)
+{
+    return c_logical_call_reference_work;
+}
+#endif
+
 #if BUSTER_REFERENCE_CHECKS
 // The scan the chain replaces, kept as the reference: a Debug or sanitized
 // build checks every step of every walk against it.  It is not compiled into the Release
@@ -23393,6 +23401,9 @@ BUSTER_C_INTERNAL void c_ir_prepared_call_chained_check(CIntegerIrBuilder* build
     u32 reference = UINT32_MAX;
     for (u32 index = 0; index < builder->prepared_call_count && reference == UINT32_MAX; index += 1)
     {
+#if BUSTER_INCLUDE_TESTS
+        c_logical_call_reference_work += 1;
+#endif
         CIrPreparedCall* candidate = builder->prepared_calls + index;
         if (candidate != call && candidate->token_index == call->open_index && candidate->close_index < end && !candidate->emitting)
         {
