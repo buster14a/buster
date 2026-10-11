@@ -65,8 +65,9 @@
 // share target/sysroot search roots with static-library lookup; explicit -L
 // roots come first. compiler_driver_mach_library_locate resolves Apple dylibs
 // and TAPI stubs to their install names and versions.
-// compiler_driver_elf_linker_script classifies located requested scripts for
-// explicit refusal; no script contents are evaluated or skipped as absent.
+// compiler_driver_elf_script_members validates bounded INPUT/GROUP/AS_NEEDED
+// scripts; compiler_driver_elf_requested_libraries expands them with a capped
+// explicit worklist and retains DSO SONAME identities in member order.
 // compiler_driver_elf_compiler_runtime adds existing libgcc_s on demand for
 // unresolved half/quad helper calls after explicit library exports are known.
 // compiler_driver_elf_cpu_runtime selects libgcc.a's CPU-feature members
@@ -3612,6 +3613,53 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
             version_definition_count = definition_count;
         }
     }
+    // SHT_DYNAMIC links its own string table; DT_SONAME, when present,
+    // supplies loader identity independently of the filename used to find it.
+    String8 soname = {0};
+    bool identity_valid = true;
+    for (u16 section_index = 0; header_valid && identity_valid && section_index < section_count; section_index += 1)
+    {
+        u64 section = section_table + (u64)section_index * DRIVER_ELF_SECTION_HEADER_SIZE;
+        u32 section_type = 0;
+        u32 strings_index = 0;
+        u64 offset = 0;
+        u64 size = 0;
+        u64 strings_offset = 0;
+        u64 strings_size = 0;
+        compiler_driver_read_u32(bytes, section + 4, &section_type);
+        if (section_type == 6)
+        {
+            identity_valid = compiler_driver_read_u64(bytes, section + 24, &offset) &&
+                             compiler_driver_read_u64(bytes, section + 32, &size) &&
+                             compiler_driver_read_u32(bytes, section + 40, &strings_index) && strings_index < section_count &&
+                             offset <= bytes.length && size <= bytes.length - offset && size % 16 == 0;
+            u64 strings = section_table + (u64)strings_index * DRIVER_ELF_SECTION_HEADER_SIZE;
+            identity_valid = identity_valid && compiler_driver_read_u64(bytes, strings + 24, &strings_offset) &&
+                             compiler_driver_read_u64(bytes, strings + 32, &strings_size) &&
+                             strings_offset <= bytes.length && strings_size <= bytes.length - strings_offset;
+            for (u64 entry = 0; identity_valid && entry < size; entry += 16)
+            {
+                u64 tag = 0;
+                u64 name = 0;
+                compiler_driver_read_u64(bytes, offset + entry, &tag);
+                if (!tag) { break; }
+                if (tag == 14)
+                {
+                    compiler_driver_read_u64(bytes, offset + entry + 8, &name);
+                    u64 length = 0;
+                    while (name < strings_size && length < strings_size - name && bytes.pointer[strings_offset + name + length])
+                    {
+                        length += 1;
+                    }
+                    identity_valid = name < strings_size && length && length < strings_size - name && !soname.length;
+                    if (identity_valid)
+                    {
+                        soname = (String8){.pointer = (char8*)bytes.pointer + strings_offset + name, .length = length};
+                    }
+                }
+            }
+        }
+    }
     // .gnu.version_d as an index-keyed table.  The definitions form a linked
     // list whose entries carry their own index, so the highest index decides
     // how large the table has to be; both walks are over the version count,
@@ -3668,7 +3716,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
     }
     // Export arrays use u32 counts and the link indexes reserve UINT32_MAX
     // as an empty entry. Check before allocating or narrowing the ELF count.
-    if (symbol_size && symbol_size / DRIVER_ELF_SYMBOL_SIZE < UINT32_MAX && !version_symbols_invalid &&
+    if (identity_valid && symbol_size && symbol_size / DRIVER_ELF_SYMBOL_SIZE < UINT32_MAX && !version_symbols_invalid &&
         (!version_symbols_present || (version_symbol_size % sizeof(u16) == 0 &&
                                      version_symbol_size / sizeof(u16) >= symbol_size / DRIVER_ELF_SYMBOL_SIZE)))
     {
@@ -3748,6 +3796,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
         // import.  The ELF export list is `versioned_symbols` itself rather
         // than a second copy of the same names in `exported_symbols`, which
         // stays the PE side's.
+        if (soname.length) { library->name = string_duplicate_arena(arena, soname, true); }
         library->exports_known = true;
         result = true;
     }
@@ -4444,8 +4493,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_system_library(String8 requested)
     return result;
 }
 
-// GNU ld scripts use C comments as whitespace. Only the initial command is
-// recognized here: the driver diagnoses unsupported input, never evaluates it.
+// GNU ld scripts use C comments as whitespace. Classification also retains
+// unsupported commands so a located script cannot disappear during lookup.
 BUSTER_GLOBAL_LOCAL u64 compiler_driver_linker_script_skip_trivia(ByteSlice bytes, u64 cursor)
 {
     bool scanning = true;
@@ -4500,8 +4549,110 @@ bool compiler_driver_elf_linker_script(ByteSlice bytes)
     return result;
 }
 
+// Parse the complete supported grammar before admitting any member. Parentheses
+// are data, never recursive calls. AS_NEEDED deliberately behaves as INPUT.
+bool compiler_driver_elf_script_members(ByteSlice bytes, String8* members, u32* count)
+{
+    bool valid = bytes.pointer && bytes.length <= COMPILER_DRIVER_ELF_SCRIPT_BYTES;
+    u32 depth = 0;
+    u32 member_count = 0;
+    u64 cursor = 0;
+    bool saw_command = false;
+    while (valid && cursor < bytes.length)
+    {
+        u64 trivia_start = cursor;
+        cursor = compiler_driver_linker_script_skip_trivia(bytes, cursor);
+        // The classifier treats an unterminated comment as end of input.
+        // The parser must distinguish it from a complete trailing comment.
+        for (u64 offset = trivia_start; valid && offset + 1 < cursor; offset += 1)
+        {
+            if (bytes.pointer[offset] == '/' && bytes.pointer[offset + 1] == '*')
+            {
+                offset += 2;
+                while (offset + 1 < cursor && !(bytes.pointer[offset] == '*' && bytes.pointer[offset + 1] == '/')) { offset += 1; }
+                valid = offset + 1 < cursor;
+                offset += 1;
+            }
+        }
+        if (!valid || cursor == bytes.length) { break; }
+        u8 byte = bytes.pointer[cursor];
+        if (byte == ')')
+        {
+            valid = depth != 0;
+            if (valid) { depth -= 1; }
+            cursor += 1;
+        }
+        else if (byte == ',' || byte == ';')
+        {
+            valid = byte == ',' ? depth != 0 : depth == 0;
+            cursor += 1;
+        }
+        else
+        {
+            u64 start = cursor;
+            bool quoted = byte == '"';
+            if (quoted)
+            {
+                cursor += 1;
+                start = cursor;
+                while (cursor < bytes.length && bytes.pointer[cursor] && bytes.pointer[cursor] != '"') { cursor += 1; }
+                valid = cursor < bytes.length && bytes.pointer[cursor] == '"';
+            }
+            else
+            {
+                bool scanning = true;
+                while (scanning && cursor < bytes.length)
+                {
+                    byte = bytes.pointer[cursor];
+                    scanning = byte && byte != '(' && byte != ')' && byte != ',' && byte != ';' &&
+                               byte != ' ' && byte != '\t' && byte != '\r' && byte != '\n' && byte != '\v' && byte != '\f' &&
+                               !(byte == '/' && bytes.length - cursor >= 2 && bytes.pointer[cursor + 1] == '*');
+                    if (scanning) { cursor += 1; }
+                }
+            }
+            String8 token = {.pointer = (char8*)bytes.pointer + start, .length = cursor - start};
+            if (quoted && valid) { cursor += 1; }
+            u64 next = compiler_driver_linker_script_skip_trivia(bytes, cursor);
+            bool command = !quoted && next < bytes.length && bytes.pointer[next] == '(';
+            if (valid && command)
+            {
+                valid = (string_equal(token, S8("INPUT")) || string_equal(token, S8("GROUP")) || string_equal(token, S8("AS_NEEDED"))) &&
+                        depth < COMPILER_DRIVER_ELF_SCRIPT_DEPTH;
+                if (valid) { depth += 1; saw_command = true; cursor = next + 1; }
+            }
+            else if (valid)
+            {
+                valid = depth && token.length && member_count < COMPILER_DRIVER_ELF_SCRIPT_MEMBERS &&
+                        !compiler_driver_archive_input(token) &&
+                        !(token.pointer[0] == '-' && (!string_starts_with_sequence(token, S8("-l")) || token.length <= 2 || string_equal(token, S8("-l:"))));
+                for (u64 index = 0; valid && index < token.length; index += 1)
+                {
+                    u8 character = (u8)token.pointer[index];
+                    valid = character >= 32 && character != '{' && character != '}' && character != '*' &&
+                            character != '?' && character != '\\' && character != '"';
+                }
+                if (valid) { members[member_count++] = token; }
+            }
+        }
+    }
+    valid = valid && saw_command && !depth;
+    *count = valid ? member_count : 0;
+    return valid;
+}
+
+typedef struct CompilerDriverElfScriptWork CompilerDriverElfScriptWork;
+struct CompilerDriverElfScriptWork
+{
+    String8 name;
+    String8 directory;
+    String8 script_path;
+    u32 depth;
+    bool literal;
+};
+
 BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, CompilerDriverInvocation invocation, bool collect_data,
-                                                             NativeDynamicLibrary* library, FileMapRead* export_map, String8* script_path)
+                                                             NativeDynamicLibrary* library, FileMapRead* export_map, String8* script_path,
+                                                             String8 member_directory, bool literal)
 {
     u16 machine = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? 183 : 62;
     String8 roots[7];
@@ -4509,25 +4660,29 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
     *export_map = (FileMapRead){0};
     bool found = false;
     bool script_found = false;
-    u32 candidate_count = invocation.library_path_count + root_count + 1;
+    bool absolute = literal && library->name.length && library->name.pointer[0] == '/';
+    u32 local_count = literal ? (member_directory.length ? 2u : 1u) : 0u;
+    u32 candidate_count = absolute ? 1u : local_count + invocation.library_path_count + root_count + (literal ? 0u : 1u);
     for (u32 path_index = 0; !found && !script_found && path_index < candidate_count; path_index += 1)
     {
-        // Every candidate is zero-terminated: os_file_open takes the path as a
-        // C string, and the bare library name is one this driver built with a
-        // length and no terminator of its own.
-        String8 path = path_index < invocation.library_path_count
-                           ? string_format_z(arena, S8("{S8}/{S8}"), invocation.library_paths[path_index], library->name)
-                       : path_index < invocation.library_path_count + root_count
-                           ? string_format_z(arena, S8("{S8}/{S8}"), roots[path_index - invocation.library_path_count], library->name)
-                           : string_duplicate_arena(arena, library->name, true);
+        String8 path;
+        if (absolute || (literal && path_index == local_count - 1) || (!literal && path_index == candidate_count - 1))
+        {
+            path = string_duplicate_arena(arena, library->name, true);
+        }
+        else
+        {
+            u32 search_index = path_index - local_count;
+            String8 root = literal && member_directory.length && !path_index ? member_directory
+                         : search_index < invocation.library_path_count ? invocation.library_paths[search_index]
+                         : roots[search_index - invocation.library_path_count];
+            path = string_format_z(arena, S8("{S8}/{S8}"), root, library->name);
+        }
         FileMapRead file = file_map_read(arena, path, (FileReadOptions){0});
         found = file.bytes.pointer && compiler_driver_elf_dynamic_symbols(arena, file.bytes, machine, collect_data, library);
         script_found = script_path && !found && compiler_driver_elf_linker_script(file.bytes);
-        if (script_found && script_path)
-        {
-            *script_path = path;
-        }
-        if (found)
+        if (script_found) { *script_path = path; }
+        if (found || script_found)
         {
             *export_map = file;
         }
@@ -4543,6 +4698,134 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
             file_map_unmap(file);
         }
     }
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_elf_requested_libraries(Arena* arena, CompilerDriverInvocation invocation, bool imports_data,
+                                                                 NativeDynamicLibrary* seeds, String8* requests, u32 seed_count,
+                                                                 CompilerDriverDynamicLibraries* result)
+{
+    u32 capacity = seed_count + 1;
+    NativeDynamicLibrary* libraries = arena_allocate(arena, NativeDynamicLibrary, capacity);
+    FileMapRead* maps = arena_allocate(arena, FileMapRead, capacity + 1);
+    u32 count = 0;
+    u32 map_count = result->export_map_count;
+    memcpy(maps, result->export_maps, (u64)map_count * sizeof(*maps));
+    CompilerDriverElfScriptWork* stack = 0;
+    String8* members = 0;
+    u32 expanded_members = 0;
+    for (u32 seed_index = 0; !result->missing_request.length && seed_index < seed_count; seed_index += 1)
+    {
+        CompilerDriverElfScriptWork seed = {.name = seeds[seed_index].name};
+        CompilerDriverElfScriptWork* work = stack ? stack : &seed;
+        work[0] = seed;
+        u32 pending = 1;
+        while (pending && !result->missing_request.length)
+        {
+            CompilerDriverElfScriptWork item = work[--pending];
+            NativeDynamicLibrary library = {.name = item.name};
+            FileMapRead map = {0};
+            String8 script_path = {0};
+            compiler_driver_elf_library_exports(arena, invocation, imports_data, &library, &map, &script_path, item.directory, item.literal);
+            if (script_path.length)
+            {
+                if (!stack)
+                {
+                    stack = arena_allocate(arena, CompilerDriverElfScriptWork, COMPILER_DRIVER_ELF_SCRIPT_MEMBERS);
+                    members = arena_allocate(arena, String8, COMPILER_DRIVER_ELF_SCRIPT_MEMBERS);
+                    work = stack;
+                    capacity = seed_count + COMPILER_DRIVER_ELF_SCRIPT_MEMBERS + 1;
+                    NativeDynamicLibrary* grown_libraries = arena_allocate(arena, NativeDynamicLibrary, capacity);
+                    FileMapRead* grown_maps = arena_allocate(arena, FileMapRead, capacity + 1);
+                    memcpy(grown_libraries, libraries, (u64)count * sizeof(*libraries));
+                    memcpy(grown_maps, maps, (u64)map_count * sizeof(*maps));
+                    libraries = grown_libraries;
+                    maps = grown_maps;
+                }
+                u32 member_count = 0;
+                bool valid = item.depth < COMPILER_DRIVER_ELF_SCRIPT_DEPTH &&
+                             compiler_driver_elf_script_members(map.bytes, members, &member_count) &&
+                             member_count <= COMPILER_DRIVER_ELF_SCRIPT_MEMBERS - expanded_members &&
+                             member_count <= COMPILER_DRIVER_ELF_SCRIPT_MEMBERS - pending;
+                if (valid)
+                {
+                    expanded_members += member_count;
+                    String8 directory = script_path;
+                    while (directory.length && directory.pointer[directory.length - 1] != '/') { directory.length -= 1; }
+                    if (directory.length) { directory.length -= 1; }
+                    // GNU ld rebases absolute members only for a script inside
+                    // the supplied sysroot. Compare canonical directory paths.
+                    String8 absolute_script = os_path_absolute(arena, script_path, false);
+                    String8 absolute_sysroot = invocation.sysroot.length ? os_path_absolute(arena, invocation.sysroot, false) : (String8){0};
+                    while (absolute_sysroot.length > 1 && absolute_sysroot.pointer[absolute_sysroot.length - 1] == '/') { absolute_sysroot.length -= 1; }
+                    bool sysrooted = absolute_sysroot.length && string_starts_with_sequence(absolute_script, absolute_sysroot) &&
+                                     absolute_script.length > absolute_sysroot.length &&
+                                     (absolute_sysroot.length == 1 || absolute_script.pointer[absolute_sysroot.length] == '/');
+                    for (u32 index = member_count; index; index -= 1)
+                    {
+                        String8 name = members[index - 1];
+                        bool named = string_starts_with_sequence(name, S8("-l"));
+                        if (named)
+                        {
+                            name.pointer += 2;
+                            name.length -= 2;
+                            bool exact = name.pointer[0] == ':';
+                            name = exact ? (String8){.pointer = name.pointer + 1, .length = name.length - 1}
+                                         : string_format(arena, S8("lib{S8}.so"), name);
+                        }
+                        else if ((sysrooted && name.pointer[0] == '/') || name.pointer[0] == '=')
+                        {
+                            bool forced = name.pointer[0] == '=';
+                            if (forced) { name.pointer += 1; name.length -= 1; }
+                            name = string_format(arena, S8("{S8}{S8}{S8}"), invocation.sysroot,
+                                                 name.length && name.pointer[0] == '/' ? S8("") : S8("/"), name);
+                        }
+                        else if (string_starts_with_sequence(name, S8("$SYSROOT")))
+                        {
+                            name.pointer += 8;
+                            name.length -= 8;
+                            name = string_format(arena, S8("{S8}{S8}"), invocation.sysroot, name);
+                        }
+                        work[pending++] = (CompilerDriverElfScriptWork){
+                            .name = string_duplicate_arena(arena, name, true), .directory = directory,
+                            .script_path = script_path, .depth = item.depth + 1, .literal = !named,
+                        };
+                    }
+                }
+                else
+                {
+                    result->missing_request = requests[seed_index];
+                    result->unsupported_script_path = script_path;
+                }
+                file_map_unmap(map);
+            }
+            else if (!library.exports_known)
+            {
+                result->missing_request = requests[seed_index];
+                // Archives, including -l:FILE.a, cannot be admitted as DSOs.
+                if (compiler_driver_archive_input(item.name)) { result->unsupported_script_path = item.script_path; }
+            }
+            else
+            {
+                bool duplicate = false;
+                for (u32 index = 0; !duplicate && index < count; index += 1) { duplicate = string_equal(libraries[index].name, library.name); }
+                if (duplicate)
+                {
+                    file_map_unmap(map);
+                }
+                else
+                {
+                    // Without DT_SONAME, GNU ld retains a literal member's
+                    // path (bare members keep their original spelling).
+                    libraries[count++] = library;
+                    maps[map_count++] = map;
+                }
+            }
+        }
+    }
+    result->pointer = libraries;
+    result->count = count;
+    result->export_maps = maps;
+    result->export_map_count = map_count;
 }
 
 BUSTER_GLOBAL_LOCAL void compiler_driver_dynamic_libraries_release(CompilerDriverDynamicLibraries* libraries)
@@ -4981,7 +5264,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_compiler_runtime(Arena* arena, Comp
                 NativeDynamicLibrary* runtime = libraries->pointer + runtime_index;
                 *runtime = (NativeDynamicLibrary){.name = S8("libgcc_s.so.1")};
                 FileMapRead* export_map = libraries->export_maps + libraries->export_map_count;
-                compiler_driver_elf_library_exports(arena, invocation, imports_data, runtime, export_map, 0);
+                compiler_driver_elf_library_exports(arena, invocation, imports_data, runtime, export_map, 0, (String8){0}, false);
                 libraries->export_map_count += export_map->bytes.pointer != 0;
                 provider = runtime;
                 provided = compiler_driver_elf_library_helper_provider(runtime, symbol->name);
@@ -5177,25 +5460,11 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         result.export_maps = arena_allocate(arena, FileMapRead, count + 2);
         result.runtime.name = S8("libc.so.6");
         FileMapRead* export_map = result.export_maps + result.export_map_count;
-        compiler_driver_elf_library_exports(arena, invocation, imports_data, &result.runtime, export_map, 0);
+        compiler_driver_elf_library_exports(arena, invocation, imports_data, &result.runtime, export_map, 0, (String8){0}, false);
         result.export_map_count += export_map->bytes.pointer != 0;
-        for (u32 index = 0; index < count; index += 1)
-        {
-            export_map = result.export_maps + result.export_map_count;
-            String8 script_path = {0};
-            compiler_driver_elf_library_exports(arena, invocation, imports_data, &libraries[index], export_map, &script_path);
-            result.export_map_count += export_map->bytes.pointer != 0;
-            // The scan walked every search directory the loader would, so a
-            // library it did not find is one the produced executable could
-            // never load -- and one the archive search above did not satisfy
-            // statically either, or the entry would not be here.  Record the
-            // first such request for the caller to refuse the link with.
-            if (!libraries[index].exports_known && requests[index].length && !result.missing_request.length)
-            {
-                result.missing_request = requests[index];
-                result.unsupported_script_path = script_path;
-            }
-        }
+        compiler_driver_elf_requested_libraries(arena, invocation, imports_data, libraries, requests, count, &result);
+        libraries = result.pointer;
+        count = result.count;
     }
     result.pointer = libraries;
     result.count = count;
@@ -8327,7 +8596,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     // Count both explicit entries and the target's defaults before any source
     // read, fast-path allocation or lookup; export maps also reserve libc.
     u64 library_count = (u64)invocation.library_count + invocation.framework_count;
-    u32 library_reserve = invocation.target.os == OPERATING_SYSTEM_WINDOWS ? 8u : invocation.target.os == OPERATING_SYSTEM_LINUX ? 2u : 0u;
+    u32 library_reserve = invocation.target.os == OPERATING_SYSTEM_WINDOWS ? 8u : invocation.target.os == OPERATING_SYSTEM_LINUX ? COMPILER_DRIVER_ELF_SCRIPT_MEMBERS + 3u : 0u;
     if (library_count >= (u64)UINT32_MAX - library_reserve || invocation.library_path_count > UINT32_MAX - 8u)
     {
         result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
