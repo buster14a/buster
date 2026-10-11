@@ -1140,6 +1140,7 @@ struct CIrDecodedString
 typedef struct CTypeParseFrame CTypeParseFrame;
 typedef struct CAstTypeBodyIndex CAstTypeBodyIndex;
 typedef struct CAstTypeBody CAstTypeBody;
+typedef struct CParserLocalIndex CParserLocalIndex;
 typedef struct CTypeMutation CTypeMutation;
 typedef struct CParseExpressionTypeTask CParseExpressionTypeTask;
 typedef struct CParsePromotedMemberWork CParsePromotedMemberWork;
@@ -1511,6 +1512,12 @@ struct CTypeParseMachine
     // the tree does not cover), and `ast_type_statistics` the optional counts.
     CAst const* syntax_tree;
     CAstTypeStatistics* ast_type_statistics;
+    // The block-declaration split (c_parse_local_declarations, #3102): the
+    // unit's DECLARATION nodes by first token, built before the body
+    // binding loop and cleared after it (null without a tree), and the
+    // optional counts.
+    CParserLocalIndex const* ast_locals;
+    CParserLocalStatistics* ast_local_statistics;
     CAstTypeBodyIndex* ast_bodies;
     CAstTypeBody* ast_types;
     CParseExpressionQuery* expression_queries;

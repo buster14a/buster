@@ -2120,6 +2120,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          tree.split.units, tree.split.records, tree.split.assertions, tree.split.fallbacks,
                          c_parser_tree_fallback_name(tree.split.fallbacks ? tree.split.reason : C_PARSER_TREE_FALLBACK_NONE),
                          tree.split.fallbacks ? tree.split.fallback_token : UINT32_MAX);
+            // Counts: block declarations whose declarator boundaries the tree supplied, and the ones split from tokens, by reason.
+            CParserLocalStatistics locals = tree.locals;
+            string_print(S8("C_AST_LOCALS declarations={u64} fallbacks={u64} auto_scans={u64} node={u64} list={u64} tokens={u64} comma={u64}\n"),
+                         locals.declarations, locals.fallbacks, locals.auto_scans, locals.fallback_counts[C_PARSER_LOCAL_FALLBACK_NODE],
+                         locals.fallback_counts[C_PARSER_LOCAL_FALLBACK_LIST], locals.fallback_counts[C_PARSER_LOCAL_FALLBACK_TOKENS],
+                         locals.fallback_counts[C_PARSER_LOCAL_FALLBACK_COMMA]);
         }
         if (invocation.fast_passes)
         {

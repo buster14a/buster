@@ -1443,6 +1443,42 @@ struct CAstTypeStatistics
     u64 gated;
 };
 
+// The most declarators of one block declaration the tree split holds.
+#define C_PARSER_LOCAL_SEGMENT_LIMIT 32
+
+// Why c_parse_local_declarations split a block declaration's declarators by
+// scanning its tokens although the unit has a syntax tree (GitHub #3102).
+typedef enum CParserLocalFallback
+{
+    C_PARSER_LOCAL_FALLBACK_NONE,
+    // No DECLARATION node is anchored at the declaration's first token, or
+    // its range does not end at a `;`.
+    C_PARSER_LOCAL_FALLBACK_NODE,
+    // More declarators than C_PARSER_LOCAL_SEGMENT_LIMIT.
+    C_PARSER_LOCAL_FALLBACK_LIST,
+    // The token before a later declarator is not a `,`, or the specifier
+    // parse ended past the first one.
+    C_PARSER_LOCAL_FALLBACK_TOKENS,
+    // An initializer holds a conditional whose middle operand is a comma
+    // expression, where the walker's split cuts the list.
+    C_PARSER_LOCAL_FALLBACK_COMMA,
+    C_PARSER_LOCAL_FALLBACK_COUNT,
+} CParserLocalFallback;
+
+// What the block-declaration split did over one analysis: declarations whose
+// declarator boundaries came from the tree, and the ones split from tokens
+// and why. `auto_scans` counts the tree-split declarations whose auto
+// inference precheck still ran, because an `auto` or `__auto_type` word
+// stands where it reads.
+typedef struct CParserLocalStatistics CParserLocalStatistics;
+struct CParserLocalStatistics
+{
+    u64 declarations;
+    u64 fallbacks;
+    u64 auto_scans;
+    u64 fallback_counts[C_PARSER_LOCAL_FALLBACK_COUNT];
+};
+
 typedef struct CParserResult CParserResult;
 struct CParserResult
 {
@@ -1464,6 +1500,8 @@ struct CParserResult
     CAst const* ast;
     // Optional: receives the typer's counts, added to what it already holds.
     CAstTypeStatistics* ast_type_statistics;
+    // Optional: receives the block-declaration split's counts, likewise.
+    CParserLocalStatistics* ast_local_statistics;
     u32 declaration_count;
     u32 diagnostic_count;
     u32 declaration_capacity;
@@ -2078,6 +2116,8 @@ struct CParserTreeStatistics
 BUSTER_F_DECL CParserResult c_parse_ast_from_tree(Arena* arena, CPreprocessResult preprocess, CAst const* ast, CParserTreeStatistics* statistics);
 // The CParserTreeFallback in lower case without its prefix ("none", "input", ...).
 BUSTER_F_DECL String8 c_parser_tree_fallback_name(CParserTreeFallback reason);
+// The CParserLocalFallback in lower case without its prefix ("none", "node", ...).
+BUSTER_F_DECL String8 c_parser_local_fallback_name(CParserLocalFallback reason);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 // Complete syntax and semantic analysis without constructing canonical IR.
 BUSTER_F_DECL CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax);

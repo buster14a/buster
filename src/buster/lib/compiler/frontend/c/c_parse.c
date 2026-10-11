@@ -23969,11 +23969,276 @@ BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range_core(CTypeParseMachin
                                                                    CScopeId scope, CTypeId type, u32 start, u32 count, u32* alignment_out,
                                                                    bool* request_out);
 
+// ---- the block-declaration split from the syntax tree (GitHub #3102) -------
+//
+// Under -fc-ast-pilot c_parse_local_declarations reads three facts of a block
+// declaration from its DECLARATION node instead of scanning its tokens. Every
+// type-machine call still runs on the walker's token ranges, so the type rows
+// keep the walker's order and contents. The three facts:
+// - The storage-class set. The walker folds every identifier outside the
+//   delimiters; in a declaration the tree accepts, a storage-class word stands
+//   only as a DECL_SPECIFIERS item, whose token is folded by the same test.
+// - Whether auto inference can apply. c_parse_auto_declaration_info reads
+//   the specifiers and the first declarator and answers no unless an `auto`
+//   or `__auto_type` word stands there, so it runs only when those nodes'
+//   subtrees hold one.
+// - Each declarator's segment end. The walker cuts the list at every comma
+//   outside delimiters. A declarator holds none, and an initializer holds one
+//   only as a conditional's middle operand, which is refused
+//   (C_PARSER_LOCAL_FALLBACK_COMMA). So the cuts are the `,` before each later
+//   INIT_DECLARATOR's first token and the declaration's end. Each `,` has no
+//   node; reading it back is the check that it is the one the shape requires.
+// The unit's DECLARATION nodes are hashed by their first token once, before
+// the body binding loop (c_parser_local_index_build). A declaration the split
+// refuses is scanned as before (CParserLocalFallback), and every loop here is
+// over a postorder range or a node's children; none recurses.
+
+struct CParserLocalIndex
+{
+    // Open addressing on the first token: a DECLARATION node plus one, or 0.
+    u32* slots;
+    u32 mask;
+};
+
+typedef struct CParserLocalSplit CParserLocalSplit;
+struct CParserLocalSplit
+{
+    u64 storage_class_bits;
+    // Where each segment ends: the `,` after every declarator but the last,
+    // then the declaration's end.
+    u32 segment_ends[C_PARSER_LOCAL_SEGMENT_LIMIT];
+    u32 segment_count;
+    CParserLocalFallback fallback;
+    // A DECLARATION node matched, so the storage-class set and the auto
+    // precheck come from it; and its specifiers or first declarator hold an
+    // `auto` or `__auto_type` word.
+    bool node;
+    bool auto_word;
+};
+
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 c_parser_local_slot(u32 token, u32 mask)
+{
+    return (u32)(((u64)token * 0x9E3779B97F4A7C15ull) >> 32) & mask;
+}
+
+// Every DECLARATION node of a complete tree, by its first token. `bound` caps
+// the count: each DECLARATION ends on a `;` of its own, so the unit's `;`
+// count is enough, and a node past it is only never found.
+BUSTER_C_INTERNAL CParserLocalIndex const* c_parser_local_index_build(Arena* arena, CAst const* ast, u32 bound)
+{
+    CParserLocalIndex* index = 0;
+    if (ast && ast->node_count && ast->root < ast->node_count && ast->kinds[ast->root] == C_AST_TRANSLATION_UNIT)
+    {
+        u32* found = arena_allocate(arena, u32, (u64)bound + 1);
+        u32 count = 0;
+        Simd512 declaration_kind = simd512_splat((u8)C_AST_DECLARATION);
+        for (u32 base = 0; base < ast->node_count; base += 64)
+        {
+            Mask64 valid = mask64_prefix(ast->node_count - base);
+            Mask64 hits = mask64_and(simd512_equal_u8(simd512_load_masked(ast->kinds + base, valid), declaration_kind), valid);
+            for (; hits && count < bound; hits = mask64_and(hits, hits - 1))
+            {
+                found[count++] = base + mask64_first_set(hits);
+            }
+        }
+        u32 slot_count = 64;
+        while (slot_count < count * 2)
+        {
+            slot_count *= 2;
+        }
+        index = arena_allocate(arena, CParserLocalIndex, 1);
+        index->slots = arena_allocate_zeroed(arena, u32, slot_count);
+        index->mask = slot_count - 1;
+        for (u32 entry = 0; entry < count; entry += 1)
+        {
+            u32 slot = c_parser_local_slot(ast->tokens[found[entry]], index->mask);
+            while (index->slots[slot])
+            {
+                slot = (slot + 1) & index->mask;
+            }
+            index->slots[slot] = found[entry] + 1;
+        }
+    }
+    return index;
+}
+
+// Whether the walker's split would cut the list inside this initializer: a
+// conditional whose middle operand is a comma expression. Parentheses leave
+// no node, so a parenthesized one, which the walker steps over, is refused
+// too. The common initializer holds no conditional and pays one pass over
+// its kinds.
+BUSTER_C_INTERNAL bool c_parser_local_initializer_splits(CAst const* ast, u32 initializer)
+{
+    u32 begin = c_ast_subtree_begin(ast, initializer);
+    bool conditional = false;
+    for (u32 node = begin; node <= initializer; node += 1)
+    {
+        conditional |= ast->kinds[node] == C_AST_CONDITIONAL;
+    }
+    bool splits = false;
+    for (u32 node = begin; conditional && !splits && node <= initializer; node += 1)
+    {
+        if (ast->kinds[node] == C_AST_CONDITIONAL)
+        {
+            u32 otherwise = node - 1;
+            splits = ast->kinds[otherwise - ast->extents[otherwise]] == C_AST_COMMA;
+        }
+    }
+    return splits;
+}
+
+// The first token of an INIT_DECLARATOR: the least anchor of its nodes before
+// `stop` (its initializer's subtree, which follows), less the `(` written
+// before it, which has no node.
+BUSTER_C_INTERNAL u32 c_parser_local_declarator_first(CAst const* ast, CPreprocessResult const* preprocess, u32 init_declarator, u32 stop)
+{
+    u32 first = UINT32_MAX;
+    for (u32 node = c_ast_subtree_begin(ast, init_declarator); node < stop; node += 1)
+    {
+        first = BUSTER_MIN(first, ast->tokens[node]);
+    }
+    while (first != UINT32_MAX && first > 0 && c_token_is_punctuator(&preprocess->tokens[first - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        first -= 1;
+    }
+    return first;
+}
+
+// The split of the block declaration [start, end), whose `end` is its `;`.
+BUSTER_C_INTERNAL void c_parser_local_split(CTypeParseMachine const* machine, CPreprocessResult const* preprocess, u32 start, u32 end,
+                                            CParserLocalSplit* split)
+{
+    CAst const* ast = machine->syntax_tree;
+    CParserLocalIndex const* index = machine->ast_locals;
+    split->storage_class_bits = 0;
+    split->segment_count = 0;
+    split->fallback = C_PARSER_LOCAL_FALLBACK_NODE;
+    split->node = false;
+    split->auto_word = false;
+    u32 node = C_AST_NODE_INVALID;
+    if (end < preprocess->token_count && c_token_is_punctuator(&preprocess->tokens[end], C_PUNCTUATOR_SEMICOLON))
+    {
+        u32 slot = c_parser_local_slot(start, index->mask);
+        while (index->slots[slot] && node == C_AST_NODE_INVALID)
+        {
+            u32 candidate = index->slots[slot] - 1;
+            node = ast->tokens[candidate] == start ? candidate : C_AST_NODE_INVALID;
+            slot = (slot + 1) & index->mask;
+        }
+    }
+    if (node != C_AST_NODE_INVALID)
+    {
+        // The children, read backward: INIT_DECLARATOR*, then DECL_SPECIFIERS.
+        u32 count = c_ast_list_count(ast, node);
+        u32 begin = c_ast_subtree_begin(ast, node);
+        bool listed = count <= C_PARSER_LOCAL_SEGMENT_LIMIT;
+        bool shaped = listed;
+        u32 child = node - 1;
+        u32 auto_stop = node;
+        for (u32 position = count; position > 0; position -= 1)
+        {
+            u32 init_declarator = child;
+            bool initialized = (ast->data[init_declarator] & 4u) != 0;
+            u32 stop = initialized ? c_ast_subtree_begin(ast, init_declarator - 1) : init_declarator;
+            if (shaped && initialized && c_parser_local_initializer_splits(ast, init_declarator - 1))
+            {
+                shaped = false;
+                split->fallback = C_PARSER_LOCAL_FALLBACK_COMMA;
+            }
+            if (shaped && position > 1)
+            {
+                u32 first = c_parser_local_declarator_first(ast, preprocess, init_declarator, stop);
+                shaped = first != UINT32_MAX && first > start && c_token_is_punctuator(&preprocess->tokens[first - 1], C_PUNCTUATOR_COMMA);
+                split->fallback = shaped ? split->fallback : C_PARSER_LOCAL_FALLBACK_TOKENS;
+                split->segment_ends[position - 2] = first - 1;
+            }
+            auto_stop = stop;
+            child = c_ast_subtree_begin(ast, init_declarator) - 1;
+        }
+        // `child` is the DECL_SPECIFIERS; its items are read backward.
+        u32 item = child;
+        u32 items_begin = c_ast_subtree_begin(ast, child);
+        while (item > items_begin)
+        {
+            item -= 1;
+            if (ast->kinds[item] == C_AST_SPECIFIER_WORD)
+            {
+                split->storage_class_bits |= c_token_well_known_bit(preprocess->spelling_base, preprocess->tokens[ast->tokens[item]],
+                                                                    C_PARSE_STORAGE_CLASS_KEYWORDS);
+            }
+            item = c_ast_subtree_begin(ast, item);
+        }
+        // The specifiers and the first declarator, where the walker's auto
+        // scan reads.
+        for (u32 scan = begin; scan < auto_stop && !split->auto_word; scan += 1)
+        {
+            split->auto_word = ast->kinds[scan] == C_AST_SPECIFIER_WORD &&
+                               (ast->data[scan] == C_AST_WORD_AUTO || ast->data[scan] == C_AST_WORD_AUTO_TYPE);
+        }
+        split->node = true;
+        split->fallback = listed ? split->fallback : C_PARSER_LOCAL_FALLBACK_LIST;
+        if (shaped)
+        {
+            split->fallback = C_PARSER_LOCAL_FALLBACK_NONE;
+            split->segment_count = count ? count : 1;
+            split->segment_ends[split->segment_count - 1] = end;
+        }
+    }
+}
+
+BUSTER_C_INTERNAL void c_parser_local_record(CParserLocalStatistics* statistics, CParserLocalFallback fallback, bool auto_scan)
+{
+    if (statistics)
+    {
+        statistics->declarations += fallback == C_PARSER_LOCAL_FALLBACK_NONE;
+        statistics->fallbacks += fallback != C_PARSER_LOCAL_FALLBACK_NONE;
+        statistics->auto_scans += fallback == C_PARSER_LOCAL_FALLBACK_NONE && auto_scan;
+        statistics->fallback_counts[fallback] += 1;
+    }
+}
+
+String8 c_parser_local_fallback_name(CParserLocalFallback reason)
+{
+    String8 name;
+    switch (reason)
+    {
+    case C_PARSER_LOCAL_FALLBACK_NONE:
+        name = S8("none");
+        break;
+    case C_PARSER_LOCAL_FALLBACK_NODE:
+        name = S8("node");
+        break;
+    case C_PARSER_LOCAL_FALLBACK_LIST:
+        name = S8("list");
+        break;
+    case C_PARSER_LOCAL_FALLBACK_TOKENS:
+        name = S8("tokens");
+        break;
+    case C_PARSER_LOCAL_FALLBACK_COMMA:
+        name = S8("comma");
+        break;
+    case C_PARSER_LOCAL_FALLBACK_COUNT:
+    default:
+        name = S8("unknown");
+        break;
+    }
+    return name;
+}
+
 BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess,
                                                     CScopeId scope, u32 declaration_index, u32 start, u32 end, bool is_for_initializer)
 {
+    // Under the pilot the tree supplies the storage-class set, the auto
+    // precheck and the declarator boundaries (c_parser_local_split).
+    CParserLocalSplit tree_split;
+    bool from_tree = machine->ast_locals != 0;
+    if (from_tree)
+    {
+        c_parser_local_split(machine, &preprocess, start, end, &tree_split);
+    }
+    bool tree_node = from_tree && tree_split.node;
     CAutoDeclarationInfo auto_info = {0};
-    bool is_auto_type = c_parse_auto_declaration_info(result, preprocess, scope, start, end, &auto_info);
+    bool is_auto_type = (!tree_node || tree_split.auto_word) && c_parse_auto_declaration_info(result, preprocess, scope, start, end, &auto_info);
     if (is_auto_type && !c_parse_storage_classes_valid(result, preprocess, scope, start, end))
     {
         return false;
@@ -23990,7 +24255,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
     // static `s` -- and an array parameter's `[static 3]` is a bound qualifier
     // rather than a storage class.
     u32 specifier_depth = 0;
-    for (u32 token_index = start; token_index < end; token_index += 1)
+    for (u32 token_index = tree_node ? end : start; token_index < end; token_index += 1)
     {
         CToken specifier_token = preprocess.tokens[token_index];
         if (c_token_is_punctuator(&specifier_token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&specifier_token, C_PUNCTUATOR_LEFT_BRACKET) ||
@@ -24011,6 +24276,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         }
         storage_class_bits |= c_token_well_known_bit(preprocess.spelling_base, specifier_token, C_PARSE_STORAGE_CLASS_KEYWORDS);
     }
+    storage_class_bits |= tree_node ? tree_split.storage_class_bits : 0;
     bool is_typedef = (storage_class_bits & C_SYMBOL_WELL_KNOWN_BIT(TYPEDEF)) != 0;
     bool is_static_storage = (storage_class_bits & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
     bool is_register = (storage_class_bits & C_SYMBOL_WELL_KNOWN_BIT(REGISTER)) != 0;
@@ -24210,12 +24476,25 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
     CCleanupAttributeInfo declaration_cleanup = {0};
     c_parse_cleanup_attribute_scan(preprocess, start, declarator_start, true, &declaration_cleanup);
     c_parse_publish_enum_members(result, preprocess, scope, declaration_index, enum_member_start, result->enum_member_count);
+    // The tree's cuts are the walker's once the specifier parse ends before
+    // the first of them; tokens before the first declarator hold no comma.
+    bool tree_segments = false;
+    if (from_tree)
+    {
+        tree_segments = tree_split.fallback == C_PARSER_LOCAL_FALLBACK_NONE && declarator_start <= tree_split.segment_ends[0];
+        c_parser_local_record(machine->ast_local_statistics,
+                              tree_segments || tree_split.fallback != C_PARSER_LOCAL_FALLBACK_NONE ? tree_split.fallback : C_PARSER_LOCAL_FALLBACK_TOKENS,
+                              tree_split.auto_word);
+    }
+    u32 tree_segment = 0;
     u32 segment_start = declarator_start;
     while (segment_start < end)
     {
-        u32 segment_end = segment_start;
+        bool tree_cut = tree_segments && tree_segment < tree_split.segment_count;
+        u32 segment_end = tree_cut ? tree_split.segment_ends[tree_segment] : segment_start;
+        tree_segment += tree_cut;
         u32 depth = 0;
-        for (; segment_end < end; segment_end += 1)
+        for (; !tree_cut && segment_end < end; segment_end += 1)
         {
             CToken token = preprocess.tokens[segment_end];
             if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
@@ -38336,6 +38615,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         .expression_task_capacity = expression_task_capacity,
         .syntax_tree = syntax.ast,
         .ast_type_statistics = syntax.ast_type_statistics,
+        .ast_local_statistics = syntax.ast_local_statistics,
     };
     result.declaration_capacity = semicolon_count + open_brace_count + declarator_list_comma_count + 1;
     result.type_capacity = token_count * 2 + 1;
@@ -38991,6 +39271,9 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                                         .value = 0,
                                     });
     }
+    // The block-declaration split's node index lives in the scratch arena
+    // for the binding loop alone (c_parser_local_index_build).
+    machine.ast_locals = c_parser_local_index_build(machine.scratch_arena, machine.syntax_tree, semicolon_count);
     for (u32 declaration_index = 0; declaration_index < result.declaration_count; declaration_index += 1)
     {
         // Every parameter and local the previous definition bound leaves the
@@ -39099,6 +39382,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         }
         c_parse_bind_function_body(&machine, arena, &result, preprocess, declaration_index);
     }
+    machine.ast_locals = 0;
     // The lowering re-enters scopes through c_parse_scope_for_token, so the
     // array is left standing for the file scope alone, where it is right.
     c_parse_binding_unwind(&result, 0);

@@ -503,6 +503,9 @@ struct CompilerDriverCAstPilotResult
     // The declaration split read from the tree (c_parse_ast_from_tree):
     // records published, and units handed to the token walker and why.
     CParserTreeStatistics split;
+    // The block-declaration split read from the tree during semantic
+    // analysis; see CParserLocalStatistics.
+    CParserLocalStatistics locals;
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;
