@@ -1193,16 +1193,13 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append(ObjectAssemblyBuffer* buffer, co
 {
     if (!buffer->error)
     {
-        if (count > buffer->capacity - buffer->count)
-        {
-            buffer->error = true;
-            return;
-        }
-        if (count)
+        // `count` is the logical output length even past capacity: an overrun
+        // is not an error, it only measures the exact size a retry reserves.
+        if (buffer->count <= buffer->capacity && count <= buffer->capacity - buffer->count && count)
         {
             memcpy(buffer->bytes + buffer->count, bytes, count);
-            buffer->count += count;
         }
+        buffer->count = count > UINT64_MAX - buffer->count ? UINT64_MAX : buffer->count + count;
     }
 }
 
@@ -1357,6 +1354,25 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_internal_label(ObjectAssemblyBuffe
     {
         object_assembly_append_internal_label(buffer, section, offset);
         object_assembly_append_string(buffer, S8(":\n"));
+    }
+}
+
+// A marked offset strictly inside an emitted unit never gets its `label:`
+// form because the unit is printed whole; the label is instead defined
+// relative to the location just after that unit (#3517).
+BUSTER_GLOBAL_LOCAL void object_assembly_emit_interior_internal_labels(ObjectAssemblyBuffer* buffer, u32 section, u64 unit_start,
+                                                                       u64 unit_end)
+{
+    for (u64 offset = unit_start + 1; offset < unit_end; offset += 1)
+    {
+        if (object_assembly_has_internal_label(buffer, section, offset))
+        {
+            object_assembly_append_string(buffer, S8("\t.set "));
+            object_assembly_append_internal_label(buffer, section, offset);
+            object_assembly_append_string(buffer, S8(", . - "));
+            object_assembly_append_u64_decimal(buffer, unit_end - offset);
+            object_assembly_append_string(buffer, S8("\n"));
+        }
     }
 }
 
@@ -4545,8 +4561,11 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
         object_assembly_prepare_internal_labels(buffer, object, section_index);
     }
     u64 cursor = 0;
+    u64 unit_start = 0;
     while (cursor < data.length && !buffer->error)
     {
+        object_assembly_emit_interior_internal_labels(buffer, section_index, unit_start, cursor);
+        unit_start = cursor;
         object_assembly_advance_index(buffer, object, section_index, cursor);
         ObjectRelocation* next_relocation = object_assembly_first_relocation(buffer, object, section_index, cursor, data.length);
         u64 apple_x86_start = object_assembly_apple_x86_relocation_start(next_relocation, data, cursor);
@@ -4623,6 +4642,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
         object_assembly_append_byte_range(buffer, data, cursor, boundary);
         cursor = boundary;
     }
+    object_assembly_emit_interior_internal_labels(buffer, section_index, unit_start, cursor);
     object_assembly_advance_index(buffer, object, section_index, data.length);
     object_assembly_emit_labels(buffer, object, target, section_index, data.length);
     object_assembly_emit_internal_label(buffer, section_index, data.length);
@@ -4663,14 +4683,18 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
             valid = object_aarch64_elf_got_addend_valid(relocation->kind, relocation->addend);
         }
     }
-    if (valid)
+    for (u32 attempt = 0; attempt < 2 && valid; attempt += 1)
     {
+        u64 attempt_position = arena->position;
         ObjectAssemblyBuffer buffer = {.bytes = arena_allocate(arena, char8, capacity), .capacity = capacity, .arena = arena};
         if (buffer.bytes)
         {
-            // Reserve output first, then discard every index/label allocation
-            // on either success or failure without disturbing the returned bytes.
+            // The capacity estimate is a first guess; when emission overruns
+            // it, the logical count it still produced is the exact size the
+            // one retry reserves. Discard every index/label allocation on
+            // either success or failure without disturbing the returned bytes.
             u64 output_position = arena->position;
+            valid = false;
             buffer.index = object_assembly_build_index(arena, object);
             if (object->target.cpu_arch == CPU_ARCH_X86_64)
             {
@@ -4705,8 +4729,20 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
                 object_assembly_append_string(&buffer, object->requires_executable_stack ? S8("\t.section .note.GNU-stack,\"x\",@progbits\n")
                                                                                        : S8("\t.section .note.GNU-stack,\"\",@progbits\n"));
             }
-            if (!buffer.error) result = (String8){.pointer = buffer.bytes, .length = buffer.count};
-            arena_set_position(arena, output_position);
+            if (!buffer.error && buffer.count <= buffer.capacity)
+            {
+                result = (String8){.pointer = buffer.bytes, .length = buffer.count};
+            }
+            else if (!buffer.error && !attempt && buffer.count != UINT64_MAX)
+            {
+                capacity = buffer.count;
+                valid = true;
+            }
+            arena_set_position(arena, valid ? attempt_position : output_position);
+        }
+        else
+        {
+            valid = false;
         }
     }
     return result;
