@@ -2,7 +2,7 @@
 // curl_compat_main owns admission and stage evidence; curl_compat_record logs
 // compiler/link launcher children. Existing RAD process and pristine guards
 // provide bounded capture, cleanup and Git input controls. No upstream patches.
-#define CURL_COMPAT_COMMIT "11b991232fbcaa88e2b1faecac224416b0001e35"
+#define BUSTER_CURL_COMPAT_COMMIT "11b991232fbcaa88e2b1faecac224416b0001e35"
 
 BUSTER_GLOBAL_LOCAL bool curl_compat_write(Arena* arena, String8 directory, String8 name, String8 text)
 {
@@ -47,11 +47,13 @@ BUSTER_GLOBAL_LOCAL bool curl_compat_configure(Arena* arena, String8 cmake, Stri
     String8 records = path_join(arena, directory, S8("children"));
     make_directory_recursive(arena, records);
     String8 launcher = string_format(arena, S8("{S8};test_curl;--record;{S8}"), driver, records);
-    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    String8 compiler_flag = string_format(arena, S8("-DCMAKE_C_COMPILER={S8}"), compiler);
+    String8 compile_launcher_flag = string_format(arena, S8("-DCMAKE_C_COMPILER_LAUNCHER={S8}"), launcher);
+    String8 link_launcher_flag = string_format(arena, S8("-DCMAKE_C_LINKER_LAUNCHER={S8}"), launcher);
     String8 flags[] = {
         cmake, S8("-S"), source, S8("-B"), directory, S8("-G"), S8("Ninja"),
         S8("-DCMAKE_BUILD_TYPE=Debug"), S8("-DCMAKE_C_FLAGS=-O0 -g -march=x86-64"),
-        S8("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"), S8("-DCMAKE_TRY_COMPILE_NO_PLATFORM_VARIABLES=OFF"),
+        S8("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"),
         S8("-DBUILD_CURL_EXE=ON"), S8("-DBUILD_TESTING=ON"), S8("-DBUILD_EXAMPLES=OFF"),
         S8("-DBUILD_LIBCURL_DOCS=OFF"), S8("-DBUILD_MISC_DOCS=OFF"), S8("-DENABLE_CURL_MANUAL=OFF"),
         S8("-DPICKY_COMPILER=OFF"), S8("-DCURL_WERROR=OFF"), S8("-DHTTP_ONLY=ON"),
@@ -65,17 +67,19 @@ BUSTER_GLOBAL_LOCAL bool curl_compat_configure(Arena* arena, String8 cmake, Stri
         S8("-DCURL_USE_GSASL=OFF"), S8("-DUSE_LIBRTMP=OFF"), S8("-DCURL_LTO=OFF"),
         S8("-DCURL_USE_PKGCONFIG=OFF"),
     };
+    // Argument-builder storage must stay contiguous until flush.
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(flags); i += 1)
     {
         os_argument_builder_append(&builder, flags[i]);
     }
-    os_argument_builder_append(&builder, string_format(arena, S8("-DCMAKE_C_COMPILER={S8}"), compiler));
+    os_argument_builder_append(&builder, compiler_flag);
     if (buster)
     {
         os_argument_builder_append(&builder, S8("-DCMAKE_C_COMPILER_ARG1=cc"));
     }
-    os_argument_builder_append(&builder, string_format(arena, S8("-DCMAKE_C_COMPILER_LAUNCHER={S8}"), launcher));
-    os_argument_builder_append(&builder, string_format(arena, S8("-DCMAKE_C_LINKER_LAUNCHER={S8}"), launcher));
+    os_argument_builder_append(&builder, compile_launcher_flag);
+    os_argument_builder_append(&builder, link_launcher_flag);
     os_argument_builder_append(&builder, shared ? S8("-DBUILD_SHARED_LIBS=ON") : S8("-DBUILD_SHARED_LIBS=OFF"));
     os_argument_builder_append(&builder, shared ? S8("-DBUILD_STATIC_LIBS=OFF") : S8("-DBUILD_STATIC_LIBS=ON"));
     os_argument_builder_append(&builder, shared ? S8("-DBUILD_STATIC_CURL=OFF") : S8("-DBUILD_STATIC_CURL=ON"));
@@ -103,7 +107,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult curl_compat_census(Arena* arena, SliceString8 
     bool admitted = source.length && parent.length && ide.length && driver.length && git.length && clang.length &&
                     cmake.length && ninja.length && sha256sum.length && clang_suite_safe_path(name) &&
                     !string_equal(parent, source) && !string_starts_with_sequence(parent, string_format(arena, S8("{S8}/"), source)) &&
-                    raddebugger_git_verify(arena, git, source, S8(CURL_COMPAT_COMMIT), &stopped);
+                    raddebugger_git_verify(arena, git, source, S8(BUSTER_CURL_COMPAT_COMMIT), &stopped);
     if (admitted)
     {
         OsDirectoryCreateResult created = os_make_directory_exclusive(output);
@@ -133,7 +137,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult curl_compat_census(Arena* arena, SliceString8 
                 String8 library_name = shared ? S8("shared") : S8("static");
                 String8 directory = path_join(arena, output, string_format(arena, S8("{S8}-{S8}"), compiler_name, library_name));
                 make_directory_recursive(arena, directory);
-                bool configured = !stopped && curl_compat_configure(arena, cmake, source, directory, buster ? ide : clang, buster, shared, driver, &stopped);
+                bool configure_run = !stopped;
+                bool configured = configure_run && curl_compat_configure(arena, cmake, source, directory, buster ? ide : clang, buster, shared, driver, &stopped);
                 bool built = false;
                 bool version = false;
                 bool tested = false;
@@ -158,7 +163,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult curl_compat_census(Arena* arena, SliceString8 
                     String8 tests[] = {cmake, S8("--build"), directory, S8("--parallel"), S8("2"), S8("--target"), S8("test-nonflaky")};
                     tested = curl_compat_step(arena, output, directory, S8("upstream-tests"), (SliceString8)BUSTER_ARRAY_TO_SLICE(tests), &stopped);
                 }
-                String8 configure_status = configured ? S8("pass") : S8("fail");
+                String8 configure_status = configure_run ? (configured ? S8("pass") : S8("fail")) : S8("not-run");
                 String8 build_status = configured ? (built ? S8("pass") : S8("fail")) : S8("not-run");
                 String8 version_status = built ? (version ? S8("pass") : S8("fail")) : S8("not-run");
                 String8 test_status = built ? (tested ? S8("pass") : S8("fail")) : S8("not-run");
@@ -169,7 +174,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult curl_compat_census(Arena* arena, SliceString8 
                 passed = configured && built && version && tested && passed;
             }
         }
-        bool unchanged = raddebugger_git_verify(arena, git, source, S8(CURL_COMPAT_COMMIT), &stopped);
+        bool unchanged = raddebugger_git_verify(arena, git, source, S8(BUSTER_CURL_COMPAT_COMMIT), &stopped);
         String8 text = string_join_arena(arena, string8_list_to_slice(arena, summary), false);
         passed = curl_compat_write(arena, output, S8("summary.tsv"), text) && unchanged && passed;
         bool scope = curl_compat_write(arena, output, S8("scope.txt"),
@@ -177,7 +182,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult curl_compat_census(Arena* arena, SliceString8 
                                          "TLS transfers, mixed ABI, incremental costs and 9700X performance remain unqualified.\n"
                                          "Configure probes not using launchers remain in CMakeConfigureLog.yaml; no fabricated feature answers.\n"));
         string_print(S8("CURL_RESULT commit={S8} pristine_after={u32} status={S8} artifacts={S8}\n"),
-                     S8(CURL_COMPAT_COMMIT), (u32)unchanged, passed && scope ? S8("pass") : S8("fail"), output);
+                     S8(BUSTER_CURL_COMPAT_COMMIT), (u32)unchanged, passed && scope ? S8("pass") : S8("fail"), output);
         result = passed && scope && !stopped ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
     }
     else
