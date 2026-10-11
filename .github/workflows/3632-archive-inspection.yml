@@ -24,7 +24,7 @@ jobs:
           for sdl_cell in reference candidate; do
             echo "CELL=$sdl_cell"
             grep -n -E "X11_X11_LIB:|X11_Xext_LIB:|X11_X11_INCLUDE_PATH:|CMAKE_LIBRARY_ARCHITECTURE" "$RUNNER_TEMP/sdl-inspection/sdl3-evidence/$sdl_cell/CMakeCache.txt" || true
-            grep -n -E "CMAKE_C_SIZEOF_DATA_PTR|CMAKE_C_IMPLICIT_LINK_DIRECTORIES|CMAKE_C_LIBRARY_ARCHITECTURE" "$RUNNER_TEMP/sdl-inspection/sdl3-evidence/$sdl_cell/CMakeFiles/4.4.0/CMakeCCompiler.cmake" || true
+            grep -n -E "CMAKE_C_SIZEOF_DATA_PTR|CMAKE_C_IMPLICIT_LINK_DIRECTORIES|CMAKE_C_LIBRARY_ARCHITECTURE" "$RUNNER_TEMP/sdl-inspection/sdl3-evidence/$sdl_cell/CMakeFiles"/*/CMakeCCompiler.cmake
           done
           grep -n -A45 -B18 "Performing Test LINKER_SUPPORTS_VERSION_SCRIPT" "$RUNNER_TEMP/sdl-inspection/sdl3-evidence/candidate/CMakeFiles/CMakeConfigureLog.yaml"
           grep -n -A10 -B40 "unsupported linker argument for this output: -v" "$RUNNER_TEMP/sdl-inspection/sdl3-evidence/candidate/CMakeFiles/CMakeConfigureLog.yaml"
