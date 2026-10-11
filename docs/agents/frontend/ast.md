@@ -1348,4 +1348,14 @@ walked, 191,184 lookups and no disagreement on the self-host. The budgets:
   comparison is requested, so Zen 5 validation stays incomplete (#2761) and
   the hook stays opt-in.
 
+The settled name checks' hosted census is
+[`2026-10-11T114326Z`](../../performance-audits/2026-10-11T114326Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. The typer's counters are identical in B and C,
+  and the objects of all four arms are identical at `-g0` and `-g`.
+- The check falls from 52.48 M to 33.02 M Ir (−37.1%), and the pilot's
+  compile by 19.04 M (−0.203%). 138,650 checks settle, and 148 walk.
+- The default path is +0.0081% on `-fsyntax-only` and +0.0047% on `-c`.
+- Zen 5 validation stays incomplete (#2761).
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
