@@ -176,8 +176,10 @@ class SchedulerTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(cancellation_errors, [], diagnostics)
         self.assertEqual(summary["unreaped_children"], 0, diagnostics)
-        self.assertTrue(all(child.cleaned and child.stdout.closed and child.stderr.closed for child in children))
-        self.assertTrue(all(not Path(path).exists() for path in directories))
+        self.assertTrue(all(child.cleaned and child.stdout.closed and child.stderr.closed for child in children), diagnostics)
+        survivors = {path: [str(entry) for entry in Path(path).rglob("*")]
+                     for path in directories if Path(path).exists()}
+        self.assertEqual(survivors, {}, diagnostics + "\nfixture survivors: " + repr(survivors))
         self.assertTrue(summary["cases"][0].get("success"), diagnostics)
         self.assertTrue(requested.is_set(), diagnostics)
         self.assertTrue(summary["cancelled"], diagnostics)
