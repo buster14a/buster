@@ -57,6 +57,13 @@ available image placement return `JIT_FAILED` with the JIT capacity diagnostic.
 Absolute pointer forms have no relative-distance requirement. Other
 unsupported external-data relocation kinds remain refused.
 
+A missing explicit binding for an admitted function or data import returns
+`BUSTER_EMBED_STATUS_UNRESOLVED_IMPORT`; the message names that symbol even
+when the import list is empty. The module remains compiled and unloaded, so
+callers can retry `buster_embed_module_load` with the binding. A successful
+retry clears the failure message. Unsupported data forms, TLS, kind mismatches
+and address-range failures retain their own JIT diagnostics.
+
 Included headers are read from the filesystem using the compiler's normal
 include search. Virtual header overlays are outside this bounded facade and
 remain the boundary described by issue #1946.

@@ -1,5 +1,7 @@
 // Driver integration tests: compiler_driver_tests registers argument parsing,
 // artifact, link, runtime, and cross-mode checks.
+// compiler_driver_test_executable_cleanup checks bounded just-run image cleanup,
+// native Windows locks/denials and checked native-error propagation.
 // compiler_driver_test_mach_framework_search owns Apple framework file search/identity. compiler_driver_test_output_paths
 // owns stdout/output placement and publication refusal coverage.
 // compiler_driver_test_pic_arguments
@@ -9,6 +11,7 @@
 // compiler_driver_test_static_address_integer_native checks stored address integers.
 // compiler_driver_test_dwarf5_objects covers external DWARF contributions and links.
 // compiler_driver_test_debug_options owns the default and ordered debug switches.
+// compiler_driver_test_nonnative_debug_options owns direct Wasm/eBPF debug refusals.
 // driver_metrics_test.c holds the per-input metrics / -fkeep-going fixtures.
 // compiler_driver_test_aarch64_elf_ldst checks foreign non-PIC memory references
 // against native host-linked controls, including each scaled low12 form.
@@ -80,6 +83,130 @@
 #if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
 #include <poll.h>
 #endif
+
+
+#if BUSTER_WINDOWS && !BUSTER_SINGLE_THREADED
+typedef struct CompilerDriverExecutableCleanupLanes CompilerDriverExecutableCleanupLanes;
+struct CompilerDriverExecutableCleanupLanes
+{
+    UnitTestArguments* arguments;
+    String8 path;
+    OsFileDescriptor* holder;
+    OsError blocked;
+    OsError cleaned;
+    bool closed;
+};
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_driver_test_executable_cleanup_lane(void* pointer)
+{
+    CompilerDriverExecutableCleanupLanes* state = (CompilerDriverExecutableCleanupLanes*)pointer;
+    if (!lane_index()) { state->blocked = os_file_delete_checked(state->path); }
+    // Both lanes see a real sharing failure before either releases its owner.
+    lane_sync();
+    if (!lane_index())
+    {
+        state->cleaned = buster_test_executable_delete(state->arguments, state->path);
+    }
+    else
+    {
+        Sleep(20);
+        state->closed = os_file_close(state->holder);
+    }
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_executable_cleanup(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    Arena* arena = arguments->arena;
+    String8 path = buster_test_temporary_unique_path(arena, S8("buster-executable-cleanup"), S8(".exe"));
+    String8 sentinel = S8("cleanup control");
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
+    {
+        // An error outside the retry set must retain both its native code and
+        // the file. The next DELETE is deliberately different to prove only
+        // one syscall was attempted.
+        OsFileTestStep permanent[] = {
+            {OS_FILE_TEST_DELETE, OS_FILE_TEST_ERROR, 123},
+            {OS_FILE_TEST_DELETE, OS_FILE_TEST_ERROR, 124},
+        };
+        os_file_test_begin(path, permanent, BUSTER_ARRAY_LENGTH(permanent));
+        OsError refused = buster_test_executable_delete(arguments, path);
+        u32 consumed = os_file_test_end();
+        BUSTER_TEST(arguments, refused.v == 123 && consumed == 1);
+        ByteSlice bytes = file_read(arena, path, (FileReadOptions){0});
+        BUSTER_TEST(arguments, bytes.length == sentinel.length && bytes.pointer &&
+                               !memcmp(bytes.pointer, sentinel.pointer, (size_t)sentinel.length));
+#if BUSTER_WINDOWS
+        OsFileTestStep transient[] = {
+            {OS_FILE_TEST_DELETE, OS_FILE_TEST_ERROR, ERROR_SHARING_VIOLATION},
+            {OS_FILE_TEST_DELETE, OS_FILE_TEST_ERROR, ERROR_ACCESS_DENIED},
+        };
+        os_file_test_begin(path, transient, BUSTER_ARRAY_LENGTH(transient));
+        OsError recovered = buster_test_executable_delete(arguments, path);
+        consumed = os_file_test_end();
+        BUSTER_TEST(arguments, !recovered.v && consumed == 2);
+        FileStats recovered_stats = os_path_followed_stats(path);
+        BUSTER_TEST(arguments, recovered_stats.valid && recovered_stats.kind == OS_FILE_KIND_MISSING);
+        BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, path).v);
+
+        if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
+        {
+            // Real Win32 sharing semantics, with the lock owned and released
+            // here. A persistent lock must exhaust cleanup and still fail.
+            OsFileDescriptor* holder = os_file_open(path, (OpenFlags){0}, (OsFileAccess){.read = 1},
+                                                   (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
+            if (BUSTER_REQUIRE(arguments, holder != 0))
+            {
+                OsError locked = os_file_delete_checked(path);
+                BUSTER_TEST(arguments, locked.v == ERROR_SHARING_VIOLATION);
+                OsError held = buster_test_executable_delete(arguments, path);
+                FileStats held_stats = os_path_followed_stats(path);
+                BUSTER_TEST(arguments, held.v == ERROR_SHARING_VIOLATION && held_stats.valid && held_stats.kind == OS_FILE_KIND_REGULAR);
+                BUSTER_TEST(arguments, os_file_close(holder));
+                BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, path).v);
+            }
+        }
+
+#if !BUSTER_SINGLE_THREADED
+        if (buster_test_worker_count(2) > 1 && BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
+        {
+            OsFileDescriptor* holder = os_file_open(path, (OpenFlags){0}, (OsFileAccess){.read = 1},
+                                                   (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
+            if (BUSTER_REQUIRE(arguments, holder != 0))
+            {
+                CompilerDriverExecutableCleanupLanes state = {.arguments = arguments, .path = path, .holder = holder};
+                lane_run(2, compiler_driver_test_executable_cleanup_lane, &state);
+                BUSTER_TEST(arguments, state.blocked.v == ERROR_SHARING_VIOLATION);
+                BUSTER_TEST(arguments, state.closed && !state.cleaned.v);
+                FileStats released_stats = os_path_followed_stats(path);
+                BUSTER_TEST(arguments, released_stats.valid && released_stats.kind == OS_FILE_KIND_MISSING);
+            }
+        }
+#endif
+        if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
+        {
+            String16 wide = string16_from_string8(arena, path, true);
+            if (BUSTER_REQUIRE(arguments, SetFileAttributesW(wide.pointer, FILE_ATTRIBUTE_READONLY) != 0))
+            {
+                OsError denied = buster_test_executable_delete(arguments, path);
+                FileStats denied_stats = os_path_followed_stats(path);
+                BUSTER_TEST(arguments, denied.v == ERROR_ACCESS_DENIED && denied_stats.valid && denied_stats.kind == OS_FILE_KIND_REGULAR);
+                BUSTER_TEST(arguments, SetFileAttributesW(wide.pointer, FILE_ATTRIBUTE_NORMAL) != 0);
+            }
+        }
+#endif
+        BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, path).v);
+        FileStats removed_stats = os_path_followed_stats(path);
+        BUSTER_TEST(arguments, removed_stats.valid && removed_stats.kind == OS_FILE_KIND_MISSING);
+        BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, path).v);
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_elf_section_find(ByteSlice image, String8 name, u64* offset, u64* size, u64* address)
 {
@@ -5628,7 +5755,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_declarator_group_cases(UnitTe
                                     string_format(arena, S8("redundant declarator groups case {u32}: status={u32} timed_out={u32}"), case_index,
                                                   execution.platform_status, (u32)execution.timed_out));
                 }
-                BUSTER_TEST(arguments, os_file_delete(output));
+                BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, output).v);
             }
 #endif
         }
@@ -5881,7 +6008,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_scoped_constant_executio
                     if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
                     {
                         BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(arena, output), description);
-                        BUSTER_TEST(arguments, os_file_delete(output));
+                        BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, output).v);
                     }
                 }
             }
@@ -9186,6 +9313,140 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_lexical_block_nest
                 BUSTER_TEST_RAW(arguments, lists[list * 4] == symbol->value && lists[list * 4 + 1] == symbol->value + symbol->size &&
                                                !lists[list * 4 + 2] && !lists[list * 4 + 3], label);
             }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// Direct writers cannot honor source-debug requests. Refuse before reading
+// source or publishing output, including API requests without argv markers.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_nonnative_debug_options(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-nonnative-debug"), S8(".c"));
+    String8 missing_input = buster_test_temporary_path(arena, S8("buster-nonnative-debug-missing"), S8(".c"));
+    String8 source = S8("int main(void) { return 0; }\n");
+    ByteSlice sentinel = BUSTER_SLICE_TO_BYTE_SLICE(S8("unchanged-existing-output"));
+    String8 targets[] = {S8("wasm32-wasip1"), S8("wasm64-unknown-freestanding"), S8("bpfel-unknown-linux")};
+    String8 messages[] = {
+        S8("-g is not supported for direct WebAssembly module output"),
+        S8("-g is not supported for direct WebAssembly module output"),
+        S8("-g is not supported for direct eBPF object output"),
+    };
+    String8 debug_options[][2] = {
+        {S8(""), S8("")}, {S8("-g"), S8("")}, {S8("-g0"), S8("")},
+        {S8("-g"), S8("-g0")}, {S8("-g0"), S8("-g")},
+    };
+    u32 option_counts[] = {0, 1, 1, 2, 2};
+    bool debug_expected[] = {false, true, false, false, true};
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+        {
+            TemporalArena target_temporary = arena_begin_temporal(arena);
+            ByteSlice default_image = {0};
+            String8 output = buster_test_temporary_path(arena, S8("buster-nonnative-debug"), S8(".bin"));
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(debug_options); mode += 1)
+            {
+                String8 command[10];
+                u32 count = 0;
+                for (u32 option = 0; option < option_counts[mode]; option += 1)
+                {
+                    command[count++] = debug_options[mode][option];
+                }
+                // Resolve the target after the debug switches.
+                command[count++] = S8("-target");
+                command[count++] = targets[target_index];
+                command[count++] = S8("-c");
+                command[count++] = S8("-nostdinc");
+                command[count++] = S8("-o");
+                command[count++] = output;
+                command[count++] = debug_expected[mode] ? missing_input : input;
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command, .length = count});
+                BUSTER_TEST(arguments, invocation.debug_info == debug_expected[mode]);
+                BUSTER_TEST(arguments, invocation.debug_info_explicit == (mode != 0));
+                BUSTER_TEST(arguments, invocation.error == (debug_expected[mode] ? COMPILER_DRIVER_ERROR_ARGUMENT : COMPILER_DRIVER_ERROR_NONE));
+                if (debug_expected[mode])
+                {
+                    BUSTER_STRING_TEST(arguments, invocation.diagnostic, messages[target_index]);
+                }
+                if (BUSTER_REQUIRE(arguments, file_write(output, sentinel)))
+                {
+                    CompilerDriverResult built = compiler_driver_execute_invocation(arena, invocation);
+                    ByteSlice image = file_read(arena, output, (FileReadOptions){0});
+                    if (debug_expected[mode])
+                    {
+                        BUSTER_TEST(arguments, built.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                        BUSTER_STRING_TEST(arguments, built.diagnostic, messages[target_index]);
+                        BUSTER_TEST(arguments, !built.has_wasm && !built.has_wasm64 && !built.has_ebpf && !built.has_spirv &&
+                                               !built.has_object && !built.has_llvm_bitcode && !built.has_gpu);
+                        if (BUSTER_REQUIRE(arguments, built.diagnostics && built.diagnostic_count == 1))
+                        {
+                            BUSTER_TEST(arguments, built.diagnostics[0].severity == COMPILER_DIAGNOSTIC_ERROR);
+                            BUSTER_STRING_TEST(arguments, built.diagnostics[0].code, S8("driver.argument"));
+                            BUSTER_STRING_TEST(arguments, built.diagnostics[0].message, messages[target_index]);
+                        }
+                        BUSTER_TEST(arguments, image.pointer && image.length == sentinel.length &&
+                                               memcmp(image.pointer, sentinel.pointer, sentinel.length) == 0);
+                    }
+                    else if (BUSTER_REQUIRE(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && image.length != 0))
+                    {
+                        BUSTER_TEST(arguments, target_index == 0 ? built.has_wasm : target_index == 1 ? built.has_wasm64 : built.has_ebpf);
+                        if (!mode)
+                        {
+                            default_image = image;
+                        }
+                        else if (BUSTER_REQUIRE(arguments, default_image.pointer && image.length == default_image.length))
+                        {
+                            BUSTER_TEST(arguments, memcmp(image.pointer, default_image.pointer, image.length) == 0);
+                        }
+                    }
+                }
+            }
+            // Typed callers set debug_info directly; the explicit marker is
+            // optional and must not let an unsupported request escape.
+            for (u32 explicit_debug = 0; explicit_debug < 2; explicit_debug += 1)
+            {
+                String8 command[] = {S8("-target"), targets[target_index], S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-o"), output, missing_input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                if (BUSTER_REQUIRE(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && file_write(output, sentinel)))
+                {
+                    invocation.debug_info = true;
+                    invocation.debug_info_explicit = explicit_debug != 0;
+                    CompilerDriverResult rejected = compiler_driver_execute_invocation(arena, invocation);
+                    BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                    BUSTER_STRING_TEST(arguments, rejected.diagnostic, messages[target_index]);
+                    BUSTER_TEST(arguments, !rejected.has_wasm && !rejected.has_wasm64 && !rejected.has_ebpf && !rejected.has_spirv &&
+                                           !rejected.has_object && !rejected.has_llvm_bitcode && !rejected.has_gpu);
+                    if (BUSTER_REQUIRE(arguments, rejected.diagnostics && rejected.diagnostic_count == 1))
+                    {
+                        BUSTER_TEST(arguments, rejected.diagnostics[0].severity == COMPILER_DIAGNOSTIC_ERROR);
+                        BUSTER_STRING_TEST(arguments, rejected.diagnostics[0].code, S8("driver.argument"));
+                        BUSTER_STRING_TEST(arguments, rejected.diagnostics[0].message, messages[target_index]);
+                    }
+                    ByteSlice image = file_read(arena, output, (FileReadOptions){0});
+                    BUSTER_TEST(arguments, image.pointer && image.length == sentinel.length &&
+                                           memcmp(image.pointer, sentinel.pointer, sentinel.length) == 0);
+                }
+            }
+            // Frontend-only actions have no debug artifact to promise.
+            String8 actions[] = {S8("-E"), S8("-fsyntax-only")};
+            for (u32 action = 0; action < BUSTER_ARRAY_LENGTH(actions); action += 1)
+            {
+                String8 command[] = {S8("-target"), targets[target_index], S8("-g"), actions[action], S8("-nostdinc"), input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                if (BUSTER_REQUIRE(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE))
+                {
+                    CompilerDriverResult built = compiler_driver_execute_invocation(arena, invocation);
+                    BUSTER_TEST(arguments, built.error == COMPILER_DRIVER_ERROR_NONE);
+                    BUSTER_TEST(arguments, !built.has_wasm && !built.has_wasm64 && !built.has_ebpf && !built.has_object);
+                    BUSTER_TEST(arguments, action != 0 || built.output.length != 0);
+                }
+            }
+            scratch_end(target_temporary);
         }
     }
     scratch_end(temporary);
@@ -27995,9 +28256,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integer_n
                                                 waited.streams[STANDARD_STREAM_ERROR].length == 0, diagnostic);
                                 arguments->show(arguments, S8("ADDRESS-INTEGER native {S8} status={u32}\n"), context, waited.platform_status);
                             }
-                            BUSTER_TEST(arguments, os_file_delete(output));
+                            BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, output).v);
                         }
-                        BUSTER_TEST(arguments, os_file_delete(output));
+                        BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, output).v);
                     }
                 }
             }
@@ -28073,10 +28334,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_address_integer_n
                                                 waited.streams[STANDARD_STREAM_ERROR].length == 0, diagnostic);
                                 arguments->show(arguments, S8("ADDRESS-INTEGER reference {S8} status={u32}\n"), context, waited.platform_status);
                             }
-                            BUSTER_TEST(arguments, os_file_delete(output));
+                            BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, output).v);
                         }
                     }
-                    BUSTER_TEST(arguments, os_file_delete(output));
+                    BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, output).v);
                 }
             }
         }
@@ -28640,9 +28901,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(Un
                                                 dialects[dialect], forms[form], modes[mode], optimizations[optimization],
                                                 waited.platform_status, (u32)waited.timed_out);
                             }
-                            BUSTER_TEST(arguments, os_file_delete(output));
+                            BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, output).v);
                         }
-                        BUSTER_TEST(arguments, os_file_delete(output));
+                        BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, output).v);
                     }
                 }
             }
@@ -28719,10 +28980,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_native(Un
                                                 reference_dialects[dialect], optimizations[optimization],
                                                 waited.platform_status, (u32)waited.timed_out);
                             }
-                            BUSTER_TEST(arguments, os_file_delete(output));
+                            BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, output).v);
                         }
                     }
-                    BUSTER_TEST(arguments, os_file_delete(output));
+                    BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, output).v);
                 }
             }
         }
@@ -29229,7 +29490,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_literal_identit
                                 }
                             }
                         }
-                        BUSTER_TEST(arguments, os_file_delete(output));
+                        BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, output).v);
                     }
                 }
             }
@@ -29420,7 +29681,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_pointer_addresses
                 if (linked.error == COMPILER_DRIVER_ERROR_NONE)
                 {
                     BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(arena, executable), name);
-                    BUSTER_TEST(arguments, os_file_delete(executable));
+                    BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, executable).v);
                 }
 #endif
                 BUSTER_TEST(arguments, os_file_delete(input));
@@ -33654,6 +33915,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #endif
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_cached_plan_lanes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_output_paths);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_executable_cleanup);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_frontend_reservation_failures);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_reservation_failure);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_boundaries);
@@ -33828,6 +34090,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_windows_arm64_unwind);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_dwarf5_objects);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_options);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_nonnative_debug_options);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_codeview_limit);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_global_relocations);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_scalar_local_locations);
@@ -37521,7 +37784,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     ProcessWaitResult waited = os_process_wait_sync(literal_arena, spawned);
                     BUSTER_TEST(arguments, waited.result == PROCESS_RESULT_SUCCESS);
                 }
-                BUSTER_TEST(arguments, os_file_delete(literal_path));
+                BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, literal_path).v);
             }
             BUSTER_TEST(arguments, os_file_delete(literal_object));
             BUSTER_TEST(arguments, os_file_delete(literal_source));
