@@ -4,10 +4,12 @@ name: OpenSSL qualification intake
 on:
   workflow_dispatch:
   push:
-    branches: [codex/3184-openssl-qualification]
+    branches:
+      - 'codex/3184-openssl-qualification'
     paths:
       - '.github/workflows/openssl-qualification.yml'
       - 'tools/openssl_compatibility.c'
+      - 'tools/openssl_compatibility_test.c'
       - 'build.c'
 permissions:
   contents: read
@@ -22,7 +24,8 @@ jobs:
       - name: Machine specifications
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
-          requested-runner: ubuntu-26.04
+          requested-runner: >-
+            ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
