@@ -1165,6 +1165,28 @@ the same way and diagnostic only:
   a planless and a planned caller. The band was not widened.
 - Acceptance stays with Zen 5 (#2761), so the default stays off.
 
+**Owner decision, 2026-10-11: the default-path criterion for the body walk.**
+The ±0.05% Ir budget above stays recorded as failed (−0.34%); it is not
+relabelled. It is replaced, for changes to the body walk
+(`c_parse_bind_block_walk` and its two callers), by a work-equivalence
+criterion:
+- The planless walk's callees and their call counts on the self-host unity
+  input equal the base's, apart from helpers the compiler inlines differently.
+- `-c` objects (`-g0` and `-g`) are byte-identical across the four arms.
+- Callgrind instruction counts are still measured and reported, but they do
+  not gate when the work is equivalent.
+- Wall-time neutrality of the default path belongs to the Ryzen 7 9700X route
+  (#2761), which remains incomplete here.
+
+The reason is that for this function the instruction band is below
+code-generation noise. Six variants whose planless walks make the same calls
+measured D against A at +0.088%, +0.125%, +0.146%, −0.105%, −0.22% and
+−0.34% (the census above and
+[PR #3370](https://github.com/buster14a/buster/pull/3370)): register
+allocation in one 500-line loop moves with its surroundings. The statement
+plan meets the replacement criterion. Every other budget in this plan keeps
+its own declared criterion.
+
 For the split's [diagnostic probe](#declaration-split-from-the-tree)
 (`c_parser_tree_probe`), these budgets were declared before its measured runs.
 The probe classifies identifier lanes from their interned ids instead of
