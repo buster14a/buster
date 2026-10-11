@@ -5,12 +5,15 @@ Usage:
     python3 tools/backend_capabilities.py --check
     python3 tools/backend_capabilities.py --write
     python3 tools/backend_capabilities.py --json
+    python3 tools/backend_capabilities.py --ci-report LOG
 """
 
 import argparse
 import json
+import os
 import posixpath
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +21,20 @@ SCHEMA = "buster-backend-capabilities-v1"
 CATALOGUE = "docs/backend-capabilities-v1.json"
 OUTPUT = "docs/backend-capabilities.md"
 STATUSES = ["supported", "partial", "unsupported-diagnostic", "not-applicable", "unknown"]
+C_NONCODE = re.compile(r"/\*.*?\*/|//[^\n]*|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'", re.S)
+UNIT_TEST_FUNCTION = re.compile(r"\bUnitTestResult\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{", re.S)
+MODULE_TABLE = re.compile(r"\btest_descriptors\s*\[[^\]]*\]\s*=\s*\{")
+MODULE_ENTRY = re.compile(
+    r'\[\s*[A-Za-z_]\w*\s*\]\s*=\s*\{\s*S8_INITIALIZER\("([^"]+)"\)\s*,\s*&\s*([A-Za-z_]\w*)'
+)
+TIMING_LINE = re.compile(
+    r"^TEST_MODULE_TIMING index=(\d+) module=([A-Za-z_]\w*) duration_ns=(\d+) "
+    r"passed=(\d+) failed=(\d+) assertions=(\d+) status=(pass|fail)$"
+)
+FIXTURE_START_LINE = re.compile(
+    r"^TEST_FIXTURE_START_V1 kind=(module|fixture) module=([A-Za-z_]\w*) "
+    r"fixture=([A-Za-z_]\w*) index=(\d+)$"
+)
 TOP_LEVEL_KEYS = {
     "schema",
     "reviewed_revision",
@@ -83,6 +100,76 @@ def source_files(root):
                 if text is not None:
                     files[path] = text
     return files
+
+
+def mask_noncode(text):
+    return C_NONCODE.sub(lambda match: re.sub(r"[^\n]", " ", match.group()), text)
+
+
+def closing_brace(text, opening):
+    depth = 0
+    for index in range(opening, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def registered_test_modules(root):
+    functions = {}
+    errors = []
+    for path, text in source_files(root).items():
+        if path.suffix not in (".c", ".h"):
+            continue
+        code = mask_noncode(text)
+        for match in UNIT_TEST_FUNCTION.finditer(code):
+            end = closing_brace(code, match.end() - 1)
+            if end is None:
+                errors.append(f"{path}: unterminated UnitTestResult function {match.group(1)!r}")
+                continue
+            name = match.group(1)
+            body = code[match.end():end]
+            functions.setdefault(name, set()).update(re.findall(r"\b[A-Za-z_]\w*\b", body))
+
+    manifest = root / "src" / "buster" / "tests" / "test.c"
+    manifest_text = read_text(manifest)
+    if manifest_text is None:
+        return {}, [f"{manifest}: could not read test module manifest"]
+    manifest_code = mask_noncode(manifest_text)
+    table = MODULE_TABLE.search(manifest_code)
+    if table is None:
+        return {}, [f"{manifest}: test_descriptors table not found"]
+    end = closing_brace(manifest_code, table.end() - 1)
+    if end is None:
+        return {}, [f"{manifest}: unterminated test_descriptors table"]
+    entries = MODULE_ENTRY.findall(manifest_text[table.end():end])
+    if not entries:
+        return {}, [f"{manifest}: test_descriptors has no module entries"]
+
+    modules = {}
+    for module, entry in entries:
+        if entry not in functions:
+            errors.append(f"{manifest}: module {module!r} references undefined UnitTestResult {entry!r}")
+            continue
+        visited = set()
+        pending = [entry]
+        while pending:
+            function = pending.pop()
+            if function in visited:
+                continue
+            visited.add(function)
+            reached = modules.setdefault(function, [])
+            if module not in reached:
+                reached.append(module)
+            pending.extend(functions.get(function, set()) - visited)
+    return modules, errors
+
+
+def test_command(modules):
+    return f"build/Release/ide test --module={','.join(modules)} --ci=1"
 
 
 def rooted_file(root, value):
@@ -179,6 +266,8 @@ def validate_catalogue(data, root, label=CATALOGUE):
         if nonempty_string(value.get("id"))
     }
     test_texts = source_files(root)
+    modules_by_symbol, module_errors = registered_test_modules(root)
+    errors.extend(catalogue_error(label, "test modules", error) for error in module_errors)
 
     cells = data.get("cells")
     if not isinstance(cells, list):
@@ -256,6 +345,10 @@ def validate_catalogue(data, root, label=CATALOGUE):
                         errors.append(catalogue_error(
                             label, f"{entry_location}.symbol",
                             f"{symbol!r} occurs {count} times under src/buster/tests; expected at least 2"))
+                    if not modules_by_symbol.get(symbol):
+                        errors.append(catalogue_error(
+                            label, f"{entry_location}.symbol",
+                            f"{symbol!r} is not reachable from any registered test module"))
             if has_anchor:
                 anchor = entry.get("anchor")
                 if not nonempty_string(anchor):
@@ -307,6 +400,10 @@ def validate_catalogue(data, root, label=CATALOGUE):
                 elif nonempty_string(text) and text not in file_text:
                     errors.append(catalogue_error(
                         label, f"{diagnostic_location}.text", f"literal diagnostic text not found in {file_name}"))
+            if nonempty_string(text) and not any(text in test_text for test_text in test_texts.values()):
+                errors.append(catalogue_error(
+                    label, f"{diagnostic_location}.text",
+                    f"diagnostic text is not asserted under src/buster/tests: {text!r}"))
 
         evidence_count = len(evidence)
         diagnostic_count = len(diagnostics)
@@ -357,6 +454,7 @@ def derived_report(data, root):
         for backend in data["backends"]
     }
     test_texts = source_files(root)
+    modules_by_symbol, _ = registered_test_modules(root)
     for cell in data["cells"]:
         levels = {
             level
@@ -371,11 +469,20 @@ def derived_report(data, root):
             }
             for diagnostic in cell.get("diagnostics", [])
         ]
+        evidence = []
+        for entry in cell.get("evidence", []):
+            detail = dict(entry)
+            modules = modules_by_symbol.get(entry.get("symbol"), []) if "symbol" in entry else []
+            detail["modules"] = modules
+            if modules:
+                detail["test_command"] = test_command(modules)
+            evidence.append(detail)
         report_cell = {
             "backend": cell["backend"],
             "feature": cell["feature"],
             "status": cell["status"],
             "levels": [level for level in level_ids if level in levels],
+            "evidence": evidence,
             "diagnostics": diagnostics,
         }
         cells.append(report_cell)
@@ -470,9 +577,12 @@ def render_catalogue(data, root):
                 if any(level in evidence["provides"] for evidence in cell.get("evidence", []))
             ]
             evidence_text = []
-            for evidence in cell.get("evidence", []):
+            report_evidence = report_by_pair[(backend["id"], feature["id"])]["evidence"]
+            for evidence, derived_evidence in zip(cell.get("evidence", []), report_evidence):
                 if "symbol" in evidence:
                     item = f"{code_span(evidence['symbol'])} in {code_span(evidence['file'])}"
+                    if derived_evidence["modules"]:
+                        item += f"<br>test {code_span(derived_evidence['test_command'])}"
                 else:
                     item = f"anchor {code_span(evidence['anchor'])} in {code_span(evidence['file'])}"
                 if "requires" in evidence:
@@ -517,13 +627,110 @@ def load_catalogue(path, label):
         return None, [catalogue_error(label, f"line {error.lineno}", f"invalid JSON: {error.msg}")]
 
 
+def render_ci_report(data, root, log_text, environment=None):
+    statuses = {}
+    observed = set()
+    errors = []
+    for line_number, line in enumerate(log_text.splitlines(), 1):
+        line = line.strip()
+        if line.startswith("TEST_MODULE_TIMING"):
+            match = TIMING_LINE.fullmatch(line)
+            if match is None:
+                errors.append(f"line {line_number}: malformed TEST_MODULE_TIMING record")
+                continue
+            module, status = match.group(2), "passed" if match.group(7) == "pass" else "failed"
+            if status == "failed" or module not in statuses:
+                statuses[module] = status
+            continue
+        if not line.startswith("TEST_FIXTURE_START_V1"):
+            continue
+        match = FIXTURE_START_LINE.fullmatch(line)
+        if match is None:
+            errors.append(f"line {line_number}: malformed TEST_FIXTURE_START_V1 record")
+        elif match.group(1) == "fixture":
+            observed.add((match.group(2), match.group(3)))
+    if errors:
+        return None, errors
+
+    environment = os.environ if environment is None else environment
+    revision = environment.get("GITHUB_SHA")
+    if not revision:
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
+        ).stdout.strip()
+    run_url = None
+    server = environment.get("GITHUB_SERVER_URL")
+    repository = environment.get("GITHUB_REPOSITORY")
+    run_id = environment.get("GITHUB_RUN_ID")
+    if server and repository and run_id:
+        run_url = f"{server.rstrip('/')}/{repository.strip('/')}/actions/runs/{run_id}"
+
+    report = derived_report(data, root)
+    lines = ["# Backend capability test evidence", "", f"Revision: {code_span(revision)}"]
+    if run_url:
+        lines.append(f"Run: {code_span(run_url)}")
+    lines.extend([
+        "",
+        "Status legend: `fixture observed; module passed` and `fixture observed; module failed` "
+        "mean an exact fixture-start record was found; `module passed; fixture not observed "
+        "(may be compiled out on this host)` and `module failed; fixture not observed` mean "
+        "the module ran without that record; `not run` means no module result was recorded. "
+        "A `missing: skip` requirement is reported as possibly skipped when its module ran.",
+        "",
+        "| Backend | Feature | Evidence | Module | Status | Note / scope |",
+        "|---|---|---|---|---|---|",
+    ])
+    notes = {
+        (cell["backend"], cell["feature"]): cell.get("note", "—")
+        for cell in data["cells"]
+    }
+    for cell in report["cells"]:
+        for evidence in cell["evidence"]:
+            label = (
+                code_span(evidence["symbol"]) if "symbol" in evidence
+                else f"anchor {code_span(evidence['anchor'])}"
+            )
+            modules = evidence["modules"]
+            if not modules:
+                modules = [None]
+            for module in modules:
+                module_status = statuses.get(module) if module else None
+                fixture_seen = module and (module, evidence.get("symbol")) in observed
+                if module_status is None:
+                    status = "not run"
+                elif fixture_seen:
+                    status = f"fixture observed; module {module_status}"
+                else:
+                    status = f"module {module_status}; fixture not observed"
+                    if module_status == "passed":
+                        status += " (may be compiled out on this host)"
+                requirement_id = evidence.get("requires")
+                requirement = data["requirements"].get(requirement_id, {})
+                if module_status is not None and requirement.get("missing") == "skip":
+                    status += f"; requirement {requirement_id} may have skipped"
+                note = " ".join(notes[(cell["backend"], cell["feature"])].split())
+                if len(note) > 120:
+                    note = note[:117].rstrip() + "..."
+                lines.append("| " + " | ".join((
+                    markdown_cell(cell["backend"]),
+                    markdown_cell(cell["feature"]),
+                    markdown_cell(label),
+                    markdown_cell(module or "—"),
+                    markdown_cell(status),
+                    markdown_cell(note),
+                )) + " |")
+    return "\n".join(lines) + "\n", []
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--check", action="store_const", const="check", dest="mode")
     modes.add_argument("--write", action="store_const", const="write", dest="mode")
     modes.add_argument("--json", action="store_const", const="json", dest="mode")
+    modes.add_argument("--ci-report", metavar="LOG", dest="ci_report")
     parser.set_defaults(mode="check")
+    parser.set_defaults(ci_report=None)
     parser.add_argument("--root", type=Path, help="repository root (default: script location)")
     parser.add_argument("--catalogue", help=f"catalogue path, relative to --root (default: {CATALOGUE})")
     arguments = parser.parse_args(argv)
@@ -546,6 +753,29 @@ def main(argv=None):
             sys.stdout.flush()
         except BrokenPipeError:
             sys.stdout = None
+        return 0
+
+    if arguments.ci_report is not None:
+        log_path = rooted_file(root, arguments.ci_report)
+        log_text = read_text(log_path)
+        if log_text is None:
+            print(f"{arguments.ci_report}: could not read test log", file=sys.stderr)
+            return 1
+        report, report_errors = render_ci_report(data, root, log_text)
+        if report_errors:
+            for error in report_errors:
+                print(f"{arguments.ci_report}: {error}", file=sys.stderr)
+            return 1
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        try:
+            if summary:
+                with open(summary, "a", encoding="utf-8") as handle:
+                    handle.write(report)
+            else:
+                sys.stdout.write(report)
+        except OSError as error:
+            print(f"{arguments.ci_report}: could not write CI report: {error}", file=sys.stderr)
+            return 1
         return 0
 
     rendered = render_catalogue(data, root).encode("utf-8")
