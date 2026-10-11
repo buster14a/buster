@@ -22,7 +22,7 @@
 // silent misselection.
 // machine_a64_select_inline_hint selects the fixed NOP/YIELD literal rows.
 // Symbol addresses: machine_a64_symbol_reference picks the inline literal, the
-// Darwin page pair, or under ELF -fPIC the GOT or page pair that the
+// Darwin page pair or GOT load, or under ELF -fPIC the GOT or page pair that the
 // MACHINE_A64_LEA_SYMBOL encoder case emits (thread-locals are refused there in
 // machine_a64_select_global_address).
 //
@@ -2939,8 +2939,10 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_field(MachineA64Selector* selector, 
     return selected;
 }
 
-// The reference form of a symbol address. Darwin always pairs a page with a
-// page offset. Under AArch64 ELF -fPIC an address another object could
+// The reference form of a symbol address. Darwin pairs a page with a page
+// offset for a symbol this module defines, and loads the address of any
+// other one out of its GOT slot (ARM64_RELOC_GOT_LOAD_PAGE21/PAGEOFF12),
+// because a linker may bind it to a dylib. Under AArch64 ELF -fPIC an address another object could
 // interpose is read out of its GOT slot, and one this object binds itself is a
 // page pair; without -fPIC the canonical inline literal stays. A direct call
 // never needs a form of its own: BL names the symbol and the linker adds the
@@ -2952,7 +2954,9 @@ BUSTER_GLOBAL_LOCAL u8 machine_a64_symbol_reference(MachineA64Selector* selector
     {
         if (selector->target.os == OPERATING_SYSTEM_MACOS || selector->target.os == OPERATING_SYSTEM_IOS)
         {
-            result = (u8)MACHINE_SYMBOL_REFERENCE_MACH_PAGE;
+            IrSymbol* record = ir_symbol_from_id(&selector->program->symbols, symbol);
+            bool external = record && !record->is_definition && record->linkage != IR_LINKAGE_INTERNAL;
+            result = (u8)(external ? MACHINE_SYMBOL_REFERENCE_GOT : MACHINE_SYMBOL_REFERENCE_MACH_PAGE);
         }
         else if (selector->position_independent)
         {

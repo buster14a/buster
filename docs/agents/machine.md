@@ -109,6 +109,18 @@ fixture as well as compiling both architectures.
   symbol rows own TLS/GOT/relocations, and offset folding never modifies them.
   These facts authorize no memory reordering or dereference. No `MachineAddress`
   MIR side table is produced; keep `MACHINE_REF_ADDRESS` stable.
+- A symbol row's `MachineSymbolReference` is chosen per symbol by
+  `machine_x64_symbol_reference` / `machine_a64_symbol_reference`, and the
+  object layer spells it per format. Mach-O relocation types name the
+  instruction, and ld64/lld resolve them with that meaning (#1454). An x86-64
+  direct call takes the PLT form, which the writer emits as
+  `X86_64_RELOC_BRANCH`. The address of a symbol the module does not define
+  takes the GOT form on both architectures: `GOT_LOAD`, or `GOT_LOAD_PAGE21`
+  and `GOT_LOAD_PAGEOFF12` on `adrp`+`ldr`. Every other rip-relative field is
+  `SIGNED`, or `SIGNED_1/2/4` when immediate bytes follow the field.
+  Inline/global assembly keeps a direct branch's identity through
+  `assembly_x86_relocation_is_branch`. `tools/test_mach_o_dylib_data_lld.sh`
+  is the independent-linker oracle for this contract.
 - `MachineFunction` owns CFG edges, block parameters, and incoming edge
   parallel-copy sources. Edge source `i` maps to destination block parameter
   `i`; keep these copies parallel through allocation so cycles are resolved as
@@ -1153,6 +1165,16 @@ fixture as well as compiling both architectures.
   length-preserving replacement and its field descriptor. The relaxable kinds
   authorize conversion; plain `GOTPCREL` retains a GOT reference. An
   unrecognized site fails by name rather than guessing replacement bytes.
+  A GOT reference to an absent weak name (one that resolves to zero) is never
+  relaxed: GCC and Clang's default PIE `cmpq $0, name@GOTPCREL(%rip)` has no
+  direct form. The static writer points every such site at one shared zero
+  slot after `.eh_frame`. The dynamic writer gives each name a
+  `function_got_indices` slot that no loader relocation fills. The
+  position-independent planner uses `LINK_ELF_PIC_GOT_ADDRESS_ZERO`. AArch64
+  `ADR_GOT_PAGE`/`LD64_GOT_LO12_NC` already become `MOVZ #0`/`ADD #0` in
+  `object_aarch64_elf_page_relocate`. `compiler_driver_elf_weak_got_tests`
+  links host PIE objects as PIE and `-no-pie` against a host-linker oracle
+  (#3414).
   It relaxes the two indirect
   thread-local models back to local-exec for the same reason
   (`link_elf_relax_thread_local`), and a foreign object's local-dynamic

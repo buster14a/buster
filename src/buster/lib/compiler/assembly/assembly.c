@@ -43,6 +43,7 @@
 //   assembly_source_parse                          the parse phase driver
 //   assembly_relocation_append,                    the emit phase and the
 //   assembly_instructions_emit, assembly_encode    public entry point
+//   assembly_x86_relocation_is_branch              Mach-O BRANCH identity of a PC32
 
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
@@ -8984,6 +8985,7 @@ BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, Strin
         TARGET_CPU_FEATURE_AARCH64_SSBS,
         TARGET_CPU_FEATURE_AARCH64_TRACEV8_4,
         TARGET_CPU_FEATURE_AARCH64_SME,
+        TARGET_CPU_FEATURE_AARCH64_SVE,
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(x86_feature_bits) + BUSTER_ARRAY_LENGTH(aarch64_feature_bits) ==
                     (u32)TARGET_CPU_FEATURE_COUNT - 2);
@@ -12760,6 +12762,8 @@ BUSTER_GLOBAL_LOCAL void assembly_aarch64_base_instruction_parse(AssemblyBuilder
                             : status == A64_BASE_ASSEMBLY_REQUIRES_FULLFP16 ? S8("instruction requires the fullfp16 target feature")
                             : status == A64_BASE_ASSEMBLY_REQUIRES_NEON ? S8("instruction requires the neon target feature")
                             : status == A64_BASE_ASSEMBLY_REQUIRES_LSE ? S8("instruction requires the lse target feature")
+                            : status == A64_BASE_ASSEMBLY_REQUIRES_SVE_OR_SME
+                                  ? S8("instruction requires the sve or sme target feature")
                             : lane_result == ASSEMBLY_AARCH64_COMPLEX_SIMD_LANE_FEATURE_TARGET_UNSUPPORTED
                                   ? S8("instruction is unsupported by the selected target features")
                                                                        : (String8){0};
@@ -14745,6 +14749,17 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
     {
         builder->result.bytes.length = builder->output_count;
     }
+}
+
+bool assembly_x86_relocation_is_branch(ByteSlice bytes, AssemblyRelocation relocation)
+{
+    bool pc32 = relocation.kind == ASSEMBLY_RELOCATION_X86_PC32 && relocation.offset <= bytes.length &&
+                sizeof(u32) <= bytes.length - relocation.offset;
+    bool direct = pc32 && relocation.offset >= 1u &&
+                  (bytes.pointer[relocation.offset - 1u] == 0xe8u || bytes.pointer[relocation.offset - 1u] == 0xe9u);
+    bool conditional = pc32 && relocation.offset >= 2u && bytes.pointer[relocation.offset - 2u] == 0x0fu &&
+                       (bytes.pointer[relocation.offset - 1u] & 0xf0u) == 0x80u;
+    return direct || conditional;
 }
 
 AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncodeOptions options)

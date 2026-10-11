@@ -311,9 +311,13 @@ Under `-v` the driver prints five rows with the other verbose counters:
   uses=<identifier uses they bound> bails=<segments it handed back to the
   token loop partway> declaration_hints=<block declarations whose end the plan
   gave> loop_hints=<for statements whose boundaries the plan gave>
-  declines=<statements the plan left to the token loop> fallbacks=<bodies left
-  wholly to the token loop> reason=<CAstStatementFallback of the last
-  fallback> fallback_token=<that body's `{`>`
+  declines=<statements the plan left to the token loop>
+  declarator_hints=<block declarators the split took from their hints>
+  initializer_hints=<plain initializers among them> auto_skips=<declarations
+  whose auto-inference scans were skipped> declarator_declines=<declarator
+  hints the split refused> fallbacks=<bodies left wholly to the token loop>
+  reason=<CAstStatementFallback of the last fallback> fallback_token=<that
+  body's `{`>`
 
 The second row's passes run only under `-v`; they are diagnostic. The third,
 fourth and fifth rows count what the typer, the split and the statement plan
@@ -776,7 +780,10 @@ fixed number of node and token reads; nothing recurses.
 - **Names.** A record's name is its declarator's `DECLARATOR_NAME`. The
   record is a function when the first derivation above that name is a
   `DECLARATOR_FUNCTION`; its parameter list then gives the identifier-list
-  range, when no `(` is written before the name. Group boundaries are where a
+  range. That holds when the list sits inside a redundant group,
+  `int (k(a))`, or after one, `int (k)(a)`, because the walker records the
+  name's own list either way
+  ([#3368](https://github.com/buster14a/buster/issues/3368)). Group boundaries are where a
   suffix derivation's inner declarator is a pointer. Redundant parentheses
   leave no node, so the split counts the `(` written before the name; more
   than the boundaries is a redundant group, which the walker reads the same
@@ -815,7 +822,8 @@ two cases:
      qualifier word, where the walker reads the group as a parameter list
      (it reads that `T (x)` as a function `T`); attributes on a pointer or
      opening a group; or a function returning a function or an array;
-   - `old_style`: an old-style declaration list;
+   - `old_style`: an old-style declaration list, including one after a
+     parenthesized name (`int (k(a)) int a; {...}`);
    - `tokens`: a comma operator in an initializer, where the walker splits a
      list, a token next to an anchor that is not the required one, or a
      variadic list inside a redundant group (`int (gv(int, ...))`), since the
@@ -905,8 +913,22 @@ given tokens the plan tells it what it would otherwise scan for:
   end of a statement scope.
 - **Declaration hints.** A block `DECLARATION` gives its `;`, so the loop's
   scan for it and its search for a GNU typeof statement expression are
-  skipped. `c_parse_local_declarations` still reads the declaration from its
-  tokens; that is the next row's declarator machine.
+  skipped. It also carries a **declarator hint** per `INIT_DECLARATOR`
+  (`c_parse_plan_declarators`): the `,` or `;` past the declarator's greatest
+  anchor and closers, the `=` past the closers of the child before its
+  initializer, and whether that initializer is plain (expressions, type names
+  as above, initializer lists, designators and compound literals). It also
+  says whether `DECL_SPECIFIERS` holds an `auto` or `__auto_type` word. The
+  split (`c_parse_planned_local_declarations`, the hinted caller of the
+  always-inline `c_parse_local_declarations_split`) then skips the two
+  auto-inference scans of a declaration that cannot infer, the `,` and `=`
+  scans of each declarator whose hinted tokens it confirms, and, in a plain
+  initializer, the statement-expression, type-definition, attributed
+  definition and attribute tests; `__builtin_offsetof` is a call in the tree,
+  so its test stays, as does the use filter. A hint the tokens refuse
+  (`declarator_declines`) returns that declarator and the rest of the
+  declaration to the scans. The specifiers and declarators themselves are
+  still read by the type machine from tokens; that is the next row's.
 - **Loop hints.** A `FOR` gives its header's first `;` and `)` and one past
   its body, in place of the loop's scans and `c_parse_statement_end`.
 
@@ -944,8 +966,10 @@ the per-token use map, every scope and every entity of the analysis with the
 plan against the analysis without the tree. `c_ast_test_statements` runs one
 body that takes every kind of entry, one whose statements the plan leaves to
 the loop (with an `__builtin_offsetof` bail), and one tampered tree per
-fallback reason, in every layout. On the self-host unity input every body
-follows its plan, with no fallback and no bail.
+fallback reason, in every layout, and a body of block declarations whose
+declarators take every hint, with a tampered declarator whose `=` hint the
+split refuses. On the self-host unity input every body follows its plan, with
+no fallback, no bail and no refused declarator hint.
 
 ## Corpus differential
 
@@ -975,7 +999,9 @@ constructs too, beside the other redundant shapes: objects and functions in
 one or more groups, a definition whose list sits inside its group, groups in a
 declarator list, after a typedef name and in parameters. The single groups
 after a typedef or tag name
-([#3368](https://github.com/buster14a/buster/issues/3368)) joined them.
+([#3368](https://github.com/buster14a/buster/issues/3368)) joined them, and
+so did the old-style definitions whose name sits in a redundant group, with
+and without a declaration list.
 The tree also rejects syntax errors that today's `-fsyntax-only` accepts
 ([#3143](https://github.com/buster14a/buster/issues/3143)).
 
@@ -1030,7 +1056,7 @@ differential tests pass.
 | Current owner | Rediscovers | Tree replacement | Status |
 |---|---|---|---|
 | `c_parse_ast_run`, `c_parser_parse_function_body`, `c_parser_parse_declaration_expression` | declaration split, declarator name, body range, static-assert ranges | `DECLARATION`, `FUNCTION_DEFINITION`, `INIT_DECLARATOR`, `STATIC_ASSERT` | Retired under `-fc-ast-pilot` by the [declaration split](#declaration-split-from-the-tree). The walker stays the default path and the per-unit fallback. |
-| `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, and plain segments bound in one pass. The token loop stays the engine, the default path and the per-body fallback; `c_parse_local_declarations` still reads each declaration's declarators from tokens (next row), and the switch and control-statement validators still call `c_parse_statement_end`. |
+| `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, plain segments bound in one pass, and each block declarator's `,`, `=` and plain initializer. The token loop stays the engine, the default path and the per-body fallback; the type machine still reads specifiers and declarators from tokens (next row), and the switch and control-statement validators keep `c_parse_statement_end`, whose calls cost about 1 M instructions on the self-host. |
 | `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Not migrated. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Not migrated. |
@@ -1048,14 +1074,18 @@ Deleting it waits on the hook becoming the default.
 
 Under `-fc-ast-pilot`, the second row's boundary scans no longer run for a
 planned statement: the body binder takes block declaration ends, `for` header
-boundaries and loop ends from the tree, and binds plain segments without its
-per-token loop. Its consumer is the binder itself, and the field-by-field
-binding differential passes. The row is not retired: the loop still runs
-without the flag, for every statement the plan declines and for every body
-that falls back; `c_parse_local_declarations` still splits declarators and
-initializers by tokens; and `c_parse_validate_one_switch` and
-`c_parse_validate_control_statements` still find statement ends with
-`c_parse_statement_end`.
+boundaries and loop ends from the tree, binds plain segments without its
+per-token loop, and `c_parse_local_declarations` splits a planned block
+declaration at the declarators' hinted `,` and `=` and binds a plain
+initializer with the use filter alone. Its consumer is the binder itself, and
+the field-by-field binding differential passes. The row is not retired: the
+loop and the token split still run without the flag, for every statement the
+plan declines and for every body that falls back; the declaration's
+specifiers and declarators are still read by the type machine (the next row);
+and `c_parse_validate_one_switch` and `c_parse_validate_control_statements`
+still find statement ends with `c_parse_statement_end`, deliberately: those
+calls cost 1.05 M instructions on the self-host unity input, less than a tree
+lookup would.
 
 The [tree expression typer](#tree-expression-typer) is the first consumer of
 the fourth row's replacement. Under `-fc-ast-pilot` it answers most of semantic
@@ -1443,6 +1473,54 @@ measured D against A at +0.088%, +0.125%, +0.146%, −0.105%, −0.22% and
 allocation in one 500-line loop moves with its surroundings. The statement
 plan meets the replacement criterion. Every other budget in this plan keeps
 its own declared criterion.
+
+For the statement plan's [declarator hints](#statement-plan-from-the-tree),
+these budgets were declared before their measured runs. The input, flags and
+four Callgrind arms are the statement plan's (`-g0 -fsyntax-only`, the
+self-host unity input, `--cache-sim=no --branch-sim=no`, tests-off
+`-march=x86-64-v3` builds). The base is main `4317e0dd`, which carries the
+statement plan (#3370). A throwaway no-inline census of that base charged
+`c_parse_local_declarations` 337.1 M inclusive, of which the initializer
+loop's per-token tests are about 47 M, the `,` and `=` scans about 7 M, and
+the two auto-inference scans per declaration 36.4 M. The budgets:
+- **Correctness.**
+  - 0 binding differences over the corpus and the frontend sources (the
+    statement plan's differential, unchanged);
+  - a one-off comparison of the same fields on the self-host unity input,
+    also with 0 differences;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **Coverage** on the self-host unity input: no body falls back; no
+  declarator hint is refused (`declarator_declines=0`); at least 95% of
+  planned declarations skip the auto-inference scans and at least 90% of
+  hinted declarators' initializers are plain.
+- **The hints' own effect (C against B).** The whole compile costs at least
+  40 M fewer instructions (about 0.4%), with the hints' construction charged.
+- **The default path (D against A).** The split is one always-inline worker
+  with a hintless and a hinted caller, so the default path runs no hint code.
+  The difference stays within ±0.05% Ir.
+- **Adoption of the hook as the default.** Unchanged, with acceptance on the
+  Zen 5 route (#2761).
+
+The declarator hints' hosted census is
+[`2026-10-11T104257Z`](../../performance-audits/2026-10-11T104257Z.md), taken
+the same way and diagnostic only:
+- Correctness, object identity and coverage pass: 0 binding differences on
+  the corpus, the frontend sources and the self-host unity input; identical
+  `-c` objects in the four arms; 36,366 hinted declarators on the self-host,
+  none refused, and every planned declaration skips the inference scans.
+- The block-declaration split falls by 84.2 M (25%), and the whole compile by
+  63.9 M (0.69%, C against B).
+- **The default-path budget fails by 0.006 points:** D against A is +0.056%.
+  The hintless split is 2.6 M cheaper than the base's; the body walk's own
+  code is 7.9 M dearer, with identical callees and call counts. The band was
+  not widened. The walk's default-path criterion is the owner decision above
+  (work equivalence), which this change meets.
+- Acceptance stays with Zen 5 (#2761), so the default stays off.
+
+The census also found that the switch and control-statement validators'
+`c_parse_statement_end` calls cost 1.05 M in total (7,586 calls) on that input.
+Reading their ends from the tree cannot repay its own lookup, so they stay
+with tokens; this is recorded as a negative result, not a budget.
 
 For the split's [diagnostic probe](#declaration-split-from-the-tree)
 (`c_parser_tree_probe`), these budgets were declared before its measured runs.

@@ -323,15 +323,22 @@ struct MachineX64Selector
 // An undefined weak symbol keeps that indirection under -fPIC even when it is
 // hidden, function or data: a PC-relative reference to the absent symbol is a
 // relocation a shared object cannot carry, while a GOT slot is simply zero.
+// Mach-O names the instruction in the relocation type itself: every direct
+// call takes the PLT form, which the Mach-O writer spells X86_64_RELOC_BRANCH,
+// and the address of a symbol this module does not define is loaded from its
+// GOT slot (X86_64_RELOC_GOT_LOAD), because a linker may bind it to a dylib.
+// Everything else stays the direct rip-relative X86_64_RELOC_SIGNED.
 BUSTER_GLOBAL_LOCAL u8 machine_x64_symbol_reference(MachineX64Selector* selector, IrSymbolId symbol, bool call_site)
 {
     IrSymbol* record = ir_symbol_from_id(&selector->program->symbols, symbol);
-    bool elf_external_call = call_site && record && !record->is_definition &&
-                             object_format_for_target(selector->target) == OBJECT_FORMAT_ELF64;
+    ObjectFormat format = object_format_for_target(selector->target);
+    bool elf_external_call = call_site && record && !record->is_definition && format == OBJECT_FORMAT_ELF64;
+    bool mach = format == OBJECT_FORMAT_MACH_O64;
+    bool mach_external_address = mach && !call_site && record && !record->is_definition && record->linkage != IR_LINKAGE_INTERNAL;
     bool weak_function_address = !call_site && selector->target.os == OPERATING_SYSTEM_LINUX && record &&
                                  record->kind == IR_SYMBOL_FUNCTION && !record->is_definition && record->is_weak;
     bool weak_undefined = record && !record->is_definition && record->is_weak && record->linkage != IR_LINKAGE_INTERNAL;
-    bool indirect = elf_external_call || weak_function_address ||
+    bool indirect = elf_external_call || weak_function_address || (mach && call_site) || mach_external_address ||
                     (selector->position_independent && (ir_symbol_is_interposable(record) || weak_undefined));
     return (u8)(!indirect ? MACHINE_SYMBOL_REFERENCE_DIRECT : call_site ? MACHINE_SYMBOL_REFERENCE_PLT : MACHINE_SYMBOL_REFERENCE_GOT);
 }
@@ -5688,7 +5695,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
             *row = (MachineInlineAssemblyRelocation){.symbol = name, .addend = addend, .offset = (u32)relocation.offset,
                                                      .block = target_block, .continuation_block = continuation_block,
                                                      .target_index = block ? label_target : UINT32_MAX,
-                                                     .kind = (u8)relocation.kind, .is_block = block, .is_control = control};
+                                                     .kind = (u8)relocation.kind, .is_block = block, .is_control = control,
+                                                     .is_branch = assembly_x86_relocation_is_branch(encoded.bytes, relocation)};
             if (control)
             {
                 control_targets[control_count++] = label_target;
