@@ -75,8 +75,8 @@ jobs:
         run: '"$RUNNER_TEMP/sdl3-build" test_self_host --config Release'
       - name: Exact repair source-size comparison
         run: |
-          git fetch --no-tags origin 5bfa5489b1505ffb85be31f0f43b2a3b5a73e200 866343905137af01330b9aad6468b891cc297944
-          "$RUNNER_TEMP/sdl3-build" source_size --rev 5bfa5489b1505ffb85be31f0f43b2a3b5a73e200 --base 866343905137af01330b9aad6468b891cc297944
+          git fetch --no-tags origin 4cd490b33c37b54f77a05838e7372ef084776a38 866343905137af01330b9aad6468b891cc297944
+          "$RUNNER_TEMP/sdl3-build" source_size --rev 4cd490b33c37b54f77a05838e7372ef084776a38 --base 866343905137af01330b9aad6468b891cc297944
       - name: Start isolated software display and virtual audio server
         run: |
           mkdir -p "$RUNNER_TEMP/sdl3-environment"
@@ -108,6 +108,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
   baseline:
+    if: false # Baseline execution is retained in run38172055864.
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:

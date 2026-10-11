@@ -7384,10 +7384,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_pe_x64_tls_index_object(UnitTestArg
     return result;
 }
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL u16 link_test_version_read_u16(u8 const* bytes, u64 offset)
 {
     return (u16)((u16)bytes[offset] | ((u16)bytes[offset + 1] << 8));
 }
+
+#endif
 
 // Scripts are consumed by the public native link, before any image is
 // published. Literal ELF facts below are independent of the script parser.
