@@ -40,6 +40,8 @@ Map (searchable symbols):
     INLINE_ACCEPTANCE_PROFILE, validate_inline_acceptance  issue #48 same-candidate inliner pair
     AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_BUDGET, ast_pilot_budget_verdict,
         validate_ast_pilot_acceptance                      issue #3397 -fc-ast-pilot pair
+    THROUGHPUT_REAL_SOURCE_PROFILE, validate_throughput_real_source,
+        throughput_real_source_digest                      real-source throughput (#2761)
     REGRESSION_POLICIES, regression_policy                 report-only switch
     range_label                                            main baseline relation
     render                                                 readable report
@@ -173,6 +175,77 @@ AST_PILOT_ACCEPTANCE_PROFILE = {
 # every cell: B's median peak RSS above A's by at most retained bytes times
 # (1 + rss_slack).
 AST_PILOT_BUDGET = {"syntax_only_min_gain": 0.01, "rss_slack": 0.05}
+# Issue #2761: the Zen 5 route for real-source throughput. One fresh exact line
+# in ANALYZER_REQUEST_PATH selects it on the pull-compare route. After the
+# corpus leg, the base revision's `bench_throughput run --real-source` times
+# each pinned version-2 descriptor's own compile_link_argv on the matched
+# baseline/candidate binaries. Inputs, sampling and stopping are frozen here;
+# changing any value needs a new name. It is report-only: the guard is off.
+THROUGHPUT_REAL_SOURCE_REQUEST_LINE = "profile: throughput-real-source-v1"
+THROUGHPUT_REAL_SOURCE_STAGING_SCHEMA = "buster-throughput-real-source-staging-v1"
+THROUGHPUT_REAL_SOURCE_DECISION = "diagnostic (guard disabled)"
+# Each staged root must hash to its descriptor's input_tree_sha256. A fetched
+# file or archive is checked against its pinned SHA-256 before use; a copy
+# comes from the base checkout. An archive contributes only the members under
+# its prefix, with the prefix removed.
+THROUGHPUT_REAL_SOURCE_INPUTS = {
+    "cjson-1.7.19-native": {
+        "descriptor": "tools/throughput/workloads/cjson-1.7.19.workload",
+        "descriptor_sha256": "0bd68a027a8c30d95eeddae7907f3278dfd265084db515424944262bfb878685",
+        "input_tree_sha256": "38f1730a865924c9b1918c7483c8abf6a7a0467ac465a34412f7630b713d1a52",
+        "requested_translation_unit_bytes": 121771,
+        "files": [{"path": name, "sha256": digest,
+                   "url": "https://raw.githubusercontent.com/DaveGamble/cJSON/c859b25da02955fef659d658b8f324b5cde87be3/" + name}
+                  for name, digest in (
+                      ("cJSON.c", "298581a04a36c0165da4b0aade235c23088cb2faa58651d720ea2f3706ed0b0d"),
+                      ("cJSON.h", "25b0145150d500498e4d209cec69c18c42cf818bffcc54690be3b895a2a16dee"),
+                      ("cJSON_Utils.c", "bf3092696763a9a446c39365d7c35f23e5acfdca1bd1da33ef66c1161f9243e9"),
+                      ("cJSON_Utils.h", "1050a7cce8ffe352c509e0c1faad505b9b8a09cac3a1c45c544447868e05f3b5"))],
+        "copies": [{"path": "generated/roundtrip.c", "from": "tests/basic_cjson_roundtrip.c",
+                    "sha256": "1f528863c902c039ae3d1a9391eb5a0478d5fa60bd123b8e170a9e981c852da8"}],
+        "archive": None,
+    },
+    "lua-5.4.8-native": {
+        "descriptor": "tools/throughput/workloads/lua-5.4.8.workload",
+        "descriptor_sha256": "97d9674fa41f68a3b948ef8bbf9a8e250c95e619bdf5ec1d751a31833bcc7e82",
+        "input_tree_sha256": "ad56eca3663473ae288f0650e8da4361a951bc68985881e1168ae619b4ef6999",
+        "requested_translation_unit_bytes": 717585,
+        "files": [],
+        "copies": [],
+        "archive": {"url": "https://www.lua.org/ftp/lua-5.4.8.tar.gz", "format": "tar.gz", "prefix": "lua-5.4.8/src/",
+                    "sha256": "4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae"},
+    },
+    "sqlite-3.53.4-amalgamation-native": {
+        "descriptor": "tools/throughput/workloads/sqlite-3.53.4.workload",
+        "descriptor_sha256": "cf4c5d38e88f61aaf1530c65c2c203d17164e8c9fe2a570001112832bfe65e24",
+        "input_tree_sha256": "25607ba4393af6bd955ae63b22061974e2cacbc96dfde146878e3d41fdc3ad8b",
+        "requested_translation_unit_bytes": 10701256,
+        "files": [],
+        "copies": [],
+        "archive": {"url": "https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip", "format": "zip",
+                    "prefix": "sqlite-amalgamation-3530400/",
+                    "sha256": "1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d"},
+    },
+}
+THROUGHPUT_REAL_SOURCE_PROFILE = {
+    "name": "throughput-real-source-v1",
+    "workload": "bench_throughput run --real-source: each pinned version-2 descriptor's frozen compile_link_argv "
+                "(source to linked executable) on its verified staged tree, under both FAST/QUALITY modes",
+    "harness": "tools/throughput at the base revision, built and run by ./build.sh bench_throughput",
+    "inputs": THROUGHPUT_REAL_SOURCE_INPUTS,
+    "arguments": ["--no-guard", "--mode", "all", "--pairs", "20", "--warmups", "2", "--timeout", "120", "--cpu", "2"],
+    "modes": ["fast", "quality"],
+    "pairs_per_round": 20,
+    "rounds": 2,
+    "warmups": 2,
+    "cpu": 2,
+    "seed": 20260907,
+    "sampling": "per descriptor and mode: two warmups per variant, then two fixed rounds of 20 adjacent A/B pairs; "
+                "ABBA blocks and job order follow the recorded seed; every sample is retained",
+    "stopping": "fixed: every pair of both rounds runs; no early stop, rerun, trimming or best-of-N",
+    "decision": "report-only: the guard is off; paired medians and per-round sign tests are reported and never gate",
+    "report_only": True,
+}
 SCALING_SCHEMA = "buster-throughput-scaling-v1"
 SCALING_PROFILE = {
     "name": "scaling-v1",
@@ -377,6 +450,130 @@ def ast_pilot_budget_verdict(cells: dict, retained_bytes: int, correctness: dict
     outcomes = [check["outcome"] for check in checks.values()]
     outcome = "fail" if "fail" in outcomes else "pass" if all(item == "pass" for item in outcomes) else "inconclusive"
     return {"outcome": outcome, "checks": checks, "budget": dict(AST_PILOT_BUDGET), "report_only": True}
+
+
+def _finite_positive(value: object) -> bool:
+    return type(value) in (int, float) and math.isfinite(value) and value > 0
+
+
+def validate_throughput_real_source(status: object, summary: object, metadata: object, staging: object,
+                                    cpuinfo: object, binaries: object) -> list[str]:
+    """Reasons the evidence is not one complete THROUGHPUT_REAL_SOURCE_PROFILE run on these binaries and host.
+
+    status is the harness exit, summary/metadata its summary.json and metadata.json,
+    staging the helper's staging.json and cpuinfo the run's own cpuinfo.txt snapshot.
+    """
+    label = "real-source throughput"
+    profile = THROUGHPUT_REAL_SOURCE_PROFILE
+    inputs = profile["inputs"]
+    pairs, rounds = profile["pairs_per_round"], profile["rounds"]
+    cells = [f"{name}/{mode}" for name in inputs for mode in profile["modes"]]
+    problems: list[str] = []
+    summary = summary if isinstance(summary, dict) else None
+    metadata = metadata if isinstance(metadata, dict) else None
+    binaries = binaries if isinstance(binaries, dict) else {}
+    if type(status) is not int or status != 0:
+        problems.append(f"{label} harness exited {status!r}, not 0")
+    if summary is None or metadata is None:
+        return [*problems, f"{label} summary.json or metadata.json is missing or not an object"]
+    if summary.get("schema") != THROUGHPUT_SCHEMA or summary.get("valid") is not True or \
+            summary.get("guard_enabled") is not False:
+        problems.append(f"{label} summary is not a valid unguarded schema-2 comparison")
+    if summary.get("family_alpha") != 0.01 or summary.get("per_test_alpha") != 0.01 / (len(cells) * 2) or \
+            summary.get("confirmed_regressions") != 0 or summary.get("inconclusive_cases") != 0:
+        problems.append(f"{label} summary alpha or report-only totals differ from the profile")
+    rows = summary.get("comparisons")
+    names = [row.get("name") if isinstance(row, dict) else None for row in rows] if isinstance(rows, list) else []
+    if names != cells:
+        problems.append(f"{label} comparisons {names!r} are not exactly the profile cells {cells!r}")
+    wanted = sorted((metric, number) for metric in THROUGHPUT_TEST_METRICS for number in range(rounds))
+    for row in rows if isinstance(rows, list) else []:
+        name = row.get("name") if isinstance(row, dict) else None
+        medians = row.get("medians") if isinstance(row, dict) and isinstance(row.get("medians"), dict) else {}
+        tests = row.get("tests") if isinstance(row, dict) and isinstance(row.get("tests"), list) else []
+        if not isinstance(row, dict) or row.get("decision") != THROUGHPUT_REAL_SOURCE_DECISION:
+            problems.append(f"{label} cell {name!r} is not a report-only diagnostic decision")
+        for metric in THROUGHPUT_TEST_METRICS:
+            values = medians.get(metric)
+            if not isinstance(values, list) or len(values) != 2 or not all(_finite_positive(value) for value in values):
+                problems.append(f"{label} cell {name!r} has incomplete {metric} medians")
+        got = sorted((test.get("metric"), test.get("round")) for test in tests if isinstance(test, dict))
+        if got != wanted or any(not isinstance(test, dict) or type(test.get("pairs")) is not int or test["pairs"] != pairs
+                                for test in tests):
+            problems.append(f"{label} cell {name!r} does not have {pairs} complete pairs per metric and round")
+    facts = {"schema": THROUGHPUT_SCHEMA, "seed": profile["seed"], "pairs_per_round": pairs, "rounds": rounds,
+             "warmups": profile["warmups"], "cpu": profile["cpu"], "profile": "ci", "scale": 1, "input_schema": 1,
+             "workloads": [], "flags": [], "allocation_compilers": [],
+             "cache_policy": "warm-filesystem-new-process", "clock": "monotonic"}
+    for key, value in facts.items():
+        if type(metadata.get(key)) is not type(value) or metadata.get(key) != value:
+            problems.append(f"{label} metadata {key} {metadata.get(key)!r} is not the profile's {value!r}")
+    real = metadata.get("real_sources")
+    real = real if isinstance(real, list) else []
+    if [row.get("name") if isinstance(row, dict) else None for row in real] != list(inputs):
+        problems.append(f"{label} metadata does not list exactly the pinned descriptors in order")
+    for row in real:
+        pinned = inputs.get(row.get("name")) if isinstance(row, dict) else None
+        if pinned is None:
+            continue
+        descriptor = row.get("descriptor")
+        if row.get("descriptor_sha256") != pinned["descriptor_sha256"] or \
+                row.get("input_tree_sha256") != pinned["input_tree_sha256"] or \
+                row.get("requested_translation_unit_bytes") != pinned["requested_translation_unit_bytes"] or \
+                row.get("operation") != "source-to-linked-executable" or row.get("template") != "compile_link_argv" or \
+                not isinstance(descriptor, str) or not descriptor.endswith("/" + pinned["descriptor"]):
+            problems.append(f"{label} descriptor {row.get('name')!r} is not its pinned identity")
+    jobs = metadata.get("jobs")
+    expected_jobs = [(name, mode) for name in inputs for mode in profile["modes"]]
+    if not isinstance(jobs, list) or len(jobs) != len(expected_jobs):
+        problems.append(f"{label} metadata job population is incomplete")
+    else:
+        for index, (job, (name, mode)) in enumerate(zip(jobs, expected_jobs)):
+            if not isinstance(job, dict) or job.get("job") != index or job.get("name") != name or \
+                    job.get("mode") != mode or job.get("artifact") != "executable" or \
+                    job.get("sha256") != inputs[name]["input_tree_sha256"] or \
+                    job.get("bytes") != inputs[name]["requested_translation_unit_bytes"]:
+                problems.append(f"{label} metadata job {index} is not {name}/{mode} on its pinned tree")
+    provenance = metadata.get("compiler_provenance")
+    provenance = provenance if isinstance(provenance, list) and len(provenance) == 2 else [{}, {}]
+    for role, row in zip(("baseline", "candidate"), provenance):
+        recorded = binaries.get(role) if isinstance(binaries.get(role), dict) else {}
+        digest = row.get("sha256") if isinstance(row, dict) else None
+        if not (isinstance(digest, str) and SHA256.fullmatch(digest)) or digest != recorded.get("sha256"):
+            problems.append(f"{label} {role} compiler is not the measured {role} binary")
+    staged = staging.get("inputs") if isinstance(staging, dict) else None
+    if not isinstance(staging, dict) or staging.get("schema") != THROUGHPUT_REAL_SOURCE_STAGING_SCHEMA or \
+            staging.get("status") != "complete" or not isinstance(staged, dict) or list(staged) != list(inputs):
+        problems.append(f"{label} staging record is missing, incomplete or not the pinned input set")
+    else:
+        for name, pinned in inputs.items():
+            row = staged[name] if isinstance(staged[name], dict) else {}
+            archive = pinned["archive"]
+            if row.get("descriptor_sha256") != pinned["descriptor_sha256"] or \
+                    row.get("files") != [{"path": item["path"], "sha256": item["sha256"]} for item in pinned["files"]] or \
+                    row.get("copies") != [{"path": item["path"], "sha256": item["sha256"]} for item in pinned["copies"]] or \
+                    row.get("archive_sha256") != (archive["sha256"] if archive else None):
+                problems.append(f"{label} staged input {name!r} does not match its pins")
+    models = [line.split(":", 1)[1].strip() for line in cpuinfo.splitlines() if line.startswith("model name")] \
+        if isinstance(cpuinfo, str) else []
+    if not models or not all(APPROVED_HOST.search(model) for model in models):
+        problems.append(f"{label} run's own cpuinfo does not name the approved Zen 5 host (AMD Ryzen 7 9700X)")
+    return problems
+
+
+def throughput_real_source_digest(summary: object) -> list[dict]:
+    """The report's view of each real-source cell: base/candidate wall and peak-RSS medians."""
+    rows = summary.get("comparisons") if isinstance(summary, dict) and isinstance(summary.get("comparisons"), list) else []
+    digest = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        medians = row.get("medians") if isinstance(row.get("medians"), dict) else {}
+        wall, rss = medians.get("wall_seconds"), medians.get("peak_rss_bytes")
+        digest.append({"name": row.get("name"), "decision": row.get("decision"),
+                       "wall_seconds": wall if isinstance(wall, list) else None,
+                       "peak_rss_bytes": rss if isinstance(rss, list) else None})
+    return digest
 
 
 def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expected_candidate_sha: str | None = None) -> list[str]:
@@ -3019,6 +3216,26 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
                   for name, check in checks.items()]
         if ast.get("exit") not in (None, 0):
             lines.append(f"Issue #3397 profile exit: {ast.get('exit')}.")
+    real = receipt.get("throughput_real_source") if isinstance(receipt, dict) else None
+    if isinstance(real, dict) and real.get("requested"):
+        profile = THROUGHPUT_REAL_SOURCE_PROFILE
+        lines += ["", f"Real-source throughput ({profile['name']}): {real.get('status', 'NA')} "
+                  f"({profile['pairs_per_round']} pairs x {profile['rounds']} rounds per cell; report-only, guard off). "
+                  "Each cell times its descriptor's compile_link_argv to a linked executable.", "",
+                  "| Descriptor / mode | Base wall (ms) | Candidate wall (ms) | Candidate / base | Peak MiB base / candidate |",
+                  "| --- | ---: | ---: | ---: | ---: |"]
+        for row in real.get("cells") if isinstance(real.get("cells"), list) else []:
+            wall = row.get("wall_seconds") if isinstance(row, dict) and isinstance(row.get("wall_seconds"), list) else []
+            rss = row.get("peak_rss_bytes") if isinstance(row, dict) and isinstance(row.get("peak_rss_bytes"), list) else []
+            ok = len(wall) == 2 and all(_finite_positive(value) for value in wall)
+            memory = len(rss) == 2 and all(_finite_positive(value) for value in rss)
+            lines.append("| %s | %s | %s | %s | %s |" % (
+                row.get("name") if isinstance(row, dict) else "NA",
+                "%.1f" % (wall[0] * 1000) if ok else "NA", "%.1f" % (wall[1] * 1000) if ok else "NA",
+                "%.4f" % (wall[1] / wall[0]) if ok else "NA",
+                "%.1f / %.1f" % (rss[0] / 1048576, rss[1] / 1048576) if memory else "NA"))
+        if real.get("exit") not in (None, 0):
+            lines.append(f"Real-source throughput exit: {real.get('exit')}.")
     reasons = receipt.get("reasons") if isinstance(receipt, dict) else None
     warnings = summary.get("warnings")
     for item in (*notes, *(reasons if isinstance(reasons, list) else ()),

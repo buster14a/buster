@@ -93,6 +93,8 @@ def native_members(directory: Path) -> dict[str, bytes]:
             child = Path(root) / name
             member = child.relative_to(directory).as_posix()
             check(len(result) < 2048, "native export exceeds bounded archive member count")
+            check(name not in ("out.exe", "reference.exe") and not child.stat(follow_symlinks=False).st_mode & 0o111,
+                  "native export retains a compiled or executable member")
             data = read_regular(child, publisher.ANALYZER_MEMBER_LIMIT)
             total += len(data)
             check(total <= publisher.ARTIFACT_LIMIT, "native export exceeds archive size bound")
@@ -115,7 +117,8 @@ def stored_zip(members: dict[str, bytes]) -> bytes:
 
 def read_export(members: dict[str, bytes], trusted: dict) -> dict:
     # Unpack only the map already bounded and path-checked by the real publisher.
-    bounded = publisher.sampling_archive(stored_zip(members))
+    bounded = publisher.sampling_archive(stored_zip(members), member_limit=publisher.MAIN_ARCHIVE_FILE_LIMIT,
+                                         require_nonexecutable=True)
     check(bounded == members, "publisher did not preserve every native archive member byte")
     with tempfile.TemporaryDirectory(prefix="buster-hosted-packet-consumer-") as temporary:
         directory = Path(temporary)
