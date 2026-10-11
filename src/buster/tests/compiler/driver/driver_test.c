@@ -35582,9 +35582,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // A GNU statement expression in a file-scope initializer (#3364) is
     // rejected by the frontend at its `(`, as GCC and Clang do, so
     // -fsyntax-only and -c report the same located diagnostic instead of -c
-    // failing first in the static-initializer folder. Statement expressions
-    // in function bodies still compile. The sources are temporary files, so
-    // the native-retirement inventory stays unchanged.
+    // failing first in the static-initializer folder. The same holds anywhere
+    // else in a file-scope declaration (#3437): a typeof operand was accepted
+    // silently, and an array bound was reported as a variably modified type.
+    // Statement expressions in function bodies, local declarations included,
+    // still compile. The sources are temporary files, so the native-retirement
+    // inventory stays unchanged.
     {
         TemporalArena statement_temporary = arena_begin_temporal(arguments->arena);
         Arena* statement_arena = statement_temporary.arena;
@@ -35599,8 +35602,23 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                "int main(void) { return sx - 4; }\n"),
             S8("int f(void) { return ({ int a = 2; a; }); }\n"
                "int main(void) { int v = ({ typedef int T; T t = 1; t; }); return v - 1 + f() - 2; }\n"),
+            S8("static __typeof__(({ 1; })) x;\n"
+               "int main(void) { return x; }\n"),
+            S8("int a[({ 2; })];\n"
+               "int main(void) { return 0; }\n"),
+            S8("int g __attribute__((aligned(({ 8; }))));\n"
+               "int main(void) { return g; }\n"),
+            S8("struct S { int m[({ 2; })]; };\n"
+               "int main(void) { return 0; }\n"),
+            S8("int main(void)\n"
+               "{\n"
+               "    __typeof__(({ 1; })) v = ({ 2; });\n"
+               "    int a[({ 2; })];\n"
+               "    a[0] = v;\n"
+               "    return a[0] - sizeof(({ 3; })) / sizeof(int) - 1;\n"
+               "}\n"),
         };
-        String8 statement_locations[] = {S8(":1:17: "), S8(":1:17: "), S8(":1:24: "), S8("")};
+        String8 statement_locations[] = {S8(":1:17: "), S8(":1:17: "), S8(":1:24: "), S8(""), S8(":1:19: "), S8(":1:7: "), S8(":1:30: "), S8(":1:18: "), S8("")};
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(statement_texts); index += 1)
         {
             if (BUSTER_REQUIRE(arguments, file_write(statement_source, BUSTER_SLICE_TO_BYTE_SLICE(statement_texts[index]))))
