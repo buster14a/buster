@@ -1531,9 +1531,31 @@ switches, runtime paths, version scripts, and other `-z` modes are refused.
 
 `-Wp,` and `-Wa,` are unsupported and are never warning options. This includes
 preprocessor macro/include operations and dependency requests. Direct `-D`,
-`-U`, and `-I` remain available; dependency generation (`-M`, `-MM`, `-MD`,
-`-MMD`, `-MF`, `-MT`, `-MP`) is refused in every spelling. A failed request
-preserves any existing artifact instead of reporting a successful stale build.
+`-U`, and `-I` remain available; `-Wp,-M*` stays refused. The driver supports
+the bounded `-MD`/`-MMD` dependency-file contract described below; standalone
+`-M`, `-MM`, and `-MG` remain unsupported.
+
+## Dependency files
+
+`-MD` and `-MMD` write a Make-compatible depfile for C `-c` output. The default
+depfile path comes from the object path by removing only the basename's last
+extension and appending `.d`; `-MF` overrides it. `-MT` adds a raw target,
+`-MQ` adds an escaped target, and the default target is the escaped object path.
+Multiple target options retain command-line order. `-MP` adds phony rules for
+header prerequisites. `-MF`, `-MT`, `-MQ`, and `-MP` require `-MD` or `-MMD`;
+explicit `-MF`/target options cannot be used with multiple inputs.
+
+Prerequisites come from resolved preprocessor include identities, in
+first-inclusion order; the main source comes first unless compiling stdin.
+Repeated identities appear once, builtin headers and `<command-line>` do not
+appear, and forced includes follow the main source. `-MMD` excludes headers
+found in system include paths and all headers included from a system header.
+Makefile-special spaces, tabs, dollar signs, and `#` characters are escaped.
+Paths containing a newline or carriage return cannot be represented and fail
+with a file-write diagnostic.
+The depfile is atomically published only after successful compilation and
+object publication, so a failed compile preserves existing object and depfile
+contents.
 
 ## Warning options
 
