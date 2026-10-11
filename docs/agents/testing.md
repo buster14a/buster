@@ -1293,9 +1293,10 @@ modules, fixtures or assertions. Hosted wall-time improvements still require
 same-binary, same-runner comparisons and complete lane evidence.
 
 The `codex/3620-schedule-unit-modules` qualification branch runs three paired
-sanitized Release invocations per Linux x86-64, Linux AArch64, Windows x64 and
-macOS AArch64 hosted runner, using one immutable binary and four test workers
-in both arms. The `pair` control runs before each `modules` candidate. Raw
+sanitized Release invocations per Linux x86-64, Linux AArch64 and Windows x64
+hosted runner, using one immutable binary and four test workers in both arms.
+The three-core macOS hosted runner keeps its ordinary serial fallback and
+normal sanitized CI validation. The `pair` control runs before each `modules` candidate. Raw
 logs and machine records remain in the unit-partition artifact, including failed
 attempts. `test_units_partitioned --compare <pair-log> <module-log>` requires
 identical source and binary identities, per-module indices/names/assertion

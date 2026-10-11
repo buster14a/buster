@@ -1512,6 +1512,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission(UnitTestArgume
     OsTestEnvironment environment = os_test_environment(arena, keys, values, BUSTER_ARRAY_LENGTH(keys));
     String8 child[] = {program_state->input.arguments.pointer[0], S8("test")};
     u64 resources = os_process_spawn_test_resource_count();
+#if BUSTER_WINDOWS
+    // Temporary bounded read-only diagnostic for the cold-process census.
+    bool inspect_handles = string_equal(os_get_environment_variable(S8("BUSTER_OS_CAPTURE_RESOURCE_DIAGNOSTICS")), S8("1"));
+    bool handles_before[16384] = {0};
+    if (inspect_handles)
+    {
+        for (u32 index = 1; index < BUSTER_ARRAY_LENGTH(handles_before); index += 1)
+        {
+            DWORD flags = 0;
+            handles_before[index] = GetHandleInformation((HANDLE)(uintptr_t)(index * 4), &flags) != 0;
+        }
+    }
+#endif
     ProcessSpawnOptions outer = {
         .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .new_process_group = 1,
     };
@@ -1551,6 +1564,34 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission(UnitTestArgume
     if (resources_after != resources)
     {
         arguments->show(arguments, S8("CAPTURE_SINK_RESOURCES_V1 before={u64} after={u64}\n"), resources, resources_after);
+#if BUSTER_WINDOWS
+        if (inspect_handles)
+        {
+            typedef LONG (WINAPI *QueryObject)(HANDLE, int, void*, ULONG, ULONG*);
+            QueryObject query = (QueryObject)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryObject");
+            for (u32 index = 1; index < BUSTER_ARRAY_LENGTH(handles_before); index += 1)
+            {
+                DWORD flags = 0;
+                HANDLE handle = (HANDLE)(uintptr_t)(index * 4);
+                if (!handles_before[index] && GetHandleInformation(handle, &flags))
+                {
+                    struct {u16 length, maximum; u16* pointer;}* name;
+                    u64 storage[128] = {0};
+                    ULONG required = 0;
+                    String8 type = S8("unknown");
+                    if (query && query(handle, 2, storage, sizeof(storage), &required) >= 0)
+                    {
+                        name = (void*)storage;
+                        if (name->length <= sizeof(storage) && name->pointer)
+                        {
+                            type = string8_from_string16(arena, (String16){name->pointer, name->length / 2});
+                        }
+                    }
+                    arguments->show(arguments, S8("CAPTURE_SINK_HANDLE_V1 value={u32} type={S8}\n"), index * 4, type);
+                }
+            }
+        }
+#endif
     }
     BUSTER_TEST(arguments, resources_after == resources);
     BUSTER_TEST(arguments, os_file_delete(marker));
