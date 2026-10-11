@@ -1569,6 +1569,12 @@ struct CTypeParseMachine
     // inside one is reported there, because neither path has a later fallback
     // that names it.
     u32 member_declarator_depth;
+    // The `(` and `)` of the identifier list of the old-style definition
+    // whose parenthesized declarator is being parsed, `(a)` in
+    // `int (k(a)) int a; {...}`, else both zero: its names are parameters,
+    // not declarations (GitHub #3368).
+    u32 identifier_list_open;
+    u32 identifier_list_close;
     u32 expression_task_count;
     u32 expression_task_capacity;
     CConstantEvaluationMode constant_evaluation_mode;
