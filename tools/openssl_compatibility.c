@@ -129,6 +129,37 @@ BUSTER_GLOBAL_LOCAL bool openssl_gitlink_admitted(Arena* arena, String8 root, St
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL bool openssl_git_file_batch(Arena* arena, String8 git, String8 root, String8* paths, String8* hashes, u64 count, bool* stopped)
+{
+    bool valid = true;
+    if (count)
+    {
+        OsArgumentBuilder builder = os_argument_builder_start(arena);
+        os_argument_builder_append(&builder, git);
+        os_argument_builder_append(&builder, S8("--no-replace-objects"));
+        os_argument_builder_append(&builder, S8("hash-object"));
+        os_argument_builder_append(&builder, S8("--no-filters"));
+        os_argument_builder_append(&builder, S8("--"));
+        for (u64 i = 0; i < count; i += 1)
+        {
+            os_argument_builder_append(&builder, paths[i]);
+        }
+        RaddebuggerCommandResult command = openssl_command(arena, os_argument_builder_flush(&builder), root, (String8){0},
+                                                          RADDEBUGGER_ENVIRONMENT_GIT, stopped, RADDEBUGGER_PROCESS_TIMEOUT_US);
+        valid = raddebugger_command_ok(command);
+        u64 offset = 0;
+        for (u64 i = 0; valid && i < count; i += 1)
+        {
+            u64 end = offset;
+            while (end < command.output.length && command.output.pointer[end] != '\n') { end += 1; }
+            valid = string_equal(compat_trim_ascii_space(string_slice(command.output, offset, end)), hashes[i]);
+            offset = end + (end < command.output.length);
+        }
+        valid = valid && offset == command.output.length;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool openssl_git_verify(Arena* arena, String8 git, String8 source_directory, String8 expected_commit, bool* stopped)
 {
     String8 root_arguments[] = {git, S8("--no-replace-objects"), S8("-c"), S8("core.fsmonitor=false"), S8("rev-parse"), S8("--show-toplevel")};
@@ -156,6 +187,9 @@ BUSTER_GLOBAL_LOCAL bool openssl_git_verify(Arena* arena, String8 git, String8 s
         String8 index_arguments[] = {git, S8("--no-replace-objects"), S8("-c"), S8("core.fsmonitor=false"), S8("ls-files"), S8("-v"), S8("--stage"), S8("-z")};
         RaddebuggerCommandResult index = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(index_arguments), source_directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
         valid = raddebugger_command_ok(index) && index.output.length;
+        String8 paths[128];
+        String8 hashes[128];
+        u64 count = 0;
         for (u64 offset = 0; valid && offset < index.output.length;)
         {
             u64 end = offset;
@@ -168,8 +202,25 @@ BUSTER_GLOBAL_LOCAL bool openssl_git_verify(Arena* arena, String8 git, String8 s
                     (string_equal(string_slice(entry, 2, 8), S8("100644")) || string_equal(string_slice(entry, 2, 8), S8("100755")) ||
                      (string_equal(string_slice(entry, 2, 8), S8("160000")) && string_equal(expected_commit, S8(BUSTER_OPENSSL_COMMIT)) &&
                       openssl_gitlink_admitted(arena, source_directory, entry)));
+            if (valid && !string_equal(string_slice(entry, 2, 8), S8("160000")))
+            {
+                valid = entry.length > 52 && entry.pointer[49] == ' ' && entry.pointer[50] == '0' && entry.pointer[51] == '\t';
+                if (valid)
+                {
+                    String8 path = path_join(arena, source_directory, string_slice(entry, 52, entry.length));
+                    valid = string_equal(path, os_path_absolute(arena, path, true));
+                    paths[count] = path;
+                    hashes[count++] = string_slice(entry, 9, 49);
+                    if (valid && count == BUSTER_ARRAY_LENGTH(paths))
+                    {
+                        valid = openssl_git_file_batch(arena, git, source_directory, paths, hashes, count, stopped);
+                        count = 0;
+                    }
+                }
+            }
             offset = end + 1;
         }
+        if (valid) { valid = openssl_git_file_batch(arena, git, source_directory, paths, hashes, count, stopped); }
     }
     if (valid)
     {
