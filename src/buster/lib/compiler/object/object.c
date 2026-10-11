@@ -95,6 +95,8 @@
 //   object_elf64_plan, object_elf64_emit,          the ELF writer: plan every
 //   object_write_elf64                             range, then store each
 //                                                  byte once
+//   object_relocations_by_section                  per-section relocation groups
+//                                                  for the COFF/Mach-O tables
 //   object_coff_bind_tls_index,                    platform TLS spelling the
 //   object_coff_place_tls,                         COFF/Mach-O writers apply:
 //   object_mach_o_place_thread_variables           _tls_index, .tls$, and
@@ -13671,6 +13673,9 @@ BUSTER_GLOBAL_LOCAL bool object_writer_32_arena_fits(Arena* arena, ObjectFile* o
     bool coff = format == OBJECT_FORMAT_COFF;
     u64 scratch = 64 + (u64)object->section_count * (coff ? 144u : 20u) + (u64)object->symbol_count * sizeof(u32) +
                   (coff ? 0 : (u64)object->relocation_count * 144);
+    // object_relocations_by_section: section counts and cursors, the grouped
+    // relocation indices, and their allocation alignment.
+    scratch += ((u64)object->section_count * 2 + 2) * sizeof(u32) + ((u64)object->relocation_count + 1) * sizeof(u32) + 24;
     if (coff && object->target.cpu_arch == CPU_ARCH_AARCH64)
     {
         // TLS index binding may append a symbol and copy both source arrays
@@ -14801,6 +14806,45 @@ BUSTER_GLOBAL_LOCAL bool object_coff_section_alignment_characteristics(ObjectSec
     return result;
 }
 
+// Relocation indices grouped by section, in relocation order within each
+// section: section s owns entries [(*starts)[s], (*starts)[s + 1]). A writer
+// that emits per-section tables walks its own group instead of rescanning
+// every relocation for every section. Relocations naming a section at or
+// past section_count belong to no group. Its counting and placement passes
+// each visit every relocation once, and both are counted.
+BUSTER_GLOBAL_LOCAL u32* object_relocations_by_section(Arena* arena, ObjectFile* object, u32 section_count, u32** starts,
+                                                       ObjectWriteStatistics* statistics)
+{
+    u32* counts = arena_allocate_zeroed(arena, u32, (u64)section_count + 1);
+    for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
+    {
+        statistics->relocation_visits += 1;
+        u32 section = object->relocations[relocation].section;
+        if (section < section_count)
+        {
+            counts[section + 1] += 1;
+        }
+    }
+    for (u32 section = 0; section < section_count; section += 1)
+    {
+        counts[section + 1] += counts[section];
+    }
+    u32* order = arena_allocate(arena, u32, counts[section_count] ? counts[section_count] : 1);
+    u32* cursors = arena_allocate(arena, u32, section_count ? section_count : 1);
+    memcpy(cursors, counts, (u64)section_count * sizeof(*cursors));
+    for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
+    {
+        statistics->relocation_visits += 1;
+        u32 section = object->relocations[relocation].section;
+        if (section < section_count)
+        {
+            order[cursors[section]++] = relocation;
+        }
+    }
+    *starts = counts;
+    return order;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena, ObjectFile* object, u64 capacity,
                                                                   ObjectWriteStatistics* statistics)
 {
@@ -14836,6 +14880,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
         }
         relocation_counts[source->section] += 1;
     }
+    u32* section_relocation_starts = 0;
+    u32* section_relocations = object_relocations_by_section(arena, object, section_count, &section_relocation_starts, statistics);
     for (u32 section = 0; section < section_count && buffer.error == OBJECT_ERROR_NONE; section += 1)
     {
         ObjectSection* object_section = object->sections + section;
@@ -14848,14 +14894,11 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
             object_buffer_write(&buffer, object_section->data.pointer, object_section->data.length);
             statistics->payload_bytes_copied += object_section->data.length;
         }
-        for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
+        for (u32 grouped = section_relocation_starts[section]; grouped < section_relocation_starts[section + 1]; grouped += 1)
         {
+            u32 relocation = section_relocations[grouped];
             ObjectRelocation* source = object->relocations + relocation;
             statistics->relocation_visits += 1;
-            if (source->section != section)
-            {
-                continue;
-            }
             s64 addend = source->addend;
             if (source->kind == OBJECT_RELOCATION_X86_64_PC32 || source->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
                 source->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32)
@@ -14934,14 +14977,11 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
             // The 32-bit field counts the marker as well as all real relocations.
             object_write_u32_at(&buffer, overflow_offset, relocation_counts[section] + 1);
         }
-        for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
+        for (u32 grouped = section_relocation_starts[section]; grouped < section_relocation_starts[section + 1]; grouped += 1)
         {
+            u32 relocation = section_relocations[grouped];
             ObjectRelocation* source = object->relocations + relocation;
             statistics->relocation_visits += 1;
-            if (source->section != section)
-            {
-                continue;
-            }
             u16 type = object_coff_relocation_type(object->target.cpu_arch, source->kind);
             if (!type)
             {
@@ -15236,19 +15276,18 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64_with_capacity(Arena* ar
         object_buffer_write(&buffer, object->sections[section].data.pointer, object->sections[section].data.length);
         statistics->payload_bytes_copied += object->sections[section].data.length;
     }
+    u32* section_relocation_starts = 0;
+    u32* section_relocations = object_relocations_by_section(arena, object, section_count, &section_relocation_starts, statistics);
     for (u32 section = 0; section < section_count; section += 1)
     {
         statistics->section_visits += 1;
         object_buffer_align(&buffer, 4);
         relocation_offsets[section] = object_buffer_u32(&buffer, buffer.count);
-        for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
+        for (u32 grouped = section_relocation_starts[section]; grouped < section_relocation_starts[section + 1]; grouped += 1)
         {
+            u32 relocation = section_relocations[grouped];
             ObjectRelocation* source = object->relocations + relocation;
             statistics->relocation_visits += 1;
-            if (source->section != section)
-            {
-                continue;
-            }
             s64 addend = source->addend;
             bool place_difference = prel32_place_symbols[relocation] != UINT32_MAX;
             // X86_64_RELOC_SIGNED, the GOT forms and X86_64_RELOC_TLV all store
