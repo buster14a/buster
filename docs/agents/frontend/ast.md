@@ -1306,6 +1306,19 @@ tests-off `-march=x86-64-v3` builds, run on `-fsyntax-only` and on `-c`
   requested, so Zen 5 validation stays incomplete (#2761), and the hook stays
   opt-in.
 
+The shared copies' hosted census is
+[`2026-10-11T152407Z`](../../performance-audits/2026-10-11T152407Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. Objects are identical across the four arms at
+  `-g0` and `-g`, and the corpus verify gate has 0 mismatches.
+- **The pilot (C against B):** −74.9 M Ir (−0.81%) on `-fsyntax-only` and
+  −86.5 M (−0.38%) on `-c`.
+  - Machine runs from queries fall from 28,360 to 20,742.
+  - About half of the saving is those runs, and half is fewer whole-table
+    layout solves over the smaller table (91 to 82).
+- **The default path (D against A):** +0.0034% and +0.0029%.
+- Zen 5 validation stays incomplete (#2761).
+
 For the in-place columns ([storage](#storage-and-lifetime)), these budgets were
 declared before the measured runs, on the same input and flags, with stage 2's
 four arms (A base default, B base with `-fc-ast-pilot`, C candidate with it,
