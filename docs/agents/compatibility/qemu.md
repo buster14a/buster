@@ -19,6 +19,11 @@ with actual package/compiler identities retained. Ubuntu 26.04 was rejected
 at intake because its newer string header caused unchanged QEMU 9.2.4 to fail
 its Clang reference build; that attempt is not a qualified cell.
 The cell is Linux x86-64 host, `x86_64-softmmu`, TCG enabled and KVM disabled.
+Both compiler command lines, including `--host-cc`, pin `-march=x86-64`.
+Buster's implicit CPU is the host's detected model, while Clang defaults to the
+portable baseline; the explicit common pin aligns predefined feature macros
+and selected object ISA before either variant runs. The compiler executable
+hash and actual probe/build arguments are retained separately.
 The same explicit configure options are used for Clang and Buster:
 `--without-default-features --disable-download --disable-docs
 --disable-guest-agent --disable-tools --disable-fdt --disable-strip

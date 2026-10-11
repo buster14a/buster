@@ -258,7 +258,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult qemu_compat_main(Arena* arena, SliceString8 ar
             bool retained = created.created;
             String8List summary = {0};
             string8_list_push(arena, &summary, S8("variant\tconfigure\tbuild\tunit\tqtest\tguest\tfunctional\tperformance\n"));
-            String8 compilers[] = {clang, string_format(arena, S8("{S8} cc"), ide)};
+            String8 compilers[] = {string_format(arena, S8("{S8} -march=x86-64"), clang), string_format(arena, S8("{S8} cc -march=x86-64"), ide)};
             String8 variants[] = {S8("reference"), S8("buster")};
             bool prepared = created.created && qemu_packagefiles_prepare(arena, source, output, &stopped) && qemu_inputs_verify(arena, git, source, &stopped);
             bool all_passed = prepared;
