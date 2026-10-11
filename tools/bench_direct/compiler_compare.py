@@ -32,7 +32,7 @@ under the direct path's owner-only trust boundary, not a sealed result.
 Map: queue_head (pull-mode supersession), build (one ide), toolchain, export_tree (bounded evidence export),
 read_exported_json (classification reads the export, #2929), collect_evidence,
 measure_throughput (corpus leg), scaling_requested and measure_scaling (scaling leg),
-main. Validity rules live in compiler_receipt.classify.
+ast_pilot_request_selection and measure_ast_pilot (#3397 opt-in flag pair), main. Validity rules live in compiler_receipt.classify.
 """
 
 from __future__ import annotations
@@ -55,6 +55,7 @@ from pathlib import Path
 
 from compiler_github import ARTIFACT_LIMIT, RECONCILE_DEPTH
 from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE_PROFILE, INLINE_ACCEPTANCE_REQUEST_LINE,
+                              AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_ACCEPTANCE_REQUEST_LINE, validate_ast_pilot_acceptance,
                               INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUEST_LINE,
                               ANALYZER_REQUEST_LINES,
                               ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, MAIN40_PROFILE, MAIN_PROFILES, named_main_profile, RECEIPT_SCHEMA, SCALING_PROFILE,
@@ -69,6 +70,7 @@ LAB_TIMEOUT_SECONDS = 3000
 THROUGHPUT_TIMEOUT_SECONDS = 1800
 SCALING_TIMEOUT_SECONDS = 1200
 INLINE_ACCEPTANCE_TIMEOUT_SECONDS = 3 * 60 * 60
+AST_PILOT_ACCEPTANCE_TIMEOUT_SECONDS = 2 * 60 * 60
 ANALYZER_DRIVER_BUILD_TIMEOUT_SECONDS = 600
 ANALYZER_GENERATE_TIMEOUT_SECONDS = 900
 ANALYZER_HELPER_TIMEOUT_SECONDS = 76 * 60
@@ -871,6 +873,18 @@ def analyzer_profile_request_selection(candidate: Path, head: str) -> tuple[str 
     return selected, ""
 
 
+def ast_pilot_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #3397's fixed profile only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, AST_PILOT_ACCEPTANCE_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the ast-pilot acceptance selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the ast-pilot acceptance selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
 def analyzer_profile_request_status(candidate: Path, head: str) -> tuple[bool, str]:
     """Compatibility boolean wrapper for callers interested only in selection state."""
     selected, problem = analyzer_profile_request_selection(candidate, head)
@@ -1087,6 +1101,11 @@ def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, wor
         reasons.append("could not prove the inline acceptance selector count against every head parent")
     elif any(delta > 0 for delta in inline_selector_deltas):
         reasons.append(f"{selected_profile['name']} cannot be combined with the inline acceptance selector")
+    ast_selector_deltas = request_selector_parent_deltas(candidate, arguments.head, AST_PILOT_ACCEPTANCE_REQUEST_LINE)
+    if ast_selector_deltas is None:
+        reasons.append("could not prove the ast-pilot acceptance selector count against every head parent")
+    elif any(delta > 0 for delta in ast_selector_deltas):
+        reasons.append(f"{selected_profile['name']} cannot be combined with the ast-pilot acceptance selector")
     if scaling_requested(candidate, arguments.base, arguments.head):
         reasons.append(f"{selected_profile['name']} cannot be combined with a scaling.request profile")
     drivers: dict[str, Path] = {}
@@ -1297,6 +1316,40 @@ def closure_phase(arguments: argparse.Namespace, candidate: Path, work: Path, ev
     return problem
 
 
+AST_PILOT_REQUIRED = ("acceptance.json", "probe/probe.json",
+                      *(f"{cell}/{name}" for cell in AST_PILOT_ACCEPTANCE_PROFILE["cells"]
+                        for name in ("summary.json", "compare.json", "a/lab.json", "b/lab.json")))
+
+
+def measure_ast_pilot(arguments: argparse.Namespace, candidate: Path, binary: Path, work: Path, evidence: Path,
+                      receipt: dict) -> None:
+    """Run #3397's fixed -fc-ast-pilot profile on the frozen candidate build and record it in the receipt."""
+    mark(receipt, evidence, "ast-pilot-acceptance")
+    output = work / "ast-pilot-acceptance"
+    helper = Path(__file__).with_name("ast_pilot_acceptance.py").resolve()
+    measured = time.monotonic()
+    status = run([sys.executable, "-B", str(helper),
+                  "--lab", str(arguments.lab.resolve()), "--candidate-ide", str(binary),
+                  "--repo-root", str(candidate), "--head-revision", arguments.head,
+                  "--cpu", str(AST_PILOT_ACCEPTANCE_PROFILE["cpu"]), "--output", str(output)],
+                 candidate, evidence / "ast-pilot-acceptance.log", AST_PILOT_ACCEPTANCE_TIMEOUT_SECONDS)
+    receipt["timings"]["ast_pilot_acceptance_seconds"] = round(time.monotonic() - measured, 3)
+    record = receipt["ast_pilot_acceptance"]
+    record["exit"] = status
+    errors, omissions = export_tree(output, evidence / "ast_pilot_acceptance", evidence, EVIDENCE_IGNORE, AST_PILOT_REQUIRED)
+    record["evidence_omissions"] = omissions
+    summary, problem = read_exported_json(evidence / "ast_pilot_acceptance" / "acceptance.json")
+    if problem:
+        errors.append(f"issue #3397 ast-pilot acceptance receipt unreadable: {problem}")
+    else:
+        record["summary"] = summary
+        errors.extend(validate_ast_pilot_acceptance(summary, arguments.head, receipt["binaries"]["candidate"]["sha256"]))
+    if status != 0:
+        errors.append(f"issue #3397 ast-pilot acceptance exited {status}")
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
 def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path, bins: Path, log: Path,
             receipt: dict, summaries: list) -> None:
     """Build both revisions and run the lab, corpus and scaling legs; the lab summary goes to summaries."""
@@ -1324,6 +1377,13 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         "request_line": INLINE_ACCEPTANCE_REQUEST_LINE if inline_requested else None,
         "profile": INLINE_ACCEPTANCE_PROFILE if inline_requested else None,
         "status": "pending" if inline_requested else "not requested"}
+    ast_requested, problem = (ast_pilot_request_selection(candidate, arguments.head) if arguments.mode == "pull"
+                              else (False, ""))
+    if problem:
+        reasons.append(problem)
+    if ast_requested:
+        receipt["ast_pilot_acceptance"] = {"requested": True, "request_line": AST_PILOT_ACCEPTANCE_REQUEST_LINE,
+                                           "profile": AST_PILOT_ACCEPTANCE_PROFILE, "status": "pending"}
     if not reasons:
         for role, commit in (("baseline", arguments.base), ("candidate", arguments.head), ("closure", arguments.base)):
             mark(receipt, evidence, f"build-{role}")
@@ -1383,6 +1443,8 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                         errors.append(f"issue #48 inline self-host acceptance exited {inline_status}")
                     inline["errors"] = errors
                     inline["status"] = "complete" if not errors else "failed"
+                if role == "candidate" and ast_requested:
+                    measure_ast_pilot(arguments, candidate, binary, work, evidence, receipt)
 
     if not reasons:
         lab = work / "lab"
@@ -1487,6 +1549,14 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             receipt["inline_acceptance"]["status"] = "failed"
             reasons.append("issue #48 inline self-host acceptance was requested but did not reach its candidate-build phase")
         if receipt["inline_acceptance"]["status"] != "complete":
+            receipt["state"] = "failed"
+    if ast_requested:
+        record = receipt["ast_pilot_acceptance"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("issue #3397 ast-pilot acceptance was requested but did not reach its candidate-build phase")
+        if record["status"] != "complete":
             receipt["state"] = "failed"
 
 
