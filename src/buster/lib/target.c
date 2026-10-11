@@ -1401,6 +1401,7 @@ bool target_cpu_features_are_valid(Target target)
                 TARGET_CPU_FEATURE_AARCH64_TRACEV8_4,
                 TARGET_CPU_FEATURE_AARCH64_SME,
                 TARGET_CPU_FEATURE_AARCH64_SVE,
+                TARGET_CPU_FEATURE_AARCH64_SME_I16I64,
             };
             TargetCpuFeatures known = target_cpu_features_from_array(known_feature_list, (u32)BUSTER_ARRAY_LENGTH(known_feature_list));
             if (!target_cpu_features_subset(features, known))
@@ -1435,7 +1436,9 @@ bool target_cpu_features_are_valid(Target target)
                 (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_RCPC_IMMO) &&
                  !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_RCPC)) ||
                 (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_SHA3) &&
-                 !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_SHA2)))
+                 !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_SHA2)) ||
+                (target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_SME_I16I64) &&
+                 !target_cpu_features_contains(features, TARGET_CPU_FEATURE_AARCH64_SME)))
             {
                 return false;
             }
@@ -1949,6 +1952,7 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("sm4"), .feature = TARGET_CPU_FEATURE_X86_SM4, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("smap"), .feature = TARGET_CPU_FEATURE_X86_SMAP, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sme"), .feature = TARGET_CPU_FEATURE_AARCH64_SME, .arch = CPU_ARCH_AARCH64},
+    {.name = S8_INITIALIZER("sme-i16i64"), .feature = TARGET_CPU_FEATURE_AARCH64_SME_I16I64, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("snp"), .feature = TARGET_CPU_FEATURE_X86_SNP, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("specrestrict"), .feature = TARGET_CPU_FEATURE_AARCH64_SPECRESTRICT, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("ssbs"), .feature = TARGET_CPU_FEATURE_AARCH64_SSBS, .arch = CPU_ARCH_AARCH64},
