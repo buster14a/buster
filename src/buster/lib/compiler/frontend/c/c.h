@@ -556,6 +556,15 @@ struct CPreprocessorOperation
     CPreprocessorOperationKind kind;
 };
 
+// Literal, case-sensitive filename prefix substitutions in command-line order.
+// The last matching entry wins once; replacements are not remapped.
+typedef struct CMacroPrefixMap CMacroPrefixMap;
+struct CMacroPrefixMap
+{
+    String8 old_prefix;
+    String8 new_prefix;
+};
+
 typedef enum CPreprocessDialect
 {
     C_PREPROCESS_DIALECT_GNU17,
@@ -611,6 +620,7 @@ struct CPreprocessOptions
     // arrays below remain the compatibility path for existing callers: their
     // definitions are applied first, followed by their undefinitions.
     CPreprocessorOperation* macro_operations;
+    CMacroPrefixMap* macro_prefix_maps;
     CPreprocessorDefinition* definitions;
     String8* undefinitions;
     String8* include_paths;
@@ -629,6 +639,7 @@ struct CPreprocessOptions
     Target target;
     TargetDataLayout data_layout;
     u32 macro_operation_count;
+    u32 macro_prefix_map_count;
     u32 definition_count;
     u32 undefinition_count;
     u32 include_path_count;
