@@ -12,7 +12,9 @@ permissions:
   contents: read
 
 env:
-  MAIN_PUSH_MAINTENANCE_SHA256: 118669698721ecc0d5da220d598bdf87afa172111dac784b6142e1f82a251ce5
+  MAIN_PUSH_MAINTENANCE_SHA256: 041050c5e89cc9b8994bd769b4b8b0dc5523b652b5608b93f90810ff091c4fbb
+  MAIN_PUSH_INVENTORY_SHA256: 57af93a7c03c976c90601c85daed55d5222a3224bca66fdafd13d2b78e47bcc7
+  MAIN_PUSH_JSON_SHA256: 353d14e35fc8dd056a1a37637f7c28d3c4cb2b9f6724466a55e7eac445781590
 
 # Candidate heads retain ordinary cancellation. Main pushes use exact-SHA groups
 # so GitHub cannot cancel or replace an older pending run. The push-only helper
@@ -74,10 +76,10 @@ jobs:
       - name: Verify main-push maintenance authority
         shell: bash
         working-directory: authority
-        run: >-
-          printf '%s  %s\n' "$MAIN_PUSH_MAINTENANCE_SHA256"
-          tools/main_push_maintenance.py |
-          sha256sum --check --strict
+        run: |
+          printf '%s  %s\n' "$MAIN_PUSH_MAINTENANCE_SHA256" tools/main_push_maintenance.py | sha256sum --check --strict
+          printf '%s  %s\n' "$MAIN_PUSH_INVENTORY_SHA256" tools/main_push_inventory.c | sha256sum --check --strict
+          printf '%s  %s\n' "$MAIN_PUSH_JSON_SHA256" tools/ci_metrics_json.h | sha256sum --check --strict
       - name: Check out exact candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:

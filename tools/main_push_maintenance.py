@@ -10,9 +10,9 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 import time
-import urllib.parse
 
 import merge_conflict_preflight as preflight
 import merge_conflict_preflight_refresh as refresh
@@ -87,79 +87,59 @@ def _main(api) -> str:
     return _sha(obj.get("sha") if isinstance(obj, dict) else None, "live main")
 
 
-def _pages(api, path: str, key: str, **query) -> list[dict]:
-    rows = []
-    for page in range(1, MAX_PAGES + 1):
-        value = api.request(path, per_page=100, page=page, **query)
-        batch = value.get(key) if isinstance(value, dict) else None
-        if not isinstance(batch, list) or not all(isinstance(row, dict) for row in batch):
-            raise MaintenanceError(f"{key} inventory is malformed")
-        rows.extend(batch)
-        if len(batch) < 100:
-            return rows
-    raise MaintenanceError(f"{key} pagination limit reached")
+def _native_inventory(api, mode: str, workflow: str, number: int,
+                      selected: str, *, deadline: float | None = None):
+    """Transport-only compatibility adapter; native C owns query and verdict."""
+    executable = Path(__file__).with_name("main_push_inventory")
+    deadline = deadline if deadline is not None else time.monotonic() + 60
+    evidence = {"phase": mode + "-discovery", "requests": 0, "pages": 0,
+                "inventory_complete": False}
+    child = None
+    previous = getattr(api, "deadline", None)
+    try:
+        child = subprocess.Popen(
+            [os.fspath(executable), mode, workflow, str(number), selected],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        while True:
+            message = json.loads(child.stdout.readline())
+            if "request" not in message:
+                evidence.update(message)
+                status = child.wait(timeout=5)
+                if status != 0 or message.get("inventory_complete") is not True:
+                    raise MaintenanceError(message.get("error", "native discovery failed"))
+                return message["result"]
+            evidence["requests"] += 1
+            evidence["pages"] += int("page" in message["query"])
+            evidence["last_query"] = {"path": message["request"], **message["query"]}
+            if time.monotonic() >= deadline:
+                raise MaintenanceError("discovery deadline reached")
+            if hasattr(api, "deadline"):
+                api.deadline = min(previous, deadline) if previous is not None else deadline
+            response = api.request(message["request"], **message["query"])
+            child.stdin.write(json.dumps(response, separators=(",", ":")) + "\n")
+            child.stdin.flush()
+    except (MaintenanceError, OSError, ValueError, TypeError,
+            subprocess.SubprocessError, preflight.PreflightError,
+            retirement.AdmissionError) as error:
+        failure = MaintenanceError(str(error) if isinstance(error, MaintenanceError)
+                                   else "discovery transport/adapter failure: " + type(error).__name__)
+        failure.discovery = evidence
+        raise failure from None
+    finally:
+        if hasattr(api, "deadline"):
+            api.deadline = previous
+        if child is not None:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)
+            child.stdin.close()
+            child.stdout.close()
 
 
-def _runs(api, workflow: str) -> list[dict]:
-    if not workflow or "/" in workflow:
-        raise MaintenanceError(f"workflow must be a file name: {workflow!r}")
-    name = urllib.parse.quote(workflow, safe="")
-    return _pages(
-        api, f"actions/workflows/{name}/runs", "workflow_runs",
-        event="push", branch="main",
-    )
-
-
-def _jobs(api, run_id: int) -> list[dict]:
-    return _pages(
-        api, f"actions/runs/{_positive(run_id, 'run id')}/jobs", "jobs",
-        filter="all",
-    )
-
-
-def _identity(run: dict) -> tuple[int, int, str, str, str]:
-    values = (
-        _positive(run.get("id"), "run id"),
-        _positive(run.get("run_number"), "run number"),
-        run.get("event"),
-        run.get("head_branch"),
-        run.get("status"),
-    )
-    if not all(isinstance(value, str) for value in values[2:]):
-        raise MaintenanceError("workflow run omits event, branch, or status")
-    return values
-
-
-def _job_pending(api, run: dict, target: str) -> bool:
-    run_id, _number, _event, _branch, status = _identity(run)
-    if status == "completed":
-        return False
-    matches = [job for job in _jobs(api, run_id) if job.get("name") == target]
-    if not matches:
-        return True
-    for job in matches:
-        status = job.get("status")
-        if not isinstance(status, str):
-            raise MaintenanceError("target job omits status")
-        if status != "completed":
-            return True
-    return False
-
-
-def _predecessors(api, workflow: str, number: int, target: str) -> list[dict]:
-    number = _positive(number, "current run number")
-    blocked = []
-    for run in _runs(api, workflow):
-        run_id, run_number, event, branch, _status = _identity(run)
-        if event != "push" or branch != "main" or run_number >= number:
-            continue
-        if _job_pending(api, run, target):
-            blocked.append({
-                "id": run_id,
-                "run_number": run_number,
-                "head_sha": _sha(run.get("head_sha"), "predecessor head"),
-            })
-    return sorted(blocked, key=lambda row: (row["run_number"], row["id"]))
+def _predecessors(api, workflow: str, number: int, target: str, *, deadline=None) -> list[dict]:
+    return _native_inventory(api, "predecessors", workflow,
+                             _positive(number, "current run number"), target, deadline=deadline)
 
 
 def wait_predecessors(api, workflow: str, number: int, target: str,
@@ -172,7 +152,8 @@ def wait_predecessors(api, workflow: str, number: int, target: str,
     observed = {}
     clear = 0
     while True:
-        blocked = _predecessors(api, workflow, number, target)
+        blocked = _predecessors(api, workflow, number, target,
+                                deadline=deadline if seconds > 0 else None)
         observed.update((row["id"], row) for row in blocked)
         clear = clear + 1 if not blocked else 0
         if clear >= clear_reads:
@@ -184,17 +165,10 @@ def wait_predecessors(api, workflow: str, number: int, target: str,
         sleep(min(poll, remaining))
 
 
-def _successor(api, workflow: str, number: int, head: str) -> dict | None:
-    matches = []
-    for run in _runs(api, workflow):
-        run_id, run_number, event, branch, status = _identity(run)
-        if (event == "push" and branch == "main" and run_number > number and
-                run.get("head_sha") == head):
-            matches.append({
-                "id": run_id, "run_number": run_number,
-                "status": status, "head_sha": head,
-            })
-    return min(matches, key=lambda row: (row["run_number"], row["id"])) if matches else None
+def _successor(api, workflow: str, number: int, head: str, *, deadline=None) -> dict | None:
+    return _native_inventory(api, "successor", workflow,
+                             _positive(number, "current run number"),
+                             _sha(head, "successor head"), deadline=deadline)
 
 
 def wait_successor(api, workflow: str, number: int, head: str,
@@ -203,7 +177,8 @@ def wait_successor(api, workflow: str, number: int, head: str,
     deadline = clock() + seconds
     while True:
         result = _successor(api, workflow, _positive(number, "current run number"),
-                            _sha(head, "successor head"))
+                            _sha(head, "successor head"),
+                            deadline=deadline if seconds > 0 else None)
         if result is not None:
             return result
         remaining = deadline - clock()
@@ -265,11 +240,40 @@ def reconcile(event_main: str, read_main, action, successor) -> tuple[int, dict,
 
 def _ordered(api, workflow: str, number: int, target: str, seconds: float,
              event_main: str, action) -> tuple[int, dict, Action | None]:
-    waited = wait_predecessors(api, workflow, number, target, seconds)
-    successor = lambda head: wait_successor(
-        api, workflow, number, head, min(seconds, SUCCESSOR_WAIT_SECONDS)
-    )
-    status, report, result = reconcile(event_main, lambda: _main(api), action, successor)
+    phase = "predecessor-discovery"
+    attempted = False
+    waited = []
+
+    def invoke(head):
+        nonlocal phase, attempted
+        phase, attempted = "action", True
+        return action(head)
+
+    def successor(head):
+        nonlocal phase
+        phase = "successor-discovery"
+        return wait_successor(api, workflow, number, head,
+                              min(seconds, SUCCESSOR_WAIT_SECONDS))
+
+    try:
+        waited = wait_predecessors(api, workflow, number, target, seconds)
+        phase = "main-reconciliation"
+        status, report, result = reconcile(event_main, lambda: _main(api), invoke, successor)
+    except (MaintenanceError, preflight.PreflightError, retirement.AdmissionError,
+            OSError, TypeError, ValueError) as error:
+        status, result = 2, None
+        report = {
+            "schema": SCHEMA, "status": "failed", "event_main": event_main,
+            "current_main": None, "attempts": [], "failing_phase": phase,
+            "action_attempted": attempted,
+            "error": {"type": type(error).__name__,
+                      "message": str(error) if isinstance(error, MaintenanceError)
+                      else "maintenance API/action failure"},
+        }
+        if hasattr(error, "discovery"):
+            report["discovery"] = error.discovery
+    report["run_id"] = os.environ.get("GITHUB_RUN_ID")
+    report["run_attempt"] = os.environ.get("GITHUB_RUN_ATTEMPT")
     report["ordering"] = {
         "workflow": workflow, "run_number": number, "target_job": target,
         "predecessors_waited": waited,
@@ -300,11 +304,13 @@ def _promote(result: Action | None, report: dict, root: Path,
 
 
 def _record(root: Path, summary: Path | None, report: dict, action: str) -> None:
+    report["action"] = action
     root.mkdir(parents=True, exist_ok=True)
     (root / "main-push-maintenance.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     if summary is not None:
+        summary.parent.mkdir(parents=True, exist_ok=True)
         with summary.open("a", encoding="utf-8") as output:
             output.write(
                 "\n### Main-push maintenance\n\n"
@@ -312,6 +318,7 @@ def _record(root: Path, summary: Path | None, report: dict, action: str) -> None
                 f"- Event main: `{report['event_main']}`\n"
                 f"- Current main: `{report['current_main']}`\n"
                 f"- Result: **{report['status']}**\n"
+                f"- Failing phase: `{report.get('failing_phase', 'none')}`\n"
             )
 
 
@@ -370,6 +377,7 @@ def invalidate_push(api, event_main: str, details_url: str, workflow: str,
         payload = dict(result.payload)
         if report["status"] != "current":
             payload["status"] = report["status"]
+    report["action"] = "native-retirement-invalidation"
     payload["maintenance"] = report
     return status, payload
 
@@ -400,6 +408,8 @@ def _parser():
     invalidation.add_argument("--repository", required=True)
     invalidation.add_argument("--event-main", required=True)
     invalidation.add_argument("--details-url", required=True)
+    invalidation.add_argument("--report-dir", type=Path, default=Path("evidence/native-retirement-invalidation"))
+    invalidation.add_argument("--summary", type=Path, default=os.environ.get("GITHUB_STEP_SUMMARY"))
     _order_args(invalidation)
     return parser
 
@@ -424,6 +434,8 @@ def main(argv=None) -> int:
                 arguments.workflow, arguments.run_number,
                 arguments.predecessor_job, arguments.wait_seconds,
             )
+            _record(arguments.report_dir, arguments.summary, report["maintenance"],
+                    "native-retirement-invalidation")
             print(json.dumps(report, indent=2, sort_keys=True))
         return status
     except (MaintenanceError, preflight.PreflightError, retirement.AdmissionError,
