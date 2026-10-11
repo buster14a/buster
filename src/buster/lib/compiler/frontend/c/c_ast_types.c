@@ -134,8 +134,10 @@
 //   binary       `* / % + - << >> < > <= >= == != & ^ | && ||`: the operation
 //                switch of c_type_parse_sizeof_step (c_ast_types_binary), with
 //                c_parse_expression_arithmetic_type, the bit-field widths it
-//                reads (c_ast_types_operand_width) and the checked-mode operand
-//                rule (c_ast_types_binary_safe).
+//                reads (c_ast_types_operand_width; an operand that ends in
+//                `. name` without being a member is 0 only where the machine's
+//                width probe provably fails, c_ast_types_probe_fails) and the
+//                checked-mode operand rule (c_ast_types_binary_safe).
 //   unary        `+ - ~ !`: promotion with the operand's bit-field width;
 //                complex and suitable vector operands keep their type.
 //   assignment   `=` and every compound form: the left operand's unqualified
@@ -190,6 +192,8 @@
 //   c_ast_types_waiting
 //   c_ast_types_looked_up_entity                 an initializer's unbound names
 //   c_ast_types_span, c_ast_types_expand         span rules
+//   c_ast_types_probe_fails,                      bit-field widths of operands
+//   c_ast_types_operand_width
 //   c_ast_types_type_body, c_ast_types_type_node the eager pass and its rules
 //   c_ast_types_member_lookup                    the pass's member memo
 //   c_ast_types_builtin_call                     void builtins, failing calls

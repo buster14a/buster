@@ -448,6 +448,18 @@ unchanged.
   constraint checks, a `sizeof` expression) must therefore hold no type name
   the tree did not accept. The typer also declines a `?:` whose range holds a
   top-level comma or assignment, which the machine splits at instead.
+- **Member-tail widths.** For an operand that ends in `. name` or `-> name`
+  but is not a member node (`a + s.f`, `c ? x : s.f`), the machine re-types
+  the tokens before the final `.` with `c_parse_direct_expression_type` to
+  read a bit-field width. The pass answers width 0 only where that probe
+  provably fails without a new row (`c_ast_types_probe_fails`):
+  - its base, before the first postfix step, types to nothing before any row
+    is made;
+  - or the base is one identifier whose postfix steps span an accepted
+    member or index node, which reads no qualified aggregate or array.
+
+  A parent over any other such operand (a cast, a comma, a qualified chain)
+  declines.
 - **The replay.** With constraint checks the machine types a cast's operand.
   When that operand is one string-literal token, alone or in parentheses
   (`(char8*)("text")`, as `S8()` spells it), its typing appends the literal's
@@ -1496,5 +1508,25 @@ The base is main `4e5d563f`, which the candidate branches from. The budgets:
 - **Performance acceptance.** Hosted counts are diagnostic. No 9700X
   comparison is requested, so Zen 5 validation stays incomplete (#2761) and
   the hook stays opt-in.
+
+The member-tail width's hosted census is
+[`2026-10-11T103427Z`](../../performance-audits/2026-10-11T103427Z.md), taken
+the same way and diagnostic only:
+- **Proof.** On the base, all 546 probes the rule calls failing did fail,
+  and none appended a row. The 1,440 runs the width rule refused first
+  append 162 rows, all const-qualified copies:
+  - 158 come from a qualified member elsewhere in the same query;
+  - 4 come from probes the rule leaves to the machine.
+- **Budgets.** Every budget passes:
+  - the corpus verify gate has 0 mismatches, and its tree answers rise from
+    58,322 to 58,365;
+  - the mutation (width 3 instead of 0) fails the gate;
+  - objects are byte-identical across the four arms at `-g0` and `-g`.
+- **Effect.** The pilot runs 5.60 M fewer instructions (−0.060%). Declines
+  fall by 508, and the pass costs 1.18 M more.
+- **Default path.** −0.002% on `-fsyntax-only` and −0.0015% on `-c`.
+- **What stays.** The other 908 runs keep their machine run: their probe
+  starts at a cast or a comma, or walks a qualified chain.
+- Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
