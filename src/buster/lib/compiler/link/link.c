@@ -232,6 +232,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_loaded_section_indices(ObjectFile* object, u64
 #define BUSTER_LINK_ELF_SECTION_TYPE_VERSION_NEED 0x6ffffffe
 #define BUSTER_LINK_ELF_SECTION_TYPE_VERSION_SYMBOLS 0x6fffffff
 #define BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT 15
+#define BUSTER_LINK_ELF_VERSION_DEFINITION_COUNT 2
 #define BUSTER_LINK_ELF_SECTION_DESCRIPTOR_CAPACITY                                                                                                          \
     (BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds) + 1 + BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT + BUSTER_ARRAY_LENGTH(link_elf_debug_kinds) + 2)
 
@@ -4521,7 +4522,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
                     .alignment = 4,
                     .type = 0x6ffffffd,
                     .link = dynamic_string_index,
-                    .info = 2,
+                    .info = BUSTER_LINK_ELF_VERSION_DEFINITION_COUNT,
                 };
             }
             descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
@@ -5905,7 +5906,6 @@ enum
     LINK_ELF_VERSION_SCRIPT_RULE_LIMIT = 8192,
     LINK_ELF_VERSION_SCRIPT_RULE_CAPACITY = 16384,
     LINK_ELF_VERSION_DEFINITION_SIZE = 28,
-    LINK_ELF_VERSION_DEFINITION_COUNT = 2,
 };
 
 typedef struct LinkElfVersionRule LinkElfVersionRule;
@@ -6081,7 +6081,7 @@ BUSTER_GLOBAL_LOCAL bool link_elf_version_script_prepare(Arena* arena, ObjectFil
                 else if (mode && string_equal(following, S8(";")) && token.length && link_elf_version_name_byte(token.pointer[0]))
                 {
                     LinkElfVersionRule* rule = link_elf_version_rule(script, token);
-                    cursor.valid = rule_count < LINK_ELF_VERSION_SCRIPT_RULE_LIMIT && (!rule->name.length || rule->global == (mode == 1));
+                    cursor.valid = (rule->name.length || rule_count < LINK_ELF_VERSION_SCRIPT_RULE_LIMIT) && (!rule->name.length || rule->global == (mode == 1));
                     if (cursor.valid && !rule->name.length)
                     {
                         *rule = (LinkElfVersionRule){.name = token, .global = mode == 1};
@@ -6144,7 +6144,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_version_definition_write(LinkElfVersionScript*
                                                            u64* string_cursor, u64 definition_offset)
 {
     String8 names[] = {script->base_name, script->name};
-    for (u32 index = 0; index < LINK_ELF_VERSION_DEFINITION_COUNT; index += 1)
+    for (u32 index = 0; index < BUSTER_LINK_ELF_VERSION_DEFINITION_COUNT; index += 1)
     {
         u64 entry = definition_offset + (u64)index * LINK_ELF_VERSION_DEFINITION_SIZE;
         link_write_u16(bytes, entry, 1);
@@ -6247,7 +6247,7 @@ BUSTER_GLOBAL_LOCAL LinkElfVersionPlan link_elf_version_plan_build(Arena* arena,
             }
             if (!version_index && version.length)
             {
-                if (plan.version_count > ELF_VERSION_INDEX_MAX - first_index || version.length >= UINT32_MAX ||
+                if (plan.version_count > (u32)ELF_VERSION_INDEX_MAX - first_index || version.length >= UINT32_MAX ||
                     plan.version_name_size > UINT32_MAX - version.length - 1)
                 {
                     plan.error = LINK_ERROR_INVALID_INPUT;
@@ -6891,7 +6891,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 dynamic_string_offset = interpreter_offset + interpreter_size;
     u32 first_symbol_name_offset = 1 + (u32)library_name_size;
     bool has_versions = version_count || script->name.length;
-    u64 definition_size = script->name.length ? LINK_ELF_VERSION_DEFINITION_COUNT * LINK_ELF_VERSION_DEFINITION_SIZE : 0;
+    u64 definition_size = script->name.length ? BUSTER_LINK_ELF_VERSION_DEFINITION_COUNT * LINK_ELF_VERSION_DEFINITION_SIZE : 0;
     u64 definition_name_size = script->name.length ? script->base_name.length + script->name.length + 2 : 0;
     u64 dynamic_string_size = 1 + library_name_size + imported_name_size + version_name_size + exported_name_size + definition_name_size;
     u64 dynamic_symbol_offset = align_forward(dynamic_string_offset + dynamic_string_size, 8);
@@ -7589,7 +7589,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     if (script->name.length)
     {
         BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_DEFINITION, image_base + definition_offset);
-        BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_DEFINITION_COUNT, LINK_ELF_VERSION_DEFINITION_COUNT);
+        BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_DEFINITION_COUNT, BUSTER_LINK_ELF_VERSION_DEFINITION_COUNT);
     }
     if (version_count)
     {
@@ -8950,7 +8950,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
     u64 hash_size = (2 + (u64)hash_bucket_count + dynamic_symbol_count) * sizeof(u32);
     u64 version_symbol_offset = align_forward(hash_offset + hash_size, 2);
     bool has_versions = versions.version_count || script->name.length;
-    u64 definition_size = script->name.length ? LINK_ELF_VERSION_DEFINITION_COUNT * LINK_ELF_VERSION_DEFINITION_SIZE : 0;
+    u64 definition_size = script->name.length ? BUSTER_LINK_ELF_VERSION_DEFINITION_COUNT * LINK_ELF_VERSION_DEFINITION_SIZE : 0;
     u64 version_symbol_size = has_versions ? (u64)dynamic_symbol_count * sizeof(u16) : 0;
     u64 version_need_offset = align_forward(version_symbol_offset + version_symbol_size, 8);
     u64 definition_offset = align_forward(version_need_offset + versions.version_need_size, 4);
@@ -9220,7 +9220,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
         if (script->name.length)
         {
             BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_DEFINITION, definition_offset);
-            BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_DEFINITION_COUNT, LINK_ELF_VERSION_DEFINITION_COUNT);
+            BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_DEFINITION_COUNT, BUSTER_LINK_ELF_VERSION_DEFINITION_COUNT);
         }
         if (versions.version_count)
         {
