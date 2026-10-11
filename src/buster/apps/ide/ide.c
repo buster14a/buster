@@ -2121,9 +2121,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          c_parser_tree_fallback_name(tree.split.fallbacks ? tree.split.reason : C_PARSER_TREE_FALLBACK_NONE),
                          tree.split.fallbacks ? tree.split.fallback_token : UINT32_MAX);
             // Counts: lowering's root-conditional splits read from the tree (zero for -fsyntax-only).
-            string_print(S8("C_AST_LOWER bodies={u64} kept={u64} built={u64} nodes_spanned={u64} answers={u64} declines={u64} misses={u64}\n"),
-                         tree.lower.bodies, tree.lower.kept, tree.lower.built, tree.lower.nodes_spanned, tree.lower.answers, tree.lower.declines,
-                         tree.lower.misses);
+            string_print(S8("C_AST_LOWER bodies={u64} answers={u64} declines={u64} misses={u64}\n"), tree.lower.bodies, tree.lower.answers,
+                         tree.lower.declines, tree.lower.misses);
         }
         if (invocation.fast_passes)
         {

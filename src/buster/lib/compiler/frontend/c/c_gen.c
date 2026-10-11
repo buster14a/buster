@@ -3377,27 +3377,23 @@ struct CIrErrorAttributeCall
 
 // Lowering's reads of the unit's syntax tree (GitHub #3102), present only
 // when the caller passed one (CIRLowerOptions.syntax_tree, the driver's
-// -fc-ast-pilot) and the stream's delimiters nest properly. One record serves
-// the whole lowering. The span index of the function being lowered (spans)
-// is the one semantic analysis kept for that body (CIRLowerOptions.
-// syntax_tree_spans, built by the tree typer's eager pass); for a body it did not keep, the
-// top-level definitions are indexed once and the body's index is built in
-// `arena` on its first tree query and dropped when the next function begins.
-// A query outside that body, or in a function the tree does not index, scans
-// tokens as it always has. Node indices stay here: none reaches the IR.
+// -fc-ast-pilot) with the body span indexes semantic analysis kept for it
+// (CIRLowerOptions.syntax_tree_spans: the tree typer's eager pass spans every
+// function body it types), and the stream's delimiters nest properly. One
+// record serves the whole lowering; `spans` is the kept index of the function
+// being lowered. A query outside that body, or in a function without a kept
+// index, scans tokens as it always has. Node indices stay here: none reaches
+// the IR.
 typedef struct CIrSyntaxTree CIrSyntaxTree;
 struct CIrSyntaxTree
 {
     CAstSpanStore const* kept;
-    CAstDefinitionIndex definitions;
-    CAstSpans spans;
-    Arena* arena;
-    TemporalArena mark;
+    CAstSpans const* spans;
+    CAst const* ast;
+    u32 const* matches;
+    u32 token_total;
     CAstLowerStatistics* statistics;
     CAstLowerStatistics local_statistics;
-    // The function body's COMPOUND_STATEMENT, else C_AST_SPAN_NONE.
-    u32 body;
-    bool built;
     // GNU dialect: `c ?: b` is a conditional, as c_ir_root_conditional reads it.
     bool gnu;
 };
@@ -39295,21 +39291,10 @@ typedef enum CIrTreeRoot
 
 // The relative index of the expression node that spans [start, end) exactly,
 // after stripping balanced outer parentheses, in the body being lowered; else
-// C_AST_SPAN_NONE. The body's span index is built on its first query.
-BUSTER_C_INTERNAL u32 c_ir_syntax_tree_locate(CIrSyntaxTree* tree, u32 start, u32 end)
+// C_AST_SPAN_NONE.
+BUSTER_C_INTERNAL u32 c_ir_syntax_tree_locate(CIrSyntaxTree const* tree, u32 start, u32 end)
 {
-    u32 relative = C_AST_SPAN_NONE;
-    if (tree->body != C_AST_SPAN_NONE)
-    {
-        if (!tree->built)
-        {
-            tree->statistics->nodes_spanned += c_ast_spans_build(&tree->spans);
-            tree->statistics->built += 1;
-            tree->built = true;
-        }
-        relative = c_ast_spans_locate(&tree->spans, start, end);
-    }
-    return relative;
+    return tree->spans ? c_ast_spans_locate(tree->spans, start, end) : C_AST_SPAN_NONE;
 }
 
 // c_ir_root_conditional from the tree. The range maps to its root expression
@@ -39327,7 +39312,7 @@ BUSTER_C_INTERNAL CIrTreeRoot c_ir_root_conditional_tree(CIntegerIrBuilder* buil
                                                          u32* expression_end)
 {
     CIrSyntaxTree* tree = builder->syntax_tree;
-    CAstSpans const* spans = &tree->spans;
+    CAstSpans const* spans = tree->spans;
     u32 relative = c_ir_syntax_tree_locate(tree, start, end);
     CIrTreeRoot root = C_IR_TREE_ROOT_UNKNOWN;
     if (relative != C_AST_SPAN_NONE)
@@ -60839,81 +60824,34 @@ BUSTER_C_INTERNAL bool c_ir_function_scratch_tail_reservation(u64* position, u64
     return fits;
 }
 
-// Lowering's tree reads for one lowering (CIrSyntaxTree): the definitions
-// index, and an arena that can hold the span index of any one body, the
-// largest being bounded by the whole tree and the whole stream. Null when the
-// arena cannot be reserved, and lowering then scans tokens throughout.
-BUSTER_C_INTERNAL CIrSyntaxTree* c_ir_syntax_tree_create(Arena* arena, CAst const* ast, CPreprocessResult const* preprocess, u32 const* matches,
-                                                         CAstSpanStore const* kept, CAstLowerStatistics* statistics)
+// Lowering's tree reads for one lowering (CIrSyntaxTree).
+BUSTER_C_INTERNAL CIrSyntaxTree* c_ir_syntax_tree_create(Arena* arena, CAst const* ast, CAstSpanStore const* kept, CPreprocessResult const* preprocess,
+                                                         u32 const* matches, CAstLowerStatistics* statistics)
 {
-    // At least the arena's first commit (four 64 KiB granules), which a small
-    // unit's bound falls below.
-    u64 reserved_size = BUSTER_MAX((u64)ast->node_count * sizeof(u32) * 3 + preprocess->token_count * sizeof(u32) + BUSTER_KB(64), BUSTER_MB(1));
-    Arena* spans_arena = arena_create((ArenaCreation){.reserved_size = reserved_size});
-    CIrSyntaxTree* tree = 0;
-    if (spans_arena)
-    {
-        tree = arena_allocate(arena, CIrSyntaxTree, 1);
-        *tree = (CIrSyntaxTree){
-            .kept = kept,
-            .definitions = c_ast_definitions_index(arena, ast),
-            .spans =
-                {
-                    .ast = ast,
-                    .tokens = preprocess->tokens,
-                    .matches = matches,
-                    .token_total = (u32)preprocess->token_count,
-                },
-            .arena = spans_arena,
-            .mark = arena_begin_temporal(spans_arena),
-            .body = C_AST_SPAN_NONE,
-            .gnu = c_preprocess_dialect_is_gnu(preprocess->dialect),
-        };
-        tree->statistics = statistics ? statistics : &tree->local_statistics;
-    }
+    CIrSyntaxTree* tree = arena_allocate(arena, CIrSyntaxTree, 1);
+    *tree = (CIrSyntaxTree){
+        .kept = kept,
+        .ast = ast,
+        .matches = matches,
+        .token_total = (u32)preprocess->token_count,
+        .gnu = c_preprocess_dialect_is_gnu(preprocess->dialect),
+    };
+    tree->statistics = statistics ? statistics : &tree->local_statistics;
     return tree;
 }
 
-// Points the tree reads at the function about to be lowered: its body's
-// COMPOUND_STATEMENT, when the tree indexes the definition and its braces are
-// the declaration's. The body's span index is the kept one when analysis kept
-// it for these tokens; otherwise fresh arrays that nothing spans until the
-// body's first query (c_ir_syntax_tree_locate).
+// Points the tree reads at the function about to be lowered: the span index
+// analysis kept for its body, when it covers exactly the body's tokens over
+// this tree and stream; otherwise none, and the body's queries scan tokens.
 BUSTER_C_INTERNAL void c_ir_syntax_tree_begin(CIrSyntaxTree* tree, CDeclaration const* declaration)
 {
-    scratch_end(tree->mark);
-    tree->mark = arena_begin_temporal(tree->arena);
     u64 token_end = (u64)declaration->body_start + declaration->body_token_count;
-    bool eligible = declaration->body_start >= 1 && declaration->body_token_count && token_end < tree->spans.token_total;
+    bool eligible = declaration->body_start >= 1 && declaration->body_token_count && token_end < tree->token_total;
     CAstSpans const* kept = eligible ? c_ast_spans_store_find(tree->kept, declaration->body_start - 1) : 0;
-    bool reused = kept && kept->token_start == declaration->body_start && kept->token_end == token_end && kept->ast == tree->spans.ast &&
-                  kept->matches == tree->spans.matches;
-    u32 body = reused ? kept->node
-               : eligible ? c_ast_definitions_find(&tree->definitions, declaration->body_start - 1)
-                          : C_AST_SPAN_NONE;
-    bool matched = body != C_AST_SPAN_NONE && tree->spans.matches[declaration->body_start - 1] - 1 == token_end;
-    tree->body = matched ? body : C_AST_SPAN_NONE;
-    tree->built = matched && reused;
-    tree->statistics->bodies += matched;
-    tree->statistics->kept += matched && reused;
-    if (matched && reused)
-    {
-        tree->spans = *kept;
-    }
-    else if (matched)
-    {
-        CAst const* ast = tree->spans.ast;
-        u32 begin = c_ast_subtree_begin(ast, body);
-        u32 count = body - begin + 1;
-        tree->spans.first = arena_allocate(tree->arena, u32, count);
-        tree->spans.end = arena_allocate(tree->arena, u32, count);
-        tree->spans.link = arena_allocate(tree->arena, u32, count);
-        tree->spans.start_head = arena_allocate(tree->arena, u32, declaration->body_token_count);
-        tree->spans.begin = begin;
-        tree->spans.node = body;
-        tree->spans.token_start = declaration->body_start;
-        tree->spans.token_end = (u32)token_end;
-    }
+    bool usable = kept && kept->ast == tree->ast && kept->matches == tree->matches && kept->token_start == declaration->body_start &&
+                  kept->token_end == token_end && tree->matches[declaration->body_start - 1] - 1 == token_end;
+    tree->spans = usable ? kept : 0;
+    tree->statistics->bodies += usable;
 }
 
 BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
@@ -63354,11 +63292,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         result.program = 0;
         return result;
     }
-    // The tree reads need the stream's delimiter index, which exists only when
-    // every delimiter nests properly.
-    CIrSyntaxTree* syntax_tree = options.syntax_tree && options.syntax_tree->node_count && stream_matching_delimiters_plus_one
-                                     ? c_ir_syntax_tree_create(temporary_arena, options.syntax_tree, &preprocess, stream_matching_delimiters_plus_one,
-                                                               options.syntax_tree_spans, options.syntax_tree_statistics)
+    // The tree reads need the kept body spans and the stream's delimiter
+    // index, which exists only when every delimiter nests properly.
+    CIrSyntaxTree* syntax_tree = options.syntax_tree && options.syntax_tree->node_count && options.syntax_tree_spans &&
+                                         stream_matching_delimiters_plus_one
+                                     ? c_ir_syntax_tree_create(temporary_arena, options.syntax_tree, options.syntax_tree_spans, &preprocess,
+                                                               stream_matching_delimiters_plus_one, options.syntax_tree_statistics)
                                      : 0;
     bool reservation_failed = false;
     CIrDebugScopeScratch debug_scope_scratch = options.omit_debug_locals ? (CIrDebugScopeScratch){0} : c_ir_debug_scope_scratch_make(temporary_arena, parse.scope_count);
@@ -64132,10 +64071,6 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .location = c_preprocess_token_location(&preprocess, preprocess.tokens[oversized_array_bound_token_plus_one - 1]),
             .kind = C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
         };
-    }
-    if (syntax_tree)
-    {
-        arena_destroy(syntax_tree->arena, 1);
     }
     arena_destroy(lowering_arena, 1);
     if (reservation_failed)

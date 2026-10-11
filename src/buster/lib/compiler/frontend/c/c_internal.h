@@ -1634,10 +1634,11 @@ struct CAstTypeAnswer
 // Expression spans over one node interval of the syntax tree (c_ast_types.c,
 // GitHub #3102): for each expression node its token span [first, end), and a
 // chain of the nodes that start at each token, so a token range maps to the
-// node that spans it exactly. The typer's eager pass fills them as it types;
-// lowering's tree reads (c_gen.c, CIrSyntaxTree) fill them alone through
-// c_ast_spans_build. Arrays are indexed by node - begin, and start_head by
-// token - token_start. A node without a span holds C_AST_SPAN_NONE.
+// node that spans it exactly. The typer's eager pass fills them; a function
+// body's are kept for lowering's tree reads (c_gen.c, CIrSyntaxTree) when the
+// caller passes a CAstSpanStore. Arrays are indexed by node - begin, and
+// start_head by token - token_start. A node without a span holds
+// C_AST_SPAN_NONE.
 #define C_AST_SPAN_NONE UINT32_MAX
 struct CAstSpans
 {
@@ -1661,31 +1662,14 @@ struct CAstSpans
     u32 token_total;
 };
 
-// Spans every expression node of the interval; returns how many it spanned.
-BUSTER_C_EXTERN u32 c_ast_spans_build(CAstSpans* spans);
 // The relative index of the node whose span is exactly [start, end) after
 // stripping balanced outer parentheses, else C_AST_SPAN_NONE.
 BUSTER_C_EXTERN u32 c_ast_spans_locate(CAstSpans const* spans, u32 start, u32 end);
 // The span of the node at `relative`, widened over every balanced pair of
 // parentheses that wraps it exactly.
 BUSTER_C_EXTERN void c_ast_spans_expand(CAstSpans const* spans, u32 relative, u32* first_out, u32* end_out);
-
-// The tree's top-level function definitions, ascending by the token of each
-// body's `{`, with each body's COMPOUND_STATEMENT node.
-typedef struct CAstDefinitionIndex CAstDefinitionIndex;
-struct CAstDefinitionIndex
-{
-    u32* braces;
-    u32* bodies;
-    u32 count;
-};
-
 // The kept span index of the body whose `{` is the token `brace`, else null.
 BUSTER_C_EXTERN CAstSpans const* c_ast_spans_store_find(CAstSpanStore const* store, u32 brace);
-
-BUSTER_C_EXTERN CAstDefinitionIndex c_ast_definitions_index(Arena* arena, CAst const* ast);
-// The COMPOUND_STATEMENT whose `{` is the token `brace`, else C_AST_SPAN_NONE.
-BUSTER_C_EXTERN u32 c_ast_definitions_find(CAstDefinitionIndex const* index, u32 brace);
 
 BUSTER_C_EXTERN void c_ast_types_bodies_prepare(CTypeParseMachine* machine, CParseResult const* result);
 BUSTER_C_EXTERN void c_ast_types_body_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,

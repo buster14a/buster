@@ -1459,20 +1459,16 @@ struct CAstTypeStatistics
 };
 
 // Lowering's reads of the syntax tree (-fc-ast-pilot, CIrSyntaxTree in
-// c_gen.c), summed over a unit. A body is a function body the tree indexes.
-// Its span index is the one semantic analysis kept (kept,
-// CIRLowerOptions.syntax_tree_spans), or one lowering builds itself on the
-// body's first query (built; nodes_spanned counts the expression nodes those
-// builds gave a span). An answer is a root-conditional split read from the
+// c_gen.c), summed over a unit. A body is a function body lowered with the
+// span index semantic analysis kept for it (CIRLowerOptions.
+// syntax_tree_spans). An answer is a root-conditional split read from the
 // tree; a decline mapped to a node the tree read leaves to the token scan (a
-// comma root); a miss mapped to no node or lay outside an indexed body.
+// comma root); a miss mapped to no node, or came from a body without a kept
+// index.
 typedef struct CAstLowerStatistics CAstLowerStatistics;
 struct CAstLowerStatistics
 {
     u64 bodies;
-    u64 kept;
-    u64 built;
-    u64 nodes_spanned;
     u64 answers;
     u64 declines;
     u64 misses;
@@ -1933,8 +1929,9 @@ struct CIRLowerOptions
     // and the preprocessing result must outlive the lowering. No node index
     // reaches the IR.
     CAst const* syntax_tree;
-    // Optional: the body span indexes semantic analysis kept with the tree
-    // (CParserResult.ast_spans); a body without one is spanned by lowering.
+    // The body span indexes semantic analysis kept with the tree
+    // (CParserResult.ast_spans); the tree is read only with them, and only in
+    // a body that has one.
     CAstSpanStore const* syntax_tree_spans;
     // Optional: receives the tree reads' counts, added to what it holds.
     CAstLowerStatistics* syntax_tree_statistics;

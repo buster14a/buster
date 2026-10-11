@@ -7329,9 +7329,6 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.types.misses += unit.c_ast.types.misses;
         result.c_ast.types.gated += unit.c_ast.types.gated;
         result.c_ast.lower.bodies += unit.c_ast.lower.bodies;
-        result.c_ast.lower.kept += unit.c_ast.lower.kept;
-        result.c_ast.lower.built += unit.c_ast.lower.built;
-        result.c_ast.lower.nodes_spanned += unit.c_ast.lower.nodes_spanned;
         result.c_ast.lower.answers += unit.c_ast.lower.answers;
         result.c_ast.lower.declines += unit.c_ast.lower.declines;
         result.c_ast.lower.misses += unit.c_ast.lower.misses;

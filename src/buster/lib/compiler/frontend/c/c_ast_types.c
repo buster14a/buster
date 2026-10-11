@@ -42,9 +42,13 @@
 // c_ast_types_body_end when the body is done. The per-body arrays are allocated
 // in the machine's scratch arena above the body's validation mark and are
 // released with it: nothing here outlives a body, because a speculative
-// rollback may truncate the type rows an entry refers to. A body is typed only
-// while the machine is idle (frame_count 0), and a query is answered only
-// under the same condition.
+// rollback may truncate the type rows an entry refers to. The exception is a
+// body's span columns (CAstSpans: token spans and start chains, which name no
+// type row) when the caller passes a CAstSpanStore (CParserResult.ast_spans):
+// they are allocated in the analysis arena and recorded there by the body's
+// `{`, so lowering's tree reads (c_gen.c, CIrSyntaxTree) need not span the
+// body again. A body is typed only while the machine is idle (frame_count 0),
+// and a query is answered only under the same condition.
 //
 // File-scope initializers. c_parse_validate_static_initializers makes nearly
 // every query outside a body, so before it validates a file-scope object's
@@ -183,17 +187,16 @@
 // Layout map (search these symbols):
 //   CAstTypeBodyIndex, CAstTypeBody              top-level index, per-region arrays
 //   c_ast_types_bodies_prepare, c_ast_types_find_definition,
-//   c_ast_types_find_initializer
-//   c_ast_definitions_index, _find               the definitions alone, for
-//                                                lowering's tree reads
+//   c_ast_types_find_initializer, c_ast_types_brace_slot,
+//   c_ast_spans_store_find                       kept body spans, by `{`
 //   c_ast_types_region_create, _fill             reserves, then types, one region
 //   c_ast_types_body_begin, c_ast_types_body_end the per-body entry points
 //   c_ast_types_initializer_begin, _end,         the per-initializer entry points
 //   c_ast_types_waiting
 //   c_ast_types_looked_up_entity                 an initializer's unbound names
-//   c_ast_spans_rule, c_ast_spans_expand         span rules (CAstSpans, shared
-//                                                with lowering)
-//   c_ast_spans_locate, c_ast_spans_build        range to node; spans alone
+//   c_ast_spans_rule, c_ast_spans_expand         span rules (CAstSpans)
+//   c_ast_spans_locate                           range to node (shared with
+//                                                lowering's tree reads)
 //   c_ast_types_type_body, c_ast_types_type_node the eager pass and its rules
 //   c_ast_types_member_lookup                    the pass's member memo
 //   c_ast_types_builtin_call                     void builtins, failing calls
@@ -377,49 +380,6 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_types_brace_slot(u32 const* braces, u32 count, u32
     return low < count && braces[low] == brace ? low : C_AST_TYPE_NONE;
 }
 
-// The walk c_ast_types_bodies_prepare makes for its definitions, for a reader
-// outside semantic analysis (lowering's tree reads): two backward passes over
-// the TRANSLATION_UNIT's children, a count and then a fill in ascending order.
-BUSTER_C_SHARED CAstDefinitionIndex c_ast_definitions_index(Arena* arena, CAst const* ast)
-{
-    CAstDefinitionIndex index = {0};
-    if (ast && ast->node_count && ast->root < ast->node_count && ast->kinds[ast->root] == C_AST_TRANSLATION_UNIT)
-    {
-        u32 floor = c_ast_subtree_begin(ast, ast->root);
-        u32 count = 0;
-        u32 cursor = ast->root;
-        while (cursor > floor && ast->extents[cursor - 1] && ast->extents[cursor - 1] <= cursor)
-        {
-            u32 child = cursor - 1;
-            count += c_ast_types_top_level_definition(ast, child);
-            cursor = c_ast_subtree_begin(ast, child);
-        }
-        index.braces = arena_allocate(arena, u32, count + 1);
-        index.bodies = arena_allocate(arena, u32, count + 1);
-        index.count = count;
-        u32 slot = count;
-        cursor = ast->root;
-        while (slot && cursor > floor && ast->extents[cursor - 1] && ast->extents[cursor - 1] <= cursor)
-        {
-            u32 child = cursor - 1;
-            if (c_ast_types_top_level_definition(ast, child))
-            {
-                slot -= 1;
-                index.braces[slot] = ast->tokens[child - 1];
-                index.bodies[slot] = child - 1;
-            }
-            cursor = c_ast_subtree_begin(ast, child);
-        }
-    }
-    return index;
-}
-
-BUSTER_C_SHARED u32 c_ast_definitions_find(CAstDefinitionIndex const* index, u32 brace)
-{
-    u32 slot = c_ast_types_brace_slot(index->braces, index->count, brace);
-    return slot != C_AST_TYPE_NONE ? index->bodies[slot] : C_AST_SPAN_NONE;
-}
-
 // Whether c_parse_validate_lowering_constraints has published the immutable
 // row of every scalar kind a literal can have. While it has, the literal leaf
 // returns that row and appends none.
@@ -567,9 +527,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_spans_punctuator_at(CAstSpans const
 
 // The span of the node at `relative`, widened over every balanced pair of
 // parentheses that wraps it exactly. The tree has no node for a parenthesis, so
-// an operator's own span begins or ends outside its operand's. Always inlined
-// into the span rule, which runs once per expression node.
-BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_ast_spans_widen(CAstSpans const* spans, u32 relative, u32* first_out, u32* end_out)
+// an operator's own span begins or ends outside its operand's.
+BUSTER_GLOBAL_LOCAL void c_ast_spans_widen(CAstSpans const* spans, u32 relative, u32* first_out, u32* end_out)
 {
     u32 first = spans->first[relative];
     u32 end = spans->end[relative];
@@ -593,9 +552,8 @@ BUSTER_C_SHARED void c_ast_spans_expand(CAstSpans const* spans, u32 relative, u3
 // Computes [first, end) for one expression node. Returns false when the span
 // cannot be established (an unmatched delimiter, an operand without a span, a
 // span outside the unit), and then the node can be neither queried nor
-// accepted. Always inlined: the typer's eager pass and c_ast_spans_build each
-// run it once per expression node.
-BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_spans_rule(CAstSpans const* spans, u32 node, u32 relative, u32* first_out, u32* end_out)
+// accepted.
+BUSTER_GLOBAL_LOCAL bool c_ast_spans_rule(CAstSpans const* spans, u32 node, u32 relative, u32* first_out, u32* end_out)
 {
     CAst const* ast = spans->ast;
     u32 kind = ast->kinds[node];
@@ -744,37 +702,6 @@ BUSTER_C_SHARED u32 c_ast_spans_locate(CAstSpans const* spans, u32 start, u32 en
         end -= searching ? 1 : 0;
     }
     return relative;
-}
-
-// Spans every expression node of the interval whose span lies inside the
-// tokens, and links each into the chain of its start token; any other node
-// keeps no span. The interval's nodes are visited in index order, so every
-// operand is spanned before the operator that reads it. This is the span half
-// of the typer's eager pass (c_ast_types_type_body), for a reader that types
-// nothing: lowering's tree reads (c_gen.c, CIrSyntaxTree). Returns the number
-// of nodes spanned.
-BUSTER_C_SHARED u32 c_ast_spans_build(CAstSpans* spans)
-{
-    CAst const* ast = spans->ast;
-    u32 spanned_count = 0;
-    memset(spans->start_head, 0, sizeof(*spans->start_head) * (spans->token_end - spans->token_start));
-    for (u32 node = spans->begin; node <= spans->node; node += 1)
-    {
-        u32 relative = node - spans->begin;
-        u32 first = C_AST_TYPE_NONE;
-        u32 end = C_AST_TYPE_NONE;
-        bool spanned = c_ast_types_expression_kind(ast->kinds[node]) && c_ast_spans_rule(spans, node, relative, &first, &end) &&
-                       first >= spans->token_start && end <= spans->token_end;
-        spans->first[relative] = spanned ? first : C_AST_TYPE_NONE;
-        spans->end[relative] = spanned ? end : C_AST_TYPE_NONE;
-        if (spanned)
-        {
-            spans->link[relative] = spans->start_head[first - spans->token_start];
-            spans->start_head[first - spans->token_start] = relative + 1;
-        }
-        spanned_count += spanned;
-    }
-    return spanned_count;
 }
 
 // ---- the typing rules ----------------------------------------------------------

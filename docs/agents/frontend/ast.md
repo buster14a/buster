@@ -307,7 +307,7 @@ Under `-v` the driver prints five rows with the other verbose counters:
   published> fallbacks=<units it handed to c_parse_ast's walker>
   reason=<CParserTreeFallback of the last fallback> fallback_token=<the first
   token of the declaration that caused it>`
-- `C_AST_LOWER bodies=<> nodes_spanned=<> answers=<> declines=<> misses=<>`:
+- `C_AST_LOWER bodies=<> answers=<> declines=<> misses=<>`:
   lowering's tree reads, described under [Lowering reads](#lowering-reads).
 
 The second row's passes run only under `-v`; they are diagnostic. The third,
@@ -341,7 +341,9 @@ unchanged.
   constraint checks, and the bit-field width of a member. A node is accepted
   only when every operand the machine types for it is accepted. Its arrays
   live in the machine's scratch arena above the body's validation mark and are
-  released with the rest of the body's scratch.
+  released with the rest of the body's scratch. The exception is the span
+  columns when lowering will read them, which are kept
+  ([lowering reads](#lowering-reads)).
 - **Why bodies are typed eagerly.** Initializers wait for their first query
   (below), but bodies gain nothing from that. On the unity self-host, 6,531 of
   6,612 bodies receive a query that the literal fast path does not answer, and
@@ -771,19 +773,24 @@ before it branches on one. The census in the
 [measurement plan](#measurement-plan) found it the costliest of the
 root-split predicates.
 
-- **The index.** One `CIrSyntaxTree` serves a lowering:
-  - It indexes the top-level function definitions once
-    (`c_ast_definitions_index`).
-  - Before each function, `c_ir_syntax_tree_begin` finds that body's
-    `COMPOUND_STATEMENT` by its `{`, and checks that the declaration's braces
-    match it.
-  - On the body's first query, `c_ast_spans_build` spans every expression
-    node of the body. It applies the typer's own span rules (`CAstSpans`,
-    shared through `c_internal.h`) in a forward loop, and chains each node
-    by its first token.
-  - The arrays live in a private arena that is rewound for each function.
-  - Without a tree, or when the stream's delimiters do not nest, there is no
-    record, and every query scans tokens.
+- **The index.** A query needs the body's span index (`CAstSpans`): each
+  expression node's token span, and a chain of the nodes that start at each
+  token. The [tree expression typer](#tree-expression-typer)'s eager pass
+  already builds exactly that for every function body it types, so lowering
+  reuses it and builds none of its own.
+  - The caller passes a `CAstSpanStore` (`CParserResult.ast_spans`). The typer
+    then allocates each body's span arrays in the analysis arena rather than
+    body scratch, and records them by the body's `{`. The driver passes the
+    store with the tree whenever the unit is lowered, but not for
+    `-fsyntax-only`.
+  - Lowering receives the same store as `CIRLowerOptions.syntax_tree_spans`.
+    Before each function, `c_ir_syntax_tree_begin` takes the body's kept
+    index when it covers exactly the body's tokens, over the same tree and
+    stream. On the unity self-host every lowered body has one.
+  - A body without a kept index, a lowering without a store, and a stream
+    whose delimiters do not nest all scan tokens.
+  - The kept arrays live until the unit ends: 12 bytes per node of a body's
+    interval and 4 per body token.
 - **The answer.** `c_ast_spans_locate` maps the range to the node that spans
   it exactly. It strips redundant outer parentheses one pair at a time, as
   the token rule does. A statement expression has a node of its own, so it is
@@ -805,23 +812,28 @@ root-split predicates.
   visited before its block is chosen. Nothing in lowering's frames, and
   nothing in the IR, holds a node index.
 - **Proof.** `c_ast_corpus_lowering` in `c_ast_tests` lowers every corpus
-  input that analyzes cleanly twice, without the tree and with it.
+  input twice: without the tree, and with it and the typer's kept indexes,
+  as the driver does.
   - The two programs must be identical, instruction by instruction.
-  - The second run is in verify mode (`c_test_ir_tree_verify_set`). The
-    token rule answers every split the tree answered, and both answers must
-    agree, positions included.
-  - The fixtures give about 76,600 checked splits and the frontend sources
-    about 338,300 more, with floors on both.
+  - The tree run is in verify mode (`c_test_ir_tree_verify_set`). The token
+    rule answers every split the tree answered, and both answers must agree,
+    positions included.
+  - The fixtures give about 77,000 checked splits over 2,720 kept bodies,
+    and the frontend sources about 338,100 more. There are floors on the
+    splits, the conditionals among them and the bodies.
   - A corpus construct covers parenthesized arms, nested and chained
     conditionals, GNU `?:`, comma roots, a statement expression and
     `__extension__`.
   - `compiler_driver_tests` compares the pilot's objects, in every layout, with
     the default's at `-g0` and `-g`.
-- **Counters.** `-v` prints `C_AST_LOWER bodies=<bodies whose span index was
-  built> nodes_spanned=<expression nodes given a span> answers=<splits read
-  from the tree> declines=<ranges that mapped to a node left to the token
-  rule> misses=<ranges that mapped to no node>`. The counts are zero for
-  `-fsyntax-only`, which does not lower.
+- **Counters.** `-v` prints `C_AST_LOWER` with these fields:
+  - `bodies`: bodies lowered with a kept index;
+  - `answers`: splits read from the tree;
+  - `declines`: ranges that mapped to a node left to the token rule;
+  - `misses`: ranges that mapped to no node, or came from a body without
+    a kept index.
+
+  The counts are zero for `-fsyntax-only`, which does not lower.
 
 The token rule stays the default path and the per-query fallback. Retiring
 it, and moving the other root-split predicates, waits on the hook becoming
