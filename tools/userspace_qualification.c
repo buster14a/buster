@@ -77,201 +77,13 @@ BUSTER_GLOBAL_LOCAL bool userspace_checkout(Arena* arena, String8 root, String8 
     return valid;
 }
 
-// Never call a command assembled from an upstream shell recipe. The native
-// adapter receives the actual argv from upstream make and retains it verbatim.
-// Preprocessor/query calls use Clang and are labeled external generators;
-// required target-C actions use the selected compiler with no source patch,
-// unsupported-flag filtering, replacement object or successful-result stub.
-BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 arguments)
-{
-    bool valid = arguments.length >= 8 && string_equal(arguments.pointer[6], S8("--")) &&
-                 (string_equal(arguments.pointer[1], S8("reference")) || string_equal(arguments.pointer[1], S8("buster")) ||
-                  string_equal(arguments.pointer[1], S8("host")));
-    ProcessResult result = PROCESS_RESULT_FAILED;
-    if (valid)
-    {
-        bool candidate = string_equal(arguments.pointer[1], S8("buster"));
-        bool host = string_equal(arguments.pointer[1], S8("host"));
-        String8 ide = arguments.pointer[2];
-        String8 musl_root = arguments.pointer[3];
-        String8 musl_output = arguments.pointer[4];
-        String8 evidence = arguments.pointer[5];
-        bool compile = false;
-        bool preprocess = false;
-        bool query = false;
-        bool relocatable = false;
-        String8 output = {0};
-        String8 source = {0};
-        for (u64 i = 7; i < arguments.length; i += 1)
-        {
-            String8 arg = arguments.pointer[i];
-            compile = compile || string_equal(arg, S8("-c"));
-            preprocess = preprocess || string_equal(arg, S8("-E"));
-            relocatable = relocatable || string_equal(arg, S8("-r")) || string_equal(arg, S8("-Wl,-r"));
-            query = query || string_equal(arg, S8("--version")) || string_equal(arg, S8("-dumpmachine")) ||
-                    string_equal(arg, S8("-dumpversion")) || string_starts_with_sequence(arg, S8("-print-"));
-            if (string_equal(arg, S8("-o")) && i + 1 < arguments.length)
-            {
-                output = arguments.pointer[i + 1];
-            }
-            if (string_ends_with_sequence(arg, S8(".c")))
-            {
-                source = arg;
-            }
-        }
-        bool target_c = !host && compile && source.length && output.length && string_ends_with_sequence(output, S8(".o")) &&
-                        !string_starts_with_sequence(source, S8("tmp.")) && !string_equal(source, S8("bb_libtest.c"));
-        bool buster = candidate && compile;
-        bool link = !compile && !preprocess && !query && !relocatable;
-        String8 action = path_join(arena, evidence, string_format(arena, S8("action-{u64}"), os_get_current_process_id()));
-        valid = summary_self_test_directory_claim(action) == SUMMARY_DIRECTORY_CLAIMED;
-        String8List command = {0};
-        string8_list_push(arena, &command, buster ? ide : S8("clang"));
-        if (buster)
-        {
-            string8_list_push(arena, &command, S8("cc"));
-            string8_list_push(arena, &command, S8("-fregister-allocator=fast"));
-            string8_list_push(arena, &command, S8("-fno-machine-fallback"));
-        }
-        if (!query && !host)
-        {
-            string8_list_push(arena, &command, S8("-nostdinc"));
-            String8 includes[] = {
-                path_join(arena, musl_output, S8("obj/include")),
-                path_join(arena, musl_root, S8("arch/x86_64")),
-                path_join(arena, musl_root, S8("arch/generic")),
-                path_join(arena, musl_root, S8("include")),
-                path_join(arena, path_parent(arena, evidence), S8("uapi")),
-            };
-            for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(includes); i += 1)
-            {
-                string8_list_push(arena, &command, S8("-isystem"));
-                string8_list_push(arena, &command, includes[i]);
-            }
-        }
-        if (link && !host)
-        {
-            // musl's install provides empty libm/libpthread/libdl/libcrypt/librt
-            // aliases; all their symbols live in libc.a. Startup is explicit.
-            string8_list_push(arena, &command, S8("-nostdlib"));
-            string8_list_push(arena, &command, S8("-no-pie"));
-            String8 side = S8("clang");
-            string8_list_push(arena, &command, path_join(arena, path_join(arena, musl_output, side), S8("crt/crt1.o")));
-            string8_list_push(arena, &command, path_join(arena, path_join(arena, musl_output, side), S8("crt/crti.o")));
-        }
-        String8List original = {0};
-        for (u64 i = 7; i < arguments.length; i += 1)
-        {
-            String8 arg = arguments.pointer[i];
-            string8_list_push(arena, &original, arg);
-            bool musl_alias = link && !host && (string_equal(arg, S8("-lm")) || string_equal(arg, S8("-lpthread")) ||
-                                      string_equal(arg, S8("-ldl")) || string_equal(arg, S8("-lcrypt")) || string_equal(arg, S8("-lrt")));
-            if (!musl_alias)
-            {
-                string8_list_push(arena, &command, arg);
-            }
-        }
-        if (link)
-        {
-            string8_list_push(arena, &command, S8("-Wl,--start-group"));
-            string8_list_push(arena, &command, path_join(arena, musl_output, S8("libc-clang.a")));
-            string8_list_push(arena, &command, S8("-Wl,--end-group"));
-            string8_list_push(arena, &command, path_join(arena, path_join(arena, musl_output, S8("clang")), S8("crt/crtn.o")));
-        }
-        SliceString8 argv = string8_list_to_slice(arena, command);
-        String8List original_raw = {0};
-        SliceString8 original_argv = string8_list_to_slice(arena, original);
-        for (u64 i = 0; i < original_argv.length; i += 1)
-        {
-            string8_list_push(arena, &original_raw, string_format(arena, S8("{u64}:{S8}\n"), original_argv.pointer[i].length, original_argv.pointer[i]));
-        }
-        valid = clang_suite_write(arena, path_join(arena, action, S8("upstream-argv.txt")),
-                                  string_join_arena(arena, string8_list_to_slice(arena, original_raw), false)) && valid;
-        // Length-prefixed argv cannot confuse whitespace inside a define/path.
-        String8List raw = {0};
-        for (u64 i = 0; i < argv.length; i += 1)
-        {
-            string8_list_push(arena, &raw, string_format(arena, S8("{u64}:{S8}\n"), argv.pointer[i].length, argv.pointer[i]));
-        }
-        valid = clang_suite_write(arena, path_join(arena, action, S8("argv.txt")),
-                                  string_join_arena(arena, string8_list_to_slice(arena, raw), false)) && valid;
-        if (link && !host && string_equal(output, S8("busybox_unstripped")))
-        {
-            valid = clang_suite_write(arena, path_join(arena, evidence, S8("final-link.argv")),
-                                      string_join_arena(arena, string8_list_to_slice(arena, raw), false)) && valid;
-        }
-        ClangSuiteCommand ran = {.result = PROCESS_RESULT_FAILED};
-        if (valid)
-        {
-            // Keep compiler stdout clean: upstream's macro/version recipes read it.
-            ProcessRun run = {
-                .arguments = argv,
-                .spawn_options = {
-                    .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                    .use_process_environment = 1, .new_process_group = 1, .search_path = 1,
-                    .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL,
-                },
-            };
-            run.spawn = process_run_spawn(arena, &run);
-            ran.launch_failed = !run.spawn.handle;
-            if (run.spawn.handle)
-            {
-                ProcessWaitResult wait = os_process_wait_deadline(arena, run.spawn, USERSPACE_CC_SECONDS * 1000000);
-                ran = (ClangSuiteCommand){
-                    .result = wait.result,
-                    .output = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length},
-                    .error = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length},
-                    .platform_status = wait.platform_status, .timed_out = wait.timed_out != 0,
-                    .output_truncated = wait.output_truncated != 0,
-                    .capture_failed = wait.capture_failed != 0 || wait.capture_limit_exceeded != 0,
-                    .cleanup_failed = wait.process_tree_cleanup_failed != 0 || wait.process_group_reservation_retained != 0 ||
-                                      wait.process_group_ownership_lost != 0,
-                };
-                if (ran.timed_out || ran.output_truncated || ran.capture_failed || ran.cleanup_failed)
-                {
-                    ran.result = PROCESS_RESULT_FAILED;
-                }
-            }
-        }
-        valid = userspace_save_command(arena, action, ran) && valid;
-        String8 source_hash = {0};
-        if (source.length)
-        {
-            ByteSlice bytes = file_read(arena, source, (FileReadOptions){0});
-            valid = bytes.pointer && bytes.length && valid;
-            if (bytes.pointer && bytes.length)
-            {
-                source_hash = stage_object_sha256_bytes(arena, bytes.pointer, bytes.length);
-            }
-        }
-        String8 object_hash = {0};
-        if (ran.result == PROCESS_RESULT_SUCCESS && output.length && !string_equal(output, S8("/dev/null")))
-        {
-            ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
-            valid = bytes.length && bytes.pointer && valid;
-            if (bytes.pointer && bytes.length)
-            {
-                object_hash = stage_object_sha256_bytes(arena, bytes.pointer, bytes.length);
-            }
-        }
-        String8 record = string_format(arena, S8("role={S8}\ncompiler={S8}\nsource={S8}\nsource_sha256={S8}\noutput={S8}\nobject_sha256={S8}\nstatus={S8}\n"),
-                                       host ? S8("external-host-generator") : target_c ? S8("target-c") : preprocess || query ? S8("external-generator") : link ? S8("external-link") : relocatable ? S8("external-relocatable-link") : S8("compiler-probe"),
-                                       buster ? S8("buster") : S8("clang"), source, source_hash, output, object_hash,
-                                       ran.result == PROCESS_RESULT_SUCCESS && valid ? S8("pass") : S8("fail"));
-        valid = clang_suite_write(arena, path_join(arena, action, S8("record.txt")), record) && valid;
-        os_file_write(os_get_standard_stream(STANDARD_STREAM_OUTPUT), BUSTER_SLICE_TO_BYTE_SLICE(ran.output));
-        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(ran.error));
-        result = valid ? ran.result : PROCESS_RESULT_FAILED;
-    }
-    return result;
-}
-
 #include "userspace_actions.c"
 
 BUSTER_GLOBAL_LOCAL bool userspace_make(Arena* arena, String8 source, String8 directory, String8 cc, String8 host_cc, String8 target, String8 evidence)
 {
     String8 args[] = {S8("make"), S8("-C"), source, string_format(arena, S8("O={S8}"), directory),
-                     string_format(arena, S8("CC={S8}"), cc), string_format(arena, S8("KCONFIG_ALLCONFIG={S8}"), path_join(arena, directory, S8("seed.config"))),
+                     string_format(arena, S8("CC={S8}"), cc), string_format(arena, S8("KBUILD_DEFCONFIG={S8}"), path_join(arena, directory, S8("seed.config"))),
+                     S8("KCONFIG_NOTIMESTAMP=1"), S8("SOURCE_DATE_EPOCH=0"),
                      string_format(arena, S8("HOSTCC={S8}"), host_cc), S8("SKIP_STRIP=y"), S8("V=1"), S8("-j2"), S8("-k"), target};
     ClangSuiteCommand ran = userspace_command(arena, S8("."), (SliceString8)BUSTER_ARRAY_TO_SLICE(args), USERSPACE_COMMAND_SECONDS);
     bool valid = userspace_save_command(arena, evidence, ran) && ran.result == PROCESS_RESULT_SUCCESS;
@@ -499,6 +311,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
                     String8 configure = path_join(arena, build, S8("configure"));
                     make_directory_recursive(arena, configure);
                     valid = valid && userspace_make(arena, source, build, compiler, host_compiler, side ? S8("silentoldconfig") : S8("allnoconfig"), configure);
+                    if (valid && !side)
+                    {
+                        String8 resolve = path_join(arena, build, S8("resolve"));
+                        make_directory_recursive(arena, resolve);
+                        valid = userspace_seed(arena, build, config) &&
+                                userspace_make(arena, source, build, compiler, host_compiler, S8("defconfig"), resolve);
+                    }
                 }
                 String8 actual_config = clang_suite_read(arena, path_join(arena, build, S8(".config")));
                 if (!side)
@@ -515,7 +334,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
                         String8 line = string_slice(config, start, i);
                         if (line.length)
                         {
-                            valid = string_contains(actual_config, string_format(arena, S8("{S8}\n"), line)) && valid;
+                            String8 expected = string_ends_with_sequence(line, S8("=n"))
+                                               ? string_format(arena, S8("# {S8} is not set\n"), string_slice(line, 0, line.length - 2))
+                                               : string_format(arena, S8("{S8}\n"), line);
+                            bool kept = string_contains(actual_config, expected);
+                            if (!kept)
+                            {
+                                string_print(S8("USERSPACE_CONFIGURATION missing={S8}\n"), line);
+                            }
+                            valid = kept && valid;
                         }
                         start = i + 1;
                     }

@@ -42,8 +42,12 @@ license decision remains [unselected](../../../LICENSES/README.md).
 
 [busybox.config](../../../tests/userspace/busybox.config) is an explicit seed:
 ash, file/directory and process/exit-status operations, text utilities,
-uncompressed tar and SHA-256. Upstream `allnoconfig` resolves it; the candidate
-starts from that exact resolved `.config` and runs `silentoldconfig`.
+uncompressed tar and SHA-256. Upstream `allnoconfig` first supplies a complete
+disabled basis. The native driver overlays the seed and upstream `defconfig`
+resolves that basis; this version resets boolean seeds in `allnoconfig`.
+The candidate starts from the exact resolved `.config` and runs `silentoldconfig`.
+`KCONFIG_NOTIMESTAMP=1` and `SOURCE_DATE_EPOCH=0` keep configuration timestamps
+out of the comparison and give generators the same declared epoch.
 Different resolved configurations fail instead of silently reducing features.
 The seed requests debug, unoptimized, static output. It is a bounded userspace,
 not defconfig, networking, init, privileged device management or a complete OS.
