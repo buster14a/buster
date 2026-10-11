@@ -7580,7 +7580,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_object_text(ObjectFile const*
 }
 
 // #3593: Darwin -S is an assembler input, including TLS and unwind sections.
-// Compare serialized text and each TLVP site's kind, offset, addend and symbol
+// Compare serialized text and each TLVP/GOT site's kind, offset, addend and symbol
 // with direct -c, under both allocators and with/without TLS.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_aarch64_listing_round_trip(UnitTestArguments* arguments)
 {
@@ -7640,21 +7640,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_aarch64_listing_ro
                         ByteSlice actual_text = compiler_driver_test_object_text(&actual);
                         BUSTER_TEST_RAW(arguments, expected_text.length && expected_text.length == actual_text.length &&
                             memcmp(expected_text.pointer, actual_text.pointer, expected_text.length) == 0, allocator);
-                        u32 expected_tlvp = 0;
-                        u32 actual_tlvp = 0;
+                        u32 expected_indirect = 0;
+                        u32 actual_indirect = 0;
                         for (u32 index = 0; index < actual.relocation_count; index += 1)
                         {
                             ObjectRelocationKind kind = actual.relocations[index].kind;
-                            actual_tlvp += kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 ||
-                                           kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12;
+                            actual_indirect += kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 ||
+                                           kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 ||
+                                           kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 ||
+                                           kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12;
                         }
                         for (u32 index = 0; index < expected.relocation_count; index += 1)
                         {
                             ObjectRelocation relocation = expected.relocations[index];
                             if (relocation.kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 ||
-                                relocation.kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12)
+                                relocation.kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 ||
+                                relocation.kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 ||
+                                relocation.kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12)
                             {
-                                expected_tlvp += 1;
+                                expected_indirect += 1;
                                 u32 matches = 0;
                                 for (u32 candidate = 0; candidate < actual.relocation_count; candidate += 1)
                                 {
@@ -7669,7 +7673,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_aarch64_listing_ro
                                 BUSTER_TEST(arguments, matches == 1);
                             }
                         }
-                        BUSTER_TEST(arguments, expected_tlvp == (source_index ? 6u : 0u) && actual_tlvp == expected_tlvp);
+                        BUSTER_TEST(arguments, expected_indirect == (source_index ? 8u : 0u) && actual_indirect == expected_indirect);
                     }
                 }
             }

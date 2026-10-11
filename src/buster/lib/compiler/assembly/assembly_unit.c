@@ -1786,7 +1786,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder
             }
             String8 suffix = string_slice(line, index + 1, suffix_end);
             if (string_equal(suffix, S8("PAGE")) || string_equal(suffix, S8("PAGEOFF")) ||
-                string_equal(suffix, S8("TLVPPAGE")) || string_equal(suffix, S8("TLVPPAGEOFF")))
+                string_equal(suffix, S8("TLVPPAGE")) || string_equal(suffix, S8("TLVPPAGEOFF")) ||
+                string_equal(suffix, S8("GOTPAGE")) || string_equal(suffix, S8("GOTPAGEOFF")))
             {
                 text[length++] = code_unit;
                 index += 1;

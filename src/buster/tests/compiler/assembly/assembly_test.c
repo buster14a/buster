@@ -2749,6 +2749,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_macho_listing_forms(UnitTe
         S8(".text\nadrp x0, _tv@TLVPPAGEOFF\n"),
         S8(".text\nldr x0, [x0, _tv@TLVPPAGE]\n"),
         S8(".text\nadrp x0, 3@TLVPPAGE\n"),
+        S8(".text\nadrp x0, _ext@GOTPAGE+8\n"),
+        S8(".text\nldr x0, [x0, _ext@GOTPAGEOFF-8]\n"),
+        S8(".text\nadd x0, x0, _ext@GOTPAGEOFF\n"),
+        S8(".text\nldr w0, [x0, _ext@GOTPAGEOFF]\n"),
+        S8(".text\nstr x0, [x0, _ext@GOTPAGEOFF]\n"),
+        S8(".text\nldr xzr, [x0, _ext@GOTPAGEOFF]\n"),
     };
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
     {
@@ -2764,20 +2770,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_macho_listing_forms(UnitTe
         }
         String8 source = S8(".section __TEXT,__text,regular,pure_instructions\n.globl _f\n_f:\n"
                             "adrp x0, _tv@TLVPPAGE\nldr x0, [x0, _tv@TLVPPAGEOFF]\n"
-                            "adrp x1, _etv@TLVPPAGE+8\nldr x1, [x1, _etv@TLVPPAGEOFF+8]\nret\n");
+                            "adrp x1, _etv@TLVPPAGE+8\nldr x1, [x1, _etv@TLVPPAGEOFF+8]\n"
+                            "adrp x2, _ext@GOTPAGE\nldr x2, [x2, _ext@GOTPAGEOFF]\nret\n");
         AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = targets[target]});
-        BUSTER_TEST(arguments, !unit.diagnostic_count && unit.relocation_count == 4 && unit.section_count == 1);
-        if (!unit.diagnostic_count && unit.relocation_count == 4 && unit.section_count == 1)
+        BUSTER_TEST(arguments, !unit.diagnostic_count && unit.relocation_count == 6 && unit.section_count == 1);
+        if (!unit.diagnostic_count && unit.relocation_count == 6 && unit.section_count == 1)
         {
-            u32 words[] = {UINT32_C(0x90000000), UINT32_C(0xf9400000), UINT32_C(0x90000001), UINT32_C(0xf9400021), UINT32_C(0xd65f03c0)};
+            u32 words[] = {UINT32_C(0x90000000), UINT32_C(0xf9400000), UINT32_C(0x90000001), UINT32_C(0xf9400021), UINT32_C(0x90000002), UINT32_C(0xf9400042), UINT32_C(0xd65f03c0)};
             BUSTER_TEST(arguments, unit.sections[0].data.length == sizeof(words) && !memcmp(unit.sections[0].data.pointer, words, sizeof(words)));
-            for (u32 index = 0; index < 4; index += 1)
+            for (u32 index = 0; index < 6; index += 1)
             {
                 AssemblyUnitRelocation relocation = unit.relocations[index];
-                BUSTER_TEST(arguments, relocation.kind == (index & 1 ? ASSEMBLY_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12
-                                                                                    : ASSEMBLY_RELOCATION_AARCH64_MACH_TLVP_PAGE21) &&
-                    relocation.offset == 4 * index && relocation.addend == (index < 2 ? 0 : 8) && relocation.symbol < unit.symbol_count &&
-                    string_equal(unit.symbols[relocation.symbol].name, index < 2 ? S8("_tv") : S8("_etv")));
+                AssemblyRelocationKind kind = index < 4
+                    ? (index & 1 ? ASSEMBLY_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 : ASSEMBLY_RELOCATION_AARCH64_MACH_TLVP_PAGE21)
+                    : (index & 1 ? ASSEMBLY_RELOCATION_AARCH64_MACH_GOT_PAGEOFF12 : ASSEMBLY_RELOCATION_AARCH64_MACH_GOT_PAGE21);
+                BUSTER_TEST(arguments, relocation.kind == kind &&
+                    relocation.offset == 4 * index && relocation.addend == (index >= 2 && index < 4 ? 8 : 0) && relocation.symbol < unit.symbol_count &&
+                    string_equal(unit.symbols[relocation.symbol].name, index < 2 ? S8("_tv") : index < 4 ? S8("_etv") : S8("_ext")));
             }
         }
         AssemblyUnitResult reopened = assembly_unit_encode(arguments->arena,

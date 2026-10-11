@@ -813,9 +813,11 @@ attributes and extra operands are structured directive diagnostics.
 AArch64 `adrp Xd, sym@TLVPPAGE` and
 `ldr Xt, [Xn, sym@TLVPPAGEOFF]` retain the Darwin TLVP page/load relocations,
 including signed addends. The low half must be a plain 64-bit unsigned-offset
-LDR; ADD, stores, other widths and writeback are refused. Both modifiers are
-Mach-O-only. `compiler_driver_test_macho_aarch64_listing_round_trip` compares
-serialized text and TLVP kinds, offsets, addends and symbols with direct
+LDR; ADD, stores, other widths and writeback are refused. The Mach-O-only
+`@GOTPAGE`/`@GOTPAGEOFF` pair uses the existing GOT-load page/load kinds;
+its addend must be zero and its low half must load into a 64-bit integer
+register other than XZR. `compiler_driver_test_macho_aarch64_listing_round_trip` compares
+serialized text and TLVP/GOT kinds, offsets, addends and symbols with direct
 `-c`, for plain functions and defined/undefined TLS in fast/quality modes.
 
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
