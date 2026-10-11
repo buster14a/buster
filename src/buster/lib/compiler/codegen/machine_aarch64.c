@@ -3293,63 +3293,93 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_va_end(MachineA64Selector* selector,
     return selected;
 }
 
-// A public pointer list advances through one contiguous argument image. Keep
-// its loads, cursor store and aggregate copy as ordinary MIR so allocation and
-// memory scheduling observe each effect. Windows homes join the incoming stack.
+// Public pointer lists pass values up to sixteen bytes inline. Larger indirect
+// aggregates consume one pointer and copy its pointee; Darwin also passes large
+// by-value HFAs/HVAs inline. Keep their cursor effects and copies as ordinary MIR.
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_pointer_va_arg(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     bool selected = false;
     u32 list;
     IrType* type = ir_type_from_id(&selector->program->types, instruction->canonical_type);
-    if (type && type->layout.resolved && type->layout.size && type->layout.size <= 16 && instruction->operand_count &&
+    IrAbiValue abi = ir_type_abi_value(selector->program, instruction->canonical_type,
+        ir_abi_convention_for_target(selector->target), IR_ABI_USE_VARIADIC_ARGUMENT);
+    bool indirect = abi.indirect;
+    bool small_value = type && type->layout.size && type->layout.size <= 16;
+    bool large_value = type && type->layout.size > 16 && type->layout.size <= UINT32_MAX - 15u;
+    if (type && type->layout.resolved && (small_value || large_value) && instruction->operand_count &&
         instruction->result.value < selector->function->value_count &&
         machine_a64_operand_register(selector, instruction->operands[0], &list))
     {
         u32 slot = selector->value_stack_slots[instruction->result.value];
         bool frame = result_register == UINT32_MAX && slot != UINT32_MAX;
+        bool large_frame = frame && large_value && (indirect || !abi.memory);
         bool scalar = result_register != UINT32_MAX &&
                       (machine_a64_type_is_scalar_register(type) || machine_a64_type_is_float_scalar(type));
-        if (frame || scalar)
+        if ((frame && (small_value || large_frame)) || (scalar && small_value))
         {
             u32 cursor = machine_a64_synthesize_register(selector);
             machine_a64_select_row(selector, (MachineInstruction){
                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, list)},
                 .opcode = MACHINE_A64_LOAD_PTR64,
             });
-            bool aligned_pair = ir_abi_value_is_aarch64_even_integer_pair(selector->program, instruction->canonical_type,
-                ir_abi_convention_for_target(selector->target), IR_ABI_USE_VARIADIC_ARGUMENT);
-            if (aligned_pair)
+            if (large_frame && indirect)
             {
-                u32 padding = machine_a64_select_immediate_register(selector, 15);
-                u32 rounded = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ADD64, cursor, padding);
-                u32 mask = machine_a64_select_immediate_register(selector, ~UINT64_C(15));
-                cursor = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, rounded, mask);
-            }
-            u32 next = machine_a64_synthesize_register(selector);
-            machine_a64_select_row(selector, (MachineInstruction){
-                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, next), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor)},
-                .payload = (u32)((type->layout.size + 7u) & ~(u64)7), .opcode = MACHINE_A64_LEA_OFFSET,
-            });
-            machine_a64_select_row(selector, (MachineInstruction){
-                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, list), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, next)},
-                .opcode = MACHINE_A64_STORE_PTR64,
-            });
-            if (frame)
-            {
+                u32 source = machine_a64_synthesize_register(selector);
                 machine_a64_select_row(selector, (MachineInstruction){
-                    .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor)},
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor)},
+                    .opcode = MACHINE_A64_LOAD_PTR64,
+                });
+                u32 next = machine_a64_synthesize_register(selector);
+                machine_a64_select_row(selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, next), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor)},
+                    .payload = 8, .opcode = MACHINE_A64_LEA_OFFSET,
+                });
+                machine_a64_select_row(selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, list), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, next)},
+                    .opcode = MACHINE_A64_STORE_PTR64,
+                });
+                machine_a64_select_row(selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source)},
                     .payload = (u32)type->layout.size, .opcode = MACHINE_A64_COPY_FRAME_FROM_PTR,
                 });
             }
             else
             {
-                u16 opcode = (u16)(type->layout.size == 1 ? MACHINE_A64_LOAD_PTR8 : type->layout.size == 2 ? MACHINE_A64_LOAD_PTR16 :
-                                  type->layout.size == 4 ? MACHINE_A64_LOAD_PTR32 : MACHINE_A64_LOAD_PTR64);
-                u32 row = machine_a64_select_row(selector, (MachineInstruction){
-                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor)},
-                    .opcode = opcode,
+                bool aligned_pair = ir_abi_value_is_aarch64_even_integer_pair(selector->program, instruction->canonical_type,
+                    ir_abi_convention_for_target(selector->target), IR_ABI_USE_VARIADIC_ARGUMENT);
+                if (aligned_pair || (large_frame && type->layout.alignment >= 16))
+                {
+                    u32 padding = machine_a64_select_immediate_register(selector, 15);
+                    u32 rounded = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ADD64, cursor, padding);
+                    u32 mask = machine_a64_select_immediate_register(selector, ~UINT64_C(15));
+                    cursor = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, rounded, mask);
+                }
+                u32 next = machine_a64_synthesize_register(selector);
+                machine_a64_select_row(selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, next), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor)},
+                    .payload = (u32)((type->layout.size + 7u) & ~(u64)7), .opcode = MACHINE_A64_LEA_OFFSET,
                 });
-                machine_a64_define(selector, result_register, row);
+                machine_a64_select_row(selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, list), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, next)},
+                    .opcode = MACHINE_A64_STORE_PTR64,
+                });
+                if (frame)
+                {
+                    machine_a64_select_row(selector, (MachineInstruction){
+                        .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor)},
+                        .payload = (u32)type->layout.size, .opcode = MACHINE_A64_COPY_FRAME_FROM_PTR,
+                    });
+                }
+                else
+                {
+                    u16 opcode = (u16)(type->layout.size == 1 ? MACHINE_A64_LOAD_PTR8 : type->layout.size == 2 ? MACHINE_A64_LOAD_PTR16 :
+                                      type->layout.size == 4 ? MACHINE_A64_LOAD_PTR32 : MACHINE_A64_LOAD_PTR64);
+                    u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor)},
+                        .opcode = opcode,
+                    });
+                    machine_a64_define(selector, result_register, row);
+                }
             }
             selected = true;
         }

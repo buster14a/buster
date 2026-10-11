@@ -23,6 +23,8 @@
 // compiler_driver_test_elf_symbolic_immediates checks imm32 types and host overflow.
 // compiler_driver_test_sysv_indirect_variadic checks AL against a foreign probe.
 // compiler_driver_test_variadic_workspace checks successive calls against host va_arg.
+// compiler_driver_test_aarch64_platform_large_va_arg checks classified large
+// pointer-list aggregate reads and copied cursors against native host callers.
 // compiler_driver_test_pragma_pack_alignment cross-links explicit member ceilings.
 // compiler_driver_test_wasm_index_signedness checks canonical signed/narrow indices.
 // compiler_driver_test_wasm_stack_alignment checks opaque observed stack addresses.
@@ -16502,6 +16504,92 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_variadi
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_large_va_arg(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("aarch64-macos"), S8("aarch64-windows"), S8("aarch64-linux")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 source = S8("src/buster/tests/compiler/driver/fixtures/aarch64_platform_large_va_arg.c");
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && (BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_IOS && !BUSTER_HOST_C_COMPILER_MSVC
+    String8 host_object = buster_test_temporary_path(arguments->arena, S8("buster-platform-large-va-host"), S8(".o"));
+    String8 host_command[16];
+    u32 host_count = 0;
+    host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER);
+    if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+    host_command[host_count++] = S8("-O2");
+    host_command[host_count++] = S8("-ffreestanding");
+    host_command[host_count++] = S8("-fno-stack-protector");
+    host_command[host_count++] = S8("-fno-unwind-tables");
+    host_command[host_count++] = S8("-fno-asynchronous-unwind-tables");
+    host_command[host_count++] = S8("-DLARGE_VA_HOST=1");
+    host_command[host_count++] = S8("-c");
+    host_command[host_count++] = source;
+    host_command[host_count++] = S8("-o");
+    host_command[host_count++] = host_object;
+    ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
+        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+    bool host_compiled = host_spawn.handle && os_process_wait_sync(arguments->arena, host_spawn).result == PROCESS_RESULT_SUCCESS;
+    BUSTER_TEST(arguments, host_compiled);
+#endif
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                u32 iteration = (target * (u32)BUSTER_ARRAY_LENGTH(modes) + mode) * (u32)BUSTER_ARRAY_LENGTH(frontends) + frontend;
+                String8 object_suffix = string_format(temporary.arena, S8("-{u32}.o"), iteration);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("buster-platform-large-va"), object_suffix);
+                String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
+                    S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                String8 description = string_format(temporary.arena, S8("platform large va_arg {S8} {S8} {S8}: {S8}"),
+                    targets[target], modes[mode], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 3 &&
+                    compiled.codegen_statistics.fallback_function_count == 0, description);
+#if BUSTER_CPU_ARCH_AARCH64 && (BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_IOS
+                bool native_target = target == (BUSTER_WINDOWS ? 1u : 0u);
+                if (native_target && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 executable_suffix = string_format(temporary.arena, S8("-{u32}.exe"), iteration);
+                    String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-platform-large-va-run"), executable_suffix);
+                    String8 native_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                        S8("-o"), executable, source};
+                    CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command)));
+                    BUSTER_TEST_RAW(arguments, native.error == COMPILER_DRIVER_ERROR_NONE, native.diagnostic);
+                    if (native.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+                    }
+#if defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC
+                    if (host_compiled)
+                    {
+                        String8 mixed = buster_test_temporary_path(temporary.arena, S8("buster-platform-large-va-mixed"), executable_suffix);
+                        String8 mixed_command[] = {modes[mode], frontends[frontend], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                            S8("-DLARGE_VA_MIXED=1"), S8("-o"), mixed, source, host_object};
+                        CompilerDriverResult mixed_result = compiler_driver_execute_invocation(temporary.arena,
+                            compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(mixed_command)));
+                        BUSTER_TEST_RAW(arguments, mixed_result.error == COMPILER_DRIVER_ERROR_NONE, mixed_result.diagnostic);
+                        if (mixed_result.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, mixed));
+                        }
+                    }
+#endif
+                }
+#endif
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 // One strict compilation of the machine-fallback census. The gang fills the
 // results; the census checks read them serially in target/mode/frontend order.
 typedef struct CompilerDriverTestStrictCorpusCell CompilerDriverTestStrictCorpusCell;
@@ -30511,6 +30599,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_scalar_argument_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_dynamic_calls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_platform_variadic);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_platform_large_va_arg);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_frame_vectors);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_float16_codegen);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_count_signatures);
