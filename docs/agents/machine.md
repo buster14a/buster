@@ -1168,6 +1168,16 @@ fixture as well as compiling both architectures.
   length-preserving replacement and its field descriptor. The relaxable kinds
   authorize conversion; plain `GOTPCREL` retains a GOT reference. An
   unrecognized site fails by name rather than guessing replacement bytes.
+  A GOT reference to an absent weak name (one that resolves to zero) is never
+  relaxed: GCC and Clang's default PIE `cmpq $0, name@GOTPCREL(%rip)` has no
+  direct form. The static writer points every such site at one shared zero
+  slot after `.eh_frame`. The dynamic writer gives each name a
+  `function_got_indices` slot that no loader relocation fills. The
+  position-independent planner uses `LINK_ELF_PIC_GOT_ADDRESS_ZERO`. AArch64
+  `ADR_GOT_PAGE`/`LD64_GOT_LO12_NC` already become `MOVZ #0`/`ADD #0` in
+  `object_aarch64_elf_page_relocate`. `compiler_driver_elf_weak_got_tests`
+  links host PIE objects as PIE and `-no-pie` against a host-linker oracle
+  (#3414).
   It relaxes the two indirect
   thread-local models back to local-exec for the same reason
   (`link_elf_relax_thread_local`), and a foreign object's local-dynamic

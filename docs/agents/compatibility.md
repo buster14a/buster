@@ -30,5 +30,24 @@ directory and removes the compiler and in-progress outputs.
 | RAD Debugger (Linux x86-64 diagnostic campaign) | [RAD Debugger](compatibility/raddebugger.md) |
 | Clang test corpus | [Clang suite](compatibility/clang-suite.md) |
 
+## Compiler selection
+
+Every harness command (`test_cjson` through `test_raddebugger`) resolves the
+`ide` it drives once, through `compat_ide_resolve` in `build.c`, and prints a
+`COMPAT_IDE` line with the build directory, requested and effective
+configuration, selection disposition and path (#1920):
+
+- `--config Debug|Release` selects exactly `<build-directory>/<config>/ide`
+  or fails before any external input is compiled; the other configuration
+  and the flat tree are never substituted.
+- With no `--config`, the harness takes Release, then Debug, then the flat
+  `<build-directory>/ide` (reported as `effective_config=unknown`).
+  `test_raddebugger` defaults to an explicit Release instead.
+- `--build-directory`/`--build-dir` choose the root (default `build`). They
+  select only the compiler; harness outputs stay under `build/`.
+
+The path names a file, not a producer: it does not prove which revision or
+options built that compiler.
+
 The musl and libc-test guides form one investigation in that order; references
 to preceding stages and later tests cross that boundary.

@@ -2522,6 +2522,95 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_elf_cpu_runtime_archive(Arena* are
 // sysroot with no GCC installation, refuse the link with the archive and
 // symbol named and leave no output. Runtime members that depend on each other
 // are selected in either archive order.
+// Issue 3414: default PIE GCC and Clang objects read an absent weak name's
+// address through R_X86_64_GOTPCREL or REX_GOTPCRELX, a site that cannot
+// always be rewritten into a direct form (`cmpq $0, name@GOTPCREL(%rip)`).
+// The libc-free programs take the static writer, the libc one the dynamic
+// writer, and every program must read both names as null in PIE and
+// position-dependent outputs, as the host linker does.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_weak_got_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 compiler = S8(BUSTER_HOST_C_COMPILER_ID);
+    bool supported = string_equal(compiler, S8("GNU")) || string_equal(compiler, S8("Clang"));
+    if (supported)
+    {
+        typedef struct ElfWeakGotCase ElfWeakGotCase;
+        struct ElfWeakGotCase
+        {
+            String8 name;
+            String8 program;
+        };
+        ElfWeakGotCase cases[] = {
+            {S8("compare"), S8("extern void weak_got_hook(void) __attribute__((weak));\n"
+                "extern int weak_got_data __attribute__((weak));\n"
+                "int main(void) { return (weak_got_hook ? 1 : 0) | (&weak_got_data ? 2 : 0); }\n")},
+            {S8("load"), S8("extern void weak_got_hook(void) __attribute__((weak));\n"
+                "extern int weak_got_data __attribute__((weak));\n"
+                "__attribute__((noinline)) int weak_got_count(void const* a, void const* b) { return (a != 0) + (b != 0); }\n"
+                "int main(void) { return weak_got_count((void const*)weak_got_hook, &weak_got_data); }\n")},
+            {S8("libc"), S8("int puts(const char*);\n"
+                "extern void weak_got_hook(void) __attribute__((weak));\n"
+                "extern int weak_got_data __attribute__((weak));\n"
+                "int main(void)\n"
+                "{\n"
+                "    int absent = !weak_got_hook && !&weak_got_data;\n"
+                "    puts(absent ? \"weak absent\" : \"weak present\");\n"
+                "    return !absent;\n"
+                "}\n")},
+        };
+        String8 root = buster_test_temporary_path(arena, S8("buster-elf-weak-got"), S8(""));
+        OsDirectoryCreateResult created = os_make_directory(root);
+        BUSTER_TEST(arguments, created.error.v == 0);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            ElfWeakGotCase test = cases[index];
+            String8 source = string_format_z(arena, S8("{S8}/{S8}.c"), root, test.name);
+            String8 object = string_format_z(arena, S8("{S8}/{S8}.o"), root, test.name);
+            BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(test.program)));
+            String8 compile[] = {S8("-w"), S8("-O2"), S8("-fPIE"), S8("-c"), source, S8("-o"), object};
+            bool produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile));
+            BUSTER_TEST(arguments, produced);
+            if (produced)
+            {
+                // The input must exercise the GOT form, not a direct one.
+                ObjectFile read = object_read(arena, file_read(arena, object, (FileReadOptions){0}), target_native);
+                BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE);
+                u32 got_hook = 0;
+                u32 got_data = 0;
+                for (u32 relocation = 0; read.error == OBJECT_ERROR_NONE && relocation < read.relocation_count; relocation += 1)
+                {
+                    ObjectRelocation* entry = read.relocations + relocation;
+                    String8 name = entry->symbol < read.symbol_count ? read.symbols[entry->symbol].name : (String8){0};
+                    bool got = object_relocation_kind_is_x86_got(entry->kind);
+                    got_hook += got && string_equal(name, S8("weak_got_hook"));
+                    got_data += got && string_equal(name, S8("weak_got_data"));
+                }
+                BUSTER_TEST(arguments, got_hook != 0 && got_data != 0);
+                String8 kinds[] = {S8("-pie"), S8("-no-pie")};
+                for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+                {
+                    String8 oracle = string_format_z(arena, S8("{S8}/{S8}-oracle{S8}"), root, test.name, kinds[kind]);
+                    String8 host_link[] = {kinds[kind], object, S8("-o"), oracle};
+                    bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
+                    BUSTER_TEST(arguments, linked);
+                    if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, oracle));
+                    String8 output = string_format_z(arena, S8("{S8}/{S8}-buster{S8}"), root, test.name, kinds[kind]);
+                    String8 command[] = {kinds[kind], object, S8("-o"), output};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+                    if (compiled.error != COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("weak GOT {S8}{S8}: {S8}\n"), test.name, kinds[kind], compiled.diagnostic);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
+                }
+            }
+        }
+        BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_cpu_runtime_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2689,17 +2778,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_cpu_runtime_tests(UnitTes
         BUSTER_TEST(arguments, file_write(weak_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
             "extern struct { unsigned vendor; } __cpu_model __attribute__((weak));\n"
             "int main(void) { return &__cpu_model != 0; }\n"))));
-        // The weak object is position-dependent: a GOT reference to an absent
-        // weak symbol is a separate open defect (issue 3414).
+        // The weak object is position-independent, so it reads the absent
+        // name through the GOT (issue 3414); it links as both image kinds.
         String8 ordinary_compile[] = {S8("-w"), S8("-O2"), S8("-c"), ordinary_source, S8("-o"), ordinary_object};
-        String8 weak_compile[] = {S8("-w"), S8("-O0"), S8("-fno-pie"), S8("-c"), weak_source, S8("-o"), weak_object};
+        String8 weak_compile[] = {S8("-w"), S8("-O0"), S8("-fPIE"), S8("-c"), weak_source, S8("-o"), weak_object};
         bool unneeded_produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(ordinary_compile)) &&
                                  compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(weak_compile));
         BUSTER_TEST(arguments, unneeded_produced);
-        for (u32 index = 0; unneeded_produced && garbage_written && index < 2; index += 1)
+        for (u32 index = 0; unneeded_produced && garbage_written && index < 3; index += 1)
         {
             String8 output = string_format_z(arena, S8("{S8}/unneeded-{u32}"), root, index);
-            String8 command[] = {garbage_search, S8("-no-pie"), index ? weak_object : ordinary_object, S8("-o"), output};
+            String8 command[] = {garbage_search, index == 2 ? S8("-pie") : S8("-no-pie"), index ? weak_object : ordinary_object, S8("-o"), output};
             CompilerDriverResult compiled = compiler_driver_execute_invocation(
                 arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
             BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
@@ -2996,6 +3085,7 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_ifunc_tests);
 #if BUSTER_CPU_ARCH_X86_64
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_cpu_runtime_tests);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_weak_got_tests);
 #endif
 #endif
 #if BUSTER_ANDROID || BUSTER_IOS
