@@ -151,8 +151,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x64_narrow_call_results(
     }
     ProcessWaitResult host_wait = host_spawn.handle ? os_process_wait_deadline(arguments->arena, host_spawn, 30000000) : (ProcessWaitResult){0};
     bool host_compiled = host_spawn.handle && !host_wait.timed_out && !host_wait.capture_failed && host_wait.result == PROCESS_RESULT_SUCCESS;
-    BUSTER_TEST_RAW(arguments, host_compiled, (String8){.pointer = (char8*)host_wait.streams[STANDARD_STREAM_ERROR].pointer,
-        .length = host_wait.streams[STANDARD_STREAM_ERROR].length});
+    BUSTER_TEST_RAW(arguments, host_compiled, ((String8){.pointer = (char8*)host_wait.streams[STANDARD_STREAM_ERROR].pointer,
+        .length = host_wait.streams[STANDARD_STREAM_ERROR].length}));
     bool reference_ok = false;
     if (written && host_compiled)
     {
@@ -174,8 +174,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x64_narrow_call_results(
         ProcessWaitResult reference_wait = reference_spawn.handle ? os_process_wait_deadline(arguments->arena, reference_spawn, 30000000) : (ProcessWaitResult){0};
         reference_ok = reference_spawn.handle && !reference_wait.timed_out && !reference_wait.capture_failed &&
             reference_wait.result == PROCESS_RESULT_SUCCESS;
-        BUSTER_TEST_RAW(arguments, reference_ok, (String8){.pointer = (char8*)reference_wait.streams[STANDARD_STREAM_ERROR].pointer,
-            .length = reference_wait.streams[STANDARD_STREAM_ERROR].length});
+        BUSTER_TEST_RAW(arguments, reference_ok, ((String8){.pointer = (char8*)reference_wait.streams[STANDARD_STREAM_ERROR].pointer,
+            .length = reference_wait.streams[STANDARD_STREAM_ERROR].length}));
         if (reference_ok)
         {
             reference_ok = compiler_driver_test_process_success(arguments->arena, reference);
@@ -221,8 +221,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x64_narrow_call_results(
                         (SliceString8){0}, (SliceString8){0}, options);
                     ProcessWaitResult link_wait = link_spawn.handle ? os_process_wait_deadline(temporary.arena, link_spawn, 30000000) : (ProcessWaitResult){0};
                     bool linked = link_spawn.handle && !link_wait.timed_out && !link_wait.capture_failed && link_wait.result == PROCESS_RESULT_SUCCESS;
-                    BUSTER_TEST_RAW(arguments, linked, (String8){.pointer = (char8*)link_wait.streams[STANDARD_STREAM_ERROR].pointer,
-                        .length = link_wait.streams[STANDARD_STREAM_ERROR].length});
+                    BUSTER_TEST_RAW(arguments, linked, ((String8){.pointer = (char8*)link_wait.streams[STANDARD_STREAM_ERROR].pointer,
+                        .length = link_wait.streams[STANDARD_STREAM_ERROR].length}));
                     if (linked) { BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), context); }
                 }
 #endif
