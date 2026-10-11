@@ -1858,4 +1858,13 @@ above (`--cache-sim=no --branch-sim=no`):
 - **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
   requested, so Zen 5 validation stays incomplete (#2761).
 
+The count-only first sight's hosted census is
+[`2026-10-11T142104Z`](../../performance-audits/2026-10-11T142104Z.md),
+diagnostic only. Every budget passes, and the change ships:
+- `-fsyntax-only` falls by 183.9 M Ir: −1.755% default and −1.990% under the
+  pilot. The 30,943 first-sight decodes (310.9 M) become counts (127.2 M), and
+  no length-only slot sends a decode back.
+- `-c` moves by +0.0001%, with the same decode calls and no count calls.
+  Objects are byte-identical at `-g0` and `-g`.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
