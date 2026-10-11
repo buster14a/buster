@@ -236,8 +236,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_checksum_records(UnitTestArguments* 
             BUSTER_TEST(arguments, memcmp(module.pointer + 112, original + lines_header, 100) == 0);
         }
     }
-    // Reuse the same record shapes in a second module: its remap must use its
-    // own names offsets without moving any checksum or line-record boundary.
+    // Reuse the same record shapes in a second module: its remap must not move
+    // any checksum or line-record boundary, and since it names the same paths
+    // it points at the first module's /names copies rather than new ones.
     PdbModule modules[2] = {
         {.name = S8("first.obj"), .codeview_symbols = input.codeview_symbols, .code_section = 1, .code_size = 16},
         {.name = S8("second.obj"), .codeview_symbols = input.codeview_symbols, .code_section = 1, .code_offset = 16, .code_size = 16},
@@ -255,7 +256,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_checksum_records(UnitTestArguments* 
             {
                 u32 offset = record_offsets[index];
                 u32 stride = (6 + (u32)digest_sizes[index] + 3) & ~(u32)3;
-                BUSTER_TEST(arguments, pdb_read_u32(second, 12 + offset) == mapped_offsets[index] + 29);
+                BUSTER_TEST(arguments, pdb_read_u32(second, 12 + offset) == mapped_offsets[index]);
                 BUSTER_TEST(arguments, memcmp(second.pointer + 12 + offset + 4,
                                              original + checksum_start + offset + 4, stride - 4) == 0);
             }
