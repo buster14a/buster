@@ -42,7 +42,10 @@
 // symbols by object_from_canonical_codegen_module: an alias owns no storage,
 // so it takes its target's section, offset, size and kind and contributes
 // only its own binding. All three formats carry that, because it is an
-// ordinary symbol pointing at an address another symbol already names.
+// ordinary symbol pointing at an address another symbol already names. An
+// indirect alias (__attribute__((ifunc))) is the same symbol at its
+// resolver's address with ObjectSymbol.indirect set, which only ELF writes
+// (STT_GNU_IFUNC); the frontend refuses it for COFF and Mach-O first.
 //
 // Layout, in file order; each anchor is a definition to search for:
 //   object_buffer_write .. object_buffer_align     append-only write buffer
@@ -12936,6 +12939,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .weak = symbol->is_weak,
             .hidden = symbol->is_hidden,
             .thread_local_state = definition.thread_local_state,
+            .indirect = alias.is_indirect,
         };
     }
     if (apple_thread_local)

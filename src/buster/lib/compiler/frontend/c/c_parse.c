@@ -34726,6 +34726,98 @@ BUSTER_C_INTERNAL void c_parse_validate_switch_duplicates(CTypeParseMachine* mac
     arena_set_position(machine->scratch_arena, mark);
 }
 
+// The output an `ifunc` attribute cannot be honoured in, named for the
+// refusal, or empty where it can. Only an ELF object has an indirect-function
+// symbol (STT_GNU_IFUNC), and only the x86-64 and AArch64 ELF linkers rebind
+// one (link_elf_indirect_functions_rebind); COFF, Mach-O and the non-native
+// emitters have no such symbol, so the attribute is refused rather than left
+// to come out as a call to the resolver.
+BUSTER_C_INTERNAL String8 c_ifunc_attribute_unsupported_output(Target target)
+{
+    String8 result = {0};
+    if (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI)
+    {
+        result = S8("COFF");
+    }
+    else if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
+    {
+        result = S8("Mach-O");
+    }
+    else if ((target.cpu_arch != CPU_ARCH_X86_64 && target.cpu_arch != CPU_ARCH_AARCH64) ||
+             (target.os != OPERATING_SYSTEM_LINUX && target.os != OPERATING_SYSTEM_ANDROID && target.os != OPERATING_SYSTEM_FREESTANDING))
+    {
+        result = S8("this target");
+    }
+
+    return result;
+}
+
+// The diagnostic an `ifunc` declaration earns, or an empty string when its
+// resolver is acceptable. Checked in the order a reader would fix them: the
+// declaration itself, then the resolver's existence, kind, definition and
+// return type. The output comes first: no resolver fixes that.
+BUSTER_C_INTERNAL String8 c_parse_ifunc_resolver_message(Arena* arena, CParseResult* result, CPreprocessResult preprocess,
+                                                        CDeclaration declaration, CDeclarationBinding binding)
+{
+    String8 message = {0};
+    CEntityId resolver = binding.ifunc_resolver.length && result->scope_count
+                             ? c_parse_lookup_entity(result, (CScopeId){.value = 0}, binding.ifunc_resolver)
+                             : C_ENTITY_ID_INVALID;
+    CEntity* entity = result->entities + declaration.entity.value;
+    String8 unsupported_output = c_ifunc_attribute_unsupported_output(preprocess.target);
+    if (unsupported_output.length)
+    {
+        message = c_parse_message(arena, S8("ifunc attribute on '{S8}' is not supported: {S8} output has no indirect function symbol"), declaration.name,
+                                  unsupported_output);
+    }
+    else if (declaration.kind != C_DECLARATION_FUNCTION || entity->kind != C_ENTITY_FUNCTION)
+    {
+        message = c_parse_message(arena, S8("ifunc attribute on '{S8}' requires a function declaration"), declaration.name);
+    }
+    else if (!binding.ifunc_resolver.length)
+    {
+        message = c_parse_message(arena, S8("ifunc attribute on '{S8}' must name a resolver"), declaration.name);
+    }
+    else if (binding.is_weakref || binding.alias_target.length)
+    {
+        message = c_parse_message(arena, S8("'{S8}' cannot be both an ifunc and an alias"), declaration.name);
+    }
+    else if (entity->is_definition)
+    {
+        message = c_parse_message(arena, S8("'{S8}' is both defined here and an ifunc resolved by '{S8}'"), declaration.name, binding.ifunc_resolver);
+    }
+    else if (resolver.value >= result->entity_count || resolver.value == declaration.entity.value)
+    {
+        message = c_parse_message(arena, S8("ifunc resolver '{S8}' is not declared in this translation unit"), binding.ifunc_resolver);
+    }
+    else if (result->entities[resolver.value].kind != C_ENTITY_FUNCTION)
+    {
+        message = c_parse_message(arena, S8("ifunc resolver '{S8}' for '{S8}' is not a function"), binding.ifunc_resolver, declaration.name);
+    }
+    else if (!result->entities[resolver.value].is_definition)
+    {
+        message = c_parse_message(arena, S8("ifunc '{S8}' names '{S8}', which is not defined in this translation unit"), declaration.name,
+                                  binding.ifunc_resolver);
+    }
+    else
+    {
+        CTypeId resolver_type = result->entities[resolver.value].type;
+        CTypeId returned = resolver_type.value < result->type_count ? result->types[resolver_type.value].return_type : C_TYPE_ID_INVALID;
+        CType* pointer = returned.value < result->type_count ? result->types + returned.value : 0;
+        CType* pointee = pointer && pointer->kind == C_TYPE_POINTER && pointer->element_type.value < result->type_count
+                             ? result->types + pointer->element_type.value
+                             : 0;
+        bool acceptable = pointee && (pointee->kind == C_TYPE_VOID ||
+                                      (pointee->kind == C_TYPE_FUNCTION && c_parse_types_compatible(arena, result, preprocess, pointer->element_type, entity->type)));
+        if (!acceptable)
+        {
+            message = c_parse_message(arena, S8("ifunc resolver '{S8}' must return 'void *' or a pointer to a function compatible with '{S8}'"),
+                                      binding.ifunc_resolver, declaration.name);
+        }
+    }
+    return message;
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_alias_targets(Arena* arena, CParseResult* result, CPreprocessResult preprocess)
 {
     for (u32 index = 0; index < result->declaration_count; index += 1)
@@ -34750,14 +34842,20 @@ BUSTER_C_INTERNAL void c_parse_validate_alias_targets(Arena* arena, CParseResult
                                    c_parse_message(arena, S8("visibility attribute on '{S8}' must name \"default\", \"hidden\", \"internal\" or \"protected\""),
                                                    declaration.name));
             }
-            // `ifunc` has no lowering, so it is refused here rather than left
-            // to come out as an undefined symbol; a `weakref` names its target
-            // itself or through the GCC `alias` spelling, and either way it is
-            // not an alias definition to validate below.
+            // An `ifunc` names its resolver the way an alias names its target,
+            // so it obeys the same rules and one more: the resolver returns the
+            // implementation, so it must be a function returning `void *` or a
+            // pointer to a function compatible with the declared one -- what
+            // Clang requires, and what GCC warns about. A `weakref` names its
+            // target itself or through the GCC `alias` spelling, and either
+            // way it is not an alias definition to validate below.
             if (binding.is_ifunc)
             {
-                c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration.location), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                                   S8("ifunc attribute is not supported"));
+                String8 message = c_parse_ifunc_resolver_message(arena, result, preprocess, declaration, binding);
+                if (message.length)
+                {
+                    c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration.location), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, message);
+                }
             }
             else if (binding.is_weakref)
             {

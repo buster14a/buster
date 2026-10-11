@@ -221,6 +221,31 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   marker attribute has no argument shape to recognise it by, and `weak` and
   `alias` are ordinary identifiers, so `int weak;` must stay a strong
   definition.
+- **`__attribute__((ifunc("resolver")))`** (issue 1243) defines its name as a
+  GNU indirect function whose value is the resolver's address, as GCC and
+  Clang do. It is an alias whose target is the resolver, so it travels the
+  same path with one more bit: `c_declaration_binding` records
+  `ifunc_resolver`, the lowering adds an `IrSymbolAlias` with `is_indirect`
+  set, `ir_validate_canonical_module` requires that target to be a function
+  body of the same module, and the object writer gives the symbol the
+  resolver's section, offset and size with `ObjectSymbol.indirect`, which the
+  ELF writer emits as `STT_GNU_IFUNC` (`object_elf64_symbol_type`). A local
+  (`static`) ifunc is a local indirect symbol. From there the linker treats
+  it as it treats a host compiler's IFUNC
+  ([object emission](../../object-emission.md)):
+  `link_elf_indirect_functions_rebind` turns it into a thunk and a slot.
+  `c_parse_validate_alias_targets` refuses, by name and identically under
+  `-fsyntax-only` and `-c`: an output without an indirect symbol (COFF,
+  Mach-O, and any target but x86-64/AArch64 Linux, Android or freestanding
+  ELF); an ifunc on an object; a missing resolver string; an ifunc that is
+  also an alias or weakref, or that has a body; a resolver that is not
+  declared, not a function or not defined in the translation unit; and a
+  resolver that returns neither `void *` nor a pointer to a function
+  compatible with the declared one, which Clang refuses and GCC warns about.
+  LLVM bitcode has no ifunc form here and refuses the module rather than
+  drop the symbol. `compiler_driver_test_ifunc_attribute` checks the symbol
+  and every refusal; `compiler_driver_elf_ifunc_tests` runs `ide cc`-built
+  programs, static, dynamic, `-pie` and `-shared`, against the host oracle.
 - **Symbol visibility** (GitHub #1291) is one bit, `IrSymbol.is_hidden`
   (`ObjectSymbol.hidden`, ELF `STV_HIDDEN`; LLVM bitcode `hidden`). Three
   statements set it, each read where its declaration is: `__attribute__((visibility("...")))`

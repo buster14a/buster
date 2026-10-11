@@ -302,9 +302,14 @@ struct CDeclarationBinding
     // the declaration is a local name for a weak reference to `weakref_target`
     // rather than a definition or an alias of one.
     bool is_weakref;
-    // __attribute__((ifunc("resolver"))), which has no lowering yet.
+    // __attribute__((ifunc("resolver"))): the declaration defines the name as
+    // a GNU indirect function whose value is `ifunc_resolver`, a function this
+    // translation unit defines. It lowers to an indirect IrSymbolAlias; a
+    // missing resolver string leaves `ifunc_resolver` empty for
+    // c_parse_validate_alias_targets to refuse.
     bool is_ifunc;
     String8 weakref_target;
+    String8 ifunc_resolver;
 };
 
 BUSTER_C_EXTERN bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out);

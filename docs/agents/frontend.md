@@ -13,7 +13,7 @@ substitute for inspecting the current implementation and fixtures.
 | Semantic-only validation, lowering constraint inventory, diagnostic and allocation regression contract | [Semantic validation](frontend/semantic-validation.md) |
 | Implicit postorder syntax tree (pilot): node contract, forward construction, layouts, tree expression typer, consumer map | [Syntax tree](frontend/ast.md) |
 | Phase arenas, the preprocessing seal and semantic layout queries | [Compiler phase lifetimes](../compiler-lifetime.md) |
-| Relocations, weak/alias symbols, constructors/destructors, object formats and linker | [Linkage](frontend/linkage.md) |
+| Relocations, weak/alias/ifunc symbols, constructors/destructors, object formats and linker | [Linkage](frontend/linkage.md) |
 | Packed/aligned types, bit-fields, layout engines | [Layout](frontend/layout.md) |
 | Atomic layout, argument classification, loads/stores, conversions | [Atomics](frontend/atomics.md) |
 | Declarators, typeof, conditional types, calls, JIT/driver boundaries | [Calls](frontend/calls.md) |
