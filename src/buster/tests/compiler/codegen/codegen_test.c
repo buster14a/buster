@@ -906,26 +906,33 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_x64_has_stack_alignment(ByteSlice code, u6
 }
 
 // Machine scratch for one function is planned from its IR counts (#3413).
-// An ordinary function keeps the thread scratch. One whose bound outgrows it
+// An ordinary function keeps the thread scratch. One whose bound outgrows
+// any thread scratch arena, including one an outer caller has filled,
 // runs on private reservations installed as the thread's scratch arenas, so
 // a pass's nested scratch grows with it, and the originals come back at the
 // end. A bound past the limit is refused before any pass runs.
 BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_scratch_plan(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    CodegenTestMachineScratch small = codegen_test_machine_scratch(arguments->arena, 1000, 800, 40);
+    CodegenTestMachineScratch small = codegen_test_machine_scratch(arguments->arena, 1000, 800, 40, 0);
     BUSTER_TEST(arguments, small.fits && !small.replaced && small.restored);
     BUSTER_TEST(arguments, small.bound < BUSTER_MB(8));
     // 200,000 rows bound about 513 MB, past the 256 MiB thread scratch.
-    CodegenTestMachineScratch large = codegen_test_machine_scratch(arguments->arena, 200000, 200000, 1);
+    CodegenTestMachineScratch large = codegen_test_machine_scratch(arguments->arena, 200000, 200000, 1, 0);
     BUSTER_TEST(arguments, large.fits && large.replaced && large.restored);
     BUSTER_TEST(arguments, large.bound > BUSTER_MB(400) && large.scratch_reserved >= large.bound);
     BUSTER_TEST(arguments, large.nested_distinct && large.nested_reserved >= large.bound);
     // Many blocks over many values: the liveness planes dominate the bound.
-    CodegenTestMachineScratch planes = codegen_test_machine_scratch(arguments->arena, 40000, 50000, 2000);
+    CodegenTestMachineScratch planes = codegen_test_machine_scratch(arguments->arena, 40000, 50000, 2000, 0);
     BUSTER_TEST(arguments, planes.fits && planes.replaced && planes.restored);
     BUSTER_TEST(arguments, planes.bound > (u64)2000 * (2 * 50000 / 64) * sizeof(u64) * 16 && planes.bound < BUSTER_MB(600));
-    CodegenTestMachineScratch refused = codegen_test_machine_scratch(arguments->arena, UINT32_MAX, UINT32_MAX, UINT32_MAX);
+    // The same small function while the other thread arena holds live outer
+    // allocations up to its last 32 KiB: a nested pass could land there, so
+    // the plan must replace both arenas rather than trust the free one.
+    CodegenTestMachineScratch occupied = codegen_test_machine_scratch(arguments->arena, 1000, 800, 40, BUSTER_KB(32));
+    BUSTER_TEST(arguments, occupied.bound == small.bound && occupied.fits && occupied.replaced && occupied.restored);
+    BUSTER_TEST(arguments, occupied.nested_distinct && occupied.nested_reserved >= occupied.bound);
+    CodegenTestMachineScratch refused = codegen_test_machine_scratch(arguments->arena, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0);
     BUSTER_TEST(arguments, !refused.fits && !refused.replaced && refused.restored);
     BUSTER_TEST(arguments, refused.bound == UINT64_MAX);
     return result;

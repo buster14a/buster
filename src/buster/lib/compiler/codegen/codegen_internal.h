@@ -129,7 +129,10 @@ struct CodegenTestMachineScratch
     bool nested_distinct;
     bool restored;
 };
-BUSTER_F_DECL CodegenTestMachineScratch codegen_test_machine_scratch(Arena* arena, u32 instruction_count, u32 value_count, u32 block_count);
+// A nonzero `other_remaining` first fills the other thread scratch arena to
+// that many free bytes, as a live outer allocation would.
+BUSTER_F_DECL CodegenTestMachineScratch codegen_test_machine_scratch(Arena* arena, u32 instruction_count, u32 value_count, u32 block_count,
+                                                                     u64 other_remaining);
 BUSTER_F_DECL bool codegen_test_canonical_block_offsets(u32* offsets, IrFunction* function, MachineSelectResult* selected,
                                                        MachineEncodeResult* encoded);
 BUSTER_F_DECL void codegen_test_emit_scalar(CodegenBuffer* buffer, u32 byte_count, u64 value);

@@ -2259,10 +2259,18 @@ BUSTER_GLOBAL_LOCAL CodegenMachineScratch codegen_machine_scratch_begin(Arena* a
     CodegenMachineScratch result = {0};
     u64 bound = codegen_machine_scratch_bound(function);
     TemporalArena probe = scratch_begin(&arena, 1);
-    result.fits = bound <= probe.arena->reserved_size - probe.arena->position;
+    ThreadContext* context = thread_context_selected();
+    // A pass's nested scratch_begin may select any thread scratch arena other
+    // than the one it was handed, including one an outer caller holds live
+    // allocations in, so every arena must have the bound's room left.
+    result.fits = true;
+    for (u32 index = 0; index < SCRATCH_ARENA_COUNT; index += 1)
+    {
+        Arena* scratch = context->arenas[index];
+        result.fits = result.fits && bound <= scratch->reserved_size - scratch->position;
+    }
     if (!result.fits && bound <= CODEGEN_MACHINE_SCRATCH_LIMIT)
     {
-        ThreadContext* context = thread_context_selected();
         bool created = true;
         for (u32 index = 0; index < SCRATCH_ARENA_COUNT && created; index += 1)
         {
@@ -2308,7 +2316,7 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_scratch_end(CodegenMachineScratch* mach
 }
 
 #if BUSTER_INCLUDE_TESTS
-CodegenTestMachineScratch codegen_test_machine_scratch(Arena* arena, u32 instruction_count, u32 value_count, u32 block_count)
+CodegenTestMachineScratch codegen_test_machine_scratch(Arena* arena, u32 instruction_count, u32 value_count, u32 block_count, u64 other_remaining)
 {
     IrFunction function = {.instruction_count = instruction_count, .value_count = value_count, .block_count = block_count};
     ThreadContext* context = thread_context_selected();
@@ -2318,6 +2326,20 @@ CodegenTestMachineScratch codegen_test_machine_scratch(Arena* arena, u32 instruc
     {
         before[index] = context->arenas[index];
         positions[index] = before[index]->position;
+    }
+    // Occupy the thread arena the planner will not hand out first, leaving
+    // `other_remaining` bytes: a live outer allocation a nested pass's
+    // scratch_begin can still land on.
+    Arena* other = 0;
+    if (other_remaining)
+    {
+        Arena* first = scratch_begin(&arena, 1).arena;
+        for (u32 index = 0; index < SCRATCH_ARENA_COUNT && !other; index += 1)
+        {
+            other = before[index] != first ? before[index] : 0;
+        }
+        u64 remaining = other->reserved_size - other->position;
+        (void)arena_allocate_bytes(other, remaining > other_remaining ? remaining - other_remaining : 0, 1);
     }
     CodegenMachineScratch machine_scratch = codegen_machine_scratch_begin(arena, &function);
     CodegenTestMachineScratch result = {
@@ -2334,6 +2356,13 @@ CodegenTestMachineScratch codegen_test_machine_scratch(Arena* arena, u32 instruc
     scratch_end(nested);
     (void)arena_allocate(machine_scratch.scratch.arena, u8, BUSTER_KB(64));
     codegen_machine_scratch_end(&machine_scratch);
+    for (u32 index = 0; index < SCRATCH_ARENA_COUNT; index += 1)
+    {
+        if (before[index] == other)
+        {
+            arena_set_position(other, positions[index]);
+        }
+    }
     result.restored = true;
     for (u32 index = 0; index < SCRATCH_ARENA_COUNT; index += 1)
     {
