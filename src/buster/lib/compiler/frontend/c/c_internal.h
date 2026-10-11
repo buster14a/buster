@@ -1755,6 +1755,8 @@ struct CAstTypePending
     // the comparison reports as a mismatch.
     CType replay_type_rows[C_AST_TYPE_REPLAY_ROWS];
     CArrayBound replay_bound_rows[C_AST_TYPE_REPLAY_ROWS];
+    // The alignment records a replayed row inherited (c_parse_add_qualified_type).
+    CTypeAlignment replay_alignment_rows[C_AST_TYPE_REPLAY_ROWS];
 };
 #endif
 

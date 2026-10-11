@@ -2080,10 +2080,16 @@ BUSTER_C_SHARED void c_ast_types_publish(CTypeParseMachine* machine, CParseResul
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_ast_types_verify_enabled;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestAstTypeVerify c_ast_types_verify_state;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_ast_types_verify_perturb_alignments;
 
 void c_test_ast_type_verify_set(bool enabled)
 {
     c_ast_types_verify_enabled = enabled;
+}
+
+void c_test_ast_type_verify_perturb_alignments(bool enabled)
+{
+    c_ast_types_verify_perturb_alignments = enabled;
 }
 
 CTestAstTypeVerify c_test_ast_type_verify_take(void)
@@ -2213,6 +2219,11 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_rows_equal(CType const* x, CType const* y)
            x->is_unprototyped == y->is_unprototyped && x->has_fixed_underlying_type == y->has_fixed_underlying_type;
 }
 
+BUSTER_GLOBAL_LOCAL bool c_ast_types_alignments_equal(CTypeAlignment const* x, CTypeAlignment const* y)
+{
+    return x->type_index == y->type_index && x->alignment_start == y->alignment_start && x->alignment_count == y->alignment_count;
+}
+
 BUSTER_GLOBAL_LOCAL bool c_ast_types_bounds_equal(CArrayBound const* x, CArrayBound const* y)
 {
     return x->inferred_count == y->inferred_count && x->token_start == y->token_start && x->token_count == y->token_count &&
@@ -2235,6 +2246,11 @@ BUSTER_C_SHARED void c_ast_types_verify_hold_replay(CParseResult* result, CAstTy
     for (u32 row = 0; row < pending->replay_bounds && row < C_AST_TYPE_REPLAY_ROWS; row += 1)
     {
         pending->replay_bound_rows[row] = result->array_bounds[mark.array_bounds + row];
+    }
+    for (u32 row = 0; row < pending->replay_alignments && row < C_AST_TYPE_REPLAY_ROWS; row += 1)
+    {
+        pending->replay_alignment_rows[row] = result->type_alignments[mark.type_alignments + row];
+        pending->replay_alignment_rows[row].alignment_start += c_ast_types_verify_perturb_alignments ? 1 : 0;
     }
     result->type_count = mark.types;
     result->array_bound_count = mark.array_bounds;
@@ -2283,6 +2299,11 @@ BUSTER_C_SHARED void c_ast_types_verify_end(CTypeParseMachine* machine, CParseRe
     for (u32 row = 0; tables && row < pending->replay_bounds; row += 1)
     {
         tables = row < C_AST_TYPE_REPLAY_ROWS && c_ast_types_bounds_equal(result->array_bounds + mark.array_bounds + row, pending->replay_bound_rows + row);
+    }
+    for (u32 row = 0; tables && row < pending->replay_alignments; row += 1)
+    {
+        tables = row < C_AST_TYPE_REPLAY_ROWS &&
+                 c_ast_types_alignments_equal(result->type_alignments + mark.type_alignments + row, pending->replay_alignment_rows + row);
     }
     if (!tables)
     {

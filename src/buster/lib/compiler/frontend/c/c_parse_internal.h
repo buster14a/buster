@@ -122,6 +122,10 @@ struct CTestAstTypeVerify
     u32 first_count;
 };
 BUSTER_F_DECL void c_test_ast_type_verify_set(bool enabled);
+// A negative control for the differential: while set, every alignment record
+// a replay inherited is held with its range start moved, so the comparison
+// with the machine's record must report a table mismatch.
+BUSTER_F_DECL void c_test_ast_type_verify_perturb_alignments(bool enabled);
 // The counts since the last take, which resets them.
 BUSTER_F_DECL CTestAstTypeVerify c_test_ast_type_verify_take(void);
 

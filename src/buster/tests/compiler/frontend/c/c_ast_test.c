@@ -3999,6 +3999,35 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
     CTestAstTypeVerify verify = c_test_ast_type_verify_take();
     BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count && verify.probes == 4 && verify.probe_mismatches == 0);
     scratch_end(temporary);
+    // A member of a const aggregate whose type is an aligned typedef: the
+    // replay's qualified copy inherits the typedef's alignment record, and
+    // verify mode holds that record to the machine's, field by field. With
+    // the held record's range moved, the comparison must fail.
+    for (u32 perturb = 0; perturb < 2; perturb += 1)
+    {
+        temporary = scratch_begin(&arguments->arena, 1);
+        preprocess = c_ast_test_preprocess(temporary.arena,
+                                           S8("typedef int A __attribute__((aligned(16))); struct S { A a; }; A f(struct S const* p) { return p->a; }"),
+                                           C_PREPROCESS_DIALECT_GNU17);
+        built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        if (BUSTER_REQUIRE(arguments, built.complete))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.ast = &built.ast;
+            syntax.type_interning = true;
+            c_test_ast_type_verify_take();
+            c_test_ast_type_verify_set(true);
+            c_test_ast_type_verify_perturb_alignments(perturb != 0);
+            analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            c_test_ast_type_verify_perturb_alignments(false);
+            c_test_ast_type_verify_set(false);
+            verify = c_test_ast_type_verify_take();
+            BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count && verify.compared > 0);
+            BUSTER_TEST(arguments, perturb ? verify.mismatches > 0 && verify.first[0].reasons == C_TEST_AST_TYPE_MISMATCH_TABLES : verify.mismatches == 0);
+        }
+        c_ast_release(&built.ast);
+        scratch_end(temporary);
+    }
     return result;
 }
 
