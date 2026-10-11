@@ -1452,6 +1452,152 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_bindings_differ(Arena* arena, CAnalysis
     return difference;
 }
 
+BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_analyses_differ(Arena* arena, CAnalysisResult const* left, CAnalysisResult const* right)
+{
+    String8 difference = {0};
+    if (left->type_count != right->type_count || left->array_bound_count != right->array_bound_count || left->member_count != right->member_count ||
+        left->entity_count != right->entity_count)
+    {
+        difference = string_format(arena, S8("tables differ: {u32} types, {u32} bounds, {u32} members, {u32} entities without the tree; "
+                                             "{u32}, {u32}, {u32}, {u32} with it"),
+                                   left->type_count, left->array_bound_count, left->member_count, left->entity_count, right->type_count,
+                                   right->array_bound_count, right->member_count, right->entity_count);
+    }
+    else if (left->diagnostic_count != right->diagnostic_count || left->analysis_complete != right->analysis_complete)
+    {
+        difference = string_format(arena, S8("{u32} diagnostics (complete {u32}) without the tree, {u32} (complete {u32}) with it"), left->diagnostic_count,
+                                   (u32)left->analysis_complete, right->diagnostic_count, (u32)right->analysis_complete);
+    }
+    for (u32 index = 0; index < left->diagnostic_count && !difference.length; index += 1)
+    {
+        CDiagnostic const* a = left->diagnostics + index;
+        CDiagnostic const* b = right->diagnostics + index;
+        if (!string_equal(a->message, b->message) || a->kind != b->kind || a->severity != b->severity || a->location.offset != b->location.offset ||
+            a->location.line != b->location.line || a->location.column != b->location.column || a->location.file != b->location.file)
+        {
+            difference = string_format(arena, S8("diagnostic {u32} differs: '{S8}' without the tree, '{S8}' with it"), index, a->message, b->message);
+        }
+    }
+    return difference;
+}
+
+// The analysis model, field by field: every type row, array bound,
+// alignment specifier, type alignment, member, parameter, entity and
+// declaration's types. The declaration specifier read (c_parse.c, #3102)
+// must leave every table exactly as the type machine builds it, in the same
+// order; the diagnostics are compared by c_ast_corpus_analyses_differ.
+BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_model_differ(Arena* arena, CAnalysisResult const* left, CAnalysisResult const* right)
+{
+    String8 difference = {0};
+    if (left->type_count != right->type_count || left->array_bound_count != right->array_bound_count ||
+        left->alignment_count != right->alignment_count || left->type_alignment_count != right->type_alignment_count ||
+        left->member_count != right->member_count || left->parameter_count != right->parameter_count || left->entity_count != right->entity_count ||
+        left->declaration_count != right->declaration_count)
+    {
+        difference = string_format(arena,
+                                   S8("tables differ: {u32} types, {u32} bounds, {u32} alignments, {u32} type alignments, {u32} members, {u32} parameters, "
+                                      "{u32} entities, {u32} declarations without the tree; {u32}, {u32}, {u32}, {u32}, {u32}, {u32}, {u32}, {u32} with it"),
+                                   left->type_count, left->array_bound_count, left->alignment_count, left->type_alignment_count, left->member_count,
+                                   left->parameter_count, left->entity_count, left->declaration_count, right->type_count, right->array_bound_count,
+                                   right->alignment_count, right->type_alignment_count, right->member_count, right->parameter_count, right->entity_count,
+                                   right->declaration_count);
+    }
+    for (u32 index = 0; index < left->type_count && !difference.length; index += 1)
+    {
+        CType const* a = left->types + index;
+        CType const* b = right->types + index;
+        bool same = string_equal(a->tag, b->tag) && a->tag_scope.value == b->tag_scope.value && a->element_type.value == b->element_type.value &&
+                    a->return_type.value == b->return_type.value && a->unqualified_type.value == b->unqualified_type.value &&
+                    a->array_bound == b->array_bound && a->parameter_start == b->parameter_start && a->parameter_count == b->parameter_count &&
+                    a->member_start == b->member_start && a->member_count == b->member_count && a->enum_member_start == b->enum_member_start &&
+                    a->enum_member_count == b->enum_member_count && a->definition_start == b->definition_start &&
+                    a->definition_token_count == b->definition_token_count && a->vector_byte_size == b->vector_byte_size && a->kind == b->kind &&
+                    a->is_const == b->is_const && a->is_volatile == b->is_volatile && a->is_restrict == b->is_restrict && a->is_atomic == b->is_atomic &&
+                    a->is_variadic == b->is_variadic && a->is_complete == b->is_complete && a->is_transparent_union == b->is_transparent_union &&
+                    a->has_unqualified_type == b->has_unqualified_type && a->is_unprototyped == b->is_unprototyped &&
+                    a->has_fixed_underlying_type == b->has_fixed_underlying_type;
+        if (!same)
+        {
+            difference = string_format(arena, S8("type {u32} differs: kind {u32} element {u32} without the tree, kind {u32} element {u32} with it"), index,
+                                       (u32)a->kind, a->element_type.value, (u32)b->kind, b->element_type.value);
+        }
+    }
+    for (u32 index = 0; index < left->array_bound_count && !difference.length; index += 1)
+    {
+        CArrayBound const* a = left->array_bounds + index;
+        CArrayBound const* b = right->array_bounds + index;
+        if (a->inferred_count != b->inferred_count || a->token_start != b->token_start || a->token_count != b->token_count ||
+            a->is_static != b->is_static || a->is_star != b->is_star || a->has_inferred_count != b->has_inferred_count || a->is_const != b->is_const ||
+            a->is_parameter_declarator != b->is_parameter_declarator)
+        {
+            difference = string_format(arena, S8("array bound {u32} differs"), index);
+        }
+    }
+    for (u32 index = 0; index < left->alignment_count && !difference.length; index += 1)
+    {
+        CAlignmentSpecifier const* a = left->alignments + index;
+        CAlignmentSpecifier const* b = right->alignments + index;
+        if (a->type.value != b->type.value || a->token_start != b->token_start || a->token_count != b->token_count)
+        {
+            difference = string_format(arena, S8("alignment {u32} differs"), index);
+        }
+    }
+    for (u32 index = 0; index < left->type_alignment_count && !difference.length; index += 1)
+    {
+        CTypeAlignment const* a = left->type_alignments + index;
+        CTypeAlignment const* b = right->type_alignments + index;
+        if (a->type_index != b->type_index || a->alignment_start != b->alignment_start || a->alignment_count != b->alignment_count)
+        {
+            difference = string_format(arena, S8("type alignment {u32} differs"), index);
+        }
+    }
+    for (u32 index = 0; index < left->member_count && !difference.length; index += 1)
+    {
+        CMember const* a = left->members + index;
+        CMember const* b = right->members + index;
+        if (a->type.value != b->type.value || a->symbol != b->symbol || a->alignment_start != b->alignment_start ||
+            a->alignment_count != b->alignment_count || a->bit_width != b->bit_width || a->is_bit_field != b->is_bit_field ||
+            a->is_packed != b->is_packed || !string_equal(a->name, b->name))
+        {
+            difference = string_format(arena, S8("member {u32} differs"), index);
+        }
+    }
+    for (u32 index = 0; index < left->parameter_count && !difference.length; index += 1)
+    {
+        CParameter const* a = left->parameters + index;
+        CParameter const* b = right->parameters + index;
+        if (a->type.value != b->type.value || a->entity.value != b->entity.value || a->symbol != b->symbol || !string_equal(a->name, b->name))
+        {
+            difference = string_format(arena, S8("parameter {u32} differs"), index);
+        }
+    }
+    for (u32 index = 0; index < left->entity_count && !difference.length; index += 1)
+    {
+        CEntity const* a = left->entities + index;
+        CEntity const* b = right->entities + index;
+        if (a->type.value != b->type.value || a->scope.value != b->scope.value || a->kind != b->kind || a->symbol != b->symbol ||
+            a->declaration_index != b->declaration_index || a->alignment_start != b->alignment_start || a->alignment_count != b->alignment_count ||
+            a->is_definition != b->is_definition || a->is_static_storage != b->is_static_storage || a->is_thread_local != b->is_thread_local ||
+            a->is_constexpr != b->is_constexpr || a->is_register != b->is_register || a->is_extern != b->is_extern)
+        {
+            difference = string_format(arena, S8("entity {u32} ('{S8}') differs: type {u32} without the tree, {u32} with it"), index, a->name,
+                                       a->type.value, b->type.value);
+        }
+    }
+    for (u32 index = 0; index < left->declaration_count && !difference.length; index += 1)
+    {
+        CDeclaration const* a = left->declarations + index;
+        CDeclaration const* b = right->declarations + index;
+        if (a->type.value != b->type.value || a->base_type.value != b->base_type.value || a->entity.value != b->entity.value ||
+            a->scope.value != b->scope.value || a->kind != b->kind || a->alignment_start != b->alignment_start || a->alignment_count != b->alignment_count)
+        {
+            difference = string_format(arena, S8("declaration {u32} differs: type {u32} without the tree, {u32} with it"), index, a->type.value,
+                                       b->type.value);
+        }
+    }
+    return difference;
+}
+
 #if !BUSTER_ANDROID && !BUSTER_IOS
 // Mobile test runs carry no repository tree, so the fixture-reading suites
 // below run only where the tests/ directory exists, as c_test.c's do.
@@ -2210,152 +2356,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_split(UnitTestArguments* argumen
 // The first difference between two analyses: the sizes of the type tables,
 // then the diagnostics (count, then each message, kind, severity and
 // location). Empty when there is none.
-BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_analyses_differ(Arena* arena, CAnalysisResult const* left, CAnalysisResult const* right)
-{
-    String8 difference = {0};
-    if (left->type_count != right->type_count || left->array_bound_count != right->array_bound_count || left->member_count != right->member_count ||
-        left->entity_count != right->entity_count)
-    {
-        difference = string_format(arena, S8("tables differ: {u32} types, {u32} bounds, {u32} members, {u32} entities without the tree; "
-                                             "{u32}, {u32}, {u32}, {u32} with it"),
-                                   left->type_count, left->array_bound_count, left->member_count, left->entity_count, right->type_count,
-                                   right->array_bound_count, right->member_count, right->entity_count);
-    }
-    else if (left->diagnostic_count != right->diagnostic_count || left->analysis_complete != right->analysis_complete)
-    {
-        difference = string_format(arena, S8("{u32} diagnostics (complete {u32}) without the tree, {u32} (complete {u32}) with it"), left->diagnostic_count,
-                                   (u32)left->analysis_complete, right->diagnostic_count, (u32)right->analysis_complete);
-    }
-    for (u32 index = 0; index < left->diagnostic_count && !difference.length; index += 1)
-    {
-        CDiagnostic const* a = left->diagnostics + index;
-        CDiagnostic const* b = right->diagnostics + index;
-        if (!string_equal(a->message, b->message) || a->kind != b->kind || a->severity != b->severity || a->location.offset != b->location.offset ||
-            a->location.line != b->location.line || a->location.column != b->location.column || a->location.file != b->location.file)
-        {
-            difference = string_format(arena, S8("diagnostic {u32} differs: '{S8}' without the tree, '{S8}' with it"), index, a->message, b->message);
-        }
-    }
-    return difference;
-}
-
-// The analysis model, field by field: every type row, array bound,
-// alignment specifier, type alignment, member, parameter, entity and
-// declaration's types. The declaration specifier read (c_parse.c, #3102)
-// must leave every table exactly as the type machine builds it, in the same
-// order; the diagnostics are compared by c_ast_corpus_analyses_differ.
-BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_model_differ(Arena* arena, CAnalysisResult const* left, CAnalysisResult const* right)
-{
-    String8 difference = {0};
-    if (left->type_count != right->type_count || left->array_bound_count != right->array_bound_count ||
-        left->alignment_count != right->alignment_count || left->type_alignment_count != right->type_alignment_count ||
-        left->member_count != right->member_count || left->parameter_count != right->parameter_count || left->entity_count != right->entity_count ||
-        left->declaration_count != right->declaration_count)
-    {
-        difference = string_format(arena,
-                                   S8("tables differ: {u32} types, {u32} bounds, {u32} alignments, {u32} type alignments, {u32} members, {u32} parameters, "
-                                      "{u32} entities, {u32} declarations without the tree; {u32}, {u32}, {u32}, {u32}, {u32}, {u32}, {u32}, {u32} with it"),
-                                   left->type_count, left->array_bound_count, left->alignment_count, left->type_alignment_count, left->member_count,
-                                   left->parameter_count, left->entity_count, left->declaration_count, right->type_count, right->array_bound_count,
-                                   right->alignment_count, right->type_alignment_count, right->member_count, right->parameter_count, right->entity_count,
-                                   right->declaration_count);
-    }
-    for (u32 index = 0; index < left->type_count && !difference.length; index += 1)
-    {
-        CType const* a = left->types + index;
-        CType const* b = right->types + index;
-        bool same = string_equal(a->tag, b->tag) && a->tag_scope.value == b->tag_scope.value && a->element_type.value == b->element_type.value &&
-                    a->return_type.value == b->return_type.value && a->unqualified_type.value == b->unqualified_type.value &&
-                    a->array_bound == b->array_bound && a->parameter_start == b->parameter_start && a->parameter_count == b->parameter_count &&
-                    a->member_start == b->member_start && a->member_count == b->member_count && a->enum_member_start == b->enum_member_start &&
-                    a->enum_member_count == b->enum_member_count && a->definition_start == b->definition_start &&
-                    a->definition_token_count == b->definition_token_count && a->vector_byte_size == b->vector_byte_size && a->kind == b->kind &&
-                    a->is_const == b->is_const && a->is_volatile == b->is_volatile && a->is_restrict == b->is_restrict && a->is_atomic == b->is_atomic &&
-                    a->is_variadic == b->is_variadic && a->is_complete == b->is_complete && a->is_transparent_union == b->is_transparent_union &&
-                    a->has_unqualified_type == b->has_unqualified_type && a->is_unprototyped == b->is_unprototyped &&
-                    a->has_fixed_underlying_type == b->has_fixed_underlying_type;
-        if (!same)
-        {
-            difference = string_format(arena, S8("type {u32} differs: kind {u32} element {u32} without the tree, kind {u32} element {u32} with it"), index,
-                                       (u32)a->kind, a->element_type.value, (u32)b->kind, b->element_type.value);
-        }
-    }
-    for (u32 index = 0; index < left->array_bound_count && !difference.length; index += 1)
-    {
-        CArrayBound const* a = left->array_bounds + index;
-        CArrayBound const* b = right->array_bounds + index;
-        if (a->inferred_count != b->inferred_count || a->token_start != b->token_start || a->token_count != b->token_count ||
-            a->is_static != b->is_static || a->is_star != b->is_star || a->has_inferred_count != b->has_inferred_count || a->is_const != b->is_const ||
-            a->is_parameter_declarator != b->is_parameter_declarator)
-        {
-            difference = string_format(arena, S8("array bound {u32} differs"), index);
-        }
-    }
-    for (u32 index = 0; index < left->alignment_count && !difference.length; index += 1)
-    {
-        CAlignmentSpecifier const* a = left->alignments + index;
-        CAlignmentSpecifier const* b = right->alignments + index;
-        if (a->type.value != b->type.value || a->token_start != b->token_start || a->token_count != b->token_count)
-        {
-            difference = string_format(arena, S8("alignment {u32} differs"), index);
-        }
-    }
-    for (u32 index = 0; index < left->type_alignment_count && !difference.length; index += 1)
-    {
-        CTypeAlignment const* a = left->type_alignments + index;
-        CTypeAlignment const* b = right->type_alignments + index;
-        if (a->type_index != b->type_index || a->alignment_start != b->alignment_start || a->alignment_count != b->alignment_count)
-        {
-            difference = string_format(arena, S8("type alignment {u32} differs"), index);
-        }
-    }
-    for (u32 index = 0; index < left->member_count && !difference.length; index += 1)
-    {
-        CMember const* a = left->members + index;
-        CMember const* b = right->members + index;
-        if (a->type.value != b->type.value || a->symbol != b->symbol || a->alignment_start != b->alignment_start ||
-            a->alignment_count != b->alignment_count || a->bit_width != b->bit_width || a->is_bit_field != b->is_bit_field ||
-            a->is_packed != b->is_packed || !string_equal(a->name, b->name))
-        {
-            difference = string_format(arena, S8("member {u32} differs"), index);
-        }
-    }
-    for (u32 index = 0; index < left->parameter_count && !difference.length; index += 1)
-    {
-        CParameter const* a = left->parameters + index;
-        CParameter const* b = right->parameters + index;
-        if (a->type.value != b->type.value || a->entity.value != b->entity.value || a->symbol != b->symbol || !string_equal(a->name, b->name))
-        {
-            difference = string_format(arena, S8("parameter {u32} differs"), index);
-        }
-    }
-    for (u32 index = 0; index < left->entity_count && !difference.length; index += 1)
-    {
-        CEntity const* a = left->entities + index;
-        CEntity const* b = right->entities + index;
-        if (a->type.value != b->type.value || a->scope.value != b->scope.value || a->kind != b->kind || a->symbol != b->symbol ||
-            a->declaration_index != b->declaration_index || a->alignment_start != b->alignment_start || a->alignment_count != b->alignment_count ||
-            a->is_definition != b->is_definition || a->is_static_storage != b->is_static_storage || a->is_thread_local != b->is_thread_local ||
-            a->is_constexpr != b->is_constexpr || a->is_register != b->is_register || a->is_extern != b->is_extern)
-        {
-            difference = string_format(arena, S8("entity {u32} ('{S8}') differs: type {u32} without the tree, {u32} with it"), index, a->name,
-                                       a->type.value, b->type.value);
-        }
-    }
-    for (u32 index = 0; index < left->declaration_count && !difference.length; index += 1)
-    {
-        CDeclaration const* a = left->declarations + index;
-        CDeclaration const* b = right->declarations + index;
-        if (a->type.value != b->type.value || a->base_type.value != b->base_type.value || a->entity.value != b->entity.value ||
-            a->scope.value != b->scope.value || a->kind != b->kind || a->alignment_start != b->alignment_start || a->alignment_count != b->alignment_count)
-        {
-            difference = string_format(arena, S8("declaration {u32} differs: type {u32} without the tree, {u32} with it"), index, a->type.value,
-                                       b->type.value);
-        }
-    }
-    return difference;
-}
-
 // The tree expression typer (c_ast_types.c, #3102) on one input whose tree is
 // complete and whose declarations c_parse_ast accepted. Semantic analysis runs
 // three times on fresh declaration splits: without the tree, with it, and with
