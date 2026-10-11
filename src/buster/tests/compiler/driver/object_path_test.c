@@ -2590,6 +2590,107 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_cpu_runtime_tests(UnitTes
             BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
             if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
         }
+
+        // Cases ported from Devin's duplicate branch for this issue. A
+        // malformed -L libgcc.a is read only by a link that needs the runtime.
+        // Ordinary links and weak references must succeed without touching it.
+        // A refusal preserves an existing output byte for byte.
+        String8 garbage_directory = string_format_z(arena, S8("{S8}/garbage"), root);
+        created = os_make_directory(garbage_directory);
+        String8 garbage_archive = string_format_z(arena, S8("{S8}/libgcc.a"), garbage_directory);
+        bool garbage_written = created.error.v == 0 && file_write(garbage_archive, BUSTER_SLICE_TO_BYTE_SLICE(S8("not an archive")));
+        BUSTER_TEST(arguments, garbage_written);
+        String8 garbage_search = string_format_z(arena, S8("-L{S8}"), garbage_directory);
+        String8 sentinel_output = string_format_z(arena, S8("{S8}/sentinel"), root);
+        String8 sentinel = S8("preserve this output");
+        if (produced && garbage_written)
+        {
+            BUSTER_TEST(arguments, file_write(sentinel_output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+            String8 malformed[] = {garbage_search, object, S8("-o"), sentinel_output};
+            CompilerDriverResult refused = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(malformed)));
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK &&
+                                   string_starts_with_sequence(refused.diagnostic, string_format(arena, S8("could not read archive {S8}:"), garbage_archive)));
+            BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, sentinel_output, (FileReadOptions){0})), sentinel);
+        }
+        String8 ordinary_source = string_format_z(arena, S8("{S8}/ordinary.c"), root);
+        String8 ordinary_object = string_format_z(arena, S8("{S8}/ordinary.o"), root);
+        String8 weak_source = string_format_z(arena, S8("{S8}/weak.c"), root);
+        String8 weak_object = string_format_z(arena, S8("{S8}/weak.o"), root);
+        BUSTER_TEST(arguments, file_write(ordinary_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
+        BUSTER_TEST(arguments, file_write(weak_source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "extern struct { unsigned vendor; } __cpu_model __attribute__((weak));\n"
+            "int main(void) { return &__cpu_model != 0; }\n"))));
+        // The weak object is position-dependent: a GOT reference to an absent
+        // weak symbol is a separate open defect (issue 3414).
+        String8 ordinary_compile[] = {S8("-w"), S8("-O2"), S8("-c"), ordinary_source, S8("-o"), ordinary_object};
+        String8 weak_compile[] = {S8("-w"), S8("-O0"), S8("-fno-pie"), S8("-c"), weak_source, S8("-o"), weak_object};
+        bool unneeded_produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(ordinary_compile)) &&
+                                 compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(weak_compile));
+        BUSTER_TEST(arguments, unneeded_produced);
+        for (u32 index = 0; unneeded_produced && garbage_written && index < 2; index += 1)
+        {
+            String8 output = string_format_z(arena, S8("{S8}/unneeded-{u32}"), root, index);
+            String8 command[] = {garbage_search, S8("-no-pie"), index ? weak_object : ordinary_object, S8("-o"), output};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
+        }
+
+        // The newest GCC version directory wins, and names that are not
+        // versions are skipped. The newest archive here is malformed, so the
+        // diagnostic names it. Once it is removed, the older unrelated archive
+        // is the one reported.
+        String8 versions_sysroot = string_format_z(arena, S8("{S8}/versions"), root);
+        String8 triple = string_format_z(arena, S8("{S8}/usr/lib/gcc/x86_64-linux-gnu"), versions_sysroot);
+        String8 directories[] = {
+            versions_sysroot,
+            string_format_z(arena, S8("{S8}/usr"), versions_sysroot),
+            string_format_z(arena, S8("{S8}/usr/lib"), versions_sysroot),
+            string_format_z(arena, S8("{S8}/usr/lib/gcc"), versions_sysroot),
+            triple,
+            string_format_z(arena, S8("{S8}/9"), triple),
+            string_format_z(arena, S8("{S8}/13.2.1"), triple),
+            string_format_z(arena, S8("{S8}/include"), triple),
+        };
+        bool directories_made = true;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(directories); index += 1)
+        {
+            directories_made = directories_made && os_make_directory(directories[index]).error.v == 0;
+        }
+        BUSTER_TEST(arguments, directories_made);
+        if (produced && directories_made)
+        {
+            String8 older_archive = string_format_z(arena, S8("{S8}/9/libgcc.a"), triple);
+            String8 newest_archive = string_format_z(arena, S8("{S8}/13.2.1/libgcc.a"), triple);
+            String8 include_archive = string_format_z(arena, S8("{S8}/include/libgcc.a"), triple);
+            ByteSlice member = file_read(arena, unrelated_object, (FileReadOptions){0});
+            BUSTER_TEST(arguments, file_write(older_archive, compiler_driver_elf_semantic_archive(arena, member)));
+            BUSTER_TEST(arguments, file_write(newest_archive, BUSTER_SLICE_TO_BYTE_SLICE(S8("not an archive"))));
+            BUSTER_TEST(arguments, file_write(include_archive, BUSTER_SLICE_TO_BYTE_SLICE(S8("not an archive either"))));
+            String8 sysroot = string_format_z(arena, S8("--sysroot={S8}"), versions_sysroot);
+            String8 command[] = {sysroot, object, S8("-o"), sentinel_output};
+            for (u32 attempt = 0; attempt < 2; attempt += 1)
+            {
+                BUSTER_TEST(arguments, file_write(sentinel_output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+                CompilerDriverResult refused = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK);
+                if (attempt)
+                {
+                    BUSTER_STRING_TEST(arguments, refused.diagnostic,
+                                       string_format(arena, S8("GCC runtime {S8} does not define {S8}"), older_archive, refused.native_link.symbol));
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, string_starts_with_sequence(refused.diagnostic,
+                                                                       string_format(arena, S8("could not read archive {S8}:"), newest_archive)));
+                    BUSTER_TEST(arguments, os_file_delete(newest_archive));
+                }
+                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, sentinel_output, (FileReadOptions){0})), sentinel);
+            }
+        }
         BUSTER_TEST(arguments, os_directory_delete(root));
     }
     return result;
