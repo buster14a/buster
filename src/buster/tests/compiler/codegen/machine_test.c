@@ -52,7 +52,7 @@ BUSTER_CT_CHECK(sizeof(MachineVirtualRegister) == 16);
 BUSTER_CT_CHECK(sizeof(MachineBlock) == 32);
 BUSTER_CT_CHECK(sizeof(MachineEdge) == 16);
 BUSTER_CT_CHECK(sizeof(MachineEdit) == 16);
-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(MachineEncodeResult) == 88);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(MachineEncodeResult) == 96);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrInstruction) == 64);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrValue) == 16);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlock) == 64);
@@ -4575,7 +4575,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_dynamic_stack(UnitTestArgume
                 {
                     BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
                     BUSTER_TEST(arguments, selected.function.outgoing_bytes == 0);
-                    BUSTER_TEST(arguments, encoded.frame_pointer_offset != 0);
+                    BUSTER_TEST(arguments, encoded.frame_pointer_after_allocation && encoded.frame_event_count >= 2);
+                    if (encoded.frame_pointer_after_allocation && encoded.frame_event_count >= 2)
+                    {
+                        // RBP is established last, after the allocation, and
+                        // its event closes the prologue.
+                        CodegenUnwindAction* frame_pointer = encoded.frame_events + encoded.frame_event_count - 1;
+                        BUSTER_TEST(arguments, frame_pointer->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER &&
+                                                   frame_pointer->code_offset == encoded.prologue_size &&
+                                                   frame_pointer[-1].kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK);
+                    }
                     u32 allocations = 0;
                     u32 stack_stores = 0;
                     for (u32 index = 0; index < selected.function.instruction_count; index += 1)
@@ -10257,8 +10266,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_encode_into_caller_buffer(UnitTe
                                 (!encoded[0].epilog_count ||
                                  memcmp(candidate->epilog_offsets, encoded[0].epilog_offsets, sizeof(u32) * encoded[0].epilog_count) == 0) &&
                                 candidate->inline_assembly_relocation_count == encoded[0].inline_assembly_relocation_count &&
-                                candidate->frame_allocation_offset == encoded[0].frame_allocation_offset &&
-                                candidate->frame_pointer_offset == encoded[0].frame_pointer_offset;
+                                candidate->prologue_size == encoded[0].prologue_size &&
+                                candidate->frame_pointer_after_allocation == encoded[0].frame_pointer_after_allocation &&
+                                candidate->frame_event_count == encoded[0].frame_event_count &&
+                                (!encoded[0].frame_event_count ||
+                                 memcmp(candidate->frame_events, encoded[0].frame_events,
+                                        sizeof(CodegenUnwindAction) * encoded[0].frame_event_count) == 0);
                     String8 description = string_format(temporary.arena, S8("{S8} allocator={u32} variant={u32}"), function->name, allocator, variant);
                     BUSTER_TEST_RAW(arguments, same, description);
                 }
@@ -11551,6 +11564,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, exact_map.memory_base_tables == 8);
     BUSTER_TEST(arguments, exact_map.displacement_patch_tables == 8);
     BUSTER_TEST(arguments, exact_map.variable_memory_encoding_tables == 9);
+    // Prewarm encodes cells on first read; the complete form must leave
+    // every cell of every table encoded, and the authority must refuse none.
+    BUSTER_TEST(arguments, exact_map.variable_memory_encoded_cells == 9u * 3u * 256u);
+    BUSTER_TEST(arguments, exact_map.variable_memory_failed_cells == 0);
     // Every fixed-shape template row prewarm allots must be one the
     // metadata authority accepted; a refused row would silently keep the
     // slower metadata lane for its shape. The vpermt2d variant of the
