@@ -50,4 +50,8 @@ jobs:
             SchedulerTests.test_cancellation_cleans_tree_before_fixture_removal \
             SchedulerTests.test_cancellation_waits_for_delayed_readiness \
             SchedulerTests.test_cancellation_cleans_tree_before_fixture_removal \
-            SchedulerTests.test_cancellation_waits_for_delayed_readiness -v
+            SchedulerTests.test_cancellation_waits_for_delayed_readiness \
+            SchedulerTests.test_windows_cleanup_waits_for_descendant_handles_before_fixture_removal \
+            SchedulerTests.test_windows_descendant_wait_failure_is_not_success \
+            SchedulerTests.test_windows_tree_capture_failure_still_reaps_direct_child \
+            SchedulerTests.test_windows_descendant_wait_shares_deadline_and_keeps_all_identities -v
