@@ -1800,6 +1800,47 @@ the same way and diagnostic only:
 - The default path is within +0.006%.
 - Zen 5 validation stays incomplete (#2761).
 
+For the typer's `++` and `--` rule (`c_ast_types_update`), proposed by the
+decline census in audit
+[`2026-10-11T093336Z`](../../performance-audits/2026-10-11T093336Z.md), these
+budgets were declared before its measured runs. They use the stage-2 input,
+flags and four Callgrind arms (`--cache-sim=no --branch-sim=no`) on tests-off
+`-march=x86-64-v3` Release builds. The base is main `4e5d563f`, which the
+candidate branches from. The budgets:
+- **Correctness.**
+  - no verify mismatch over the corpus, so no accepted update node's machine
+    run appends a row or raises a constraint the tree did not predict;
+  - every row that a machine run touching `++` or `--` still appends under
+    the pilot is explained by a shape the rule declines;
+  - identical diagnostics with and without the flag;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **The gain that ships it (C against B).** At least 1 M fewer instructions
+  in the whole `-fsyntax-only` compile, with the larger eager pass charged.
+  Machine runs from queries and tree declines must both fall.
+- **Default path (D against A).** The rule runs only with the tree, so the
+  default path stays within ±0.05% Ir on `-fsyntax-only` and on `-c`
+  (`-g0`).
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete (#2761) and
+  the hook stays opt-in.
+
+If the gain budget fails, no code ships, and the audit and #3102 record the
+negative result.
+
+The `++` and `--` rule's hosted census is
+[`2026-10-11T101413Z`](../../performance-audits/2026-10-11T101413Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. Objects are byte-identical across the four
+  arms at `-g0` and `-g`.
+- On the pilot the rule removes 14.99 M instructions (−0.162%): machine runs
+  from queries fall from 28,054 to 23,760, and tree declines from 24,919 to
+  20,625. The eager pass grows by 0.83 M.
+- The default path is −0.0019% on `-fsyntax-only` and −0.0015% on `-c`.
+- The 17 machine runs touching `++` or `--` that append rows (23 rows) are
+  the same with and without the rule; each declines for a qualified member
+  or an array operand that decays.
+- Zen 5 validation stays incomplete (#2761).
+
 The stage-1 adoption budget is **not yet measured** on the Ryzen 7 9700X. As
 of main `a6705764` no approved route can time one compiler binary with and
 without `-fc-ast-pilot`:
@@ -1972,46 +2013,5 @@ the same way and diagnostic only:
   compiles in 0.37 s under the pilot (4.44 s before), with 163,834 build
   steps.
 - **Zen 5.** Validation is incomplete (#2761), and the default stays off.
-
-For the typer's `++` and `--` rule (`c_ast_types_update`), proposed by the
-decline census in audit
-[`2026-10-11T093336Z`](../../performance-audits/2026-10-11T093336Z.md), these
-budgets were declared before its measured runs. They use the stage-2 input,
-flags and four Callgrind arms (`--cache-sim=no --branch-sim=no`) on tests-off
-`-march=x86-64-v3` Release builds. The base is main `4e5d563f`, which the
-candidate branches from. The budgets:
-- **Correctness.**
-  - no verify mismatch over the corpus, so no accepted update node's machine
-    run appends a row or raises a constraint the tree did not predict;
-  - every row that a machine run touching `++` or `--` still appends under
-    the pilot is explained by a shape the rule declines;
-  - identical diagnostics with and without the flag;
-  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
-- **The gain that ships it (C against B).** At least 1 M fewer instructions
-  in the whole `-fsyntax-only` compile, with the larger eager pass charged.
-  Machine runs from queries and tree declines must both fall.
-- **Default path (D against A).** The rule runs only with the tree, so the
-  default path stays within ±0.05% Ir on `-fsyntax-only` and on `-c`
-  (`-g0`).
-- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
-  comparison is requested, so Zen 5 validation stays incomplete (#2761) and
-  the hook stays opt-in.
-
-If the gain budget fails, no code ships, and the audit and #3102 record the
-negative result.
-
-The `++` and `--` rule's hosted census is
-[`2026-10-11T101413Z`](../../performance-audits/2026-10-11T101413Z.md), taken
-the same way and diagnostic only:
-- Every hosted budget passes. Objects are byte-identical across the four
-  arms at `-g0` and `-g`.
-- On the pilot the rule removes 14.99 M instructions (−0.162%): machine runs
-  from queries fall from 28,054 to 23,760, and tree declines from 24,919 to
-  20,625. The eager pass grows by 0.83 M.
-- The default path is −0.0019% on `-fsyntax-only` and −0.0015% on `-c`.
-- The 17 machine runs touching `++` or `--` that append rows (23 rows) are
-  the same with and without the rule; each declines for a qualified member
-  or an array operand that decays.
-- Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
