@@ -620,7 +620,13 @@ BUSTER_F_DECL void compiler_prewarm(void);
 // after the first gang starts is too late. The opt-in multi-TU driver calls
 // this before creating its first gang; ordinary serial compilation does not.
 BUSTER_F_DECL void compiler_parallel_prewarm(void);
+// When true, an absent -march keeps the host CPU (the test runners set it);
+// when false, the default is the portable baseline like Clang and GCC (#1557).
+BUSTER_V_DECL bool compiler_driver_host_cpu_default;
 BUSTER_F_DECL CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments);
+// The CPU an absent -march leaves behind: baseline by default, the host CPU
+// under compiler_driver_host_cpu_default (#1557).
+BUSTER_F_DECL Target compiler_driver_default_target(bool host_cpu_default);
 // The layout spelling of -fc-ast-pilot=<layout> ("implicit", "hybrid",
 // "explicit"); "off" for COMPILER_DRIVER_C_AST_PILOT_OFF.
 BUSTER_F_DECL String8 compiler_driver_c_ast_pilot_name(CompilerDriverCAstPilot pilot);

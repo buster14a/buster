@@ -318,7 +318,8 @@ Under `-v` the driver prints six rows with the other verbose counters:
   declarator_hints=<block declarators the split took from their hints>
   initializer_hints=<plain initializers among them> auto_skips=<declarations
   whose auto-inference scans were skipped> declarator_declines=<declarator
-  hints the split refused> fallbacks=<bodies left wholly to the token loop>
+  hints the split refused> braced=<statements planned around their
+  initializer lists' braces> fallbacks=<bodies left wholly to the token loop>
   reason=<CAstStatementFallback of the last fallback> fallback_token=<that
   body's `{`>`
 
@@ -478,9 +479,9 @@ unchanged.
   for which it has no rule:
   - `++` and `--`, prefix and postfix;
   - an arithmetic, shift or `?:` operand that ends in `. name` or `-> name`
-    without being a member node, such as `a + s.f`. The machine reads the
-    bit-field width from those tokens, so `c_ast_types_operand_width` leaves
-    them to it.
+    without being a member node, such as `(T)s.f` or `x, s.f`, unless the
+    machine's bit-field probe on those tokens provably fails (see
+    member-tail widths below);
   - a member access over any other base kind, such as a cast or a compound
     literal;
   - a call whose callee is not a plain identifier, and a call of an unbound
@@ -547,6 +548,18 @@ unchanged.
   for two pointers to one unqualified element row. A cast whose conversion
   rule is clean is safe, and so is a conditional whose condition is a safe
   scalar.
+- **Member-tail widths.** For an operand that ends in `. name` or `-> name`
+  but is not a member node (`a + s.f`, `c ? x : s.f`), the machine re-types
+  the tokens before the final `.` with `c_parse_direct_expression_type` to
+  read a bit-field width. The pass answers width 0 only where that probe
+  provably fails without a new row (`c_ast_types_probe_fails`):
+  - its base, before the first postfix step, types to nothing before any row
+    is made;
+  - or the base is one identifier whose postfix steps span an accepted
+    member or index node, which reads no qualified aggregate or array.
+
+  A parent over any other such operand (a cast, a comma, a qualified chain)
+  declines.
 - **Failing operands.** The machine types a few nodes to nothing, with no row
   and no constraint: `__func__`, `__FUNCTION__` and `__PRETTY_FUNCTION__`,
   which name no entity, and an unbound `__builtin_expect(...)` call, which no
@@ -858,10 +871,9 @@ two cases:
    here states what it reads.** `CParserTreeFallback` names each case:
    - `specifiers`: a parenthesized specifier (`typeof`, `_Atomic(T)`,
      `_Alignas`, `_BitInt`), or an enum's fixed type;
-   - `declarator`: a redundant group after a decorated typedef name
-     (`__attribute__((a)) T (x)`), or after a keyword other than a type or
-     qualifier word, where the walker reads the group as a parameter list
-     (it reads that `T (x)` as a function `T`); attributes on a pointer or
+   - `declarator`: a redundant group after a keyword other than a type or
+     qualifier word, where the walker reads the group as a parameter list;
+     attributes on a pointer or
      opening a group; or a function returning a function or an array;
    - `old_style`: an old-style declaration list, including one after a
      parenthesized name (`int (k(a)) int a; {...}`);
@@ -901,14 +913,20 @@ After a typedef or tag name it is a group too
 `c_parser_type_name_before_group` answers for a tag after `struct`, `union`
 or `enum` (`c_parse_tag_name_before_group`), and for a typedef name in the
 type's position (`c_parse_typedef_name_position`: first in the declaration,
-or after storage-class, function-specifier and qualifier words only). The
+or after storage-class, function-specifier and qualifier words and
+declaration decorations only). A decoration is recognizable only from its
+head, so when the backward walk over those words stops at a `)` or `]`, the
+prefix is walked again forwards from the declaration's start, stepping over
+`__attribute__((...))`, `__declspec(...)`, `[[...]]` and `__extension__`
+(`c_parse_skip_declaration_decoration`); `int f(void)` stops at `int` and
+never walks forwards. The
 scans have no binding table, so `c_parse_ast_run` records each file-scope
 typedef record's name in `CParserTypedefNames`, a set it asks only in that
 position; at file scope a typedef name cannot be redeclared, and block-scope
 typedefs never reach these scans. `T (x);`, `struct S (s2);`,
 `T (tg(int a)) { ... }` and `struct P (pg(void)) { ... }` therefore declare
-`x`, `s2`, `tg` and `pg`. After a decoration, `__attribute__((a)) T (x)`, the
-walker still reads the group as `T`'s parameter list. The split reads the
+`x`, `s2`, `tg` and `pg`, and so do decorated forms such as
+`static __attribute__((a)) T (y);` and `[[maybe_unused]] T (z);`. The split reads the
 same position, with the grammar's `TYPEDEF_NAME` in place of the set, so its
 records match. The type parser
 (`c_type_parse_parenthesized_step`) nests a group that opens a group holding
@@ -952,6 +970,20 @@ given tokens the plan tells it what it would otherwise scan for:
   is not entered while a state the plan cannot see reaches into it: a pending
   GNU typeof declaration, a live asm range, an attribute resume point, or the
   end of a statement scope.
+- **Braced segments.** An expression statement, `return`, `if`, `while` or
+  `switch` header, `case` value or do-while tail whose subtree also holds
+  compound literals, initializer lists and designators, and at most 16 lists,
+  is planned as segments split at each list's `{` and `}`
+  (`c_parse_plan_braced`). The loop gives a compound literal's `{` a block
+  scope and starts a statement after each brace, so it still reads every
+  brace itself and the segments between them carry its state as before. A
+  list's `}` follows its last item's last token, that token's closers and an
+  optional `,` (an empty list's follows its `{`); lists come in node order,
+  so an inner list's `}` is known before the outer one's, and the last-token
+  rule stops at a list on the rightmost chain. A `{` or `}` the tokens do
+  not confirm leaves the statement to the loop. These compound literals,
+  mostly the codebase's `S8("...")`, were 9,629 of the 10,378 statements the
+  plan declined on the self-host unity input.
 - **Declaration hints.** A block `DECLARATION` gives its `;`, so the loop's
   scan for it and its search for a GNU typeof statement expression are
   skipped. It also carries a **declarator hint** per `INIT_DECLARATOR`
@@ -990,8 +1022,10 @@ grammar puts there:
 
 A statement whose rule cannot state its boundaries, and every label, asm
 statement, attributed statement, static assertion, nested function and
-statement whose subtree is not plain, gets no entry, and the loop reads it as
-it always has. A token the grammar fixes next to an anchor that is not that
+statement whose subtree is neither plain nor braced, gets no entry, and the
+loop reads it as it always has. Labels, asm statements and static
+assertions were 47 of the declined statements on the self-host unity input,
+too few to repay a rule. A token the grammar fixes next to an anchor that is not that
 token sends the whole body to the loop, as does a body the tree does not have;
 `CAstStatementFallback` names the two cases (`tokens`, `input`). The plan is
 built by one preorder walk over statements on an explicit stack, so entries
@@ -1007,9 +1041,12 @@ the per-token use map, every scope and every entity of the analysis with the
 plan against the analysis without the tree. `c_ast_test_statements` runs one
 body that takes every kind of entry, one whose statements the plan leaves to
 the loop (with an `__builtin_offsetof` bail), and one tampered tree per
-fallback reason, in every layout, and a body of block declarations whose
+fallback reason, in every layout, a body of block declarations whose
 declarators take every hint, with a tampered declarator whose `=` hint the
-split refuses. On the self-host unity input every body follows its plan, with
+split refuses, and a body with a compound literal in every braced position
+(each designator kind, nested, empty and over-cap lists, a trailing comma, a
+bail inside a list), with a tampered list anchor that leaves its statement to
+the loop. On the self-host unity input every body follows its plan, with
 no fallback, no bail and no refused declarator hint.
 
 ## Corpus differential
@@ -1877,6 +1914,62 @@ The census also found that the switch and control-statement validators'
 Reading their ends from the tree cannot repay its own lookup, so they stay
 with tokens; this is recorded as a negative result, not a budget.
 
+For the statement plan's [braced segments](#statement-plan-from-the-tree),
+these budgets were declared before their measured runs. The input, flags and
+four Callgrind arms are the statement plan's (`-g0 -fsyntax-only`, the
+self-host unity input, `--cache-sim=no --branch-sim=no`, tests-off
+`-march=x86-64-v3` builds). The base is main `680e16d3`.
+
+A throwaway census of that base recorded every declined statement's reason.
+It switched Callgrind collection on only while the walk was at a declined
+statement's own tokens. The 10,378 declined statements cost 188.3 M Ir, of
+which:
+- compound literals were 9,629 statements and 156.1 M (7,187 expression
+  statements, 2,442 `if`, `return` and `while` headers);
+- block declarations holding a member or enumerator list were 702 and
+  31.8 M;
+- labels (12), asm statements (2) and static assertions (33) were too few to
+  matter.
+
+Of the compound literals' cost, about 9 M is the census's own toggling, and
+roughly 120 M is the walk's per-token chain and tests, which a segment skips;
+the binding calls stay. The budgets:
+- **Correctness.**
+  - 0 binding differences over the corpus and the frontend sources (the
+    statement plan's differential, unchanged);
+  - a one-off comparison of the same fields on the self-host unity input,
+    also with 0 differences;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **Coverage** on the self-host unity input:
+  - no body falls back, and no segment bails;
+  - at least 9,000 statements are planned braced, and the declines fall by at
+    least 9,000.
+- **The braced segments' own effect (C against B).** The whole compile costs
+  at least 50 M fewer instructions (about 0.5%), with their construction
+  charged.
+- **The default path (D against A).** The walk and the segment binder are
+  unchanged, and the plan builder runs only under the pilot. The criterion is
+  the owner's work equivalence for the body walk (above): identical callees
+  and call counts, and identical objects. Instruction counts are reported.
+- **Adoption of the hook as the default.** Unchanged, with acceptance on the
+  Zen 5 route (#2761).
+
+The braced segments' hosted census is
+[`2026-10-11T151745Z`](../../performance-audits/2026-10-11T151745Z.md), taken
+the same way and diagnostic only:
+- Correctness, object identity and coverage pass:
+  - 0 binding differences on the corpus, the frontend sources and the
+    self-host unity input;
+  - identical `-c` objects in the four arms;
+  - 9,627 statements planned braced, with the declines falling from 10,378 to
+    751, and no fallback or bail.
+- The body binder falls by 73.3 M (9.5%), and the whole compile by 73.2 M
+  (0.79%, C against B), with about 11 M of plan construction charged.
+- The default path meets work equivalence: the planless walk makes identical
+  calls, and D against A is +0.003%, all of it libc string comparison with
+  identical call counts.
+- Acceptance stays with Zen 5 (#2761), so the default stays off.
+
 For the split's [diagnostic probe](#declaration-split-from-the-tree)
 (`c_parser_tree_probe`), these budgets were declared before its measured runs.
 The probe classifies identifier lanes from their interned ids instead of
@@ -2141,6 +2234,60 @@ diagnostic only, and its result is negative. No candidate was built:
 - The 17 constant-evaluation runs (3.22 M) are never the typer's.
 - 92% of the machine Ir still left under the pilot is declines and misses
   inside typed bodies.
+
+For the member-tail width (`c_ast_types_probe_fails`, row 2 of the decline
+census in audit
+[`2026-10-11T093336Z`](../../performance-audits/2026-10-11T093336Z.md)),
+these budgets were declared before its measured runs. They use the stage-2
+input and flags (`-g0 -fsyntax-only` and `-g0 -c`) and the four Callgrind
+arms (`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3`
+Release builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `4e5d563f`, which the candidate branches from. The budgets:
+- **Proof first.** A throwaway census build of the base must show, over the
+  whole self-host compile, that every bit-field probe the new rule calls
+  failing does fail and appends no row, and must account for the 120 rows
+  that the census's 1,424 runs append. Without both, no code ships.
+- **Correctness.**
+  - no verify mismatch over the corpus, with the existing answer floors;
+  - a mutation that hands the parent a nonzero width where the rule says 0
+    must fail the corpus gate;
+  - identical diagnostics with and without the flag;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **The slice's own effect (C against B).** Fewer instructions in the whole
+  `-fsyntax-only` compile, with the token test charged, together with fewer
+  machine runs from queries and fewer tree declines. The census ceiling is
+  about 18.6 M. If C is not below B, nothing ships, and the result is recorded
+  on #3102 as a negative one.
+- **Default path (D against A).** The change is confined to the typer, so the
+  default path stays within ±0.05% Ir on `-fsyntax-only` and on `-c` (`-g0`).
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete (#2761) and
+  the hook stays opt-in.
+
+The member-tail width's hosted census is
+[`2026-10-11T103427Z`](../../performance-audits/2026-10-11T103427Z.md), taken
+the same way and diagnostic only:
+- **Proof.** On the base, all 546 probes the rule calls failing did fail,
+  and none appended a row. The 1,440 runs the width rule refused first
+  append 162 rows, all const-qualified copies:
+  - 158 come from a qualified member elsewhere in the same query;
+  - 4 come from probes the rule leaves to the machine.
+- **Budgets.** Every budget passes:
+  - the corpus verify gate has 0 mismatches, and its tree answers rise from
+    58,322 to 58,365;
+  - the mutation (width 3 instead of 0) fails the gate;
+  - objects are byte-identical across the four arms at `-g0` and `-g`.
+- **Effect.** The pilot runs 5.60 M fewer instructions (−0.060%). Declines
+  fall by 508, and the pass costs 1.18 M more.
+- **Default path.** −0.002% on `-fsyntax-only` and −0.0015% on `-c`.
+- **What stays.** The other 908 runs keep their machine run: their probe
+  starts at a cast or a comma, or walks a qualified chain.
+- Zen 5 validation stays incomplete (#2761).
 
 The count cache's audit, below, leaves a second lead: under `-fsyntax-only`
 nothing reads the bytes a first sight records. The candidate counts a narrow
