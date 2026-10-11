@@ -205,6 +205,26 @@ partial tree is never handed on. The tree refers to the preprocessing result's
 tokens and symbols by index, so that result must stay alive as long as the
 tree does.
 
+The [tree expression typer](#tree-expression-typer)'s per-node types are body
+scratch in analysis and are released before lowering runs. They are **not
+retained** for lowering, and lowering does **not** recompute them. On the
+unity self-host (audit
+[`2026-10-11T104652Z`](../../performance-audits/2026-10-11T104652Z.md)):
+- Recomputing them in lowering is the eager pass again, 329.9 M Ir. That is
+  more than all of map row 7's removable work, so it is rejected.
+- Retaining them would fit the budget of 16 bytes per token: a dense `u32`
+  column adds 11.1 MB to the tree's 36.1 MB (11.3 B per token in all), and the
+  accepted nodes alone, kept sparsely, add 8.9 MB. But no lowering consumer
+  measured so far reads a per-node type. A negative type-name answer needs
+  only `TYPE_NAME` anchors, which the kinds and tokens columns already hold,
+  and a positive answer must reproduce the probe's IR type.
+
+A slice that needs per-node types retains them from analysis, sparsely, and
+charges the bytes to this budget. It must also show that each retained id
+still names the same row when lowering reads it: `c_ast_types.c` keeps its
+arrays per body because a speculative rollback may truncate rows an entry
+refers to. The typer's other arrays (spans, chains, flags) stay body scratch.
+
 ## Layouts
 
 `CAstOptions.layout` selects a variant of the same tree:
@@ -858,7 +878,7 @@ differential tests pass.
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Not migrated. |
 | `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | Not migrated. |
-| `c_ir_predict_expression_type*`, `c_ir_query_*` | type-name probes, operand types over token ranges | `TYPE_NAME` / `CAST` / `SIZEOF_*` nodes plus retained semantic facts | Not migrated. |
+| `c_ir_predict_expression_type*`, `c_ir_query_*` | type-name probes, operand types over token ranges | `TYPE_NAME` / `CAST` / `SIZEOF_*` nodes plus retained semantic facts | Not migrated. Only negative type-name answers are cheap to take from the tree, and an exact first-token gate removes most of those without it (audit [`2026-10-11T104652Z`](../../performance-audits/2026-10-11T104652Z.md)); the tree slice waits on that gate and on the hand-off to lowering. |
 | `c_ir_build_delimiter_index`, `CTokenPositionIndex` matching delimiters | bracket matching for every structural query | subtree extents | Not migrated. |
 
 Under `-fc-ast-pilot`, the first row's three walkers no longer run for a unit
@@ -1462,5 +1482,40 @@ the same way and diagnostic only:
 - The memo answers 58% of the pass's member lookups.
 - The default path is within +0.006%.
 - Zen 5 validation stays incomplete (#2761).
+
+For map row 7 in lowering (`c_ir_group_type_name`, `c_ir_query_type_name` and
+the query machine's `TYPE_NAME` frames), a census came first:
+[`2026-10-11T104652Z`](../../performance-audits/2026-10-11T104652Z.md), on
+main `4e5d563f`, hosted and diagnostic. No candidate was built:
+- Positive answers still parse the type, so only negative answers are
+  removable. On the unity self-host there are 70,007 negative `TYPE_NAME`
+  attempts and 10,448 negative group probes.
+- Most of them begin with a token that can never begin a type name: a
+  literal, a number, a punctuator other than `[`, or `sizeof`. The constant
+  evaluator's cast probe asks without the existing token gate and memo. A
+  throwaway build that routes it through `c_ir_query_group_type_name` runs
+  32.7 M fewer instructions (−0.136%) on the default path, with byte-identical
+  objects. That is a default-path change in its own right, measured on its
+  own ([#3473](https://github.com/buster14a/buster/issues/3473)).
+- After that gate, a tree answer ("no `TYPE_NAME` anchored at the first
+  token, so negative") could still remove at most about 26 M (0.11%), almost
+  all of it unbound identifiers whose scope lookup the probe runs.
+
+If that tree slice is built, after the hand-off to lowering
+(`CIRLowerOptions.syntax_tree`) and the gate have landed, these budgets apply.
+They use the unity self-host, `-g0 -c`, and the usual four Callgrind arms on
+tests-off `-march=x86-64-v3` builds (A base default, B base pilot, C candidate
+pilot, D candidate default):
+- **Correctness.** A test-only verify mode answers every negative both ways
+  over the corpus and the hosted frontend sources, with 0 disagreements and a
+  floor on tree answers. A probe whose first token has a `TYPE_NAME` node
+  always runs. The `-c` objects are byte-identical at `-g0` and `-g` across
+  the four arms. No node id or `CAst*` reaches canonical IR.
+- **The slice's own effect (C against B).** Fewer instructions in the whole
+  compile, with the anchor index charged, by at least 10 M; below that the
+  slice is recorded as a negative result and not shipped.
+- **Default path (D against A).** Within ±0.05% Ir.
+- **Performance acceptance.** Hosted counts are diagnostic; Zen 5 validation
+  stays incomplete (#2761) and the hook stays opt-in.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
