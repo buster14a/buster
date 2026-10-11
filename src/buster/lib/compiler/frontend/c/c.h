@@ -1422,6 +1422,21 @@ struct CParserDeclaration
 
 typedef struct CNumberFacts CNumberFacts;
 typedef struct CAst CAst;
+typedef struct CAstSpans CAstSpans;
+
+// The span indexes the tree typer built for the function bodies it typed,
+// kept for lowering (CParserResult.ast_spans): one slot per top-level
+// definition, ascending by the token of the body's `{`, and a slot whose
+// `first` is null for a body the typer did not span (CAstSpans is in
+// c_internal.h). The caller owns the record; analysis fills it, and its
+// arrays live in the analysis arena with the rest of the result.
+typedef struct CAstSpanStore CAstSpanStore;
+struct CAstSpanStore
+{
+    u32* braces;
+    CAstSpans* bodies;
+    u32 count;
+};
 
 // What the tree expression typer (c_ast_types.c, GitHub #3102) did over one
 // analysis: function bodies and file-scope initializers it typed, expression
@@ -1444,15 +1459,19 @@ struct CAstTypeStatistics
 };
 
 // Lowering's reads of the syntax tree (-fc-ast-pilot, CIrSyntaxTree in
-// c_gen.c), summed over a unit. A body is a function body whose span index
-// was built (on its first query); nodes_spanned counts the expression nodes
-// those builds gave a span. An answer is a root-conditional split read from
-// the tree; a decline mapped to a node the tree read leaves to the token scan
-// (a comma root); a miss mapped to no node or lay outside an indexed body.
+// c_gen.c), summed over a unit. A body is a function body the tree indexes.
+// Its span index is the one semantic analysis kept (kept,
+// CIRLowerOptions.syntax_tree_spans), or one lowering builds itself on the
+// body's first query (built; nodes_spanned counts the expression nodes those
+// builds gave a span). An answer is a root-conditional split read from the
+// tree; a decline mapped to a node the tree read leaves to the token scan (a
+// comma root); a miss mapped to no node or lay outside an indexed body.
 typedef struct CAstLowerStatistics CAstLowerStatistics;
 struct CAstLowerStatistics
 {
     u64 bodies;
+    u64 kept;
+    u64 built;
     u64 nodes_spanned;
     u64 answers;
     u64 declines;
@@ -1490,6 +1509,12 @@ struct CParserResult
     // tree (-fc-ast-pilot); without it every row is appended, as the default
     // path always has.
     bool type_interning;
+    // Optional, with a tree: receives the span index the tree typer builds
+    // for each function body (CAstSpanStore), kept in the analysis arena, so
+    // lowering reads its tree splits (CIRLowerOptions.syntax_tree_spans)
+    // without spanning the body again. The driver passes one with the tree
+    // when the unit is lowered; without it the typer's spans are body scratch.
+    CAstSpanStore* ast_spans;
 };
 
 // Definition token -> lowest type id ever given that definition_start.
@@ -1908,6 +1933,9 @@ struct CIRLowerOptions
     // and the preprocessing result must outlive the lowering. No node index
     // reaches the IR.
     CAst const* syntax_tree;
+    // Optional: the body span indexes semantic analysis kept with the tree
+    // (CParserResult.ast_spans); a body without one is spanned by lowering.
+    CAstSpanStore const* syntax_tree_spans;
     // Optional: receives the tree reads' counts, added to what it holds.
     CAstLowerStatistics* syntax_tree_statistics;
 };

@@ -2045,13 +2045,16 @@ enum
     // aarch64-windows).
     C_AST_CORPUS_TYPE_PROBE_FLOOR = 1200,
     // Lowering's root-conditional splits read from the tree, each checked
-    // against the token rule (c_ast_corpus_lowering): about 76,600 from the
-    // fixtures on Linux x86-64 (446 units lowered), 1,480 of them splitting
-    // at a conditional, and about 414,900 in all with the frontend's own
-    // sources (21,100 conditionals).
-    C_AST_CORPUS_LOWER_ANSWER_FLOOR = 60000,
-    C_AST_CORPUS_LOWER_CONDITIONAL_FLOOR = 1200,
-    C_AST_CORPUS_HOSTED_LOWER_ANSWER_FLOOR = 380000,
+    // against the token rule (c_ast_corpus_lowering), over its two tree runs:
+    // about 154,100 from the fixtures and constructs on Linux x86-64 (448
+    // units lowered), 3,260 of them splitting at a conditional, and about
+    // 830,700 in all with the frontend's own sources (42,600 conditionals).
+    // The kept-span run reads about 2,720 body indexes the typer kept from
+    // the fixtures (4,930 in all).
+    C_AST_CORPUS_LOWER_ANSWER_FLOOR = 120000,
+    C_AST_CORPUS_LOWER_CONDITIONAL_FLOOR = 2600,
+    C_AST_CORPUS_LOWER_KEPT_BODY_FLOOR = 2200,
+    C_AST_CORPUS_HOSTED_LOWER_ANSWER_FLOOR = 760000,
 };
 
 BUSTER_GLOBAL_LOCAL bool c_ast_corpus_in(String8 const* paths, u32 count, String8 path)
@@ -2091,10 +2094,12 @@ struct CAstCorpusTally
     // checked against the machine.
     u64 type_probes;
     // Lowering's tree reads over the inputs that lower without a diagnostic
-    // (c_ast_corpus_lowering): units lowered both ways, the splits the tree
-    // answered, those verify mode compared with the token rule, and the
-    // answers that split at a conditional.
+    // (c_ast_corpus_lowering): units lowered every way, the splits the tree
+    // answered, those verify mode compared with the token rule, the answers
+    // that split at a conditional, and the body indexes read from the spans
+    // the typer kept.
     u64 lower_units;
+    u64 lower_kept_bodies;
     u64 lower_answers;
     u64 lower_compared;
     u64 lower_conditionals;
@@ -2291,10 +2296,12 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_programs_differ(Arena* arena, IrProgram
 }
 
 // Lowering's tree reads (CIRLowerOptions.syntax_tree, GitHub #3102) on one
-// input that analyzes cleanly: the unit is lowered without the tree, and with
-// it in verify mode, where the token rule also answers every split the tree
-// answered and each must agree. Both lowerings must end alike, with the same
-// diagnostics and the same program, instruction by instruction.
+// input: the unit is lowered without the tree, then twice with it in verify
+// mode, where the token rule also answers every split the tree answered and
+// each must agree. The first tree run reads the body span indexes the typer
+// kept (the driver's setting), the second builds its own. All three lowerings
+// must end alike, with the same diagnostics and the same program, instruction
+// by instruction.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_lowering(UnitTestArguments* arguments, String8 label, CPreprocessResult preprocess, CAst const* ast,
                                                          CAstCorpusTally* tally)
 {
@@ -2304,18 +2311,36 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_lowering(UnitTestArguments* argu
     if (BUSTER_REQUIRE(arguments, arena != 0))
     {
         CIRLowerResult plain = c_analyze_with_options(arena, label, preprocess, c_parse_ast(arena, preprocess), preprocess.target, (CIRLowerOptions){0});
+        // Read through the span indexes the typer kept (the driver's setting),
+        // then through indexes lowering builds itself, both in verify mode.
+        CAstLowerStatistics kept_statistics = {0};
         CAstLowerStatistics statistics = {0};
         c_test_ir_tree_verify_take();
         c_test_ir_tree_verify_set(true);
+        CParserResult kept_syntax = c_parse_ast(arena, preprocess);
+        kept_syntax.ast = ast;
+        kept_syntax.type_interning = true;
+        CAstSpanStore kept_spans = {0};
+        kept_syntax.ast_spans = &kept_spans;
+        CIRLowerResult kept = c_analyze_with_options(arena, label, preprocess, kept_syntax, preprocess.target,
+                                                     (CIRLowerOptions){.syntax_tree = ast, .syntax_tree_spans = &kept_spans,
+                                                                       .syntax_tree_statistics = &kept_statistics});
         CIRLowerResult read = c_analyze_with_options(arena, label, preprocess, c_parse_ast(arena, preprocess), preprocess.target,
                                                      (CIRLowerOptions){.syntax_tree = ast, .syntax_tree_statistics = &statistics});
+        // The run without kept spans builds every index it uses.
+        BUSTER_TEST_RAW(arguments, statistics.kept == 0, string_format(arguments->arena, S8("{S8}: {u64} kept indexes without kept spans"), label,
+                                                                        statistics.kept));
+        statistics.answers += kept_statistics.answers;
         c_test_ir_tree_verify_set(false);
         CTestIrTreeVerify verify = c_test_ir_tree_verify_take();
-        BUSTER_TEST_RAW(arguments, plain.diagnostic_count == read.diagnostic_count,
-                        string_format(arguments->arena, S8("{S8}: {u32} lowering diagnostics without the tree, {u32} with it"), label,
-                                      plain.diagnostic_count, read.diagnostic_count));
+        BUSTER_TEST_RAW(arguments, plain.diagnostic_count == read.diagnostic_count && plain.diagnostic_count == kept.diagnostic_count,
+                        string_format(arguments->arena, S8("{S8}: {u32} lowering diagnostics without the tree, {u32} and {u32} with it"), label,
+                                      plain.diagnostic_count, kept.diagnostic_count, read.diagnostic_count));
         String8 difference = c_ast_corpus_programs_differ(arguments->arena, plain.program, read.program);
         BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(arguments->arena, S8("{S8}: {S8}"), label, difference));
+        difference = c_ast_corpus_programs_differ(arguments->arena, plain.program, kept.program);
+        BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(arguments->arena, S8("{S8}: kept spans: {S8}"), label, difference));
+        tally->lower_kept_bodies += kept_statistics.kept;
         BUSTER_TEST_RAW(arguments, verify.compared == statistics.answers,
                         string_format(arguments->arena, S8("{S8}: {u64} tree splits, {u64} verified"), label, statistics.answers, verify.compared));
         for (u32 index = 0; index < verify.first_count; index += 1)
@@ -2756,7 +2781,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
     BUSTER_TEST(arguments, tally.type_answers >= C_AST_CORPUS_TYPE_ANSWER_FLOOR && tally.type_compared == tally.type_answers);
     BUSTER_TEST(arguments, tally.type_probes >= C_AST_CORPUS_TYPE_PROBE_FLOOR);
     BUSTER_TEST(arguments, tally.lower_answers >= C_AST_CORPUS_LOWER_ANSWER_FLOOR && tally.lower_compared == tally.lower_answers &&
-                               tally.lower_conditionals >= C_AST_CORPUS_LOWER_CONDITIONAL_FLOOR);
+                               tally.lower_conditionals >= C_AST_CORPUS_LOWER_CONDITIONAL_FLOOR &&
+                               tally.lower_kept_bodies >= C_AST_CORPUS_LOWER_KEPT_BODY_FLOOR);
     BUSTER_TEST(arguments, tally.split_records >= C_AST_CORPUS_SPLIT_RECORD_FLOOR && tally.split_compared >= tally.split_records);
 #if BUSTER_LINUX && !BUSTER_ANDROID
     c_ast_test_merge(&result, c_ast_corpus_sources(arguments, &tally));

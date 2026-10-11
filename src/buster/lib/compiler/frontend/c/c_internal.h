@@ -1512,6 +1512,10 @@ struct CTypeParseMachine
     CAst const* syntax_tree;
     CAstTypeStatistics* ast_type_statistics;
     CAstTypeBodyIndex* ast_bodies;
+    // With CParserResult.ast_spans: the caller's store for the kept body span
+    // indexes, and the arena their arrays go to (the analysis arena).
+    CAstSpanStore* ast_spans;
+    Arena* ast_spans_arena;
     CAstTypeBody* ast_types;
     CParseExpressionQuery* expression_queries;
     u8* expression_query_flags;
@@ -1635,7 +1639,6 @@ struct CAstTypeAnswer
 // c_ast_spans_build. Arrays are indexed by node - begin, and start_head by
 // token - token_start. A node without a span holds C_AST_SPAN_NONE.
 #define C_AST_SPAN_NONE UINT32_MAX
-typedef struct CAstSpans CAstSpans;
 struct CAstSpans
 {
     CAst const* ast;
@@ -1676,6 +1679,9 @@ struct CAstDefinitionIndex
     u32* bodies;
     u32 count;
 };
+
+// The kept span index of the body whose `{` is the token `brace`, else null.
+BUSTER_C_EXTERN CAstSpans const* c_ast_spans_store_find(CAstSpanStore const* store, u32 brace);
 
 BUSTER_C_EXTERN CAstDefinitionIndex c_ast_definitions_index(Arena* arena, CAst const* ast);
 // The COMPOUND_STATEMENT whose `{` is the token `brace`, else C_AST_SPAN_NONE.

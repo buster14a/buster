@@ -5413,6 +5413,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     // preprocessing result by index, so the end label releases its column
     // arenas first.
     CAst pilot_tree = {0};
+    // The pilot tree's body span indexes, kept by analysis for lowering.
+    CAstSpanStore pilot_spans = {0};
     if (!arena || invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {
         return result;
@@ -5562,6 +5564,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         syntax.ast = &pilot_tree;
         syntax.ast_type_statistics = &result.c_ast.types;
         syntax.type_interning = true;
+        // Lowering reads its root-conditional splits through the span
+        // indexes the typer builds for the bodies, so they are kept when the
+        // unit is lowered.
+        syntax.ast_spans = invocation.action != COMPILER_DRIVER_ACTION_SYNTAX_ONLY ? &pilot_spans : 0;
     }
     result.parser_diagnostic_count = syntax.diagnostic_count;
     if (syntax.diagnostic_count)
@@ -5604,6 +5610,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     // Under the pilot, lowering reads its root
                                                                     // conditional splits from the tree too.
                                                                     .syntax_tree = pilot_tree_built ? &pilot_tree : 0,
+                                                                    .syntax_tree_spans = pilot_tree_built ? &pilot_spans : 0,
                                                                     .syntax_tree_statistics = &result.c_ast.lower});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
@@ -7322,6 +7329,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.types.misses += unit.c_ast.types.misses;
         result.c_ast.types.gated += unit.c_ast.types.gated;
         result.c_ast.lower.bodies += unit.c_ast.lower.bodies;
+        result.c_ast.lower.kept += unit.c_ast.lower.kept;
+        result.c_ast.lower.built += unit.c_ast.lower.built;
         result.c_ast.lower.nodes_spanned += unit.c_ast.lower.nodes_spanned;
         result.c_ast.lower.answers += unit.c_ast.lower.answers;
         result.c_ast.lower.declines += unit.c_ast.lower.declines;

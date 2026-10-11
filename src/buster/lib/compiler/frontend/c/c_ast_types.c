@@ -357,6 +357,26 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_top_level_definition(CAst const* ast, u32 c
     return ast->kinds[child] == C_AST_FUNCTION_DEFINITION && child >= 1 && ast->kinds[child - 1] == C_AST_COMPOUND_STATEMENT;
 }
 
+// The slot of `brace` in an ascending brace array, else C_AST_TYPE_NONE.
+BUSTER_GLOBAL_LOCAL u32 c_ast_types_brace_slot(u32 const* braces, u32 count, u32 brace)
+{
+    u32 low = 0;
+    u32 high = count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (braces[middle] < brace)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low < count && braces[low] == brace ? low : C_AST_TYPE_NONE;
+}
+
 // The walk c_ast_types_bodies_prepare makes for its definitions, for a reader
 // outside semantic analysis (lowering's tree reads): two backward passes over
 // the TRANSLATION_UNIT's children, a count and then a fill in ascending order.
@@ -396,21 +416,8 @@ BUSTER_C_SHARED CAstDefinitionIndex c_ast_definitions_index(Arena* arena, CAst c
 
 BUSTER_C_SHARED u32 c_ast_definitions_find(CAstDefinitionIndex const* index, u32 brace)
 {
-    u32 low = 0;
-    u32 high = index->count;
-    while (low < high)
-    {
-        u32 middle = low + (high - low) / 2;
-        if (index->braces[middle] < brace)
-        {
-            low = middle + 1;
-        }
-        else
-        {
-            high = middle;
-        }
-    }
-    return low < index->count && index->braces[low] == brace ? index->bodies[low] : C_AST_SPAN_NONE;
+    u32 slot = c_ast_types_brace_slot(index->braces, index->count, brace);
+    return slot != C_AST_TYPE_NONE ? index->bodies[slot] : C_AST_SPAN_NONE;
 }
 
 // Whether c_parse_validate_lowering_constraints has published the immutable
@@ -475,26 +482,30 @@ BUSTER_C_SHARED void c_ast_types_bodies_prepare(CTypeParseMachine* machine, CPar
             cursor = c_ast_subtree_begin(ast, child);
         }
         machine->ast_bodies = index;
+        // The kept span indexes (CAstSpanStore) outlive the scratch arena, so
+        // they carry their own copy of the braces.
+        if (machine->ast_spans)
+        {
+            CAstSpanStore* store = machine->ast_spans;
+            store->braces = arena_allocate(machine->ast_spans_arena, u32, count + 1);
+            store->bodies = arena_allocate(machine->ast_spans_arena, CAstSpans, count + 1);
+            store->count = count;
+            memcpy(store->braces, index->braces, sizeof(*store->braces) * count);
+            memset(store->bodies, 0, sizeof(*store->bodies) * count);
+        }
     }
 }
 
 BUSTER_GLOBAL_LOCAL u32 c_ast_types_find_definition(CAstTypeBodyIndex const* index, u32 brace)
 {
-    u32 low = 0;
-    u32 high = index->count;
-    while (low < high)
-    {
-        u32 middle = low + (high - low) / 2;
-        if (index->braces[middle] < brace)
-        {
-            low = middle + 1;
-        }
-        else
-        {
-            high = middle;
-        }
-    }
-    return low < index->count && index->braces[low] == brace ? index->nodes[low] : C_AST_TYPE_NONE;
+    u32 slot = c_ast_types_brace_slot(index->braces, index->count, brace);
+    return slot != C_AST_TYPE_NONE ? index->nodes[slot] : C_AST_TYPE_NONE;
+}
+
+BUSTER_C_SHARED CAstSpans const* c_ast_spans_store_find(CAstSpanStore const* store, u32 brace)
+{
+    u32 slot = store ? c_ast_types_brace_slot(store->braces, store->count, brace) : C_AST_TYPE_NONE;
+    return slot != C_AST_TYPE_NONE && store->bodies[slot].first ? &store->bodies[slot] : 0;
 }
 
 // The initializer node of the top-level declarator whose initializer starts at
@@ -556,8 +567,9 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_spans_punctuator_at(CAstSpans const
 
 // The span of the node at `relative`, widened over every balanced pair of
 // parentheses that wraps it exactly. The tree has no node for a parenthesis, so
-// an operator's own span begins or ends outside its operand's.
-BUSTER_C_SHARED void c_ast_spans_expand(CAstSpans const* spans, u32 relative, u32* first_out, u32* end_out)
+// an operator's own span begins or ends outside its operand's. Always inlined
+// into the span rule, which runs once per expression node.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_ast_spans_widen(CAstSpans const* spans, u32 relative, u32* first_out, u32* end_out)
 {
     u32 first = spans->first[relative];
     u32 end = spans->end[relative];
@@ -573,11 +585,17 @@ BUSTER_C_SHARED void c_ast_spans_expand(CAstSpans const* spans, u32 relative, u3
     *end_out = end;
 }
 
+BUSTER_C_SHARED void c_ast_spans_expand(CAstSpans const* spans, u32 relative, u32* first_out, u32* end_out)
+{
+    c_ast_spans_widen(spans, relative, first_out, end_out);
+}
+
 // Computes [first, end) for one expression node. Returns false when the span
 // cannot be established (an unmatched delimiter, an operand without a span, a
 // span outside the unit), and then the node can be neither queried nor
-// accepted.
-BUSTER_GLOBAL_LOCAL bool c_ast_spans_rule(CAstSpans const* spans, u32 node, u32 relative, u32* first_out, u32* end_out)
+// accepted. Always inlined: the typer's eager pass and c_ast_spans_build each
+// run it once per expression node.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_spans_rule(CAstSpans const* spans, u32 node, u32 relative, u32* first_out, u32* end_out)
 {
     CAst const* ast = spans->ast;
     u32 kind = ast->kinds[node];
@@ -630,7 +648,7 @@ BUSTER_GLOBAL_LOCAL bool c_ast_spans_rule(CAstSpans const* spans, u32 node, u32 
         u32 callee = c_ast_types_first_child(ast, node);
         u32 expanded_first = C_AST_TYPE_NONE;
         u32 expanded_end = C_AST_TYPE_NONE;
-        c_ast_spans_expand(spans, callee - spans->begin, &expanded_first, &expanded_end);
+        c_ast_spans_widen(spans, callee - spans->begin, &expanded_first, &expanded_end);
         u32 close = c_ast_spans_match(spans, token);
         if (expanded_first != C_AST_TYPE_NONE && close != C_AST_TYPE_NONE)
         {
@@ -646,7 +664,7 @@ BUSTER_GLOBAL_LOCAL bool c_ast_spans_rule(CAstSpans const* spans, u32 node, u32 
     {
         u32 expanded_first = C_AST_TYPE_NONE;
         u32 expanded_end = C_AST_TYPE_NONE;
-        c_ast_spans_expand(spans, relative - 1, &expanded_first, &expanded_end);
+        c_ast_spans_widen(spans, relative - 1, &expanded_first, &expanded_end);
         if (expanded_first != C_AST_TYPE_NONE)
         {
             first = expanded_first;
@@ -674,7 +692,7 @@ BUSTER_GLOBAL_LOCAL bool c_ast_spans_rule(CAstSpans const* spans, u32 node, u32 
         {
             u32 expanded_first = C_AST_TYPE_NONE;
             u32 expanded_end = C_AST_TYPE_NONE;
-            c_ast_spans_expand(spans, relative - 1, &expanded_first, &expanded_end);
+            c_ast_spans_widen(spans, relative - 1, &expanded_first, &expanded_end);
             if (expanded_first != C_AST_TYPE_NONE)
             {
                 first = token;
@@ -688,8 +706,8 @@ BUSTER_GLOBAL_LOCAL bool c_ast_spans_rule(CAstSpans const* spans, u32 node, u32 
             u32 left_end = C_AST_TYPE_NONE;
             u32 right_first = C_AST_TYPE_NONE;
             u32 right_end = C_AST_TYPE_NONE;
-            c_ast_spans_expand(spans, leftmost - spans->begin, &left_first, &left_end);
-            c_ast_spans_expand(spans, relative - 1, &right_first, &right_end);
+            c_ast_spans_widen(spans, leftmost - spans->begin, &left_first, &left_end);
+            c_ast_spans_widen(spans, relative - 1, &right_first, &right_end);
             if (left_first != C_AST_TYPE_NONE && right_end != C_AST_TYPE_NONE)
             {
                 first = left_first;
@@ -1857,13 +1875,16 @@ BUSTER_GLOBAL_LOCAL CAstTypeBody* c_ast_types_region_create(CTypeParseMachine* m
     u32 count = ast->extents[node];
     u32 token_count = token_end - token_start;
     Arena* scratch = machine->scratch_arena;
+    // A body's span columns go to the kept store's arena when lowering will
+    // read them (CAstSpanStore), and are body scratch otherwise.
+    Arena* kept = !initializer && machine->ast_spans ? machine->ast_spans_arena : 0;
     CAstTypeBody* body = C_PARSE_BODY_SCRATCH_ARRAY(scratch, CAstTypeBody, 1);
     CTypeId* types = C_PARSE_BODY_SCRATCH_ARRAY(scratch, CTypeId, count);
-    u32* first = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
-    u32* end = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
+    u32* first = kept ? arena_allocate(kept, u32, count) : C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
+    u32* end = kept ? arena_allocate(kept, u32, count) : C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
     u32* entities = initializer ? C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count) : 0;
-    u32* link = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
-    u32* start_head = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, token_count);
+    u32* link = kept ? arena_allocate(kept, u32, count) : C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
+    u32* start_head = kept ? arena_allocate(kept, u32, token_count) : C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, token_count);
     u8* flags = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u8, count);
     u8* widths = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u8, count);
     bool reserved = body && types && first && end && (entities || !initializer) && link && start_head && flags && widths;
@@ -1929,6 +1950,14 @@ BUSTER_C_SHARED void c_ast_types_body_begin(CTypeParseMachine* machine, CParseRe
         {
             c_ast_types_region_fill(body, machine, preprocess);
             body->statistics->bodies += 1;
+            // The spans are final once the eager pass is done: keep them for
+            // lowering when asked.
+            CAstSpanStore* store = machine->ast_spans;
+            u32 slot = store ? c_ast_types_brace_slot(store->braces, store->count, token_start - 1) : C_AST_TYPE_NONE;
+            if (slot != C_AST_TYPE_NONE)
+            {
+                store->bodies[slot] = body->spans;
+            }
         }
     }
 }
