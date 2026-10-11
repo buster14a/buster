@@ -95,7 +95,10 @@ status=0
 while IFS='|' read -r name buster_target clang_target lld_arch; do
     directory="$output/$name"
     mkdir -p "$directory"
-    link=(ld64.lld -arch "$lld_arch" -platform_version macos 13.0.0 13.0.0)
+    # Classic dyld info, which --bind and --lazy-bind print: newer ld64.lld
+    # defaults to chained fixups for this deployment target, and those leave
+    # both tables empty, so two empty binding lists would compare equal.
+    link=(ld64.lld -arch "$lld_arch" -platform_version macos 13.0.0 13.0.0 -no_fixup_chains)
     clang --target="$clang_target" -g0 -c "$sources/library.c" -o "$directory/library.o"
     clang --target="$clang_target" -g0 -c "$sources/system.c" -o "$directory/system.o"
     "${link[@]}" -dylib -install_name @rpath/libmachdata.dylib -o "$directory/libmachdata.dylib" "$directory/library.o"
@@ -118,6 +121,11 @@ while IFS='|' read -r name buster_target clang_target lld_arch; do
                 printf '%s %s: relocation types differ from Clang\n' "$name" "$optimization" >&2
                 status=1
             fi
+        fi
+        if ! grep -q '^__DATA[_A-Z]* __got _mach_dylib_data$' "$directory/clang-$optimization.bindings.txt"; then
+            printf '%s %s: the Clang oracle does not bind _mach_dylib_data through __got; the binding listing is unusable\n' "$name" "$optimization" >&2
+            cat "$directory/clang-$optimization.bindings.txt" >&2
+            status=1
         fi
         if ! grep -q '^__DATA[_A-Z]* __got _mach_dylib_data$' "$directory/buster-$optimization.bindings.txt"; then
             printf '%s %s: _mach_dylib_data is not bound through __got\n' "$name" "$optimization" >&2
