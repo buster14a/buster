@@ -973,7 +973,12 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    - affinity other than CPU 2;
    - a population that is not exactly the 54 frontend cells, three selection
      workloads and 40 `ide bench` runs, each with its full sample count;
+   - a malformed sample: a missing or wrongly typed target, work count,
+     timing or object hash fails closed before any comparison;
    - a fallback sample, or differing work counts, targets or objects;
+   - a tool's reported median that its own retained samples do not give.
+     The report's cells are re-derived from the raw samples, never taken
+     from a tool's summary;
    - a frozen profile or cell digest that changed.
 
    Cost: on a hosted 4-vCPU 2.1 GHz Xeon (diagnostic, not Zen 5), the whole

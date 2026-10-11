@@ -44,7 +44,7 @@ Map (searchable symbols):
         throughput_real_source_digest                      real-source throughput (#2761)
     PRODUCTION_PROFILE_PROFILE, validate_production_profile,
         production_profile_fields                          PGO/LTO production profile (#2761)
-    FRONTEND_SELECTOR_PROFILE, validate_frontend_selector,
+    FRONTEND_SELECTOR_PROFILE, validate_frontend_selector, selection_medians,
         frontend_selector_digest                           frontend and selector probes (#2761)
     REGRESSION_POLICIES, regression_policy                 report-only switch
     range_label                                            main baseline relation
@@ -728,6 +728,35 @@ def _samples(values: object, count: int, positive: bool) -> bool:
             for value in values)
 
 
+def _median(values: object) -> float | None:
+    """The median of a non-empty list of finite numbers, else None; reported medians are re-derived with it."""
+    usable = isinstance(values, list) and values and \
+        all(type(value) in (int, float) and math.isfinite(value) for value in values)
+    return statistics.median(values) if usable else None
+
+
+def _selection_sample(sample: object, allocators: list) -> bool:
+    """Whether one selection_benchmark sample has every typed identity, work count, timing and object field."""
+    metrics = sample.get("selection") if isinstance(sample, dict) and isinstance(sample.get("selection"), dict) else {}
+    built = sample.get("objects") if isinstance(sample, dict) and isinstance(sample.get("objects"), dict) else {}
+    return isinstance(sample, dict) and isinstance(sample.get("target"), str) and bool(sample["target"]) and \
+        all(type(metrics.get(key)) is int and metrics[key] >= 0 for key in (*SELECTION_WORK_FIELDS, "median_ns")) and \
+        metrics["fallback_functions"] == 0 and \
+        all(metrics[key] > 0 for key in ("functions", "mir_instructions", "median_ns")) and \
+        sorted(built) == sorted(allocators) and \
+        all(isinstance(item, dict) and type(item.get("wall_ns")) is int and item["wall_ns"] > 0 and
+            isinstance(item.get("sha256"), str) and SHA256.fullmatch(item["sha256"]) is not None
+            for item in built.values())
+
+
+def selection_medians(samples: object, allocators: list) -> dict | None:
+    """Re-derived {selection_median_ns, compile_median_ns} of one binary's samples, or None when any is malformed."""
+    usable = isinstance(samples, list) and samples and all(_selection_sample(sample, allocators) for sample in samples)
+    return {"selection_median_ns": statistics.median(sample["selection"]["median_ns"] for sample in samples),
+            "compile_median_ns": {allocator: statistics.median(sample["objects"][allocator]["wall_ns"] for sample in samples)
+                                  for allocator in allocators}} if usable else None
+
+
 def validate_frontend_selector(scaling_status: object, provenance: object, results: object, selection_status: object,
                                report: object, bench: object, binaries: object) -> list[str]:
     """Reasons the evidence is not one complete FRONTEND_SELECTOR_PROFILE run on these binaries and host.
@@ -771,6 +800,9 @@ def validate_frontend_selector(scaling_status: object, provenance: object, resul
                 isinstance(item, dict) and _samples(item.get("wall_seconds"), scaling["repetitions"], True) and
                 _samples(item.get("cpu_seconds"), scaling["repetitions"], False) for item in compilers.values()):
             problems.append(f"{label} cell {name} does not have {scaling['repetitions']} complete samples per binary")
+        elif any(item.get(f"{metric}_median") != _median(item[f"{metric}_seconds"])
+                 for item in compilers.values() for metric in ("wall", "cpu")):
+            problems.append(f"{label} cell {name} reports medians its samples do not give")
         if row.get("mode") == "object" and not (isinstance(row.get("object_sha256"), str) and
                                                 SHA256.fullmatch(row["object_sha256"])):
             problems.append(f"{label} cell {name} has no identical-object hash")
@@ -806,27 +838,23 @@ def validate_frontend_selector(scaling_status: object, provenance: object, resul
                 not isinstance(samples[role], list) or len(samples[role]) != selection["samples"] for role in samples):
             problems.append(f"{label} workload {name} does not have {selection['samples']} samples per binary")
         identities, objects = set(), {allocator: set() for allocator in selection["allocators"]}
-        complete = True
-        for sample in flat:
-            metrics = sample.get("selection") if isinstance(sample, dict) and isinstance(sample.get("selection"), dict) else {}
-            built = sample.get("objects") if isinstance(sample, dict) and isinstance(sample.get("objects"), dict) else {}
-            if sorted(built) != sorted(selection["allocators"]) or metrics.get("fallback_functions") != 0 or \
-                    not all(type(metrics.get(key)) is int and metrics[key] > 0
-                            for key in ("functions", "mir_instructions", "median_ns")) or \
-                    not all(isinstance(item, dict) and type(item.get("wall_ns")) is int and item["wall_ns"] > 0
-                            for item in built.values()):
-                complete = False
-                continue
-            identities.add((sample.get("target"), *(metrics.get(key) for key in SELECTION_WORK_FIELDS)))
-            for allocator, item in built.items():
-                objects[allocator].add(item.get("sha256"))
+        complete = all(_selection_sample(sample, selection["allocators"]) for sample in flat)
+        # Identities and hashes are compared only once every field is typed, so nothing unhashable reaches a set.
+        for sample in flat if complete else []:
+            identities.add((sample["target"], *(sample["selection"][key] for key in SELECTION_WORK_FIELDS)))
+            for allocator, item in sample["objects"].items():
+                objects[allocator].add(item["sha256"])
+        summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
         if not complete:
-            problems.append(f"{label} workload {name} has an incomplete or fallback sample")
+            problems.append(f"{label} workload {name} has a malformed, incomplete or fallback sample")
+        elif any(not isinstance(summary.get(role), dict) or
+                 {key: summary[role].get(key) for key in ("selection_median_ns", "compile_median_ns")} !=
+                 selection_medians(samples.get(role), selection["allocators"]) for role in ("baseline", "candidate")):
+            problems.append(f"{label} workload {name} reports medians its samples do not give")
         if len(identities) > 1:
             problems.append(f"{label} workload {name} selected different work or targets across samples")
-        if any(len(found) > 1 or not all(isinstance(value, str) and SHA256.fullmatch(value) for value in found)
-               for found in objects.values()):
-            problems.append(f"{label} workload {name} produced different or unhashed objects")
+        if any(len(found) > 1 for found in objects.values()):
+            problems.append(f"{label} workload {name} produced different objects")
     # ide bench.
     label = "ide bench"
     wanted = profile["ide_bench"]
@@ -855,30 +883,31 @@ def validate_frontend_selector(scaling_status: object, provenance: object, resul
 
 
 def frontend_selector_digest(results: object, report: object, bench: object) -> list[dict]:
-    """The report's view: baseline/candidate medians for each frontend, selection and ide bench cell."""
+    """The report's view: baseline/candidate medians re-derived from the raw samples of every cell, never
+    taken from a tool's own summary fields."""
     digest = []
     for row in results if isinstance(results, list) else []:
         compilers = row.get("compilers") if isinstance(row, dict) and isinstance(row.get("compilers"), dict) else {}
-        values = [compilers.get(role, {}).get("wall_median") if isinstance(compilers.get(role), dict) else None
+        values = [_median(compilers[role].get("wall_seconds")) if isinstance(compilers.get(role), dict) else None
                   for role in ("baseline", "candidate")]
         if isinstance(row, dict):
             digest.append({"name": f"frontend {row.get('kind')}-{row.get('count')}/{row.get('mode')}",
                            "unit": "s", "values": values})
     for row in report.get("workloads", []) if isinstance(report, dict) and isinstance(report.get("workloads"), list) else []:
-        summary = row.get("summary") if isinstance(row, dict) and isinstance(row.get("summary"), dict) else {}
+        samples = row.get("samples") if isinstance(row, dict) and isinstance(row.get("samples"), dict) else {}
         name = Path(str(row.get("path"))).name if isinstance(row, dict) else "NA"
-        roles = [summary.get(role) if isinstance(summary.get(role), dict) else {} for role in ("baseline", "candidate")]
+        allocators = FRONTEND_SELECTOR_PROFILE["selection"]["allocators"]
+        roles = [selection_medians(samples.get(role), allocators) or {} for role in ("baseline", "candidate")]
         digest.append({"name": f"selection {name}", "unit": "ns",
                        "values": [role.get("selection_median_ns") for role in roles]})
-        for allocator in FRONTEND_SELECTOR_PROFILE["selection"]["allocators"]:
+        for allocator in allocators:
             digest.append({"name": f"selection {name} -c {allocator}", "unit": "ns",
-                           "values": [role.get("compile_median_ns", {}).get(allocator)
-                                      if isinstance(role.get("compile_median_ns"), dict) else None for role in roles]})
+                           "values": [role["compile_median_ns"][allocator] if role else None for role in roles]})
     runs = bench.get("runs") if isinstance(bench, dict) and isinstance(bench.get("runs"), list) else []
     medians = {"baseline": [], "candidate": []}
     for run in runs:
         fields = ide_bench_fields(run.get("line")) if isinstance(run, dict) else None
-        if fields is not None and run.get("role") in medians:
+        if fields is not None and run.get("role") in ("baseline", "candidate"):
             medians[run["role"]].append(fields["median_ns"])
     if runs:
         digest.append({"name": "ide bench", "unit": "ns",

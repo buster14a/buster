@@ -4188,6 +4188,90 @@ class FrontendSelectorTest(unittest.TestCase):
         self.assertIn("| frontend small-1/syntax | 10.0 ms | 10.0 ms | 1.0000 |", report)
         self.assertIn("| ide bench | 1.0 us | 1.0 us | 1.0000 |", report)
 
+    def publish(self, record: dict, bundle: dict) -> tuple:
+        """ZIP -> read_evidence -> decide on a pull receipt carrying record, as the publisher runs it."""
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["frontend_selector"] = record
+        members = {"receipt.json": json.dumps(pull), "lab/summary.json": json.dumps(summary()),
+                   "throughput/summary.json": json.dumps(corpus()["summary"]),
+                   "throughput/metadata.json": json.dumps(corpus()["metadata"]),
+                   **{path: json.dumps(bundle[key]) for key, path in compiler_publish.FRONTEND_SELECTOR_BUNDLE_FILES.items()}}
+        read, lab, problem, unused_artifact, throughput = compiler_publish.read_evidence(
+            FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+        self.assertEqual(problem, "")
+        return compiler_publish.decide(dict(EXPECTED, mode="pull"), True, "success", read, lab, "", throughput)
+
+    def test_reported_medians_are_rederived_from_the_samples(self) -> None:
+        record, bundle = frontend_selector_evidence()
+        self.assertEqual(self.publish(record, bundle)[0], "success")
+        frontend = copy.deepcopy(bundle)
+        frontend["results"][0]["compilers"]["candidate"]["wall_median"] = 0.001
+        selection = copy.deepcopy(bundle)
+        selection["report"]["workloads"][0]["summary"]["candidate"]["selection_median_ns"] = 100
+        compile_time = copy.deepcopy(bundle)
+        compile_time["report"]["workloads"][2]["summary"]["baseline"]["compile_median_ns"]["quality"] = 1
+        for name, changed in (("frontend wall median", frontend), ("selection median", selection),
+                              ("compile median", compile_time)):
+            with self.subTest(case=name):
+                # The cells come from the samples, so a contradictory summary cannot move the reported ratio.
+                self.assertEqual(compiler_receipt.frontend_selector_digest(changed["results"], changed["report"],
+                                                                           changed["bench"]), record["cells"])
+                self.assertTrue(any("medians its samples do not give" in problem for problem in self.validate(changed)))
+                conclusion, unused_title, reasons = self.publish(record, changed)
+                self.assertEqual(conclusion, "failure", reasons)
+
+    def test_malformed_selection_identities_fail_without_raising(self) -> None:
+        record, bundle = frontend_selector_evidence()
+        def every_sample(report: dict, mutate) -> None:
+            for row in report["workloads"]:
+                for samples in row["samples"].values():
+                    for sample in samples:
+                        mutate(sample)
+        cases = {
+            "list target": lambda report: report["workloads"][0]["samples"]["baseline"][0].update(target=[]),
+            "object hash": lambda report: report["workloads"][0]["samples"]["candidate"][3]["objects"]["fast"].update(
+                sha256={}),
+            "no target anywhere": lambda report: every_sample(report, lambda sample: sample.pop("target")),
+            "no ir_instructions anywhere": lambda report: every_sample(
+                report, lambda sample: sample["selection"].pop("ir_instructions")),
+            "boolean work count": lambda report: report["workloads"][1]["samples"]["baseline"][2]["selection"].update(
+                functions=True),
+        }
+        for name, mutate in cases.items():
+            changed = copy.deepcopy(bundle)
+            mutate(changed["report"])
+            with self.subTest(case=name):
+                self.assertTrue(any("malformed" in problem for problem in self.validate(changed)), name)
+                conclusion, unused_title, reasons = self.publish(record, changed)
+                self.assertEqual(conclusion, "failure", reasons)
+
+    def test_any_wrongly_typed_field_fails_closed_without_raising(self) -> None:
+        unused_record, bundle = frontend_selector_evidence()
+        def paths(value: object, prefix: tuple = ()):
+            yield prefix
+            children = value.items() if isinstance(value, dict) else enumerate(value[:1]) if isinstance(value, list) else ()
+            for key, child in children:
+                yield from paths(child, (*prefix, key))
+        replacements = (None, [], {}, "x", -1, 1.5, True, [[]], {"": {}})
+        checked = 0
+        for key in bundle:
+            for path in paths(bundle[key]):
+                for replacement in replacements:
+                    changed = copy.deepcopy(bundle)
+                    if path:
+                        holder = changed[key]
+                        for step in path[:-1]:
+                            holder = holder[step]
+                        holder[path[-1]] = replacement
+                    else:
+                        changed[key] = replacement
+                    compiler_receipt.frontend_selector_digest(changed["results"], changed["report"], changed["bench"])
+                    self.validate(changed)
+                    checked += 1
+        self.assertGreater(checked, 500)
+
     def test_read_evidence_requires_every_bundle_member(self) -> None:
         record, bundle = frontend_selector_evidence()
         pull = dict(receipt(), mode="pull", frontend_selector=record)
