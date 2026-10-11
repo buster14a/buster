@@ -1,0 +1,1108 @@
+{
+ "schema": "buster-backend-capabilities-v1",
+ "reviewed_revision": "2b90c52fcd8aa9d9dc59b23e7c02fdbc852e1aef",
+ "owner_issue": 309,
+ "levels": [
+  {
+   "id": "validate",
+   "name": "Parse/validate"
+  },
+  {
+   "id": "encode",
+   "name": "Exact encode"
+  },
+  {
+   "id": "object-link",
+   "name": "Object/link"
+  },
+  {
+   "id": "oracle",
+   "name": "Independent oracle"
+  },
+  {
+   "id": "execute",
+   "name": "Executed semantics"
+  },
+  {
+   "id": "integration",
+   "name": "Self-host/real project"
+  }
+ ],
+ "statuses": [
+  "supported",
+  "partial",
+  "unsupported-diagnostic",
+  "not-applicable",
+  "unknown"
+ ],
+ "backends": [
+  {
+   "id": "x86_64-native",
+   "name": "x86-64 native",
+   "kind": "direct-codegen",
+   "doc": "docs/compiler-pipeline.md"
+  },
+  {
+   "id": "aarch64-native",
+   "name": "AArch64 native",
+   "kind": "direct-codegen",
+   "doc": "docs/compiler-pipeline.md"
+  },
+  {
+   "id": "uefi-pe32plus",
+   "name": "UEFI PE32+ (x86-64, AArch64)",
+   "kind": "direct-codegen",
+   "doc": "docs/uefi-target.md"
+  },
+  {
+   "id": "wasm64",
+   "name": "Wasm64 Memory64 (wasm64-unknown-freestanding)",
+   "kind": "direct-codegen",
+   "doc": "WASM64.md"
+  },
+  {
+   "id": "wasm32-wasip1",
+   "name": "Wasm32 WASI Preview 1 (wasm32-wasip1)",
+   "kind": "direct-codegen",
+   "doc": "WASI.md"
+  },
+  {
+   "id": "ebpf",
+   "name": "eBPF (bpfel-unknown-linux)",
+   "kind": "direct-codegen",
+   "doc": "src/buster/lib/compiler/ebpf/ebpf.c"
+  },
+  {
+   "id": "llvm-bitcode",
+   "name": "LLVM bitcode (-emit-llvm)",
+   "kind": "direct-codegen",
+   "doc": "LLVM_BITCODE.md"
+  },
+  {
+   "id": "spirv-compute",
+   "name": "Direct Vulkan 1.2 SPIR-V compute",
+   "kind": "direct-codegen",
+   "doc": "docs/spirv-compute.md"
+  },
+  {
+   "id": "gpu-external",
+   "name": "External GPU toolchains (SPIR-V, PTX, AMDGCN, Metal, DXIL)",
+   "kind": "external-tool",
+   "doc": "docs/gpu-target-pipelines.md"
+  }
+ ],
+ "features": [
+  {
+   "id": "scalar-calls",
+   "name": "Scalar calls"
+  },
+  {
+   "id": "aggregate-calls",
+   "name": "Aggregate call ABI"
+  },
+  {
+   "id": "variadic-calls",
+   "name": "Variadic calls"
+  },
+  {
+   "id": "indirect-calls",
+   "name": "Indirect calls"
+  },
+  {
+   "id": "atomics",
+   "name": "Atomics"
+  },
+  {
+   "id": "simd",
+   "name": "SIMD/vectors"
+  },
+  {
+   "id": "tls",
+   "name": "TLS"
+  },
+  {
+   "id": "debug-info",
+   "name": "Debug info"
+  },
+  {
+   "id": "object-link",
+   "name": "Object/link"
+  },
+  {
+   "id": "execution",
+   "name": "Execution/independent oracle"
+  }
+ ],
+ "requirements": {
+  "node": {
+   "text": "Node.js with WebAssembly support on PATH",
+   "missing": "skip"
+  },
+  "clang": {
+   "text": "Clang on PATH as the independent LLVM bitcode consumer",
+   "missing": "skip"
+  },
+  "gcc-and-clang": {
+   "text": "Both GCC and Clang on PATH for the Linux scalar ABI oracle (mandatory on supported Linux)",
+   "missing": "fail"
+  },
+  "gpu-toolchains": {
+   "text": "Pinned toolchains for the selected profile in .github/workflows/gpu-toolchains.yml; an omitted profile reports SKIP_NOT_CONFIGURED and provides no evidence",
+   "missing": "fail"
+  }
+ },
+ "cells": [
+  {
+   "backend": "x86_64-native",
+   "feature": "scalar-calls",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "build.c",
+     "anchor": "S8_INITIALIZER(\"test_self_host\")",
+     "provides": [
+      "integration"
+     ]
+    }
+   ],
+   "note": "Self-host fixed point builds and reruns the compiler with itself."
+  },
+  {
+   "backend": "x86_64-native",
+   "feature": "aggregate-calls",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/codegen/machine_test.c",
+     "symbol": "machine_test_native_aggregate",
+     "provides": [
+      "encode"
+     ]
+    },
+    {
+     "file": "src/buster/tests/compiler/driver/driver_test.c",
+     "symbol": "compiler_driver_test_sysv_empty_aggregates",
+     "provides": [
+      "object-link"
+     ]
+    }
+   ]
+  },
+  {
+   "backend": "x86_64-native",
+   "feature": "variadic-calls",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/driver/driver_test.c",
+     "symbol": "compiler_driver_test_sysv_indirect_variadic",
+     "provides": [
+      "object-link"
+     ]
+    },
+    {
+     "file": "src/buster/tests/compiler/driver/driver_test.c",
+     "symbol": "compiler_driver_test_sysv_wide_aggregate_va_arg",
+     "provides": [
+      "object-link"
+     ]
+    }
+   ]
+  },
+  {
+   "backend": "x86_64-native",
+   "feature": "indirect-calls",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/driver/driver_test.c",
+     "symbol": "compiler_driver_test_sysv_indirect_variadic",
+     "provides": [
+      "object-link"
+     ]
+    }
+   ]
+  },
+  {
+   "backend": "x86_64-native",
+   "feature": "atomics",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/frontend/c/c_test.c",
+     "symbol": "c_test_atomic_compound_assignment_runtime",
+     "provides": [
+      "execute"
+     ]
+    },
+    {
+     "file": "src/buster/tests/compiler/driver/driver_test.c",
+     "symbol": "compiler_driver_test_atomic_pair_contention",
+     "provides": [
+      "object-link",
+      "execute"
+     ]
+    }
+   ]
+  },
+  {
+   "backend": "x86_64-native",
+   "feature": "simd",
+   "status": "partial",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/codegen/machine_test.c",
+     "symbol": "machine_test_wide_vector_boundaries",
+     "provides": [
+      "encode"
+     ]
+    },
+    {
+     "file": "src/buster/tests/compiler/codegen/machine_test.c",
+     "symbol": "machine_test_win64_vector_execute",
+     "provides": [
+      "execute"
+     ]
+    }
+   ],
+   "note": "Vector values and ABI boundaries are covered; this row does not claim every SIMD intrinsic form."
+  },
+  {
+   "backend": "x86_64-native",
+   "feature": "tls",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/driver/driver_test.c",
+     "symbol": "compiler_driver_test_native_tls",
+     "provides": [
+      "object-link"
+     ]
+    }
+   ]
+  },
+  {
+   "backend": "x86_64-native",
+   "feature": "debug-info",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/driver/driver_test.c",
+     "symbol": "compiler_driver_test_dwarf5_objects",
+     "provides": [
+      "object-link"
+     ]
+    },
+    {
+     "file": "src/buster/tests/compiler/driver/driver_test.c",
+     "symbol": "compiler_driver_test_debug_scalar_local_locations",
+     "provides": [
+      "object-link"
+     ]
+    }
+   ],
+   "note": "DWARF evidence; CodeView/PDB are tracked by their own test modules."
+  },
+  {
+   "backend": "x86_64-native",
+   "feature": "object-link",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/driver/driver_test.c",
+     "symbol": "compiler_driver_test_dwarf5_objects",
+     "provides": [
+      "object-link"
+     ]
+    },
+    {
+     "file": "build.c",
+     "anchor": "S8_INITIALIZER(\"test_self_host\")",
+     "provides": [
+      "integration"
+     ]
+    }
+   ]
+  },
+  {
+   "backend": "x86_64-native",
+   "feature": "execution",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/frontend/c/c_test.c",
+     "symbol": "c_test_atomic_compound_assignment_runtime",
+     "provides": [
+      "execute"
+     ]
+    },
+    {
+     "file": "build.c",
+     "anchor": "S8_INITIALIZER(\"test_self_host\")",
+     "provides": [
+      "integration"
+     ]
+    }
+   ]
+  },
+  {
+   "backend": "aarch64-native",
+   "feature": "scalar-calls",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "aarch64-native",
+   "feature": "aggregate-calls",
+   "status": "partial",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/codegen/machine_test.c",
+     "symbol": "machine_test_a64_large_aggregate_copy",
+     "provides": [
+      "encode"
+     ]
+    }
+   ],
+   "note": "Large aggregate copy lowering only; AAPCS64 aggregate argument evidence not yet audited."
+  },
+  {
+   "backend": "aarch64-native",
+   "feature": "variadic-calls",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/driver/driver_test.c",
+     "symbol": "compiler_driver_test_aarch64_platform_variadic",
+     "provides": [
+      "object-link"
+     ]
+    }
+   ]
+  },
+  {
+   "backend": "aarch64-native",
+   "feature": "indirect-calls",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "aarch64-native",
+   "feature": "atomics",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "aarch64-native",
+   "feature": "simd",
+   "status": "partial",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/assembly/aarch64_direct_simd_test.c",
+     "symbol": "aarch64_direct_simd_tests",
+     "provides": [
+      "encode"
+     ]
+    }
+   ],
+   "note": "Assembler-level SIMD encoding; canonical vector codegen evidence not yet audited."
+  },
+  {
+   "backend": "aarch64-native",
+   "feature": "tls",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/driver/driver_test.c",
+     "symbol": "compiler_driver_test_aarch64_elf_tlsdesc",
+     "provides": [
+      "object-link"
+     ]
+    },
+    {
+     "file": "src/buster/tests/compiler/driver/driver_test.c",
+     "symbol": "compiler_driver_test_aarch64_elf_tls_initial_exec",
+     "provides": [
+      "object-link"
+     ]
+    }
+   ]
+  },
+  {
+   "backend": "aarch64-native",
+   "feature": "debug-info",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "aarch64-native",
+   "feature": "object-link",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "aarch64-native",
+   "feature": "execution",
+   "status": "unknown",
+   "note": "Routine Apple CI runs AArch64; per-feature execution evidence not yet mapped."
+  },
+  {
+   "backend": "uefi-pe32plus",
+   "feature": "scalar-calls",
+   "status": "unknown",
+   "note": "Shares native code generation; UEFI-specific evidence not yet audited."
+  },
+  {
+   "backend": "uefi-pe32plus",
+   "feature": "aggregate-calls",
+   "status": "unknown",
+   "note": "Shares native code generation; UEFI-specific evidence not yet audited."
+  },
+  {
+   "backend": "uefi-pe32plus",
+   "feature": "variadic-calls",
+   "status": "unknown",
+   "note": "Shares native code generation; UEFI-specific evidence not yet audited."
+  },
+  {
+   "backend": "uefi-pe32plus",
+   "feature": "indirect-calls",
+   "status": "unknown",
+   "note": "Shares native code generation; UEFI-specific evidence not yet audited."
+  },
+  {
+   "backend": "uefi-pe32plus",
+   "feature": "atomics",
+   "status": "unknown",
+   "note": "Shares native code generation; UEFI-specific evidence not yet audited."
+  },
+  {
+   "backend": "uefi-pe32plus",
+   "feature": "simd",
+   "status": "unknown",
+   "note": "Shares native code generation; UEFI-specific evidence not yet audited."
+  },
+  {
+   "backend": "uefi-pe32plus",
+   "feature": "tls",
+   "status": "unknown",
+   "note": "Shares native code generation; UEFI-specific evidence not yet audited."
+  },
+  {
+   "backend": "uefi-pe32plus",
+   "feature": "debug-info",
+   "status": "unknown",
+   "note": "Shares native code generation; UEFI-specific evidence not yet audited."
+  },
+  {
+   "backend": "uefi-pe32plus",
+   "feature": "object-link",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/link/link_test.c",
+     "symbol": "link_test_uefi_pe64",
+     "provides": [
+      "object-link"
+     ]
+    }
+   ],
+   "note": "x86-64 and AArch64 PE32+ images."
+  },
+  {
+   "backend": "uefi-pe32plus",
+   "feature": "execution",
+   "status": "unknown",
+   "note": "Firmware execution is a separate gate described in docs/uefi-target.md."
+  },
+  {
+   "backend": "wasm64",
+   "feature": "scalar-calls",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/driver/driver_test.c",
+     "symbol": "compiler_driver_test_wasm_integers",
+     "provides": [
+      "encode"
+     ]
+    }
+   ]
+  },
+  {
+   "backend": "wasm64",
+   "feature": "aggregate-calls",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/wasm/wasm.c",
+     "text": "aggregate or unsupported parameter ABI in WebAssembly function"
+    }
+   ],
+   "note": "Local aggregate copies are supported; aggregate parameter ABI is not."
+  },
+  {
+   "backend": "wasm64",
+   "feature": "variadic-calls",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "wasm64",
+   "feature": "indirect-calls",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/driver/driver_test.c",
+     "symbol": "compiler_driver_test_wasm64_function_tables",
+     "provides": [
+      "encode",
+      "oracle",
+      "execute"
+     ],
+     "requires": "node"
+    }
+   ],
+   "note": "Scalar function-pointer table ABI with typed indirect calls."
+  },
+  {
+   "backend": "wasm64",
+   "feature": "atomics",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/wasm/wasm.c",
+     "text": "atomic operations are unsupported by WebAssembly"
+    }
+   ]
+  },
+  {
+   "backend": "wasm64",
+   "feature": "simd",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/wasm/wasm.c",
+     "text": "exact SIMD intrinsics are unsupported by Wasm64; select an explicit source fallback"
+    }
+   ]
+  },
+  {
+   "backend": "wasm64",
+   "feature": "tls",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "wasm64",
+   "feature": "debug-info",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "wasm64",
+   "feature": "object-link",
+   "status": "unknown",
+   "note": "Emits a core module directly; no relocatable object/link contract is claimed."
+  },
+  {
+   "backend": "wasm64",
+   "feature": "execution",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/driver/driver_test.c",
+     "symbol": "compiler_driver_test_wasm64_function_tables",
+     "provides": [
+      "oracle",
+      "execute"
+     ],
+     "requires": "node"
+    }
+   ],
+   "note": "Node validates and executes the emitted table/typed-call module. compiler_driver_test_wasm_node_policy covers Node process-lifecycle policy only, not engine execution."
+  },
+  {
+   "backend": "wasm32-wasip1",
+   "feature": "scalar-calls",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/driver/driver_test.c",
+     "anchor": "3/3 wasm32 WASI Preview 1 command executions passed",
+     "provides": [
+      "execute"
+     ],
+     "requires": "node"
+    }
+   ]
+  },
+  {
+   "backend": "wasm32-wasip1",
+   "feature": "aggregate-calls",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/wasm/wasm.c",
+     "text": "aggregate or unsupported parameter ABI in WebAssembly function"
+    }
+   ]
+  },
+  {
+   "backend": "wasm32-wasip1",
+   "feature": "variadic-calls",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "wasm32-wasip1",
+   "feature": "indirect-calls",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/wasm/wasm.c",
+     "text": "indirect calls are unsupported by Wasm32"
+    },
+    {
+     "file": "src/buster/lib/compiler/wasm/wasm.c",
+     "text": "runtime function addresses are unsupported by Wasm32"
+    }
+   ]
+  },
+  {
+   "backend": "wasm32-wasip1",
+   "feature": "atomics",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/wasm/wasm.c",
+     "text": "atomic operations are unsupported by WebAssembly"
+    }
+   ]
+  },
+  {
+   "backend": "wasm32-wasip1",
+   "feature": "simd",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/wasm/wasm.c",
+     "text": "vector/SIMD unary operation is unsupported by WebAssembly"
+    }
+   ]
+  },
+  {
+   "backend": "wasm32-wasip1",
+   "feature": "tls",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "wasm32-wasip1",
+   "feature": "debug-info",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "wasm32-wasip1",
+   "feature": "object-link",
+   "status": "unknown",
+   "note": "Emits a WASI command module directly; no relocatable object/link contract is claimed."
+  },
+  {
+   "backend": "wasm32-wasip1",
+   "feature": "execution",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/driver/driver_test.c",
+     "anchor": "3/3 wasm32 WASI Preview 1 command executions passed",
+     "provides": [
+      "execute"
+     ],
+     "requires": "node"
+    }
+   ]
+  },
+  {
+   "backend": "ebpf",
+   "feature": "scalar-calls",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/codegen/ebpf_call_test_internal.h",
+     "symbol": "codegen_test_ebpf_local_calls",
+     "provides": [
+      "encode"
+     ]
+    },
+    {
+     "file": "src/buster/tests/compiler/codegen/ebpf_test_internal.h",
+     "symbol": "codegen_test_ebpf_scalars",
+     "provides": [
+      "encode"
+     ]
+    }
+   ]
+  },
+  {
+   "backend": "ebpf",
+   "feature": "aggregate-calls",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/ebpf/ebpf.c",
+     "text": "aggregate eBPF subprogram arguments are unsupported"
+    }
+   ]
+  },
+  {
+   "backend": "ebpf",
+   "feature": "variadic-calls",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/ebpf/ebpf.c",
+     "text": "variadic functions are unsupported by eBPF"
+    }
+   ]
+  },
+  {
+   "backend": "ebpf",
+   "feature": "indirect-calls",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/ebpf/ebpf.c",
+     "text": "indirect calls are unsupported by the eBPF backend"
+    }
+   ]
+  },
+  {
+   "backend": "ebpf",
+   "feature": "atomics",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/ebpf/ebpf.c",
+     "text": "atomic IR operations are not yet lowered by the eBPF backend"
+    }
+   ]
+  },
+  {
+   "backend": "ebpf",
+   "feature": "simd",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/ebpf/ebpf.c",
+     "text": "exact SIMD intrinsics are unsupported by eBPF; select an explicit source fallback"
+    }
+   ]
+  },
+  {
+   "backend": "ebpf",
+   "feature": "tls",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/ebpf/ebpf.c",
+     "text": "thread-local storage is unsupported by eBPF"
+    }
+   ]
+  },
+  {
+   "backend": "ebpf",
+   "feature": "debug-info",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "ebpf",
+   "feature": "object-link",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "ebpf",
+   "feature": "execution",
+   "status": "unknown",
+   "note": "Kernel verifier/loader evidence not yet mapped."
+  },
+  {
+   "backend": "llvm-bitcode",
+   "feature": "scalar-calls",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
+     "symbol": "llvm_bitcode_test_scalar_abi_wire",
+     "provides": [
+      "encode"
+     ]
+    },
+    {
+     "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
+     "symbol": "llvm_bitcode_test_scalar_abi_runtime",
+     "provides": [
+      "oracle",
+      "execute"
+     ],
+     "requires": "gcc-and-clang"
+    }
+   ]
+  },
+  {
+   "backend": "llvm-bitcode",
+   "feature": "aggregate-calls",
+   "status": "partial",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
+     "symbol": "llvm_bitcode_test_aggregate_va_arg",
+     "provides": [
+      "oracle"
+     ],
+     "requires": "clang"
+    }
+   ],
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/llvm/bitcode.c",
+     "text": "unsupported LLVM aggregate ABI part"
+    }
+   ],
+   "note": "Only the documented aggregate ABI parts are lowered."
+  },
+  {
+   "backend": "llvm-bitcode",
+   "feature": "variadic-calls",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
+     "symbol": "llvm_bitcode_test_canonical_variadics",
+     "provides": [
+      "encode"
+     ]
+    }
+   ],
+   "note": "Canonical va_list operations are built directly in IR and encoded; no independent consumer is mapped for this row."
+  },
+  {
+   "backend": "llvm-bitcode",
+   "feature": "indirect-calls",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "llvm-bitcode",
+   "feature": "atomics",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "llvm-bitcode",
+   "feature": "simd",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "llvm-bitcode",
+   "feature": "tls",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "llvm-bitcode",
+   "feature": "debug-info",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "llvm-bitcode",
+   "feature": "object-link",
+   "status": "not-applicable",
+   "note": "Bitcode is consumed by external LLVM tools; Buster does not link it."
+  },
+  {
+   "backend": "llvm-bitcode",
+   "feature": "execution",
+   "status": "supported",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/llvm/bitcode_test.c",
+     "symbol": "llvm_bitcode_test_consumers",
+     "provides": [
+      "oracle"
+     ],
+     "requires": "clang"
+    }
+   ]
+  },
+  {
+   "backend": "spirv-compute",
+   "feature": "scalar-calls",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/spirv/spirv.c",
+     "text": "SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported"
+    }
+   ]
+  },
+  {
+   "backend": "spirv-compute",
+   "feature": "aggregate-calls",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/spirv/spirv.c",
+     "text": "SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported"
+    }
+   ]
+  },
+  {
+   "backend": "spirv-compute",
+   "feature": "variadic-calls",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/spirv/spirv.c",
+     "text": "SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported"
+    }
+   ]
+  },
+  {
+   "backend": "spirv-compute",
+   "feature": "indirect-calls",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/spirv/spirv.c",
+     "text": "SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported"
+    }
+   ]
+  },
+  {
+   "backend": "spirv-compute",
+   "feature": "atomics",
+   "status": "unsupported-diagnostic",
+   "diagnostics": [
+    {
+     "file": "src/buster/lib/compiler/spirv/spirv.c",
+     "text": "SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported"
+    }
+   ]
+  },
+  {
+   "backend": "spirv-compute",
+   "feature": "simd",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "spirv-compute",
+   "feature": "tls",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "spirv-compute",
+   "feature": "debug-info",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "spirv-compute",
+   "feature": "object-link",
+   "status": "unknown",
+   "note": "Not yet audited for this backend."
+  },
+  {
+   "backend": "spirv-compute",
+   "feature": "execution",
+   "status": "partial",
+   "evidence": [
+    {
+     "file": "src/buster/tests/compiler/spirv/spirv_test.c",
+     "symbol": "spirv_test_transform",
+     "provides": [
+      "encode"
+     ]
+    }
+   ],
+   "note": "Independent spirv-val validation and device execution are not mapped to a registered test here."
+  },
+  {
+   "backend": "gpu-external",
+   "feature": "scalar-calls",
+   "status": "not-applicable",
+   "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
+  },
+  {
+   "backend": "gpu-external",
+   "feature": "aggregate-calls",
+   "status": "not-applicable",
+   "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
+  },
+  {
+   "backend": "gpu-external",
+   "feature": "variadic-calls",
+   "status": "not-applicable",
+   "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
+  },
+  {
+   "backend": "gpu-external",
+   "feature": "indirect-calls",
+   "status": "not-applicable",
+   "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
+  },
+  {
+   "backend": "gpu-external",
+   "feature": "atomics",
+   "status": "not-applicable",
+   "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
+  },
+  {
+   "backend": "gpu-external",
+   "feature": "simd",
+   "status": "not-applicable",
+   "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
+  },
+  {
+   "backend": "gpu-external",
+   "feature": "tls",
+   "status": "not-applicable",
+   "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
+  },
+  {
+   "backend": "gpu-external",
+   "feature": "debug-info",
+   "status": "not-applicable",
+   "note": "Source lowering belongs to the external GPU toolchain; Buster orchestrates it."
+  },
+  {
+   "backend": "gpu-external",
+   "feature": "object-link",
+   "status": "partial",
+   "evidence": [
+    {
+     "file": "tools/gpu_toolchains.c",
+     "anchor": "spirv-dxc-2025.07",
+     "provides": [
+      "oracle"
+     ],
+     "requires": "gpu-toolchains"
+    }
+   ],
+   "note": "Single-module SPIR-V passthrough is byte-identical and revalidated; no multi-module linking."
+  },
+  {
+   "backend": "gpu-external",
+   "feature": "execution",
+   "status": "not-applicable",
+   "note": "Toolchain acceptance profiles are smoke tests, not shader execution."
+  }
+ ]
+}

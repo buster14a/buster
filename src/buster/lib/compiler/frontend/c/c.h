@@ -595,6 +595,15 @@ BUSTER_F_DECL void c_source_cache_clear(CSourceCache* cache);
 BUSTER_F_DECL void c_source_cache_destroy(CSourceCache* cache);
 BUSTER_F_DECL CSourceCacheStats c_source_cache_stats(CSourceCache const* cache);
 
+// Phase-one trigraph replacement: the dialect's default, or an explicit
+// -ftrigraphs/-fno-trigraphs override.
+typedef enum CTrigraphMode
+{
+    C_TRIGRAPH_MODE_DIALECT,
+    C_TRIGRAPH_MODE_ENABLED,
+    C_TRIGRAPH_MODE_DISABLED,
+} CTrigraphMode;
+
 typedef struct CPreprocessOptions CPreprocessOptions;
 struct CPreprocessOptions
 {
@@ -628,6 +637,7 @@ struct CPreprocessOptions
     u32 expansion_limit;
     u32 include_depth_limit;
     CPreprocessDialect dialect;
+    CTrigraphMode trigraph_mode;
     bool disable_external_includes;
     // GNU-as sources use `#` for line comments, so a `.S` run treats a `#`
     // line whose word is no known directive as a comment instead of an
@@ -1506,6 +1516,24 @@ struct CAstStatementStatistics
     u32 fallback_token;
 };
 
+// What lowering read from the tree (GitHub #3102) over one lowering: the
+// top-level function bodies whose conditional nodes it indexed, the nodes, and
+// how each root-conditional query inside an indexed body ended. An answer is
+// a root `?:` the tree reported; a negative is a range holding no `?`; a
+// fallback went to the token scan. Steps are the nodes and parentheses the
+// index build's walks and widening visited, a work count that must stay linear
+// in the input; it leaves out the memo's binary-search comparisons.
+typedef struct CAstLowerStatistics CAstLowerStatistics;
+struct CAstLowerStatistics
+{
+    u64 bodies;
+    u64 conditionals;
+    u64 steps;
+    u64 answers;
+    u64 negatives;
+    u64 fallbacks;
+};
+
 typedef struct CParserResult CParserResult;
 struct CParserResult
 {
@@ -1950,6 +1978,14 @@ struct CIRLowerOptions
     // in its frame slot unless its one write is the entry initializer and an
     // instruction result names it (see IrProgram pin_debug_locals).
     bool pin_debug_locals;
+    // The unit's syntax tree when the caller built one (the driver's
+    // -fc-ast-pilot, GitHub #3102): lowering answers root-conditional splits
+    // from its nodes and runs the token scans for everything else. Null
+    // lowers exactly as before. Read only during the call; the tree and the
+    // preprocessing result must outlive it.
+    CAst const* syntax_tree;
+    // Optional: receives the counts, added to what it already holds.
+    CAstLowerStatistics* ast_lower_statistics;
 };
 
 typedef struct CIRDirectSsaStatistics CIRDirectSsaStatistics;
