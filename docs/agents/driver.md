@@ -1761,6 +1761,12 @@ one `hashTypeRecord` bucket per record modulo `0x3ffff` (`pdb_type_record_hash`)
 and a sparse type-index offset entry per 8 KiB of records. DbgHelp (cdb,
 WinDbg, `symchk`, `dbh`) faults with `0xc0000005` loading a PDB whose TPI
 stream names no hash stream (#3411). The regression is `pdb_test_tpi_hashes`.
+The globals and publics streams index each module's top-level procedures
+(`S_PROCREF`/`S_LPROCREF` naming the module-stream record) and data (copies of
+`S_GDATA32`/`S_LDATA32`); global ones also get an `S_PUB32` and an entry in the
+publics address map, sorted by section and offset (`pdb_gsi_emit`). With these
+empty, DbgHelp loads the PDB only as "public symbols & lines". The regression is
+`pdb_test_global_indexes`.
 
 CodeView names a frame-resident location with `S_DEFRANGE_REGISTER_REL`
 against RBP (x86-64) or X29 (AArch64), the base codegen normalizes FRAME offsets
