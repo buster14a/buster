@@ -123,16 +123,19 @@ BUSTER_GLOBAL_LOCAL String8 compiler_sampling_controller_read(Arena* arena, Stri
     struct stat before = {0}, after = {0};
     bool valid = descriptor >= 0 && fstat(descriptor, &before) == 0 && S_ISREG(before.st_mode) &&
         before.st_size >= 0 && (u64)before.st_size <= limit && limit <= BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT;
-    char8* bytes = valid ? arena_allocate(arena, char8, limit + 1) : 0;
+    // Size the buffer from the observed file, not the limit: one packet export
+    // reads ~100 bounded files and limit-sized buffers exhaust the arena.
+    u64 capacity = valid ? (u64)before.st_size + 1 : 0;
+    char8* bytes = valid ? arena_allocate(arena, char8, capacity) : 0;
     u64 used = 0;
     bool eof = false;
     while (valid && !eof)
     {
-        ssize_t count = read(descriptor, bytes + used, limit + 1 - used);
+        ssize_t count = read(descriptor, bytes + used, capacity - used);
         if (count > 0)
         {
             used += (u64)count;
-            valid = used <= limit;
+            valid = used < capacity;
         }
         else if (!count) eof = true;
         else valid = errno == EINTR;
@@ -590,7 +593,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_export(CompilerSamplingCon
         {
             String8 bytes = compiler_sampling_controller_read(controller->arena,
                 path_join(controller->arena, controller->prepared, name), BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT);
-            bool retained = compiler_sampling_controller_path_safe(name) && bytes.length &&
+            // Quiet children (git checkout/reset/clean) leave empty logs; the
+            // reader still requires each bounded stream, so keep empty files.
+            bool retained = compiler_sampling_controller_path_safe(name) && bytes.pointer &&
                 file_write(path_join(controller->arena, output, name), BUSTER_SLICE_TO_BYTE_SLICE(bytes));
             result = retained && result;
         }
@@ -914,6 +919,24 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_self_test(Arena* arena)
     result = result && owned;
     if (owned)
     {
+        // A packet export reads ~100 bounded files; reads must not reserve the
+        // 8 MiB limit each, and empty child logs must stay distinguishable from
+        // unreadable ones.
+        Arena* bounded = arena_create((ArenaCreation){0});
+        String8 small = path_join(arena, directory, S8("bounded.txt"));
+        String8 empty = path_join(arena, directory, S8("empty.stdout"));
+        bool reads = bounded && file_write(small, BUSTER_SLICE_TO_BYTE_SLICE(S8("x\n"))) &&
+            file_write(empty, (ByteSlice){0});
+        for (u64 i = 0; reads && i < 64; i += 1)
+        {
+            String8 text = compiler_sampling_controller_read(bounded, small, BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT);
+            String8 none = compiler_sampling_controller_read(bounded, empty, BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT);
+            reads = string_equal(text, S8("x\n")) && none.pointer && !none.length;
+        }
+        reads = reads && !compiler_sampling_controller_read(bounded, path_join(arena, directory, S8("missing")),
+            BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT).pointer;
+        if (bounded) arena_destroy(bounded, 1);
+        result = result && reads;
         CompilerSamplingController fixture = {.arena = arena, .evidence = directory,
             .started = os_now_microseconds(), .deadline = os_now_microseconds() + 5000000ull, .success = true};
         string8_list_push(arena, &fixture.phases, S8("stage\tphase\twall_us\texit_status\ttimed_out\tcleanup_failed\tcancelled\tstate\n"));

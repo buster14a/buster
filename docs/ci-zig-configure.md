@@ -21,7 +21,8 @@ without admitting either shard's separate superbuild directory.
 
 - `CMakeCache.txt` and `CMakeFiles/CMakeConfigureLog.yaml`;
 - legacy `CMakeFiles/CMakeOutput.log` and `CMakeFiles/CMakeError.log`, when present;
-- `cmake-profile.json`, when native profiling was enabled.
+- `cmake-profile.json`, when native profiling was enabled;
+- `.ninja_log`.
 
 Zig belongs to the `checks` partition, so the primary #707 evidence is in the
 Windows x86-64 checks and macOS x86-64 checks artifacts. Keep both shards when
@@ -35,6 +36,14 @@ The source, driver, compiler, target, and coverage identities remain in the
 adjacent authoritative `coverage.json`; exact commands and native timings remain
 in `combinations.log`. The manifest is diagnostic-only: it neither certifies
 successful compiler probes nor replaces the coverage/result consumers.
+Each tree's raw `.ninja_log` is retained as `<tree>/ninja_log.txt` (a nonhidden
+name kept by artifact upload), alongside `ninja-log-summary.json`. Manifest
+`retained_path` identifies each file's location in the artifact. Per-output
+summaries are printed as `NINJA_LOG_*` lines; this remains diagnostic-only (#2816).
+The summary reports per-output durations only: `.ninja_log` may append build,
+`test_all`, and analyzer invocations with independently zeroed clocks, so it
+provides no elapsed or phase timing; use [matrix phase records](ci-matrix-phases.md)
+for build-phase wall time.
 
 The collector performs no build or toolchain subprocesses and does not parse or
 sum profile events. It examines at most 4,096 build-root entries and 32 matching
