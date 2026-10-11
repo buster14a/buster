@@ -5425,6 +5425,15 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_relocation_kind(Target target,
                               : (ObjectRelocationKind)(OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12 +
                                                        (kind - ASSEMBLY_RELOCATION_AARCH64_LDST8_LO12));
         break;
+    // GOT spellings exist on ELF only (#3192); Mach-O and COFF have no kind.
+    case ASSEMBLY_RELOCATION_AARCH64_GOT_PAGE21:
+        *object_kind = OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21;
+        valid = !macho && !coff;
+        break;
+    case ASSEMBLY_RELOCATION_AARCH64_GOT_LD64_LO12:
+        *object_kind = OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12;
+        valid = !macho && !coff;
+        break;
     default: valid = false; break;
     }
     return valid;
