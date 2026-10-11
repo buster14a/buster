@@ -522,7 +522,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
                 }
                 if (valid)
                 {
-                    stages[side] = userspace_make(arena, source, build, compiler, S8("busybox"), build);
+                    stages[side] = userspace_make(arena, source, build, compiler, host_compiler, S8("busybox"), build);
                     bool inventory = userspace_inventory(arena, directory, side != 0);
                     stages[side] = stages[side] && inventory;
                     // Keep attempting the independent candidate after a
