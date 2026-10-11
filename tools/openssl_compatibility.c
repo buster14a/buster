@@ -381,6 +381,9 @@ BUSTER_GLOBAL_LOCAL bool openssl_archive(Arena* arena, String8 directory, bool* 
     {
         String8 version[] = {tar, S8("--version")};
         valid = openssl_step(arena, directory, S8("archiver"), (SliceString8)BUSTER_ARRAY_TO_SLICE(version), stopped);
+        // Create the excluded output before tar snapshots directory metadata.
+        // Creating it during traversal would make the input directory change.
+        valid = clang_suite_write(arena, archive, (String8){0}) && valid;
         String8 arguments[] = {tar, S8("--exclude=./evidence.tar.gz"), S8("-czf"), archive, S8("-C"), directory, S8(".")};
         valid = openssl_step(arena, directory, S8("archive"), (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), stopped) && valid;
     }
