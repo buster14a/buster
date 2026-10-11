@@ -35,23 +35,30 @@ static int value(void)
     calls += 1;
     return 37;
 }
+extern void *malloc(__SIZE_TYPE__);
+extern void free(void *);
 static int copy_shape(void)
 {
-    union storage { long alignment; unsigned char bytes[128]; } backing;
-    struct dso object = { .values = {11, 0, 23}, .marker = value() };
-    struct dso *copy = (void *)backing.bytes;
-    unsigned long index;
-    for (index = 0; index < sizeof backing.bytes; index += 1)
+    unsigned char *backing = malloc(128);
+    int failed = 1;
+    if (backing)
     {
-        backing.bytes[index] = 90;
-    }
-    *copy = object;
-    int failed = calls != 1 || copy->base != (void *)0 ||
+        struct dso object = { .values = {11, 0, 23}, .marker = value() };
+        struct dso *copy = (void *)backing;
+        unsigned long index;
+        for (index = 0; index < 128; index += 1)
+        {
+            backing[index] = 90;
+        }
+        *copy = object;
+        failed = calls != 1 || copy->base != (void *)0 ||
                  copy->values[0] != 11 || copy->values[1] != 0 ||
                  copy->values[2] != 23 || copy->marker != 37;
-    for (index = sizeof object; index < sizeof backing.bytes; index += 1)
-    {
-        failed |= backing.bytes[index] != 90;
+        for (index = sizeof object; index < 128; index += 1)
+        {
+            failed |= backing[index] != 90;
+        }
+        free(backing);
     }
     return failed;
 }

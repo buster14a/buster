@@ -32,8 +32,8 @@ fixture as well as compiling both architectures.
 
 
 Zero-byte array members in an aggregate constructor require a resolved empty
-layout and a frame-backed captured value. The x86-64 member writer accepts
-that image without emitting a store, as it does for empty struct/union members.
+layout and a frame-backed captured value. Both native member writers accept
+that image without emitting a store, as they do for empty struct/union members.
 This includes omitted flexible-array tails; only the fixed header belongs to
 the local object's initialization or copy. The registered
 `compiler_driver_test_flexible_initializers` checks zero and designated local
