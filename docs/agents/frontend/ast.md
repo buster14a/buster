@@ -1378,4 +1378,19 @@ and base:
 - **Default path (D against A).** Within ±0.05% Ir on `-fsyntax-only` and on
   `-c` (`-g0`).
 
+The census and the replay's hosted measurements are in audit
+[`2026-10-11T111859Z`](../../performance-audits/2026-10-11T111859Z.md),
+diagnostic only:
+- **Census.** The gate fails for the declined checked casts (0.71 M).
+- **Correctness.** 0 verify mismatches. Objects are byte-identical at `-g0`
+  and `-g` across the four arms.
+- **Ship.** C against B is −1.01 M (−0.011%), with 3,650 fewer machine runs
+  from queries. That passes the gate by 11.7 K Ir.
+- **Default path.** +4 Ir on `-fsyntax-only` and +5 on `-c`.
+- **Code layout.** Four earlier versions with the same work measured from
+  +21 M to +6 M on the pilot, and up to +0.147% on the default path, because
+  the code inlined into `c_parse_expression_type_query` changed. The shipped
+  version keeps the whole decline tail in one out-of-line function that
+  returns its answer by value.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
