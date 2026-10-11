@@ -27,6 +27,9 @@ OWNERSHIP_SCHEMA = "buster-native-qualification-supervisor-v1"
 IDENTITY = ("base", "base_tree", "head", "head_tree")
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 COMMIT = re.compile(r"[a-f0-9]{40}\Z")
+# Matches compiler_closure_preparation_build: mold --no-fork keeps link children
+# from outliving the phase and being adopted by its subreaper (#3372).
+GENERATE = ["generate", "--cc", "clang", "--no-include-tests", "--", "-DCMAKE_EXE_LINKER_FLAGS=-Wl,--no-fork"]
 UINT = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 MEMBER_LIMIT = 8 * 1024 * 1024
 LOG_LIMIT = 1 * 1024 * 1024
@@ -372,11 +375,11 @@ def child_commands(arm: str, expected: dict, prepared: dict, qualification: bool
         roles.append(("candidate2", expected["secondary_head"]))
     for role, commit in roles:
         result[role + "-checkout"] = [*git, "checkout", "--quiet", "--detach", commit]
-        result[role + "-generate"] = [wrapper, "generate", "--cc", "clang", "--no-include-tests"]
+        result[role + "-generate"] = [wrapper, *GENERATE]
         result[role + "-build"] = [wrapper, "build", "--config", "Release", "-t", "ide"]
     if arm == "legacy":
         result["baseline-closure-checkout"] = [*git, "checkout", "--quiet", "--detach", expected["base"]]
-        result["baseline-closure-generate"] = [wrapper, "generate", "--cc", "clang", "--no-include-tests"]
+        result["baseline-closure-generate"] = [wrapper, *GENERATE]
         result["baseline-closure-build"] = [wrapper, "build", "--config", "Release", "-t", "ide"]
         result["baseline-corpus-prepare"] = [wrapper, "bench_throughput", "help"]
     else:
