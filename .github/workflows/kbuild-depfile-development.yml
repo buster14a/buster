@@ -1,0 +1,28 @@
+name: Kbuild depfile development
+on:
+  push:
+    branches: [codex/3484-kbuild-pass-through-depfiles]
+permissions:
+  contents: read
+jobs:
+  oracle:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Record native dependency spelling
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/deps/src" "$RUNNER_TEMP/deps/out"
+          printf '%s\n' 'int answer(void) { return 1; }' > "$RUNNER_TEMP/deps/src/input.c"
+          gcc --version
+          gcc -c "-Wp,-MMD,$RUNNER_TEMP/deps/out/object.d" -o "$RUNNER_TEMP/deps/out/renamed.o" "$RUNNER_TEMP/deps/src/input.c"
+          gcc -S "-Wp,-MMD,$RUNNER_TEMP/deps/out/assembly.d" -o "$RUNNER_TEMP/deps/out/renamed.s" "$RUNNER_TEMP/deps/src/input.c"
+          cat "$RUNNER_TEMP/deps/out/object.d" "$RUNNER_TEMP/deps/out/assembly.d"
+          clang --version
+          clang -c "-Wp,-MMD,$RUNNER_TEMP/deps/out/clang-object.d" -o "$RUNNER_TEMP/deps/out/renamed.o" "$RUNNER_TEMP/deps/src/input.c"
+          clang -S "-Wp,-MMD,$RUNNER_TEMP/deps/out/clang-assembly.d" -o "$RUNNER_TEMP/deps/out/renamed.s" "$RUNNER_TEMP/deps/src/input.c"
+          cat "$RUNNER_TEMP/deps/out/clang-object.d" "$RUNNER_TEMP/deps/out/clang-assembly.d"
