@@ -41003,6 +41003,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_control_call(Unit
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    ByteSlice indexed_input = file_read(arguments->arena, S8("src/buster/tests/compiler/driver/fixtures/basic_c_indexed_callback.c"), (FileReadOptions){0});
+    BUSTER_TEST(arguments, indexed_input.length != 0);
     String8 sources[] = {
         S8(
             "static int factory_calls, invoke_calls, arg_calls, slot;\n"
@@ -41102,6 +41104,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
             "int grouped_condition(int enabled) { RESET(); int value = 0; if (enabled && ((value = (*(holder.callback))(arg(5))) > 0)) { } return value == enabled * 10 && invoke_calls == enabled && arg_calls == enabled; }\n"
             "int grouped_pointer(void) { RESET(); Unary pointer = twice; int value = (*(pointer))(6); return value == 12 && invoke_calls == 1; }\n"
             "int main(void) { return !grouped_member() || !grouped_condition(0) || !grouped_condition(1) || !grouped_pointer(); }\n"),
+        BYTE_SLICE_TO_STRING(8, indexed_input),
     };
     typedef struct CTestCallResultExpected CTestCallResultExpected;
     struct CTestCallResultExpected
@@ -41136,6 +41139,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
         {3, S8("grouped_member"), 3},
         {3, S8("grouped_condition"), 2},
         {3, S8("grouped_pointer"), 1},
+        {4, S8("indexed_plain"), 2},
+        {4, S8("indexed_member"), 2},
+        {4, S8("indexed_weighted"), 2},
+        {4, S8("indexed_effects"), 6},
+        {4, S8("indexed_slot"), 4},
+        {4, S8("indexed_group"), 5},
+        {4, S8("indexed_lazy"), 6},
+        {4, S8("indexed_updates"), 1},
     };
     for (u32 program = 0; program < BUSTER_ARRAY_LENGTH(sources); program += 1)
     {
@@ -41210,6 +41221,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
         }
     }
     String8 rejected[] = {
+        S8("int table[2][2]; int bad(void) { return table[1][0](3); }"),
+        S8("typedef int (*Unary)(int); struct Dsp { Unary uni[2][2][2]; };"
+           "int bad(struct Dsp *s) { return s->uni[1][0][1](); }"),
+        S8("typedef int (*Unary)(int); struct Dsp { Unary uni[2][2][2]; };"
+           "int bad(struct Dsp *s) { return s->uni[1][0][1](1, 2); }"),
+        S8("typedef int (*Unary)(int); struct Dsp { Unary uni[2][2][2]; };"
+           "int bad(struct Dsp *s) { return s->uni[1][0.5][1](3); }"),
         S8("static int scalar(void) { return 1; } int bad(void) { return scalar()(3); }"),
         S8("typedef int (*Unary)(int); static int twice(int value) { return value * 2; }"
            "static Unary get(void) { return twice; } int bad(void) { return get()(); }"),
@@ -41234,7 +41252,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
                 BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified,
                     string_format(temporary.arena, S8("invalid call result case={u32} dialect={u32} form={u32} diagnostics={u32} certified={u32}"),
                         index, dialect, form, lowered.diagnostic_count, (u32)lowered.canonical_ir_certified));
-                if (index == 0 && BUSTER_REQUIRE(arguments, lowered.diagnostic_count != 0))
+                if (index == 4 && BUSTER_REQUIRE(arguments, lowered.diagnostic_count != 0))
                 {
                     BUSTER_TEST_RAW(arguments, string_equal(lowered.diagnostics[0].message,
                         S8("in function 'bad': called object is not a function or function pointer (have 'int')")),
