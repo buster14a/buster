@@ -42417,6 +42417,59 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_control_work_growth(UnitTestArg
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL String8 c_test_nested_tag_source(Arena* arena, u32 depth)
+{
+    u64 capacity = (u64)depth * 96 + 128;
+    char8* bytes = arena_allocate(arena, char8, capacity);
+    u64 length = 0;
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, string_format(arena, S8("struct Tag{u32} {{\n"), level));
+    }
+    c_test_append_source(bytes, capacity, &length, S8("int value;\n"));
+    for (u32 level = depth; level > 1; level -= 1)
+    {
+        c_test_append_source(bytes, capacity, &length, string_format(arena, S8("} member{u32};\n"), level - 1));
+    }
+    c_test_append_source(bytes, capacity, &length, S8("};\n_Static_assert(sizeof(struct Tag0) == sizeof(int), \"nested layout\");\n"));
+    return (String8){.pointer = bytes, .length = length};
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_tag_scan_growth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u64 work[2][C_TEST_PARSE_TAG_SCAN_SLOTS] = {0};
+    u32 depths[] = {1000, 2000};
+    for (u32 sample = 0; sample < BUSTER_ARRAY_LENGTH(depths); sample += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = c_test_nested_tag_source(temporary.arena, depths[sample]);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        u64 before[C_TEST_PARSE_TAG_SCAN_SLOTS];
+        for (u32 slot = 0; slot < C_TEST_PARSE_TAG_SCAN_SLOTS; slot += 1)
+        {
+            before[slot] = c_test_parse_tag_scan_count(slot);
+        }
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        bool valid = preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && analysis.diagnostic_count == 0;
+        BUSTER_TEST_RAW(arguments, valid, string_format(arguments->arena, S8("nested tags depth={u32}"), depths[sample]));
+        for (u32 slot = 0; slot < C_TEST_PARSE_TAG_SCAN_SLOTS; slot += 1)
+        {
+            work[sample][slot] = c_test_parse_tag_scan_count(slot) - before[slot];
+        }
+        BUSTER_TEST(arguments, work[sample][C_TEST_PARSE_TAG_SCAN_INDEX_TOKENS] == preprocess.token_count);
+        c_test_scratch_end(temporary);
+    }
+    for (u32 slot = 0; slot < C_TEST_PARSE_TAG_SCAN_SLOTS; slot += 1)
+    {
+        BUSTER_TEST_RAW(arguments, work[0][slot] > 0 && work[1][slot] * 10 <= work[0][slot] * 22,
+            string_format(arguments->arena, S8("nested-tag scan slot={u32} depth1000={u64} depth2000={u64}"), slot, work[0][slot], work[1][slot]));
+        string_print(S8("NESTED_TAG_SCAN slot={u32} depth1000={u64} depth2000={u64}\n"), slot, work[0][slot], work[1][slot]);
+    }
+    return result;
+}
+
 // One function with `count` labels and `count` gotos, the gotos spread over
 // the labels with a stride coprime to every tested count, so no lookup is
 // answered by the first or last array row (issue #1313).
@@ -62914,6 +62967,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
     C_TEST_FIXTURE(arguments, c_test_label_lookup_work_growth);
     C_TEST_FIXTURE(arguments, c_test_nested_control_work_growth);
+    C_TEST_FIXTURE(arguments, c_test_nested_tag_scan_growth);
     C_TEST_FIXTURE(arguments, c_test_nested_vector_lane_stores);
     C_TEST_FIXTURE(arguments, c_test_promoted_offsetof_static_tables);
     C_TEST_FIXTURE(arguments, c_test_runtime_compound_literal_overrides);
