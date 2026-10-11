@@ -6173,7 +6173,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_group_type_name(CIntegerIrBuilder* builder, u32 
         string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[open + 1]), S8("struct")) &&
         string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[open + 2]), S8("item")))
     {
-        string_print(S8("TYPE_NAME_TRACE path=GROUP type={u32} memo={u32} frame_count={u32} request={u32}\n"),
+        string_print_error(S8("TYPE_NAME_TRACE path=GROUP type={u32} memo={u32} frame_count={u32} request={u32}\n"),
                      result.value, slot ? *slot : 0, builder->queries->frame_count, builder->queries->has_request ? 1u : 0u);
     }
     return result;
@@ -6213,7 +6213,7 @@ BUSTER_C_INTERNAL bool c_ir_query_group_type_name(CIntegerIrBuilder* builder, u3
         string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[open + 1]), S8("struct")) &&
         string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[open + 2]), S8("item")))
     {
-        string_print(S8("TYPE_NAME_TRACE path=QUERY_GROUP type={u32} memo={u32} frame_count={u32} request={u32}\n"),
+        string_print_error(S8("TYPE_NAME_TRACE path=QUERY_GROUP type={u32} memo={u32} frame_count={u32} request={u32}\n"),
                      type_out->value, slot ? *slot : 0, builder->queries->frame_count, builder->queries->has_request ? 1u : 0u);
     }
     return resolved;
@@ -36986,11 +36986,11 @@ c_ir_expression_core_loop:
             {
                 if (!builder->failure_message.length)
                 {
-                    string_print(S8("INDEX_REFUSAL_TRACE start={u32} end={u32} index={u32} first={S8} frames={u32}\n"),
+                    string_print_error(S8("INDEX_REFUSAL_TRACE start={u32} end={u32} index={u32} first={S8} frames={u32}\n"),
                              start, end, index, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start]), machine->frame_count);
                 for (u32 trace_frame = 0; trace_frame < machine->frame_count; trace_frame += 1)
                 {
-                    string_print(S8("INDEX_FRAME_TRACE slot={u32} kind={u32} stage={u32}\n"), trace_frame,
+                    string_print_error(S8("INDEX_FRAME_TRACE slot={u32} kind={u32} stage={u32}\n"), trace_frame,
                                  (u32)machine->frames[trace_frame].kind, (u32)machine->frames[trace_frame].stage);
                 }
                 builder->failure_message = S8("could not form an indexed place");

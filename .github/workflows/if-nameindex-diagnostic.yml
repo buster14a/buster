@@ -55,7 +55,7 @@ jobs:
             "$RUNNER_TEMP/reference-$case_id"
             reference_result=$?
             for allocator in fast quality; do
-              build/Release/ide cc -std=c99 -g0 -fregister-allocator="$allocator" -fverify-codegen "$RUNNER_TEMP/probe-$case_id.c" -o "$RUNNER_TEMP/buster-$case_id-$allocator" > "$RUNNER_TEMP/aggregate-evidence/probe-$case_id-$allocator.log" 2>&1
+              build/Release/ide cc -std=c99 -g0 -fcompile-jobs=1 -fregister-allocator="$allocator" -fverify-codegen "$RUNNER_TEMP/probe-$case_id.c" -o "$RUNNER_TEMP/buster-$case_id-$allocator" > "$RUNNER_TEMP/aggregate-evidence/probe-$case_id-$allocator.log" 2>&1
               compile_result=$?
               runtime_result=999
               if [ "$compile_result" -eq 0 ]; then
