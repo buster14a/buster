@@ -905,6 +905,39 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_x64_has_stack_alignment(ByteSlice code, u6
     return found_mask && found_application;
 }
 
+// Machine scratch for one function is planned from its IR counts (#3413).
+// An ordinary function keeps the thread scratch. One whose bound outgrows
+// any thread scratch arena, including one an outer caller has filled,
+// runs on private reservations installed as the thread's scratch arenas, so
+// a pass's nested scratch grows with it, and the originals come back at the
+// end. A bound past the limit is refused before any pass runs.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_scratch_plan(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CodegenTestMachineScratch small = codegen_test_machine_scratch(arguments->arena, 1000, 800, 40, 0);
+    BUSTER_TEST(arguments, small.fits && !small.replaced && small.restored);
+    BUSTER_TEST(arguments, small.bound < BUSTER_MB(8));
+    // 200,000 rows bound about 513 MB, past the 256 MiB thread scratch.
+    CodegenTestMachineScratch large = codegen_test_machine_scratch(arguments->arena, 200000, 200000, 1, 0);
+    BUSTER_TEST(arguments, large.fits && large.replaced && large.restored);
+    BUSTER_TEST(arguments, large.bound > BUSTER_MB(400) && large.scratch_reserved >= large.bound);
+    BUSTER_TEST(arguments, large.nested_distinct && large.nested_reserved >= large.bound);
+    // Many blocks over many values: the liveness planes dominate the bound.
+    CodegenTestMachineScratch planes = codegen_test_machine_scratch(arguments->arena, 40000, 50000, 2000, 0);
+    BUSTER_TEST(arguments, planes.fits && planes.replaced && planes.restored);
+    BUSTER_TEST(arguments, planes.bound > (u64)2000 * (2 * 50000 / 64) * sizeof(u64) * 16 && planes.bound < BUSTER_MB(600));
+    // The same small function while the other thread arena holds live outer
+    // allocations up to its last 32 KiB: a nested pass could land there, so
+    // the plan must replace both arenas rather than trust the free one.
+    CodegenTestMachineScratch occupied = codegen_test_machine_scratch(arguments->arena, 1000, 800, 40, BUSTER_KB(32));
+    BUSTER_TEST(arguments, occupied.bound == small.bound && occupied.fits && occupied.replaced && occupied.restored);
+    BUSTER_TEST(arguments, occupied.nested_distinct && occupied.nested_reserved >= occupied.bound);
+    CodegenTestMachineScratch refused = codegen_test_machine_scratch(arguments->arena, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0);
+    BUSTER_TEST(arguments, !refused.fits && !refused.replaced && refused.restored);
+    BUSTER_TEST(arguments, refused.bound == UINT64_MAX);
+    return result;
+}
+
 // Exercise executable-image construction under sanitizers without invoking
 // uninstrumented generated code. An absent constant pool is {NULL, 0}.
 BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_executable_data_copy(UnitTestArguments* arguments)
@@ -3815,6 +3848,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_seed_capacity);
     BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_block_local_storage);
     BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_first_scratch_storage);
+    BUSTER_TEST_FIXTURE(arguments, codegen_test_machine_scratch_plan);
     UnitTestResult ebpf_scalars = codegen_test_ebpf_scalars(arguments);
     result.succeeded_test_count += ebpf_scalars.succeeded_test_count;
     result.test_count += ebpf_scalars.test_count;
@@ -3839,6 +3873,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     UnitTestResult kernel_regressions = codegen_test_ebpf_kernel_regressions(arguments);
     result.succeeded_test_count += kernel_regressions.succeeded_test_count;
     result.test_count += kernel_regressions.test_count;
+    BUSTER_TEST_FIXTURE(arguments, codegen_test_ebpf_rejections);
     UnitTestResult verification = codegen_test_verify_invariants(arguments);
     result.succeeded_test_count += verification.succeeded_test_count;
     result.test_count += verification.test_count;

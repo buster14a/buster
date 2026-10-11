@@ -120,7 +120,9 @@ captures (#2741).
   passing oracle after parsed closure verification, separate object and
   compile-link operations, and an exact runtime transcript. That receipt covers
   only its one direct-SSA/non-PIC/fast cell; it is not timing, dedicated-host,
-  A/A or A/B performance admission.
+  A/A or A/B performance admission. Timed real-source runs use
+  `run --real-source DESCRIPTOR ROOT`, and their Zen 5 route is the fixed
+  `throughput-real-source-v1` profile on `compare-pull` (below).
   This does not replace the canonical self-host/correctness gates below.
   The same optional allocation observer can emit a [per-site census](../allocation-census.md)
   with separate zeroing, alignment and OS request totals for offline analysis.
@@ -530,7 +532,11 @@ captures (#2741).
   that can claim performance validation has a row in
   [`docs/performance-validation-v1.json`](../performance-validation-v1.json),
   either a 9700X route with the consumer that checks its evidence, or an
-  explicit `NOT VALIDATED` with a resolution. `tools/bench_direct/performance_inventory_test.py`
+  explicit `NOT VALIDATED` with a resolution and a `claim_route`: the existing
+  9700X route a claim about it must use instead, or `none` for a visible gap
+  with no Zen 5 route yet. A tool that includes `<buster/...>` headers cannot
+  claim the direct-workload route, because each workload is compiled alone
+  against system headers. `tools/bench_direct/performance_inventory_test.py`
   (part of the required benchmark policy check) discovers entry points from
   `build.c`, `uarch_lab.py`, `ide`, `tools/` and the workflows, and fails on an
   unregistered or stale one. Each published 9700X compiler receipt must name
@@ -837,6 +843,51 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    not accepted; a different flag pair needs its own versioned profile.
    `compiler_publish.py` re-validates every raw cell document, the tree probe
    and the recomputed verdict on the 9700X evidence.
+
+   **Issue #2761 opt-in real-source throughput profile.** The same route
+   accepts one fresh exact line `profile: throughput-real-source-v1`, selected
+   by the same every-parent freshness rule; it cannot be combined with an
+   analyzer profile. After the corpus leg,
+   `tools/bench_direct/throughput_real_source.py` stages one fresh root per
+   pinned input outside timing (`THROUGHPUT_REAL_SOURCE_INPUTS`): the cJSON
+   sources from raw GitHub URLs at commit `c859b25d`, the Lua 5.4.8 tarball's
+   `src/` and the SQLite 3.53.4 amalgamation zip, each checked against its
+   pinned SHA-256, plus `tests/basic_cjson_roundtrip.c` from the merge base.
+   Each merge-base descriptor must match its pinned SHA-256. Then the merge
+   base's `./build.sh bench_throughput run --real-source` times each
+   descriptor's own `compile_link_argv` (source to linked executable, `-O2`,
+   direct-SSA, non-PIC) on the matched baseline and candidate binaries, so
+   the merge base must contain the `--real-source` option.
+   The harness re-verifies every staged tree against its descriptor's
+   inventory and tree hash before and after timing.
+
+   Sampling is declared up front: FAST and QUALITY, two warmups per variant,
+   then two fixed rounds of 20 adjacent A/B pairs for each of the six
+   descriptor/mode cells, on CPU 2 with a 120-second per-sample timeout.
+   ABBA blocks and job order follow the recorded seed. Every pair runs: there
+   is no early stop, rerun, trimming or best-of-N. The guard is off, so each
+   cell is `diagnostic (guard disabled)`: medians and per-round sign tests are
+   reported and never gate. The receipt's `throughput_real_source` record and
+   the evidence under `throughput_real_source/` (`summary.json`,
+   `metadata.json`, `staging.json`, the run's own `cpuinfo.txt` and raw
+   samples) are re-validated by `compiler_publish.py`
+   (`validate_throughput_real_source`). It refuses a harness exit other than
+   0, a missing or extra cell, a round with fewer than 20 pairs, a descriptor,
+   tree, archive or file hash other than its pin, compiler hashes other than
+   the measured binaries, and a `cpuinfo.txt` that does not name only the
+   Ryzen 7 9700X. Missing, partial, failed or cancelled evidence therefore
+   fails the check.
+
+   Cost: on a 4-vCPU hosted 2.8 GHz Xeon (diagnostic, not Zen 5), the full
+   profile (two warmups plus 40 timed pairs, so 42 passes over the six cells
+   and both variants) took 508 s, about 12 s per pass, partly alongside other
+   test runs. The slowest cell, SQLite QUALITY, had a 1.96 s median. That
+   fits inside the unchanged 90-minute `compare-pull` job, next to the roughly
+   14-minute ordinary comparison. The leg has its own 30-minute timeout; no
+   job timeout changed. The host needs the
+   descriptors' native dependencies (for Lua, the readline headers and
+   library) and outbound HTTPS to `raw.githubusercontent.com`, `www.lua.org`
+   and `www.sqlite.org`.
 
    **Without perf (#2768).** Before the first timed run the lab runs
    `perf stat -- true` once (`probe_counters`). If perf is missing, exits

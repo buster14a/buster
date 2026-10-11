@@ -482,6 +482,28 @@ The default `-fcanonical-fast` shared pipeline and independent
 [the FAST pipeline contract](../canonical-fast-pipeline.md). Timing is separate
 (`-ftime-canonical-fast -v`); register allocation selection is unchanged.
 
+Canonical inlining is separate from register allocation. Tiny direct-call
+inlining is opt-in at every optimization level: `-fcanonical-inline` enables
+it and `-fno-canonical-inline` disables it (the last of the two wins), and
+`-O*` levels never change it. The matched 9700X tiny-off/on self-host profile
+on #3111 measured no compiler-throughput gain from enabling it (stage-1
+compile wall +1.66%, generated compiler self-host wall +0.68%), so no level
+adopts it by default. The optimizer still enforces `always_inline` requirements when tiny
+inlining is disabled; an impossible requirement produces a source-mapped
+`ir.inline-required` error. Positive 32-bit per-invocation limits are set with
+`-fcanonical-inline-max-callee=N`,
+`-fcanonical-inline-function-growth=N`,
+`-fcanonical-inline-module-growth=N`, and
+`-fcanonical-inline-call-sites=N`. These flags set budgets but do not enable
+tiny inlining; zero is rejected and zero-valued API options normalize to the
+named defaults. Budgets cap callee instruction count, added instructions per
+caller, added instructions per module, and accepted call sites, respectively.
+Verbose output emits one `IR_INLINE` record when tiny inlining is enabled or
+inlining candidates were encountered. Its fields are `tiny`, `candidates`,
+`inlined`, `always_inlined`, `copied_instructions`, `growth`,
+`budget_skips`, `shape_skips`, `linkage_skips`, `recursion_skips`, and
+`visits`. It is compile-work telemetry, not generated-code runtime.
+
 `-fno-frontend-ssa` selects the original memory-form C lowering;
 `-ffrontend-ssa` restores direct SSA for the bounded supported subset. The last
 flag wins. These controls are independent of `-fno-canonical-local-promotion`
@@ -798,6 +820,28 @@ when it fails. The retained witnesses establish what the admitted public
 source and encoder paths did for this snapshot; they do not supply an
 independent architectural oracle for every form. The broader #2931 issue
 remains open for unrelated encoding defects and further proof.
+
+On Mach-O, `.section SEGMENT,SECTION[,TYPE[,ATTRIBUTES]]` and
+`.pushsection` accept the pairs Buster's listing writer represents:
+`__TEXT,__text,regular,pure_instructions`, `__TEXT,__const`,
+`__DATA,__data`, `__DATA,__bss,zerofill`, `__DATA,__thread_data`,
+`__DATA,__thread_bss`, the `__mod_init_func`/`__mod_term_func` pairs with
+`mod_init_funcs`/`mod_term_funcs`, and
+`__TEXT,__eh_frame,coalesced,no_toc+strip_static_syms+live_support`.
+Known `__DWARF,__debug_*` sections retain their debug identities.
+The segment/section pairs normalize to the object's section names, so
+`.text` and `__TEXT,__text` reopen the same section. Unknown pairs, types,
+attributes and extra operands are structured directive diagnostics.
+AArch64 `adrp Xd, sym@TLVPPAGE` and
+`ldr Xt, [Xn, sym@TLVPPAGEOFF]` retain the Darwin TLVP page/load relocations,
+with zero addends; nonzero signed addends are refused because the platform
+linker rejects them. The low half must be a plain 64-bit unsigned-offset
+LDR; ADD, stores, other widths and writeback are refused. The Mach-O-only
+`@GOTPAGE`/`@GOTPAGEOFF` pair uses the existing GOT-load page/load kinds;
+its addend must be zero and its low half must load into a 64-bit integer
+register other than XZR. `compiler_driver_test_macho_aarch64_listing_round_trip` compares
+serialized text and TLVP/GOT kinds, offsets, addends and symbols with direct
+`-c`, for plain functions and defined/undefined TLS in fast/quality modes.
 
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
@@ -1197,25 +1241,48 @@ Its configured native Linux control builds a real archive with host compiler
 and archiver, links an independent host control, and runs both Buster's direct
 and sysroot-default named links.
 
-For requested Linux shared libraries, a located GNU linker script beginning
-with `INPUT`, `GROUP`, `AS_NEEDED`, `OUTPUT_FORMAT`, `OUTPUT_ARCH`, or
-`SEARCH_DIR` and an opening parenthesis is refused as
-`unsupported GNU linker script <path> requested by -l<request>`. Leading
-whitespace and C block comments are accepted for this classification. The
-first script in search order stops lookup; a later ELF library cannot hide it.
-The driver neither interprets script members nor creates an image from them.
-Other ELF missing/malformed-library policy and automatic runtime-provider
-lookup retain their existing behavior. `compiler_driver_test_elf_linker_scripts`
-covers literal script/non-script boundaries, both ELF CPUs, normal/exact
-library spellings, single/multi-input links, first-request error ordering,
-later-ELF/script precedence, and preservation of an existing output.
-General GNU linker-script interpretation remains separate work.
+For requested Linux shared libraries, located GNU linker scripts support
+`INPUT(...)`, `GROUP(...)` and `AS_NEEDED(...)`, including nested commands,
+commas, quoted filenames, whitespace and C block comments. Members name ELF64
+shared libraries or further scripts: bare filenames, absolute paths and `-lX`
+(including `-l:FILE`). Bare members search beside the script, then the current
+directory, then the existing explicit/default ELF roots. Named members use the
+existing ELF roots. Absolute members are prefixed with the sysroot when their
+script is inside that sysroot; `=` and `$SYSROOT` force that prefix, following
+[GNU ld's file-command rules](https://sourceware.org/binutils/docs/ld.html).
+Explicit `-L` paths retain their literal meaning.
+
+Expansion uses an explicit worklist in member order, limited to 32 script files
+on a dependency chain, 32 nested command levels, 4,096 total script members per
+invocation, and 65,536 bytes per script. Cycles reach the same depth/count refusal;
+they never recurse on the C stack. DSO identity comes from `DT_SONAME` when
+present, with filename spelling retained otherwise; repeated identities create
+one dynamic-library entry. Worklist and expanded-library storage is allocated
+only when a script is encountered.
+
+This is a shared-library subset: archive/object members are refused, including
+glibc's `libc_nonshared.a`, rather than dropped or admitted as shared objects.
+`GROUP` preserves member order without archive rescanning. `AS_NEEDED` includes
+its members unconditionally, just like `INPUT`; it does not implement GNU ld's
+as-needed selection. Other commands, including `OUTPUT_FORMAT`, `OUTPUT_ARCH`
+and `SEARCH_DIR`, remain unsupported. Unsupported syntax, archive members and
+bounds failures retain `unsupported GNU linker script <path> requested by
+-l<request>`; missing DSOs retain the original request's missing-library error.
+A later DSO cannot hide the first located script. Automatic runtime lookup and
+the existing special treatment of `-lc` are unchanged.
+
+`compiler_driver_test_elf_linker_scripts` covers both ELF CPUs, normal/exact
+requests, single/multi-input links, member forms, comments, SONAME identity,
+nested scripts at/beyond the cap, cycles, parser byte/member/command-depth bounds,
+unsupported grammar, first-request error ordering and preserved output on refusal.
+On native Linux with a configured GCC or Clang driver, a host-style
+`INPUT(-lncursesw)` fixture compares its `DT_NEEDED` identity with GNU ld.
 
 On macOS and iOS, `-lNAME` searches explicit `-L` roots in order, probing
 `libNAME.tbd` before `libNAME.dylib` within each root, then
 `<sysroot>/usr/lib` when a sysroot was supplied. A compatible thin or fat
 Mach-O dylib contributes its `LC_ID_DYLIB` install name and current and
-compatibility versions to `LC_LOAD_DYLIB`; TAPI YAML TBD v1-v4 stubs provide
+compatibility versions to `LC_LOAD_DYLIB`; TAPI YAML TBD v1-v4 and JSON TBD v5 stubs provide
 the same metadata, and wrong-CPU or wrong-platform candidates are skipped.
 Mach-O dylib platforms come from `LC_BUILD_VERSION` and `LC_VERSION_MIN_*`;
 TBD v4 `targets:` entries must match both architecture and platform suffix,
@@ -1225,10 +1292,40 @@ including zero; absent TBD current/compatibility versions default to 1.0.0,
 while a present malformed version makes the stub unusable. `-lc` and `-lm` keep
 their existing implicit behavior. Without a located candidate, only the
 allowlisted Apple system libraries retain the legacy `/usr/lib/libNAME.dylib`
-fallback; other requests fail with `cannot find -l<request>`. TBD v5 JSON is
-unsupported. `compiler_driver_test_mach_library_search` covers parser bounds,
+fallback; other requests fail with `cannot find -l<request>`. TBD v5 reads only
+`main_library`: `target_info[].target` must match both CPU and platform, and
+`install_names`, `current_versions` and `compatibility_versions` honor their
+optional `targets` lists. Inlined `libraries` do not supply the identity.
+The JSON scan validates the complete document with a fixed 64-frame stack;
+malformed/truncated input and deeper nesting are unusable. Ordinary metadata
+strings borrow mapped bytes; escaped strings/keys are decoded into the caller
+arena, including Unicode surrogate pairs. Invalid Unicode metadata and embedded
+NUL are refused. Ambiguous duplicate identity fields
+and overlapping target-specific metadata are refused. `compiler_driver_test_mach_library_search` covers parser bounds,
 architecture selection, search order, versions, fallback, refusal and archive
 interaction on every host without running the cross-linked image.
+
+`-framework NAME` searches every explicit `-F` root in order, then
+`<sysroot>/System/Library/Frameworks`, or `/System/Library/Frameworks` when
+no sysroot is supplied. Within each root it probes `NAME.framework/NAME.tbd`
+before `NAME.framework/NAME`. The same Mach-O/TAPI CPU and platform checks
+apply; unusable candidates are skipped. YAML TAPI stubs may describe AArch64
+libraries as `arm64e`; this ARM64 CPU subtype is accepted for ordinary AArch64
+consumers, while macOS/iOS platform matching remains exact. Unknown architecture
+spellings and other CPU families remain incompatible. The located file supplies the install
+name and both versions, including zero, rather than the search path. Duplicate
+install names produce one load command. A framework without a compatible file
+fails with `framework not found: NAME` before output publication, preserving
+any existing output. SDK-less links also require a real file: there is no
+framework-name allowlist or guessed load path. Supply `-F` or a sysroot for
+cross links. `compiler_driver_test_mach_framework_search` covers synthetic
+framework trees for macOS and iOS on every host, including both single-source
+and multi-input link paths, without executing the foreign image. On native
+macOS, the same fixture resolves the active SDK through `xcrun` and records
+`MACH_FRAMEWORK_SDK` candidate paths, formats, sizes, statuses, install names
+and packed versions for AppKit, Metal, QuartzCore and Foundation. Every one
+must have a compatible identity; the Release self-host gate also links and
+executes against these real framework identities.
 
 ELF executable data placement honors both page and requested object alignment.
 Align the final virtual address, not only its file offset: an initialized
@@ -1636,6 +1733,29 @@ Buster-compiled main defining the other thread-local, and the test checks
 every descriptor appears relaxed and the image prints the same values as a
 host-linked control.
 
+## Native linker identity
+
+`ide cc -Wl,--version` and `ide cc -Xlinker --version` print
+`Buster native linker` followed by the effective target triple and exit
+successfully without reading source or standard input, compiling, spawning an
+external tool, or writing an artifact. `-march=x86-64 -O0 -g` may accompany the query. The independent
+`-m64` driver capability is tracked by
+[#3458](https://github.com/buster14a/buster/issues/3458). The typed invocation API exposes
+`COMPILER_DRIVER_QUERY_LINKER_VERSION`; execution returns the identity in
+`CompilerDriverResult.output`.
+
+The query requires a native x86-64/AArch64 link action and a supported native
+OS. The raw linker request must contain exactly `--version`; other linker
+arguments, compiler queries, compile-only actions, bitcode and GPU pipelines
+are refused. A SONAME operand named `--version` retains its ordinary meaning.
+The identity makes no GNU ld/LLD compatibility or invented version claim.
+Buster currently links in process and has no external-linker selector.
+
+Meson versions without a Buster linker detection/class implementation still
+reject this truthful identity. Native query support alone does not qualify
+Meson/QEMU configuration: upstream recognition and tests against unmodified
+Meson are required under [#3475](https://github.com/buster14a/buster/issues/3475).
+
 ## Pass-through options
 
 `-Wl,a,b,c` produces three individual linker arguments, in order. Each
@@ -1660,11 +1780,11 @@ preprocessing, assembly-text and bitcode output. `-rdynamic` uses the same
 export validation. Unknown options, entry overrides, wrapping, archive-mode
 switches, runtime paths, version scripts, and other `-z` modes are refused.
 
-`-Wp,` and `-Wa,` are unsupported and are never warning options. This includes
-preprocessor macro/include operations and dependency requests. Direct `-D`,
-`-U`, and `-I` remain available; `-Wp,-M*` stays refused. The driver supports
-the bounded `-MD`/`-MMD` dependency-file contract described below; standalone
-`-M`, `-MM`, and `-MG` remain unsupported.
+`-Wp,` and `-Wa,` are never warning options. Only the exact
+`-Wp,-MD,PATH` and `-Wp,-MMD,PATH` dependency spellings described below are
+supported; other pass-through requests, including macro/include operations,
+are refused. Direct `-D`, `-U`, and `-I` remain available.
+Standalone `-M`, `-MM`, and `-MG` remain unsupported.
 
 ## Dependency files
 
@@ -1687,6 +1807,25 @@ with a file-write diagnostic.
 The depfile is atomically published only after successful compilation and
 object publication, so a failed compile preserves existing object and depfile
 contents.
+
+The bounded Linux Kbuild/BusyBox spellings `-Wp,-MMD,PATH` and
+`-Wp,-MD,PATH` reuse that collector and writer for exactly one native
+x86-64/AArch64 C input. They support `-c` and `-S -o FILE`; assembly must
+name its output file, so stdout output is refused. The path must be nonempty,
+contain no comma, newline, carriage return or NUL, and cannot be `-` or
+alias the source or artifact. Repeated pass-through dependency requests,
+additional comma-separated operations, direct `-MD/-MMD/-MF/-MT/-MQ/-MP`
+modifiers, retained in-memory objects, libraries and unsupported output modes
+are refused before compilation. Direct dependency options retain their C
+`-c` contract; this does not enable direct `-MD -S`.
+
+The default escaped target is the actual object or assembly output path,
+matching Clang's handling of these pass-through spellings. GCC uses the
+source basename with an `.o` suffix instead; this target-name difference is
+explicit. Linux Kbuild's `fixdep` supplies the real build target separately.
+A depfile is published only after its named artifact succeeds. A failed
+source or artifact write preserves the prior depfile; failure to publish the
+depfile reports failure even if the artifact has already been published.
 
 ## Warning options
 
@@ -1846,13 +1985,17 @@ sized from the by-value nesting depth of the initialized type
 a flat table does not limit them. Driver regressions
 (`compiler_driver_test_large_static_initializers`) compile with `-c` a
 1,000,000-element `unsigned char` array, a 250,000-entry `const char *` table
-and a 200,000-entry struct array. Remaining limits: a flat initializer past
-about 1.7 million elements stops in `c_parse_typed_constant`; a single
-function of about 225,000 non-foldable statements exhausts the machine scratch
-in `codegen.c` (both tracked by #2527); and an array of
-`struct { int a; const char *s; short v[3]; }` compiles to 220,000 entries but
-aborts with an arena validation failure from 230,000 (#3254). The mobile
-builds of the driver fixture use smaller counts to keep their deadlines. A reservation that cannot be carved
+and a 200,000-entry struct array. Semantic analysis no longer sizes its
+initializer work by the tokens of the whole braced list: the typed-constant
+task stack in `c_parse_typed_constant` grows on demand, and the array-count
+inference frames and continuations are also bounded by the type count.
+`c_test_parse_large_static_initializers` analyses a 230,000-entry
+`struct { int a; const char *s; short v[3]; }` table (#3254) and a
+4,000,000-element byte table, both of which aborted on the 256 MiB thread
+scratch before. Measured with `ide cc -c`: 8,000,000 bytes take 3.2 s and
+471 MB; 1,000,000 entries of that struct take 15 s and 2.7 GB, so time, not a
+reservation, is the next limit. The mobile builds of the driver fixture use
+smaller counts to keep their deadlines. A reservation that cannot be carved
 is a positioned `initializer working storage exceeds the scratch reservation`
 or `initializer nesting exceeds its capacity` diagnostic and a failed result.
 
@@ -1863,10 +2006,31 @@ stack grows with the widest path through the type (`c_ir_emit_zero_value`),
 the cursor stack follows the type's nesting depth, and the unit-lifetime query
 stack gets its own mapping when it would leave lowering less than half of the
 thread scratch. `c_test_ir_local_table_zero_scratch` lowers a 20,000-entry
-local table that previously exhausted the scratch (#2527); generating machine
-code for a function that large still aborts in the fast register allocator
-(#3413). A task stack that cannot grow is the diagnostic
+local table that previously exhausted the scratch (#2527). A task stack that
+cannot grow is the diagnostic
 `aggregate zero-initializer exceeds the lowering scratch reservation`.
+
+### Large functions in the backend
+
+Machine selection, placement, scheduling and encoding of one function share
+the thread scratch, which is 256 MiB by default. `codegen_machine_scratch_bound` plans the
+function's need from its IR instruction, value and block counts before
+selection. The plan has a linear term several times the measured peak (about
+290 bytes per machine row under FAST, 410 under QUALITY) and a term for the
+FAST allocator's block-by-register liveness planes. When the bound exceeds
+what is left of the thread scratch, `codegen_machine_scratch_begin` installs
+private reservations of that size as the thread's scratch arenas for this one
+function, so nested pass scratch grows with it too, and restores the originals
+afterwards. Ordinary functions, including every function of the self-host,
+never take this path. A bound past 256 GiB, or a reservation the system
+refuses, fails the function with `kind=capacity reason=machine-scratch`
+instead of an arena validation abort (#3413).
+`c_test_large_function_machine_scratch_runtime` compiles and runs a
+5,000-entry local table, about 555,000 machine rows in one block, under both
+allocators; `codegen_test_machine_scratch_plan` checks the plan, the
+replacement and its restoration. Backend time, not memory, is the next limit
+for such functions: 128,000 and 256,000 `sink += x + i;` statements in one
+function take about 10 s and 42 s.
 
 ## ELF TLS companion lookup
 

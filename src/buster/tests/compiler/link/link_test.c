@@ -6973,6 +6973,238 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_mach_got_loads(UnitTestArguments* a
     return result;
 }
 
+typedef struct LinkTestMachFixup
+{
+    String8 symbol;
+    u64 segment_offset;
+    s64 addend;
+    u8 segment;
+} LinkTestMachFixup;
+
+BUSTER_GLOBAL_LOCAL u64 link_test_uleb128_read(u8 const* bytes, u64 end, u64* cursor)
+{
+    u64 value = 0;
+    u32 shift = 0;
+    bool more = true;
+    while (more && *cursor < end)
+    {
+        u8 byte = bytes[(*cursor)++];
+        value |= shift < 64 ? (u64)(byte & 0x7f) << shift : 0;
+        shift += 7;
+        more = (byte & 0x80) != 0;
+    }
+    return value;
+}
+
+BUSTER_GLOBAL_LOCAL s64 link_test_sleb128_read(u8 const* bytes, u64 end, u64* cursor)
+{
+    u64 value = 0;
+    u32 shift = 0;
+    u8 byte = 0x80;
+    while ((byte & 0x80) && *cursor < end)
+    {
+        byte = bytes[(*cursor)++];
+        value |= shift < 64 ? (u64)(byte & 0x7f) << shift : 0;
+        shift += 7;
+    }
+    if (shift < 64 && (byte & 0x40))
+    {
+        value |= ~UINT64_C(0) << shift;
+    }
+    return (s64)value;
+}
+
+// Decodes the classic dyld rebase (`bind` false) or bind stream of a linked
+// Mach-O image into one entry per fixed-up pointer, reading only the opcodes
+// link_native_executable_mach_o64 writes.  Returns UINT32_MAX for anything else.
+BUSTER_GLOBAL_LOCAL u32 link_test_mach_fixups(ByteSlice image, bool bind, LinkTestMachFixup* fixups, u32 capacity)
+{
+    u32 count = 0;
+    u64 stream = 0;
+    u64 stream_size = 0;
+    u32 command_count = image.length >= 32 && link_read_u32(image.pointer, 0) == 0xfeedfacf ? link_read_u32(image.pointer, 16) : 0;
+    u64 command = 32;
+    for (u32 command_index = 0; command_index < command_count && command + 8 <= image.length; command_index += 1)
+    {
+        u32 size = link_read_u32(image.pointer, command + 4);
+        if (size < 8 || size > image.length - command)
+        {
+            break;
+        }
+        if (link_read_u32(image.pointer, command) == 0x80000022 && size >= 24)
+        {
+            stream = link_read_u32(image.pointer, command + (bind ? 16 : 8));
+            stream_size = link_read_u32(image.pointer, command + (bind ? 20 : 12));
+        }
+        command += size;
+    }
+    bool valid = stream <= image.length && stream_size <= image.length - stream;
+    u64 end = stream + stream_size;
+    u64 cursor = stream;
+    LinkTestMachFixup current = {0};
+    bool done = !valid || !stream_size;
+    while (!done && valid)
+    {
+        if (cursor >= end)
+        {
+            valid = false;
+            continue;
+        }
+        u8 byte = image.pointer[cursor++];
+        u8 opcode = byte & 0xf0;
+        u8 immediate = byte & 0x0f;
+        if (byte == 0)
+        {
+            done = true;
+        }
+        else if (opcode == 0x10 || (bind && (opcode == 0x30 || byte == 0x51)))
+        {
+            // The pointer type and the library ordinal hold for every entry.
+            done = false;
+        }
+        else if (bind && opcode == 0x40)
+        {
+            current.symbol = (String8){.pointer = (char8*)image.pointer + cursor, .length = 0};
+            while (cursor < end && image.pointer[cursor])
+            {
+                cursor += 1;
+                current.symbol.length += 1;
+            }
+            cursor += 1;
+        }
+        else if (bind && opcode == 0x60)
+        {
+            current.addend = link_test_sleb128_read(image.pointer, end, &cursor);
+        }
+        else if ((bind && opcode == 0x70) || (!bind && opcode == 0x20))
+        {
+            current.segment = immediate;
+            current.segment_offset = link_test_uleb128_read(image.pointer, end, &cursor);
+        }
+        else if ((bind && byte == 0x90) || (!bind && byte == 0x51))
+        {
+            if (count < capacity)
+            {
+                fixups[count] = current;
+            }
+            count += 1;
+            current.segment_offset += sizeof(u64);
+        }
+        else
+        {
+            valid = false;
+        }
+    }
+
+    return valid && count <= capacity ? count : UINT32_MAX;
+}
+
+BUSTER_GLOBAL_LOCAL u32 link_test_mach_fixup_matches(LinkTestMachFixup* fixups, u32 count, u64 segment_offset, String8 symbol, s64 addend)
+{
+    u32 matches = 0;
+    for (u32 index = 0; count != UINT32_MAX && index < count; index += 1)
+    {
+        matches += fixups[index].segment == 2 && fixups[index].segment_offset == segment_offset && string_equal(fixups[index].symbol, symbol) &&
+                           fixups[index].addend == addend
+                       ? 1u
+                       : 0u;
+    }
+    return matches;
+}
+
+// #3547: a pointer-sized word in __DATA that names an import is a dyld bind
+// site carrying its addend, as Apple ld writes it -- not a rebase of the
+// import's call stub, which is not the address dyld or any other image gives
+// the symbol, and for data is code.  A pointer to a definition here is still
+// rebased, and __const words take the same binds because this writer keeps
+// __const in the writable __DATA segment, where ld64's __DATA_CONST would
+// also be written by dyld.  The two programs below are the issue's:
+// `int *optind_pointer = &optind;` and `int (*puts_pointer)(const char *) = puts;`.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_mach_import_pointers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ObjectSymbol symbols[] = {
+        {.name = S8("main"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("optind"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        {.name = S8("puts"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("local"), .value = 24, .size = 8, .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA},
+    };
+    // optind_pointer, puts_pointer, &optind + 12 and local_pointer.
+    u8 data[32] = {0};
+    u8 constant[16] = {0};
+    ObjectRelocation relocations[] = {
+        {.offset = 0, .section = OBJECT_SECTION_DATA, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        {.offset = 8, .section = OBJECT_SECTION_DATA, .symbol = 2, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        {.addend = 12, .offset = 16, .section = OBJECT_SECTION_DATA, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        {.offset = 24, .section = OBJECT_SECTION_DATA, .symbol = 3, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        {.addend = -8, .offset = 8, .section = OBJECT_SECTION_READ_ONLY_DATA, .symbol = 2, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+    };
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        bool x86 = architecture == 0;
+        Target target = {.cpu_arch = x86 ? CPU_ARCH_X86_64 : CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS};
+        u8 x86_text[] = {0xc3};
+        u32 aarch64_text[] = {0xd65f03c0};
+        ByteSlice text = x86 ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_text) : (ByteSlice){.pointer = (u8*)aarch64_text, .length = sizeof(aarch64_text)};
+        symbols[0].size = text.length;
+        ObjectFile object = link_test_object_make(arguments->arena, target, text, symbols, BUSTER_ARRAY_LENGTH(symbols), relocations,
+                                                  BUSTER_ARRAY_LENGTH(relocations));
+        object.sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data);
+        object.sections[OBJECT_SECTION_DATA].alignment = 8;
+        object.sections[OBJECT_SECTION_READ_ONLY_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(constant);
+        object.sections[OBJECT_SECTION_READ_ONLY_DATA].alignment = 8;
+        String8 output_path =
+            link_test_temporary_executable_path(arguments->arena, x86 ? S8("buster-mach-import-pointers-x86") : S8("buster-mach-import-pointers-aarch64"), S8(""));
+        NativeExecutableLinkOptions options = {.output_path = output_path, .entry_symbol = S8("main")};
+        NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &object, options);
+        u64 data_header = 0;
+        u64 const_header = 0;
+        bool found = linked.error == LINK_ERROR_NONE && link_test_mach_section_find(linked.executable, S8("__DATA"), S8("__data"), &data_header) &&
+                     link_test_mach_section_find(linked.executable, S8("__DATA"), S8("__const"), &const_header);
+        if (BUSTER_REQUIRE(arguments, found))
+        {
+            ByteSlice image = linked.executable;
+            UnitTestResult layout = link_test_mach_linkedit_layout(arguments, image, true, 0);
+            result.succeeded_test_count += layout.succeeded_test_count;
+            result.test_count += layout.test_count;
+            // __data opens the segment, so its offsets are segment offsets.
+            u64 data_address = link_read_u64(image.pointer, data_header + 32);
+            u32 data_offset = link_read_u32(image.pointer, data_header + 48);
+            u64 const_segment_offset = link_read_u64(image.pointer, const_header + 32) - data_address;
+            LinkTestMachFixup binds[16];
+            LinkTestMachFixup rebases[16];
+            u32 bind_count = link_test_mach_fixups(image, true, binds, BUSTER_ARRAY_LENGTH(binds));
+            u32 rebase_count = link_test_mach_fixups(image, false, rebases, BUSTER_ARRAY_LENGTH(rebases));
+            // Two __got slots, then the four import pointers.
+            BUSTER_TEST(arguments, bind_count == 6 && rebase_count == 1);
+            BUSTER_TEST(arguments, link_test_mach_fixup_matches(binds, bind_count, 0, S8("_optind"), 0) == 1);
+            BUSTER_TEST(arguments, link_test_mach_fixup_matches(binds, bind_count, 8, S8("_puts"), 0) == 1);
+            BUSTER_TEST(arguments, link_test_mach_fixup_matches(binds, bind_count, 16, S8("_optind"), 12) == 1);
+            BUSTER_TEST(arguments, link_test_mach_fixup_matches(binds, bind_count, const_segment_offset + 8, S8("_puts"), -8) == 1);
+            // Only the local pointer is rebased, and it holds the definition.
+            BUSTER_TEST(arguments, rebase_count == 1 && rebases[0].segment == 2 && rebases[0].segment_offset == 24);
+            BUSTER_TEST(arguments, link_read_u64(image.pointer, data_offset + 24) == data_address + 24);
+            // dyld writes the bound words; the file leaves them zero rather
+            // than holding a stub address.
+            BUSTER_TEST(arguments, link_read_u64(image.pointer, data_offset) == 0 && link_read_u64(image.pointer, data_offset + 8) == 0 &&
+                                       link_read_u64(image.pointer, data_offset + 16) == 0);
+        }
+        // An absolute word in code is no bind site, and imported data still
+        // cannot be reached from there.
+        if (x86)
+        {
+            u8 absolute_text[] = {0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xc3};
+            ObjectRelocation code_relocation = {.offset = 2, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+            symbols[0].size = sizeof(absolute_text);
+            ObjectFile code = link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(absolute_text), symbols,
+                                                    BUSTER_ARRAY_LENGTH(symbols), &code_relocation, 1);
+            NativeExecutableLinkResult refused = link_native_executable(arguments->arena, &code, options);
+            BUSTER_TEST(arguments, refused.error == LINK_ERROR_RELOCATION && string_equal(refused.symbol, S8("optind")));
+        }
+    }
+    return result;
+}
+
 // Finds the single `mov eax, [rip + disp32]; ret` in .text and returns the
 // absolute address it loads together with the TLS directory's AddressOfIndex
 // and the file bytes of its StartAddressOfRawData..EndAddressOfRawData template.
@@ -7156,6 +7388,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, link_test_mach_got_loads);
+    BUSTER_TEST_FIXTURE(arguments, link_test_mach_import_pointers);
     BUSTER_TEST_FIXTURE(arguments, link_test_elf_stack_contract);
     UnitTestResult tls_membership = link_test_tls_membership(arguments);
     result.succeeded_test_count += tls_membership.succeeded_test_count;
@@ -7343,6 +7576,50 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         relocations[1].addend = UINT16_MAX;
         BUSTER_TEST(arguments,
                     link_pe_resolved_codeview(arguments->arena, &object, &debug_module, object_output_sections, object_section_offsets, 5).length == 0);
+        relocations[1].addend = 0;
+        // Per-module grouping must match resolving each module against every
+        // relocation: relocations out of offset order, a second write to one
+        // field (the later relocation wins), an empty module, and modules
+        // that overlap or descend, which take the full-scan path.
+        ObjectRelocation reversed[BUSTER_ARRAY_LENGTH(relocations) + 1];
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(relocations); index += 1)
+        {
+            reversed[index] = relocations[BUSTER_ARRAY_LENGTH(relocations) - 1 - index];
+        }
+        reversed[BUSTER_ARRAY_LENGTH(relocations)] = relocations[2];
+        reversed[BUSTER_ARRAY_LENGTH(relocations)].addend = 7;
+        object.relocations = reversed;
+        object.relocation_count = BUSTER_ARRAY_LENGTH(reversed);
+        ObjectDebugModule layouts[][4] = {
+            {{.symbols_offset = 0, .symbols_size = 8}, {.symbols_offset = 8, .symbols_size = 0}, {.symbols_offset = 8, .symbols_size = 16}, {.symbols_offset = 24, .symbols_size = 24}},
+            {{.symbols_offset = 0, .symbols_size = 16}, {.symbols_offset = 8, .symbols_size = 16}, {.symbols_offset = 24, .symbols_size = 8}, {.symbols_offset = 32, .symbols_size = 16}},
+            {{.symbols_offset = 24, .symbols_size = 24}, {.symbols_offset = 0, .symbols_size = 8}, {.symbols_offset = 8, .symbols_size = 16}, {.symbols_offset = 40, .symbols_size = 8}},
+        };
+        for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(layouts); layout += 1)
+        {
+            object.debug_modules = layouts[layout];
+            object.debug_module_count = BUSTER_ARRAY_LENGTH(layouts[layout]);
+            ByteSlice grouped[BUSTER_ARRAY_LENGTH(layouts[layout])];
+            link_pe_resolved_codeview_modules(arguments->arena, &object, object_output_sections, object_section_offsets, 5, grouped);
+            for (u32 module = 0; module < object.debug_module_count; module += 1)
+            {
+                ByteSlice expected = link_pe_resolved_codeview(arguments->arena, &object, object.debug_modules + module, object_output_sections,
+                                                               object_section_offsets, 5);
+                BUSTER_TEST(arguments, grouped[module].length == expected.length &&
+                                           (!expected.length || memcmp(grouped[module].pointer, expected.pointer, expected.length) == 0));
+            }
+        }
+        object.debug_modules = layouts[0];
+        object.debug_module_count = BUSTER_ARRAY_LENGTH(layouts[0]);
+        ByteSlice last_write[BUSTER_ARRAY_LENGTH(layouts[0])];
+        link_pe_resolved_codeview_modules(arguments->arena, &object, object_output_sections, object_section_offsets, 5, last_write);
+        u32 overwritten = 0;
+        BUSTER_TEST(arguments, last_write[2].length == 16);
+        if (last_write[2].length == 16)
+        {
+            memcpy(&overwritten, last_write[2].pointer, sizeof(overwritten));
+            BUSTER_TEST(arguments, overwritten == (u32)((s64)symbols[1].value + (s64)expected_section_offsets[1] + 7));
+        }
     }
     Target target = target_native;
     {

@@ -30,6 +30,17 @@ returns, partial eightbytes and tail fields with both frontend forms and
 both allocators; desktop lanes execute the native
 fixture as well as compiling both architectures.
 
+
+Zero-byte array members in an aggregate constructor require a resolved empty
+layout and a frame-backed captured value. Both native member writers accept
+that image without emitting a store, as they do for empty struct/union members.
+This includes omitted flexible-array tails; only the fixed header belongs to
+the local object's initialization or copy. The registered
+`compiler_driver_test_flexible_initializers` checks zero and designated local
+initializers, nested array fields, one evaluation and untouched tail storage
+on six native targets, both allocators, both frontend forms and O0/O2. Matching desktop
+hosts execute its independent expected-value fixture.
+
 ## Machine instruction selection and scheduling
 
 - Debug-location seed storage starts with a small arena-backed array and grows
@@ -381,6 +392,18 @@ fixture as well as compiling both architectures.
   through `machine_a64_cast_copies_constant` and `MACHINE_A64_MOV_RI`; its
   classification pass counts the copy-cast reads and the marking runs after
   branch fusion against the same use counts, edge arguments included.
+- x86-64 selection folds a constant `INDEX` index into its base address
+  offset (`machine_x64_index_constant_offset`). When the index is a
+  `CONSTANT_INTEGER` whose value, read at the index's width and signedness, is
+  non-negative and whose scaled offset fits a 32-bit displacement, the element
+  address is selected through `machine_x64_select_place_address_offset`. A
+  direct frame array then gets one `LEA_FRAME`, which the frame-address recipe
+  above rematerializes; a pointer gets one `LEA_OFFSET`, or a copy at offset
+  zero. Otherwise the result is a mutable copy of the base plus a scaled index,
+  which no recipe covers. A constant that only such rows and constant-copying
+  casts read is `fused_dead`. A `GLOBAL` base folds like a pointer, so its
+  element address is not rematerialized. Negative indices keep the computed
+  form. AArch64 selection does not fold `INDEX` indices yet.
 - FAST/QUALITY start a join's or loop header's general block parameters in
   registers. `machine_fast_parameter_contract` gives each non-pinned,
   non-mutable general parameter a caller-saved (or already-saved) register
@@ -1243,6 +1266,25 @@ pinned to the same register.
 `machine_test_x64_inline_port_environment` and
 `c_test_inline_assembly_constraint_unions` hold the byte oracles (GNU as 2.47)
 and the neighbouring refusals; only unprivileged MXCSR/x87 round trips execute.
+
+## Narrow x86-64 call results
+
+Ordinary Boolean and 8/16-bit integer results are captured from RAX with
+zero/sign extension at their ABI width, before their canonical value reaches a
+branch, conversion or spill. Foreign callees may leave the upper RAX bits
+unspecified. `machine_x64_receive_call_result` uses the existing scalar shape's
+extension opcode for direct and indirect calls; aggregate parts and floating,
+vector and full-width scalar capture retain their own paths.
+
+`machine_test_x64_narrow_call_results` checks selected RAX capture widths on all
+five x86-64 OS targets, both frontend forms and both allocators.
+`compiler_driver_test_x64_narrow_call_results` uses independently assembled
+foreign callees with dirty upper bits and literal C expectations. Matching
+Linux/macOS x86-64 hosts first run a host-compiled client, then Buster clients
+against the same foreign object, covering direct/indirect Boolean branches,
+signed/unsigned byte and word boundaries, and 32/64-bit controls. Other hosts
+retain selection and object-generation coverage; cross-generation is not native
+execution.
 
 ## Wide integer conversion rounding
 
