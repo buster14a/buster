@@ -96,6 +96,17 @@
   later assertion. Failure counts and diagnostics remain unchanged.
   `test_debugger_failure_self_test` checks debugger-present/absent decisions,
   restoration, and argument-free failures without changing registered totals.
+- Each `c_preprocess` unit reserves three 1 GiB arenas that stay registered
+  on the test thread until released, so a test must release a unit after its
+  last reader. IR names point into the unit's spelling arena, so that includes
+  readers of the lowered IR. A `BUSTER_TEST_FIXTURE` or module scope releases
+  its units when it ends. Inside a scope, use `c_test_scratch_end` for a
+  scratch, `c_preprocess_release` for one result, or
+  `c_test_preprocess_unit_mark` / `c_test_release_preprocess_arenas_since` for
+  units in a loop or behind a helper. `C_TEST_BOUNDED_FIXTURE`
+  (`c_source_internal.h`) also requires a fixture to return every reservation
+  it made; call `c_test_unit_registry_prewarm()` before the first one. See
+  #3306 and #3431.
 - Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.

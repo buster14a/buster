@@ -1,5 +1,6 @@
 #include <buster/tests/compiler/codegen/aarch64_stride_test.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 // A variable index scales by the element stride, and the stride is an
 // arbitrary 64-bit constant rather than a movz immediate. The canonical
@@ -164,8 +165,11 @@ UnitTestResult aarch64_stride_tests(UnitTestArguments* arguments)
         {.stride = BUSTER_MB(1), .materialization_words = 1},
         {.stride = BUSTER_MB(1) + 24, .materialization_words = 2},
     };
+    u64 preprocess_mark = c_test_preprocess_unit_mark();
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(stride_cases); case_index += 1)
     {
+        // Release the previous iteration's unit; nothing reads it any more.
+        c_test_release_preprocess_arenas_since(preprocess_mark);
         Aarch64StrideCase stride_case = stride_cases[case_index];
         // Doubled braces are the formatter's escape, not C.
         String8 source = string_format(arguments->arena,
@@ -222,6 +226,7 @@ UnitTestResult aarch64_stride_tests(UnitTestArguments* arguments)
             }
         }
     }
+    c_test_release_preprocess_arenas_since(preprocess_mark);
     return result;
 }
 
