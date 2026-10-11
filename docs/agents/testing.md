@@ -728,31 +728,39 @@ failures remain failures and must not be hidden by this fixture repair.
 
 ## External compiler-oracle qualification
 
-The registered function-parameter compatibility and type-specifier fixtures
-qualify the specific external-compiler rows they compare. A CAPABLE result
-requires the exact resolved compiler command and captured environment, a
-complete normal process wait with successful cleanup and capture, a silent
-successful known-valid probe, and the expected executable or object artifact.
-The fixture then runs the subject comparisons; any capable compiler that
-disagrees with Buster remains a failed assertion.
+Fixtures that compare Buster with a host compiler or linker qualify the
+specific reference rows they compare (#2579). A CAPABLE result requires the
+exact resolved compiler command and captured environment, a complete normal
+process wait with successful cleanup and capture, a silent successful
+known-valid probe, and the expected executable or object artifact. The fixture
+then runs the subject comparisons; any capable reference that disagrees with
+Buster remains a failed assertion.
 
-An optional local compiler refusal is reported as NOT_RUN. It is explicit
-non-participation, never a passing assertion. In required CI, the type-specifier
-fixture's narrowly authenticated `_Float16` refusal is INCOMPLETE and adds a
-failed assertion, so ide test --ci=1 cannot accept that required reference
-obligation as complete. The function-parameter fixture's GCC `-std=gnu23`
-rows are the exception (#2579): GCC 13 lacks only that dialect spelling, which
-GCC 14 added, so its exact authenticated refusal is NOT_RUN under --ci=1 too.
-A GCC 14 or newer host still runs those rows.
-Other outcomes are failures: missing tools, an unauthenticated profile, an
-unhealthy control, altered or additional diagnostics, unexpected stdout or
-artifacts, abnormal exit, timeout, capture loss, or cleanup failure. A refusal
-qualifies only when its compiler/profile witness and known-valid control pass
-and the full normalized stderr, normal exit code, argv, and environment match
-the fixture's exact contract. The probes set LC_ALL=C in a per-child
-environment and disable diagnostic color, carets, and wrapping without changing
-the parent process environment. These dispositions do not weaken Buster's
-semantic or diagnostic assertions.
+A reference that is too old for a row is reported as NOT_RUN, under
+`ide test --ci=1` as well. NOT_RUN is explicit non-participation, never a
+passing assertion, and it skips only that reference row; Buster's own
+compilations and assertions still run. Hosted CI images carry current
+toolchains, so they still execute these rows. Each qualification names its
+reference release and evidence:
+
+| Fixture | Reference that qualifies | Witness |
+|---|---|---|
+| `c_test_function_parameter_compatibility_runtime` | GCC 11-13 for `-std=gnu23` (GCC 14 added the spelling) | exact refusal of the known-valid control |
+| `compiler_driver_test_type_specifiers` | GCC 11 on x86-64 for `_Float16` (GCC 12 added it) | exact refusal of `_Float16 v;` after a healthy integer control |
+| `compiler_driver_test_function_literal_identity` | GCC 11 on x86-64, GCC producer rows | the same `_Float16` qualification |
+| `c_test_enumerator_type_differential` | GCC 11 and 12, GCC rows (GCC 13 added C23 enumerator types) | documented release profile, never a probe of the subject |
+| `c_macro_rescan_boundary_tests` | GCC 11, two `pop_macro`-in-argument rows | the exact token output GCC 11 is recorded to print |
+| `compiler_driver_test_imported_function_addresses` | GNU ld 2.38 behind a Clang host driver (binutils 2.39 accepts it) | exact protected-symbol refusal after a healthy shared-object control |
+
+Compiler identity comes from `buster_test_reference_identity`: `--version`,
+`-dumpmachine` and a header-free `-dM -E` profile must agree on a native,
+non-Clang GCC release. Other outcomes are failures: missing tools, an
+unidentified or different release, an unhealthy control, altered or additional
+diagnostics, unexpected stdout or artifacts, abnormal exit, timeout, capture
+loss, or cleanup failure. The probes set LC_ALL=C in a per-child environment
+and disable diagnostic color, carets, and wrapping without changing the parent
+process environment. The classifier still supports a `required` reference,
+which reports INCOMPLETE and fails; no fixture currently requests it.
 
 ## Native differential matrix
 
