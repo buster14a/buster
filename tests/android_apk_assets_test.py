@@ -65,10 +65,6 @@ class ApkGraphCases:
         (tests / "basic.c").write_text("int answer(void) { return 42; }\n", encoding="utf-8")
         (tests / "nested directory/value.h").write_text("#define VALUE 42\n", encoding="utf-8")
         (tests / "preserved.bbb").write_text("dormant corpus\n", encoding="utf-8")
-        self.driver_fixture = (
-            self.source / "src/buster/tests/compiler/driver/fixtures/aarch64_platform_large_va_arg.c")
-        self.driver_fixture.parent.mkdir(parents=True)
-        self.driver_fixture.write_text("int driver_fixture(void) { return 42; }\n", encoding="utf-8")
         self.native = self.source / "libide.so"
         self.native.write_bytes(b"controlled native input\n")
         self.manifest = self.source / "AndroidManifest.xml"
@@ -141,8 +137,6 @@ class ApkGraphCases:
         contents = self.contents()
         self.assertEqual(contents["assets/tests/basic.c"], (self.source / "tests/basic.c").read_bytes())
         self.assertIn("assets/tests/nested directory/value.h", contents)
-        self.assertEqual(contents["assets/src/buster/tests/compiler/driver/fixtures/aarch64_platform_large_va_arg.c"],
-                         self.driver_fixture.read_bytes())
         self.assertEqual(contents["lib/x86_64/libide.so"], self.native.read_bytes())
         self.assertFalse(any(name.endswith(".bbb") for name in contents), contents.keys())
         before = (self.build_dir / "buster.apk").stat().st_mtime_ns
@@ -154,13 +148,8 @@ class ApkGraphCases:
         native_before = (self.native.read_bytes(), self.native.stat().st_mtime_ns)
         edited = b"int answer(void) { return 73; }\n"
         self.change(self.source / "tests/basic.c", edited)
-        driver_edited = b"int driver_fixture(void) { return 73; }\n"
-        self.change(self.driver_fixture, driver_edited)
         self.build_apk()
         self.assertEqual(self.contents()["assets/tests/basic.c"], edited, "fixture-only edit packaged stale bytes")
-        self.assertEqual(
-            self.contents()["assets/src/buster/tests/compiler/driver/fixtures/aarch64_platform_large_va_arg.c"],
-            driver_edited)
         self.assertEqual(self.package_count(), 2)
         self.assertEqual((self.native.read_bytes(), self.native.stat().st_mtime_ns), native_before)
         self.build_apk()
@@ -176,11 +165,8 @@ class ApkGraphCases:
 
     def test_removal(self):
         (self.source / "tests/nested directory/value.h").unlink()
-        self.driver_fixture.unlink()
         self.build_apk()
         self.assertNotIn("assets/tests/nested directory/value.h", self.contents(), "deleted fixture survived packaging")
-        self.assertNotIn(
-            "assets/src/buster/tests/compiler/driver/fixtures/aarch64_platform_large_va_arg.c", self.contents())
         self.assertEqual(self.package_count(), 2)
 
     def test_rename(self):
@@ -212,7 +198,6 @@ class ApkGraphCases:
     def test_empty_active_inventory(self):
         (self.source / "tests/basic.c").unlink()
         (self.source / "tests/nested directory/value.h").unlink()
-        self.driver_fixture.unlink()
         self.build_apk()
         self.assertEqual(set(self.contents()), {"lib/x86_64/libide.so"})
         self.assertEqual(self.package_count(), 2)

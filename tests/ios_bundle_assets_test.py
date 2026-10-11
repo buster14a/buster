@@ -34,10 +34,6 @@ class IosAssetGraphCases:
         (tests / "nested directory/value.h").write_text(
             "#define VALUE 42\n", encoding="utf-8")
         (tests / "preserved.bbb").write_text("dormant corpus\n", encoding="utf-8")
-        self.driver_fixture = (
-            self.source / "src/buster/tests/compiler/driver/fixtures/aarch64_platform_large_va_arg.c")
-        self.driver_fixture.parent.mkdir(parents=True)
-        self.driver_fixture.write_text("int driver_fixture(void) { return 42; }\n", encoding="utf-8")
         self.native_input = self.source / "native input"
         self.native_input.write_bytes(b"controlled native input\n")
         self.native = self.build_dir / "native" / "ide"
@@ -81,13 +77,7 @@ class IosAssetGraphCases:
             "--target", "ide", "--parallel", "1", expect_success=expect_success)
 
     def bundle_tests(self):
-        return self.bundle_content() / "tests"
-
-    def bundle_content(self):
-        return self.build_dir / "bundles" / self.configuration / "ide.app"
-
-    def driver_fixture_asset(self):
-        return self.bundle_content() / "src/buster/tests/compiler/driver/fixtures/aarch64_platform_large_va_arg.c"
+        return self.build_dir / "bundles" / self.configuration / "ide.app" / "tests"
 
     def contents(self):
         root = self.bundle_tests()
@@ -107,7 +97,6 @@ class IosAssetGraphCases:
         contents = self.contents()
         self.assertEqual(contents["basic.c"], (self.source / "tests/basic.c").read_bytes())
         self.assertIn("nested directory/value.h", contents)
-        self.assertEqual(self.driver_fixture_asset().read_bytes(), self.driver_fixture.read_bytes())
         self.assertFalse(any(name.endswith(".bbb") for name in contents), contents.keys())
         native_before = self.native_state()
         fixture_before = (self.bundle_tests() / "basic.c").stat().st_mtime_ns
@@ -120,12 +109,9 @@ class IosAssetGraphCases:
         native_before = self.native_state()
         edited = b"int answer(void) { return 73; }\n"
         self.change(self.source / "tests/basic.c", edited)
-        driver_edited = b"int driver_fixture(void) { return 73; }\n"
-        self.change(self.driver_fixture, driver_edited)
         result = self.build_assets()
         self.assertIn("Staging active test fixtures", result.stdout)
         self.assertEqual(self.contents()["basic.c"], edited)
-        self.assertEqual(self.driver_fixture_asset().read_bytes(), driver_edited)
         self.assertEqual(self.native_state(), native_before)
         result = self.build_assets()
         self.assertNotIn("Staging active test fixtures", result.stdout)
@@ -139,10 +125,8 @@ class IosAssetGraphCases:
 
     def test_removal(self):
         (self.source / "tests/nested directory/value.h").unlink()
-        self.driver_fixture.unlink()
         self.build_assets()
         self.assertNotIn("nested directory/value.h", self.contents())
-        self.assertFalse(self.driver_fixture_asset().exists())
 
     def test_rename(self):
         old = self.source / "tests/nested directory/value.h"
@@ -167,7 +151,6 @@ class IosAssetGraphCases:
     def test_empty_active_inventory(self):
         (self.source / "tests/basic.c").unlink()
         (self.source / "tests/nested directory/value.h").unlink()
-        self.driver_fixture.unlink()
         self.build_assets()
         self.assertEqual(self.contents(), {})
         result = self.build_assets()

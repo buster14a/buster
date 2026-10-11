@@ -602,6 +602,8 @@ fixtures and controlled packaging-tool stand-ins. It checks package contents,
 fixture-only invalidation, stale-file removal, no-op behavior, and the retained
 native-library/manifest/sign-script dependencies. It requires the existing
 CMake, Ninja, Python and Bash prerequisites, not an Android SDK or a compiler.
+`python3 tools/mobile_driver_fixture_assets_test.py` covers staging of the
+source-tree driver fixtures.
 The existing `tests/mobile_ci_scripts_test.sh` suite and mobile lifecycle CI run
 it on Linux and macOS. This is build-graph evidence, not Android compilation,
 signing or device execution; those remain the regular Android mobile CI gates.
@@ -623,8 +625,9 @@ use separate stamps and bundles, and an unchanged build does not rewrite either.
 with Ninja Multi-Config in paths containing spaces. It covers both configurations,
 stale-file removal, old-timestamp additions, dormant/empty inventories, native
 target stability, no-op builds and command failure propagation without requiring
-an Apple SDK. Actual iOS compilation, bundle validation and simulator execution
-remain in `ios/test_ci.sh` and the mobile CI lanes.
+an Apple SDK. `python3 tools/mobile_driver_fixture_assets_test.py` covers staging
+of the source-tree driver fixtures. Actual iOS compilation, bundle validation
+and simulator execution remain in `ios/test_ci.sh` and the mobile CI lanes.
 
 The Clang/GCC build-driver binary now leaves the existing lane implementation
 available for opt-in `test_differential --jobs N`. The default remains one case
