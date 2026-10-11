@@ -14415,6 +14415,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL Arena* c_test_unit_registry_arena;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestUnitEntry* c_test_unit_registry;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_registry_count;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_serial;
+// The most units the thread held at once since the last peak reset.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_registry_peak;
 
 BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Arena* shapes, Arena* owner, u64 owner_position)
 {
@@ -14432,6 +14434,7 @@ BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Ar
         *entry = (CTestUnitEntry){.arenas = {spelling, tokens, shapes}, .owner = owner, .owner_position = owner_position, .serial = c_test_unit_serial};
         c_test_unit_registry_count += 1;
         c_test_unit_serial += 1;
+        c_test_unit_registry_peak = BUSTER_MAX(c_test_unit_registry_peak, c_test_unit_registry_count);
     }
 }
 
@@ -14534,6 +14537,17 @@ u64 c_test_preprocess_unit_mark(void)
 void c_test_release_preprocess_arenas_since(u64 mark)
 {
     c_test_release_preprocess_units(0, 0, mark);
+}
+
+u64 c_test_preprocess_unit_peak_reset(void)
+{
+    c_test_unit_registry_peak = c_test_unit_registry_count;
+    return c_test_unit_registry_count;
+}
+
+u64 c_test_preprocess_unit_peak(void)
+{
+    return c_test_unit_registry_peak;
 }
 
 void c_test_release_preprocess_arenas(void)

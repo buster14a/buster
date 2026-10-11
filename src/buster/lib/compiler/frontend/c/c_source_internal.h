@@ -121,6 +121,11 @@ BUSTER_F_DECL void c_test_release_preprocess_arenas_from(Arena* owner, u64 posit
 // scope ends, so no unit outlives the scope that created it (GitHub #3431).
 BUSTER_F_DECL u64 c_test_preprocess_unit_mark(void);
 BUSTER_F_DECL void c_test_release_preprocess_arenas_since(u64 mark);
+// The calling thread's registry high-water mark: reset returns the units it
+// holds now and restarts the peak there; peak returns the most it has held
+// at once since. A module bounds what one fixture keeps alive with the pair.
+BUSTER_F_DECL u64 c_test_preprocess_unit_peak_reset(void);
+BUSTER_F_DECL u64 c_test_preprocess_unit_peak(void);
 // scratch_end for a test that preprocessed into the scratch arena: releases
 // the units the rewind discards, then rewinds.
 BUSTER_F_DECL void c_test_scratch_end(TemporalArena temporary);

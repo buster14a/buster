@@ -69,12 +69,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_semantics_agreement(UnitTestAr
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
     {
+        u64 case_position = arena->position;
         u32 count = c_integer_semantics_diagnostics(arena, rejected[index], 0, 0);
         if (!count)
         {
             BUSTER_TEST_ERROR(S8("accepted: {S8}\n"), rejected[index]);
         }
         BUSTER_TEST(arguments, count != 0);
+        c_test_rewind(arena, case_position);
     }
     CParseResult failed_parse = {0};
     c_integer_semantics_diagnostics(arena, S8("_Static_assert(-1 < sizeof(int), \"must fail\");"), 0, &failed_parse);
@@ -112,12 +114,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_semantics_agreement(UnitTestAr
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(accepted); index += 1)
     {
+        u64 case_position = arena->position;
         u32 count = c_integer_semantics_diagnostics(arena, accepted[index], 0, 0);
         if (count)
         {
             BUSTER_TEST_ERROR(S8("rejected: {S8}\n"), accepted[index]);
         }
         BUSTER_TEST(arguments, count == 0);
+        c_test_rewind(arena, case_position);
     }
     // The control: a nonzero integer is still no null pointer constant.
     BUSTER_TEST(arguments, c_integer_semantics_diagnostics(arena, S8("int check(void) { int *p = 0; return p == ((signed char)1 + 1); }"), 0, 0) != 0);

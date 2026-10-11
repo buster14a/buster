@@ -16,6 +16,16 @@
 #include <buster/lib/os_internal.h>
 #include <buster/lib/os.h>
 
+// Every rewind in this module goes through here: it releases the
+// preprocessing units whose results the rewind discards, as c_test_scratch_end
+// does for a scratch. A plain arena_set_position would leave each unit's three
+// private arenas reserved until the fixture ends (GitHub #3431).
+BUSTER_GLOBAL_LOCAL void c_test_rewind(Arena* arena, u64 position)
+{
+    c_test_release_preprocess_arenas_from(arena, position);
+    arena_set_position(arena, position);
+}
+
 // Each ordinal names an actual arena_create in the chosen frontend phase.
 // The private seam arms arena_test_fail_next_reserve at that boundary, so
 // previously pooled mappings cannot make a supposed failure test succeed.
@@ -2403,7 +2413,7 @@ BUSTER_GLOBAL_LOCAL bool c_test_translate_source_paths_agree(Arena* arena, Strin
     {
         result = memcmp(dispatched.translated_source.pointer, scalar, scalar_length) == 0;
     }
-    arena_set_position(arena, arena_position);
+    c_test_rewind(arena, arena_position);
     return result;
 }
 
@@ -9743,7 +9753,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_unique_search(UnitTestArgume
         u64 slot_mark = temporary.arena->position;
         CAggregateLookupSlot* dirty_slots = arena_allocate(temporary.arena, CAggregateLookupSlot, 16384);
         memset(dirty_slots, 0xa5, sizeof(*dirty_slots) * 16384);
-        arena_set_position(temporary.arena, slot_mark);
+        c_test_rewind(temporary.arena, slot_mark);
         CTypeId first = c_test_aggregate_lookup_add(&empty, (CType){.kind = C_TYPE_STRUCT, .tag = S8("First"), .tag_scope = {0}});
         BUSTER_TEST(arguments, first.value < empty.type_count && empty_lookup.slots == dirty_slots && empty_lookup.slot_count == 16384);
         BUSTER_TEST(arguments, empty_lookup.fill == 1 && !empty_lookup.incomplete);
@@ -15911,6 +15921,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_false(UnitTestArgument
     };
     for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(invalid_static_assert_sources); source_index += 1)
     {
+        u64 source_position = static_assert_type_temporary.arena->position;
         CPreprocessResult invalid_tokens = c_preprocess(
             static_assert_type_temporary.arena, invalid_static_assert_sources[source_index],
             (CPreprocessOptions){
@@ -15924,6 +15935,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_false(UnitTestArgument
         {
             BUSTER_TEST(arguments, invalid_parse.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT);
         }
+        c_test_rewind(static_assert_type_temporary.arena, source_position);
     }
     CPreprocessResult valid_static_assert_tokens = c_preprocess(
         static_assert_type_temporary.arena,
@@ -17189,7 +17201,7 @@ BUSTER_GLOBAL_LOCAL bool c_test_lex_paths_agree(Arena* arena, String8 source)
     CLexResult dispatched = c_lex(arena, source);
     CLexResult reference = c_lex_reference(arena, source);
     bool result = c_test_lex_results_agree(dispatched, reference);
-    arena_set_position(arena, position);
+    c_test_rewind(arena, position);
     return result;
 }
 
@@ -17238,7 +17250,7 @@ BUSTER_GLOBAL_LOCAL void c_test_utf8_lex_expect(UnitTestArguments* arguments, Un
         BUSTER_STRING_TEST(arguments, diagnostic.message, S8("invalid UTF-8 sequence in C source token"));
     }
     BUSTER_TEST(arguments, c_test_lex_paths_agree(arguments->arena, source));
-    arena_set_position(arguments->arena, position);
+    c_test_rewind(arguments->arena, position);
     c_test_result_add(outer_result, result);
 }
 
@@ -17314,7 +17326,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_utf8(UnitTestArguments* argumen
                 BUSTER_TEST(arguments, lex.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_UTF8);
                 BUSTER_TEST(arguments, lex.diagnostics[0].location.offset == 0);
             }
-            arena_set_position(arena, position);
+            c_test_rewind(arena, position);
         }
     }
     for (u32 width = 3; width <= 4; width += 1)
@@ -17329,7 +17341,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_utf8(UnitTestArguments* argumen
                 CLexResult lex = c_lex(arena, source);
                 BUSTER_TEST(arguments, (lex.diagnostic_count == 0) == c_test_utf8_scalar_valid(source));
                 BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, source));
-                arena_set_position(arena, position);
+                c_test_rewind(arena, position);
             }
         }
     }
@@ -17376,7 +17388,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_utf8(UnitTestArguments* argumen
     BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
     BUSTER_TEST(arguments, parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, lower.diagnostic_count == 0 && lower.program != 0);
-    arena_set_position(arena, position);
+    c_test_rewind(arena, position);
     return result;
 }
 
@@ -17453,7 +17465,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_differential(UnitTestArgu
             memset(padded, ' ', pad);
             memcpy(padded + pad, differential_case.pointer, differential_case.length);
             BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){padded, padded_length}));
-            arena_set_position(arena, position);
+            c_test_rewind(arena, position);
         }
     }
 
@@ -17564,7 +17576,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_differential(UnitTestArgu
             buffer[run_length] = '=';
             BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){buffer, run_length + 1}));
 
-            arena_set_position(arena, position);
+            c_test_rewind(arena, position);
         }
     }
 
@@ -17610,7 +17622,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_differential(UnitTestArgu
                 }
             }
             file_map_unmap(source_file);
-            arena_set_position(arena, position);
+            c_test_rewind(arena, position);
         }
     }
 
@@ -17633,7 +17645,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_differential(UnitTestArgu
                 blob[index] = pick < fuzz_alphabet_length ? fuzz_alphabet[pick] : fuzz_high_bytes[pick - fuzz_alphabet_length];
             }
             BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){blob, fuzz_length}));
-            arena_set_position(arena, position);
+            c_test_rewind(arena, position);
         }
     }
 
@@ -17744,7 +17756,7 @@ BUSTER_GLOBAL_LOCAL bool c_test_quoted_paths_agree(Arena* arena, String8 prefix,
     }
     spelling[length - 1] = (char8)delimiter;
     bool result = c_test_decode_quoted_paths_agree(arena, (String8){spelling, length}, delimiter, accepted_out);
-    arena_set_position(arena, position);
+    c_test_rewind(arena, position);
     return result;
 }
 
@@ -17810,13 +17822,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
                 {
                     String8 body = c_test_quoted_body(arena, offsets[offset_index], accepted_escapes[escape_index], tails[tail_index]);
                     BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, delimiter, &accepted) && accepted);
-                    arena_set_position(arena, position);
+                    c_test_rewind(arena, position);
                 }
                 for (u64 escape_index = 0; escape_index < BUSTER_ARRAY_LENGTH(rejected_escapes); escape_index += 1)
                 {
                     String8 body = c_test_quoted_body(arena, offsets[offset_index], rejected_escapes[escape_index], tails[tail_index]);
                     BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, delimiter, &accepted) && !accepted);
-                    arena_set_position(arena, position);
+                    c_test_rewind(arena, position);
                 }
             }
         }
@@ -17834,7 +17846,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
         {
             String8 body = c_test_quoted_body(arena, run_offsets[offset_index], runs[run_index], 3);
             BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, '"', &accepted) && accepted);
-            arena_set_position(arena, position);
+            c_test_rewind(arena, position);
         }
     }
 
@@ -17848,7 +17860,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
         {
             String8 body = c_test_quoted_repeat(arena, units[unit_index], unit_counts[count_index]);
             BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, '"', &accepted) && accepted);
-            arena_set_position(arena, position);
+            c_test_rewind(arena, position);
         }
     }
 
@@ -17860,7 +17872,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
         String8 body = c_test_quoted_body(arena, plain_lengths[length_index], S8(""), 0);
         BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, '"', &accepted) && accepted);
         BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, '\'', &accepted) && accepted);
-        arena_set_position(arena, position);
+        c_test_rewind(arena, position);
     }
 
     // Multi-byte UTF-8 and bare high bytes pass through, across the boundary.
@@ -17869,7 +17881,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
     {
         String8 body = c_test_quoted_body(arena, offset, utf8, 2);
         BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, '"', &accepted) && accepted);
-        arena_set_position(arena, position);
+        c_test_rewind(arena, position);
     }
 
     // The u8 prefix is the one prefix the narrow decoder accepts; every other
@@ -17889,7 +17901,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
         {
             BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, rejected_prefixes[prefix_index], S8("x"), '"', &accepted) && !accepted);
         }
-        arena_set_position(arena, position);
+        c_test_rewind(arena, position);
     }
 
     // Spellings no lexer produces: the decoders must still agree on them.
@@ -17898,11 +17910,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
         for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(malformed); index += 1)
         {
             BUSTER_TEST(arguments, c_test_decode_quoted_paths_agree(arena, malformed[index], '"', &accepted) && !accepted);
-            arena_set_position(arena, position);
+            c_test_rewind(arena, position);
         }
         BUSTER_TEST(arguments, c_test_decode_quoted_paths_agree(arena, S8("\"\""), '"', &accepted) && accepted);
         BUSTER_TEST(arguments, c_test_decode_quoted_paths_agree(arena, S8("''"), '\'', &accepted) && accepted);
-        arena_set_position(arena, position);
+        c_test_rewind(arena, position);
     }
 
     // Agreement is not enough on its own: a few decodes are pinned to the
@@ -17931,7 +17943,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
             BUSTER_TEST(arguments, c_test_decode_quoted(arena, expectations[index].spelling, delimiter, &decoded) &&
                                        decoded.length == expectations[index].expected.length &&
                                        (decoded.length == 0 || memcmp(decoded.pointer, expectations[index].expected.pointer, decoded.length) == 0));
-            arena_set_position(arena, position);
+            c_test_rewind(arena, position);
         }
         // An escaped delimiter in the second window: the prefix store, the
         // escape, and the tail land where the reference puts them.
@@ -17943,7 +17955,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
         ByteSlice long_decoded = {0};
         BUSTER_TEST(arguments, c_test_decode_quoted(arena, (String8){long_spelling, long_body.length + 2}, '"', &long_decoded) && long_decoded.length == 67 &&
                                    long_decoded.pointer[64] == 'z' && long_decoded.pointer[65] == '"' && long_decoded.pointer[66] == 'y');
-        arena_set_position(arena, position);
+        c_test_rewind(arena, position);
     }
 
     // A literal longer than the u16 token length, with escapes strewn through
@@ -17955,7 +17967,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
         BUSTER_TEST(arguments, c_test_decode_quoted_paths_agree(arena, giant, '"', &accepted) && accepted);
         BUSTER_TEST(arguments, c_test_decode_quoted(arena, giant, '"', &giant_decoded) && giant_decoded.length == giant_expected.length &&
                                    memcmp(giant_decoded.pointer, giant_expected.pointer, giant_expected.length) == 0);
-        arena_set_position(arena, position);
+        c_test_rewind(arena, position);
     }
 
     // Fuzz over the grammar's alphabet: fillers, backslashes, every escape
@@ -17980,7 +17992,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
                 body[index] = (char8)alphabet[(state >> 24) % BUSTER_ARRAY_LENGTH(alphabet)];
             }
             BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), (String8){body, length}, '"', &accepted));
-            arena_set_position(arena, position);
+            c_test_rewind(arena, position);
         }
     }
 
@@ -18071,7 +18083,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
                     BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
                     u64 decode_position = arena->position;
                     memset(arena_allocate(arena, u8, 4096), 0xa5, 4096);
-                    arena_set_position(arena, decode_position);
+                    c_test_rewind(arena, decode_position);
                     bool range_accepted = false;
                     u32 end = (u32)preprocess.token_count;
                     while (end && preprocess.tokens[end - 1].kind == C_TOKEN_END_OF_FILE)
@@ -18080,15 +18092,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
                     }
                     BUSTER_TEST(arguments, c_test_string_literal_range_paths_agree(arena, preprocess, 0, end, &range_accepted));
                     BUSTER_TEST(arguments, range_accepted == cases[case_index].accepted);
-                    arena_set_position(arena, decode_position);
-                    arena_set_position(temporary.arena, temporary_position);
+                    c_test_rewind(arena, decode_position);
+                    c_test_rewind(temporary.arena, temporary_position);
                 }
             }
         }
         c_test_scratch_end(temporary);
     }
 
-    arena_set_position(arena, position);
+    c_test_rewind(arena, position);
     return result;
 }
 
@@ -18162,7 +18174,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_hexadecimal_escapes(UnitTestArgum
                 // case also exercises the allocation-free descriptor path.
                 for (u32 concatenate = 0; concatenate < 2; concatenate += 1)
                 {
-                    u64 unit_start = arena->position;
                     String8 literal = string_format(arena, S8("{S8}\"{S8}\""), prefix, cases[case_index].body);
                     if (concatenate)
                     {
@@ -18182,7 +18193,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_hexadecimal_escapes(UnitTestArgum
                         }
                         u64 decode_position = arena->position;
                         memset(arena_allocate(arena, u8, 4096), 0xa5, 4096);
-                        arena_set_position(arena, decode_position);
+                        c_test_rewind(arena, decode_position);
                         bool accepted = false;
                         BUSTER_TEST_RAW(arguments, c_test_string_literal_range_paths_agree(arena, tokens, 0, end, &accepted), literal);
                         BUSTER_TEST_RAW(arguments, accepted == expected_accepted, literal);
@@ -18261,8 +18272,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_hexadecimal_escapes(UnitTestArgum
                             }
                         }
                     }
-                    arena_set_position(arena, position);
-                    c_test_release_preprocess_arenas_from(arena, unit_start);
+                    c_test_rewind(arena, position);
                 }
             }
         }
@@ -18698,7 +18708,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
             BUSTER_TEST(arguments, memcmp(big_global->bytes.pointer, decoded.pointer, decoded.length) == 0);
             BUSTER_TEST(arguments, big_global->bytes.pointer[decoded.length] == 0);
         }
-        arena_set_position(arena, position);
+        c_test_rewind(arena, position);
     }
 
     // A >64 KB character literal only has to lex: its spelling and the
@@ -18714,7 +18724,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
             BUSTER_STRING_TEST(arguments, c_token_spelling(lex.spelling_base, token), character_literal);
         }
         BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, character_literal));
-        arena_set_position(arena, position);
+        c_test_rewind(arena, position);
     }
 
     // An unterminated >64 KB string literal: the token cannot report its true
@@ -18734,7 +18744,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
         BUSTER_TEST(arguments, lex.diagnostic_count == 1);
         BUSTER_TEST(arguments, lex.diagnostic_count == 1 && lex.diagnostics[0].kind == C_DIAGNOSTIC_UNTERMINATED_STRING_LITERAL);
         BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, source));
-        arena_set_position(arena, position);
+        c_test_rewind(arena, position);
     }
 
     // Stringify: # over a giant string-literal argument escapes its quotes
@@ -18791,7 +18801,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
         {
             BUSTER_TEST(arguments, memcmp(stringified_global->bytes.pointer, inner.pointer, inner.length) == 0);
         }
-        arena_set_position(arena, position);
+        c_test_rewind(arena, position);
     }
 
     // Token paste: u8 ## "..." runs the join-and-relex path with an
@@ -18831,7 +18841,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
         {
             BUSTER_TEST(arguments, memcmp(glued_global->bytes.pointer, decoded.pointer, decoded.length) == 0);
         }
-        arena_set_position(arena, position);
+        c_test_rewind(arena, position);
     }
 
     // Only terminated literals carry the length escape: an identifier or a
@@ -18856,7 +18866,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
         BUSTER_TEST(arguments, number_lex.diagnostic_count == 1);
         BUSTER_TEST(arguments, number_lex.diagnostic_count == 1 && number_lex.diagnostics[0].kind == C_DIAGNOSTIC_TOKEN_TOO_LONG);
         BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, number_source));
-        arena_set_position(arena, position);
+        c_test_rewind(arena, position);
     }
 
     // Pasting two identifiers whose join crosses the sentinel relexes with
@@ -18882,7 +18892,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
         CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){0});
         BUSTER_TEST(arguments, preprocess.error_count == 1);
         BUSTER_TEST(arguments, preprocess.diagnostic_count >= 1 && preprocess.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_TOKEN_PASTE);
-        arena_set_position(arena, position);
+        c_test_rewind(arena, position);
     }
 
     return result;
@@ -27161,7 +27171,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
             }
             BUSTER_TEST(arguments, c_test_translate_source_paths_agree(arguments->arena, (String8){.pointer = fuzz, .length = fuzz_length}));
         }
-        arena_set_position(arguments->arena, arena_position);
+        c_test_rewind(arguments->arena, arena_position);
     }
 
     CLexResult basic = c_lex(arguments->arena, S8("int ma\\\r\nin(void) // comment\r\n"
@@ -27226,6 +27236,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
         .name = S8("COMMAND_VALUE"),
         .value = S8("9"),
     };
+    // Each release below returns every unit the thread still holds; nothing
+    // after it reads their results (GitHub #3431).
+    c_test_release_preprocess_arenas();
     CPreprocessResult command_preprocess = c_preprocess(arguments->arena, S8("COMMAND_VALUE\n"),
                                                         (CPreprocessOptions){
                                                             .definitions = &command_definition,
@@ -27341,11 +27354,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
             BUSTER_TEST(arguments, invalid_command.diagnostics[0].kind == C_DIAGNOSTIC_EXPECTED_MACRO_NAME ||
                                        invalid_command.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_MACRO_DEFINITION);
         }
+        c_preprocess_release(&invalid_command);
     }
     CPreprocessorOperation invalid_undefinition = {
         .operand = S8("BAD NAME"),
         .kind = C_PREPROCESSOR_OPERATION_UNDEFINE,
     };
+    c_test_release_preprocess_arenas();
     CPreprocessResult invalid_undefine = c_preprocess(arguments->arena, S8("int valid_after_undefine_diagnostic;\n"),
                                                       (CPreprocessOptions){
                                                           .macro_operations = &invalid_undefinition,
@@ -27394,6 +27409,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     BUSTER_TEST(arguments, multiline_macro_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, multiline_macro_parse.declaration_count == 1);
 
+    c_test_release_preprocess_arenas();
     CPreprocessResult variadic_macro = c_preprocess(arguments->arena,
                                                     S8("#define TAIL(first, ...) __VA_ARGS__\n"
                                                        "TAIL(0, 1, 2)\n"),
@@ -27456,6 +27472,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     c_test_preprocessed_token(arguments, &result, conditional, 1, C_TOKEN_IDENTIFIER, S8("also_kept"));
     c_test_preprocessed_token(arguments, &result, conditional, 2, C_TOKEN_IDENTIFIER, S8("conditional_kept"));
 
+    c_test_release_preprocess_arenas();
     CPreprocessResult directive_in_expression = c_preprocess(arguments->arena,
                                                              S8("int selected = (\n"
                                                                 "#if 0\n"
@@ -27519,6 +27536,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
         .name = S8("DIAGNOSTIC_TEXT"),
         .value = S8("expanded warning"),
     };
+    c_test_release_preprocess_arenas();
     CPreprocessResult preprocess_diagnostics = c_preprocess(arguments->arena,
                                                             S8("#warning hello-warning\n"
                                                                "#warning DIAGNOSTIC_TEXT\n"
@@ -27632,6 +27650,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     BUSTER_TEST(arguments, windows_packed_alignment_seen);
     BUSTER_TEST(arguments, windows_natural_alignment_seen);
 
+    c_test_release_preprocess_arenas();
     CPreprocessResult cross_target_clang_macros = c_preprocess(arguments->arena,
                                                                 S8("#if defined(__clang__) && __clang_major__ == 18\n"
                                                                    "int clang_compatibility;\n"
@@ -27682,6 +27701,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
                                                  });
     BUSTER_TEST(arguments, c99_version.diagnostic_count == 0);
     c_test_preprocessed_token(arguments, &result, c99_version, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("199901L"));
+    c_test_release_preprocess_arenas();
     CPreprocessResult gnu99_version = c_preprocess(arguments->arena, S8("__STDC_VERSION__\n"),
                                                    (CPreprocessOptions){
                                                        .source_path = S8("gnu99-version.c"),
@@ -27736,6 +27756,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     c_test_preprocessed_token(arguments, &result, floating_builtins, 0, C_TOKEN_PREPROCESSING_NUMBER,
                                S8("2.220446049250313080847263336181640625e-16"));
 
+    c_test_release_preprocess_arenas();
     CPreprocessResult floating_mantissa_builtin = c_preprocess(arguments->arena,
                                                                 S8("__DBL_MANT_DIG__\n"),
                                                                 (CPreprocessOptions){
@@ -27813,6 +27834,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     CParseResult x64_windows_builtins_parse = c_parse(arguments->arena, x64_windows_builtins);
     BUSTER_TEST(arguments, x64_windows_builtins_parse.diagnostic_count == 0);
 
+    c_test_release_preprocess_arenas();
     CPreprocessResult aarch64_macos_builtins = c_preprocess(arguments->arena,
                                                             S8("#if defined(__APPLE__) && "
                                                                "defined(__MACH__) && "
@@ -27969,6 +27991,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
         }
         CParseResult target_os_parse = c_parse(arguments->arena, target_os_queries);
         BUSTER_TEST(arguments, target_os_parse.diagnostic_count == 0);
+        c_preprocess_release(&target_os_queries);
     }
 
     // #639: __has_attribute answers for the GNU attributes this frontend
@@ -28024,6 +28047,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
                                                               (CPreprocessOptions){0});
     BUSTER_TEST(arguments, empty_attribute_argument.diagnostic_count != 0);
 
+    c_test_release_preprocess_arenas();
     CPreprocessResult include = c_preprocess(arguments->arena,
                                              S8("#include \"basic_c_include.h\"\n"
                                                 "INCLUDED_VALUE\n"),
@@ -28081,6 +28105,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     BUSTER_TEST(arguments, c_preprocess_detail(unguarded)->source_unique.files == 2);
     // A token after the guard's #endif breaks the whole-file shape, so the
     // header is re-lexed at every inclusion and its declaration repeats.
+    c_test_release_preprocess_arenas();
     CPreprocessResult partial_guard = c_preprocess(arguments->arena,
                                                    S8("#include \"basic_c_partial_guard_include.h\"\n"
                                                       "#include \"basic_c_partial_guard_include.h\"\n"),
@@ -28162,6 +28187,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
         S8("tests/include_first"),
         S8("tests/include_second"),
     };
+    c_test_release_preprocess_arenas();
     CPreprocessResult feature_queries = c_preprocess(arguments->arena,
                                                      S8("#define HEADER_AVAILABLE(header)"
                                                         " __has_include(header)\n"
@@ -28307,6 +28333,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     BUSTER_TEST(arguments, builtin_include_next.diagnostic_count == 0);
     BUSTER_TEST(arguments, builtin_include_next.token_count == 2);
     c_test_preprocessed_token(arguments, &result, builtin_include_next, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("79"));
+    c_test_release_preprocess_arenas();
     CPreprocessResult included_warning_growth = c_preprocess(arguments->arena,
                                                              S8("#include \"basic_c_preprocessor_warning_include.h\"\n"
                                                                 "int included_warning_fixture;\n"),
@@ -29015,7 +29042,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments
             u64 edge_mark = edge_temporary.arena->position;
             u8* dirty = arena_allocate(edge_temporary.arena, u8, BUSTER_KB(64));
             memset(dirty, 0xa5, BUSTER_KB(64));
-            arena_set_position(edge_temporary.arena, edge_mark);
+            c_test_rewind(edge_temporary.arena, edge_mark);
             CTokenPositionIndex edge_index = {0};
             CParseResult edge_parse = {.arena = edge_temporary.arena, .position_index = &edge_index};
             CTokenShape* edge_shapes = edge_preprocess.recovery ? edge_preprocess.recovery->token_shapes : 0;
@@ -29304,6 +29331,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
     CParseResult static_assert_parse = c_parse(arguments->arena, static_assert_tokens);
     BUSTER_TEST(arguments, static_assert_parse.diagnostic_count == 0);
 
+    // Each release below returns every unit the thread still holds; nothing
+    // after it reads their results (GitHub #3431).
+    c_test_release_preprocess_arenas();
     CPreprocessResult failed_static_assert_tokens = c_preprocess(arguments->arena, S8("_Static_assert(0, \"expected failure\");\n"), (CPreprocessOptions){0});
     CParserResult failed_static_assert_syntax = c_parse_ast(arguments->arena, failed_static_assert_tokens);
     BUSTER_TEST(arguments, failed_static_assert_syntax.diagnostic_count == 0);
@@ -29408,6 +29438,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
         }
     }
 
+    c_test_release_preprocess_arenas();
     CPreprocessResult block_extern_cleanup_tokens = c_preprocess(arguments->arena,
                                                                  S8("extern int cleanup_file_callback(int *);\n"
                                                                     "int cleanup_callback(int *value) { return *value; }\n"
@@ -29530,6 +29561,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
         BUSTER_TEST(arguments, ir_validate_canonical_module(cleanup_conversion_ir.program, &cleanup_conversion_ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
 
+    c_test_release_preprocess_arenas();
     CPreprocessResult dead_cleanup_tokens = c_preprocess(arguments->arena,
                                                          S8("static void dead_cleanup(int *value) { (void)value; }\n"
                                                             "static int dead_owner(void) {\n"
@@ -29673,6 +29705,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
         }
     }
 
+    c_test_release_preprocess_arenas();
     CPreprocessResult callback_tokens = c_preprocess(arguments->arena,
                                                      S8("typedef int (*Callback)"
                                                         "(int value, void *context);\n"
@@ -29778,6 +29811,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
         }
     }
 
+    c_test_release_preprocess_arenas();
     CPreprocessResult redeclaration_tokens = c_preprocess(arguments->arena,
                                                           S8("int add(int, int);\n"
                                                              "int add(int left, int right)"
@@ -29843,6 +29877,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
         BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE);
     }
 
+    c_test_release_preprocess_arenas();
     CPreprocessResult redefinition_tokens = c_preprocess(arguments->arena,
                                                          S8("int value = 1;\n"
                                                             "int value = 2;\n"),
@@ -29928,6 +29963,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
         IrValidationResult validation = ir_validate_canonical_module(nullability_ir.program, &nullability_ir.program->modules[0]);
         BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE);
     }
+    c_test_release_preprocess_arenas();
     CPreprocessResult attributed_enum_tokens = c_preprocess(arguments->arena,
                                                             S8("enum NativeStrategy {\n"
                                                                "    NATIVE_SEAMLESS = 0,\n"
@@ -30026,6 +30062,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
         BUSTER_TEST(arguments, sum->block_count >= 4);
         BUSTER_TEST(arguments, ir_validate_canonical_module(multi_for_ir.program, multi_for_module).error == IR_VALIDATION_NONE);
     }
+    c_test_release_preprocess_arenas();
     CPreprocessResult math_builtin_tokens = c_preprocess(arguments->arena,
                                                          S8("float lower(float value) {\n"
                                                             " return __builtin_floorf(value);\n"
@@ -30324,6 +30361,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
     };
     TemporalArena scalar_temporary = scratch_begin(scalar_conflicts, BUSTER_ARRAY_LENGTH(scalar_conflicts));
     Arena* scalar_arena = scalar_temporary.arena;
+    // Each release below returns every unit the thread still holds; nothing
+    // after it reads their results (GitHub #3431).
+    c_test_release_preprocess_arenas();
     CPreprocessResult scalar_tokens = c_preprocess(scalar_arena,
                                                    S8("long widen(long value);\n"
                                                       "unsigned short narrow("
@@ -30444,6 +30484,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
         BUSTER_TEST(arguments, integer_to_float_count == 1);
         BUSTER_TEST(arguments, ir_validate_canonical_module(float_body_ir.program, &float_body_ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
+    c_test_release_preprocess_arenas();
     CPreprocessResult pointer_body_tokens = c_preprocess(scalar_arena,
                                                          S8("int *identity_pointer("
                                                             "int *value)\n"
@@ -30649,6 +30690,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
     // the call itself disappears.  base.h falls back to <intrin.h> when the
     // builtin is missing, which drags all of <immintrin.h> into MSVC-targeted
     // builds.
+    c_test_release_preprocess_arenas();
     CPreprocessResult prefetch_tokens = c_preprocess(scalar_arena,
                                                      S8("extern int sink;\n"
                                                         "static int bump(int *values) { sink += 1; return values[0]; }\n"
@@ -30819,6 +30861,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
         CParseResult c99_inline_parse = c_parse(scalar_arena, c99_inline_tokens);
         BUSTER_TEST(arguments, c99_inline_parse.diagnostic_count == 1 && c99_inline_parse.diagnostics[0].kind == C_DIAGNOSTIC_REDEFINITION);
     }
+    c_test_release_preprocess_arenas();
     CPreprocessResult typedef_shadow_tokens = c_preprocess(scalar_arena,
                                                            S8("typedef void *id;\n"
                                                               "typedef int TokenId;\n"
@@ -31045,6 +31088,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
     }
     c_test_scratch_end(aggregate_temporary);
     TemporalArena extension_aggregate_temporary = scratch_begin(0, 0);
+    c_test_release_preprocess_arenas();
     CPreprocessResult extension_aggregate_tokens = c_preprocess(extension_aggregate_temporary.arena,
                                                                 S8("typedef long SystemLong;\n"
                                                                    "struct ResourceUsage {\n"
@@ -31407,6 +31451,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
         }
         c_test_scratch_end(shadow_temporary);
     }
+    c_test_release_preprocess_arenas();
     CPreprocessResult shadow_tokens = c_preprocess(arguments->arena,
                                                    S8("int main(int value) {\n"
                                                       "    int result = value;\n"
@@ -37185,6 +37230,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
         BUSTER_TEST(arguments, branch_count == 3);
         BUSTER_TEST(arguments, ir_validate_canonical_module(while_ir.program, module).error == IR_VALIDATION_NONE);
     }
+    // Each release below returns every unit the thread still holds; nothing
+    // after it reads their results (GitHub #3431).
+    c_test_release_preprocess_arenas();
     CPreprocessResult for_tokens = c_preprocess(control_flow_temporary.arena,
                                                 S8("int sum_to(int count) {\n"
                                                    "    int sum = 0;\n"
@@ -37262,6 +37310,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
     {
         BUSTER_TEST(arguments, ir_validate_canonical_module(single_body_ir.program, &single_body_ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
+    c_test_release_preprocess_arenas();
     CPreprocessResult switch_tokens = c_preprocess(control_flow_temporary.arena,
                                                    S8("int select_value(int value) {\n"
                                                       "    int result = 0;\n"
@@ -37484,6 +37533,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
     // Promotion, not truncation to the switched value's own type, is what the
     // narrow function pins -- an `unsigned char` switch promotes to `int`, so
     // -1 stays -1 there and never collapses onto 255.
+    c_test_release_preprocess_arenas();
     CPreprocessResult case_label_tokens = c_preprocess(control_flow_temporary.arena,
                                                        S8("long long wide_labels(long long value) {\n"
                                                           "    switch (value) {\n"
@@ -37603,6 +37653,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
             BUSTER_TEST(arguments, ir_validate_canonical_module(falls_off_ir.program, falls_off_module).error == IR_VALIDATION_NONE);
         }
     }
+    c_test_release_preprocess_arenas();
     CPreprocessResult goto_tokens = c_preprocess(control_flow_temporary.arena,
                                                  S8("int jump(int value) {\n"
                                                     "    goto target;\n"
@@ -37732,6 +37783,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
     CParseResult undeclared_parse = c_parse(arguments->arena, undeclared_tokens);
     BUSTER_TEST(arguments, undeclared_parse.diagnostic_count == 1);
     BUSTER_TEST(arguments, undeclared_parse.diagnostic_count == 1 && undeclared_parse.diagnostics[0].kind == C_DIAGNOSTIC_UNDECLARED_IDENTIFIER);
+    c_test_release_preprocess_arenas();
     CPreprocessResult argument_tokens = c_preprocess(arguments->arena,
                                                      S8("static int identity(int value)\n"
                                                         "{\n"
@@ -42245,6 +42297,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_va_list_identity_and_places(UnitTestAr
             }
             for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
             {
+                u64 case_position = temporary.arena->position;
                 CPreprocessResult bad_tokens = c_preprocess(temporary.arena, invalid[case_index], options);
                 CParseResult bad_parse = c_parse(temporary.arena, bad_tokens);
                 CIRLowerResult bad = c_lower_to_ir_with_options(temporary.arena, S8("invalid-va-list.c"), bad_tokens, bad_parse, target.target,
@@ -42256,6 +42309,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_va_list_identity_and_places(UnitTestAr
                     BUSTER_TEST(arguments, bad.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
                     BUSTER_TEST(arguments, bad.diagnostics[0].message.length > 0);
                 }
+                c_test_rewind(temporary.arena, case_position);
             }
             if (target.target.os == OPERATING_SYSTEM_WINDOWS)
             {
@@ -42277,6 +42331,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_va_list_identity_and_places(UnitTestAr
                         "int crt(int n, ...) { va_list ap; __crt_va_start(ap, n);"
                         " int result = __crt_va_arg(ap, int); __crt_va_end(ap); return result; }\n"
                         "#endif\n");
+                    u64 order_position = temporary.arena->position;
                     String8 header_source = string_format(temporary.arena, S8("{S8}{S8}"), prefixes[order], body);
                     CPreprocessResult header_tokens = c_preprocess(temporary.arena, header_source, options);
                     CParseResult header_parse = c_parse(temporary.arena, header_tokens);
@@ -42288,6 +42343,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_va_list_identity_and_places(UnitTestAr
                     {
                         BUSTER_TEST(arguments, ir_validate_canonical_module(header.program, header.program->modules).error == IR_VALIDATION_NONE);
                     }
+                    c_test_rewind(temporary.arena, order_position);
                 }
             }
             c_test_scratch_end(temporary);
@@ -53427,9 +53483,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_dead_continuation_edges(Uni
     u64 large[4];
     for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(small); shape += 1)
     {
+        u64 shape_position = temporary.arena->position;
         small[shape] = c_test_direct_ssa_retained_parameters(temporary.arena, 4, shape);
         large[shape] = c_test_direct_ssa_retained_parameters(temporary.arena, 64, shape);
         BUSTER_TEST(arguments, small[shape] != UINT64_MAX && large[shape] != UINT64_MAX);
+        c_test_rewind(temporary.arena, shape_position);
     }
     BUSTER_TEST(arguments, small[0] == small[1] && large[0] == large[1]);
     BUSTER_TEST(arguments, large[0] == small[0] && large[2] == small[2]);
@@ -61088,7 +61146,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_work_and_scratch(UnitTestArgum
                 {
                     u64 mark = temporary.arena->position;
                     memset(arena_allocate(temporary.arena, u8, 8192), 0xa5, 8192);
-                    arena_set_position(temporary.arena, mark);
+                    c_test_rewind(temporary.arena, mark);
                 }
                 CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
                 CParserResult syntax = c_parse_ast(temporary.arena, tokens);
@@ -61816,465 +61874,493 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_omitted_conditional(UnitTestArgume
     return result;
 }
 
+// Each fixture must return every reservation it made and never hold more than
+// C_TEST_FIXTURE_UNIT_LIMIT preprocessing units at once: each unit reserves
+// three 1 GiB arenas until it is released (GitHub #3431). The thread's arena
+// pool is drained between fixtures as well, so phase and translation-unit
+// arenas one fixture parked do not add to the next fixture's peak.
+#define C_TEST_FIXTURE_UNIT_LIMIT 8
+#define C_FRONTEND_TEST_FIXTURE(arguments, function) \
+    do \
+    { \
+        u64 live_ = arena_test_live_reserved_bytes(); \
+        u64 units_ = c_test_preprocess_unit_peak_reset(); \
+        BUSTER_TEST_FIXTURE(arguments, function); \
+        u64 held_ = c_test_preprocess_unit_peak() - units_; \
+        u64 left_ = arena_test_live_reserved_bytes(); \
+        BUSTER_TEST_RAW(arguments, left_ == live_ && held_ <= C_TEST_FIXTURE_UNIT_LIMIT, \
+                        string_format(arguments->arena, S8("{S8}: {u64} reserved bytes live before, {u64} after; {u64} units held at once"), \
+                                      S8(#function), live_, left_, held_)); \
+        c_test_release_preprocess_arenas(); \
+        arena_pool_release_thread(); \
+    } while (0)
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    BUSTER_TEST_FIXTURE(arguments, c_test_generic_work_and_scratch);
-    BUSTER_TEST_FIXTURE(arguments, c_test_generic_large_function);
+    // The thread's unit registry reserves its own arena at its first unit;
+    // reserve it before the first fixture's reading.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        c_preprocess(temporary.arena, S8(""), (CPreprocessOptions){0});
+        c_test_scratch_end(temporary);
+    }
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_generic_work_and_scratch);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_generic_large_function);
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
 #if BUSTER_BENCH_ALLOCATIONS
-    C_TEST_FIXTURE(arguments, c_test_source_fact_census);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_source_fact_census);
 #endif
     // Fixtures run in byte order of their names. Register a new fixture at
     // its sorted position, not after the newest one, so independent
     // additions land at different anchors; see docs/agents/testing.md.
-    C_TEST_FIXTURE(arguments, c_test_abstract_pointer_array_sizeof);
-    C_TEST_FIXTURE(arguments, c_test_aggregate_array_element_initializers);
-    C_TEST_FIXTURE(arguments, c_test_aggregate_constant_bytes);
-    C_TEST_FIXTURE(arguments, c_test_aggregate_corrections);
-    C_TEST_FIXTURE(arguments, c_test_aggregate_expression_brace_elision);
-    C_TEST_FIXTURE(arguments, c_test_aggregate_initializer_inferred_bounds);
-    C_TEST_FIXTURE(arguments, c_test_aggregate_lookup_frontend);
-    C_TEST_FIXTURE(arguments, c_test_aggregate_lookup_growth);
-    C_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);
-    C_TEST_FIXTURE(arguments, c_test_aggregate_unique_search);
-    C_TEST_FIXTURE(arguments, c_test_alignment_redeclarations);
-    C_TEST_FIXTURE(arguments, c_test_tentative_alignment_merging);
-    C_TEST_FIXTURE(arguments, c_test_alignof_member);
-    C_TEST_FIXTURE(arguments, c_test_alignof_object);
-    C_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_ir);
-    C_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_parse);
-    C_TEST_FIXTURE(arguments, c_test_array_bound_object_layout);
-    C_TEST_FIXTURE(arguments, c_test_atomic_compound_assignment_runtime);
-    C_TEST_FIXTURE(arguments, c_test_atomic_compound_result);
-    C_TEST_FIXTURE(arguments, c_test_atomic_float_compare_exchange);
-    C_TEST_FIXTURE(arguments, c_test_attribute_call_roles);
-    C_TEST_FIXTURE(arguments, c_test_bfloat16_semantic_acceptance);
-    C_TEST_FIXTURE(arguments, c_test_bfloat16_type);
-    C_TEST_FIXTURE(arguments, c_test_bit_field_assignment_accesses);
-    C_TEST_FIXTURE(arguments, c_test_bit_field_diagnostic_completeness);
-    C_TEST_FIXTURE(arguments, c_test_bit_field_width_authority);
-    C_TEST_FIXTURE(arguments, c_test_bit_field_width_constraints);
-    C_TEST_FIXTURE(arguments, c_test_bit_field_width_spellings);
-    C_TEST_FIXTURE(arguments, c_test_block_scope_fixed_enum_runtime);
-    C_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration);
-    C_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration_file_scope_name);
-    C_TEST_FIXTURE(arguments, c_test_block_type_name_attributes);
-    C_TEST_FIXTURE(arguments, c_test_body_scope_map);
-    C_TEST_FIXTURE(arguments, c_test_body_validation_scratch_exhaustion);
-    C_TEST_FIXTURE(arguments, c_test_body_validation_scratch_families);
-    C_TEST_FIXTURE(arguments, c_test_body_validation_type_query_model);
-    C_TEST_FIXTURE(arguments, c_test_bool_bit_field_loads);
-    C_TEST_FIXTURE(arguments, c_test_brace_designators);
-    C_TEST_FIXTURE(arguments, c_test_braced_string_initializers);
-    C_TEST_FIXTURE(arguments, c_test_braced_string_runtime);
-    C_TEST_FIXTURE(arguments, c_test_builtin_classify_type);
-    C_TEST_FIXTURE(arguments, c_test_builtin_infinity);
-    C_TEST_FIXTURE(arguments, c_test_c23_attribute_noreturn);
-    C_TEST_FIXTURE(arguments, c_test_c23_attribute_positions);
-    C_TEST_FIXTURE(arguments, c_test_c23_auto_local_declarations);
-    C_TEST_FIXTURE(arguments, c_test_c23_empty_initializers);
-    C_TEST_FIXTURE(arguments, c_test_c23_empty_list_prototypes);
-    C_TEST_FIXTURE(arguments, c_test_c99_inline_linkage);
-    C_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
-    C_TEST_FIXTURE(arguments, c_test_call_assignment_values);
-    C_TEST_FIXTURE(arguments, c_test_call_result_callees);
-    C_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operand_runtime);
-    C_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operands);
-    C_TEST_FIXTURE(arguments, c_test_casted_dereference_update);
-    C_TEST_FIXTURE(arguments, c_test_character_literal_query_types);
-    C_TEST_FIXTURE(arguments, c_test_choose_expr_evaluation);
-    C_TEST_FIXTURE(arguments, c_test_comma_condition_evaluation);
-    C_TEST_FIXTURE(arguments, c_test_comma_result_constraints);
-    C_TEST_FIXTURE(arguments, c_test_comma_value_operands);
-    C_TEST_FIXTURE(arguments, c_test_complex_bool_conversion);
-    C_TEST_FIXTURE(arguments, c_test_complex_initializer_elision_runtime);
-    C_TEST_FIXTURE(arguments, c_test_automatic_range_designator_runtime);
-    C_TEST_FIXTURE(arguments, c_test_compound_assignment_conversions);
-    C_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
-    C_TEST_FIXTURE(arguments, c_test_conditional_incomplete_array_runtime);
-    C_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
-    C_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
-    C_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
-    C_TEST_FIXTURE(arguments, c_test_constant_expression_syntax);
-    C_TEST_FIXTURE(arguments, c_test_constant_scalar_truth);
-    C_TEST_FIXTURE(arguments, c_test_constexpr_integer_range);
-    C_TEST_FIXTURE(arguments, c_test_constexpr_integer_types);
-    C_TEST_FIXTURE(arguments, c_test_constexpr_integer_types_runtime);
-    C_TEST_FIXTURE(arguments, c_test_constexpr_leaf_storage);
-    C_TEST_FIXTURE(arguments, c_test_controlled_body_extents_linear);
-    C_TEST_FIXTURE(arguments, c_test_controlling_expression_scope);
-    C_TEST_FIXTURE(arguments, c_test_array_object_size_limits);
-    C_TEST_FIXTURE(arguments, c_test_static_assert_object_size_scaling);
-    C_TEST_FIXTURE(arguments, c_test_alignas_typed_query_chain);
-    C_TEST_FIXTURE(arguments, c_test_alignas_fold_typed_width);
-    C_TEST_FIXTURE(arguments, c_test_declaration_constraints);
-    C_TEST_FIXTURE(arguments, c_test_declaration_regressions);
-    C_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
-    C_TEST_FIXTURE(arguments, c_test_declarator_group_nesting);
-    C_TEST_FIXTURE(arguments, c_test_declarator_trailing_token_diagnostics);
-    C_TEST_FIXTURE(arguments, c_test_deep_block_lookup_linear);
-    C_TEST_FIXTURE(arguments, c_test_deferred_assert_false);
-    C_TEST_FIXTURE(arguments, c_test_deferred_assert_diagnostic_ownership);
-    C_TEST_FIXTURE(arguments, c_test_deferred_assert_nonconstant);
-    C_TEST_FIXTURE(arguments, c_test_deferred_assert_positive);
-    C_TEST_FIXTURE(arguments, c_test_definition_index);
-    C_TEST_FIXTURE(arguments, c_test_digraphs);
-    C_TEST_FIXTURE(arguments, c_test_direct_ssa);
-    C_TEST_FIXTURE(arguments, c_test_direct_ssa_dead_continuation_edges);
-    C_TEST_FIXTURE(arguments, c_test_direct_ssa_declaration_definition);
-    C_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
-    C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_join_simplify);
-    C_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
-    C_TEST_FIXTURE(arguments, c_test_duplicate_parameter_names);
-    C_TEST_FIXTURE(arguments, c_test_dynamic_object_size);
-    C_TEST_FIXTURE(arguments, c_test_redefinition_names_previous_site);
-    C_TEST_FIXTURE(arguments, c_test_empty_scalar_initializer_runtime);
-    C_TEST_FIXTURE(arguments, c_test_nested_initializer_cursor_depth_runtime);
-    C_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
-    C_TEST_FIXTURE(arguments, c_test_enum_bool_conversion);
-    C_TEST_FIXTURE(arguments, c_test_enum_lowering);
-    C_TEST_FIXTURE(arguments, c_test_enum_runtime);
-    C_TEST_FIXTURE(arguments, c_test_enum_scratch_keeps_position_index);
-    C_TEST_FIXTURE(arguments, c_test_unnamed_parameter_definitions);
-    C_TEST_FIXTURE(arguments, c_test_nested_statement_expression_operands);
-    C_TEST_FIXTURE(arguments, c_test_enum_sizeof_parenthesized_operand);
-    C_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression);
-    C_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression_runtime);
-    C_TEST_FIXTURE(arguments, c_test_enum_successor_limits);
-    C_TEST_FIXTURE(arguments, c_test_enum_successors);
-    C_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);
-    C_TEST_FIXTURE(arguments, c_test_enumerator_types);
-    C_TEST_FIXTURE(arguments, c_test_error_attribute_calls);
-    C_TEST_FIXTURE(arguments, c_test_expanded_empty_foreign_source_map);
-    C_TEST_FIXTURE(arguments, c_test_expression_aggregate_bit_fields);
-    C_TEST_FIXTURE(arguments, c_test_expression_enum_runtime);
-    C_TEST_FIXTURE(arguments, c_test_expression_enum_scope);
-    C_TEST_FIXTURE(arguments, c_test_ext80_big_live_limbs);
-    C_TEST_FIXTURE(arguments, c_test_extension_constants);
-    C_TEST_FIXTURE(arguments, c_test_file_scope_declaration_order);
-    C_TEST_FIXTURE(arguments, c_test_file_scope_expression_enum_runtime);
-    C_TEST_FIXTURE(arguments, c_test_file_scope_expression_enum_scope);
-    C_TEST_FIXTURE(arguments, c_test_file_tls_dialect);
-    C_TEST_FIXTURE(arguments, c_test_file_tls_dialect_runtime);
-    C_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
-    C_TEST_FIXTURE(arguments, c_test_fixed_arity_builtins);
-    C_TEST_FIXTURE(arguments, c_test_fixed_enum_range_diagnostics);
-    C_TEST_FIXTURE(arguments, c_test_fixed_enum_ranges);
-    C_TEST_FIXTURE(arguments, c_test_fabs_builtin_lowering);
-    C_TEST_FIXTURE(arguments, c_test_float16_type);
-    C_TEST_FIXTURE(arguments, c_test_float_classifier_widths);
-    C_TEST_FIXTURE(arguments, c_test_float_integer_constants);
-    C_TEST_FIXTURE(arguments, c_test_float_literal_initializer_rounding);
-    C_TEST_FIXTURE(arguments, c_test_float_literal_initializer_runtime);
-    C_TEST_FIXTURE(arguments, c_test_for_declaration_constraints);
-    C_TEST_FIXTURE(arguments, c_test_for_declaration_scopes);
-    C_TEST_FIXTURE(arguments, c_test_fresh_binding_publication);
-    C_TEST_FIXTURE(arguments, c_test_frontend_control_flow);
-    C_TEST_FIXTURE(arguments, c_test_frontend_global_types);
-    C_TEST_FIXTURE(arguments, c_test_frontend_lex_differential);
-    C_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
-    C_TEST_FIXTURE(arguments, c_test_frontend_reservation_failures);
-    C_TEST_FIXTURE(arguments, c_test_frontend_scratch_and_hardening);
-    C_TEST_FIXTURE(arguments, c_test_frontend_semantic_basics);
-    C_TEST_FIXTURE(arguments, c_test_frontend_source_metrics);
-    C_TEST_FIXTURE(arguments, c_test_frontend_vectors);
-    C_TEST_FIXTURE(arguments, c_test_frontend_vla_and_ir);
-    C_TEST_FIXTURE(arguments, c_test_function_body_sizeof_expression);
-    C_TEST_FIXTURE(arguments, c_test_function_name_literals);
-    C_TEST_FIXTURE(arguments, c_test_function_parameter_compatibility);
-    C_TEST_FIXTURE(arguments, c_test_function_parameter_compatibility_runtime);
-    C_TEST_FIXTURE(arguments, c_test_function_pointer_array_type_name_runtime);
-    C_TEST_FIXTURE(arguments, c_test_function_typedef_scopes);
-    C_TEST_FIXTURE(arguments, c_test_generic_function_designator_call);
-    C_TEST_FIXTURE(arguments, c_test_generic_overflow_builtins);
-    C_TEST_FIXTURE(arguments, c_test_generic_overflow_builtins_runtime);
-    C_TEST_FIXTURE(arguments, c_test_generic_string_subscripts);
-    C_TEST_FIXTURE(arguments, c_test_elifdef_and_wide_character_constants);
-    C_TEST_FIXTURE(arguments, c_test_abstract_declarator_and_pointer_typing);
-    C_TEST_FIXTURE(arguments, c_test_debug_lexical_scopes);
-    C_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
-    C_TEST_FIXTURE(arguments, c_test_string_literal_sizeof_array_bound);
-    C_TEST_FIXTURE(arguments, c_test_global_identifier_updates);
-    C_TEST_FIXTURE(arguments, c_test_gnu_attribute_queries);
-    C_TEST_FIXTURE(arguments, c_test_gnu_omitted_conditional);
-    C_TEST_FIXTURE(arguments, c_test_gnu_void_conditional_operand);
-    C_TEST_FIXTURE(arguments, c_test_sync_builtins_runtime);
-    C_TEST_FIXTURE(arguments, c_test_sync_builtins_diagnostics);
-    C_TEST_FIXTURE(arguments, c_test_sync_builtins_canonical_ir);
-    C_TEST_FIXTURE(arguments, c_test_sync_builtins_wide_no_cx16);
-    C_TEST_FIXTURE(arguments, c_test_gnu_void_return);
-    C_TEST_FIXTURE(arguments, c_test_has_builtin);
-    C_TEST_FIXTURE(arguments, c_test_header_operands);
-    C_TEST_FIXTURE(arguments, c_test_identifier_identity_once);
-    C_TEST_FIXTURE(arguments, c_test_identifier_list_function_definitions);
-    C_TEST_FIXTURE(arguments, c_test_incomplete_array_address_runtime);
-    C_TEST_FIXTURE(arguments, c_test_initializer_enum_runtime);
-    C_TEST_FIXTURE(arguments, c_test_initializer_enum_scope);
-    C_TEST_FIXTURE(arguments, c_test_initializer_frame_bounds);
-    C_TEST_FIXTURE(arguments, c_test_initializer_overrides);
-    C_TEST_FIXTURE(arguments, c_test_initializer_relocation_index);
-    C_TEST_FIXTURE(arguments, c_test_initializer_relocation_lowering);
-    C_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
-    C_TEST_FIXTURE(arguments, c_test_initializer_separators);
-    C_TEST_FIXTURE(arguments, c_test_initializer_stack_capacity);
-    C_TEST_FIXTURE(arguments, c_test_inline_assembly_constraint_unions);
-    C_TEST_FIXTURE(arguments, c_test_inline_assembly_cpuid_register_views);
-    C_TEST_FIXTURE(arguments, c_test_inline_assembly_volatile_ir);
-    C_TEST_FIXTURE(arguments, c_test_integer_conversion_rank);
-    C_TEST_FIXTURE(arguments, c_test_integer_literal_policy);
-    C_TEST_FIXTURE(arguments, c_test_integer_literal_policy_runtime);
-    C_TEST_FIXTURE(arguments, c_test_integer_semantics_agreement);
-    C_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
-    C_TEST_FIXTURE(arguments, c_test_integer_transform_builtins);
-    C_TEST_FIXTURE(arguments, c_test_intern_scan_by_shape);
-    C_TEST_FIXTURE(arguments, c_test_invalid_block_tls);
-    C_TEST_FIXTURE(arguments, c_test_invalid_designators);
-    C_TEST_FIXTURE(arguments, c_test_invalid_local_static_initializer);
-    C_TEST_FIXTURE(arguments, c_test_invalid_root_designators);
-    C_TEST_FIXTURE(arguments, c_test_invalid_union_initializer);
-    C_TEST_FIXTURE(arguments, c_test_ir_initializer_context_buffer_owner);
-    C_TEST_FIXTURE(arguments, c_test_ir_lower_capacity_plan);
-    C_TEST_FIXTURE(arguments, c_test_ir_lower_scratch_capacity);
-    C_TEST_FIXTURE(arguments, c_test_ir_query_scratch_growth);
-    C_TEST_FIXTURE(arguments, c_test_ir_local_table_zero_scratch);
-    C_TEST_FIXTURE(arguments, c_test_ir_row_streams);
-    C_TEST_FIXTURE(arguments, c_test_label_values_gate);
-    C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_growth);
-    C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_message_lifetime);
-    C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_reserve_failure);
-    C_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
-    C_TEST_FIXTURE(arguments, c_test_line_filename_escapes);
-    C_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
-    C_TEST_FIXTURE(arguments, c_test_type_interning_objects);
-    C_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
-    C_TEST_FIXTURE(arguments, c_test_local_label_declarations);
-    C_TEST_FIXTURE(arguments, c_test_local_labels);
-    C_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations);
-    C_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations_runtime);
-    C_TEST_FIXTURE(arguments, c_test_local_static_aggregates);
-    C_TEST_FIXTURE(arguments, c_test_local_tls);
-    C_TEST_FIXTURE(arguments, c_test_local_typedef_for_declaration);
-    C_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
-    C_TEST_FIXTURE(arguments, c_test_lowering_nested_calls_and_wide_switch);
-    C_TEST_FIXTURE(arguments, c_test_switch_late_overlap);
-    C_TEST_FIXTURE(arguments, c_test_lowering_flat_call_arguments);
-    C_TEST_FIXTURE(arguments, c_test_lowering_nested_call_arguments);
-    C_TEST_FIXTURE(arguments, c_test_lowering_nested_conditional_sizeof_memo);
-    C_TEST_FIXTURE(arguments, c_test_lowering_nested_logical_operands_never_abort);
-    C_TEST_FIXTURE(arguments, c_test_lowering_parenthesized_logical_chains);
-    C_TEST_FIXTURE(arguments, c_test_macro_plain_production);
-    C_TEST_FIXTURE(arguments, c_test_macro_stringify_backslashes);
-    C_TEST_FIXTURE(arguments, c_test_macro_task_batches);
-    C_TEST_FIXTURE(arguments, c_test_malformed_initializer_progress_and_identifier_uses);
-    C_TEST_FIXTURE(arguments, c_test_max_align_t_layout);
-    C_TEST_FIXTURE(arguments, c_test_member_array_declarators);
-    C_TEST_FIXTURE(arguments, c_test_member_call_arity_ownership);
-    C_TEST_FIXTURE(arguments, c_test_member_declaration_without_declarator_diagnostics);
-    C_TEST_FIXTURE(arguments, c_test_member_declarator_trailing_token_diagnostics);
-    C_TEST_FIXTURE(arguments, c_test_member_lookup_linear_work);
-    C_TEST_FIXTURE(arguments, c_test_member_search_scratch);
-    C_TEST_FIXTURE(arguments, c_test_microsoft_aligned_typedef_pack);
-    C_TEST_FIXTURE(arguments, c_test_msvc_enum_abi);
-    C_TEST_FIXTURE(arguments, c_test_multiline_comment_conditionals);
-    C_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
-    C_TEST_FIXTURE(arguments, c_test_negative_array_bounds);
-    C_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
-    C_TEST_FIXTURE(arguments, c_test_label_lookup_work_growth);
-    C_TEST_FIXTURE(arguments, c_test_nested_control_work_growth);
-    C_TEST_FIXTURE(arguments, c_test_nested_vector_lane_stores);
-    C_TEST_FIXTURE(arguments, c_test_promoted_offsetof_static_tables);
-    C_TEST_FIXTURE(arguments, c_test_runtime_compound_literal_overrides);
-    C_TEST_FIXTURE(arguments, c_test_braceless_control_work_growth);
-    C_TEST_FIXTURE(arguments, c_test_nested_control_lowering_scope_levels);
-    C_TEST_FIXTURE(arguments, c_test_sizeof_conditional_nesting_depth);
-    C_TEST_FIXTURE(arguments, c_test_sizeof_long_shallow_operand);
-    C_TEST_FIXTURE(arguments, c_test_tall_expression_types);
-    C_TEST_FIXTURE(arguments, c_test_nested_offsetof_pointer_prediction);
-    C_TEST_FIXTURE(arguments, c_test_nonvoid_falloff);
-    C_TEST_FIXTURE(arguments, c_test_noreturn_call_expression_statements);
-    C_TEST_FIXTURE(arguments, c_test_noreturn_call_value_operands);
-    C_TEST_FIXTURE(arguments, c_test_null_preprocessing_directives);
-    C_TEST_FIXTURE(arguments, c_test_number_facts);
-    C_TEST_FIXTURE(arguments, c_test_obsolete_field_designators);
-    C_TEST_FIXTURE(arguments, c_test_offsetof_address_static_initializer_runtime);
-    C_TEST_FIXTURE(arguments, c_test_offsetof_members);
-    C_TEST_FIXTURE(arguments, c_test_offsetof_members_runtime);
-    C_TEST_FIXTURE(arguments, c_test_offsetof_runtime_index);
-    C_TEST_FIXTURE(arguments, c_test_offsetof_runtime_index_declaration_order);
-    C_TEST_FIXTURE(arguments, c_test_offsetof_typed_indices);
-    C_TEST_FIXTURE(arguments, c_test_offsetof_typed_indices_runtime);
-    C_TEST_FIXTURE(arguments, c_test_offsetof_typed_refusals);
-    C_TEST_FIXTURE(arguments, c_test_offsetof_bit_field_diagnostic);
-    C_TEST_FIXTURE(arguments, c_test_oversized_token_spellings);
-    C_TEST_FIXTURE(arguments, c_test_packed_and_aligned_layout);
-    C_TEST_FIXTURE(arguments, c_test_parameter_local_alignment);
-    C_TEST_FIXTURE(arguments, c_test_parenthesized_address_assignment_expression);
-    C_TEST_FIXTURE(arguments, c_test_parenthesized_address_place_assignment);
-    C_TEST_FIXTURE(arguments, c_test_parenthesized_bit_field_assignment_values);
-    C_TEST_FIXTURE(arguments, c_test_parenthesized_function_declarations);
-    C_TEST_FIXTURE(arguments, c_test_parenthesized_logical_chain_order_runtime);
-    C_TEST_FIXTURE(arguments, c_test_parenthesized_typedef_parameters);
-    C_TEST_FIXTURE(arguments, c_test_parse_storage_growth);
-    C_TEST_FIXTURE(arguments, c_test_parser_body_frame_storage);
-    C_TEST_FIXTURE(arguments, c_test_parser_diagnostic_storage);
-    C_TEST_FIXTURE(arguments, c_test_pasted_keyword_body_walk);
-    C_TEST_FIXTURE(arguments, c_test_phase_arena_release);
-    C_TEST_FIXTURE(arguments, c_test_pointer_declarator_attributes);
-    C_TEST_FIXTURE(arguments, c_test_pointer_to_array_shapes_runtime);
-    C_TEST_FIXTURE(arguments, c_test_pointer_update_operand_runtime);
-    C_TEST_FIXTURE(arguments, c_test_pointer_width_integer_conversion);
-    C_TEST_FIXTURE(arguments, c_test_position_index_tiles);
-    C_TEST_FIXTURE(arguments, c_test_positional_initializer_relocations);
-    C_TEST_FIXTURE(arguments, c_test_post_tag_declaration_specifiers);
-    C_TEST_FIXTURE(arguments, c_test_pp_class_masks);
-    C_TEST_FIXTURE(arguments, c_test_pragma_pack_explicit_alignment);
-    C_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);
-    C_TEST_FIXTURE(arguments, c_test_promoted_designator_continuation_runtime);
-    C_TEST_FIXTURE(arguments, c_test_promoted_member_search);
-    C_TEST_FIXTURE(arguments, c_test_initializer_slot_tables);
-    C_TEST_FIXTURE(arguments, c_test_integer_builtin_constant_folding);
-    C_TEST_FIXTURE(arguments, c_test_promoted_union_initializer_overrides);
-    C_TEST_FIXTURE(arguments, c_test_qualified_compound_values);
-    C_TEST_FIXTURE(arguments, c_test_qualified_parameter_values);
-    C_TEST_FIXTURE(arguments, c_test_repeated_incomplete_arrays);
-    C_TEST_FIXTURE(arguments, c_test_resolved_call_effects);
-    C_TEST_FIXTURE(arguments, c_test_returns_twice_attribute_ir);
-    C_TEST_FIXTURE(arguments, c_test_returns_twice_attribute_runtime);
-    C_TEST_FIXTURE(arguments, c_test_runtime_place_updates);
-    C_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);
-    C_TEST_FIXTURE(arguments, c_test_scope_interval_index);
-    C_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);
-    C_TEST_FIXTURE(arguments, c_test_sizeof_control_preparation);
-    C_TEST_FIXTURE(arguments, c_test_sizeof_function_type_name);
-    C_TEST_FIXTURE(arguments, c_test_sizeof_statement_expression_operand);
-    C_TEST_FIXTURE(arguments, c_test_sizeof_update_operand_constraints);
-    C_TEST_FIXTURE(arguments, c_test_sizeof_vla_evaluation);
-    C_TEST_FIXTURE(arguments, c_test_source_map_lifetime);
-    C_TEST_FIXTURE(arguments, c_test_source_map_locations);
-    C_TEST_FIXTURE(arguments, c_test_source_map_order);
-    C_TEST_FIXTURE(arguments, c_test_source_map_publication);
-    C_TEST_FIXTURE(arguments, c_test_source_metrics_path_identity);
-    C_TEST_FIXTURE(arguments, c_test_source_size_limit);
-    C_TEST_FIXTURE(arguments, c_test_source_utf8);
-    C_TEST_FIXTURE(arguments, c_test_symbol_visibility);
-    C_TEST_FIXTURE(arguments, c_test_statement_expression_control_call);
-    C_TEST_FIXTURE(arguments, c_test_statement_expression_control_value);
-    C_TEST_FIXTURE(arguments, c_test_statement_expression_declaration_scope);
-    C_TEST_FIXTURE(arguments, c_test_statement_expression_goto_out);
-    C_TEST_FIXTURE(arguments, c_test_statement_expression_nested_call);
-    C_TEST_FIXTURE(arguments, c_test_statement_expression_nested_operand_runtime);
-    C_TEST_FIXTURE(arguments, c_test_static_assert_diagnostic_messages);
-    C_TEST_FIXTURE(arguments, c_test_static_assert_nonconstant_quote);
-    C_TEST_FIXTURE(arguments, c_test_static_compound_literal);
-    C_TEST_FIXTURE(arguments, c_test_static_declaration_inline_definition);
-    C_TEST_FIXTURE(arguments, c_test_static_label_differences);
-    C_TEST_FIXTURE(arguments, c_test_automatic_label_differences);
-    C_TEST_FIXTURE(arguments, c_test_unbraced_switch_bodies);
-    C_TEST_FIXTURE(arguments, c_test_obsolete_designator_labels);
-    C_TEST_FIXTURE(arguments, c_test_static_range_designators);
-    C_TEST_FIXTURE(arguments, c_test_stddef_need_protocol);
-    C_TEST_FIXTURE(arguments, c_test_string_literal_decode_differential);
-    C_TEST_FIXTURE(arguments, c_test_string_literal_memo);
-    C_TEST_FIXTURE(arguments, c_test_switch_integer_controls);
-    C_TEST_FIXTURE(arguments, c_test_symbol_find_collisions);
-    C_TEST_FIXTURE(arguments, c_test_tag_scope_typedef_identity);
-    C_TEST_FIXTURE(arguments, c_test_tagged_member_declares_nothing);
-    C_TEST_FIXTURE(arguments, c_test_tagged_member_microsoft_anonymous);
-    C_TEST_FIXTURE(arguments, c_test_target_abi_macros);
-    C_TEST_FIXTURE(arguments, c_test_gnu_common_predefined_macros);
-    C_TEST_FIXTURE(arguments, c_test_tgmath_runtime);
-    C_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
-    C_TEST_FIXTURE(arguments, c_test_token_view_constant_range);
-    C_TEST_FIXTURE(arguments, c_test_transparent_union_abi);
-    C_TEST_FIXTURE(arguments, c_test_transparent_union_pointer_qualifiers);
-    C_TEST_FIXTURE(arguments, c_test_transparent_union_qualifiers);
-    C_TEST_FIXTURE(arguments, c_test_transparent_union_qualifiers_runtime);
-    C_TEST_FIXTURE(arguments, c_test_trigraph_translation);
-    C_TEST_FIXTURE(arguments, c_test_type_constant_large_buffers);
-    C_TEST_FIXTURE(arguments, c_test_type_constant_query_isolation);
-    C_TEST_FIXTURE(arguments, c_test_type_identity_authority);
-    C_TEST_FIXTURE(arguments, c_test_type_name_attributes);
-    C_TEST_FIXTURE(arguments, c_test_type_name_operand_trailer);
-    C_TEST_FIXTURE(arguments, c_test_type_parse_rollback_growth);
-    C_TEST_FIXTURE(arguments, c_test_type_parse_snapshot_rows);
-    C_TEST_FIXTURE(arguments, c_test_type_self_compatibility);
-    C_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
-    C_TEST_FIXTURE(arguments, c_test_typed_enum_integer_constants);
-    C_TEST_FIXTURE(arguments, c_test_typedef_fallback_lookup);
-    C_TEST_FIXTURE(arguments, c_test_typeof_anonymous_aggregate_runtime);
-    C_TEST_FIXTURE(arguments, c_test_typeof_cast_prefix_operator);
-    C_TEST_FIXTURE(arguments, c_test_typeof_conditional_type);
-    C_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
-    C_TEST_FIXTURE(arguments, c_test_typeof_invalid_operand_diagnostics);
-    C_TEST_FIXTURE(arguments, c_test_typeof_malformed_operand_diagnostics);
-    C_TEST_FIXTURE(arguments, c_test_typeof_statement_expression_declarations);
-    C_TEST_FIXTURE(arguments, c_test_u64_initializer_slots);
-    C_TEST_FIXTURE(arguments, c_test_ucn_lex);
-    C_TEST_FIXTURE(arguments, c_test_ucn_preprocess);
-    C_TEST_FIXTURE(arguments, c_test_ucn_runtime);
-    C_TEST_FIXTURE(arguments, c_test_ucn_semantic);
-    C_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
-    C_TEST_FIXTURE(arguments, c_test_unknown_type_name_diagnostics);
-    C_TEST_FIXTURE(arguments, c_test_unsupported_float_extension_diagnostics);
-    C_TEST_FIXTURE(arguments, c_test_unnamed_initializer_places);
-    C_TEST_FIXTURE(arguments, c_test_unneeded_prototyped_definitions);
-    C_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
-    C_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
-    C_TEST_FIXTURE(arguments, c_test_unused_wide_vector_signatures);
-    C_TEST_FIXTURE(arguments, c_test_va_list_identity_and_places);
-    C_TEST_FIXTURE(arguments, c_test_validation_candidates);
-    C_TEST_FIXTURE(arguments, c_test_variable_member_types);
-    C_TEST_FIXTURE(arguments, c_test_variadic_comma_omission);
-    C_TEST_FIXTURE(arguments, c_test_variadic_function_pointer_cast);
-    C_TEST_FIXTURE(arguments, c_test_variadic_function_pointer_cast_runtime);
-    C_TEST_FIXTURE(arguments, c_test_variadic_va_opt);
-    C_TEST_FIXTURE(arguments, c_test_vector_subscript_conditional_type);
-    C_TEST_FIXTURE(arguments, c_test_vendor_builtin_admission);
-    C_TEST_FIXTURE(arguments, c_test_vendor_fixed_lane_selection);
-    C_TEST_FIXTURE(arguments, c_test_vendor_halfword_shuffles);
-    C_TEST_FIXTURE(arguments, c_test_vendor_immediate_byte_shifts);
-    C_TEST_FIXTURE(arguments, c_test_vendor_lzcnt);
-    C_TEST_FIXTURE(arguments, c_test_vendor_sse2_shift_counts);
-    C_TEST_FIXTURE(arguments, c_test_vendor_storage_half_admission);
-    C_TEST_FIXTURE(arguments, c_test_vendor_tzcnt);
-    C_TEST_FIXTURE(arguments, c_test_vla_row_places);
-    C_TEST_FIXTURE(arguments, c_test_void_function_pointer_policy);
-    C_TEST_FIXTURE(arguments, c_test_void_object_refusals);
-    C_TEST_FIXTURE(arguments, c_test_volatile_split_bit_fields);
-    C_TEST_FIXTURE(arguments, c_test_wasm_long_double_storage);
-    C_TEST_FIXTURE(arguments, c_test_wide_float_android_boundaries);
-    C_TEST_FIXTURE(arguments, c_test_wide_float_cleanup_signature_calls);
-    C_TEST_FIXTURE(arguments, c_test_wide_float_deep_initializers);
-    C_TEST_FIXTURE(arguments, c_test_wide_float_function_signatures);
-    C_TEST_FIXTURE(arguments, c_test_wide_float_global_boundaries);
-    C_TEST_FIXTURE(arguments, c_test_wide_float_global_braces);
-    C_TEST_FIXTURE(arguments, c_test_wide_float_global_folding);
-    C_TEST_FIXTURE(arguments, c_test_x87_integer_unary_initializers);
-    C_TEST_FIXTURE(arguments, c_test_x87_integer_unary_runtime);
-    C_TEST_FIXTURE(arguments, c_test_wide_float_global_initializers);
-    C_TEST_FIXTURE(arguments, c_test_wide_float_integer_global_initializers);
-    C_TEST_FIXTURE(arguments, c_test_wide_float_global_rejections);
-    C_TEST_FIXTURE(arguments, c_test_wide_float_local_transport);
-    C_TEST_FIXTURE(arguments, c_test_wide_float_signature_calls);
-    C_TEST_FIXTURE(arguments, c_test_packed_wide_float_wrapper_signatures);
-    C_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
-    C_TEST_FIXTURE(arguments, c_test_wide_member_lookup_semantics);
-    C_TEST_FIXTURE(arguments, c_test_wide_numeric_literal_contexts);
-    C_TEST_FIXTURE(arguments, c_test_wide_numeric_literal_runtime);
-    C_TEST_FIXTURE(arguments, c_test_wide_pragma_operands);
-    C_TEST_FIXTURE(arguments, c_test_windows_inline_bodies);
-    C_TEST_FIXTURE(arguments, c_test_windows_va_start_cursor);
-    C_TEST_FIXTURE(arguments, c_test_windows_va_start_semantics);
-    C_TEST_FIXTURE(arguments, c_test_word_class_token_kinds);
-    C_TEST_FIXTURE(arguments, c_test_x87_classifier_runtime);
-    C_TEST_FIXTURE(arguments, c_test_generic_float_builtins_lowering);
-    C_TEST_FIXTURE(arguments, c_test_libm_rounding_builtins_lowering);
-    C_TEST_FIXTURE(arguments, c_test_generic_float_builtins_runtime);
-    C_TEST_FIXTURE(arguments, c_test_gnu_library_builtins_runtime);
-    C_TEST_FIXTURE(arguments, c_test_quiet_nan_compare_runtime);
-    C_TEST_FIXTURE(arguments, c_test_atomic_float_compare_exchange_runtime);
-    C_TEST_FIXTURE(arguments, c_test_aarch64_float_compare_quiet_signaling);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_abstract_pointer_array_sizeof);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_aggregate_array_element_initializers);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_aggregate_constant_bytes);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_aggregate_corrections);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_aggregate_expression_brace_elision);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_aggregate_initializer_inferred_bounds);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_aggregate_lookup_frontend);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_aggregate_lookup_growth);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_aggregate_unique_search);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_alignment_redeclarations);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_tentative_alignment_merging);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_alignof_member);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_alignof_object);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_ir);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_parse);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_array_bound_object_layout);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_atomic_compound_assignment_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_atomic_compound_result);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_atomic_float_compare_exchange);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_attribute_call_roles);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_bfloat16_semantic_acceptance);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_bfloat16_type);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_bit_field_assignment_accesses);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_bit_field_diagnostic_completeness);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_bit_field_width_authority);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_bit_field_width_constraints);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_bit_field_width_spellings);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_block_scope_fixed_enum_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_block_scope_function_declaration_file_scope_name);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_block_type_name_attributes);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_body_scope_map);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_body_validation_scratch_exhaustion);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_body_validation_scratch_families);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_body_validation_type_query_model);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_bool_bit_field_loads);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_brace_designators);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_braced_string_initializers);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_braced_string_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_builtin_classify_type);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_builtin_infinity);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_c23_attribute_noreturn);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_c23_attribute_positions);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_c23_auto_local_declarations);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_c23_empty_initializers);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_c23_empty_list_prototypes);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_c99_inline_linkage);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_call_assignment_values);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_call_result_callees);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operand_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operands);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_casted_dereference_update);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_character_literal_query_types);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_choose_expr_evaluation);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_comma_condition_evaluation);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_comma_result_constraints);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_comma_value_operands);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_complex_bool_conversion);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_complex_initializer_elision_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_automatic_range_designator_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_compound_assignment_conversions);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_conditional_incomplete_array_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_constant_expression_syntax);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_constant_scalar_truth);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_constexpr_integer_range);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_constexpr_integer_types);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_constexpr_integer_types_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_constexpr_leaf_storage);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_controlled_body_extents_linear);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_controlling_expression_scope);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_array_object_size_limits);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_static_assert_object_size_scaling);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_alignas_typed_query_chain);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_alignas_fold_typed_width);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_declaration_constraints);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_declaration_regressions);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_declarator_group_nesting);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_declarator_trailing_token_diagnostics);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_deep_block_lookup_linear);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_deferred_assert_false);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_deferred_assert_diagnostic_ownership);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_deferred_assert_nonconstant);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_deferred_assert_positive);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_definition_index);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_digraphs);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_direct_ssa);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_direct_ssa_dead_continuation_edges);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_direct_ssa_declaration_definition);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_join_simplify);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_duplicate_parameter_names);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_dynamic_object_size);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_redefinition_names_previous_site);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_empty_scalar_initializer_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_nested_initializer_cursor_depth_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_enum_bool_conversion);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_enum_lowering);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_enum_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_enum_scratch_keeps_position_index);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_unnamed_parameter_definitions);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_nested_statement_expression_operands);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_enum_sizeof_parenthesized_operand);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_enum_sizeof_expression_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_enum_successor_limits);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_enum_successors);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_enumerator_types);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_error_attribute_calls);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_expanded_empty_foreign_source_map);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_expression_aggregate_bit_fields);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_expression_enum_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_expression_enum_scope);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_ext80_big_live_limbs);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_extension_constants);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_file_scope_declaration_order);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_file_scope_expression_enum_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_file_scope_expression_enum_scope);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_file_tls_dialect);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_file_tls_dialect_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_fixed_arity_builtins);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_fixed_enum_range_diagnostics);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_fixed_enum_ranges);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_fabs_builtin_lowering);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_float16_type);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_float_classifier_widths);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_float_integer_constants);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_float_literal_initializer_rounding);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_float_literal_initializer_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_for_declaration_constraints);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_for_declaration_scopes);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_fresh_binding_publication);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_frontend_control_flow);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_frontend_global_types);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_frontend_lex_differential);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_frontend_lex_preprocess);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_frontend_reservation_failures);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_frontend_scratch_and_hardening);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_frontend_semantic_basics);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_frontend_source_metrics);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_frontend_vectors);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_frontend_vla_and_ir);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_function_body_sizeof_expression);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_function_name_literals);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_function_parameter_compatibility);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_function_parameter_compatibility_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_function_pointer_array_type_name_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_function_typedef_scopes);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_generic_function_designator_call);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_generic_overflow_builtins);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_generic_overflow_builtins_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_generic_string_subscripts);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_elifdef_and_wide_character_constants);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_abstract_declarator_and_pointer_typing);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_debug_lexical_scopes);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_string_literal_sizeof_array_bound);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_global_identifier_updates);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_gnu_attribute_queries);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_gnu_omitted_conditional);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_gnu_void_conditional_operand);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_sync_builtins_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_sync_builtins_diagnostics);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_sync_builtins_canonical_ir);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_sync_builtins_wide_no_cx16);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_gnu_void_return);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_has_builtin);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_header_operands);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_identifier_identity_once);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_identifier_list_function_definitions);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_incomplete_array_address_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_initializer_enum_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_initializer_enum_scope);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_initializer_frame_bounds);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_initializer_overrides);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_initializer_relocation_index);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_initializer_relocation_lowering);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_initializer_relocation_orders);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_initializer_separators);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_initializer_stack_capacity);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_inline_assembly_constraint_unions);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_inline_assembly_cpuid_register_views);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_inline_assembly_volatile_ir);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_integer_conversion_rank);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_integer_literal_policy);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_integer_literal_policy_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_integer_semantics_agreement);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_integer_transform_builtins);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_intern_scan_by_shape);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_invalid_block_tls);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_invalid_designators);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_invalid_local_static_initializer);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_invalid_root_designators);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_invalid_union_initializer);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_ir_initializer_context_buffer_owner);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_ir_lower_capacity_plan);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_ir_lower_scratch_capacity);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_ir_query_scratch_growth);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_ir_local_table_zero_scratch);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_ir_row_streams);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_label_values_gate);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_lex_diagnostic_growth);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_lex_diagnostic_message_lifetime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_lex_diagnostic_reserve_failure);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_line_filename_escapes);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_type_interning_objects);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_local_label_declarations);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_local_labels);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_local_linkage_redeclarations_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_local_static_aggregates);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_local_tls);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_local_typedef_for_declaration);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_lowering_nested_calls_and_wide_switch);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_switch_late_overlap);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_lowering_flat_call_arguments);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_lowering_nested_call_arguments);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_lowering_nested_conditional_sizeof_memo);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_lowering_nested_logical_operands_never_abort);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_lowering_parenthesized_logical_chains);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_macro_plain_production);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_macro_stringify_backslashes);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_macro_task_batches);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_malformed_initializer_progress_and_identifier_uses);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_max_align_t_layout);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_member_array_declarators);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_member_call_arity_ownership);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_member_declaration_without_declarator_diagnostics);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_member_declarator_trailing_token_diagnostics);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_member_lookup_linear_work);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_member_search_scratch);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_microsoft_aligned_typedef_pack);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_msvc_enum_abi);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_multiline_comment_conditionals);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_negative_array_bounds);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_label_lookup_work_growth);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_nested_control_work_growth);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_nested_vector_lane_stores);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_promoted_offsetof_static_tables);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_runtime_compound_literal_overrides);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_braceless_control_work_growth);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_nested_control_lowering_scope_levels);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_sizeof_conditional_nesting_depth);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_sizeof_long_shallow_operand);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_tall_expression_types);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_nested_offsetof_pointer_prediction);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_nonvoid_falloff);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_noreturn_call_expression_statements);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_noreturn_call_value_operands);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_null_preprocessing_directives);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_number_facts);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_obsolete_field_designators);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_offsetof_address_static_initializer_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_offsetof_members);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_offsetof_members_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_offsetof_runtime_index);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_offsetof_runtime_index_declaration_order);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_offsetof_typed_indices);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_offsetof_typed_indices_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_offsetof_typed_refusals);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_offsetof_bit_field_diagnostic);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_oversized_token_spellings);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_packed_and_aligned_layout);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_parameter_local_alignment);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_parenthesized_address_assignment_expression);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_parenthesized_address_place_assignment);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_parenthesized_bit_field_assignment_values);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_parenthesized_function_declarations);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_parenthesized_logical_chain_order_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_parenthesized_typedef_parameters);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_parse_storage_growth);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_parser_body_frame_storage);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_parser_diagnostic_storage);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_pasted_keyword_body_walk);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_phase_arena_release);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_pointer_declarator_attributes);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_pointer_to_array_shapes_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_pointer_update_operand_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_pointer_width_integer_conversion);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_position_index_tiles);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_positional_initializer_relocations);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_post_tag_declaration_specifiers);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_pp_class_masks);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_pragma_pack_explicit_alignment);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_preprocessor_short_circuit);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_promoted_designator_continuation_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_promoted_member_search);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_initializer_slot_tables);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_integer_builtin_constant_folding);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_promoted_union_initializer_overrides);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_qualified_compound_values);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_qualified_parameter_values);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_repeated_incomplete_arrays);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_resolved_call_effects);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_returns_twice_attribute_ir);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_returns_twice_attribute_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_runtime_place_updates);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_scope_interval_index);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_sizeof_control_preparation);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_sizeof_function_type_name);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_sizeof_statement_expression_operand);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_sizeof_update_operand_constraints);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_sizeof_vla_evaluation);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_source_map_lifetime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_source_map_locations);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_source_map_order);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_source_map_publication);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_source_metrics_path_identity);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_source_size_limit);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_source_utf8);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_symbol_visibility);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_statement_expression_control_call);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_statement_expression_control_value);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_statement_expression_declaration_scope);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_statement_expression_goto_out);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_statement_expression_nested_call);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_statement_expression_nested_operand_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_static_assert_diagnostic_messages);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_static_assert_nonconstant_quote);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_static_compound_literal);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_static_declaration_inline_definition);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_static_label_differences);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_automatic_label_differences);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_unbraced_switch_bodies);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_obsolete_designator_labels);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_static_range_designators);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_stddef_need_protocol);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_string_literal_decode_differential);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_string_literal_memo);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_switch_integer_controls);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_symbol_find_collisions);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_tag_scope_typedef_identity);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_tagged_member_declares_nothing);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_tagged_member_microsoft_anonymous);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_target_abi_macros);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_gnu_common_predefined_macros);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_tgmath_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_token_view_constant_range);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_transparent_union_abi);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_transparent_union_pointer_qualifiers);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_transparent_union_qualifiers);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_transparent_union_qualifiers_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_trigraph_translation);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_type_constant_large_buffers);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_type_constant_query_isolation);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_type_identity_authority);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_type_name_attributes);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_type_name_operand_trailer);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_type_parse_rollback_growth);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_type_parse_snapshot_rows);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_type_self_compatibility);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_typed_enum_integer_constants);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_typedef_fallback_lookup);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_typeof_anonymous_aggregate_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_typeof_cast_prefix_operator);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_typeof_conditional_type);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_typeof_invalid_operand_diagnostics);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_typeof_malformed_operand_diagnostics);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_typeof_statement_expression_declarations);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_u64_initializer_slots);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_ucn_lex);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_ucn_preprocess);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_ucn_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_ucn_semantic);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_unknown_type_name_diagnostics);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_unsupported_float_extension_diagnostics);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_unnamed_initializer_places);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_unneeded_prototyped_definitions);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_unprototyped_then_prototyped);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_unused_wide_vector_signatures);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_va_list_identity_and_places);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_validation_candidates);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_variable_member_types);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_variadic_comma_omission);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_variadic_function_pointer_cast);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_variadic_function_pointer_cast_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_variadic_va_opt);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_vector_subscript_conditional_type);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_vendor_builtin_admission);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_vendor_fixed_lane_selection);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_vendor_halfword_shuffles);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_vendor_immediate_byte_shifts);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_vendor_lzcnt);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_vendor_sse2_shift_counts);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_vendor_storage_half_admission);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_vendor_tzcnt);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_vla_row_places);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_void_function_pointer_policy);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_void_object_refusals);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_volatile_split_bit_fields);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wasm_long_double_storage);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wide_float_android_boundaries);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wide_float_cleanup_signature_calls);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wide_float_deep_initializers);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wide_float_function_signatures);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wide_float_global_boundaries);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wide_float_global_braces);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wide_float_global_folding);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_x87_integer_unary_initializers);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_x87_integer_unary_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wide_float_global_initializers);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wide_float_integer_global_initializers);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wide_float_global_rejections);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wide_float_local_transport);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wide_float_signature_calls);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_packed_wide_float_wrapper_signatures);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wide_member_lookup_semantics);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wide_numeric_literal_contexts);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wide_numeric_literal_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_wide_pragma_operands);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_windows_inline_bodies);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_windows_va_start_cursor);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_windows_va_start_semantics);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_word_class_token_kinds);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_x87_classifier_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_generic_float_builtins_lowering);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_libm_rounding_builtins_lowering);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_generic_float_builtins_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_gnu_library_builtins_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_quiet_nan_compare_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_atomic_float_compare_exchange_runtime);
+    C_FRONTEND_TEST_FIXTURE(arguments, c_test_aarch64_float_compare_quiet_signaling);
 
 
     {
@@ -62699,6 +62785,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, arena_destroy(typeof_arena, 1));
     }
+    // Each release below returns every unit the thread still holds; nothing
+    // after it reads their results (GitHub #3431).
+    c_test_release_preprocess_arenas();
     {
         Arena* atomic_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
         String8 atomic_prefix = S8("_Atomic(");
@@ -62819,6 +62908,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, arena_destroy(array_bound_arena, 1));
     }
+    c_test_release_preprocess_arenas();
 
     TemporalArena nested_temporary = scratch_begin(0, 0);
     String8 nested_prefix = S8("static int identity(int value)"
@@ -62970,6 +63060,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         c_test_scratch_end(statement_temporary);
     }
+    c_test_release_preprocess_arenas();
     {
         Arena* statement_nontrivial_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
         u64 statement_part_count = (u64)C_IR_STATEMENT_EXPRESSION_STRESS_DEPTH * 2 + 3;
@@ -63119,6 +63210,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, arena_destroy(conditional_arena, 1));
     }
+    c_test_release_preprocess_arenas();
     {
         Arena* vla_assembly_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(256)});
         String8 vla_assembly_prefix = S8("int main(int count) { int values[");
@@ -63285,6 +63377,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         c_test_scratch_end(names_temporary);
     }
+    c_test_release_preprocess_arenas();
     enum
     {
         C_TYPE_MIXED_MACHINE_STRESS_DEPTH = 32,
@@ -63461,6 +63554,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         c_test_scratch_end(call_reachability_temporary);
     }
+    c_test_release_preprocess_arenas();
     {
         TemporalArena aggregate_call_temporary = scratch_begin(0, 0);
         CPreprocessResult aggregate_call_tokens = {0};
@@ -63556,6 +63650,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         c_test_scratch_end(prototype_call_temporary);
     }
+    c_test_release_preprocess_arenas();
     {
         TemporalArena dead_call_temporary = scratch_begin(0, 0);
         CPreprocessResult dead_call_tokens = {0};
@@ -63878,6 +63973,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         c_test_scratch_end(labels_temporary);
     }
+    c_test_release_preprocess_arenas();
     {
         TemporalArena label_flow_temporary = scratch_begin(0, 0);
         Target label_flow_target = target_native;
@@ -64342,6 +64438,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         c_test_scratch_end(cleanup_label_temporary);
     }
+    c_test_release_preprocess_arenas();
     {
         TemporalArena invalid_labels_temporary = scratch_begin(0, 0);
         String8 invalid_labels_source = S8("int invalid_labels(void) { void *target = (void *)0; goto *target; }\n");
@@ -64407,6 +64504,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         c_test_scratch_end(duplicate_labels_temporary);
     }
+    c_test_release_preprocess_arenas();
     {
         TemporalArena invalid_label_cast_temporary = scratch_begin(0, 0);
         CPreprocessResult invalid_label_cast_tokens = c_preprocess(invalid_label_cast_temporary.arena,
@@ -64474,6 +64572,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         c_test_scratch_end(invalid_label_address_of_temporary);
     }
+    c_test_release_preprocess_arenas();
     {
         TemporalArena invalid_union_overlay_temporary = scratch_begin(0, 0);
         CPreprocessResult invalid_union_overlay_tokens = c_preprocess(
@@ -64546,6 +64645,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         c_test_scratch_end(invalid_mixed_label_pointer_cast_temporary);
     }
+    c_test_release_preprocess_arenas();
     {
         TemporalArena valid_struct_label_sibling_temporary = scratch_begin(0, 0);
         CPreprocessResult valid_struct_label_sibling_tokens = c_preprocess(
@@ -64659,6 +64759,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         c_test_scratch_end(legal_label_address_of_temporary);
     }
+    c_test_release_preprocess_arenas();
     {
         TemporalArena invalid_asm_goto_temporary = scratch_begin(0, 0);
         CPreprocessResult invalid_asm_goto_tokens = c_preprocess(invalid_asm_goto_temporary.arena,
@@ -64725,6 +64826,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         c_test_scratch_end(malformed_asm_goto_temporary);
     }
+    c_test_release_preprocess_arenas();
     {
         TemporalArena unqualified_asm_goto_temporary = scratch_begin(0, 0);
         CPreprocessResult unqualified_asm_goto_tokens = c_preprocess(unqualified_asm_goto_temporary.arena,
@@ -64794,6 +64896,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, c_labels_parse.diagnostic_count == 0);
         c_test_scratch_end(c_labels_temporary);
     }
+    c_test_release_preprocess_arenas();
     {
         TemporalArena same_fixed_asm_temporary = scratch_begin(0, 0);
         Target same_fixed_asm_target = target_native;
@@ -64869,6 +64972,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         c_test_scratch_end(reserved_clobber_temporary);
     }
+    c_test_release_preprocess_arenas();
     {
         TemporalArena reserved_clobber_temporary = scratch_begin(0, 0);
         Target x86_64_target = target_native;
@@ -64952,6 +65056,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         c_test_scratch_end(typedef_shadow_label_temporary);
     }
+    c_test_release_preprocess_arenas();
     {
         TemporalArena symbolic_array_operand_temporary = scratch_begin(0, 0);
         CPreprocessResult symbolic_array_operand_tokens = c_preprocess(
@@ -65080,6 +65185,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         c_test_scratch_end(early_clobber_temporary);
     }
+    c_test_release_preprocess_arenas();
     {
         TemporalArena tied_assembly_temporary = scratch_begin(0, 0);
         String8 tied_assembly_source = S8(
@@ -65403,6 +65509,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         c_test_scratch_end(special_literal_assembly_temporary);
     }
+    c_test_release_preprocess_arenas();
     {
         TemporalArena legacy_asm_operand_temporary = scratch_begin(0, 0);
         CPreprocessResult legacy_asm_operand_tokens = {0};
@@ -65522,6 +65629,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             c_test_scratch_end(bound_register_temporary);
         }
     }
+    c_test_release_preprocess_arenas();
     // AArch64 local register variables carry a target-neutral physical index
     // beside the ordinary R class. Cover both caller- and callee-saved
     // allocator registers, and keep encoder/platform scratch names rejected.
@@ -65640,6 +65748,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         c_test_scratch_end(temporary);
     }
+    c_test_release_preprocess_arenas();
     // Fortified block-memory builtins have a real fourth size_t argument,
     // including when no libc declaration is present. Never lower these as
     // three-argument unchecked calls merely to accept a hosted SDK header.
@@ -65731,6 +65840,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             c_test_scratch_end(memory_temporary);
         }
     }
+    c_test_release_preprocess_arenas();
     // AArch64 uses the same place-valued M class. Both input and output forms
     // preserve the address in canonical IR rather than introducing a load.
     {
@@ -65840,6 +65950,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             c_test_scratch_end(invalid_bound_temporary);
         }
     }
+    c_test_release_preprocess_arenas();
     // A libc spells the variable-argument list type under more than one
     // typedef name -- musl declares its public prototypes with
     // __isoc_va_list and its definitions with va_list -- so all of the
@@ -65908,6 +66019,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, aarch64_fixed_tie_lowered.diagnostic_count == 1);
         c_test_scratch_end(aarch64_fixed_assembly_temporary);
     }
+    c_test_release_preprocess_arenas();
     {
         TemporalArena label_escape_temporary = scratch_begin(0, 0);
         CPreprocessResult label_escape_tokens = c_preprocess(
@@ -66028,6 +66140,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         }
         c_test_scratch_end(label_metadata_growth_temporary);
     }
+    c_test_release_preprocess_arenas();
     {
         TemporalArena cfg_label_storage_temporary = scratch_begin(0, 0);
         CPreprocessResult cfg_label_storage_tokens = c_preprocess(

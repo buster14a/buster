@@ -112,8 +112,12 @@
   a new group at its sorted position or extend the owning group, and do not
   enumerate groups in the file comment. `c_frontend_tests` in
   `src/buster/tests/compiler/frontend/c/c_test.c` registers every
-  `BUSTER_TEST_FIXTURE` in one block sorted the same way, so fixtures must not
-  depend on run order; inline assertions follow that block. Define a new test
+  `C_FRONTEND_TEST_FIXTURE` in one block sorted the same way, so fixtures must
+  not depend on run order; inline assertions follow that block. That macro
+  fails a fixture that leaves arena reservations live or holds more than
+  `C_TEST_FIXTURE_UNIT_LIMIT` preprocessing units at once (#3431): rewind with
+  `c_test_rewind` or `c_test_scratch_end`, which release the units a rewind
+  discards, or call `c_test_release_preprocess_arenas` once nothing reads them. Define a new test
   function next to the tests of the feature it covers, not after the most
   recently added one. Names that sort adjacently can still conflict.
 - Active CI is defined under `.github/workflows/`; the current tree has no
