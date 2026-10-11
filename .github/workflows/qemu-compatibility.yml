@@ -2,7 +2,8 @@ name: QEMU TCG compatibility census
 # Explicit campaign branch only; never expands PR/main/merge-group CI.
 on:
   push:
-    branches: [codex/3185-qemu-tcg-census]
+    branches:
+      - codex/3185-qemu-tcg-census
     paths:
       - 'tools/qemu_compat.c'
       - '.github/workflows/qemu-compatibility.yml'
@@ -24,7 +25,8 @@ jobs:
       - name: Machine specifications
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
-          requested-runner: ubuntu-26.04
+          requested-runner: >-
+            ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
@@ -42,24 +44,48 @@ jobs:
           ref: b2995afed254e4804611df52210067a4d5dbdf0b
           path: external/qemu
           persist-credentials: false
+      - name: Record actual qemu/qemu checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: external/qemu
+          source-repository: qemu/qemu
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: qemu/keycodemapdb
           ref: f5772a62ec52591ff6870b7e8ef32482371f22c6
           path: external/qemu/subprojects/keycodemapdb
           persist-credentials: false
+      - name: Record actual qemu/keycodemapdb checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: external/qemu/subprojects/keycodemapdb
+          source-repository: qemu/keycodemapdb
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: ucb-bar/berkeley-softfloat-3
           ref: b64af41c3276f97f0e181920400ee056b9c88037
           path: external/qemu/subprojects/berkeley-softfloat-3
           persist-credentials: false
+      - name: Record actual ucb-bar/berkeley-softfloat-3 checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: external/qemu/subprojects/berkeley-softfloat-3
+          source-repository: ucb-bar/berkeley-softfloat-3
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: ucb-bar/berkeley-testfloat-3
           ref: e7af9751d9f9fd3b47911f51a5cfd08af256a9ab
           path: external/qemu/subprojects/berkeley-testfloat-3
           persist-credentials: false
+      - name: Record actual ucb-bar/berkeley-testfloat-3 checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: external/qemu/subprojects/berkeley-testfloat-3
+          source-repository: ucb-bar/berkeley-testfloat-3
       - name: Install external upstream build prerequisites
         run: |
           sudo apt-get update
@@ -121,7 +147,7 @@ jobs:
           retention-directory: evidence
       - name: Retain census and failed-stage diagnostics
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: qemu-census-${{ github.sha }}-${{ github.run_attempt }}
           retention-days: 7
