@@ -27,8 +27,20 @@ import compiler_compare  # noqa: E402
 import compiler_publish  # noqa: E402
 import compiler_receipt  # noqa: E402
 import inline_acceptance  # noqa: E402
+import ast_pilot_acceptance  # noqa: E402
 
 A256, B256 = "1" * 64, "2" * 64
+
+
+def fixture_git(repository: Path, *arguments: str) -> str:
+    """Run Git in a disposable fixture repository and return its stripped stdout (#3361).
+
+    These repositories have no housekeeping work worth detaching. A completed
+    commit must leave no automatic gc/maintenance worker writing under .git
+    while TemporaryDirectory cleanup strictly removes it.
+    """
+    return subprocess.run(["git", "-c", "maintenance.auto=false", "-c", "gc.auto=0", "-C", str(repository),
+                           *arguments], check=True, capture_output=True, text=True).stdout.strip()
 
 
 def summary(outcome: str = "slower") -> dict:
@@ -1306,16 +1318,46 @@ class AnalyzerReceiptTest(unittest.TestCase):
         changed_root_context["rows"][root_index]["search_inventory"] = []
         self.assertTrue(compiler_receipt.analyzer_candidate_plan_problems(changed_root_context))
 
+    def test_fixture_git_commit_leaves_no_housekeeping_writer_for_strict_cleanup(self) -> None:
+        # #3361: force housekeeping even for this tiny repository. Git's trace
+        # records child launches before detachment, so this needs no scheduling race.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        repo = root / "repo"
+        repo.mkdir()
+        fixture_git(repo, "init", "-q")
+        fixture_git(repo, "config", "user.name", "Analyzer Test")
+        fixture_git(repo, "config", "user.email", "analyzer@example.invalid")
+        for key, value in (("maintenance.auto", "true"), ("maintenance.loose-objects.enabled", "true"),
+                           ("maintenance.loose-objects.auto", "1"), ("gc.auto", "1")):
+            fixture_git(repo, "config", key, value)
+        for index in range(40):
+            (repo / f"unit{index}.c").write_text(f"int value{index};\n", encoding="utf-8")
+        fixture_git(repo, "add", ".")
+        trace = root / "git-trace.jsonl"
+        with mock.patch.dict(os.environ, {"GIT_TRACE2_EVENT": str(trace)}):
+            fixture_git(repo, "commit", "-qm", "seed")
+        events = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(any(event.get("event") == "start" for event in events))
+        housekeeping = [event for event in events if event.get("event") == "child_start" and
+                        ("maintenance" in event.get("argv", []) or "gc" in event.get("argv", []))]
+        self.assertEqual(housekeeping, [])
+        self.assertEqual(fixture_git(repo, "show", "HEAD:unit0.c"), "int value0;")
+        # Strict teardown: cleanup errors are not ignored.
+        directory.cleanup()
+        self.assertFalse(root.exists())
+
     def test_source_immutability_detects_nonignored_untracked_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repo = Path(temporary)
-            subprocess.run(["git", "init", "-q", str(repo)], check=True)
-            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Analyzer Test"], check=True)
-            subprocess.run(["git", "-C", str(repo), "config", "user.email", "analyzer@example.invalid"], check=True)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Analyzer Test")
+            fixture_git(repo, "config", "user.email", "analyzer@example.invalid")
             source = repo / "tracked.c"
             source.write_text("int value;\n", encoding="utf-8")
-            subprocess.run(["git", "-C", str(repo), "add", "tracked.c"], check=True)
-            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
+            fixture_git(repo, "add", "tracked.c")
+            fixture_git(repo, "commit", "-qm", "seed")
             self.assertEqual(compiler_compare.analyzer_source_immutability_problem(repo), "")
             (repo / "injected.h").write_text("#define VALUE 1\n", encoding="utf-8")
             self.assertIn("untracked", compiler_compare.analyzer_source_immutability_problem(repo))
@@ -1327,8 +1369,7 @@ class AnalyzerReceiptTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             repo = Path(temporary)
             def git(*args: str) -> str:
-                return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
-                                      text=True).stdout.strip()
+                return fixture_git(repo, *args)
             git("init", "-q")
             git("config", "user.name", "Analyzer Test")
             git("config", "user.email", "analyzer@example.invalid")
@@ -1389,8 +1430,7 @@ class AnalyzerReceiptTest(unittest.TestCase):
                 self.assertIsNone(compiler_compare.request_selector_count(
                     repo, duplicate_request, compiler_receipt.ANALYZER_REQUEST_LINE))
 
-            tree_listing = real_run(["git", "-C", str(repo), "ls-tree", "-z", duplicate_request, "--",
-                                     compiler_receipt.ANALYZER_REQUEST_PATH], check=True, capture_output=True).stdout
+            tree_listing = git("ls-tree", "-z", duplicate_request, "--", compiler_receipt.ANALYZER_REQUEST_PATH)
             self.assertTrue(tree_listing)
             def fail_blob_read(command, *args, **kwargs):
                 if len(command) > 3 and command[3] == "show":
@@ -1404,8 +1444,7 @@ class AnalyzerReceiptTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             repo = Path(temporary)
             def git(*args: str) -> str:
-                return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
-                                      text=True).stdout.strip()
+                return fixture_git(repo, *args)
             git("init", "-q")
             git("config", "user.name", "Analyzer Test")
             git("config", "user.email", "analyzer@example.invalid")
@@ -2533,8 +2572,7 @@ class HarnessTest(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         root = Path(self.directory.name)
         self.repo = root / "candidate"
-        git = lambda *arguments: subprocess.run(["git", "-C", str(self.repo), *arguments], check=True,  # noqa: E731
-                                                capture_output=True, text=True).stdout.strip()
+        git = lambda *arguments: fixture_git(self.repo, *arguments)  # noqa: E731
         self.repo.mkdir()
         git("init", "-q", "-b", "main")
         git("config", "user.name", "fixture")
@@ -2602,8 +2640,7 @@ class HarnessTest(unittest.TestCase):
 
     def test_range_baseline_on_the_first_parent_chain(self) -> None:
         # A burst left head unmeasured: the next main commit is compared with base, two first-parent commits back.
-        git = lambda *arguments: subprocess.run(["git", "-C", str(self.repo), *arguments], check=True,  # noqa: E731
-                                                capture_output=True, text=True).stdout.strip()
+        git = lambda *arguments: fixture_git(self.repo, *arguments)  # noqa: E731
         (self.repo / "compiler.txt").write_text("later compiler\n")
         git("commit", "-qam", "later")
         later, later_tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
@@ -2622,9 +2659,8 @@ class HarnessTest(unittest.TestCase):
 
     def test_pull_mode_compares_head_with_its_merge_base(self) -> None:
         # The pull request head (second parent) against the base it branched from.
-        pull_tree = subprocess.run(["git", "-C", str(self.repo), "rev-parse", self.pull_head + "^{tree}"], check=True,
-                                   capture_output=True, text=True).stdout.strip()
-        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.pull_head], check=True)
+        pull_tree = fixture_git(self.repo, "rev-parse", self.pull_head + "^{tree}")
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.pull_head)
         code, result, evidence = self.run_harness(self.pull_head, mode="pull", ref="refs/pull/7/head", head=self.pull_head,
                                                   **{"head-tree": pull_tree})
         self.assertEqual((code, result["state"], result["mode"]), (0, "measured", "pull"), result["reasons"])
@@ -2637,8 +2673,7 @@ class HarnessTest(unittest.TestCase):
 
     def scaling_head(self) -> tuple[str, str]:
         """A pull request head that adds the scaling request on top of the candidate; (commit, tree)."""
-        git = lambda *arguments: subprocess.run(["git", "-C", str(self.repo), *arguments], check=True,  # noqa: E731
-                                                capture_output=True, text=True).stdout.strip()
+        git = lambda *arguments: fixture_git(self.repo, *arguments)  # noqa: E731
         git("checkout", "-q", "--detach", self.pull_head)
         request = self.repo / compiler_receipt.SCALING_REQUEST
         request.parent.mkdir(parents=True)
@@ -2679,9 +2714,8 @@ class HarnessTest(unittest.TestCase):
 
     def test_scaling_needs_the_request_in_this_pull_request(self) -> None:
         # Pull mode without the request, and main mode with it, never run the scaling leg.
-        pull_tree = subprocess.run(["git", "-C", str(self.repo), "rev-parse", self.pull_head + "^{tree}"], check=True,
-                                   capture_output=True, text=True).stdout.strip()
-        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.pull_head], check=True)
+        pull_tree = fixture_git(self.repo, "rev-parse", self.pull_head + "^{tree}")
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.pull_head)
         code, result, _ = self.run_harness(self.pull_head, mode="pull", ref="refs/pull/7/head", head=self.pull_head,
                                            **{"head-tree": pull_tree})
         self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
@@ -2716,7 +2750,7 @@ class HarnessTest(unittest.TestCase):
                                    ("badexit", "no counted confirmed corpus regression")):
             with self.subTest(behavior=behavior):
                 # Each run leaves the frozen base checked out.
-                subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)
+                fixture_git(self.repo, "checkout", "-q", "--detach", self.head)
                 code, result, _ = self.run_harness(self.head, corpus_behavior=behavior)
                 self.assertEqual((code, result["state"]), (1, "failed"))
                 self.assertIn(expected, " ".join(result["reasons"]))
@@ -2733,17 +2767,15 @@ class HarnessTest(unittest.TestCase):
 
     def test_direct_push_is_its_own_pull_head(self) -> None:
         # pull_head's only parent is base: a single-parent commit on main.
-        pull_tree = subprocess.run(["git", "-C", str(self.repo), "rev-parse", self.pull_head + "^{tree}"], check=True,
-                                   capture_output=True, text=True).stdout.strip()
-        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.pull_head], check=True)
+        pull_tree = fixture_git(self.repo, "rev-parse", self.pull_head + "^{tree}")
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.pull_head)
         code, result, _ = self.run_harness(self.pull_head, head=self.pull_head, pull="0", **{"head-tree": pull_tree})
         self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
         self.assertEqual(result["identity"]["pull_head"], self.pull_head)
 
     def test_moved_pull_request_is_superseded_without_building(self) -> None:
-        pull_tree = subprocess.run(["git", "-C", str(self.repo), "rev-parse", self.pull_head + "^{tree}"], check=True,
-                                   capture_output=True, text=True).stdout.strip()
-        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.pull_head], check=True)
+        pull_tree = fixture_git(self.repo, "rev-parse", self.pull_head + "^{tree}")
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.pull_head)
         code, result, _ = self.run_harness("", mode="pull", ref="refs/pull/7/head", head=self.pull_head,
                                            **{"head-tree": pull_tree})
         self.assertEqual((code, result["state"]), (0, "superseded"))
@@ -2753,7 +2785,7 @@ class HarnessTest(unittest.TestCase):
         # #2927: an error after a completed phase must not erase timings, identity or the failing stage.
         for target, phase in (("shutil.copyfile", "build-baseline"), ("compiler_compare.collect_evidence", "lab-evidence"),
                               ("compiler_compare.sha256", "build-baseline")):
-            subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)
+            fixture_git(self.repo, "checkout", "-q", "--detach", self.head)
             with self.subTest(target=target), mock.patch(target, side_effect=OSError("injected")):
                 code, result, _ = self.run_harness(self.head)
                 self.assertEqual((code, result["state"]), (1, "failed"))
@@ -2821,12 +2853,12 @@ class HarnessTest(unittest.TestCase):
                  ("empty", empty_member, "exported evidence throughput/summary.json unreadable"))
         for label, action, expected in cases:
             with self.subTest(label=label):
-                subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)
+                fixture_git(self.repo, "checkout", "-q", "--detach", self.head)
                 code, result, _ = self.run_with_tampered_export({"throughput": action})
                 self.assertEqual((code, result["state"]), (1, "failed"), result["reasons"])
                 self.assertIn(expected, " ".join(result["reasons"]))
         # The untampered export still classifies clean.
-        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.head)
         code, result, _ = self.run_with_tampered_export({})
         self.assertEqual((code, result["state"], result["reasons"]), (0, "measured", []))
 
@@ -2843,7 +2875,7 @@ class HarnessTest(unittest.TestCase):
         for label, action, expected in (("altered", alter, "candidate has failed or missing timed runs"),
                                         ("removed", remove, "lab summary unreadable")):
             with self.subTest(label=label):
-                subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)
+                fixture_git(self.repo, "checkout", "-q", "--detach", self.head)
                 code, result, _ = self.run_with_tampered_export({"lab": action})
                 self.assertEqual((code, result["state"]), (1, "failed"), result["reasons"])
                 self.assertIn(expected, " ".join(result["reasons"]))
@@ -2877,7 +2909,7 @@ class HarnessTest(unittest.TestCase):
                 return outcome
 
             with self.subTest(label=label), mock.patch.object(compiler_compare, "export_tree", export):
-                subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", head], check=True)
+                fixture_git(self.repo, "checkout", "-q", "--detach", head)
                 code, result, _ = self.run_harness(head, mode="pull", ref="refs/pull/7/head", head=head,
                                                    **{"pull-head": head, "head-tree": tree})
                 self.assertEqual((code, result["state"]), (1, "failed"), result["reasons"])
@@ -2906,7 +2938,7 @@ class HarnessTest(unittest.TestCase):
 
     def test_missing_cmake_cache_is_a_build_failure_not_a_crash(self) -> None:
         (self.repo / "build.sh").write_text("#!/usr/bin/env bash\nmkdir -p build/Release\ncp compiler.txt build/Release/ide\n")
-        subprocess.run(["git", "-C", str(self.repo), "update-index", "--assume-unchanged", "build.sh"], check=True)
+        fixture_git(self.repo, "update-index", "--assume-unchanged", "build.sh")
         code, result, _ = self.run_harness(self.head)
         self.assertEqual((code, result["state"]), (1, "failed"))
         self.assertIn("not tests-off", " ".join(result["reasons"]))
@@ -2948,7 +2980,7 @@ class HarnessTest(unittest.TestCase):
         code, result, _ = self.run_harness(self.head, base="8" * 40)
         self.assertEqual((code, result["state"]), (1, "failed"))
         (self.repo / "build.sh").write_text("#!/usr/bin/env bash\nexit 3\n")
-        subprocess.run(["git", "-C", str(self.repo), "update-index", "--assume-unchanged", "build.sh"], check=True)
+        fixture_git(self.repo, "update-index", "--assume-unchanged", "build.sh")
         code, result, _ = self.run_harness(self.head)
         self.assertEqual((code, result["state"]), (1, "failed"))
         self.assertIn("failed with exit 3", " ".join(result["reasons"]))
@@ -3149,6 +3181,287 @@ class InlineAcceptanceTest(unittest.TestCase):
             self.assertEqual(stage1_ids, result["stage1_compilers"])
             self.assertEqual(stage2_ids, stage1_ids)
             self.assertIn("build/generated", result["frozen_input_tree"])
+
+
+def ast_pilot_raw_cell(cell: str, binary: str = "c" * 64, wall: float = 0.9, instructions: object = 0.9) -> dict:
+    """One synthetic, complete raw uarch_lab cell of the #3397 profile."""
+    pairs = compiler_receipt.AST_PILOT_ACCEPTANCE_PROFILE["pairs"]
+    argv = ast_pilot_acceptance.cell_command(cell)
+    labs = {}
+    for key, extra in ast_pilot_acceptance.EXTRA_BY_VARIANT.items():
+        command = ["/bin/ide"] + (argv[:-2] + extra + argv[-2:] if cell == "object" else argv + extra)
+        labs[key] = {"config": {"extra": list(extra), "cpu": 2, "ast_pilot_cell": cell, "ide": "/bin/ide",
+                                "command": " ".join(command)}}
+    insn = {"ratio": instructions, "a_median": 1e10 if instructions is not None else None,
+            "b_median": 1e10 * instructions if instructions is not None else None}
+    summary = {"schema": ast_pilot_acceptance.UARCH_SCHEMA,
+               "plan": {"pairs": pairs, "complete_pairs": pairs, "order": "ABBA", "fresh_copy": True},
+               "baseline": {"sha256": binary, "failed": 0, "deterministic": True, "runs": pairs},
+               "candidate": {"sha256": binary, "failed": 0, "deterministic": True, "runs": pairs},
+               "metrics": {"wall": {"a_median": 2.0, "b_median": 2.0 * wall, "ratio": wall,
+                                    "ci_low": wall - 0.01, "ci_high": wall + 0.005},
+                           "instructions": insn, "peak_rss": {"a_median": 1e9, "b_median": 1.02e9, "ratio": 1.02}},
+               "counters": {"perf_stat": instructions is not None,
+                            "reason": "usable" if instructions is not None else "perf_event_paranoid"},
+               "outputs_identical": True, "diagnostics_identical": True}
+    meta = {"config": {"ast_pilot_pair": cell, "extra_by_variant": copy.deepcopy(ast_pilot_acceptance.EXTRA_BY_VARIANT),
+                       "canonical_inline_pair": False, "command": " ".join(["IDE"] + argv), "pairs": pairs,
+                       "warmups": 1, "cpu": 2, "extra": [], "profile_steps": [], "fresh_copy": True}}
+    return {"summary": summary, "meta": meta, "a": labs["a"], "b": labs["b"]}
+
+
+AST_PILOT_PROBE = {"command": compiler_receipt.AST_PILOT_COMPILE + ["-fsyntax-only", "-v"],
+                   "a": {"exit": 0, "extra": [], "tree_lines": []},
+                   "b": {"exit": 0, "extra": ["-fc-ast-pilot"], "tree_lines": [
+                       "C_AST nodes=2776521 tokens=4180360 build_ns=65332858 retained_bytes=36094773 "
+                       "transient_high_water=61008 column_copy_bytes=0 finalize_child_entries=0 layout=implicit"]}}
+
+
+def ast_pilot_evidence(head: str = "a" * 40, binary: str = "c" * 64, **cell_change) -> tuple[dict, dict, dict]:
+    """(receipt record, raw bundle, acceptance) built through the helper's own record and verdict code."""
+    raw = {cell: ast_pilot_raw_cell(cell, binary, **cell_change.get(cell, {})) for cell in compiler_receipt.AST_PILOT_CELLS}
+    cells = {cell: ast_pilot_acceptance.cell_record(raw[cell]["summary"]) for cell in raw}
+    tree = ast_pilot_acceptance.validate_probe(AST_PILOT_PROBE)
+    acceptance = {"schema": compiler_receipt.AST_PILOT_ACCEPTANCE_SCHEMA, "status": "complete", "source_revision": head,
+                  "profile": {**compiler_receipt.AST_PILOT_ACCEPTANCE_PROFILE, "source_sha256": "e" * 64},
+                  "candidate_compiler": {"sha256": binary, "size_bytes": 10}, "cells": cells, "tree": tree,
+                  "verdict": ast_pilot_acceptance.verdict(cells, tree)}
+    bundle = {"acceptance": acceptance, "probe": copy.deepcopy(AST_PILOT_PROBE)}
+    for cell, documents in raw.items():
+        for key, value in documents.items():
+            bundle[f"{cell}_{key}"] = value
+    record = {"requested": True, "request_line": compiler_receipt.AST_PILOT_ACCEPTANCE_REQUEST_LINE,
+              "profile": compiler_receipt.AST_PILOT_ACCEPTANCE_PROFILE, "summary": acceptance,
+              "status": "complete", "exit": 0}
+    return json.loads(json.dumps(record)), json.loads(json.dumps(bundle)), acceptance
+
+
+class AstPilotAcceptanceTest(unittest.TestCase):
+    def test_publisher_revalidates_raw_cells_and_tree_probe(self) -> None:
+        head, binary = "a" * 40, "c" * 64
+        record, bundle, acceptance = ast_pilot_evidence(head, binary)
+        self.assertEqual(compiler_publish.validate_ast_pilot_bundle(record, bundle, head, binary), [])
+        self.assertEqual(acceptance["verdict"]["outcome"], "pass")
+
+        def broken(change) -> list[str]:
+            changed = copy.deepcopy(bundle)
+            change(changed)
+            return compiler_publish.validate_ast_pilot_bundle(record, changed, head, binary)
+        cases = {
+            "wrong flag": lambda value: value["syntax-only_meta"]["config"].update(
+                extra_by_variant={"a": [], "b": ["-fcanonical-inline"]}),
+            "flag on A": lambda value: value["object_a"]["config"].update(extra=["-fc-ast-pilot"]),
+            "lab command": lambda value: value["object_b"]["config"].update(
+                command=value["object_a"]["config"]["command"]),
+            "linking command": lambda value: value["object_meta"]["config"].update(
+                command=" ".join(["IDE"] + compiler_receipt.AST_PILOT_COMPILE + ["-o", "OUT"])),
+            "cell swap": lambda value: value["object_meta"]["config"].update(ast_pilot_pair="syntax-only"),
+            "wrong binary": lambda value: value["syntax-only_summary"]["candidate"].update(sha256="d" * 64),
+            "cpu": lambda value: value["object_meta"]["config"].update(cpu=3),
+            "pair count": lambda value: value["object_summary"]["plan"].update(pairs=12, complete_pairs=12),
+            "missing cell": lambda value: [value.pop(f"object_{key}") for key in ("summary", "meta", "a", "b")],
+            "A built a tree": lambda value: value["probe"]["a"].update(tree_lines=value["probe"]["b"]["tree_lines"]),
+            "B built no tree": lambda value: value["probe"]["b"].update(tree_lines=[]),
+            "retained bytes": lambda value: value["acceptance"]["tree"].update(retained_bytes=1),
+            "metrics": lambda value: value["object_summary"]["metrics"]["wall"].update(ratio=1.2),
+            "diagnostics": lambda value: value["object_summary"].update(diagnostics_identical=None),
+        }
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(broken(change))
+        self.assertTrue(compiler_publish.validate_ast_pilot_bundle(dict(record, status="failed"), bundle, head, binary))
+        self.assertTrue(compiler_publish.validate_ast_pilot_bundle(dict(record, request_line="ast-pilot"), bundle, head, binary))
+        self.assertTrue(compiler_publish.validate_ast_pilot_bundle(record, None, head, binary))
+        self.assertTrue(compiler_publish.validate_ast_pilot_bundle(record, bundle, head, "d" * 64))
+        self.assertEqual(compiler_publish.validate_ast_pilot_bundle(None, None, head, binary), [])
+
+    def test_receipt_validator_needs_both_cells_frozen_profile_and_recomputed_verdict(self) -> None:
+        head, binary = "a" * 40, "c" * 64
+        unused_record, unused_bundle, acceptance = ast_pilot_evidence(head, binary)
+        self.assertEqual(compiler_receipt.validate_ast_pilot_acceptance(acceptance, head, binary), [])
+        for name, change in {
+            "profile": lambda value: value["profile"].update(pairs=2),
+            "extra profile key": lambda value: value["profile"].update(flags=["-O3"]),
+            "missing cell": lambda value: value["cells"].pop("syntax-only"),
+            "verdict": lambda value: value["verdict"].update(outcome="pass" if value["verdict"]["outcome"] != "pass" else "fail"),
+            "revision": lambda value: value.update(source_revision="b" * 40),
+            "binary": lambda value: value["candidate_compiler"].update(sha256="d" * 64),
+            "no tree": lambda value: value["tree"].update(retained_bytes=0),
+            "A tree": lambda value: value["tree"].update(a_tree_lines=1),
+        }.items():
+            changed = copy.deepcopy(acceptance)
+            change(changed)
+            with self.subTest(case=name):
+                self.assertTrue(compiler_receipt.validate_ast_pilot_acceptance(changed, head, binary))
+
+    def test_budget_verdict_follows_the_ast_md_adoption_budget(self) -> None:
+        cases = (({}, "pass"),
+                 ({"syntax-only": {"wall": 0.995}}, "fail"),
+                 ({"syntax-only": {"instructions": 0.995}}, "fail"),
+                 ({"syntax-only": {"instructions": None}}, "inconclusive"),
+                 ({"object": {"wall": 1.03}}, "fail"),
+                 ({"object": {"wall": 1.005}}, "pass"))
+        for change, expected in cases:
+            with self.subTest(change=change):
+                self.assertEqual(ast_pilot_evidence(**change)[2]["verdict"]["outcome"], expected)
+        unused_record, unused_bundle, acceptance = ast_pilot_evidence()
+        cells = {cell: acceptance["cells"][cell]["metrics"] for cell in compiler_receipt.AST_PILOT_CELLS}
+        identical = {"object_outputs_identical": True, "diagnostics_identical": True}
+        noisy = copy.deepcopy(cells)
+        noisy["syntax-only"]["wall"]["ci_high"] = 1.001
+        self.assertEqual(compiler_receipt.ast_pilot_budget_verdict(noisy, 36094773, identical)["outcome"], "inconclusive")
+        verdict = compiler_receipt.ast_pilot_budget_verdict(cells, 10_000_000, identical)
+        self.assertEqual((verdict["outcome"], verdict["checks"]["object_peak_rss"]["outcome"]), ("fail", "fail"))
+        differs = compiler_receipt.ast_pilot_budget_verdict(cells, 36094773, dict(identical, object_outputs_identical=False))
+        self.assertEqual((differs["outcome"], differs["checks"]["correctness"]["outcome"]), ("fail", "fail"))
+
+    def test_raw_cell_loader_refuses_wrong_flags_binaries_and_unexplained_na(self) -> None:
+        binary = "c" * 64
+        for cell in compiler_receipt.AST_PILOT_CELLS:
+            raw = ast_pilot_raw_cell(cell, binary)
+            documents = (raw["summary"], raw["meta"], {"a": raw["a"], "b": raw["b"]})
+            ast_pilot_acceptance.validate_documents(cell, *documents, binary)
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "frozen candidate-HEAD"):
+                ast_pilot_acceptance.validate_documents(cell, *documents, "d" * 64)
+            other = "object" if cell == "syntax-only" else "syntax-only"
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "fixed -fc-ast-pilot"):
+                ast_pilot_acceptance.validate_documents(other, *documents, binary)
+            na = ast_pilot_raw_cell(cell, binary, instructions=None)
+            ast_pilot_acceptance.validate_documents(cell, na["summary"], na["meta"], {"a": na["a"], "b": na["b"]}, binary)
+            na["summary"]["counters"] = {"perf_stat": True, "reason": "usable"}
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "NA without"):
+                ast_pilot_acceptance.validate_documents(cell, na["summary"], na["meta"], {"a": na["a"], "b": na["b"]}, binary)
+        with self.assertRaisesRegex(RuntimeError, "unknown"):
+            ast_pilot_acceptance.validate_documents("link", *documents, binary)
+
+    def test_compare_command_is_fixed_and_uses_one_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for cell in compiler_receipt.AST_PILOT_CELLS:
+                with mock.patch.object(ast_pilot_acceptance.subprocess, "run") as run:
+                    ast_pilot_acceptance.run_compare(root / "uarch_lab.py", root / "ide", root, 2, root / cell, "perf", cell)
+                argv = run.call_args.args[0]
+                self.assertEqual(argv[argv.index("--ast-pilot-pair") + 1], cell)
+                self.assertEqual(argv[argv.index("--baseline") + 1], argv[argv.index("--candidate") + 1])
+                self.assertEqual(argv[argv.index("--pairs") + 1], "20")
+                self.assertNotIn("--", argv)
+                self.assertNotIn("--canonical-inline-pair", argv)
+
+    def test_profile_runs_both_cells_on_candidate_head_and_records_the_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "ide"
+            candidate.write_bytes(b"candidate compiler")
+            repo = root / "repo"
+            source = repo / "src/buster/apps/ide/ide.c"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"int frozen_unity_source;\n")
+            (repo / "build/generated").mkdir(parents=True)
+            lab = root / "trusted-uarch.py"
+            lab.write_bytes(b"trusted test stub")
+            binary = hashlib.sha256(b"candidate compiler").hexdigest()
+            args = argparse.Namespace(lab=lab, repo_root=repo, candidate_ide=candidate, output=root / "profile",
+                                      head_revision="a" * 40, cpu=2, perf="perf")
+            cells = []
+            with mock.patch.object(ast_pilot_acceptance, "git", return_value="a" * 40), \
+                 mock.patch.object(ast_pilot_acceptance, "run_compare",
+                                   side_effect=lambda *values: cells.append(values[-1])), \
+                 mock.patch.object(ast_pilot_acceptance, "load_complete",
+                                   side_effect=lambda path, cell, sha: ast_pilot_raw_cell(cell, sha)["summary"]), \
+                 mock.patch.object(ast_pilot_acceptance, "probe_tree", return_value=copy.deepcopy(AST_PILOT_PROBE)):
+                result = ast_pilot_acceptance.execute(args)
+            self.assertEqual(cells, ["syntax-only", "object"])
+            self.assertEqual(result["tree"]["retained_bytes"], 36094773)
+            self.assertEqual(compiler_receipt.validate_ast_pilot_acceptance(result, "a" * 40, binary), [])
+            args.cpu = 3
+            args.output = root / "other"
+            with mock.patch.object(ast_pilot_acceptance, "git", return_value="a" * 40), \
+                 self.assertRaisesRegex(RuntimeError, "pins CPU 2"):
+                ast_pilot_acceptance.execute(args)
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            def git(*args: str) -> str:
+                return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                                      text=True).stdout.strip()
+            git("init", "-q")
+            git("config", "user.name", "Ast Pilot Test")
+            git("config", "user.email", "ast-pilot@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            git("add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            git("commit", "-qm", "seed")
+            line = compiler_receipt.AST_PILOT_ACCEPTANCE_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                git("commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.ast_pilot_request_selection(repo, git("rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            git("commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.ast_pilot_request_selection(repo, git("rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.AST_PILOT_ACCEPTANCE_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", ast_pilot_acceptance=ast_pilot_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        self.assertEqual(compiler_publish.verify_analyzer_request_freshness(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", compiler_publish.verify_analyzer_request_freshness(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", compiler_publish.verify_analyzer_request_freshness(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("ast_pilot_acceptance")
+        self.assertIn("no ast-pilot acceptance record",
+                      compiler_publish.verify_analyzer_request_freshness(Api(1, 0), expected, plain, {}))
+        self.assertEqual(compiler_publish.verify_analyzer_request_freshness(Api(1, 1), expected, plain, {}), "")
+        self.assertEqual(compiler_publish.verify_analyzer_request_freshness(
+            Api(1, 0), expected, dict(plain, state="superseded"), {}), "")
+
+    def test_decision_needs_pull_mode_the_9700x_and_the_complete_bundle(self) -> None:
+        record, bundle, unused_acceptance = ast_pilot_evidence("a" * 40, B256)
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["ast_pilot_acceptance"] = record
+        expected = dict(EXPECTED, mode="pull")
+        values = {"expected": expected, "authorized": True, "compare_result": "success", "receipt": pull,
+                  "summary": summary(), "policy_value": "", "throughput": dict(corpus(), ast_pilot_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "missing cell": {"throughput": dict(corpus(), ast_pilot_bundle={
+                key: value for key, value in bundle.items() if not key.startswith("object_")})},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("Issue #3397 -fc-ast-pilot adoption budget: complete, verdict pass", report)
+        self.assertIn("| syntax-only | 0.9000", report)
 
 
 if __name__ == "__main__":

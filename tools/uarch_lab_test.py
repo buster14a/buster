@@ -2096,6 +2096,53 @@ class RetirementFlowTests(Fakes, unittest.TestCase):
 
 
 class CanonicalInlinePairTest(unittest.TestCase):
+    def prepare_self_reproducing_compiler(self, root, mode, warmups):
+        compiler = os.path.join(root, "compiler")
+        with open(compiler, "w") as handle:
+            handle.write("#!" + sys.executable + "\nimport os, shutil, sys\n"
+                         "shutil.copyfile(__file__, sys.argv[1])\n"
+                         "os.chmod(sys.argv[1], %d)\n" % mode)
+        os.chmod(compiler, 0o755)
+        subject = mock.Mock(output=root, transcripts=False, last_elapsed=0.0,
+                            meta={"capabilities": {}, "config": {"role": "candidate"}})
+        subject.pin.return_value = []
+
+        def run_workload(prefix, out, flags, log):
+            completed = subprocess.run([compiler, out], capture_output=True, text=True, check=False)
+            return completed.returncode, completed.stdout, completed.stderr
+
+        subject.run_workload.side_effect = run_workload
+        lab.prepare_variant(subject, warmups)
+        return compiler, os.path.join(root, "out.exe"), os.path.join(root, "reference.exe")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX executable permission contract")
+    def test_saved_stage_one_compiler_executes_and_reproduces_its_bytes(self):
+        for warmups in (0, 1):
+            with self.subTest(warmups=warmups), tempfile.TemporaryDirectory() as root:
+                compiler, produced, reference = self.prepare_self_reproducing_compiler(root, 0o751, warmups)
+                stage_two = os.path.join(root, "stage-two")
+                subprocess.run([reference, stage_two], check=True, capture_output=True)
+                self.assertEqual(stat.S_IMODE(os.stat(reference).st_mode), 0o751)
+                self.assertEqual(lab.sha256_file(reference), lab.sha256_file(produced))
+                self.assertEqual(lab.sha256_file(reference), lab.sha256_file(compiler))
+                self.assertEqual(lab.sha256_file(stage_two), lab.sha256_file(reference))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX executable permission contract")
+    def test_saved_reference_does_not_grant_missing_execute_permission(self):
+        with tempfile.TemporaryDirectory() as root:
+            _, produced, reference = self.prepare_self_reproducing_compiler(root, 0o640, 1)
+            self.assertEqual(stat.S_IMODE(os.stat(reference).st_mode), 0o640)
+            self.assertEqual(lab.sha256_file(reference), lab.sha256_file(produced))
+            with self.assertRaises(PermissionError):
+                subprocess.run([reference, os.path.join(root, "stage-two")], check=True)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX executable permission contract")
+    def test_reference_permission_copy_failure_is_not_masked(self):
+        with tempfile.TemporaryDirectory() as root:
+            with mock.patch.object(lab.shutil, "copymode", side_effect=PermissionError("mode denied")):
+                with self.assertRaisesRegex(PermissionError, "mode denied"):
+                    self.prepare_self_reproducing_compiler(root, 0o751, 1)
+
     def test_fixed_profile_gives_only_candidate_the_feature_flag(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = os.path.abspath(temporary)
@@ -2134,6 +2181,69 @@ class CanonicalInlinePairTest(unittest.TestCase):
                 lab.main(["compare", "--baseline", "a", "--candidate", "b",
                           "--cpu", "-1", "--output", os.path.join(temporary, "out"),
                           "--canonical-inline-pair", "--", "-O3"])
+
+
+
+class AstPilotPairTest(unittest.TestCase):
+    def test_fixed_cell_gives_only_candidate_the_pilot_flag_on_the_g0_command(self):
+        for cell, flag, writes in (("syntax-only", "-fsyntax-only", False), ("object", "-c", True)):
+            with tempfile.TemporaryDirectory() as temporary, self.subTest(cell=cell):
+                root = os.path.abspath(temporary)
+                ide = os.path.join(root, "ide")
+                open(ide, "wb").close()
+                arguments = type("Args", (), {"baseline": ide, "candidate": ide, "perf": "perf", "repo_root": root,
+                                             "sudo": False, "fresh_copy": True, "ast_pilot_pair": cell})()
+                labs = lab.compare_labs(arguments, root, 2, [])
+                self.assertEqual((labs["a"].extra, labs["b"].extra), ([], ["-fc-ast-pilot"]))
+                for key in ("a", "b"):
+                    self.assertEqual(labs[key].compile, lab.AST_PILOT_COMPILE + [flag])
+                    self.assertIn("-g0", labs[key].compile)
+                    self.assertNotIn("-lm", labs[key].compile)
+                    self.assertEqual((labs[key].writes_output, labs[key].transcripts), (writes, True))
+                    self.assertEqual(labs[key].meta["config"]["ast_pilot_cell"], cell)
+                self.assertEqual("-o" in labs["b"].workload("OUT"), writes)
+
+    def test_default_compare_keeps_its_command_and_outputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = os.path.abspath(temporary)
+            ide = os.path.join(root, "ide")
+            open(ide, "wb").close()
+            arguments = type("Args", (), {"baseline": ide, "candidate": ide, "perf": "perf", "repo_root": root,
+                                         "sudo": False, "fresh_copy": True})()
+            labs = lab.compare_labs(arguments, root, 2, [])
+            self.assertEqual(labs["a"].workload("OUT"), [ide] + lab.DEFAULT_COMPILE + ["-o", "OUT"])
+            self.assertFalse(labs["a"].transcripts)
+            self.assertNotIn("ast_pilot_cell", labs["a"].meta["config"])
+
+    def test_syntax_only_transcript_is_the_compared_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = os.path.abspath(temporary)
+            ide = os.path.join(root, "ide")
+            with open(ide, "w") as handle:
+                handle.write("#!/bin/sh\necho \"note: $#\" >&2\n")
+            os.chmod(ide, 0o755)
+            run = lab.Lab(os.path.join(root, "lab"), cpu=None, ide=ide, repo_root=root, extra=["-fc-ast-pilot"],
+                          compile_command=lab.AST_PILOT_COMPILE + ["-fsyntax-only"], writes_output=False, transcripts=True)
+            out = os.path.join(root, "out.exe")
+            status, _, err = run.run_workload([], out)
+            self.assertEqual(status, 0)
+            self.assertNotIn("-o", run.workload(out))
+            with open(out) as handle:
+                text = handle.read()
+            self.assertEqual(text, "--- stdout\n--- stderr\nnote: %d\n" % (len(lab.AST_PILOT_COMPILE) + 2))
+            with open(out + ".diagnostics") as handle:
+                self.assertEqual(handle.read(), text)
+
+    def test_fixed_cell_rejects_request_flags_other_pairs_and_profile_steps(self):
+        for extra in (["--", "-O3"], ["--canonical-inline-pair"], ["--profile-steps", "topdown"]):
+            with tempfile.TemporaryDirectory() as temporary, self.subTest(extra=extra):
+                with self.assertRaises(SystemExit) as raised:
+                    lab.main(["compare", "--baseline", "a", "--candidate", "b", "--cpu", "-1",
+                              "--output", os.path.join(temporary, "out"), "--ast-pilot-pair", "object", *extra])
+                self.assertIn("--ast-pilot-pair accepts no", str(raised.exception.code))
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(SystemExit):
+            lab.main(["compare", "--baseline", "a", "--candidate", "b", "--cpu", "-1",
+                      "--output", os.path.join(temporary, "out"), "--ast-pilot-pair", "link"])
 
 
 if __name__ == "__main__":

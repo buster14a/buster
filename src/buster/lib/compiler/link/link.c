@@ -8,12 +8,15 @@
 // hosted PE64, imports-free UEFI PE64, Mach-O, and Android ELF. The
 // writers share the helpers above them — AArch64 branch range checks and
 // veneers, ELF .eh_frame table construction (duplicate initial locations are
-// refused by link_elf_eh_frame_header_write), PE export/import plumbing,
+// refused by link_elf_eh_frame_header_write; link_elf_eh_frame_entries_sort
+// skips radix bytes no address varies in and already ordered tables),
+// PE export/import plumbing,
 // CodeView/PDB resolution (link_pe_resolved_codeview), SHA-256 for build
 // ids — but each owns its image layout whole, because the formats agree
 // on almost nothing. A position-independent image (NativeImageKind SHARED
 // for -shared, PIE for -pie) has one writer,
-// link_native_image_elf64_x86_64_position_independent, for x86-64 Linux; the
+// link_native_image_elf64_x86_64_position_independent, for x86-64 Linux and
+// every x86-64 Android executable (bionic names, no RDX loader finalizer); the
 // dispatcher refuses the kind on every other target, and its own comment
 // states the relocation and preemption rules. link_elf_version_plan_build and
 // link_elf_copy_plan_build are the symbol-version and copy-slot construction
@@ -102,11 +105,11 @@
 // symbol nothing has and the import's own thunk or slot is what answers.
 // link_elf_symbol_resolves_to_zero and link_elf_symbol_needs_dynamic_import,
 // above the first ELF writer, are the single form of that question; the
-// writers, the dispatcher at the bottom, and the Android writer all ask it,
-// and the AArch64 dynamic writer re-derives the x86-64 writer's import
-// numbering from it, so the two cannot be allowed to disagree. The dynamic
-// writers ask it once per symbol and then read their own import numbering,
-// using the same link-local export index as version and alias construction.
+// writers, the dispatcher at the bottom, and the Android writer all ask it.
+// The AArch64 dynamic writer consumes the x86-64 writer's published import
+// indices rather than deriving a second numbering. The dynamic writers ask it
+// once per symbol and then read their own import numbering, using the same
+// link-local export index as version and alias construction.
 // That index also records the names each requested library leaves undefined,
 // and every hosted executable writer exports its own definition of such a
 // name, as ld does, so a library can call back into the program that loads
@@ -268,6 +271,29 @@ struct LinkElfSectionTableLayout
     u8 reserved[3];
 };
 
+// Facts decided by the x86-64 dynamic writer and published for the AArch64 overlay.
+typedef struct LinkElfDynamicLayout LinkElfDynamicLayout;
+struct LinkElfDynamicLayout
+{
+    u64 section_offsets[OBJECT_SECTION_COUNT];
+    u64 interpreter_offset;
+    u64 entry_stub_offset;
+    u64 entry_stub_slot_size;
+    u64 plt_offset;
+    u64 plt_size;
+    u64 dynamic_symbol_offset;
+    u64 dynamic_offset;
+    u64 dynamic_size;
+    u64 plt_relocation_offset;
+    u64 copy_relocation_offset;
+    u64 copy_relocation_count;
+    u64 data_relocation_count;
+    u32* import_indices;
+    u32 import_count;
+    u32 symbol_count;
+    bool dynamic;
+};
+
 typedef struct LinkElfEhFrameEntry LinkElfEhFrameEntry;
 struct LinkElfEhFrameEntry
 {
@@ -285,6 +311,19 @@ struct LinkElfEhFrameTable
     u32 count;
     bool valid;
     u8 reserved[3];
+};
+
+// Summary of function addresses in current table order, gathered while they
+// are produced: bytes that never vary cannot reorder a stable radix pass, and
+// a table without an inversion is already in final order (issue 951).
+typedef struct LinkElfEhFrameOrder LinkElfEhFrameOrder;
+struct LinkElfEhFrameOrder
+{
+    u64 first_address;
+    u64 previous_address;
+    u64 varying_bits;
+    bool inverted;
+    u8 reserved[7];
 };
 
 BUSTER_GLOBAL_LOCAL String8 link_string_copy(Arena* arena, String8 source)
@@ -969,10 +1008,13 @@ BUSTER_GLOBAL_LOCAL bool link_x86_register_loader_finalizer(LinkX86InstructionBu
 // left eight bytes short of a sixteen-byte boundary.
 //
 // Hosted startup also registers the loader's finalizer even when the program
-// has no initializer arrays of its own.
+// has no initializer arrays of its own, where `loader_finalizer` says the
+// loader supplies one. glibc's ld.so does; bionic's linker64 jumps to the
+// entry point with RDX unspecified (it runs its own finalizers from libc), so
+// an Android image must not register RDX at all.
 BUSTER_GLOBAL_LOCAL bool link_x86_build_elf_entry_stub(u8* bytes, u32 capacity, u32* byte_count, u32* call_displacement_offset, bool hosted,
-                                                       u32* exit_displacement_offset, u32* atexit_displacement_offset, u32* loader_atexit_offset, LinkInitializerPlan const* plan,
-                                                       u32* initializer_displacement_offsets)
+                                                       bool loader_finalizer, u32* exit_displacement_offset, u32* atexit_displacement_offset,
+                                                       u32* loader_atexit_offset, LinkInitializerPlan const* plan, u32* initializer_displacement_offsets)
 {
     LinkX86InstructionBuilder builder = {.bytes = bytes, .capacity = capacity};
     BusterX86MetadataPhysicalOperand operands[2] = {0};
@@ -1003,7 +1045,7 @@ BUSTER_GLOBAL_LOCAL bool link_x86_build_elf_entry_stub(u8* bytes, u32 capacity, 
     operands[0] = link_x86_register(4, 64);
     operands[1] = link_x86_immediate(-16, 8);
     if (!link_x86_emit(&builder, S8("AND"), operands, 2) ||
-        (hosted && !link_x86_register_loader_finalizer(&builder, loader_atexit_offset))) return false;
+        (hosted && loader_finalizer && !link_x86_register_loader_finalizer(&builder, loader_atexit_offset))) return false;
     if (deferred_destructors)
     {
         // __cxa_atexit(runner, 0, 0).  The rip-relative displacement is the
@@ -4057,6 +4099,63 @@ BUSTER_GLOBAL_LOCAL bool link_elf_signed_difference(u64 left, u64 right, s32* ou
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL void link_elf_eh_frame_order_note(LinkElfEhFrameOrder* order, u64 address, u32 entry_index)
+{
+    if (entry_index)
+    {
+        order->varying_bits |= address ^ order->first_address;
+        order->inverted |= order->previous_address > address;
+    }
+    else
+    {
+        order->first_address = address;
+    }
+    order->previous_address = address;
+}
+
+// Stable least-significant-digit radix sort by function_address. Only bytes
+// some address varies in are scattered, and an uninverted table moves no
+// records; an odd pass count leaves the result in the former scratch buffer,
+// so both pointers are swapped and never alias. Returns the passes run.
+BUSTER_GLOBAL_LOCAL u32 link_elf_eh_frame_entries_sort(LinkElfEhFrameTable* table, LinkElfEhFrameOrder order)
+{
+    LinkElfEhFrameEntry* source = table->entries;
+    LinkElfEhFrameEntry* destination = table->scratch;
+    u32 pass_count = 0;
+    u64 varying_bits = order.inverted ? order.varying_bits : 0;
+    for (u32 byte_index = 0; byte_index < 8; byte_index += 1)
+    {
+        u32 shift = byte_index * 8;
+        if ((varying_bits >> shift) & 0xff)
+        {
+            u32 counts[256] = {0};
+            u32 offsets[256];
+            for (u32 entry_index = 0; entry_index < table->count; entry_index += 1)
+            {
+                counts[(source[entry_index].function_address >> shift) & 0xff] += 1;
+            }
+            u32 offset = 0;
+            for (u32 bucket = 0; bucket < BUSTER_ARRAY_LENGTH(counts); bucket += 1)
+            {
+                offsets[bucket] = offset;
+                offset += counts[bucket];
+            }
+            for (u32 entry_index = 0; entry_index < table->count; entry_index += 1)
+            {
+                u32 bucket = (source[entry_index].function_address >> shift) & 0xff;
+                destination[offsets[bucket]++] = source[entry_index];
+            }
+            LinkElfEhFrameEntry* swap = source;
+            source = destination;
+            destination = swap;
+            pass_count += 1;
+        }
+    }
+    table->entries = source;
+    table->scratch = destination;
+    return pass_count;
+}
+
 BUSTER_GLOBAL_LOCAL bool link_elf_eh_frame_header_write(u8* bytes, u64 byte_count, LinkElfEhFrameTable* table, ObjectFile* object, u64 image_base,
                                                         u64 const* section_offsets, u64 header_offset)
 {
@@ -4066,6 +4165,7 @@ BUSTER_GLOBAL_LOCAL bool link_elf_eh_frame_header_write(u8* bytes, u64 byte_coun
         return !header_size && table->valid;
     }
     u64 header_address = image_base + header_offset;
+    LinkElfEhFrameOrder order = {0};
     for (u32 entry_index = 0; entry_index < table->count; entry_index += 1)
     {
         LinkElfEhFrameEntry* entry = table->entries + entry_index;
@@ -4082,34 +4182,9 @@ BUSTER_GLOBAL_LOCAL bool link_elf_eh_frame_header_write(u8* bytes, u64 byte_coun
             return false;
         }
         entry->function_address = address;
+        link_elf_eh_frame_order_note(&order, address, entry_index);
     }
-    LinkElfEhFrameEntry* source = table->entries;
-    LinkElfEhFrameEntry* destination = table->scratch;
-    for (u32 byte_index = 0; byte_index < 8; byte_index += 1)
-    {
-        u32 counts[256] = {0};
-        u32 offsets[256];
-        u32 shift = byte_index * 8;
-        for (u32 entry_index = 0; entry_index < table->count; entry_index += 1)
-        {
-            counts[(source[entry_index].function_address >> shift) & 0xff] += 1;
-        }
-        u32 offset = 0;
-        for (u32 bucket = 0; bucket < BUSTER_ARRAY_LENGTH(counts); bucket += 1)
-        {
-            offsets[bucket] = offset;
-            offset += counts[bucket];
-        }
-        for (u32 entry_index = 0; entry_index < table->count; entry_index += 1)
-        {
-            u32 bucket = (source[entry_index].function_address >> shift) & 0xff;
-            destination[offsets[bucket]++] = source[entry_index];
-        }
-        LinkElfEhFrameEntry* swap = source;
-        source = destination;
-        destination = swap;
-    }
-    table->entries = source;
+    link_elf_eh_frame_entries_sort(table, order);
     bytes[header_offset] = 1;
     bytes[header_offset + 1] = 0x1b;
     bytes[header_offset + 2] = 0x03;
@@ -5302,7 +5377,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     // No libc in this image: every symbol is defined here, so the freestanding
     // syscall shape is the only way to terminate (see
     // link_x86_build_elf_entry_stub).
-    if (!link_x86_build_elf_entry_stub(entry_stub, link_x86_elf_entry_stub_capacity(&plan), &entry_stub_size, &entry_call_displacement_offset, false, 0, 0, 0,
+    if (!link_x86_build_elf_entry_stub(entry_stub, link_x86_elf_entry_stub_capacity(&plan), &entry_stub_size, &entry_call_displacement_offset, false, false, 0, 0, 0,
                                        &plan, initializer_displacement_offsets))
     {
         result.error = LINK_ERROR_RELOCATION;
@@ -5346,6 +5421,24 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 eh_frame_header_offset = align_forward(section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length, 4);
     section_offsets[OBJECT_SECTION_UNWIND] = align_forward(eh_frame_header_offset + eh_frame_header_size, object->sections[OBJECT_SECTION_UNWIND].alignment);
     u64 read_only_end = section_offsets[OBJECT_SECTION_UNWIND] + object->sections[OBJECT_SECTION_UNWIND].data.length;
+    // An absent weak name read through the GOT (the default PIE code shape,
+    // e.g. `cmpq $0, hook@GOTPCREL(%rip)`) needs memory holding its address,
+    // and not every such site can be rewritten into a direct form. Every such
+    // name is worth zero, so they all share one slot after .eh_frame, left
+    // as the image's zero background.
+    bool zero_got_needed = false;
+    for (u32 index = 0; index < object->relocation_count; index += 1)
+    {
+        ObjectRelocation* relocation = &object->relocations[index];
+        zero_got_needed |= relocation->section < OBJECT_SECTION_COUNT && !object_section_kind_is_debug((ObjectSectionKind)relocation->section) &&
+                           relocation->symbol < object->symbol_count && object_relocation_kind_is_x86_got(relocation->kind) &&
+                           link_elf_symbol_resolves_to_zero(0, &object->symbols[relocation->symbol], false);
+    }
+    u64 zero_got_offset = align_forward(read_only_end, sizeof(u64));
+    if (zero_got_needed)
+    {
+        read_only_end = zero_got_offset + sizeof(u64);
+    }
     if (!link_elf_virtual_align(read_only_end, BUSTER_MAX((u32)ELF_PAGE_SIZE, object->sections[OBJECT_SECTION_DATA].alignment),
                                 &section_offsets[OBJECT_SECTION_DATA]))
     {
@@ -5444,7 +5537,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         u64 place_address = image_base + section_offsets[relocation->section] + relocation->offset;
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
         BusterX86MetadataGotPatch got_patch = BUSTER_X86_METADATA_GOT_PATCH_NONE;
-        if (object_relocation_kind_is_x86_got(relocation->kind))
+        bool zero_got = absent_weak && object_relocation_kind_is_x86_got(relocation->kind);
+        if (object_relocation_kind_is_x86_got(relocation->kind) && !zero_got)
         {
             got_patch = link_x86_relax_got_reference(relocation->kind, relocation->addend, bytes, output_offset, section_offsets[relocation->section],
                                                      section_offsets[relocation->section] + section->data.length);
@@ -5460,7 +5554,19 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         // definition of every name in it. A conversion that answers with the
         // address as an immediate patches the same field with the address
         // itself, and the GOT load's -4 has no part in that value.
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC64)
+        if (zero_got)
+        {
+            s64 value = 0;
+            if (!link_address_difference(image_base + zero_got_offset, place_address, relocation->addend, &value) || value < INT32_MIN ||
+                value > INT32_MAX)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            link_write_u32(bytes, output_offset, (u32)(s32)value);
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_X86_64_PC64)
         {
             s64 value = 0;
             if (!link_address_difference(symbol_address, place_address, relocation->addend, &value))
@@ -5606,9 +5712,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
 // entry stub has something to call (C 5.1.2.2.3; see
 // link_x86_build_elf_entry_stub).  A program that defines its own `exit`
 // keeps it and the stub calls that definition directly.  The AArch64 writer
-// must run this before handing the object to the x86-64 writer, because it
-// re-derives the same import numbering from the same symbol table afterwards
-// and the two would otherwise disagree by one import.
+// runs this before handing the object to the x86-64 writer, whose published
+// import indices the overlay consumes.
 //
 // Every hosted image registers the loader finalizer through __cxa_atexit.
 // A program with its own destructors uses that same import for its runner.
@@ -6081,9 +6186,6 @@ BUSTER_GLOBAL_LOCAL void link_elf_copy_relocations_write(LinkElfCopyPlan const* 
     }
 }
 
-// `layout_section_offsets`, when given, receives the image offset of every
-// object section, so the AArch64 writer that overlays this layout can place
-// its own relocations against the same addresses.
 BUSTER_GLOBAL_LOCAL bool link_elf_x86_function_plt_reference(ObjectFile* object, ObjectRelocation const* relocation)
 {
     BUSTER_UNUSED(object);
@@ -6094,11 +6196,12 @@ BUSTER_GLOBAL_LOCAL bool link_elf_x86_function_plt_reference(ObjectFile* object,
     return result;
 }
 
+// A non-null `layout` receives the decisions the AArch64 overlay consumes.
 // `function_address_identity` is enabled only for Linux x86-64 final
 // executables, never the AArch64 or Android layout staging calls.
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_64_dynamic(Arena* arena, ObjectFile* object,
                                                                                            NativeExecutableLinkOptions options, LinkElfIndex* exports,
-                                                                                           u64* layout_section_offsets, bool export_thread_local, bool function_address_identity)
+                                                                                           LinkElfDynamicLayout* layout, bool export_thread_local, bool function_address_identity)
 {
     NativeExecutableLinkResult result = {0};
     enum
@@ -6111,6 +6214,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u32 entry_exit_displacement_offset = 0;
     u32 entry_atexit_displacement_offset = 0;
     u32 loader_atexit_displacement_offset = 0;
+    if (layout)
+    {
+        layout->dynamic = false;
+    }
     static char8 const interpreter[] = "/lib64/ld-linux-x86-64.so.2";
     static char8 const library_name[] = "libc.so.6";
     if ((options.dynamic_library_count && !options.dynamic_libraries) || object->section_count < OBJECT_SECTION_COUNT || !object->sections ||
@@ -6165,7 +6272,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u8* entry_stub = arena_allocate(arena, u8, link_x86_elf_entry_stub_capacity(&plan));
     u32* initializer_displacement_offsets =
         arena_allocate(arena, u32, plan.constructor_count + plan.destructor_count ? plan.constructor_count + plan.destructor_count : 1);
-    if (!link_x86_build_elf_entry_stub(entry_stub, link_x86_elf_entry_stub_capacity(&plan), &entry_stub_size, &entry_call_displacement_offset, true,
+    if (!link_x86_build_elf_entry_stub(entry_stub, link_x86_elf_entry_stub_capacity(&plan), &entry_stub_size, &entry_call_displacement_offset, true, true,
                                        &entry_exit_displacement_offset, &entry_atexit_displacement_offset, &loader_atexit_displacement_offset, &plan, initializer_displacement_offsets))
     {
         result.error = LINK_ERROR_RELOCATION;
@@ -6306,6 +6413,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                     canonical_functions[import_index] = true;
                 }
             }
+        }
+        else if (symbol->section == OBJECT_SECTION_UNDEFINED && import_index == UINT32_MAX && object_relocation_kind_is_x86_got(relocation->kind) &&
+                 function_got_indices[relocation->symbol] == UINT32_MAX)
+        {
+            // An absent weak name read through the GOT (the default PIE code
+            // shape, e.g. `cmpq $0, hook@GOTPCREL(%rip)`) takes a slot that no
+            // loader relocation fills, so it reads as zero like ld's. Not
+            // every such site can be rewritten into a direct form.
+            function_got_indices[relocation->symbol] = function_got_count++;
         }
         // Asked of the numbering above rather than of the symbol again: an
         // undefined symbol that was not numbered is one that resolves to
@@ -6913,19 +7029,21 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                                            ELF_RELOCATION_TYPE_X86_64_64, (u64)relocation->addend);
                 continue;
             }
-            if (object_relocation_kind_is_x86_got(relocation->kind))
+        }
+        // Function address identity and absent weak names both own a slot
+        // numbered by the planning loop above.
+        if (object_relocation_kind_is_x86_got(relocation->kind) && function_got_indices[relocation->symbol] != UINT32_MAX)
+        {
+            u64 slot_address = image_base + function_got_offset + (u64)function_got_indices[relocation->symbol] * sizeof(u64);
+            s64 value = 0;
+            if (!link_address_difference(slot_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
             {
-                u64 slot_address = image_base + function_got_offset + (u64)function_got_indices[relocation->symbol] * sizeof(u64);
-                s64 value = 0;
-                if (!link_address_difference(slot_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
-                {
-                    result.error = LINK_ERROR_RELOCATION;
-                    result.symbol = symbol->name;
-                    return result;
-                }
-                link_write_u32(bytes, output_offset, (u32)(s32)value);
-                continue;
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
             }
+            link_write_u32(bytes, output_offset, (u32)(s32)value);
+            continue;
         }
         BusterX86MetadataGotPatch got_patch = BUSTER_X86_METADATA_GOT_PATCH_NONE;
         if (object_relocation_kind_is_x86_got(relocation->kind))
@@ -7219,14 +7337,31 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                                       .copy_zero_size = copy_slot_count ? copy_slot_cursor - section_offsets[OBJECT_SECTION_ZERO] : 0,
                                       .dynamic = true,
                                   });
-    if (layout_section_offsets)
-    {
-        memcpy(layout_section_offsets, section_offsets, sizeof(section_offsets));
-    }
-    if (result.error == LINK_ERROR_NONE && options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
+    if (result.error == LINK_ERROR_NONE && options.output_path.length &&
+        !link_write_executable_file(options.output_path, result.executable, &result))
     {
         result.error = LINK_ERROR_FILE_WRITE;
         result.symbol = options.output_path;
+    }
+    if (result.error == LINK_ERROR_NONE && layout)
+    {
+        memcpy(layout->section_offsets, section_offsets, sizeof(section_offsets));
+        layout->interpreter_offset = interpreter_offset;
+        layout->entry_stub_offset = entry_stub_offset;
+        layout->entry_stub_slot_size = link_elf_entry_stub_slot(entry_stub_size, &plan);
+        layout->plt_offset = plt_offset;
+        layout->plt_size = plt_size;
+        layout->dynamic_symbol_offset = dynamic_symbol_offset;
+        layout->dynamic_offset = dynamic_offset;
+        layout->dynamic_size = dynamic_size;
+        layout->plt_relocation_offset = relocation_offset;
+        layout->copy_relocation_offset = relocation_offset + plt_relocation_size;
+        layout->copy_relocation_count = copy_slot_count;
+        layout->data_relocation_count = dynamic_data_relocation_count;
+        layout->import_indices = import_indices;
+        layout->import_count = import_count;
+        layout->symbol_count = object->symbol_count;
+        layout->dynamic = true;
     }
     return result;
 }
@@ -7983,8 +8118,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
                                                                                                     LinkElfIndex* exports)
 {
     NativeExecutableLinkResult result = {0};
-    static char8 const interpreter[] = "/lib64/ld-linux-x86-64.so.2";
-    static char8 const runtime_library[] = "libc.so.6";
+    // An Android image is the same image for bionic: its loader and its C
+    // library, and no RDX finalizer (link_x86_build_elf_entry_stub).
+    bool bionic = object->target.os == OPERATING_SYSTEM_ANDROID;
+    String8 interpreter = bionic ? S8("/system/bin/linker64") : S8("/lib64/ld-linux-x86-64.so.2");
+    String8 runtime_library = bionic ? S8("libc.so") : S8("libc.so.6");
     static String8 const export_dynamic_spellings[] = {S8_INITIALIZER("-export-dynamic"), S8_INITIALIZER("--export-dynamic"), S8_INITIALIZER("-E")};
     static String8 const no_undefined_spellings[] = {S8_INITIALIZER("--no-undefined"), S8_INITIALIZER("-no-undefined")};
     bool no_undefined = link_elf_linker_argument_present(options, no_undefined_spellings, BUSTER_ARRAY_LENGTH(no_undefined_spellings));
@@ -8048,7 +8186,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
             u32 capacity = link_x86_elf_entry_stub_capacity(&plan);
             entry_stub = arena_allocate(arena, u8, capacity);
             initializer_displacement_offsets = arena_allocate(arena, u32, (u64)plan.constructor_count + plan.destructor_count + 1);
-            if (!link_x86_build_elf_entry_stub(entry_stub, capacity, &entry_stub_size, &entry_call_displacement_offset, true, &entry_exit_displacement_offset,
+            if (!link_x86_build_elf_entry_stub(entry_stub, capacity, &entry_stub_size, &entry_call_displacement_offset, true, !bionic, &entry_exit_displacement_offset,
                                                &entry_atexit_displacement_offset, &loader_atexit_displacement_offset, &plan,
                                                initializer_displacement_offsets))
             {
@@ -8114,7 +8252,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     String8 soname = shared ? link_elf_linker_argument_soname(options) : (String8){0};
     u32 needed_library_count = options.dynamic_library_count + 1;
     u32* library_name_offsets = arena_allocate(arena, u32, (u64)needed_library_count + 1);
-    u64 dynamic_string_size = 1 + sizeof(runtime_library);
+    u64 dynamic_string_size = 1 + runtime_library.length + 1;
     library_name_offsets[0] = 1;
     for (u32 library = 0; result.error == LINK_ERROR_NONE && library < options.dynamic_library_count; library += 1)
     {
@@ -8198,7 +8336,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     section_offsets[OBJECT_SECTION_UNWIND] =
         align_forward(eh_frame_header_offset + eh_frame_header_size, BUSTER_MAX(object->sections[OBJECT_SECTION_UNWIND].alignment, 1u));
     u64 interpreter_offset = section_offsets[OBJECT_SECTION_UNWIND] + object->sections[OBJECT_SECTION_UNWIND].data.length;
-    u64 interpreter_size = shared ? 0 : sizeof(interpreter);
+    u64 interpreter_size = shared ? 0 : interpreter.length + 1;
     u64 dynamic_string_offset = interpreter_offset + interpreter_size;
     u64 dynamic_symbol_offset = align_forward(dynamic_string_offset + dynamic_string_size, 8);
     u64 dynamic_symbol_size = (u64)dynamic_symbol_count * ELF_SYMBOL_SIZE;
@@ -8270,9 +8408,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
                 memcpy(bytes + section_offsets[section], data.pointer, data.length);
             }
         }
-        if (interpreter_size) memcpy(bytes + interpreter_offset, interpreter, interpreter_size);
+        if (interpreter_size) memcpy(bytes + interpreter_offset, interpreter.pointer, interpreter.length);
         // .dynstr: the libraries, the soname, the symbol names, the versions.
-        memcpy(bytes + dynamic_string_offset + library_name_offsets[0], runtime_library, sizeof(runtime_library));
+        memcpy(bytes + dynamic_string_offset + library_name_offsets[0], runtime_library.pointer, runtime_library.length);
         for (u32 library = 0; library < options.dynamic_library_count; library += 1)
         {
             String8 name = options.dynamic_libraries[library].name;
@@ -8348,13 +8486,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_x86_64_po
     if (result.error == LINK_ERROR_NONE && !shared)
     {
         // The entry stub's calls: `main`, the initializers, `exit` and the
-        // two `__cxa_atexit` registrations, each a rel32 from the stub.
+        // two `__cxa_atexit` registrations, each a rel32 from the stub. A
+        // bionic stub has no loader registration to patch.
         u32 targets[] = {entry_symbol_index, exit_symbol_index, atexit_symbol_index, atexit_symbol_index};
         u32 fields[] = {entry_call_displacement_offset, entry_exit_displacement_offset, loader_atexit_displacement_offset,
                         entry_atexit_displacement_offset};
         u32 call_count = plan.destructor_count ? 4u : 3u;
         for (u32 call = 0; result.error == LINK_ERROR_NONE && call < call_count; call += 1)
         {
+            if (bionic && call == 2) continue;
             u64 address = 0;
             u64 field = entry_stub_offset + fields[call];
             s64 displacement = 0;
@@ -9439,14 +9579,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     u32 loader_atexit_stub_word = 0;
     u32 entry_stub_words = link_aarch64_build_elf_entry_stub(entry_stub, entry_stub_capacity, true, &plan, &entry_stub_word, &exit_stub_word,
                                                              &atexit_stub_word, &loader_atexit_stub_word, initializer_words);
-    // The slot this overlays is the x86-64 hosted stub's, whatever length the
-    // same plan gave it there; building that stub here is how the two agree
-    // without either writer publishing a formula.
-    u32 x86_stub_capacity = link_x86_elf_entry_stub_capacity(&plan);
-    u8* x86_stub = arena_allocate(arena, u8, x86_stub_capacity);
-    u32 x86_stub_size = 0;
-    buster_x86_metadata_prewarm();
-    if (!entry_stub_words || !link_x86_build_elf_entry_stub(x86_stub, x86_stub_capacity, &x86_stub_size, 0, true, 0, 0, 0, &plan, 0))
+    if (!entry_stub_words)
     {
         result.error = LINK_ERROR_RELOCATION;
         return result;
@@ -9494,72 +9627,47 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     converted.relocation_count = converted_count;
     NativeExecutableLinkOptions staging_options = options;
     staging_options.output_path = (String8){0};
-    // The staging link is handed the object with its initializer arrays still
-    // on it, because the plan it derives from them is what decides the entry
-    // stub slot this overlay has to reproduce.  Everything below reads the
-    // stripped copy, whose relocations no longer name sections the image does
-    // not carry.
-    u64 staged_section_offsets[OBJECT_SECTION_COUNT] = {0};
-    result = link_native_executable_elf64_x86_64_dynamic(arena, &converted, staging_options, exports, staged_section_offsets, export_thread_local, false);
+    // The overlay consumes the staging writer's published layout; its input
+    // keeps the initializer arrays so both writers derive the same stub plan.
+    LinkElfDynamicLayout staged = {0};
+    result = link_native_executable_elf64_x86_64_dynamic(arena, &converted, staging_options, exports, &staged, export_thread_local, false);
     if (result.error != LINK_ERROR_NONE)
     {
+        return result;
+    }
+    // AArch64 can only retype COPY data relocations; another type would be
+    // silently stamped COPY by the overlay.
+    if (!staged.dynamic || staged.symbol_count != stripped_object.symbol_count ||
+        staged.copy_relocation_count != staged.data_relocation_count)
+    {
+        result.error = LINK_ERROR_RELOCATION;
         return result;
     }
     object = &stripped_object;
     u8* bytes = result.executable.pointer;
     u64 image_base = ELF_IMAGE_BASE;
-    // The staging writer's e_entry is its entry stub, the first thing in the
-    // R+X load, wherever the layout put that load.
-    u64 entry_stub_offset = link_read_u64(bytes, 24) - image_base;
-    // Data sections sit where the staging writer placed them.
-    u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
-    memcpy(section_offsets, staged_section_offsets, sizeof(section_offsets));
-    // The layout below has to be the one the x86-64 dynamic writer produced,
-    // so the stub slot is that writer's hosted stub size, not this stub's.
-    section_offsets[OBJECT_SECTION_TEXT] =
-        align_forward(entry_stub_offset + link_elf_entry_stub_slot(x86_stub_size, &plan), object->sections[OBJECT_SECTION_TEXT].alignment);
-    if (section_offsets[OBJECT_SECTION_TEXT] != staged_section_offsets[OBJECT_SECTION_TEXT])
-    {
-        result.error = LINK_ERROR_RELOCATION;
-        return result;
-    }
-    u64 plt_offset = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length, 16);
-    u32 import_count = 0;
-    u32* import_indices = arena_allocate(arena, u32, object->symbol_count);
-    for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
-    {
-        import_indices[symbol_index] = UINT32_MAX;
-        if (link_elf_symbol_needs_dynamic_import(exports, &object->symbols[symbol_index]))
-        {
-            import_indices[symbol_index] = import_count++;
-        }
-    }
-    u64 plt_size = (u64)(import_count + 1) * ELF_PLT_ENTRY_SIZE;
+    u64 entry_stub_offset = staged.entry_stub_offset;
+    u64* section_offsets = staged.section_offsets;
+    u64 plt_offset = staged.plt_offset;
+    u32 import_count = staged.import_count;
+    u32* import_indices = staged.import_indices;
+    u64 plt_size = staged.plt_size;
     memset(bytes + plt_offset, 0, plt_size);
-    // Clear the whole slot: this stub is shorter than the x86-64 one it
-    // replaces, and leaving that tail behind would put x86 bytes past the
-    // trap.
-    memset(bytes + entry_stub_offset, 0, link_elf_entry_stub_slot(x86_stub_size, &plan));
+    // Clear the whole published slot: the AArch64 stub can be shorter than
+    // the x86-64 stub reserved by the staging writer.
+    memset(bytes + entry_stub_offset, 0, staged.entry_stub_slot_size);
     memcpy(bytes + entry_stub_offset, entry_stub, (u64)entry_stub_words * sizeof(u32));
-    memcpy(bytes + link_read_u64(bytes, ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_SIZE + 8), interpreter, sizeof(interpreter));
+    memcpy(bytes + staged.interpreter_offset, interpreter, sizeof(interpreter));
     link_write_u16(bytes, 18, 183);
-    u64 dynamic_program_header = ELF_HEADER_SIZE + (u64)ELF_DYNAMIC_PROGRAM_HEADER_INDEX * ELF_PROGRAM_HEADER_SIZE;
-    u64 dynamic_offset = link_read_u64(bytes, dynamic_program_header + 8);
-    u64 relocation_offset = 0;
-    u64 dynamic_symbol_offset = 0;
-    u64 copy_relocation_offset = 0;
-    u64 copy_relocation_size = 0;
-    // Walked to its DT_NULL terminator, over the extent PT_DYNAMIC states,
-    // rather than to a length this writer recomputes from the other one's
-    // policy: that array grows both with the copy relocations and with the
-    // symbol versions an image needs, and a count that stops short leaves the
-    // tags after it unpatched.  DT_RELA/DT_RELASZ are also how the copy
-    // range's extent is learned at all -- it counts slots, not data imports,
-    // because two imported names for one library object share one slot.
-    u64 dynamic_count = link_read_u64(bytes, dynamic_program_header + 32) / ELF_DYNAMIC_SIZE;
+    u64 dynamic_symbol_offset = staged.dynamic_symbol_offset;
+    u64 relocation_offset = staged.plt_relocation_offset;
+    u64 copy_relocation_offset = staged.copy_relocation_offset;
+    u64 copy_relocation_size = staged.copy_relocation_count * ELF_RELOCATION_SIZE;
+    // The dynamic table extent and location are published by the staging writer.
+    u64 dynamic_count = staged.dynamic_size / ELF_DYNAMIC_SIZE;
     for (u64 index = 0; index < dynamic_count; index += 1)
     {
-        u64 entry = dynamic_offset + index * ELF_DYNAMIC_SIZE;
+        u64 entry = staged.dynamic_offset + index * ELF_DYNAMIC_SIZE;
         u64 tag = link_read_u64(bytes, entry);
         if (!tag)
         {
@@ -9570,30 +9678,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             link_write_u64(bytes, entry, 24);
             link_write_u64(bytes, entry + 8, 0);
         }
-        else if (tag == 23)
-        {
-            u64 address = link_read_u64(bytes, entry + 8);
-            relocation_offset = address - image_base;
-        }
-        else if (tag == 6)
-        {
-            u64 address = link_read_u64(bytes, entry + 8);
-            dynamic_symbol_offset = address - image_base;
-        }
-        else if (tag == 7)
-        {
-            u64 address = link_read_u64(bytes, entry + 8);
-            copy_relocation_offset = address - image_base;
-        }
-        else if (tag == 8)
-        {
-            copy_relocation_size = link_read_u64(bytes, entry + 8);
-        }
-    }
-    if (!relocation_offset || (copy_relocation_offset != 0) != (copy_relocation_size != 0))
-    {
-        result.error = LINK_ERROR_RELOCATION;
-        return result;
     }
     bool valid = true;
     for (u32 import_index = 0; import_index < import_count; import_index += 1)
@@ -9723,8 +9807,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         {
             // No PLT thunk for a reference nothing can define: the branch is
             // relocated against address zero, which is what the program asked
-            // for by declaring the symbol weak. The numbering above is what
-            // decided that, exactly as in the x86-64 writer.
+            // for by declaring the symbol weak. The published import indices
+            // above decided that.
             symbol_address = 0;
         }
         else if (symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_DATA && page_relocation)
@@ -10007,41 +10091,37 @@ ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebu
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool link_pe_aarch64_tls_index_symbol(ObjectFile* object, u32 symbol_index)
+// An undefined global DATA _tls_index whose every reference is a loader TLS
+// index load (x86-64 REL32, or ARM64 ADRP/LDR pairs) names this image's
+// synthesized index slot rather than an import.
+BUSTER_GLOBAL_LOCAL bool link_pe_tls_index_symbol(ObjectFile* object, u32 symbol_index)
 {
-    if (!object || symbol_index >= object->symbol_count)
+    bool result = false;
+    if (object && symbol_index < object->symbol_count)
     {
-        return false;
+        ObjectSymbol* symbol = object->symbols + symbol_index;
+        bool valid = symbol->section == OBJECT_SECTION_UNDEFINED && symbol->global && symbol->kind == OBJECT_SYMBOL_DATA &&
+                     string_equal(symbol->name, OBJECT_COFF_TLS_INDEX_NAME);
+        bool aarch64 = object->target.cpu_arch == CPU_ARCH_AARCH64;
+        u32 pc32_count = 0;
+        u32 page_count = 0;
+        u32 low_count = 0;
+        for (u32 index = 0; valid && index < object->relocation_count; index += 1)
+        {
+            ObjectRelocation* relocation = object->relocations + index;
+            if (relocation->symbol == symbol_index)
+            {
+                pc32_count += relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32;
+                page_count += relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP;
+                low_count += relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12;
+                valid = aarch64 ? relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
+                                      relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12
+                                : relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32;
+            }
+        }
+        result = valid && (aarch64 ? page_count && page_count == low_count : pc32_count != 0);
     }
-    ObjectSymbol* symbol = object->symbols + symbol_index;
-    if (symbol->section != OBJECT_SECTION_UNDEFINED || !symbol->global || symbol->kind != OBJECT_SYMBOL_DATA ||
-        !string_equal(symbol->name, S8("__tls_index")))
-    {
-        return false;
-    }
-    u32 page_count = 0;
-    u32 low_count = 0;
-    for (u32 index = 0; index < object->relocation_count; index += 1)
-    {
-        ObjectRelocation* relocation = object->relocations + index;
-        if (relocation->symbol != symbol_index)
-        {
-            continue;
-        }
-        if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP)
-        {
-            page_count += 1;
-        }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12)
-        {
-            low_count += 1;
-        }
-        else
-        {
-            return false;
-        }
-    }
-    return page_count && page_count == low_count;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
@@ -10224,7 +10304,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             {
                 continue;
             }
-            if (aarch64 && link_pe_aarch64_tls_index_symbol(object, symbol_index))
+            if (link_pe_tls_index_symbol(object, symbol_index))
             {
                 continue;
             }
@@ -11315,10 +11395,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                 data_import = false;
                 if (symbol->section == OBJECT_SECTION_UNDEFINED)
                 {
-                    if (aarch64 && link_pe_aarch64_tls_index_symbol(object, relocation->symbol))
+                    if (link_pe_tls_index_symbol(object, relocation->symbol))
                     {
-                        // __tls_index is owned by the PE loader rather than an
-                        // import library.  The two relocation handlers below
+                        // _tls_index is owned by the PE loader rather than an
+                        // import library.  The index relocation handlers below
                         // resolve it to this image's synthesized index slot.
                         symbol_rva = 0;
                     }
@@ -13562,7 +13642,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 }
                 continue;
             }
-            if (!symbol->global || symbol->kind != OBJECT_SYMBOL_FUNCTION || !symbol->name.length)
+            // Functions and data alike: each import has a bound GOT slot, which
+            // GOT loads read, and a stub beside it, which calls reach.
+            if (!symbol->global || !symbol->name.length)
             {
                 result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
                 result.symbol = symbol->name;
@@ -14445,6 +14527,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             {
                 symbol_address = 0;
             }
+            // A GOT load names the slot holding the symbol's address: an
+            // import's bound slot, or, for a definition in this image, the
+            // symbol itself once the load is relaxed to an address below.
+            bool got_load = object_relocation_kind_is_x86_got(relocation->kind) ||
+                            relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 ||
+                            relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12;
             bool thread_local_pointer = false;
             if (result.error == LINK_ERROR_NONE)
             {
@@ -14473,8 +14561,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 }
                 else if (symbol->section == OBJECT_SECTION_UNDEFINED)
                 {
-                    if ((relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12) &&
-                        symbol->kind == OBJECT_SYMBOL_DATA)
+                    // Only a call may reach an import through its stub; any
+                    // other direct reference to imported data would read the
+                    // stub's code.
+                    if (!got_load && symbol->kind == OBJECT_SYMBOL_DATA &&
+                        (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 ||
+                         relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_ABSOLUTE64))
                     {
                         result.error = LINK_ERROR_RELOCATION;
                         result.symbol = symbol->name;
@@ -14489,7 +14581,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                             result.symbol = symbol->name;
                         }
                     }
-                    if (result.error == LINK_ERROR_NONE)
+                    if (result.error == LINK_ERROR_NONE && got_load)
+                    {
+                        if (!link_u64_add(image_base, got_offset, &symbol_address) ||
+                            !link_u64_add(symbol_address, (u64)import_index * sizeof(u64), &symbol_address))
+                        {
+                            result.error = LINK_ERROR_RELOCATION;
+                            result.symbol = symbol->name;
+                        }
+                    }
+                    else if (result.error == LINK_ERROR_NONE)
                     {
                         if (!link_u64_add(text_vm_address, stub_offset, &symbol_address) || import_index > UINT64_MAX / stub_size ||
                             !link_u64_add(symbol_address, (u64)import_index * stub_size, &symbol_address))
@@ -14520,10 +14621,35 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 output_offset = section_offsets[relocation->section] + relocation->offset;
             }
             u64 place_address = 0;
+            if (result.error == LINK_ERROR_NONE && got_load && symbol->section != OBJECT_SECTION_UNDEFINED)
+            {
+                // This image defines the symbol, so no slot is needed: the
+                // x86 load becomes the rip-relative LEA of the symbol and the
+                // AArch64 slot load the ADD of its page offset.
+                if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12)
+                {
+                    u32 instruction = 0;
+                    memcpy(&instruction, bytes + output_offset, sizeof(instruction));
+                    if ((instruction & UINT32_C(0xffc00000)) != UINT32_C(0xf9400000) || (instruction & 31) == 31)
+                    {
+                        result.error = LINK_ERROR_RELOCATION;
+                        result.symbol = symbol->name;
+                    }
+                    link_write_u32(bytes, output_offset, UINT32_C(0x91000000) | (instruction & 0x3ff));
+                }
+                else if (relocation->kind != OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 &&
+                         link_x86_relax_got_reference(relocation->kind, relocation->addend, bytes, output_offset, section_offsets[relocation->section],
+                                                      section_offsets[relocation->section] + section->data.length) != BUSTER_X86_METADATA_GOT_PATCH_PC32)
+                {
+                    result.error = LINK_ERROR_RELOCATION;
+                    result.symbol = symbol->name;
+                }
+            }
             if (result.error == LINK_ERROR_NONE)
             {
                 place_address = image_base + output_offset;
                 if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32 ||
+                    relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 || object_relocation_kind_is_x86_got(relocation->kind) ||
                     relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
                 {
                     s64 value = 0;
@@ -14559,7 +14685,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                         link_write_u32(bytes, output_offset, patched);
                     }
                 }
-                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
+                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ||
+                         relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21)
                 {
                     u32 instruction = 0;
                     memcpy(&instruction, bytes + output_offset, sizeof(instruction));
@@ -14573,7 +14700,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                     if (result.error == LINK_ERROR_NONE)
                     {
                         target_address = symbol_address;
-                        if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && !link_address_addend(symbol_address, relocation->addend, &target_address))
+                        if ((relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21) &&
+                            !link_address_addend(symbol_address, relocation->addend, &target_address))
                         {
                             result.error = LINK_ERROR_RELOCATION;
                             result.symbol = symbol->name;
@@ -14635,7 +14763,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                         link_write_u32(bytes, output_offset, instruction);
                     }
                 }
-                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
+                else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12)
                 {
                     if (place_address & 3)
                     {
@@ -14902,8 +15030,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             link_write_u32(bytes, command, 0xc);
             link_write_u32(bytes, command + 4, dylib_command_size);
             link_write_u32(bytes, command + 8, 24);
-            link_write_u32(bytes, command + 16, 0x10000);
-            link_write_u32(bytes, command + 20, 0x10000);
+            link_write_u32(bytes, command + 16, options.dynamic_libraries[library_index].mach_versions_present
+                                                    ? options.dynamic_libraries[library_index].mach_current_version
+                                                    : 0x10000);
+            link_write_u32(bytes, command + 20, options.dynamic_libraries[library_index].mach_versions_present
+                                                    ? options.dynamic_libraries[library_index].mach_compatibility_version
+                                                    : 0x10000);
             memcpy(bytes + command + 24, library.pointer, library.length);
             bytes[command + 24 + library.length] = 0;
             command += dylib_command_size;
@@ -15025,6 +15157,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     return result;
 }
 
+// Android AArch64 only: x86-64 takes the PIE writer (see the dispatcher).
+// This stages a fixed-address Linux image and marks it ET_DYN, so bionic runs
+// it at a load bias that no absolute address in it accounts for.
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_elf64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options, LinkElfIndex* exports)
 {
     static char8 const interpreter[] = "/system/bin/linker64";
@@ -15046,11 +15181,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
     if (!link_validate_linker_arguments(object->target, options, has_import, &result.symbol))
     {
         result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
-    }
-    else if (object->target.cpu_arch == CPU_ARCH_X86_64)
-    {
-        result = has_import ? link_native_executable_elf64_x86_64_dynamic(arena, &staging_object, staging_options, exports, 0, false, false)
-                            : link_native_executable_elf64_x86_64(arena, &staging_object, staging_options);
     }
     else if (object->target.cpu_arch == CPU_ARCH_AARCH64)
     {
@@ -15589,9 +15719,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
     {
         result.error = LINK_ERROR_INVALID_INPUT;
     }
-    else if (object->target.os == OPERATING_SYSTEM_LINUX &&
-             (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
+    else if ((object->target.os == OPERATING_SYSTEM_LINUX &&
+              (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64)) ||
+             (object->target.os == OPERATING_SYSTEM_ANDROID && object->target.cpu_arch == CPU_ARCH_X86_64))
     {
+        // Bionic's kernel-placed executable is position independent: an
+        // image of link-time addresses marked ET_DYN would run its preinit
+        // entries, IFUNC runner and every data pointer unrelocated. Android
+        // x86-64 therefore always takes the PIE writer.
+        if (object->target.os == OPERATING_SYSTEM_ANDROID && options.image_kind == NATIVE_IMAGE_EXECUTABLE)
+        {
+            options.image_kind = NATIVE_IMAGE_PIE;
+        }
         object = &rebound;
         LinkObjectResult normalized = {.object = *object};
         if (object->target.cpu_arch == CPU_ARCH_X86_64)
@@ -15652,7 +15791,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
     {
         result = link_native_executable_mach_o64(arena, object, options);
     }
-    else if (object->target.os == OPERATING_SYSTEM_ANDROID && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
+    else if (object->target.os == OPERATING_SYSTEM_ANDROID && object->target.cpu_arch == CPU_ARCH_AARCH64)
     {
         result = link_native_executable_android_elf64(arena, &rebound, options, exports);
     }
@@ -15699,6 +15838,38 @@ NativeExecutableLinkResult link_elf_test_executable(Arena* arena, Arena* tempora
     TemporalArena scope = arena_begin_temporal(temporary);
     NativeExecutableLinkResult result = link_native_executable_with_scratch(arena, temporary, object, options);
     scratch_end(scope);
+    return result;
+}
+
+bool link_elf_eh_frame_sort_test(Arena* arena, u64 const* addresses, u32 count, u32 round_count, u32* order, u32* pass_counts)
+{
+    LinkElfEhFrameTable table = {
+        .entries = arena_allocate(arena, LinkElfEhFrameEntry, BUSTER_MAX(count, 1u)),
+        .scratch = arena_allocate(arena, LinkElfEhFrameEntry, BUSTER_MAX(count, 1u)),
+        .count = count,
+        .valid = true,
+    };
+    for (u32 entry_index = 0; entry_index < count; entry_index += 1)
+    {
+        table.entries[entry_index] = (LinkElfEhFrameEntry){.fde_offset = entry_index, .relocation = entry_index};
+    }
+    bool result = true;
+    for (u32 round = 0; round < round_count; round += 1)
+    {
+        LinkElfEhFrameOrder summary = {0};
+        for (u32 entry_index = 0; entry_index < count; entry_index += 1)
+        {
+            LinkElfEhFrameEntry* entry = table.entries + entry_index;
+            entry->function_address = addresses[(u64)round * count + entry->fde_offset];
+            link_elf_eh_frame_order_note(&summary, entry->function_address, entry_index);
+        }
+        pass_counts[round] = link_elf_eh_frame_entries_sort(&table, summary);
+        result &= table.entries != table.scratch;
+    }
+    for (u32 entry_index = 0; entry_index < count; entry_index += 1)
+    {
+        order[entry_index] = (u32)table.entries[entry_index].fde_offset;
+    }
     return result;
 }
 

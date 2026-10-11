@@ -137,6 +137,16 @@ jobs:
           python3 tools/new_audit.py --check
           python3 -B tools/check_markdown_links.py --self-test
           python3 -B tools/check_markdown_links.py
+          python3 -B tools/backend_capabilities_test.py
+          python3 -B tools/backend_capabilities.py --check
+      - name: Verify generated vendor builtin sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Hand edits to the generated c_vendor_builtin.c/.h that skip
+          # tools/c_vendor_builtin.*.in otherwise pass every hosted check (#3392).
+          python3 -B tools/generate_c_vendor_builtins.py --check
+          python3 -B tools/generate_c_vendor_builtins.py --describe __builtin_ia32_sha256rnds2 > /dev/null
       - name: Check bounded string sequence search work
         shell: bash
         run: python3 -B tools/string_first_sequence_work.py --output "$RUNNER_TEMP/string-sequence-work"
@@ -281,6 +291,16 @@ jobs:
           python3 tools/new_audit.py --check
           python3 -B tools/check_markdown_links.py --self-test
           python3 -B tools/check_markdown_links.py
+          python3 -B tools/backend_capabilities_test.py
+          python3 -B tools/backend_capabilities.py --check
+      - name: Verify generated vendor builtin sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Hand edits to the generated c_vendor_builtin.c/.h that skip
+          # tools/c_vendor_builtin.*.in otherwise pass every hosted check (#3392).
+          python3 -B tools/generate_c_vendor_builtins.py --check
+          python3 -B tools/generate_c_vendor_builtins.py --describe __builtin_ia32_sha256rnds2 > /dev/null
       - name: Check bounded string sequence search work
         shell: bash
         run: python3 -B tools/string_first_sequence_work.py --output "$RUNNER_TEMP/string-sequence-work"
@@ -592,6 +612,7 @@ jobs:
             tools/github_ci_time_test.py=ci-queue-timing-test.log
             tools/ci_checks_resources_test.py=checks-resource-observer-test.log
             tools/ci_checks_resources_workflow_test.py=checks-resource-workflow-test.log
+            tools/ci_ebpf_kernel_oracle_test.py=ebpf-kernel-oracle-test.log
           )
           if [[ '${{ matrix.os }}' == macos ]]; then
             suites+=(tools/ci_runner_resources_test.py=runner-resources-test.log)
@@ -1196,14 +1217,34 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run             --root "$BUSTER_CI_OBSERVATION_ROOT" --phase differential_producer_check --sequence 70 --             "$driver" build --config Release -t ide
           "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase differential_corpus --sequence 80 -- "$driver" test_differential --ide build/Release/ide --out "$RUNNER_TEMP/buster-ci/differential" --sanitize-oracle --jobs 4
 
+      # #1625: the eBPF kernel verifier/JIT oracle needs CAP_BPF, plus
+      # CAP_PERFMON for pointer comparisons. Only a copy of ide gets them, so
+      # the rest of the native suite keeps running unprivileged.
+      - name: eBPF kernel verifier/JIT oracle
+        id: ebpf_kernel
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.os == 'linux' && matrix.arch == 'x86_64' && steps.llvm.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          exec > >(tee "$RUNNER_TEMP/buster-ci/ebpf-kernel.log") 2>&1
+          driver="$RUNNER_TEMP/buster-build"
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase ebpf_kernel_producer_check --sequence 82 -- "$driver" build --config Release -t ide
+          oracle_ide="$RUNNER_TEMP/ebpf-kernel-ide/ide"
+          mkdir -p "${oracle_ide%/*}"
+          cp build/Release/ide "$oracle_ide"
+          sudo setcap cap_bpf,cap_perfmon+ep "$oracle_ide"
+          getcap "$oracle_ide"
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase ebpf_kernel_oracle --sequence 84 -- "$BUSTER_CI_PYTHON" tools/ci_ebpf_kernel_oracle.py --ide "$oracle_ide" --log-directory "$RUNNER_TEMP/buster-ci" --metamorphic-output "$RUNNER_TEMP/ebpf-kernel-metamorphic"
+
       - name: Native result and reproduction
         if: ${{ always() && steps.checkout.outcome == 'success' }}
         shell: bash
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          # Unix equivalent: BUSTER_CI_REQUIRED: modes differential
-          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference' || 'modes differential' }}
+          # Unix equivalent: BUSTER_CI_REQUIRED: modes differential (plus ebpf_kernel on Linux x86-64)
+          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference' || matrix.os == 'linux' && matrix.arch == 'x86_64' && 'modes differential ebpf_kernel' || 'modes differential' }}
           BUSTER_CI_REPRO: See docs/windows-ci-coverage.md and docs/ci-suite-partition.md for the matching native commands and coverage contract.
         # Unix equivalent: run: python3 tools/ci_summary.py
         run: if command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_summary.py; else python3 tools/ci_summary.py; fi
@@ -1217,7 +1258,7 @@ jobs:
         shell: bash
         env:
           BUSTER_CI_NATIVE_PLATFORM: ${{ matrix.platform }}
-          BUSTER_CI_NATIVE_COMPLETE: ${{ matrix.platform == 'windows' && steps.modes_windows.outcome == 'success' && steps.msvc_reference.outcome == 'success' && '1' || matrix.platform == 'unix' && steps.modes.outcome == 'success' && steps.differential.outcome == 'success' && '1' || '0' }}
+          BUSTER_CI_NATIVE_COMPLETE: ${{ matrix.platform == 'windows' && steps.modes_windows.outcome == 'success' && steps.msvc_reference.outcome == 'success' && '1' || matrix.platform == 'unix' && steps.modes.outcome == 'success' && steps.differential.outcome == 'success' && (matrix.os != 'linux' || matrix.arch != 'x86_64' || steps.ebpf_kernel.outcome == 'success') && '1' || '0' }}
         run: python_command=$BUSTER_CI_PYTHON; test -n "$python_command" || python_command=python3; "$python_command" tools/ci_native_observation.py package --root "$BUSTER_CI_OBSERVATION_ROOT" --python "$python_command" --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload" --platform "$BUSTER_CI_NATIVE_PLATFORM" --expect-complete "$BUSTER_CI_NATIVE_COMPLETE"
 
       - name: Retain native logs
@@ -1238,8 +1279,8 @@ jobs:
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          # Unix equivalent: BUSTER_CI_REQUIRED: modes differential pack
-          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference pack' || 'modes differential pack' }}
+          # Unix equivalent: BUSTER_CI_REQUIRED: modes differential pack (plus ebpf_kernel on Linux x86-64)
+          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference pack' || matrix.os == 'linux' && matrix.arch == 'x86_64' && 'modes differential ebpf_kernel pack' || 'modes differential pack' }}
           BUSTER_CI_REPRO: See docs/windows-ci-coverage.md and docs/ci-suite-partition.md for native evidence packaging and fallback.
         # Unix equivalent: run: python3 tools/ci_summary.py
         run: if command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_summary.py; else python3 tools/ci_summary.py; fi
@@ -1358,6 +1399,17 @@ jobs:
             --package "$BUSTER_ANDROID_SYSTEM_IMAGE"
           printf '%s\n' "$ANDROID_HOME/emulator" "$ANDROID_HOME/platform-tools" >>"$GITHUB_PATH"
 
+      - name: Bootstrap the build driver (Android runtime order)
+        if: ${{ matrix.os == 'android' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Hosted jobs build build.c only with Clang (the documented CI
+          # bootstrap exception); android/runtime_order.sh uses this driver to
+          # generate and build its host ide.
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
+            build.c -o "$RUNNER_TEMP/buster-android-build-driver"
+
       - name: Test (Android)
         id: android
         if: ${{ matrix.os == 'android' }}
@@ -1370,6 +1422,8 @@ jobs:
           BUSTER_ANDROID_EMULATOR_HEADLESS: "1"
           BUSTER_ANDROID_EMULATOR_LOG: ${{ runner.temp }}/buster-ci/android-emulator.log
           BUSTER_ANDROID_EMULATOR_STARTED_MARKER: ${{ runner.temp }}/buster-ci/android-emulator.started
+          BUSTER_ANDROID_RUNTIME_ORDER: "1"
+          BUSTER_ANDROID_HOST_DRIVER: ${{ runner.temp }}/buster-android-build-driver
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
@@ -1696,7 +1750,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         id: checkout
         with:
-          fetch-depth: ${{ needs.no_code_plan.outputs.no_code == 'true' && '0' || '1' }}
+          fetch-depth: 1
           persist-credentials: false
       - name: Record actual checkout identity
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
@@ -1726,6 +1780,34 @@ jobs:
           mode: source
           source-directory: no-code-trusted
           source-repository: ${{ github.repository }}
+      # Same data-only candidate as the planner: a bare blobless repository
+      # holding just the tested and policy histories, so the workspace stays
+      # depth 1 on every route and no credentials are left behind.
+      - name: Fetch exact tested source as data
+        if: ${{ needs.no_code_plan.outputs.no_code == 'true' }}
+        shell: bash
+        env:
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+          SOURCE_TOKEN: ${{ github.token }}
+          TESTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          policy=$(git -C no-code-trusted rev-parse --verify 'HEAD^{commit}')
+          git init --quiet --bare "$RUNNER_TEMP/no-code-candidate"
+          authorization=$(printf 'x-access-token:%s' "$SOURCE_TOKEN" | base64 -w0)
+          echo "::add-mask::$authorization"
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.$SOURCE_URL/.extraheader" \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $authorization" \
+            git -C "$RUNNER_TEMP/no-code-candidate" fetch --quiet --no-tags --no-write-fetch-head --filter=blob:none \
+            "$SOURCE_URL" "$TESTED_SHA" "$policy"
+          git -C "$RUNNER_TEMP/no-code-candidate" update-ref --no-deref HEAD "$TESTED_SHA"
+      - name: Record actual checkout identity
+        if: ${{ needs.no_code_plan.outputs.no_code == 'true' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: ${{ runner.temp }}/no-code-candidate
+          source-repository: ${{ github.repository }}
       - name: Recompute exact no-code completion
         id: no_code_verified
         if: ${{ needs.no_code_plan.outputs.no_code == 'true' }}
@@ -1736,16 +1818,17 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
           TESTED_SHA: ${{ github.sha }}
           EVENT_NAME: ${{ github.event_name }}
+          # A missing commit or tree fails the classifier, never a lazy fetch.
+          GIT_NO_LAZY_FETCH: '1'
         run: |
           set -euo pipefail
           test "$PLAN_RESULT" = success
           policy=$(git -C no-code-trusted rev-parse HEAD)
-          git fetch --quiet --no-tags origin "$policy"
           (
             cd no-code-trusted
             clang -Isrc -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/no-code-completion"
           )
-          env -u GITHUB_OUTPUT "$RUNNER_TEMP/no-code-completion" ci_no_code --repo "$GITHUB_WORKSPACE" \
+          env -u GITHUB_OUTPUT "$RUNNER_TEMP/no-code-completion" ci_no_code --repo "$RUNNER_TEMP/no-code-candidate" \
             --base "$BASE_SHA" --head "$HEAD_SHA" --tested "$TESTED_SHA" \
             --policy "$policy" --event "$EVENT_NAME" | tee "$RUNNER_TEMP/no-code-completion.json"
           grep -Fq '"no_code":true' "$RUNNER_TEMP/no-code-completion.json"

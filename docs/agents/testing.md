@@ -536,6 +536,27 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   failure: always inspect every `ANDROID_CONFIG_RESULT` line — both Debug and
   Release — plus the batch line's `status=` field; a missing per-config line or
   `status=not-run` is itself evidence of an incomplete run.
+  With `BUSTER_ANDROID_RUNTIME_ORDER=1`, which the workflow's Android step
+  sets, `android/test_ci.sh` also executes a Buster-linked program on the
+  emulator (#1243). The APK payload cannot do this: Android 10+ app data is
+  W^X, so its sandbox cannot execute a freshly written file. While the
+  emulator boots, `android/runtime_order.sh build` has the native build driver
+  generate and build a host `ide` (Debug, no tests): the workflow bootstraps
+  that driver with Clang and passes it as `BUSTER_ANDROID_HOST_DRIVER`, and a
+  local run selects `build.sh`. It then links `android/runtime_order/probe.c`
+  against a shared library and an IFUNC object built by the NDK's clang. After boot, `run` pushes the
+  probe to `/data/local/tmp`, runs it through `adb shell` with the
+  `BUSTER_ANDROID_ADB_COMMAND_TIMEOUT_SECONDS` adb bounds and a 30-second
+  probe bound (`BUSTER_ANDROID_RUNTIME_ORDER_TIMEOUT_SECONDS`), and requires
+  exit status 0 and the anchored record: both preinit entries in order, then
+  the library's constructor, then the program's, with the IFUNC resolved once
+  and callable from preinit. `ANDROID_RUNTIME_ORDER_RESULT` reports each mode
+  and `ANDROID_RUNTIME_ORDER_CHECK` the batch's view (`disabled` when not
+  requested). A build or run failure fails the batch with
+  `config=runtime-order` while both payloads still run; a probe that did not
+  build is not run. `bash android/runtime_order_test.sh` (run by
+  `android/run_tests_test.sh`) covers the script with fake tools; the frozen
+  shared mobile suite keeps the check disabled.
   `android/run_tests.sh` bounds each complete suite with a 180-second monitor
   watchdog, independently of adb command/install/boot deadlines. Debug compiler
   fixtures exceeded the former 60-second budget while still reporting progress
@@ -728,27 +749,39 @@ failures remain failures and must not be hidden by this fixture repair.
 
 ## External compiler-oracle qualification
 
-The registered function-parameter compatibility and type-specifier fixtures
-qualify the specific external-compiler rows they compare. A CAPABLE result
-requires the exact resolved compiler command and captured environment, a
-complete normal process wait with successful cleanup and capture, a silent
-successful known-valid probe, and the expected executable or object artifact.
-The fixture then runs the subject comparisons; any capable compiler that
-disagrees with Buster remains a failed assertion.
+Fixtures that compare Buster with a host compiler or linker qualify the
+specific reference rows they compare (#2579). A CAPABLE result requires the
+exact resolved compiler command and captured environment, a complete normal
+process wait with successful cleanup and capture, a silent successful
+known-valid probe, and the expected executable or object artifact. The fixture
+then runs the subject comparisons; any capable reference that disagrees with
+Buster remains a failed assertion.
 
-An optional local compiler refusal is reported as NOT_RUN. It is explicit
-non-participation, never a passing assertion. In required CI, the same narrowly
-authenticated refusal is INCOMPLETE and adds a failed assertion, so
-ide test --ci=1 cannot accept that required reference obligation as complete.
-Other outcomes are failures: missing tools, an unauthenticated profile, an
-unhealthy control, altered or additional diagnostics, unexpected stdout or
-artifacts, abnormal exit, timeout, capture loss, or cleanup failure. A refusal
-qualifies only when its compiler/profile witness and known-valid control pass
-and the full normalized stderr, normal exit code, argv, and environment match
-the fixture's exact contract. The probes set LC_ALL=C in a per-child
-environment and disable diagnostic color, carets, and wrapping without changing
-the parent process environment. These dispositions do not weaken Buster's
-semantic or diagnostic assertions.
+A reference that is too old for a row is reported as NOT_RUN, under
+`ide test --ci=1` as well. NOT_RUN is explicit non-participation, never a
+passing assertion, and it skips only that reference row; Buster's own
+compilations and assertions still run. Hosted CI images carry current
+toolchains, so they still execute these rows. Each qualification names its
+reference release and evidence:
+
+| Fixture | Reference that qualifies | Witness |
+|---|---|---|
+| `c_test_function_parameter_compatibility_runtime` | GCC 11-13 for `-std=gnu23` (GCC 14 added the spelling) | exact refusal of the known-valid control |
+| `compiler_driver_test_type_specifiers` | GCC 11 on x86-64 for `_Float16` (GCC 12 added it) | exact refusal of `_Float16 v;` after a healthy integer control |
+| `compiler_driver_test_function_literal_identity` | GCC 11 on x86-64, GCC producer rows | the same `_Float16` qualification |
+| `c_test_enumerator_type_differential` | GCC 11 and 12, GCC rows (GCC 13 added C23 enumerator types) | documented release profile, never a probe of the subject |
+| `c_macro_rescan_boundary_tests` | GCC 11, two `pop_macro`-in-argument rows | the exact token output GCC 11 is recorded to print |
+| `compiler_driver_test_imported_function_addresses` | GNU ld 2.38 behind a Clang host driver (binutils 2.39 accepts it) | exact protected-symbol refusal after a healthy shared-object control |
+
+Compiler identity comes from `buster_test_reference_identity`: `--version`,
+`-dumpmachine` and a header-free `-dM -E` profile must agree on a native,
+non-Clang GCC release. Other outcomes are failures: missing tools, an
+unidentified or different release, an unhealthy control, altered or additional
+diagnostics, unexpected stdout or artifacts, abnormal exit, timeout, capture
+loss, or cleanup failure. The probes set LC_ALL=C in a per-child environment
+and disable diagnostic color, carets, and wrapping without changing the parent
+process environment. The classifier still supports a `required` reference,
+which reports INCOMPLETE and fails; no fixture currently requests it.
 
 ## Native differential matrix
 
