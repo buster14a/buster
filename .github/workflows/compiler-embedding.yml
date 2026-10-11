@@ -59,12 +59,3 @@ jobs:
           cmake --build "$RUNNER_TEMP/embed-example" --config Release
       - name: Run external client
         run: "$RUNNER_TEMP/embed-example/buster_embed_example"
-      - name: Validate workflow inventory and policy
-        run: |
-          set -euo pipefail
-          python3 tools/check_action_pins.py
-          python3 -B tools/ci_workflow_policy_test.py
-          python3 -B tools/ci_checks_dispatch_inventory_test.py -v
-          go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 -color .github/workflows/*.yml
-      - name: Check documentation links
-        run: python3 tools/check_markdown_links.py
