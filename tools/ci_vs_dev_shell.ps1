@@ -8,7 +8,11 @@
 # dot-sourcing. Failures throw; this script never calls `exit`, which would end
 # only this script and let the calling step continue.
 #
+# Physical file operations deliberately avoid cold Management-cmdlet loading.
+# Resolve through PowerShell session paths (not the .NET process cwd), reject
+# non-filesystem providers, and append GITHUB_ENV as UTF8 with host newlines.
 # Map:
+#   Resolve-CIFileSystemPath literal paths relative to the caller's PS location.
 #   vswhere lookup           -Component selects the newest matching install.
 #   Launch-VsDevShell.ps1    always -HostArch amd64; see docs/ci-github-actions.md.
 #   -LlvmBin                 prepends the installed LLVM after the shell.
@@ -25,13 +29,22 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-if (-not (Test-Path -LiteralPath $VsWhere)) { throw "vswhere was not found at $VsWhere" }
-$VsPaths = @(& $VsWhere -latest -products * -requires $Component -property installationPath)
+function Resolve-CIFileSystemPath([string]$Value) {
+    $Provider = $null
+    $Drive = $null
+    $Resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
+        $Value, [ref]$Provider, [ref]$Drive)
+    if ($Provider.Name -ne 'FileSystem') { throw "VS shell helper requires a FileSystem path: $Value" }
+    return $Resolved
+}
+$VsWherePath = Resolve-CIFileSystemPath $VsWhere
+if (-not [System.IO.File]::Exists($VsWherePath)) { throw "vswhere was not found at $VsWhere" }
+$VsPaths = @(& $VsWherePath -latest -products * -requires $Component -property installationPath)
 if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw "Visual Studio with $Component was not found" }
 $VsPath = "$($VsPaths[0])".Trim()
 if (-not $VsPath) { throw "Visual Studio with $Component was not found" }
 # ARM64 uses an emulated amd64 VS host but the native installed LLVM.
-& (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $Arch -HostArch amd64 -SkipAutomaticLocation
+& ([System.IO.Path]::Combine($VsPath, 'Common7\Tools\Launch-VsDevShell.ps1')) -Arch $Arch -HostArch amd64 -SkipAutomaticLocation
 if ($LlvmBin) {
     $env:PATH = "$LlvmBin;$env:PATH"
 }
@@ -40,10 +53,11 @@ if ($GithubEnv) {
     # executables recorded by the driver. Preserve this step's selected
     # Visual Studio/LLVM search path and target architecture for it.
     $PathDelimiter = 'BUSTER_CI_WINDOWS_COMPILER_PATH'
-    Add-Content -LiteralPath $GithubEnv -Value "PATH<<$PathDelimiter"
-    Add-Content -LiteralPath $GithubEnv -Value $env:PATH
-    Add-Content -LiteralPath $GithubEnv -Value $PathDelimiter
-    Add-Content -LiteralPath $GithubEnv -Value "VSCMD_ARG_TGT_ARCH=$env:VSCMD_ARG_TGT_ARCH"
+    $EnvPath = Resolve-CIFileSystemPath $GithubEnv
+    $Lines = @("PATH<<$PathDelimiter", $env:PATH, $PathDelimiter,
+               "VSCMD_ARG_TGT_ARCH=$env:VSCMD_ARG_TGT_ARCH")
+    $Payload = ($Lines -join [System.Environment]::NewLine) + [System.Environment]::NewLine
+    [System.IO.File]::AppendAllText($EnvPath, $Payload, [System.Text.UTF8Encoding]::new($false))
 }
 foreach ($Compiler in $Require) {
     where.exe $Compiler
