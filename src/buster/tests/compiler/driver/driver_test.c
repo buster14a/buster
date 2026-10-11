@@ -34303,7 +34303,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // not constant", the column GCC uses, so -fsyntax-only and -c agree
     // instead of -c failing first in local static lowering. The constant-only
     // body is rejected too: the frontend does not fold statement expressions.
-    // sizeof, _Alignof and typeof operands stay unevaluated and compile.
+    // sizeof, _Alignof and typeof operands stay unevaluated and compile,
+    // including an unparenthesized unary operand such as `sizeof *({ ... })`.
     {
         TemporalArena block_temporary = arena_begin_temporal(arguments->arena);
         Arena* block_arena = block_temporary.arena;
@@ -34314,8 +34315,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             S8("int main(void) { static int s = ({ int a = 2; a + 1; }); return s - 3; }\n"),
             S8("int main(void) { static int r[] = { 1, ({ 2; }) }; return r[0] - 1; }\n"),
             S8("int main(void) { static int q = sizeof(({ int a = 2; a; })) + _Alignof(typeof(({ 1; }))); return q - 8; }\n"),
+            S8("int main(void) { static int s = sizeof *({ int x; &x; }); return s - 4; }\n"),
+            S8("int main(void) { static int s = sizeof +({ int x = 0; x; }) + 1; return s - 5; }\n"),
         };
-        String8 block_locations[] = {S8(":1:33: "), S8(":1:33: "), S8(":1:40: "), S8("")};
+        String8 block_locations[] = {S8(":1:33: "), S8(":1:33: "), S8(":1:40: "), S8(""), S8(""), S8("")};
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(block_texts); index += 1)
         {
             if (BUSTER_REQUIRE(arguments, file_write(block_source, BUSTER_SLICE_TO_BYTE_SLICE(block_texts[index]))))

@@ -35081,9 +35081,10 @@ BUSTER_C_INTERNAL u32 c_parse_file_scope_statement_expression(CParseResult* resu
 // The `(` of the first evaluated GNU statement expression in a block-scope
 // static initializer [start, end), or end. Such a static is initialized before
 // the function runs, so GCC and Clang reject the `({` as "initializer element is
-// not constant" (#3415), while a sizeof, _Alignof or typeof operand stays
-// unevaluated and constant. The position index answers the common case, a
-// static without one; only a hit walks the range to skip those operands.
+// not constant" (#3415), while a sizeof or _Alignof unary operand, or a typeof
+// operand, stays unevaluated and constant. The position index answers the
+// common case, a static without one; only a hit walks the range to skip those
+// operands.
 BUSTER_C_INTERNAL u32 c_parse_block_static_statement_expression(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
 {
     u32 found = end;
@@ -35092,14 +35093,22 @@ BUSTER_C_INTERNAL u32 c_parse_block_static_statement_expression(CParseResult* re
     {
         CToken token = preprocess.tokens[cursor];
         bool parenthesized = cursor + 1 < end && c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
-        bool unevaluated = false;
-        if (parenthesized && token.kind == C_TOKEN_IDENTIFIER)
+        bool size_or_alignment = false;
+        bool type_of = false;
+        if (token.kind == C_TOKEN_IDENTIFIER)
         {
             String8 name = c_token_spelling(preprocess.spelling_base, token);
-            unevaluated = string_equal(name, S8("sizeof")) || c_parse_alignof_word(name) || string_equal(name, S8("typeof")) ||
-                          string_equal(name, S8("typeof_unqual")) || string_equal(name, S8("__typeof")) || string_equal(name, S8("__typeof__"));
+            size_or_alignment = string_equal(name, S8("sizeof")) || c_parse_alignof_word(name);
+            type_of = parenthesized && (string_equal(name, S8("typeof")) || string_equal(name, S8("typeof_unqual")) ||
+                                        string_equal(name, S8("__typeof")) || string_equal(name, S8("__typeof__")));
         }
-        if (unevaluated)
+        if (size_or_alignment)
+        {
+            // The operand is a whole unary expression, parenthesized or not:
+            // `sizeof *({ int x; &x; })` evaluates nothing either.
+            cursor = c_parse_update_prefix_operand_end(result, preprocess, cursor + 1, end);
+        }
+        else if (type_of)
         {
             u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor + 1);
             cursor = close < end ? close + 1 : end;
