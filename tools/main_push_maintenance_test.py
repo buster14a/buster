@@ -261,6 +261,22 @@ class IntegrationTests(unittest.TestCase):
             self.assertNotIn("secret response", text)
             self.assertIn("failed", (root / "summary.md").read_text())
 
+    def test_cli_startup_failure_retains_report_and_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(M.preflight, "GitHubApi", side_effect=OSError("secret")), \
+                    mock.patch("sys.stderr"):
+                status = M.main(["refresh-merge-conflicts", "--event-path", str(root / "event.json"),
+                    "--repository", "buster14a/buster", "--event-main", self.A,
+                    "--report-dir", str(root / "reports"), "--summary", str(root / "summary.md"),
+                    "--workflow", "test.yml", "--run-number", "1", "--predecessor-job", "target",
+                    "--wait-seconds", "30"])
+            self.assertEqual(status, 2)
+            text = (root / "reports/main-push-maintenance.json").read_text()
+            self.assertEqual(json.loads(text)["status"], "failed")
+            self.assertNotIn("secret", text)
+            self.assertTrue((root / "summary.md").exists())
+
     def test_invalidation_blocks_a_stale_write_and_noops_when_superseded(self):
         api = MainApi([self.A, self.C, self.C])
 

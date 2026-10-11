@@ -60,7 +60,7 @@ BUSTER_GLOBAL_LOCAL int mp_string(const CmJson *j, unsigned node, const char *ke
 }
 BUSTER_GLOBAL_LOCAL int mp_run(const CmJson *j, unsigned node, MpRun *out)
 {
-    int result = node && j->tokens[node].kind == 'o' &&
+    int result = j->valid && node && node <= j->count && j->tokens[node].kind == 'o' &&
         mp_uint(j, node, "id", &out->id) && out->id &&
         mp_uint(j, node, "run_number", &out->number) && out->number &&
         mp_uint(j, node, "run_attempt", &out->attempt) && out->attempt &&
@@ -151,6 +151,7 @@ BUSTER_GLOBAL_LOCAL CmJson mp_request(MpState *s, const char *path, const char *
     if (valid)
     {
         ++s->requests;
+        s->pages += page > 0;
         if (s->fixture) text = mp_fixture(s, path, filter, page);
         else
         {
@@ -214,7 +215,6 @@ BUSTER_GLOBAL_LOCAL int mp_runs(MpState *s)
         for (unsigned page = 1; valid && !complete && page <= MP_PAGES; ++page)
         {
             CmJson j = mp_request(s, path, s->successor ? s->head : mp_states[bucket], page, 0);
-            ++s->pages;
             unsigned array = 0, count = 0;
             valid = mp_batch(s, &j, "workflow_runs", page, &expected, &array, &count);
             for (unsigned node = valid ? j.tokens[array].child : 0; valid && node; node = j.tokens[node].next)
@@ -271,7 +271,6 @@ BUSTER_GLOBAL_LOCAL int mp_pending(MpState *s, const MpRun *run, int *pending)
         for (unsigned page = 1; valid && !complete && page <= MP_PAGES; ++page)
         {
             CmJson j = mp_request(s, path, NULL, page, 1);
-            ++s->pages;
             unsigned array = 0, count = 0;
             valid = mp_batch(s, &j, "jobs", page, &expected, &array, &count);
             for (unsigned node = valid ? j.tokens[array].child : 0; valid && node; node = j.tokens[node].next)
@@ -302,7 +301,7 @@ BUSTER_GLOBAL_LOCAL int mp_pending(MpState *s, const MpRun *run, int *pending)
             snprintf(path, sizeof(path), "actions/runs/%" PRIu64, run->id);
             CmJson j = mp_request(s, path, NULL, 0, 0);
             MpRun live = {0};
-            valid = mp_run(&j, 1, &live) && live.id == run->id && live.number == run->number &&
+            valid = mp_run(&j, 1, &live) && live.id == run->id && live.number == run->number && live.attempt >= run->attempt &&
                 cm_equal(live.head, run->head) && cm_equal(cm_get(&j, 1, "event"), "push") &&
                 cm_equal(cm_get(&j, 1, "head_branch"), "main");
             if (valid) *pending = !cm_equal(live.status, "completed") && (*pending || live.attempt != run->attempt);
