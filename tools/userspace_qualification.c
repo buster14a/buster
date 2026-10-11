@@ -85,11 +85,13 @@ BUSTER_GLOBAL_LOCAL bool userspace_checkout(Arena* arena, String8 root, String8 
 BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 arguments)
 {
     bool valid = arguments.length >= 8 && string_equal(arguments.pointer[6], S8("--")) &&
-                 (string_equal(arguments.pointer[1], S8("reference")) || string_equal(arguments.pointer[1], S8("buster")));
+                 (string_equal(arguments.pointer[1], S8("reference")) || string_equal(arguments.pointer[1], S8("buster")) ||
+                  string_equal(arguments.pointer[1], S8("host")));
     ProcessResult result = PROCESS_RESULT_FAILED;
     if (valid)
     {
         bool candidate = string_equal(arguments.pointer[1], S8("buster"));
+        bool host = string_equal(arguments.pointer[1], S8("host"));
         String8 ide = arguments.pointer[2];
         String8 musl_root = arguments.pointer[3];
         String8 musl_output = arguments.pointer[4];
@@ -115,7 +117,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
                 source = arg;
             }
         }
-        bool target_c = compile && source.length && output.length && string_ends_with_sequence(output, S8(".o")) &&
+        bool target_c = !host && compile && source.length && output.length && string_ends_with_sequence(output, S8(".o")) &&
                         !string_starts_with_sequence(source, S8("tmp.")) && !string_equal(source, S8("bb_libtest.c"));
         bool buster = candidate && compile;
         bool link = !compile && !preprocess && !query;
@@ -129,7 +131,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
             string8_list_push(arena, &command, S8("-fregister-allocator=fast"));
             string8_list_push(arena, &command, S8("-fno-machine-fallback"));
         }
-        if (!query)
+        if (!query && !host)
         {
             string8_list_push(arena, &command, S8("-nostdinc"));
             String8 includes[] = {
@@ -145,7 +147,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
                 string8_list_push(arena, &command, includes[i]);
             }
         }
-        if (link)
+        if (link && !host)
         {
             // musl's install provides empty libm/libpthread/libdl/libcrypt/librt
             // aliases; all their symbols live in libc.a. Startup is explicit.
@@ -160,7 +162,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
         {
             String8 arg = arguments.pointer[i];
             string8_list_push(arena, &original, arg);
-            bool musl_alias = link && (string_equal(arg, S8("-lm")) || string_equal(arg, S8("-lpthread")) ||
+            bool musl_alias = link && !host && (string_equal(arg, S8("-lm")) || string_equal(arg, S8("-lpthread")) ||
                                       string_equal(arg, S8("-ldl")) || string_equal(arg, S8("-lcrypt")) || string_equal(arg, S8("-lrt")));
             if (!musl_alias)
             {
@@ -191,7 +193,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
         }
         valid = clang_suite_write(arena, path_join(arena, action, S8("argv.txt")),
                                   string_join_arena(arena, string8_list_to_slice(arena, raw), false)) && valid;
-        if (link && string_equal(output, S8("busybox_unstripped")))
+        if (link && !host && string_equal(output, S8("busybox_unstripped")))
         {
             valid = clang_suite_write(arena, path_join(arena, evidence, S8("final-link.argv")),
                                       string_join_arena(arena, string8_list_to_slice(arena, raw), false)) && valid;
@@ -231,7 +233,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
         }
         valid = userspace_save_command(arena, action, ran) && valid;
         String8 source_hash = {0};
-        if (target_c)
+        if (source.length)
         {
             ByteSlice bytes = file_read(arena, source, (FileReadOptions){0});
             valid = bytes.pointer && bytes.length && valid;
@@ -251,7 +253,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
             }
         }
         String8 record = string_format(arena, S8("role={S8}\ncompiler={S8}\nsource={S8}\nsource_sha256={S8}\noutput={S8}\nobject_sha256={S8}\nstatus={S8}\n"),
-                                       target_c ? S8("target-c") : preprocess || query ? S8("external-generator") : link ? S8("external-link") : S8("compiler-probe"),
+                                       host ? S8("external-host-generator") : target_c ? S8("target-c") : preprocess || query ? S8("external-generator") : link ? S8("external-link") : S8("compiler-probe"),
                                        buster ? S8("buster") : S8("clang"), source, source_hash, output, object_hash,
                                        ran.result == PROCESS_RESULT_SUCCESS && valid ? S8("pass") : S8("fail"));
         valid = clang_suite_write(arena, path_join(arena, action, S8("record.txt")), record) && valid;
@@ -264,10 +266,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_cc(Arena* arena, SliceString8 argume
 
 #include "userspace_actions.c"
 
-BUSTER_GLOBAL_LOCAL bool userspace_make(Arena* arena, String8 source, String8 directory, String8 cc, String8 target, String8 evidence)
+BUSTER_GLOBAL_LOCAL bool userspace_make(Arena* arena, String8 source, String8 directory, String8 cc, String8 host_cc, String8 target, String8 evidence)
 {
     String8 args[] = {S8("make"), S8("-C"), source, string_format(arena, S8("O={S8}"), directory),
-                     string_format(arena, S8("CC={S8}"), cc), string_format(arena, S8("KCONFIG_ALLCONFIG={S8}"), path_join(arena, directory, S8("seed.config"))), S8("HOSTCC=clang"), S8("SKIP_STRIP=y"), S8("V=1"), S8("-j2"), S8("-k"), target};
+                     string_format(arena, S8("CC={S8}"), cc), string_format(arena, S8("KCONFIG_ALLCONFIG={S8}"), path_join(arena, directory, S8("seed.config"))),
+                     string_format(arena, S8("HOSTCC={S8}"), host_cc), S8("SKIP_STRIP=y"), S8("V=1"), S8("-j2"), S8("-k"), target};
     ClangSuiteCommand ran = userspace_command(arena, S8("."), (SliceString8)BUSTER_ARRAY_TO_SLICE(args), USERSPACE_COMMAND_SECONDS);
     bool valid = userspace_save_command(arena, evidence, ran) && ran.result == PROCESS_RESULT_SUCCESS;
     os_file_write(os_get_standard_stream(STANDARD_STREAM_OUTPUT), BUSTER_SLICE_TO_BYTE_SLICE(ran.output));
@@ -436,7 +439,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
             if (valid)
             {
                 valid = userspace_checkout(arena, source, S8(USERSPACE_BUSYBOX_COMMIT), path_join(arena, directory, S8("busybox.identity"))) &&
-                        userspace_checkout(arena, musl, S8(MUSL_COMPATIBILITY_COMMIT), path_join(arena, directory, S8("musl.identity")));
+                        userspace_checkout(arena, musl, S8(MUSL_COMPATIBILITY_COMMIT), path_join(arena, directory, S8("musl.identity"))) &&
+                        userspace_checkout(arena, libc_test, S8(LIBC_TEST_COMMIT), path_join(arena, directory, S8("libc-test.identity")));
             }
             // Reuse the existing gate directly in this process. If it fails,
             // the complete independent reference can still expose BusyBox
@@ -472,6 +476,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
                 make_directory_recursive(arena, actions);
                 valid = clang_suite_write(arena, path_join(arena, build, S8(".config")), side ? reference_config : config) &&
                         clang_suite_write(arena, path_join(arena, build, S8("seed.config")), config);
+                String8 host_compiler = string_format(arena, S8("{S8} test_userspace --cc host {S8} {S8} {S8} {S8} --"),
+                                                     driver, ide, musl, musl_output, actions);
                 String8 compiler = string_format(arena, S8("{S8} test_userspace --cc {S8} {S8} {S8} {S8} {S8} --"),
                                                 driver, name, ide, musl, musl_output, actions);
                 // Upstream expands CC through its shell. Reject unsafe paths
@@ -490,7 +496,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
                 {
                     String8 configure = path_join(arena, build, S8("configure"));
                     make_directory_recursive(arena, configure);
-                    valid = userspace_make(arena, source, build, compiler, side ? S8("silentoldconfig") : S8("allnoconfig"), configure);
+                    valid = valid && userspace_make(arena, source, build, compiler, host_compiler, side ? S8("silentoldconfig") : S8("allnoconfig"), configure);
                 }
                 String8 actual_config = clang_suite_read(arena, path_join(arena, build, S8(".config")));
                 if (!side)
@@ -538,7 +544,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
             if (claimed)
             {
                 bool unchanged = userspace_checkout(arena, source, S8(USERSPACE_BUSYBOX_COMMIT), (String8){0}) &&
-                                 userspace_checkout(arena, musl, S8(MUSL_COMPATIBILITY_COMMIT), (String8){0});
+                                 userspace_checkout(arena, musl, S8(MUSL_COMPATIBILITY_COMMIT), (String8){0}) &&
+                                 userspace_checkout(arena, libc_test, S8(LIBC_TEST_COMMIT), (String8){0});
                 valid = unchanged && musl_passed && joint && valid;
                 String8 text = string_format(arena, S8("BUSTER_USERSPACE_RECEIPT_V1\nbusybox_commit={S8}\n"
                                                       "musl_full_gate={u32}\nreference_build={u32}\nbuster_build={u32}\njoint_workload={u32}\ninputs_pristine={u32}\n"
