@@ -907,6 +907,10 @@ struct MachineDebugValue
     IrLocalId local;
     u32 first_instruction;
     u32 instruction_count;
+    // Optional whole-block tail of a layout-adjacent run. When nonzero, the
+    // represented span ends at the end of this IR range.
+    u32 tail_first_instruction;
+    u32 tail_instruction_count;
     u8 kind;
     u8 piece_count;
     u8 piece_sizes[2];
@@ -916,7 +920,7 @@ struct MachineDebugValue
     u8 reserved[3];
 };
 
-BUSTER_CT_CHECK(sizeof(MachineDebugValue) == 40);
+BUSTER_CT_CHECK(sizeof(MachineDebugValue) == 48);
 BUSTER_CT_CHECK(sizeof(MachineLineMark) == 8);
 
 typedef struct MachineSwitchCase MachineSwitchCase;
