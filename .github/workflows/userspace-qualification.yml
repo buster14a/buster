@@ -1,0 +1,84 @@
+name: Linux userspace qualification
+on:
+  push:
+    branches:
+      - codex/3179-musl-busybox-qualification
+    paths:
+      - '.github/workflows/userspace-qualification.yml'
+      - 'tools/userspace_qualification.c'
+      - 'tests/userspace/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: userspace-qualification-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  correctness:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: ubuntu-26.04
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Record checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - name: Fetch pristine existing musl and libc-test pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/userspace-inputs" "$RUNNER_TEMP/userspace-evidence"
+          git clone https://git.musl-libc.org/git/musl "$RUNNER_TEMP/userspace-inputs/musl"
+          git -C "$RUNNER_TEMP/userspace-inputs/musl" checkout --detach 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          git clone https://repo.or.cz/libc-test.git "$RUNNER_TEMP/userspace-inputs/libc-test"
+          git -C "$RUNNER_TEMP/userspace-inputs/libc-test" checkout --detach 68edb8bd73dab8147ee54c8bec638f4d2b3cff37
+          git clone https://github.com/mirror/busybox.git "$RUNNER_TEMP/userspace-inputs/busybox"
+          git -C "$RUNNER_TEMP/userspace-inputs/busybox" checkout --detach 1a64f6a20aaf6ea4dbba68bbfa8cc1ab7e5c57c4
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/userspace-evidence/buster.identity"
+          clang --version > "$RUNNER_TEMP/userspace-evidence/clang.txt"
+          ld --version > "$RUNNER_TEMP/userspace-evidence/ld.txt"
+          ar --version > "$RUNNER_TEMP/userspace-evidence/ar.txt"
+      - name: Bootstrap native build driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/userspace-build"
+          "$RUNNER_TEMP/userspace-build" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT
+          "$RUNNER_TEMP/userspace-build" build --config Release -t ide
+          sha256sum "$RUNNER_TEMP/userspace-build" build/Release/ide > "$RUNNER_TEMP/userspace-evidence/compiler.sha256"
+      - name: Requalify existing musl and libc-test
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/userspace-build" test_musl --config Release "$RUNNER_TEMP/userspace-inputs/musl" "$RUNNER_TEMP/userspace-inputs/libc-test" 2>&1 | tee "$RUNNER_TEMP/userspace-evidence/musl.log"
+      - name: Retain machine records
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/userspace-evidence
+      - name: Retain diagnostic evidence even on failure
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: userspace-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/userspace-evidence/
+            build/musl-*/
+            build/CMakeCache.txt
+            build/compile_commands.json
+          retention-days: 7
+          if-no-files-found: warn
