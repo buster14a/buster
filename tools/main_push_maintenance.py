@@ -440,7 +440,20 @@ def main(argv=None) -> int:
         return status
     except (MaintenanceError, preflight.PreflightError, retirement.AdmissionError,
             OSError, TypeError, ValueError, json.JSONDecodeError) as error:
-        print("main-push maintenance failure: " + str(error), file=sys.stderr)
+        report = {
+            "schema": SCHEMA, "status": "failed", "event_main": arguments.event_main,
+            "current_main": None, "attempts": [], "action_attempted": None,
+            "failing_phase": "initialization-or-reporting",
+            "run_id": os.environ.get("GITHUB_RUN_ID"),
+            "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+            "ordering": {"workflow": arguments.workflow, "run_number": arguments.run_number},
+            "error": {"type": type(error).__name__, "message": "maintenance initialization/reporting failed"},
+        }
+        try:
+            _record(arguments.report_dir, arguments.summary, report, arguments.command)
+        except OSError:
+            print("main-push maintenance failure: could not retain failure report", file=sys.stderr)
+        print("main-push maintenance failure: " + type(error).__name__, file=sys.stderr)
         return 2
 
 

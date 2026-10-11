@@ -119,8 +119,9 @@ BUSTER_GLOBAL_LOCAL char *mp_fixture(MpState *s, const char *path, const char *f
             for (unsigned i = start; i < end; ++i)
             {
                 if (i > start) fputc(',', f);
-                mp_emit_run(f, 100 + i, s->successor ? 11 : 1 + i, 2, s->successor ? b : a,
-                    filter && mp_active(filter) ? filter : "completed",
+                mp_emit_run(f, s->scenario == 14 ? 100 : 100 + i, s->successor ? (s->scenario == 10 ? 10 : 11) : 1 + i, 2,
+                    s->successor && s->scenario != 9 ? b : a,
+                    s->scenario == 11 ? "unknown" : filter && mp_active(filter) ? filter : "completed",
                     s->scenario == 7 ? "workflow_dispatch" : "push", s->scenario == 8 ? "other" : "main");
             }
             fputs("]}", f);
@@ -394,13 +395,36 @@ BUSTER_GLOBAL_LOCAL int mp_self_test(void)
             free(s.runs);
         }
     }
-    for (int scenario = 0; scenario <= 8; ++scenario)
+    for (int scenario = 0; scenario <= 11; ++scenario)
     {
         MpState s = {.workflow = "test.yml", .target = "target", .head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             .number = 10, .successor = 1, .fixture = 1, .history = 1201, .scenario = scenario};
         s.runs = calloc(MP_ROWS, sizeof(*s.runs)); valid &= s.runs != NULL;
-        if (s.runs) { valid &= mp_discover(&s) && s.count == (scenario >= 7 ? 0u : 1u); free(s.runs); }
+        if (s.runs)
+        {
+            int ok = mp_discover(&s);
+            valid &= scenario == 11 ? !ok : ok && s.count == (scenario >= 7 ? 0u : 1u);
+            free(s.runs);
+        }
     }
+    const char *bad_runs[] = {
+        "{}", "{\"id\":1,\"run_number\":2,\"run_attempt\":0}",
+        "{\"id\":\"1\",\"run_number\":2,\"run_attempt\":1}",
+        "{\"id\":1,\"id\":2}", "[]"
+    };
+    for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(bad_runs); ++i)
+    {
+        CmJson j = cm_json_parse(bad_runs[i], strlen(bad_runs[i])); MpRun run = {0};
+        valid &= !mp_run(&j, 1, &run); cm_json_free(&j);
+    }
+    MpState duplicate = {.workflow = "test.yml", .number = 10, .target = "target",
+        .fixture = 1, .active = 2, .scenario = 14};
+    duplicate.runs = calloc(MP_ROWS, sizeof(*duplicate.runs)); valid &= duplicate.runs != NULL;
+    if (duplicate.runs) { valid &= !mp_discover(&duplicate) && duplicate.error; free(duplicate.runs); }
+    MpState exhausted = {.workflow = "test.yml", .number = 10, .target = "target",
+        .fixture = 1, .requests = MP_REQUESTS};
+    exhausted.runs = calloc(MP_ROWS, sizeof(*exhausted.runs)); valid &= exhausted.runs != NULL;
+    if (exhausted.runs) { valid &= !mp_discover(&exhausted) && exhausted.error; free(exhausted.runs); }
     MpState incomplete = {.workflow = "test.yml", .number = 10, .target = "target", .fixture = 1, .active = 1001};
     incomplete.runs = calloc(MP_ROWS, sizeof(*incomplete.runs)); valid &= incomplete.runs != NULL;
     if (incomplete.runs) { valid &= !mp_discover(&incomplete) && incomplete.error; free(incomplete.runs); }

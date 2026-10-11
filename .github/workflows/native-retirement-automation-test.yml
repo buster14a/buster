@@ -13,6 +13,9 @@ on:
       - 'tools/native_retirement_integration.py'
       - 'tools/native_retirement_merge_gate.py'
       - 'tools/merge_conflict_preflight.py'
+      - 'tools/main_push_maintenance*.py'
+      - 'tools/main_push_inventory.c'
+      - 'tools/ci_metrics_json.h'
   workflow_dispatch:
 
 permissions:

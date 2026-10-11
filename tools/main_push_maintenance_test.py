@@ -322,6 +322,11 @@ class WorkflowTests(unittest.TestCase):
         ).hexdigest()
         self.assertIn("MAIN_PUSH_MAINTENANCE_SHA256: " + digest, api)
         self.assertIn("sha256sum --check --strict", api)
+        for path, variable in (("tools/main_push_inventory.c", "MAIN_PUSH_INVENTORY_SHA256"),
+                               ("tools/ci_metrics_json.h", "MAIN_PUSH_JSON_SHA256")):
+            native_digest = hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
+            self.assertIn(variable + ": " + native_digest, api)
+            self.assertIn(path + " | sha256sum --check --strict", api)
 
 
 if __name__ == "__main__":
