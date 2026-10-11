@@ -1297,4 +1297,39 @@ the same way and diagnostic only:
 - The default path is within +0.006%.
 - Zen 5 validation stays incomplete (#2761).
 
+For the typer's remaining out-of-body phases, these budgets were declared
+before any measured run. These are the queries outside a typed body or
+file-scope initializer that still run the machine under `-fc-ast-pilot`: file
+`_Static_assert`, deferred assertions, type alignments, variably modified
+checks, signatures, the binder and the like. The input and flags are stage
+2's. Four Callgrind arms (`--cache-sim=no --branch-sim=no`) are counted on
+tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `a6705764`, which the candidate branches from. The budgets:
+- **Census first.** A throwaway build of the base, not committed, routes each
+  machine run from a query through one noinline wrapper per analysis phase,
+  and Callgrind charges each phase's inclusive machine Ir under the pilot. A
+  phase is a candidate only if its machine Ir is at least 1 M and the typer can
+  answer its queries: it must run in the normal constant-evaluation mode, on
+  an idle machine. If the candidates total less than 1 M, no candidate is
+  built, and the audit records the negative result.
+- **Correctness.** No verify mismatch over the corpus, or in a one-off verify
+  run over the self-host input. Identical diagnostics and type-table sizes
+  with and without the tree. Byte-identical `-c` objects (`-g0` and `-g`)
+  across the four arms.
+- **Default path (D against A).** The new scopes exist only with the tree, so
+  the difference stays within ±0.05% Ir on `-fsyntax-only` and on `-c`
+  (`-g0`).
+- **The gain that ships it (C against B).** At least 1 M fewer instructions in
+  the whole compile, with the new scopes' passes and lookups charged, and
+  fewer machine runs from queries outside a typed region. A smaller gain, or
+  a loss, is recorded as a negative result, and the code does not ship.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761), and the hook stays
+  opt-in.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
