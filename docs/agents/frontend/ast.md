@@ -487,18 +487,6 @@ unchanged.
   The census in audit
   [`2026-10-11T093336Z`](../../performance-audits/2026-10-11T093336Z.md)
   charges each declined shape its machine Ir on the unity self-host.
-- **Member-tail widths.** For an operand that ends in `. name` or `-> name`
-  but is not a member node (`a + s.f`, `c ? x : s.f`), the machine re-types
-  the tokens before the final `.` with `c_parse_direct_expression_type` to
-  read a bit-field width. The pass answers width 0 only where that probe
-  provably fails without a new row (`c_ast_types_probe_fails`):
-  - its base, before the first postfix step, types to nothing before any row
-    is made;
-  - or the base is one identifier whose postfix steps span an accepted
-    member or index node, which reads no qualified aggregate or array.
-
-  A parent over any other such operand (a cast, a comma, a qualified chain)
-  declines.
 - **The replay.** With constraint checks the machine types a cast's operand.
   When that operand is one string-literal token, alone or in parentheses
   (`(char8*)("text")`, as `S8()` spells it), its typing appends the literal's
@@ -534,6 +522,18 @@ unchanged.
   for two pointers to one unqualified element row. A cast whose conversion
   rule is clean is safe, and so is a conditional whose condition is a safe
   scalar.
+- **Member-tail widths.** For an operand that ends in `. name` or `-> name`
+  but is not a member node (`a + s.f`, `c ? x : s.f`), the machine re-types
+  the tokens before the final `.` with `c_parse_direct_expression_type` to
+  read a bit-field width. The pass answers width 0 only where that probe
+  provably fails without a new row (`c_ast_types_probe_fails`):
+  - its base, before the first postfix step, types to nothing before any row
+    is made;
+  - or the base is one identifier whose postfix steps span an accepted
+    member or index node, which reads no qualified aggregate or array.
+
+  A parent over any other such operand (a cast, a comma, a qualified chain)
+  declines.
 - **Failing operands.** The machine types a few nodes to nothing, with no row
   and no constraint: `__func__`, `__FUNCTION__` and `__PRETTY_FUNCTION__`,
   which name no entity, and an unbound `__builtin_expect(...)` call, which no
