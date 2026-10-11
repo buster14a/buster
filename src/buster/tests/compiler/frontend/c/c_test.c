@@ -5395,13 +5395,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_empty_scalar_initializer_runtime(UnitT
     return result;
 }
 
-// Nested local initializers keep a cursor per by-value container on the
-// current path. The cursors are sized from the initialized type's nesting
-// depth rather than the unit's type count (#2527), so cover the shapes that
-// walk deepest: brace elision through a six-level chain, a six-step
-// designator, designators that cross anonymous struct and union members,
-// GNU ranges in a nested array, and compound-literal members as S8 spells
-// them, then check every value at run time.
 // #3579: a later conditional assertion must not change an earlier designator.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_designator_static_assert(UnitTestArguments* arguments)
 {
@@ -5425,22 +5418,62 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_designator_static_assert(UnitTe
         {
             c_test_append_source(bytes, 4096, &length, S8(" : 99)"));
         }
-        c_test_append_source(bytes, 4096, &length, S8(" == 23, \"conditional\");\n"));
+        c_test_append_source(bytes, 4096, &length, S8(" == 23, \"conditional\");\n"
+                                                   "int main(void){return sizeof a / sizeof a[0] != 3 || "
+                                                   "a[2].x.x != 17 || a[2].x.y != 19 || a[2].y || a[0].x.x || a[1].x.y;}\n"));
         String8 source = buster_test_temporary_path(temporary.arena, S8("nested-designator-assert"), S8(".c"));
         String8 source_text = {.pointer = bytes, .length = length};
         if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
         {
-            for (u32 form = 0; form < 2; form += 1)
+            for (u32 form = 0; form < 4; form += 1)
             {
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fsyntax-only"),
-                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), source};
+                    form & 1 ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), source, S8("-fc-ast-pilot")};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
-                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    (SliceString8){.pointer = command, .length = form < 2 ? BUSTER_ARRAY_LENGTH(command) - 1 : BUSTER_ARRAY_LENGTH(command)});
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("nested designator depth={u32} form={u32}: {S8}"),
                         depths[depth_index], form, compiled.diagnostic));
             }
+#if BUSTER_LINUX && !BUSTER_ANDROID
+            if (depths[depth_index] == 16)
+            {
+                String8 references[] = {S8("gcc"), S8("clang")};
+                for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+                {
+                    String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("nested-designator-oracle"), S8(".exe"));
+                    if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+                    {
+                        String8 command[] = {compiler, S8("-std=gnu17"), S8("-nostdinc"), S8("-O0"), S8("-o"), output, source};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
+                            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult compilation = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            bool built = !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS &&
+                                !compilation.process_tree_cleanup_failed && !compilation.process_group_reservation_retained &&
+                                !compilation.process_group_ownership_lost;
+                            BUSTER_TEST_RAW(arguments, built, compiler);
+                            if (built)
+                            {
+                                String8 run[] = {output};
+                                child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run),
+                                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
+                                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                                {
+                                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS &&
+                                        !execution.process_tree_cleanup_failed && !execution.process_group_reservation_retained &&
+                                        !execution.process_group_ownership_lost, compiler);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+#endif
         }
         c_test_scratch_end(temporary);
     }
@@ -5462,6 +5495,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_designator_static_assert(UnitTe
     return result;
 }
 
+// Nested local initializers keep a cursor per by-value container on the
+// current path. The cursors are sized from the initialized type's nesting
+// depth rather than the unit's type count (#2527), so cover the shapes that
+// walk deepest: brace elision through a six-level chain, a six-step
+// designator, designators that cross anonymous struct and union members,
+// GNU ranges in a nested array, and compound-literal members as S8 spells
+// them, then check every value at run time.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_initializer_cursor_depth_runtime(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
