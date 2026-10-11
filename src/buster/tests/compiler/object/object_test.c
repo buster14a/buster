@@ -4788,6 +4788,217 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_arm64_tls_external(UnitTestArgume
     return result;
 }
 
+// Reports the RVA and the in-file raw span of a PE image's nth section; false
+// past the last section or for a truncated image.
+BUSTER_GLOBAL_LOCAL bool object_test_pe_section(ByteSlice image, u32 index, u32* virtual_address, u64* raw_offset, u64* span)
+{
+    u32 pe_offset = 0;
+    u16 section_count = 0;
+    u16 optional_size = 0;
+    bool result = image.length >= 0x40;
+    if (result)
+    {
+        memcpy(&pe_offset, image.pointer + 0x3c, 4);
+        result = pe_offset <= image.length && image.length - pe_offset >= 24;
+    }
+    if (result)
+    {
+        memcpy(&section_count, image.pointer + pe_offset + 6, 2);
+        memcpy(&optional_size, image.pointer + pe_offset + 20, 2);
+    }
+    u64 header = (u64)pe_offset + 24 + optional_size + (u64)index * 40;
+    result = result && index < section_count && header + 40 <= image.length;
+    if (result)
+    {
+        u32 virtual_size = 0;
+        u32 address = 0;
+        u32 raw_size = 0;
+        u32 raw = 0;
+        memcpy(&virtual_size, image.pointer + header + 8, 4);
+        memcpy(&address, image.pointer + header + 12, 4);
+        memcpy(&raw_size, image.pointer + header + 16, 4);
+        memcpy(&raw, image.pointer + header + 20, 4);
+        u64 bytes = BUSTER_MIN(raw_size, virtual_size);
+        bool in_image = raw <= image.length && bytes <= image.length - raw;
+        if (virtual_address)
+        {
+            *virtual_address = address;
+        }
+        if (raw_offset)
+        {
+            *raw_offset = raw;
+        }
+        if (span)
+        {
+            *span = in_image ? bytes : 0;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ObjectFile object_test_coff_x64_tls_object(Arena* arena, ByteSlice text, ByteSlice data, ByteSlice tls,
+                                                              ObjectSymbol* symbols, u32 symbol_count, ObjectRelocation* relocations,
+                                                              u32 relocation_count)
+{
+    ObjectSection* sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
+    for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+    {
+        sections[kind] = (ObjectSection){
+            .name = object_section_name_for_kind((ObjectSectionKind)kind),
+            .kind = (ObjectSectionKind)kind,
+            .alignment = object_section_default_alignment((ObjectSectionKind)kind),
+        };
+    }
+    sections[OBJECT_SECTION_TEXT].data = text;
+    sections[OBJECT_SECTION_DATA].data = data;
+    sections[OBJECT_SECTION_DATA].virtual_size = data.length;
+    sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data = tls;
+    sections[OBJECT_SECTION_THREAD_LOCAL_DATA].virtual_size = tls.length;
+    return (ObjectFile){
+        .sections = sections,
+        .symbols = symbols,
+        .relocations = relocations,
+        .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        .section_count = OBJECT_SECTION_COUNT,
+        .symbol_count = symbol_count,
+        .relocation_count = relocation_count,
+    };
+}
+
+// #1323 W1/W3 oracle: lld-link must bind Buster's x86-64 index load to the
+// _tls_index that the platform CRT defines. A stub object stands in for the
+// CRT and holds a marker; the decoded load must reach it, not the template.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_x64_tls_index_external(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_ANDROID || BUSTER_IOS
+    arguments->show(arguments, S8("X64_TLS_INDEX_EXTERNAL status=unavailable reason=mobile-host\n"));
+#else
+    String8 link_names[] = {S8("lld-link"), S8("lld-link-21"), S8("lld-link-20"), S8("lld-link-19"), S8("lld-link-18")};
+    String8 linker = {0};
+    for (u32 index = 0; !linker.length && index < BUSTER_ARRAY_LENGTH(link_names); index += 1)
+    {
+        linker = executable_resolve_in_path(arguments->arena, link_names[index]);
+    }
+    if (!linker.length)
+    {
+        arguments->show(arguments, S8("X64_TLS_INDEX_EXTERNAL status=unavailable reason=missing-tools linker={S8}\n"), linker);
+    }
+    else
+    {
+        // mov eax, [rip + _tls_index]; ret
+        u8 code[] = {0x8b, 0x05, 0x00, 0x00, 0x00, 0x00, 0xc3, 0xcc};
+        u32 tls_template[] = {UINT32_C(0x41414141), 5};
+        u32 marker = UINT32_C(0x7a7a7a7a);
+        ObjectSymbol program_symbols[] = {
+            {.name = S8("main"), .size = sizeof(code), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("tls_a"), .size = 4, .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
+            {.name = S8("tls_b"), .value = 4, .size = 4, .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        };
+        ObjectRelocation relocation = {.offset = 2, .addend = -4, .section = OBJECT_SECTION_TEXT, .symbol = 2,
+                                       .kind = OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32};
+        ObjectSymbol stub_symbols[] = {
+            {.name = S8("_tls_index"), .size = sizeof(marker), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        };
+        ObjectFile program = object_test_coff_x64_tls_object(arguments->arena, (ByteSlice){.pointer = code, .length = sizeof(code)}, (ByteSlice){0},
+                                                             (ByteSlice){.pointer = (u8*)tls_template, .length = sizeof(tls_template)},
+                                                             program_symbols, BUSTER_ARRAY_LENGTH(program_symbols), &relocation, 1);
+        ObjectFile stub = object_test_coff_x64_tls_object(arguments->arena, (ByteSlice){0}, (ByteSlice){.pointer = (u8*)&marker, .length = sizeof(marker)},
+                                                          (ByteSlice){0}, stub_symbols, BUSTER_ARRAY_LENGTH(stub_symbols), 0, 0);
+        ObjectArtifact program_artifact = object_write(arguments->arena, &program, OBJECT_FORMAT_COFF);
+        ObjectArtifact stub_artifact = object_write(arguments->arena, &stub, OBJECT_FORMAT_COFF);
+        if (BUSTER_REQUIRE(arguments, program_artifact.error == OBJECT_ERROR_NONE && stub_artifact.error == OBJECT_ERROR_NONE))
+        {
+            // LLD drops an empty .pdata output section but still sorts its
+            // chunk; rename the empty input as the ARM64 oracle does.
+            ByteSlice artifacts[] = {program_artifact.bytes, stub_artifact.bytes};
+            for (u32 artifact_index = 0; artifact_index < BUSTER_ARRAY_LENGTH(artifacts); artifact_index += 1)
+            {
+                ByteSlice bytes = artifacts[artifact_index];
+                u16 section_count = 0;
+                memcpy(&section_count, bytes.pointer + 2, 2);
+                for (u32 section = 0; section < section_count; section += 1)
+                {
+                    u64 header = 20 + (u64)section * 40;
+                    u32 raw_size = 0;
+                    if (header <= bytes.length && 40 <= bytes.length - header)
+                    {
+                        memcpy(&raw_size, bytes.pointer + header + 16, 4);
+                        if (raw_size == 0 && memcmp(bytes.pointer + header, ".pdata", 6) == 0)
+                        {
+                            object_test_coff_write_name(bytes.pointer, header, S8(".empty"));
+                        }
+                    }
+                }
+            }
+            String8 program_path = buster_test_temporary_path(arguments->arena, S8("x64-tls-index-program"), S8(".obj"));
+            String8 stub_path = buster_test_temporary_path(arguments->arena, S8("x64-tls-index-stub"), S8(".obj"));
+            String8 output = buster_test_temporary_path(arguments->arena, S8("x64-tls-index-external"), S8(".dll"));
+            if (BUSTER_REQUIRE(arguments, file_write(program_path, program_artifact.bytes) && file_write(stub_path, stub_artifact.bytes)))
+            {
+                ProcessSpawnOptions options = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                               .use_process_environment = true, .new_process_group = true};
+                String8 link_args[] = {linker, S8("/dll"), S8("/noentry"), S8("/machine:x64"), S8("/nodefaultlib"),
+                                      string_format(arguments->arena, S8("/out:{S8}"), output), program_path, stub_path};
+                ProcessSpawnResult link_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link_args), (SliceString8){0}, (SliceString8){0}, options);
+                if (BUSTER_REQUIRE(arguments, link_spawn.handle != 0))
+                {
+                    ProcessWaitResult link_wait = os_process_wait_deadline(arguments->arena, link_spawn, UINT64_C(30000000));
+                    if (link_wait.result != PROCESS_RESULT_SUCCESS)
+                    {
+                        ByteSlice error = link_wait.streams[STANDARD_STREAM_ERROR];
+                        arguments->show(arguments, S8("X64_TLS_INDEX_EXTERNAL linker stderr={S8}\n"),
+                                        (String8){.pointer = (char8*)error.pointer, .length = BUSTER_MIN(error.length, 2000)});
+                    }
+                    BUSTER_TEST(arguments, link_wait.result == PROCESS_RESULT_SUCCESS);
+                    ByteSlice image = link_wait.result == PROCESS_RESULT_SUCCESS ? file_read(arguments->arena, output, (FileReadOptions){0}) : (ByteSlice){0};
+                    // Scan every section for the one index load, then read
+                    // the word at its target through the section table.
+                    u32 loads = 0;
+                    u32 loaded = 0;
+                    u64 load_rva = 0;
+                    for (u32 section = 0; object_test_pe_section(image, section, 0, 0, 0); section += 1)
+                    {
+                        u32 virtual_address = 0;
+                        u64 raw_offset = 0;
+                        u64 span = 0;
+                        object_test_pe_section(image, section, &virtual_address, &raw_offset, &span);
+                        for (u64 offset = 0; offset + 7 <= span; offset += 1)
+                        {
+                            u8 const* bytes = image.pointer + raw_offset + offset;
+                            if (bytes[0] == 0x8b && bytes[1] == 0x05 && bytes[6] == 0xc3)
+                            {
+                                s32 displacement = 0;
+                                memcpy(&displacement, bytes + 2, 4);
+                                load_rva = virtual_address + offset + 6 + (u64)(s64)displacement;
+                                loads += 1;
+                            }
+                        }
+                    }
+                    for (u32 section = 0; loads == 1 && object_test_pe_section(image, section, 0, 0, 0); section += 1)
+                    {
+                        u32 virtual_address = 0;
+                        u64 raw_offset = 0;
+                        u64 span = 0;
+                        object_test_pe_section(image, section, &virtual_address, &raw_offset, &span);
+                        if (load_rva >= virtual_address && load_rva - virtual_address + 4 <= span)
+                        {
+                            memcpy(&loaded, image.pointer + raw_offset + (load_rva - virtual_address), 4);
+                        }
+                    }
+                    BUSTER_TEST(arguments, loads == 1 && loaded == marker);
+                    arguments->show(arguments, S8("X64_TLS_INDEX_EXTERNAL loads={u32} loaded={u32:x} linker_result={u32}\n"), loads, loaded,
+                                    (u32)link_wait.result);
+                }
+            }
+            BUSTER_TEST(arguments, os_file_delete(program_path) && os_file_delete(stub_path));
+            os_file_delete(output);
+        }
+    }
+#endif
+    return result;
+}
+
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = object_test_assembly_index_order(arguments);
@@ -4861,6 +5072,9 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     UnitTestResult external_tls = object_test_arm64_tls_external(arguments);
     result.test_count += external_tls.test_count;
     result.succeeded_test_count += external_tls.succeeded_test_count;
+    UnitTestResult external_tls_index = object_test_x64_tls_index_external(arguments);
+    result.test_count += external_tls_index.test_count;
+    result.succeeded_test_count += external_tls_index.succeeded_test_count;
 
     typedef struct CodegenRelocationKindExpectation CodegenRelocationKindExpectation;
     struct CodegenRelocationKindExpectation
