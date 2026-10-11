@@ -1774,11 +1774,35 @@ The supported subset is:
 - x86-64 Linux shared objects: `-soname NAME`, `--soname NAME`, `-h NAME`,
   `-soname=NAME`, and `--soname=NAME` set `DT_SONAME`.
 
+- x86-64 Linux executables, PIEs and shared objects: one
+  `--version-script=PATH` or `--version-script PATH` applies a GNU version
+  script. The file must be regular, at most 1 MiB, and contain one anonymous
+  or named node: `[NAME] { [global: SYMBOL; ...] [local: SYMBOL; ...] };`.
+  Clause order is flexible; each clause may occur once. Exact unquoted names
+  use ASCII letters, digits, underscores, dots and dollar signs. The local
+  clause also accepts one `*;` catch-all; exact global names override it.
+  Whitespace, `#` line comments and `/* ... */` comments are accepted.
+  At most 8,192 distinct exact names are accepted. Conflicting exact
+  global/local rules, multiple scripts/nodes, inheritance, quoted names,
+  language blocks, other patterns and malformed/trailing input fail before
+  publication. Missing exact names are permitted, as with GNU ld.
+  Local definitions become local in `.symtab`, leave `.dynsym`, and bind
+  inside shared objects. Input-hidden/local symbols cannot be promoted and
+  undefined imports are not localized. A named node assigns default version
+  index 2 to its exported exact globals, emits base/node `.gnu.version_d`
+  records and `DT_VERDEF/DT_VERDEFNUM`, and shifts needed import versions
+  above index 2. Unmatched exports remain unversioned. The base record names
+  the SONAME or output basename. Executable export selection still follows
+  `--export-dynamic` and library references; the script limits that selection.
+  Anonymous nodes change binding/export visibility without defining a version.
+  This covers pristine SDL3's single-node map and executable CMake probe;
+  broader GNU grammar and other targets remain unsupported.
+
 Other linker values and unsupported targets/output modes fail rather than
 silently losing link semantics. This includes PE, Mach-O, UEFI, compile-only,
 preprocessing, assembly-text and bitcode output. `-rdynamic` uses the same
 export validation. Unknown options, entry overrides, wrapping, archive-mode
-switches, runtime paths, version scripts, and other `-z` modes are refused.
+switches, runtime paths, and other `-z` modes are refused.
 
 `-Wp,` and `-Wa,` are never warning options. Only the exact
 `-Wp,-MD,PATH` and `-Wp,-MMD,PATH` dependency spellings described below are

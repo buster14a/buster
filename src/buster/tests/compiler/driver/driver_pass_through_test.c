@@ -10,7 +10,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_arguments(U
                          S8("aarch64-pc-windows-msvc"), S8("x86_64-apple-macos"), S8("aarch64-apple-macos"),
                          S8("x86_64-linux-android"), S8("aarch64-linux-android"), S8("x86_64-unknown-uefi")};
     String8 refused[] = {S8("--wrap=f"), S8("--defsym=x=1"), S8("-e"), S8("--whole-archive"), S8("--no-whole-archive"),
-                         S8("-rpath"), S8("-runpath"), S8("-Bstatic"), S8("-Bdynamic"), S8("--version-script=map"),
+                         S8("-rpath"), S8("-runpath"), S8("-Bstatic"), S8("-Bdynamic"),
                          S8("--dynamic-linker=loader"), S8("-o"), S8("--this-is-bogus"), S8("/ENTRY:main"), S8("--gc-sections")};
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
     {
@@ -28,6 +28,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_arguments(U
                 BUSTER_TEST(arguments, compiler_driver_test_string_contains(invocation.diagnostic, refused[option]));
             }
         }
+    }
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        String8 commands[][7] = {
+            {S8("--target"), targets[target], S8("-Wl,--version-script=map"), S8("-g0"), S8("tests/basic_c_multi_main.c"), S8("-O0"), S8("-g0")},
+            {S8("--target"), targets[target], S8("-Xlinker"), S8("--version-script"), S8("-Xlinker"), S8("map"), S8("tests/basic_c_multi_main.c")},
+        };
+        for (u32 spelling = 0; spelling < BUSTER_ARRAY_LENGTH(commands); spelling += 1)
+        {
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(commands[spelling]));
+            BUSTER_TEST(arguments, (invocation.error == COMPILER_DRIVER_ERROR_NONE) == (target == 0));
+        }
+    }
+    String8 script_refusals[] = {S8("-Wl,--version-script"), S8("-Wl,--version-script="),
+                                S8("-Wl,--version-script=a,--version-script=b")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(script_refusals); index += 1)
+    {
+        String8 command[] = {S8("--target=x86_64-unknown-linux"), script_refusals[index], S8("tests/basic_c_multi_main.c")};
+        BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)).error == COMPILER_DRIVER_ERROR_ARGUMENT);
     }
     String8 preprocessing[] = {S8("-Wp,-DFROM_WP"), S8("-Wp,-UFROM_WP"), S8("-Wp,-Iinclude"), S8("-Wp,"),
                               S8("-Wa,--this-is-bogus"), S8("-Wa,"), S8("-MF"), S8("-MT"),
