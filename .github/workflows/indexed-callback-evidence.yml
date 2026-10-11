@@ -23,7 +23,7 @@ jobs:
         with:
           ref: 291ab4a4596e0612f48e5d139fd50a60d12c7929
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 0
       - uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
           mode: source
