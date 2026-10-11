@@ -130,9 +130,47 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   synthesized index slot on both architectures when every reference is an
   index load. `link_test_pe_x64_tls_index_object` checks that an image linked
   from the written object loads `AddressOfIndex`, as a direct link does
-  (GitHub #1323 W1/W3 spelling). COFF TLS data still uses `.tdata`/`.tbss`
-  rather than `.tls$`, and Mach-O objects still lack `__thread_vars`
-  descriptors; both remain tracked by GitHub #1323.
+  (GitHub #1323 W1/W3 spelling).
+- **COFF thread-local data is serialized as initialized `.tls$`.** The PE
+  loader copies one `.tls` template, which `link.exe` and `lld-link` build from
+  the `.tls$` input sections between the CRT's `.tls` and `.tls$ZZZ` bounds;
+  a `.tdata`/`.tbss` section would land outside the TLS directory.
+  `object_coff_place_tls` therefore names every TLS section
+  `OBJECT_COFF_TLS_SECTION_NAME` and materializes zero-fill TLS as zeros, as
+  MSVC and Clang do. Section and symbol indices are unchanged, so no
+  relocation is rebased; the reader maps `.tls$` back to
+  `OBJECT_SECTION_THREAD_LOCAL_DATA`, and Windows assembly output prints the
+  same section. `link_test_pe_x64_tls_index_object` checks the written
+  sections and that the TLS template linked from the object equals the direct
+  link's (GitHub #1323 W3).
+- **Mach-O thread-local variables are named by `__thread_vars` descriptors.**
+  dyld reaches a variable through a 24-byte descriptor `{thunk, key,
+  storage}` in an `S_THREAD_LOCAL_VARIABLES` (0x13) section, and ld64 accepts
+  TLV/TLVP relocations only against such a descriptor. The canonical model
+  defines the variable on its storage and the native Mach-O linker
+  synthesizes descriptors. `object_mach_o_place_thread_variables` therefore
+  moves each written thread-local symbol `v` onto a new descriptor with
+  `UNSIGNED` relocations to `__tlv_bootstrap` (+0) and a local `v$tlv$init`
+  left on the `__thread_data`/`__thread_bss` storage (+16), as Clang does;
+  indices are unchanged, so TLV/TLVP relocations keep naming `v`. The reader
+  inverts it in `object_mach_o_restore_thread_variables`: descriptor sections
+  are not copied, each descriptor's symbol moves onto its storage, and the
+  storage alias and any other label on the descriptor (Clang's `ltmp`) are
+  dropped, their references following the variable. Only the exact
+  descriptor shape is admitted. X86_64_RELOC_TLV, like SIGNED, stores the
+  displacement from the end of its field: the writer restores B = A + 4 for
+  `OBJECT_RELOCATION_X86_64_MACH_TLV_PC32`, which the reader maps to A = B - 4.
+  `compiler_driver_mach_tls_object_tests` decodes the written descriptors
+  independently, checks the canonical read-back, requires the object-linked
+  executable to equal a direct compile on AArch64 and x86-64, and links the
+  objects with `ld64.lld` against a libSystem stub that only supplies
+  `__tlv_bootstrap`, recording `status=unavailable` without it (GitHub #1323 M1).
+  These platform TLS transforms (`_tls_index` binding, `.tls$` zero-fill and
+  Mach-O descriptors) plan their exact scratch demand with
+  `object_writer_scratch_plan` before allocating, so a bounded arena refuses
+  with `OBJECT_ERROR_CAPACITY`, publishes nothing and is rewound;
+  `object_test_tls_writer_arena_limits` sweeps every limit below the first
+  accepted one.
 - **COFF section alignment is a linker placement contract.** A nonzero
   `ObjectSection.alignment` is preserved in `IMAGE_SCN_ALIGN_*`; zero resolves
   through `object_section_default_alignment` for that kind. COFF represents
@@ -710,15 +748,21 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   unsigned-immediate LDR; the writer binds index-pair relocations to that
   loader symbol. TLS section offsets use shifted ADD type 10
   (`SECREL_HIGH12A`) followed by unshifted ADD type 9 (`SECREL_LOW12A`).
+  Clang and MSVC instead fold the low half into the access with type 11
+  (`SECREL_LOW12L`), which the reader accepts against TLS sections on the
+  scaled unsigned-immediate load/store forms `PAGEOFFSET_12L` admits, as
+  `OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L`. Its inline imm12 counts
+  access-size units; the canonical addend counts bytes, and the PE linker
+  splits offset plus addend and requires the low half to be aligned to the
+  access size. The writer restores type 11, so Buster links and rewrites
+  Clang/MSVC ARM64 TLS objects.
   Native MIR producers emit both halves, preserving offset bits 12..23
   beyond 4 KiB. COFF's inline imm12 addend is an unscaled byte count even in
   the shifted ADD; the PE linker adds it before splitting the final template
   offset. Offsets beyond 24 bits, malformed ADD forms and arithmetic overflow
   fail before executable publication. Registered codegen, original raw-COFF
   and final PE byte tests cover both frontend forms, all allocators, carries,
-  initialized/zero-fill placement and output retention. This fixes #1323 W2;
-  platform TLS-index spelling/section interoperability and Mach-O descriptors
-  remain separate work. Type 15 is `BRANCH19` and is not treated as TLS. ARM64
+  initialized/zero-fill placement and output retention. This fixes #1323 W2. Type 15 is `BRANCH19` and is not treated as TLS. ARM64
   CodeView uses `SECREL` type 8 and the two-byte `SECTION` type 13, retaining
   checked inline addends. The PE linker applies all of these only after final
   layout and returns no executable bytes on a relocation failure.
