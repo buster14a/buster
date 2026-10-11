@@ -556,6 +556,15 @@ struct CPreprocessorOperation
     CPreprocessorOperationKind kind;
 };
 
+// Literal, case-sensitive filename prefix substitutions in command-line order.
+// The last matching entry wins once; replacements are not remapped.
+typedef struct CMacroPrefixMap CMacroPrefixMap;
+struct CMacroPrefixMap
+{
+    String8 old_prefix;
+    String8 new_prefix;
+};
+
 typedef enum CPreprocessDialect
 {
     C_PREPROCESS_DIALECT_GNU17,
@@ -611,6 +620,7 @@ struct CPreprocessOptions
     // arrays below remain the compatibility path for existing callers: their
     // definitions are applied first, followed by their undefinitions.
     CPreprocessorOperation* macro_operations;
+    CMacroPrefixMap* macro_prefix_maps;
     CPreprocessorDefinition* definitions;
     String8* undefinitions;
     String8* include_paths;
@@ -629,6 +639,7 @@ struct CPreprocessOptions
     Target target;
     TargetDataLayout data_layout;
     u32 macro_operation_count;
+    u32 macro_prefix_map_count;
     u32 definition_count;
     u32 undefinition_count;
     u32 include_path_count;
@@ -1469,6 +1480,11 @@ struct CAstTypeStatistics
     u64 declines;
     u64 misses;
     u64 gated;
+    // Name checks of answered nodes (c_ast_types_lookups_settled): those a
+    // settled region answered without a lookup, and those that walked the
+    // node's subtree.
+    u64 lookups_settled;
+    u64 lookups_walked;
 };
 
 // Why the body binder read a whole function body with its token walker
@@ -1946,6 +1962,8 @@ struct CParseResult
     // The live entries of the interning log (CAggregateLookup.type_interning),
     // checkpointed with type_count so a rollback forgets the rows it removes.
     u32 interned_type_count;
+    // The same for its log of shared qualified member copies.
+    u32 interned_qualified_count;
     u32 bfloat16_builtin_call_count;
     u32 bfloat16_builtin_call_capacity;
     // Phase-arena bytes semantic analysis released (logical) and the releases

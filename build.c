@@ -11410,9 +11410,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_stb_action(Arena* arena, void* data)
             goto stb_action_done;
         }
     }
+    String8 vorbis_source = path_join(arena, source_directory, S8("stb_vorbis.c"));
     String8 image_write_test_source = path_join(arena, source_directory, S8("tests/image_write_test.c"));
     String8 ds_test_source = path_join(arena, source_directory, S8("tests/test_ds.c"));
-    if (!path_exists(arena, image_write_test_source) || !path_exists(arena, ds_test_source) || !stb_git_verify(arena, source_directory))
+    if (!path_exists(arena, vorbis_source) || !path_exists(arena, image_write_test_source) || !path_exists(arena, ds_test_source) ||
+        !stb_git_verify(arena, source_directory))
     {
         string_print(S8("error: test_stb checkout is missing applicable tests or is not pristine\n"));
         goto stb_action_done;
@@ -11453,6 +11455,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_stb_action(Arena* arena, void* data)
         {
             goto stb_action_done;
         }
+    }
+
+
+    // Compile-only coverage for the pristine Vorbis implementation (#3616).
+    String8 vorbis_clang_object = path_join(arena, output_directory, S8("stb_vorbis-clang.o"));
+    if (!stb_compile_clang(arena, clang, source_directory, vorbis_source, vorbis_clang_object, (SliceString8){0}))
+    {
+        goto stb_action_done;
     }
 
     String8 ds_churn_wrapper = path_join(arena, wrappers_directory, S8("stb_ds_churn_test.c"));
@@ -11506,6 +11516,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_stb_action(Arena* arena, void* data)
             mode_ok = mode_ok && stb_compile_buster(arena, ide, source_directory, path_join(arena, wrappers_directory, wrapper_names[unit_index]), object,
                                                      metric, mode, (SliceString8){0}, &elapsed_us, mode_index == 0) &&
                       stb_metrics_report(arena, mode, wrapper_names[unit_index], metric, elapsed_us);
+        }
+
+
+        String8 vorbis_frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        for (u64 form = 0; form < BUSTER_ARRAY_LENGTH(vorbis_frontends); form += 1)
+        {
+            String8 object = path_join(arena, mode_directory, string_format(arena, S8("stb_vorbis-{u64}.o"), form));
+            String8 metric = path_join(arena, mode_metrics, string_format(arena, S8("stb_vorbis-{u64}.metrics"), form));
+            String8 extra[] = {vorbis_frontends[form]};
+            u64 elapsed_us = 0;
+            bool vorbis_ok = stb_compile_buster(arena, ide, source_directory, vorbis_source, object, metric, mode,
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(extra), &elapsed_us, false) &&
+                stb_metrics_report(arena, mode, S8("stb_vorbis.c"), metric, elapsed_us);
+            string_print(S8("STB_COMPILE unit=stb_vorbis.c allocator={S8} frontend={S8} status={S8}\n"),
+                mode, vorbis_frontends[form], vorbis_ok ? S8("pass") : S8("fail"));
+            mode_ok = mode_ok && vorbis_ok;
         }
 
         String8 probe_object = path_join(arena, mode_directory, S8("probe.o"));
