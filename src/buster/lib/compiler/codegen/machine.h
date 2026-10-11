@@ -907,6 +907,10 @@ struct MachineDebugValue
     IrLocalId local;
     u32 first_instruction;
     u32 instruction_count;
+    // Optional whole-block tail of a layout-adjacent run. When nonzero, the
+    // represented span ends at the end of this IR range.
+    u32 tail_first_instruction;
+    u32 tail_instruction_count;
     u8 kind;
     u8 piece_count;
     u8 piece_sizes[2];
@@ -916,7 +920,7 @@ struct MachineDebugValue
     u8 reserved[3];
 };
 
-BUSTER_CT_CHECK(sizeof(MachineDebugValue) == 40);
+BUSTER_CT_CHECK(sizeof(MachineDebugValue) == 48);
 BUSTER_CT_CHECK(sizeof(MachineLineMark) == 8);
 
 typedef struct MachineSwitchCase MachineSwitchCase;
@@ -1719,14 +1723,43 @@ struct MachineCallSite
     u32 thread_local_site;
 };
 
+// One prologue frame event: the encoder appends it immediately after
+// emitting the frame instruction it describes, at that instruction's actual
+// end offset, so the unwind writers never re-derive instruction lengths. The
+// module descriptor adopts the finished stream; DWARF and PE serializers keep
+// their format-specific encoding and representability checks.
+typedef enum CodegenUnwindActionKind
+{
+    CODEGEN_UNWIND_ACTION_PUSH_REGISTER,
+    CODEGEN_UNWIND_ACTION_SAVE_REGISTER,
+    CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER,
+    CODEGEN_UNWIND_ACTION_ALLOCATE_STACK,
+    CODEGEN_UNWIND_ACTION_NOP,
+    CODEGEN_UNWIND_ACTION_COUNT,
+} CodegenUnwindActionKind;
+
+typedef struct CodegenUnwindAction CodegenUnwindAction;
+struct CodegenUnwindAction
+{
+    // Offset of the first instruction after this prolog operation.
+    u32 code_offset;
+    // Stack bytes for ALLOCATE_STACK, or the post-operation SP-relative
+    // offset for SAVE_REGISTER and SET_FRAME_POINTER.
+    u32 value;
+    CodegenUnwindActionKind kind;
+    u8 register_index;
+    u8 reserved[3];
+};
+
 typedef struct MachineEncodeResult MachineEncodeResult;
 struct MachineEncodeResult
 {
     u8* bytes;
     u32 byte_count;
-    // End of the single RSP adjustment after a Win64 large-frame probe;
-    // zero for the ordinary chunked prologue. Occupies existing padding.
-    u32 frame_allocation_offset;
+    u32 frame_event_count;
+    // The prologue's frame events in emission order, offsets function
+    // relative; published only with a valid result.
+    CodegenUnwindAction* frame_events;
     u32* block_offsets;
     // Function-relative offset of every instruction row's first byte,
     // ahead of its reload edits, parallel to the instruction array.
@@ -1740,10 +1773,12 @@ struct MachineEncodeResult
     u32 call_site_count;
     u32 inline_assembly_relocation_count;
     u32 epilog_count;
+    // End offset of the prologue's last instruction.
+    u32 prologue_size;
     bool valid;
-    // Win64 prologues fit the PE byte-sized offset. Dynamic frames
-    // establish RBP after the fixed allocation, at this instruction end.
-    u8 frame_pointer_offset;
+    // Win64 dynamic frames establish RBP after the fixed allocation, so the
+    // frame base sits frame_size above it.
+    bool frame_pointer_after_allocation;
     u8 reserved[2];
     // x86 exact-form encoder telemetry. A failed encode still returns the
     // attempted counts so the caller can aggregate them before falling back.
@@ -1870,7 +1905,7 @@ BUSTER_F_DECL MachineX64CanonicalAuthoritySite const* machine_x86_64_canonical_a
 BUSTER_F_DECL u32 machine_x86_64_neutral_patch_site_count(void);
 BUSTER_F_DECL MachineX64NeutralPatchSite const* machine_x86_64_neutral_patch_site(u32 ordinal);
 BUSTER_F_DECL void machine_x86_64_exact_prewarm(void);
-BUSTER_F_DECL void machine_x86_64_exact_prewarm_all_shapes(void);
+BUSTER_F_DECL void machine_x86_64_exact_prewarm_all(void);
 BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode);
 BUSTER_F_DECL MachineMemoryEffect machine_opcode_memory_effect(MachineOpcodeInfo const* info);
 BUSTER_F_DECL bool machine_opcode_is_memory(MachineOpcodeInfo const* info);
@@ -2178,6 +2213,10 @@ struct MachineX64ExactMapAudit
     u32 memory_base_tables;
     u32 displacement_patch_tables;
     u32 variable_memory_encoding_tables;
+    // Variable-memory cells encoded once machine_x86_64_exact_prewarm_all
+    // has run, and how many of them the metadata authority refused.
+    u32 variable_memory_encoded_cells;
+    u32 variable_memory_failed_cells;
     // Fixed-shape template rows allotted by prewarm, and how many of them
     // the metadata authority refused (those rows keep their metadata lane).
     u32 fixed_template_rows;
