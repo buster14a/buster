@@ -1771,12 +1771,12 @@ Meson are required under [#3475](https://github.com/buster14a/buster/issues/3475
 
 ### Standalone CMake ABI discovery reduction
 
-`tests/cmake_abi_discovery/CMakeLists.txt` is a standalone reduction, not a CI
+`tools/cmake_abi_discovery/CMakeLists.txt` is a standalone reduction, not a CI
 test. Compare its `discovery.txt` output with Clang and Buster in separate
 build directories. For Clang:
 
 ```sh
-cmake -S tests/cmake_abi_discovery -B out-clang -DCMAKE_C_COMPILER=clang
+cmake -S tools/cmake_abi_discovery -B out-clang -DCMAKE_C_COMPILER=clang
 cmake --build out-clang
 cat out-clang/discovery.txt
 ```
@@ -1785,7 +1785,7 @@ With CMake 3.29 or newer, point CMake directly at `ide` and make `cc` the
 compiler argument:
 
 ```sh
-cmake -S tests/cmake_abi_discovery -B out-buster \
+cmake -S tools/cmake_abi_discovery -B out-buster \
   -DCMAKE_C_COMPILER=/path/to/ide -DCMAKE_C_COMPILER_ARG1=cc
 cmake --build out-buster
 cat out-buster/discovery.txt
