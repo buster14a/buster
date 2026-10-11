@@ -83,6 +83,24 @@ owner limit, complete inventory after timeout, launch failure, cleanup failure
 and original deadline accounting. Hosted Windows execution remains the verdict
 on startup latency; the scheduler alone is not a measured speedup.
 
+The helper's filesystem operations use the already loaded .NET file APIs,
+resolving literal paths through PowerShell's session provider paths so relative
+inputs follow the caller's PowerShell location even when the process cwd differs.
+Directories and non-FileSystem providers fail before execution. GITHUB_ENV
+appends use explicit UTF8 without a BOM and platform newlines. The fake dev-shell
+launch log uses the same direct file append instead of loading a cmdlet module.
+The vendor's real developer-shell script, host/target arguments, compiler probes,
+exceptions and separate PowerShell owners are unchanged.
+
+`VS_PROBE_TRACE` retains launch UTC milliseconds, script/helper/fixture stage
+rows and completion. PowerShell stages use UTC milliseconds; CMD fixtures label
+their local `%TIME%` stamps explicitly. These clocks are diagnostic; deadlines
+remain monotonic and launch-relative. The optional
+`BUSTER_VS_PROBE_COLD_TEST_PATH=1` control stamps a real cold `Test-Path` call
+before helper entry, isolating its cost without retrying or restarting a clock.
+Controls cover literal bracket filenames, differing PowerShell/process locations,
+provider/directory rejection, UTF8 export bytes and all original failure cases.
+
 ## Bounded independent cases (#2034)
 
 Windows admits two independent behavior cases through one persistent worker

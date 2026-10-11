@@ -20,9 +20,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2025, windows-11-arm]
+        include:
+          - os: windows-2025
+            sample: x64-cold
+            cold_test_path: '0'
+          - os: windows-11-arm
+            sample: arm-cold-1
+            cold_test_path: '0'
+          - os: windows-11-arm
+            sample: arm-cold-2
+            cold_test_path: '0'
+          - os: windows-11-arm
+            sample: arm-cold-3
+            cold_test_path: '0'
+          - os: windows-11-arm
+            sample: arm-test-path-control
+            cold_test_path: '1'
+    name: workflow-tools (${{ matrix.sample }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -41,89 +57,12 @@ jobs:
           mode: source
           source-directory: .
           source-repository: ${{ github.repository }}
-      - name: Complete workflow-tools attempt 1
+      - name: Complete workflow-tools cold attempt
         timeout-minutes: 5
         shell: bash
         env:
           BUSTER_CI_PYTHON: python
-        run: |
-          set -euo pipefail
-          # Independent suites share three lanes, slowest first (#2021).
-          suites=(
-            tools/ci_vs_dev_shell_test.py=vs-dev-shell-test.log
-            tools/coverage_manifest_test.py=coverage-manifest.log
-            tools/matrix_shard_test.py=matrix-shard.log
-            tools/matrix_unit_observation_test.py=matrix-unit-observation.log
-            tools/ci_workflow_tools_test.py=workflow-tools.log
-            tools/bootstrap_wrapper_cases_test.py=bootstrap-case-controls.log
-            tools/ci_matrix_phases_test.py=matrix-phases-test.log
-            tools/ci_native_observation_test.py=native-observation-test.log
-            tools/native_target_compatibility_test.py=native-target-compatibility.log
-            tools/ci_admission_test.py=ci-admission.log
-            tools/main_ci_reuse_test.py=main-ci-reuse.log
-            tools/ci_zig_test.py=zig-installer-test.log
-            tools/ci_zig_cache_test.py=zig-cache-policy-test.log
-            tools/ci_android_sdk_test.py=android-sdk-installer-test.log
-            tools/analyzer_selection_test.py=analyzer-selection.log
-            tools/differential_ci_policy_test.py=differential-ci-policy.log
-            tools/native_producer_profile_test.py=native-producer-profile.log
-            tools/ci_llvm_test.py=llvm-installer-test.log
-            tools/ci_configure_evidence_test.py=configure-evidence-test.log
-            tools/ci_matrix_phases_bridge_test.py=matrix-phases-bridge-test.log
-            tools/ci_sanitize_logs_test.py=sanitize-logs-test.log
-            tools/github_ci_time_test.py=ci-queue-timing-test.log
-            tools/ci_checks_resources_test.py=checks-resource-observer-test.log
-            tools/ci_checks_resources_workflow_test.py=checks-resource-workflow-test.log
-            tools/ci_ebpf_kernel_oracle_test.py=ebpf-kernel-oracle-test.log
-          )
-          if [[ 'windows' == macos ]]; then
-            suites+=(tools/ci_runner_resources_test.py=runner-resources-test.log)
-          fi
-          "$BUSTER_CI_PYTHON" tools/ci_workflow_tools.py --jobs 3 --log-directory "$RUNNER_TEMP/buster-ci" "${suites[@]}"
-      - name: Complete workflow-tools attempt 2
-        timeout-minutes: 5
-        shell: bash
-        env:
-          BUSTER_CI_PYTHON: python
-        run: |
-          set -euo pipefail
-          # Independent suites share three lanes, slowest first (#2021).
-          suites=(
-            tools/ci_vs_dev_shell_test.py=vs-dev-shell-test.log
-            tools/coverage_manifest_test.py=coverage-manifest.log
-            tools/matrix_shard_test.py=matrix-shard.log
-            tools/matrix_unit_observation_test.py=matrix-unit-observation.log
-            tools/ci_workflow_tools_test.py=workflow-tools.log
-            tools/bootstrap_wrapper_cases_test.py=bootstrap-case-controls.log
-            tools/ci_matrix_phases_test.py=matrix-phases-test.log
-            tools/ci_native_observation_test.py=native-observation-test.log
-            tools/native_target_compatibility_test.py=native-target-compatibility.log
-            tools/ci_admission_test.py=ci-admission.log
-            tools/main_ci_reuse_test.py=main-ci-reuse.log
-            tools/ci_zig_test.py=zig-installer-test.log
-            tools/ci_zig_cache_test.py=zig-cache-policy-test.log
-            tools/ci_android_sdk_test.py=android-sdk-installer-test.log
-            tools/analyzer_selection_test.py=analyzer-selection.log
-            tools/differential_ci_policy_test.py=differential-ci-policy.log
-            tools/native_producer_profile_test.py=native-producer-profile.log
-            tools/ci_llvm_test.py=llvm-installer-test.log
-            tools/ci_configure_evidence_test.py=configure-evidence-test.log
-            tools/ci_matrix_phases_bridge_test.py=matrix-phases-bridge-test.log
-            tools/ci_sanitize_logs_test.py=sanitize-logs-test.log
-            tools/github_ci_time_test.py=ci-queue-timing-test.log
-            tools/ci_checks_resources_test.py=checks-resource-observer-test.log
-            tools/ci_checks_resources_workflow_test.py=checks-resource-workflow-test.log
-            tools/ci_ebpf_kernel_oracle_test.py=ebpf-kernel-oracle-test.log
-          )
-          if [[ 'windows' == macos ]]; then
-            suites+=(tools/ci_runner_resources_test.py=runner-resources-test.log)
-          fi
-          "$BUSTER_CI_PYTHON" tools/ci_workflow_tools.py --jobs 3 --log-directory "$RUNNER_TEMP/buster-ci" "${suites[@]}"
-      - name: Complete workflow-tools attempt 3
-        timeout-minutes: 5
-        shell: bash
-        env:
-          BUSTER_CI_PYTHON: python
+          BUSTER_VS_PROBE_COLD_TEST_PATH: ${{ matrix.cold_test_path }}
         run: |
           set -euo pipefail
           # Independent suites share three lanes, slowest first (#2021).
