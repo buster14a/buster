@@ -117,6 +117,12 @@
 // TLS exports reuse link_elf_thread_local_offset and packed loaded section indices;
 // their dynamic symbols carry STT_TLS offsets rather than image addresses.
 //
+// Mach-O imports keep one identity: a call reaches the import's stub and a
+// GOT load its bound __got slot, while an absolute pointer in __DATA
+// (__data, __const, the initializer and thread-local templates) is itself
+// a dyld bind site with the relocation's addend (link_mach_import_pointer,
+// #3547). Any other direct reference to imported data is refused.
+//
 // AArch64 fixed-address TLS relaxation (link_aarch64_tls_relax): sites are
 // heap-sorted by section and offset; an initial-exec ADRP/LDR pair may have
 // unrelated instructions between the halves and is matched by register
@@ -135,12 +141,6 @@
 // PLT). Protected, weak and unknown direct addresses fail by name. Explicit
 // PLT32 references remain call-only. Android and AArch64 layout staging
 // retain their separate address contracts (#1275).
-//
-// Mach-O imports keep one identity too: a call reaches the import's stub and a
-// GOT load its bound __got slot, while an absolute pointer in __DATA
-// (__data, __const, the initializer and thread-local templates) is itself
-// a dyld bind site with the relocation's addend (link_mach_import_pointer,
-// #3547). Any other direct reference to imported data is refused.
 
 #include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/link/link_internal.h>
