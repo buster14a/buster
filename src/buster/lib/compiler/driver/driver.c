@@ -5562,6 +5562,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         syntax.ast = &pilot_tree;
         syntax.ast_type_statistics = &result.c_ast.types;
         syntax.ast_statement_statistics = &result.c_ast.statements;
+        syntax.ast_specifier_statistics = &result.c_ast.specifiers;
         syntax.type_interning = true;
     }
     result.parser_diagnostic_count = syntax.diagnostic_count;
@@ -7335,6 +7336,19 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             result.c_ast.statements.reason = unit.c_ast.statements.reason;
             result.c_ast.statements.fallback_token = unit.c_ast.statements.fallback_token;
+        }
+        result.c_ast.specifiers.lists += unit.c_ast.specifiers.lists;
+        result.c_ast.specifiers.primitive_answers += unit.c_ast.specifiers.primitive_answers;
+        result.c_ast.specifiers.typedef_answers += unit.c_ast.specifiers.typedef_answers;
+        result.c_ast.specifiers.fallbacks += unit.c_ast.specifiers.fallbacks;
+        for (u32 reason = 0; reason < C_AST_SPECIFIER_FALLBACK_COUNT; reason += 1)
+        {
+            result.c_ast.specifiers.fallback_counts[reason] += unit.c_ast.specifiers.fallback_counts[reason];
+        }
+        if (unit.c_ast.specifiers.fallbacks)
+        {
+            result.c_ast.specifiers.reason = unit.c_ast.specifiers.reason;
+            result.c_ast.specifiers.fallback_token = unit.c_ast.specifiers.fallback_token;
         }
         result.local_promotion.candidate_locals += unit.local_promotion.candidate_locals;
         result.local_promotion.promoted_locals += unit.local_promotion.promoted_locals;

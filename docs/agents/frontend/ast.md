@@ -772,6 +772,73 @@ the loop (with an `__builtin_offsetof` bail), and one tampered tree per
 fallback reason, in every layout. On the self-host unity input every body
 follows its plan, with no fallback and no bail.
 
+## Declaration specifiers from the tree
+
+Semantic analysis types a declaration's specifier run with the type machine
+(`c_parse_scalar_type_in_scope_context`). It validates the storage classes word
+by word, scans the run for `typeof` and `_Atomic(T)`, pushes a scalar frame and
+a core frame, scans the run again for a tag and a typedef name, and only then
+builds the one row the run names. Under `-fc-ast-pilot`, three callers read the
+run from the declaration's `DECL_SPECIFIERS` node instead
+(`c_parse_declaration_specifiers_type` in `c_parse.c`):
+- block declarations (`c_parse_local_declarations`);
+- file-scope declarations (`c_parse_declaration_type`);
+- parameters (`c_parse_parameter_segment`).
+
+The tree read applies only to a **plain list**. Every child is a
+`SPECIFIER_WORD` or `TYPEDEF_NAME` leaf on its own token, one after another
+from the run's first token. The list names either primitive type words or one
+typedef name, never both. The only other words allowed beside them are
+`const`, `volatile`, `inline`, `_Noreturn` and the storage classes `typedef`,
+`extern`, `static`, `register` and thread-local. For such a list:
+- **Storage.** The machine's verdict (`c_parse_storage_classes_valid`) is
+  computed from the set of words. A repeated or conflicting class falls back,
+  so the diagnostic stays the machine's.
+- **Primitive words.** The row is the one `c_parse_primitive_type` interns. It
+  comes from the machine's own primitive scan
+  (`c_parse_primitive_type_read`) run over the list's words alone, so every
+  spelling combines as the machine combines it.
+- **Typedef name.** The row is the name's entity, looked up as
+  `c_parse_qualified_typedef_type` looks it up. When a `const` or `volatile`
+  word is in the list, it is qualified with `c_parse_add_qualified_type`, as
+  there.
+- **Declarator start.** The declarator starts one past the list's last word.
+
+Rows are appended only by the machine's own calls, in the machine's order:
+`c_parse_type_identity_prepare`, then `c_parse_intern_type` or
+`c_parse_add_qualified_type`. So the type table matches the machine's row for
+row.
+
+The lists are found through an index of every `DECL_SPECIFIERS` node's first
+token, built once per analysis. The kind column is scanned eight nodes at a
+time, and the few lists that postorder closes after a later-starting one are
+moved back into place. A lookup gallops forward from the previous answer,
+because each of analysis's passes types declarations in token order.
+
+Everything else goes to the machine unchanged. `CAstSpecifierFallback` names
+each case:
+- `input`: no list in the tree begins at the run's first token;
+- `specifiers`: a tag, `typeof`, an attribute or another word outside the
+  plain set, no type at all, or a word right after the list;
+- `storage`: a repeated or conflicting storage class;
+- `primitive`: words the machine's scan combines into no row, which it
+  diagnoses. The syntax pass rejects such combinations first, so only a tree
+  that classifies a word differently from the scan reaches this;
+- `typedef`: a name that is not a typedef in the run's scope, or a
+  restrict-qualified typedef under a qualifier, whose copy
+  `c_type_parse_root_finish` checks again.
+
+The machine remains the default path and the fallback for every run that is
+not read from the tree. Type names (casts, `sizeof`, compound literals),
+members, tag definitions and declarator derivations still go through the
+machine.
+
+`c_ast_test_specifiers` runs, in every layout, one unit whose block,
+file-scope and parameter runs are all read from the tree, and one shape per
+fallback reason. The `input` and `primitive` shapes use a tampered tree. The
+[corpus differential](#corpus-differential) compares the whole analysis model
+field by field.
+
 ## Corpus differential
 
 `c_ast_test_corpus` (`c_ast_tests`; like `c_test.c`'s fixture suites it does not run on Android or iOS, whose test runs carry no repository tree) builds every `tests/**/*.c` file the
@@ -825,7 +892,13 @@ so the two must also bind alike, field by field
 scope), the per-token use map, every scope and every entity. There are floors
 on the segments the plans bound and the uses in them: about 6,800 segments and
 25,700 uses from the fixtures, and about 34,300 and 129,400 with the frontend
-sources. No corpus body falls back. Every
+sources. No corpus body falls back. The second run also reads declaration
+specifier runs from the tree ([declaration specifiers](#declaration-specifiers-from-the-tree)),
+so the two analyses must also build the same model, field by field
+(`c_ast_corpus_model_differ`): every type row, array bound, alignment
+specifier, type alignment, member, parameter, entity and declaration type,
+in table order. There are floors on the runs read from the tree: about
+19,800 from the fixtures, and about 60,000 with the frontend sources. Every
 tree answer must match the machine's in validity, structural type, constraint,
 nonplace fact, diagnostics and table growth; a replayed answer's rows are
 taken back after the replay, and the machine must append the same rows again.
@@ -854,7 +927,7 @@ differential tests pass.
 |---|---|---|---|
 | `c_parse_ast_run`, `c_parser_parse_function_body`, `c_parser_parse_declaration_expression` | declaration split, declarator name, body range, static-assert ranges | `DECLARATION`, `FUNCTION_DEFINITION`, `INIT_DECLARATOR`, `STATIC_ASSERT` | Retired under `-fc-ast-pilot` by the [declaration split](#declaration-split-from-the-tree). The walker stays the default path and the per-unit fallback. |
 | `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, and plain segments bound in one pass. The token loop stays the engine, the default path and the per-body fallback; `c_parse_local_declarations` still reads each declaration's declarators from tokens (next row), and the switch and control-statement validators still call `c_parse_statement_end`. |
-| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Not migrated. |
+| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)). Tags, `typeof`, attributes, type names, members and every declarator derivation stay with the machine. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Not migrated. |
 | `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | Not migrated. |
@@ -879,6 +952,14 @@ that falls back; `c_parse_local_declarations` still splits declarators and
 initializers by tokens; and `c_parse_validate_one_switch` and
 `c_parse_validate_control_statements` still find statement ends with
 `c_parse_statement_end`.
+
+Under `-fc-ast-pilot`, the third row's specifier machine no longer runs for a
+plain specifier run of a block declaration, a file-scope declaration or a
+parameter. Its consumers, the declaration typers, take the base type and the
+declarator start from `DECL_SPECIFIERS`, and the field-by-field model
+differential passes. The row is not retired. The machine still runs without
+the flag, for every run the read hands back, for type names, members and tag
+definitions, and for every pointer, array and function derivation.
 
 The [tree expression typer](#tree-expression-typer) is the first consumer of
 the fourth row's replacement. Under `-fc-ast-pilot` it answers most of semantic
