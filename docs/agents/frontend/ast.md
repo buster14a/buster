@@ -495,7 +495,10 @@ unchanged.
     the cast replay.
 
   The replayed row is the answer. A leaf that fails is undone, and the query
-  runs the machine.
+  runs the machine. The leaf's element count already comes through
+  `CParseResult.string_literals`, which decodes each narrow token once per
+  unit. A count fast path in front of it measured as a loss (see the
+  [measurement plan](#measurement-plan)).
 - **Constraint checks.** A checked query is answered only from a node whose
   operands are safe and whose own checked-mode rule cannot fire. For the
   binary operators that is the machine's operand rule. The cases it settles by
@@ -1702,5 +1705,57 @@ diagnostic only, and its result is negative. No candidate was built:
 - The 17 constant-evaluation runs (3.22 M) are never the typer's.
 - 92% of the machine Ir still left under the pilot is declines and misses
   inside typed bodies.
+
+For a per-token cache of string literals' element counts in the machine's
+leaf (`c_parse_string_literal_expression_type`), these budgets were declared
+before the measured runs. Exploratory Callgrind runs of the base came first;
+the audit reports them as such. The base is main `a6705764`. The input and
+flags are stage 2's, and the four Callgrind arms are counted on tests-off
+`-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+
+What the leaf already reuses decides the bound. `CParseResult.string_literals`
+records each narrow fragment's decoded bytes per token, so a call that decodes
+is the first time any consumer sees that token, and lowering reads the same
+bytes. A count cache can remove only the repeat calls' range shape (trim, kind
+check, encoding scan) and memo probes. The budgets:
+- **Census first.** A throwaway build of the base splits the leaf's calls into
+  repeats, whose every fragment the memo already holds, and first sights. Each
+  half's count is charged inclusively. The repeat half bounds what a cache can
+  remove; the cache's own probe and insert are not yet charged. If that bound
+  is below 1 M Ir, the floor the string-literal replay used, no candidate is
+  built and the negative result is recorded.
+- **Correctness**, if a candidate is built:
+  - no verify mismatch over the corpus;
+  - the same leaf calls and the same appended array bounds and rows;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms;
+  - wide literals, per-target element kinds and concatenated runs covered by
+    focused tests.
+- **Default path (D against A).** It changes on purpose. The leaf's inclusive
+  instructions, with the cache charged, must fall by at least 1 M. The whole
+  compile may not grow by more than the 0.05% rebuild noise on
+  `-fsyntax-only` or on `-c` (`-g0`).
+- **Pilot (C against B).** The same leaf criterion, and the same 0.05% bound
+  on the whole compile.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761).
+
+The count cache's hosted census is
+[`2026-10-11T095929Z`](../../performance-audits/2026-10-11T095929Z.md), a
+negative result, diagnostic only:
+- **Census.** Of the leaf's 32,707 calls, 83% are the first time any consumer
+  sees the token. Their decode (38.4 M Ir) is the one lowering reuses. So
+  the 26 M decode in the string-literal replay's census above is first-sight
+  work that every design keeps, not a repeat. The 5,477 repeats cost 1.38 M,
+  so a candidate was built.
+- **Candidates.** A fast path answers a lone, recorded, unprefixed fragment
+  from the existing memo, with no second table. Objects are byte-identical at
+  `-g0` and `-g`, and the whole compile moves by at most +0.0035%.
+- **Leaf budget fails.** The leaf grows by 0.53 M, or by 0.25 M when a first
+  sight is probed only once. The code does not ship.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
