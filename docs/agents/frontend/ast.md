@@ -1653,21 +1653,29 @@ The base is main `a6705764`, which the candidate branches from. The budgets:
 The root-conditional slice's hosted census is
 [`2026-10-11T111308Z`](../../performance-audits/2026-10-11T111308Z.md), taken
 the same way and diagnostic only:
-- **Earlier versions.** Two versions failed a budget before the measured one,
-  and both failures stay recorded in the audit.
+- **Base.** The measured candidate, `4bdecbd3`, was counted against main
+  `0924dd69`, the merge base after the branch took main. The budgets did not
+  change.
+- **Earlier versions.** Three earlier versions were counted against the first
+  base, main `a6705764`, and stay recorded in the audit.
   - The first cut the function by only 34%, because it stripped parentheses
     before the `?` test.
   - The second put the default path at +0.073%, because of an out-of-line
     dispatcher.
+  - The third passed every budget, but review found its index build
+    quadratic on nested conditional chains.
 - **Correctness.** Every budget passes for the measured version. Objects are
   byte-identical across the four arms at `-g0` and `-g`. A reference-checked
-  Debug compile of the self-host input checked all 819,551 tree answers.
+  Debug compile of the self-host input checked all 823,431 tree answers.
 - **Coverage.** The tree answers 99.05% of in-body queries, and the function
-  falls by 52.99%.
-- **The pilot's compile (C against B).** It drops by 51.68 M (−0.225%), with
-  the index build charged; that build costs about 16 M.
-- **The default path.** It is +0.0047% on `-c` and −0.0005% on
+  falls by 52.94%.
+- **The pilot's compile (C against B).** It drops by 51.40 M (−0.225%), with
+  the index build charged.
+- **The default path.** It is +0.0032% on `-c` and −0.0031% on
   `-fsyntax-only`.
+- **Nested chains.** At depth 32,768 the reviewer's left-nested chain now
+  compiles in 0.37 s under the pilot (4.44 s before), with 163,834 build
+  steps.
 - **Zen 5.** Validation is incomplete (#2761), and the default stays off.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
