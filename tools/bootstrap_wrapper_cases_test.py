@@ -306,7 +306,7 @@ class SchedulerTests(unittest.TestCase):
                     child.cleanup()
             else:
                 child.cleanup()  # Already cleaned; do not recapture stale numeric PIDs.
-        factory.assert_called_once_with(123)
+        factory.assert_called_once_with(123, child.process._handle)
         expected = [("direct",)]
         if capture_error is None:
             expected += [("wait", 100 + scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS), ("close",)]
@@ -329,6 +329,32 @@ class SchedulerTests(unittest.TestCase):
         tree.close()
         self.assertEqual(tree.kernel.CloseHandle.call_args_list,
                          [mock.call("first-handle"), mock.call("second-handle")])
+        self.assertEqual(tree.handles, [])
+
+
+    def test_windows_capture_refuses_reused_and_stale_parent_identities(self):
+        tree = scheduler.WindowsFixtureTree.__new__(scheduler.WindowsFixtureTree)
+        tree.kernel = mock.Mock()
+        tree.handles = []
+        tree.parent_created = 100
+        tree.snapshot_started = 200
+        for created in (99, 201):
+            with self.subTest(created=created):
+                with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                    tree.retain_handle(23, "replacement-handle", created)
+                self.assertEqual(tree.handles, [])
+        self.assertEqual(tree.kernel.CloseHandle.call_count, 2)
+        tree.retain_handle(24, "original-handle", 150)
+        self.assertEqual(tree.handles, [(24, "original-handle")])
+
+    def test_windows_handle_close_failure_is_not_ignored(self):
+        tree = scheduler.WindowsFixtureTree.__new__(scheduler.WindowsFixtureTree)
+        tree.kernel = mock.Mock()
+        tree.handles = [(23, "first-handle"), (24, "second-handle")]
+        tree.kernel.CloseHandle.side_effect = [False, True]
+        with self.assertRaisesRegex(RuntimeError, "closure failed.*23"):
+            tree.close()
+        self.assertEqual(tree.kernel.CloseHandle.call_count, 2)
         self.assertEqual(tree.handles, [])
 
     def test_cleanup_error_cannot_be_a_success(self):

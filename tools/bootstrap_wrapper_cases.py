@@ -73,7 +73,7 @@ class CaseOwnership:
 
 class WindowsFixtureTree:
     """Retain descendant identities before taskkill; wait for termination, not its request."""
-    def __init__(self, pid):
+    def __init__(self, pid, parent_handle):
         import ctypes
         from ctypes import wintypes
 
@@ -100,7 +100,15 @@ class WindowsFixtureTree:
         kernel.WaitForSingleObject.restype = wintypes.DWORD
         kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
         kernel.CloseHandle.restype = wintypes.BOOL
+        kernel.GetProcessTimes.argtypes = (wintypes.HANDLE,) + (ctypes.POINTER(wintypes.FILETIME),) * 4
+        kernel.GetProcessTimes.restype = wintypes.BOOL
+        kernel.GetSystemTimePreciseAsFileTime.argtypes = (ctypes.POINTER(wintypes.FILETIME),)
+        kernel.GetSystemTimePreciseAsFileTime.restype = None
         self.handles = []
+        self.parent_created = self.creation_time(parent_handle)
+        cut = wintypes.FILETIME()
+        kernel.GetSystemTimePreciseAsFileTime(ctypes.byref(cut))
+        self.snapshot_started = (cut.dwHighDateTime << 32) | cut.dwLowDateTime
         snapshot = kernel.CreateToolhelp32Snapshot(2, 0)  # TH32CS_SNAPPROCESS.
         if snapshot == wintypes.HANDLE(-1).value:
             raise ctypes.WinError(ctypes.get_last_error())
@@ -123,16 +131,44 @@ class WindowsFixtureTree:
                 owned.update(children)
                 pending.difference_update(children)
             for child in sorted(owned - {pid}):
-                handle = kernel.OpenProcess(0x100000, False, child)  # SYNCHRONIZE only.
+                # Query creation identity as well as waiting. A numeric snapshot
+                # PID can be reused before OpenProcess acquires a native handle.
+                handle = kernel.OpenProcess(0x101000, False, child)  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION.
                 if handle:
-                    self.handles.append((child, handle))
+                    try:
+                        created = self.creation_time(handle)
+                    except BaseException:
+                        kernel.CloseHandle(handle)
+                        raise
+                    self.retain_handle(child, handle, created)
                 elif ctypes.get_last_error() != 87:  # ERROR_INVALID_PARAMETER: exited PID.
                     raise ctypes.WinError(ctypes.get_last_error())
         except BaseException:
             self.close()
             raise
         finally:
-            kernel.CloseHandle(snapshot)
+            if not kernel.CloseHandle(snapshot):
+                error = ctypes.WinError(ctypes.get_last_error())
+                self.close()
+                raise error
+
+    def creation_time(self, handle):
+        import ctypes
+        from ctypes import wintypes
+        created, exited, kernel_time, user_time = (wintypes.FILETIME() for _ in range(4))
+        if not self.kernel.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited),
+                                           ctypes.byref(kernel_time), ctypes.byref(user_time)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return (created.dwHighDateTime << 32) | created.dwLowDateTime
+
+    def retain_handle(self, pid, handle, created):
+        # Controlled fixtures publish readiness after spawning their descendants.
+        # Reject a replacement created after snapshot admission, or a stale parent
+        # PID from before our retained direct owner existed. Never wait on either.
+        if created < self.parent_created or created > self.snapshot_started:
+            self.kernel.CloseHandle(handle)
+            raise RuntimeError("bootstrap descendant identity changed during capture: " + str(pid))
+        self.handles.append((pid, handle))
 
     def wait_until(self, deadline):
         pending = []
@@ -149,9 +185,13 @@ class WindowsFixtureTree:
                                repr({"pending_pids": pending, "wait_failures": failed}))
 
     def close(self):
-        for _, handle in self.handles:
-            self.kernel.CloseHandle(handle)
+        failures = []
+        for pid, handle in self.handles:
+            if not self.kernel.CloseHandle(handle):
+                failures.append(pid)
         self.handles.clear()
+        if failures:
+            raise RuntimeError("bootstrap descendant handle closure failed: " + repr(failures))
 
 
 class CaseProcess(bootstrap.WrapperProcess):
@@ -191,7 +231,7 @@ class CaseProcess(bootstrap.WrapperProcess):
                 # Capture native handles first; no new PID signal target is added.
                 if not self.cleaned and os.name == "nt" and self.process.poll() is None:
                     try:
-                        tree = WindowsFixtureTree(self.process.pid)
+                        tree = WindowsFixtureTree(self.process.pid, self.process._handle)
                     except Exception as error:
                         capture_error = error
                 try:
