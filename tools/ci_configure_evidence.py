@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Retain bounded CMake diagnostics; never configure, build, or infer a verdict."""
+"""Retain bounded CMake and Ninja diagnostics; never configure, build, or infer a verdict."""
 import argparse
 import hashlib
 import json
@@ -15,7 +15,9 @@ FILES = (
     "CMakeFiles/CMakeOutput.log",
     "CMakeFiles/CMakeError.log",
     "cmake-profile.json",
+    ".ninja_log",
 )
+RETAINED_NAMES = {".ninja_log": "ninja_log.txt"}
 TREE_PREFIXES = (
     "build-ci_on-cc_",
     "build-release-ci_on-cc_",
@@ -37,6 +39,58 @@ IDENTITY_KEYS = (
 def matrix_tree_name(name):
     """Recognize only native matrix configure trees, never superbuild trees."""
     return any(name.startswith(prefix) for prefix in TREE_PREFIXES)
+
+
+def summarize_ninja_log(data: bytes) -> dict:
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    version = None
+    malformed_lines = 0
+    entries = {}
+    header_prefix = "# ninja log v"
+    header_seen = False
+    for line in lines:
+        if not line.strip():
+            continue
+        if not header_seen:
+            header_seen = True
+            if line.startswith(header_prefix):
+                try:
+                    version = int(line[len(header_prefix):])
+                except ValueError:
+                    malformed_lines += 1
+            else:
+                malformed_lines += 1
+            continue
+        fields = line.split("\t")
+        if len(fields) < 4:
+            malformed_lines += 1
+            continue
+        try:
+            start_ms = int(fields[0])
+            end_ms = int(fields[1])
+            int(fields[2])
+        except ValueError:
+            malformed_lines += 1
+            continue
+        output = fields[3]
+        # Ninja invocation clocks reset; these times are relative to each
+        # invocation and are not comparable across invocations.
+        entries[output] = {
+            "output": output,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "duration_ms": end_ms - start_ms,
+        }
+    edges = list(entries.values())
+    all_edges = sorted(edges, key=lambda edge: (-edge["duration_ms"], edge["output"]))
+    return {
+        "version": version,
+        "edges": len(edges),
+        "malformed_lines": malformed_lines,
+        "edge_duration_sum_ms": sum(edge["duration_ms"] for edge in edges),
+        "top": all_edges[:15],
+        "all_edges": all_edges,
+    }
 
 
 def regular_path(root, relative):
@@ -81,7 +135,8 @@ def collect(build_root, output, *, profile_requested=False, environment=None,
     report = {"schema": 1, "kind": "cmake-configure-evidence", "role": "diagnostic-only",
               "profile_requested": profile_requested,
               "identity": {key: env[key] for key in IDENTITY_KEYS if key in env},
-              "files": [], "errors": [], "tree_count": 0, "captured_bytes": 0}
+              "files": [], "errors": [], "tree_count": 0, "captured_bytes": 0,
+              "ninja_log_summaries": []}
     trees = []
     try:
         with os.scandir(build_root) as entries:
@@ -103,6 +158,7 @@ def collect(build_root, output, *, profile_requested=False, environment=None,
     for tree in sorted(trees):
         for name in FILES:
             relative = f"{tree}/{name}"
+            retained_relative = f"{tree}/{RETAINED_NAMES.get(name, name)}"
             record = {"path": relative}
             try:
                 source = regular_path(build_root, relative)
@@ -113,18 +169,30 @@ def collect(build_root, output, *, profile_requested=False, environment=None,
                     data = stream.read(available + 1)
                 if len(data) > available:
                     raise ValueError("evidence grew beyond byte limit")
-                destination = output / relative
+                destination = output / retained_relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with destination.open("xb") as stream:
                     stream.write(data)
                 report["captured_bytes"] += len(data)
-                record.update(status="captured", bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+                record.update(status="captured", retained_path=retained_relative,
+                              bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
             except FileNotFoundError:
                 record["status"] = "missing"
             except (OSError, ValueError) as error:
                 record.update(status="error", reason=str(error))
                 report["errors"].append(f"{relative}: {error}")
             report["files"].append(record)
+            if name == ".ninja_log" and record["status"] == "captured":
+                summary_path = output / tree / "ninja-log-summary.json"
+                try:
+                    summary = summarize_ninja_log(data)
+                    with summary_path.open("x", encoding="utf-8") as stream:
+                        json.dump(summary, stream, indent=2, sort_keys=True)
+                        stream.write("\n")
+                except (OSError, ValueError) as error:
+                    report["errors"].append(f"{tree}/ninja-log-summary.json: {error}")
+                else:
+                    report["ninja_log_summaries"].append({"tree": tree, **summary})
     # Missing files explain failed/early configure attempts. They are never a
     # successful probe, nor an excuse to change the authoritative lane result.
     report["configure_logs_captured"] = sum(
@@ -132,6 +200,9 @@ def collect(build_root, output, *, profile_requested=False, environment=None,
         for item in report["files"])
     report["profiles_captured"] = sum(
         item["status"] == "captured" and item["path"].endswith("/cmake-profile.json")
+        for item in report["files"])
+    report["ninja_logs_captured"] = sum(
+        item["status"] == "captured" and item["path"].endswith("/.ninja_log")
         for item in report["files"])
     with (output / "manifest.json").open("x", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2, sort_keys=True)
@@ -148,7 +219,16 @@ def main():
     try:
         report = collect(args.build_root, args.output, profile_requested=args.profile_requested == "1")
         print(f"CMake evidence: {report['tree_count']} trees, {report['configure_logs_captured']} configure logs, "
-              f"{report['profiles_captured']} profiles, {len(report['errors'])} collection errors")
+              f"{report['profiles_captured']} profiles, {len(report['errors'])} collection errors, "
+              f"{report['ninja_logs_captured']} ninja logs")
+        for summary in report["ninja_log_summaries"]:
+            tree = summary["tree"]
+            print(f"NINJA_LOG_SUMMARY tree={tree} edges={summary['edges']} "
+                  f"edge_duration_sum_seconds={summary['edge_duration_sum_ms'] / 1000:.3f} "
+                  f"malformed={summary['malformed_lines']}")
+            for rank, edge in enumerate(summary["top"], 1):
+                print(f"NINJA_LOG_EDGE tree={tree} rank={rank} seconds={edge['duration_ms'] / 1000:.3f} "
+                      f"output={edge['output']}")
         result = 1 if report["errors"] else 0
     except (OSError, ValueError) as error:
         print(f"CMake evidence collection failed: {error}", file=sys.stderr)
