@@ -4009,7 +4009,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_hardened_layout(UnitTestArgumen
             ByteSlice image = linked.executable;
             if (architectures[architecture] == CPU_ARCH_AARCH64)
             {
-                link_test_aarch64_dynamic_layout_facts(arguments, image);
+                UnitTestResult aarch64_layout = link_test_aarch64_dynamic_layout_facts(arguments, image);
+                result.succeeded_test_count += aarch64_layout.succeeded_test_count;
+                result.test_count += aarch64_layout.test_count;
             }
             u64 read_load = link_test_elf_program_header(image, 1, 0);
             u64 code_load = link_test_elf_program_header(image, 1, 1);
@@ -8570,7 +8572,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, valid);
         if (valid && dynamic)
         {
-            link_test_aarch64_dynamic_layout_facts(arguments, got_linked.executable);
+            UnitTestResult aarch64_layout = link_test_aarch64_dynamic_layout_facts(arguments, got_linked.executable);
+            result.succeeded_test_count += aarch64_layout.succeeded_test_count;
+            result.test_count += aarch64_layout.test_count;
         }
         if (valid)
         {
@@ -8706,7 +8710,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_libc_executable.error == LINK_ERROR_NONE);
     if (aarch64_libc_executable.error == LINK_ERROR_NONE)
     {
-        link_test_aarch64_dynamic_layout_facts(arguments, aarch64_libc_executable.executable);
+        UnitTestResult aarch64_layout = link_test_aarch64_dynamic_layout_facts(arguments, aarch64_libc_executable.executable);
+        result.succeeded_test_count += aarch64_layout.succeeded_test_count;
+        result.test_count += aarch64_layout.test_count;
     }
     ObjectRelocationKind imported_aarch64_branch_kinds[] = {OBJECT_RELOCATION_AARCH64_CALL26, OBJECT_RELOCATION_AARCH64_JUMP26};
     u32 imported_aarch64_branch_words[] = {UINT32_C(0x94000000), UINT32_C(0x14000000)};
@@ -8996,7 +9002,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_copy_executable.error == LINK_ERROR_NONE);
     if (aarch64_copy_executable.error == LINK_ERROR_NONE)
     {
-        link_test_aarch64_dynamic_layout_facts(arguments, aarch64_copy_executable.executable);
+        UnitTestResult aarch64_layout = link_test_aarch64_dynamic_layout_facts(arguments, aarch64_copy_executable.executable);
+        result.succeeded_test_count += aarch64_layout.succeeded_test_count;
+        result.test_count += aarch64_layout.test_count;
     }
     // Two slots -- environ with tzname -- and one jump slot per import, the
     // three data names plus the hosted stub's `exit` and `__cxa_atexit`.  No x86-64 type of
@@ -9044,7 +9052,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, valid);
         if (valid)
         {
-            link_test_aarch64_dynamic_layout_facts(arguments, page_linked.executable);
+            UnitTestResult aarch64_layout = link_test_aarch64_dynamic_layout_facts(arguments, page_linked.executable);
+            result.succeeded_test_count += aarch64_layout.succeeded_test_count;
+            result.test_count += aarch64_layout.test_count;
             u64 text_offset = link_read_u64(page_linked.executable.pointer, text_header + 24);
             u64 text_address = link_read_u64(page_linked.executable.pointer, text_header + 16);
             A64MCInst page = {0};
@@ -9261,7 +9271,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_version_executable.error == LINK_ERROR_NONE);
     if (aarch64_version_executable.error == LINK_ERROR_NONE)
     {
-        link_test_aarch64_dynamic_layout_facts(arguments, aarch64_version_executable.executable);
+        UnitTestResult aarch64_layout = link_test_aarch64_dynamic_layout_facts(arguments, aarch64_version_executable.executable);
+        result.succeeded_test_count += aarch64_layout.succeeded_test_count;
+        result.test_count += aarch64_layout.test_count;
     }
     String8 aarch64_version_recorded = {0};
     BUSTER_TEST(arguments, link_test_elf_symbol_version(aarch64_version_executable.executable, S8("abs"), &aarch64_version_recorded, 0) &&
@@ -9286,7 +9298,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_tls_executable.error == LINK_ERROR_NONE);
     if (aarch64_tls_executable.error == LINK_ERROR_NONE)
     {
-        link_test_aarch64_dynamic_layout_facts(arguments, aarch64_tls_executable.executable);
+        UnitTestResult aarch64_layout = link_test_aarch64_dynamic_layout_facts(arguments, aarch64_tls_executable.executable);
+        result.succeeded_test_count += aarch64_layout.succeeded_test_count;
+        result.test_count += aarch64_layout.test_count;
     }
     u64 thread_local_data_header = 0;
     u64 thread_local_zero_header = 0;
