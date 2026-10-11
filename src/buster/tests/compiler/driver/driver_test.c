@@ -34691,7 +34691,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // instead of -c failing first in local static lowering. The constant-only
     // body is rejected too: the frontend does not fold statement expressions.
     // sizeof, _Alignof and typeof operands stay unevaluated and compile,
-    // including an unparenthesized unary operand such as `sizeof *({ ... })`.
+    // including an unparenthesized unary operand such as `sizeof *({ ... })`
+    // and one behind nested unary keywords or a cast (`sizeof sizeof +({ ... })`);
+    // an evaluated `({` after the operand is still rejected.
     {
         TemporalArena block_temporary = arena_begin_temporal(arguments->arena);
         Arena* block_arena = block_temporary.arena;
@@ -34704,8 +34706,21 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             S8("int main(void) { static int q = sizeof(({ int a = 2; a; })) + _Alignof(typeof(({ 1; }))); return q - 8; }\n"),
             S8("int main(void) { static int s = sizeof *({ int x; &x; }); return s - 4; }\n"),
             S8("int main(void) { static int s = sizeof +({ int x = 0; x; }) + 1; return s - 5; }\n"),
+            S8("int main(void) { static int s = sizeof *({ int x; &x; }) + ({ int y = 2; y; }); return s; }\n"),
+            S8("int main(void) { static int s = sizeof (int) + ({ int y = 2; y; }); return s; }\n"),
+            S8("int main(void) { static int s = sizeof sizeof +({ int x = 0; x; }); return s - 8; }\n"),
+            S8("int main(void) { static int s = sizeof sizeof *({ int x; &x; }); return s - 8; }\n"),
+            S8("int main(void) { static int s = sizeof _Alignof +({ int x = 0; x; }); return s - 8; }\n"),
+            S8("int main(void) { static int s = sizeof __extension__ +({ int x = 0; x; }); return s - 4; }\n"),
+            S8("typedef long L; int main(void) { static int s = sizeof -(L)+({ int x = 0; x; }); return s - 8; }\n"),
         };
-        String8 block_locations[] = {S8(":1:33: "), S8(":1:33: "), S8(":1:40: "), S8(""), S8(""), S8("")};
+        String8 block_locations[] = {S8(":1:33: "), S8(":1:33: "), S8(":1:40: "), S8(""), S8(""), S8(""),
+                                     S8(":1:60: "), S8(":1:48: "), S8(""), S8(""), S8(""), S8(""), S8("")};
+        // The nested-keyword operands are accepted by the frontend, but the
+        // static-initializer folder cannot fold `sizeof sizeof +1` yet either
+        // (#3566): -c is only checked not to report the operand as evaluated.
+        bool block_fold_pending[] = {false, false, false, false, false, false, false, false, true, true, true, true, false};
+        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(block_fold_pending) == BUSTER_ARRAY_LENGTH(block_texts));
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(block_texts); index += 1)
         {
             if (BUSTER_REQUIRE(arguments, file_write(block_source, BUSTER_SLICE_TO_BYTE_SLICE(block_texts[index]))))
@@ -34728,7 +34743,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 else
                 {
                     BUSTER_TEST_RAW(arguments, checked.error == COMPILER_DRIVER_ERROR_NONE, checked.diagnostic);
-                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, block_fold_pending[index] || compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments,
+                                    string_first_sequence(compiled.diagnostic, S8("initializer element is not constant")) == BUSTER_STRING_NO_MATCH,
+                                    compiled.diagnostic);
                     if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
                     {
                         BUSTER_TEST(arguments, os_file_delete(block_object));
