@@ -6950,11 +6950,12 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_alias(IrProgram* program, IrMo
             defined_here = module->functions[function_index].symbol.value == alias.target.value &&
                            module->functions[function_index].state == IR_FUNCTION_LOWERED;
         }
-        for (u32 global_index = 0; global_index < module->global_count && !defined_here; global_index += 1)
+        // An indirect alias's target is its resolver, which has to be code.
+        for (u32 global_index = 0; global_index < module->global_count && !defined_here && !alias.is_indirect; global_index += 1)
         {
             defined_here = module->globals[global_index].symbol.value == alias.target.value;
         }
-        result = defined_here ? IR_VALIDATION_NONE : IR_VALIDATION_ALIAS_TARGET;
+        result = defined_here && (!alias.is_indirect || symbol->kind == IR_SYMBOL_FUNCTION) ? IR_VALIDATION_NONE : IR_VALIDATION_ALIAS_TARGET;
     }
 
     return result;
