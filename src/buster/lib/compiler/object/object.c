@@ -4560,7 +4560,10 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
         }
         u64 boundary = object_assembly_next_relocation(buffer, object, section_index, cursor + 1, data.length);
         boundary = BUSTER_MIN(boundary, object_assembly_next_symbol(buffer, object, section_index, cursor, data.length));
-        boundary = BUSTER_MIN(boundary, object_assembly_next_internal_label(buffer, section_index, cursor + 1, data.length));
+        // The successor search stops at the nearer relocation/symbol boundary;
+        // scanning to the section end made every raw-byte run cost the rest of
+        // the section (#2363).
+        boundary = object_assembly_next_internal_label(buffer, section_index, cursor + 1, boundary);
         if (boundary <= cursor)
         {
             boundary = cursor + 1;
