@@ -21,7 +21,7 @@ int main(void)
         char const source[] =
             "extern long host_add(long, long); extern long host_scale; "
             "static long* const host_scale_ref = &host_scale; "
-            "long run(void) { return host_add(*host_scale_ref, 5); }\n";
+            "long run(void) { long before = host_scale; *host_scale_ref = before + 1; return host_add(host_scale, 5); }\n";
         BusterEmbedCompileOptions options = {.source_name = {"embed_example.c", 15}};
         BusterEmbedModule* module = NULL;
         status = buster_embed_compile(compiler, (BusterEmbedString){source, sizeof(source) - 1}, &options, &module);
@@ -52,7 +52,7 @@ int main(void)
             {
                 memcpy(&run, &address, sizeof(run));
             }
-            if (!run || run() != 17)
+            if (!run || run() != 18 || host_scale != 13)
             {
                 success = 0;
             }
