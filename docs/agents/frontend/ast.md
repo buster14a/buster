@@ -1297,4 +1297,28 @@ the same way and diagnostic only:
 - The default path is within +0.006%.
 - Zen 5 validation stays incomplete (#2761).
 
+For a further cut in the eager pass (#3102), these budgets were declared
+before its measured runs. The change keeps every rule. It splits the pass into
+a leaf loop and an operator loop over a list, reads cached integer-literal
+facts without the leaf call, memoizes the usual arithmetic conversions per
+pass, and settles the checked-mode rule for two integer operands at once. The
+budgets use the stage-2 input, flags and four Callgrind arms
+(`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3` builds,
+with base main `a6705764`:
+- **Correctness.** No answer changes:
+  - no verify mismatch over the corpus;
+  - the typer's `-v` counters on the self-host are identical in B and C;
+  - identical diagnostics with and without the flag;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **The pass's own cost (C against B).** The inclusive cost of
+  `c_ast_types_type_body`, which is the cost charged at its call sites, falls
+  by at least 12%. The whole compile falls by at least the pass's saving less
+  3 M, which covers the region's two extra scratch arrays, so the saving is
+  not moved elsewhere.
+- **Default path (D against A).** The change is confined to the typer, so the
+  default path stays within ±0.05% Ir on `-fsyntax-only` and on `-c` (`-g0`).
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete (#2761) and
+  the hook stays opt-in.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
