@@ -1657,6 +1657,53 @@ the same way and diagnostic only:
 - The default path is +0.026%.
 - Zen 5 validation stays incomplete (#2761), so the hook stays opt-in.
 
+For the type-name specifier runs (`c_parse_type_name_specifiers`: `sizeof`
+and `_Alignof` operands, compound literals, and the smaller callers), these
+budgets were declared before their measured runs. The census came first. It
+was a throwaway build of the base with one no-inline wrapper per shape, with
+Callgrind's callers separated, on the same input and flags as the
+declaration specifier read. It found 70.2 K root runs costing 169.8 M:
+
+| Caller | Shape | Runs | Ir |
+| --- | --- | ---: | ---: |
+| `c_parse_validate_sizeof_operands` | no type name begins at the run | 36,710 | 68.8 M |
+| `c_parse_validate_compound_literals` | plain typedef name | 15,503 | 30.5 M |
+| `c_parse_validate_compound_literals` | no type name (`if (c) {`, ...) | 10,575 | 24.5 M |
+| `c_parse_validate_sizeof_operands` | plain typedef name | 5,544 | 10.5 M |
+| `c_parse_typed_constant` | no type name, typedef name | 1,701 | 3.9 M |
+| every other caller and shape | | < 1,000 | < 1 M each |
+
+A (caller, shape) row is taken when its removable Ir clears **5 M**, about
+0.05% of the pilot compile. The removable Ir is the row's cost less the work
+that remains. A plain typedef name keeps the declaration read's cost, about
+556 Ir a run. A run where no type name begins keeps the machine's failure
+path, about 110 Ir a run: the identity prepare and the outermost `typeof`
+aggregate scan. The first four rows clear the gate, for about 117 M. Both
+mechanisms sit in the shared entry, so the rows below the gate take them at
+no extra code.
+
+The input, flags and four Callgrind arms are the declaration specifier
+read's. The base is `b9c17db2`, the head of
+[#3483](https://github.com/buster14a/buster/pull/3483), which the candidate
+branches from. The budgets:
+- **Correctness.**
+  - 0 model differences over the corpus and the frontend sources: the
+    analysis model field by field and the bindings, with the diagnostics;
+  - a one-off comparison of the same fields on the self-host unity input, also
+    with 0 differences;
+  - in verify mode, over the same inputs, the machine answers, appends a row
+    or reports a diagnostic for none of the runs skipped as no type name;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **Coverage (reported, not gated).** The runs skipped, the runs read and the
+  runs handed back, by reason, from the `-v` counters.
+- **The change's own effect (C against B).** The whole compile falls by at
+  least 60 M Ir, about half the estimate, with the first-token bitmap charged.
+  The machine's root runs fall by exactly the runs skipped and read.
+- **The default path (D against A).** One test of a null index per type-name
+  run, so the difference stays within ±0.05% Ir.
+- **Adoption of the hook as the default.** Unchanged: acceptance on the Zen 5
+  route (#2761), with no 9700X comparison requested.
+
 For the split's [diagnostic probe](#declaration-split-from-the-tree)
 (`c_parser_tree_probe`), these budgets were declared before its measured runs.
 The probe classifies identifier lanes from their interned ids instead of
