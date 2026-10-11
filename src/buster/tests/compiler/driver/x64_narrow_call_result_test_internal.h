@@ -232,4 +232,3 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x64_narrow_call_results(
     }
     return result;
 }
-
