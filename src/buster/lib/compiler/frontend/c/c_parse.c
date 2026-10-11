@@ -11717,11 +11717,18 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
     {
         return false;
     }
-    u32 capacity = (u32)(span + 2);
+    // Below the root, every frame and every designator continuation is a
+    // distinct type on one by-value containment path, and no type contains
+    // itself by value, so the type count bounds them as well as the span
+    // does. Sizing by the span alone took 56 bytes per token of the list,
+    // past the thread scratch for a 4,000,000-element table (#2527). The
+    // capacity checks below stay the guard.
+    u32 capacity = (u32)BUSTER_MIN(span + 2, (u64)result->type_count + 2);
+    u32 continuation_capacity = (u32)BUSTER_MIN(span + 1, (u64)result->type_count + 1);
     // Guarded while a function body is validated (#1256): a miss infers
     // nothing, and the caller reports the exhausted body.
     CParseInitializerInferenceFrame* frames = C_PARSE_BODY_SCRATCH_ARRAY(temporary_arena, CParseInitializerInferenceFrame, capacity);
-    CParseInitializerContinuation* continuation_work = C_PARSE_BODY_SCRATCH_ARRAY(temporary_arena, CParseInitializerContinuation, (u32)(span + 1));
+    CParseInitializerContinuation* continuation_work = C_PARSE_BODY_SCRATCH_ARRAY(temporary_arena, CParseInitializerContinuation, continuation_capacity);
     CParseInitializerSlotCache slot_cache = {
         .arena = temporary_arena,
     };
@@ -11844,7 +11851,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
         }
         CParseInitializerInferenceDesignator designator = {0};
         if (!c_parse_initializer_designator(machine, result_arena, preprocess, result, scope, &slot_cache, frame, frame->cursor, frame->limit,
-                                             continuation_work, (u32)(span + 1), &designator, diagnostic) ||
+                                             continuation_work, continuation_capacity, &designator, diagnostic) ||
             designator.selected_end == UINT64_MAX)
         {
             return false;
@@ -32231,13 +32238,23 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_integer_builtin(CParseResult* 
     return folded;
 }
 
+// The typed-constant task stack starts with this many rows (see below).
+#define C_PARSE_CONSTANT_TASK_INITIAL_CAPACITY 32u
+
 BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                          CParseResult* result, CScopeId scope, u32 start, u32 end)
 {
     IR_SEMANTIC_RANGE(PARSE_TYPED, preprocess.tokens, start, end);
     c_parse_type_identity_prepare(machine, arena, preprocess, result, scope, start, end);
     CParseConstant last = {.type = C_TYPE_ID_INVALID};
-    u32 capacity = end > start ? end - start + 1 : 1;
+    // Every task covers at least one token, so the range bounds the stack;
+    // it starts small and doubles toward that bound on demand. A braced
+    // initializer list reaches here whole (c_parse_static_initializer_call
+    // asks whether all of it is one constant), and sizing for every token
+    // took 72 bytes per token of a 230,000-entry table, past the thread
+    // scratch (#3254). Each iteration pushes at most one task.
+    u32 maximum = end > start ? end - start + 1 : 1;
+    u32 capacity = BUSTER_MIN(maximum, C_PARSE_CONSTANT_TASK_INITIAL_CAPACITY);
     // Guarded while a function body is validated (#1256): a miss answers
     // "not a constant" and the caller reports the exhausted body.
     CParseConstantTask* tasks = C_PARSE_BODY_SCRATCH_ARRAY(arena, CParseConstantTask, capacity);
@@ -32248,6 +32265,23 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
     }
     while (count)
     {
+        if (count == capacity && capacity < maximum)
+        {
+            u32 grown_capacity = capacity <= maximum / 2 ? capacity * 2 : maximum;
+            CParseConstantTask* grown = C_PARSE_BODY_SCRATCH_ARRAY(arena, CParseConstantTask, grown_capacity);
+            if (grown)
+            {
+                memcpy(grown, tasks, (u64)count * sizeof(*tasks));
+                tasks = grown;
+                capacity = grown_capacity;
+            }
+            else
+            {
+                last = (CParseConstant){.type = C_TYPE_ID_INVALID};
+                count = 0;
+                continue;
+            }
+        }
         CParseConstantTask* task = tasks + count - 1;
         if (!task->state)
         {
