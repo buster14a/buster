@@ -12725,13 +12725,19 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE MachineX64PreparedExactOpcode* machine_x64_exa
     return entry;
 }
 
-// The complete preparation: every row, in row order.
+// The complete preparation: every row, in row order.  Idempotent, so a
+// later call from a gang caller finds it complete and touches nothing.
+BUSTER_GLOBAL_LOCAL bool machine_x64_exact_entries_complete;
 BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_all_entries(void)
 {
-    BUSTER_CHECK_SERIAL_INITIALIZATION();
-    for (u32 ordinal = 0; ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT; ordinal += 1)
+    if (!machine_x64_exact_entries_complete)
     {
-        (void)machine_x64_exact_prepared_entry(ordinal);
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
+        for (u32 ordinal = 0; ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT; ordinal += 1)
+        {
+            (void)machine_x64_exact_prepared_entry(ordinal);
+        }
+        machine_x64_exact_entries_complete = true;
     }
 }
 
