@@ -545,6 +545,26 @@ captures (#2741).
   model, prints it in its report, and on any other host compiles and runs
   nothing and fails. The inventory test also refuses a `covered` row whose
   evidence consumer never checks the observed host against `APPROVED_HOST`.
+  Each published `9700X compiler benchmark` check, for both main and pull
+  requests, names the inventory rows that its attempt discharged
+  (`compiler_receipt.covered_inventory_rows`, in the check summary, in its
+  JSON as `inventory_coverage`, and in the main commit report). The mapping
+  `compiler_receipt.INVENTORY_LEGS` ties each receipt leg to its rows. On
+  main, the self-host lab discharges `uarch_lab:compare@main` and the corpus
+  discharges `build:bench_throughput@main`. On a pull request, the lab
+  discharges `uarch_lab:compare`, and the corpus and scaling discharge
+  `build:bench_throughput`. Each opt-in profile discharges its own
+  `PROFILE_ROWS` row, and the analyzer discharges its two analyzer rows.
+  A leg discharges its rows only when the attempt concluded `success`. Every
+  other leg is listed as not discharged, with the reason: it was not
+  requested, left no record, failed, was pending or skipped, was superseded,
+  or the publisher refused its evidence. A row named by several legs is
+  discharged only when every requested leg discharged. Rows the check does
+  not name still need their own evidence. This is report-only and changes no
+  conclusion. The inventory test fails when a `covered` `main-compare` or
+  `pull-compare` row can't be reached from any leg of its mode, or when a leg
+  names a row that isn't covered on that route. So renaming or deleting a row
+  or a leg cannot silently drop coverage.
 - **The dedicated Ryzen 7 9700X is not a general GitHub Actions executor.**
   The queued benchmark service, its dispatch workflow and the earlier
   `.github/workflows/zen5-audit.yml` are removed (#2708). The only workflow

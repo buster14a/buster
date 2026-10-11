@@ -694,6 +694,13 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(published["check_url"], started["html_url"])
         self.assertEqual(compiler_comment.validate_entry(published, REPO), [])
         self.assertIn(f"`{'b' * 40}` (first parent)", published["markdown"])
+        # The check names the inventory rows this validated main attempt discharged (#2761).
+        self.assertIn("`uarch_lab:compare@main`", started["output"]["summary"])
+        shown = json.loads(started["output"]["text"].removeprefix("```json\n").removesuffix("\n```"))
+        self.assertEqual(shown["inventory_coverage"]["discharged"],
+                         ["build:bench_throughput@main", "uarch_lab:compare@main"])
+        self.assertIn("| Inventory rows discharged | `build:bench_throughput@main`, `uarch_lab:compare@main` |",
+                      published["markdown"])
 
 
 if __name__ == "__main__":

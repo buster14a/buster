@@ -29,6 +29,11 @@ candidate compiler alone, compiling and linking generated multi-TU inputs with
 -fcompile-jobs=W on whole physical cores. It is report-only too; its bundles
 must be valid and bound to the candidate binary.
 
+A published check names the docs/performance-validation-v1.json rows its
+validated legs discharged (covered_inventory_rows); a failed, skipped,
+superseded or unrequested leg discharges nothing, and
+performance_inventory_test.py keeps INVENTORY_LEGS and the inventory in step.
+
 Map (searchable symbols):
     RECEIPT_SCHEMA, LAB_SCHEMA, MODES, check_name, check_marker   identities
     attempt_marker                                         one attempt's check (#2803)
@@ -44,6 +49,8 @@ Map (searchable symbols):
         throughput_real_source_digest                      real-source throughput (#2761)
     PRODUCTION_PROFILE_PROFILE, validate_production_profile,
         production_profile_fields                          PGO/LTO production profile (#2761)
+    INVENTORY_LEGS, inventory_leg_record, covered_inventory_rows,
+        render_inventory_coverage                          inventory rows each validated leg discharged (#2761)
     REGRESSION_POLICIES, regression_policy                 report-only switch
     range_label                                            main baseline relation
     render                                                 readable report
@@ -2949,6 +2956,7 @@ def render_analyzer(receipt: dict, summary: dict, conclusion: str, notes: list[s
              f"Profile `{profile.get('name', 'NA')}`: {profile.get('workload', 'NA')}.",
              f"Profile evidence status: `{summary.get('status', 'missing')}`. Observed host: "
              f"`{host.get('cpu_model', 'NA')}`.", "",
+             *render_inventory_coverage(receipt.get("inventory_coverage")),
              "| Identity | Value |", "| --- | --- |"]
     for key in IDENTITY_KEYS:
         lines.append(f"| {key} | `{identity.get(key, 'NA')}` |")
@@ -3145,6 +3153,142 @@ def render_analyzer(receipt: dict, summary: dict, conclusion: str, notes: list[s
     return "\n".join(lines)
 
 
+# Inventory rows of docs/performance-validation-v1.json that each receipt leg
+# discharges, per mode (#2761). A row is discharged only by a leg of an attempt
+# whose evidence the publisher validated (conclusion success); every other leg
+# is listed with why it discharged nothing. performance_inventory_test.py fails
+# when a covered main-compare/pull-compare row is reachable from no leg here, or
+# when a leg names a row that is not a covered row of its mode's route.
+INVENTORY_COVERAGE_SCHEMA = "buster-performance-inventory-coverage-v1"
+INVENTORY_ROUTES = {"main": "main-compare", "pull": "pull-compare"}
+INVENTORY_LEGS = {
+    "main": {
+        "self-host": ("uarch_lab:compare@main",),
+        "corpus": ("build:bench_throughput@main",),
+    },
+    "pull": {
+        "self-host": ("uarch_lab:compare",),
+        "corpus": ("build:bench_throughput",),
+        "scaling": ("build:bench_throughput",),
+        "analyzer": ("build:clang_analyze_benchmark", "tool:clang_analyze_benchmark.c"),
+        "inline": ("uarch_lab:compare@canonical-inline-self-host",),
+        "ast-pilot": ("uarch_lab:compare@ast-pilot-acceptance",),
+        "real-source": ("build:bench_throughput@throughput-real-source",),
+        "production-profile": ("build:production_profile",),
+    },
+}
+# Opt-in legs whose receipt record carries its own requested/status fields.
+INVENTORY_OPT_IN_RECORDS = {"inline": "inline_acceptance", "ast-pilot": "ast_pilot_acceptance",
+                            "real-source": "throughput_real_source", "production-profile": "production_profile"}
+
+
+def inventory_leg_record(receipt: dict, leg: str) -> tuple[bool | None, str]:
+    """(ran, recorded status) of one leg in a receipt; ran is None when the leg left no record.
+
+    ran is False when the receipt says the leg was not requested, and True
+    when it was requested; the recorded status is the receipt's own account
+    of it, which never discharges anything by itself.
+    """
+    analyzer = receipt.get("profile") in ANALYZER_PROFILE_BY_LINE.values()
+    state = receipt.get("state") if isinstance(receipt.get("state"), str) else "missing"
+    ran: bool | None = None
+    recorded = "missing"
+    if leg == "analyzer":
+        ran, recorded = analyzer, state if analyzer else "not requested"
+    elif leg == "self-host":
+        ran, recorded = not analyzer, "not requested" if analyzer else state
+    elif leg == "corpus":
+        if analyzer or ("throughput_profile" in receipt and receipt["throughput_profile"] is None):
+            ran, recorded = False, "not requested"
+        elif "throughput_profile" in receipt:
+            corpus = receipt.get("throughput") if isinstance(receipt.get("throughput"), dict) else {}
+            ran = True
+            recorded = "missing" if not corpus else "valid" if corpus.get("valid") is True and \
+                corpus.get("exit") in (None, 0) else "failed"
+    elif leg == "scaling":
+        if "scaling_profile" in receipt:
+            series = receipt.get("scaling") if isinstance(receipt.get("scaling"), dict) else {}
+            statuses = {row.get("status") if isinstance(row, dict) else None
+                        for row in (series.get(name) for name in SCALING_PROFILE["series"])}
+            ran, recorded = True, "valid" if statuses == {"valid"} else "failed"
+        else:
+            ran, recorded = False, "not requested"
+    elif leg in INVENTORY_OPT_IN_RECORDS:
+        record = receipt.get(INVENTORY_OPT_IN_RECORDS[leg])
+        if record is None or (isinstance(record, dict) and record.get("requested") is False):
+            ran, recorded = False, "not requested"
+        elif isinstance(record, dict) and record.get("requested") is True:
+            ran, recorded = True, record.get("status") if isinstance(record.get("status"), str) else "missing"
+        else:
+            recorded = "malformed"
+    else:
+        recorded = "unknown leg"
+    return ran, recorded
+
+
+def covered_inventory_rows(receipt: object, conclusion: str, mode: str) -> dict:
+    """Which inventory rows this attempt's validated evidence discharged, per leg (pure).
+
+    mode is the trusted mode being published, never the receipt's own claim.
+    A leg discharges its rows only when the attempt concluded success, which
+    the publisher grants only after re-validating every requested leg's raw
+    evidence; a superseded, failed, invalid, absent or unrequested leg is
+    listed as not discharged with its reason. A row is discharged when every
+    requested leg naming it discharged and at least one did. Report-only:
+    nothing here changes a conclusion.
+    """
+    legs = INVENTORY_LEGS.get(mode, {})
+    receipt = receipt if isinstance(receipt, dict) else None
+    entries: list[dict] = []
+    for leg, rows in legs.items():
+        ran, recorded = inventory_leg_record(receipt, leg) if receipt is not None else (None, "no receipt")
+        if receipt is None:
+            status = "not discharged: no readable receipt"
+        elif ran is False:
+            status = "not discharged: not requested"
+        elif ran is None:
+            status = f"not discharged: no {leg} record ({recorded})"
+        elif conclusion == "success":
+            status = "discharged"
+        elif conclusion == "neutral" or receipt.get("state") == "superseded":
+            status = "not discharged: superseded before measurement"
+        elif recorded not in ("complete", "measured", "valid"):
+            status = f"not discharged: leg {recorded}"
+        else:
+            status = "not discharged: evidence refused by the publisher"
+        entries.append({"leg": leg, "rows": list(rows), "recorded": recorded, "status": status})
+    statuses: dict[str, list[str]] = {}
+    for entry in entries:
+        for row in entry["rows"]:
+            statuses.setdefault(row, []).append(entry["status"])
+    by_row: dict[str, str] = {}
+    for row, found in statuses.items():
+        requested = [status for status in found if status != "not discharged: not requested"] or found
+        by_row[row] = next((status for status in requested if status != "discharged"), "discharged")
+    return {"schema": INVENTORY_COVERAGE_SCHEMA, "inventory": "docs/performance-validation-v1.json",
+            "route": INVENTORY_ROUTES.get(mode, "none"), "conclusion": conclusion, "legs": entries,
+            "rows": dict(sorted(by_row.items())),
+            "discharged": sorted(row for row, status in by_row.items() if status == "discharged")}
+
+
+def render_inventory_coverage(coverage: object) -> list[str]:
+    """Markdown lines naming each inventory row and leg this attempt did or did not discharge."""
+    lines: list[str] = []
+    if isinstance(coverage, dict) and isinstance(coverage.get("legs"), list):
+        discharged = coverage.get("discharged") if isinstance(coverage.get("discharged"), list) else []
+        lines += [f"Inventory coverage (`docs/performance-validation-v1.json`, route `{coverage.get('route', 'NA')}`): "
+                  f"{len(discharged)} rows discharged by this attempt's validated Zen 5 evidence; any other row "
+                  "still needs its own evidence.", "",
+                  "| Leg | Inventory rows | Receipt status | Coverage |", "| --- | --- | --- | --- |"]
+        for entry in coverage["legs"]:
+            if isinstance(entry, dict):
+                rows = entry.get("rows") if isinstance(entry.get("rows"), list) else []
+                lines.append("| %s | %s | %s | %s |" % (entry.get("leg", "NA"), ", ".join(f"`{row}`" for row in rows),
+                                                          entry.get("recorded", "NA"), entry.get("status", "NA")))
+        lines.append("")
+    return lines
+
+
 def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) -> str:
     """Readable per-candidate report: identities, verdict, core metrics and timings."""
     if isinstance(receipt, dict) and receipt.get("profile") in ANALYZER_PROFILE_BY_LINE.values():
@@ -3159,6 +3303,7 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
         "",
         verdict.get("text") or "No wall-time verdict.",
         "",
+        *render_inventory_coverage(receipt.get("inventory_coverage") if isinstance(receipt, dict) else None),
         "| Identity | Value |",
         "| --- | --- |",
     ]
