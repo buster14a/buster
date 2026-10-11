@@ -7542,7 +7542,21 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
     {
         metrics->function_symbol_limit = object.symbol_count;
     }
-    compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result, metrics);
+    // Every declared section is its own COFF or Mach-O section, so a file
+    // with more than the format can number is refused here, naming the first
+    // section past the limit, rather than by the writer's capacity check.
+    ObjectFormat format = object_format_for_target(invocation.target);
+    u32 section_limit = format == OBJECT_FORMAT_COFF ? OBJECT_COFF_MAX_SECTIONS : format == OBJECT_FORMAT_MACH_O64 ? OBJECT_MACH_O_MAX_SECTIONS : UINT32_MAX;
+    if (invocation.action == COMPILER_DRIVER_ACTION_OBJECT && unit.section_count > section_limit)
+    {
+        result.error = COMPILER_DRIVER_ERROR_OBJECT;
+        result.diagnostic = string_format(arena, S8("{S8}: section '{S8}' is section {u32} of {u32}; a {S8} object holds at most {u32} sections"), path,
+                                          unit.sections[section_limit].name, section_limit + 1, unit.section_count, object_format_name(format), section_limit);
+    }
+    else
+    {
+        compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result, metrics);
+    }
     return result;
 }
 

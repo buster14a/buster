@@ -7845,6 +7845,104 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_assembly_round_t
     return result;
 }
 
+// An assembled file's sections are as many as its source declares, and each
+// stays its own COFF or Mach-O section past the one-per-kind count the
+// codegen object has. 255 cross-calling text sections assemble for every COFF
+// and Mach-O target and read back; COFF keeps each name, including the ones
+// at the initializer arrays' kind slots, which only an initializer array may
+// take as `.CRT$XCU`/`.CRT$XTX`. A 256th section is past Mach-O's one-byte
+// section numbering and is refused by name instead of failing serialization.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_many_sections_source(Arena* arena, u32 section_count, bool aarch64)
+{
+    String8 call = aarch64 ? S8("bl") : S8("call");
+    u64 capacity = (u64)section_count * 64;
+    char8* text = arena_allocate(arena, char8, capacity);
+    u64 length = 0;
+    for (u32 index = 0; index < section_count; index += 1)
+    {
+        String8 line = string_format(arena, S8(".section .text$f{u32},\"x\"\nf{u32}:\n    {S8} f{u32}\n    ret\n"), index, index, call,
+                                     (index + 1) % section_count);
+        memcpy(text + length, line.pointer, line.length);
+        length += line.length;
+    }
+    return (String8){.pointer = text, .length = length};
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_many_object_sections(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    typedef struct ManySectionsCase
+    {
+        String8 triple;
+        Target target;
+        bool coff;
+    } ManySectionsCase;
+    ManySectionsCase cases[] = {
+        {S8("x86_64-windows-msvc"), {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS}, true},
+        {S8("aarch64-windows-msvc"), {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS}, true},
+        {S8("x86_64-apple-macos"), {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS}, false},
+        {S8("aarch64-apple-macos"), {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS}, false},
+    };
+    u32 section_count = OBJECT_MACH_O_MAX_SECTIONS;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        ManySectionsCase test_case = cases[index];
+        bool aarch64 = test_case.target.cpu_arch == CPU_ARCH_AARCH64;
+        String8 target = string_format(arena, S8("--target={S8}"), test_case.triple);
+        String8 assembly = buster_test_temporary_path(arena, S8("many-object-sections"), S8(".s"));
+        String8 object = buster_test_temporary_path(arena, S8("many-object-sections"), S8(".o"));
+        BUSTER_TEST(arguments, file_write(assembly, BUSTER_SLICE_TO_BYTE_SLICE(compiler_driver_test_many_sections_source(arena, section_count, aarch64))));
+        String8 assemble[] = {target, S8("-c"), assembly, S8("-o"), object};
+        CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble)));
+        BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE, test_case.triple);
+        BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE, assembled.diagnostic);
+        if (assembled.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            ByteSlice image = file_read(arena, object, (FileReadOptions){0});
+            u32 written_sections = 0;
+            if (test_case.coff && image.length >= 20 + (u64)section_count * 40)
+            {
+                u16 count = 0;
+                memcpy(&count, image.pointer + 2, sizeof(count));
+                written_sections = count;
+                for (u32 section = OBJECT_SECTION_INIT_ARRAY; section <= OBJECT_SECTION_FINI_ARRAY; section += 1)
+                {
+                    String8 expected = string_format(arena, S8(".text$f{u32}"), section);
+                    String8 name = {.pointer = (char8*)image.pointer + 20 + (u64)section * 40, .length = expected.length};
+                    BUSTER_TEST_RAW(arguments, string_equal(name, expected), expected);
+                }
+            }
+            else if (!test_case.coff && image.length >= 100)
+            {
+                memcpy(&written_sections, image.pointer + 32 + 64, sizeof(written_sections));
+            }
+            BUSTER_TEST_RAW(arguments, written_sections == section_count, test_case.triple);
+            ObjectFile read = object_read(arena, image, test_case.target);
+            BUSTER_TEST_RAW(arguments, read.error == OBJECT_ERROR_NONE, test_case.triple);
+        }
+        if (!test_case.coff)
+        {
+            String8 past_limit = buster_test_temporary_path(arena, S8("many-object-sections-past-limit"), S8(".s"));
+            BUSTER_TEST(arguments, file_write(past_limit, BUSTER_SLICE_TO_BYTE_SLICE(compiler_driver_test_many_sections_source(arena, section_count + 1, aarch64))));
+            String8 refuse[] = {target, S8("-c"), past_limit, S8("-o"), object};
+            CompilerDriverResult refused = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(refuse)));
+            BUSTER_TEST_RAW(arguments, refused.error == COMPILER_DRIVER_ERROR_OBJECT, test_case.triple);
+            BUSTER_TEST_RAW(arguments, string_first_sequence(refused.diagnostic, S8("section '.text$f255' is section 256 of 256")) != BUSTER_STRING_NO_MATCH &&
+                                           string_first_sequence(refused.diagnostic, S8("at most 255 sections")) != BUSTER_STRING_NO_MATCH,
+                            refused.diagnostic);
+            os_file_delete(past_limit);
+        }
+        os_file_delete(assembly);
+        os_file_delete(object);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // Mach-O assembly source spells final symbol names, `_` included: the object
 // must hold `_g`, not `__g`, for defined, global, weak and referenced symbols,
 // and Buster's own -S listing must reassemble to the same symbol table as a
@@ -33833,6 +33931,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_x86_64_tls_general_dynamic_padding);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_macho_assembly_symbol_names);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_many_object_sections);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_address_integers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_address_integer_native);
