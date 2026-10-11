@@ -836,12 +836,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_large_source_count(UnitTestArguments
             ByteSlice module = pdb_test_stream_bytes(arena, built.bytes, stream_index);
             bool valid = module.length == 16 + module_files * checksum_stride;
             BUSTER_TEST(arguments, valid);
+            // Both modules name the same paths, so both point at the one
+            // /names copy of each.
             for (u32 file = 0; file < module_files && valid; file += 1)
             {
-                u32 expected = 1 + (module_index * module_files + file) * 7;
+                u32 expected = 1 + file * 7;
                 valid = pdb_read_u32(module, 12 + (u64)file * checksum_stride) == expected;
             }
             BUSTER_TEST(arguments, valid);
+        }
+        ByteSlice names = pdb_test_stream_bytes(arena, built.bytes, PDB_TEST_STREAM_NAMES);
+        u64 names_buffer = 1 + (u64)module_files * 7;
+        if (BUSTER_REQUIRE(arguments, names.length >= 12 + names_buffer + 8 && pdb_read_u32(names, 8) == names_buffer))
+        {
+            u32 bucket_count = pdb_read_u32(names, 12 + names_buffer);
+            BUSTER_TEST(arguments, names.length == 12 + names_buffer + 4 + (u64)bucket_count * 4 + 4 &&
+                                       pdb_read_u32(names, names.length - 4) == module_files);
         }
     }
     // The total may exceed 16 bits, but one module's ModFileCount may not.

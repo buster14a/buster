@@ -212,3 +212,7 @@ BUSTER_F_DECL NativeExecutableLinkResult link_native_executable(Arena* arena, Ob
 BUSTER_F_DECL ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebugModule* debug_module,
                                                        u32 const* object_output_sections, u64 const* object_section_offsets,
                                                        u32 output_section_count);
+// link_pe_resolved_codeview for every debug module, into symbols[module],
+// without rescanning every relocation per module.
+BUSTER_F_DECL void link_pe_resolved_codeview_modules(Arena* arena, ObjectFile* object, u32 const* object_output_sections,
+                                                     u64 const* object_section_offsets, u32 output_section_count, ByteSlice* symbols);
