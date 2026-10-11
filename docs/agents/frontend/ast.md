@@ -458,7 +458,6 @@ unchanged.
 
   It also declines shapes whose machine answers append few or no rows, but
   for which it has no rule:
-  - `++` and `--`, prefix and postfix;
   - an arithmetic, shift or `?:` operand that ends in `. name` or `-> name`
     without being a member node, such as `a + s.f`. The machine reads the
     bit-field width from those tokens, so `c_ast_types_operand_width` leaves
@@ -1504,8 +1503,8 @@ request runs it, the budget is neither passed nor failed. The hosted counts
 above are not acceptance, and the default stays off.
 
 For the typer's `++` and `--` rule (`c_ast_types_update`), proposed by the
-decline census in audit `2026-10-11T093336Z`
-([#3408](https://github.com/buster14a/buster/pull/3408)), these
+decline census in audit
+[`2026-10-11T093336Z`](../../performance-audits/2026-10-11T093336Z.md), these
 budgets were declared before its measured runs. They use the stage-2 input,
 flags and four Callgrind arms (`--cache-sim=no --branch-sim=no`) on tests-off
 `-march=x86-64-v3` Release builds. The base is main `4e5d563f`, which the
