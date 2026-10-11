@@ -6,8 +6,10 @@
 // artifacts), and compiler_driver_metrics_format renders the opt-in per-input
 // records (CompilerDriverInputResult, requested by collect_input_metrics /
 // -fmetrics-out) that a batched multi-input invocation publishes in input
-// order. compiler_prewarm / compiler_parallel_prewarm prepare shared tables
-// before lanes run. driver.c owns the implementation and its layout map.
+// order. The embedding facade supplies input_source and retain_object for one
+// in-memory C input without publishing an object file. compiler_prewarm /
+// compiler_parallel_prewarm prepare shared tables before lanes run. driver.c
+// owns the implementation and its layout map.
 
 #include <buster/lib/compiler/diagnostic.h>
 #include <buster/lib/compiler/assembly/assembly_unit.h>
@@ -88,14 +90,16 @@ typedef enum CompilerDriverAction
     COMPILER_DRIVER_ACTION_COUNT,
 } CompilerDriverAction;
 
-// Informational queries answered without any input: --version, -dumpversion
-// and -dumpmachine. compiler_driver_query_text renders the text.
+// Informational queries answered without any input: --version, -dumpversion,
+// -dumpmachine and -print-target-triple/-print-effective-triple.
+// compiler_driver_query_text renders the text.
 typedef enum CompilerDriverQuery
 {
     COMPILER_DRIVER_QUERY_NONE,
     COMPILER_DRIVER_QUERY_VERSION,
     COMPILER_DRIVER_QUERY_DUMP_VERSION,
     COMPILER_DRIVER_QUERY_DUMP_MACHINE,
+    COMPILER_DRIVER_QUERY_TARGET_TRIPLE,
     COMPILER_DRIVER_QUERY_COUNT,
 } CompilerDriverQuery;
 
@@ -221,6 +225,13 @@ struct CompilerDriverInvocation
     // and embedding callers supply it themselves. A null pointer means it was
     // not supplied; an empty translation unit has a nonnull pointer.
     String8 standard_input;
+    // API-only in-memory C input. When non-null, input_paths[0] names the
+    // virtual source path for diagnostics, __FILE__, and quoted includes; it
+    // is not opened. The source has no filesystem identity.
+    String8 input_source;
+    // API-only: retain the single -c object's ObjectFile in the result and
+    // suppress writing an object file.
+    bool retain_object;
     // Where to write the source measurement as key=value text. `-v` prints the
     // same numbers as a table for a human; this is the form another program
     // reads, so a build driver can divide its own instruction count by them.
@@ -233,6 +244,11 @@ struct CompilerDriverInvocation
     // other preprocessed count is still gathered. The cc command sets it when
     // it prints neither report.
     bool omit_spelled_bytes;
+    // API-only (`ide run`): with COMPILER_DRIVER_ACTION_LINK, stop after
+    // link_objects on either the single-unit or multi-input path and return
+    // the merged in-memory object in CompilerDriverResult.object; do not look
+    // up dynamic libraries, write an executable or create an output file.
+    bool retain_linked_object;
     // `-dM`: with -E, print the macros defined at the end of preprocessing as
     // `#define` lines instead of the preprocessed text. Ignored without -E.
     bool dump_macros;
@@ -301,6 +317,12 @@ struct CompilerDriverInvocation
     CompilerDriverWarningPolicy warning_policy;
     CompilerDriverQuery query;
     bool no_standard_includes;
+    // -nostdlibinc keeps only the compiler resource include directory.
+    bool no_standard_library_includes;
+    // Last -std=, -trigraphs, -ftrigraphs or -fno-trigraphs wins.
+    CTrigraphMode trigraph_mode;
+    // -working-directory: relative input paths resolve against it.
+    String8 working_directory;
     bool debug_info;
     bool disable_direct_ssa;
     bool disable_local_promotion;
@@ -516,6 +538,9 @@ struct CompilerDriverCAstPilotResult
     // segments and hints read from the tree, and bodies left to the token
     // walk and why. Zero when the analysis had no tree to use.
     CAstStatementStatistics statements;
+    // What lowering read from the tree (CAstLowerStatistics). Zero for
+    // -fsyntax-only and when lowering had no tree.
+    CAstLowerStatistics lower;
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;
@@ -603,6 +628,12 @@ BUSTER_F_DECL String8 compiler_driver_c_ast_pilot_name(CompilerDriverCAstPilot p
 // is the one the C frontend presents in __clang_major__/__clang_minor__/
 // __clang_patchlevel__; the machine is the invocation's effective target.
 BUSTER_F_DECL String8 compiler_driver_query_text(Arena* arena, CompilerDriverInvocation const* invocation);
+// Resolves an input against -working-directory with the host's path rules, as
+// LLVM's make_absolute does. On Windows a rooted path without a drive ("\\x.c")
+// takes the root name ("C:" or "\\\\server") of the absolute directory, and a
+// drive-relative "C:x.c" takes its root-relative part. Empty when the
+// directory has no root name.
+BUSTER_F_DECL String8 compiler_driver_working_directory_path(Arena* arena, String8 directory, String8 input);
 BUSTER_F_DECL CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation);
 // The -fmetrics-out record text; docs/agents/driver.md is the schema.
 BUSTER_F_DECL String8 compiler_driver_metrics_format(Arena* arena, CompilerDriverInvocation const* invocation, CompilerDriverResult const* result,
