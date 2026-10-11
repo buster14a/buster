@@ -13324,7 +13324,7 @@ BUSTER_GLOBAL_LOCAL bool object_writer_32_arena_fits(Arena* arena, ObjectFile* o
 {
     bool coff = format == OBJECT_FORMAT_COFF;
     u64 scratch = 64 + (u64)object->section_count * (coff ? 144u : 20u) + (u64)object->symbol_count * sizeof(u32) +
-                  (coff ? 0 : (u64)object->relocation_count * 144);
+                  (coff ? (u64)object->relocation_count * sizeof(u32) : (u64)object->relocation_count * 144);
     if (coff && object->target.cpu_arch == CPU_ARCH_AARCH64)
     {
         // TLS index binding may append a symbol and copy both source arrays
@@ -13376,11 +13376,12 @@ BUSTER_GLOBAL_LOCAL u32 object_buffer_u32(ObjectBuffer* buffer, u64 value)
 // The split does not copy the relocations: `moves` records where each
 // grouped entry went, and object_initializer_relocation_place gives a
 // relocation's new section and offset from it. The ELF writer places each
-// relocation as it reaches it; the COFF writer takes one placed copy. Every
-// table here is sized by sections or entries, never by relocations, and each
-// is checked before it is taken. A split past `section_limit` sections, or
-// one the arena cannot hold, answers false; the limit also bounds the one
-// formatted name each group takes.
+// relocation as it reaches it; the COFF writer takes one placed copy when a
+// group moved, then builds stable per-section relocation buckets once. The
+// split maps are sized by sections or entries, and every table is checked
+// before it is taken. A split past `section_limit` sections, or one the arena
+// cannot hold, answers false; the limit also bounds the one formatted name
+// each group takes.
 BUSTER_GLOBAL_LOCAL ObjectSectionKind const object_initializer_kinds[2] = {OBJECT_SECTION_INIT_ARRAY, OBJECT_SECTION_FINI_ARRAY};
 
 typedef struct ObjectInitializerSplit ObjectInitializerSplit;
@@ -13524,9 +13525,8 @@ BUSTER_GLOBAL_LOCAL ObjectRelocation object_initializer_relocation_place(ObjectI
     return result;
 }
 
-// The COFF writer reads each relocation's section and offset in several
-// places, so it takes the placed relocations as one copy, made only when a
-// group moved something.
+// The COFF writer builds its stable per-section buckets from the placed
+// relocations, so it takes a placed copy only when a group moved something.
 BUSTER_GLOBAL_LOCAL bool object_initializer_relocations_place(Arena* arena, ObjectFile* split, ObjectInitializerSplit const* moves,
                                                               ObjectWriteStatistics* statistics)
 {
@@ -14426,6 +14426,25 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
         }
         relocation_counts[source->section] += 1;
     }
+    u32* relocation_ends = 0;
+    u32* section_relocations = 0;
+    if (buffer.error == OBJECT_ERROR_NONE)
+    {
+        relocation_ends = arena_allocate(arena, u32, section_count);
+        section_relocations = arena_allocate(arena, u32, object->relocation_count);
+        u32 relocation_start = 0;
+        for (u32 section = 0; section < section_count; section += 1)
+        {
+            relocation_ends[section] = relocation_start;
+            relocation_start += relocation_counts[section];
+        }
+        for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
+        {
+            ObjectRelocation* source = object->relocations + relocation;
+            statistics->relocation_visits += 1;
+            section_relocations[relocation_ends[source->section]++] = relocation;
+        }
+    }
     for (u32 section = 0; section < section_count && buffer.error == OBJECT_ERROR_NONE; section += 1)
     {
         ObjectSection* object_section = object->sections + section;
@@ -14438,14 +14457,12 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
             object_buffer_write(&buffer, object_section->data.pointer, object_section->data.length);
             statistics->payload_bytes_copied += object_section->data.length;
         }
-        for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
+        u32 relocation_start = relocation_ends[section] - relocation_counts[section];
+        u32 relocation_end = relocation_ends[section];
+        for (u32 index = relocation_start; index < relocation_end; index += 1)
         {
-            ObjectRelocation* source = object->relocations + relocation;
+            ObjectRelocation* source = object->relocations + section_relocations[index];
             statistics->relocation_visits += 1;
-            if (source->section != section)
-            {
-                continue;
-            }
             s64 addend = source->addend;
             if (source->kind == OBJECT_RELOCATION_X86_64_PC32 || source->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
                 source->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32)
@@ -14522,14 +14539,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
             // The 32-bit field counts the marker as well as all real relocations.
             object_write_u32_at(&buffer, overflow_offset, relocation_counts[section] + 1);
         }
-        for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
+        for (u32 index = relocation_start; index < relocation_end; index += 1)
         {
-            ObjectRelocation* source = object->relocations + relocation;
+            ObjectRelocation* source = object->relocations + section_relocations[index];
             statistics->relocation_visits += 1;
-            if (source->section != section)
-            {
-                continue;
-            }
             u16 type = object_coff_relocation_type(object->target.cpu_arch, source->kind);
             if (!type)
             {
