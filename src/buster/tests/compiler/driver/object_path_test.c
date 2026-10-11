@@ -2363,6 +2363,101 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_ifunc_tests(UnitTestArgum
     }
     return result;
 }
+
+#if BUSTER_CPU_ARCH_X86_64
+// Issue 3399: GCC and Clang target_clones and __builtin_cpu_* code calls
+// __cpu_indicator_init and reads __cpu_model from the static libgcc.a, which
+// the host compiler driver links implicitly. This linker selects the
+// CPU-feature members only when such a reference remains. The host link is the
+// oracle; the program also fails if __cpu_model was never initialized, since
+// every x86-64 CPU has SSE2. A -L libgcc.a that lacks the runtime, and a
+// sysroot with no GCC installation, refuse the link with the archive and
+// symbol named and leave no output.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_cpu_runtime_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 compiler = S8(BUSTER_HOST_C_COMPILER_ID);
+    bool supported = string_equal(compiler, S8("GNU")) || string_equal(compiler, S8("Clang"));
+    if (supported)
+    {
+        String8 root = buster_test_temporary_path(arena, S8("buster-elf-cpu-runtime"), S8(""));
+        OsDirectoryCreateResult created = os_make_directory(root);
+        BUSTER_TEST(arguments, created.error.v == 0);
+        String8 source = string_format_z(arena, S8("{S8}/clones.c"), root);
+        String8 object = string_format_z(arena, S8("{S8}/clones.o"), root);
+        String8 unrelated_source = string_format_z(arena, S8("{S8}/unrelated.c"), root);
+        String8 unrelated_object = string_format_z(arena, S8("{S8}/unrelated.o"), root);
+        BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+            "int puts(const char *);\n"
+            "__attribute__((target_clones(\"default\", \"avx2\"))) int work(int x) { return x + 1; }\n"
+            "int main(void)\n"
+            "{\n"
+            "    int ok = work(41) == 42 && __builtin_cpu_supports(\"sse2\");\n"
+            "    puts(ok ? \"cpu runtime ok\" : \"cpu runtime wrong\");\n"
+            "    return !ok;\n"
+            "}\n"))));
+        BUSTER_TEST(arguments, file_write(unrelated_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int unrelated_runtime_member;\n"))));
+        String8 compile[] = {S8("-w"), S8("-O2"), S8("-c"), source, S8("-o"), object};
+        String8 unrelated_compile[] = {S8("-w"), S8("-O2"), S8("-c"), unrelated_source, S8("-o"), unrelated_object};
+        bool produced = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)) &&
+                        compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(unrelated_compile));
+        BUSTER_TEST(arguments, produced);
+        if (produced)
+        {
+            String8 oracle = string_format_z(arena, S8("{S8}/oracle"), root);
+            String8 host_link[] = {object, S8("-o"), oracle};
+            bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
+            BUSTER_TEST(arguments, linked);
+            if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, oracle));
+            String8 kinds[] = {S8("-no-pie"), S8("-pie")};
+            for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+            {
+                String8 output = string_format_z(arena, S8("{S8}/buster{S8}"), root, kinds[kind]);
+                String8 command[] = {kinds[kind], object, S8("-o"), output};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, output));
+            }
+
+            String8 fake = string_format_z(arena, S8("{S8}/fake"), root);
+            created = os_make_directory(fake);
+            BUSTER_TEST(arguments, created.error.v == 0);
+            String8 fake_archive = string_format_z(arena, S8("{S8}/libgcc.a"), fake);
+            ByteSlice member = file_read(arena, unrelated_object, (FileReadOptions){0});
+            BUSTER_TEST(arguments, file_write(fake_archive, compiler_driver_elf_semantic_archive(arena, member)));
+            String8 search = string_format_z(arena, S8("-L{S8}"), fake);
+            String8 lacking_output = string_format_z(arena, S8("{S8}/lacking"), root);
+            String8 lacking[] = {search, object, S8("-o"), lacking_output};
+            CompilerDriverResult refused = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(lacking)));
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK && refused.native_link.error == LINK_ERROR_UNRESOLVED_SYMBOL);
+            BUSTER_TEST(arguments, string_equal(refused.native_link.symbol, S8("__cpu_indicator_init")) ||
+                                   string_equal(refused.native_link.symbol, S8("__cpu_model")));
+            BUSTER_STRING_TEST(arguments, refused.diagnostic,
+                               string_format(arena, S8("GCC runtime {S8} does not define {S8}"), fake_archive, refused.native_link.symbol));
+            BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(lacking_output));
+
+            String8 empty = string_format_z(arena, S8("{S8}/empty-sysroot"), root);
+            created = os_make_directory(empty);
+            BUSTER_TEST(arguments, created.error.v == 0);
+            String8 sysroot = string_format_z(arena, S8("--sysroot={S8}"), empty);
+            String8 missing_output = string_format_z(arena, S8("{S8}/missing"), root);
+            String8 missing[] = {sysroot, object, S8("-o"), missing_output};
+            refused = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing)));
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK && refused.native_link.error == LINK_ERROR_UNRESOLVED_SYMBOL);
+            BUSTER_STRING_TEST(arguments, refused.diagnostic,
+                               string_format(arena, S8("{S8} is defined by the GCC runtime libgcc.a, which was not found in -L directories or the "
+                                                       "target's GCC installation"),
+                                             refused.native_link.symbol));
+            BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(missing_output));
+        }
+        BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+    return result;
+}
+#endif
 #endif
 
 #if !BUSTER_ANDROID && !BUSTER_IOS
@@ -2519,6 +2614,9 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_semantic_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_preinit_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_ifunc_tests);
+#if BUSTER_CPU_ARCH_X86_64
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_cpu_runtime_tests);
+#endif
 #endif
 #if BUSTER_ANDROID || BUSTER_IOS
     BUSTER_UNUSED(arguments);

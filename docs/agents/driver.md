@@ -1150,6 +1150,26 @@ or name libgcc_s. This uses an installed target runtime; it installs or embeds
 none. Apple, Windows, Android and freestanding runtime provisioning remain
 separate #1272 work.
 
+Native x86-64 Linux links also supply GCC's CPU-feature runtime (GitHub
+#3399). GCC and Clang `target_clones` resolvers and `__builtin_cpu_init`,
+`__builtin_cpu_supports` and `__builtin_cpu_is` call `__cpu_indicator_init`
+and read `__cpu_model` / `__cpu_features2`. Those are hidden definitions in
+the static `libgcc.a` (`cpuinfo.o`, with its own `.init_array` constructor),
+which the host compiler driver links implicitly as `-lgcc`. After objects,
+explicit archives and the ELF runtime object are selected, a remaining strong
+undefined reference to one of these names that no selected object defines
+makes `compiler_driver_elf_cpu_runtime` read `libgcc.a`: first from the `-L`
+directories, then the newest `usr/lib/gcc`, `usr/lib64/gcc` or Debian
+`usr/lib/gcc-cross` `<triple>/<version>/` directory under the sysroot, or the
+host without one (`compiler_driver_elf_libgcc_path`). Only the members that
+define those names are selected; libgcc.a is not otherwise added to the link,
+so the libgcc_s helper policy above is unchanged. Links without such a
+reference, including weak ones, do not read or name libgcc.a. A missing
+archive, or one that does not define the name, fails the link with the archive
+and symbol named, before replacing the output. AArch64 (`__aarch64_cpu_features`,
+`__init_cpu_features_resolver`, outline atomics) and non-Linux targets remain
+out of scope.
+
 `compiler_driver_elf_dynamic_symbols` walks that table once and produces two
 things.
 
