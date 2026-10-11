@@ -822,7 +822,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_flexible_initializers(Un
     TemporalArena scope = arena_begin_temporal(arguments->arena);
     Arena* arena = scope.arena;
     String8 input = buster_test_temporary_path(arena, S8("buster-flexible-initializers"), S8(".c"));
-    String8 source = {compiler_driver_flexible_initializer_source, sizeof(compiler_driver_flexible_initializer_source) - 1};
+    String8 source = S8(compiler_driver_flexible_initializer_source);
     bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source));
     BUSTER_TEST(arguments, written);
     String8 targets[] = {S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows"),

@@ -18,10 +18,21 @@ jobs:
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       BUSTER_TEST_JOBS: '2'
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Record checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Bootstrap and build trusted compiler
         shell: bash
         run: |
@@ -83,6 +94,12 @@ jobs:
           git clone https://git.musl-libc.org/git/musl "$RUNNER_TEMP/aggregate-musl"
           git -C "$RUNNER_TEMP/aggregate-musl" checkout --detach 9fa28ece75d8a2191de7c5bb53bed224c5947417
           "$RUNNER_TEMP/aggregate-build" test_musl --config Release "$RUNNER_TEMP/aggregate-musl" 2>&1 | tee "$RUNNER_TEMP/aggregate-evidence/musl.log"
+      - name: Retain machine records
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: ${{ runner.temp }}/aggregate-evidence
       - name: Retain diagnostic evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
