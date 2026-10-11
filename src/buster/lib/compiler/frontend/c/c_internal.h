@@ -302,9 +302,14 @@ struct CDeclarationBinding
     // the declaration is a local name for a weak reference to `weakref_target`
     // rather than a definition or an alias of one.
     bool is_weakref;
-    // __attribute__((ifunc("resolver"))), which has no lowering yet.
+    // __attribute__((ifunc("resolver"))): the declaration defines the name as
+    // a GNU indirect function whose value is `ifunc_resolver`, a function this
+    // translation unit defines. It lowers to an indirect IrSymbolAlias; a
+    // missing resolver string leaves `ifunc_resolver` empty for
+    // c_parse_validate_alias_targets to refuse.
     bool is_ifunc;
     String8 weakref_target;
+    String8 ifunc_resolver;
 };
 
 BUSTER_C_EXTERN bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out);
@@ -1511,6 +1516,15 @@ struct CTypeParseMachine
     // the tree does not cover), and `ast_type_statistics` the optional counts.
     CAst const* syntax_tree;
     CAstTypeStatistics* ast_type_statistics;
+    // The body binder's statement plan (c_parse_statement_plan_build) reads
+    // the same tree: `ast_statement_bodies` holds the `{` of every top-level
+    // function definition, ascending, and its COMPOUND_STATEMENT node, built
+    // once before the declarations are bound (count in
+    // `ast_statement_body_count`); `ast_statement_statistics` the optional
+    // counts.
+    CAstStatementStatistics* ast_statement_statistics;
+    u32* ast_statement_bodies;
+    u32 ast_statement_body_count;
     CAstTypeBodyIndex* ast_bodies;
     // With CParserResult.ast_spans: the caller's store for the kept body span
     // indexes, and the arena their arrays go to (the analysis arena).

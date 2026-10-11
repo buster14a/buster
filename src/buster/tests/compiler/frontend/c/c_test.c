@@ -1682,6 +1682,66 @@ BUSTER_GLOBAL_LOCAL void c_test_append_u32(char8* destination, u64 capacity, u64
     }
 }
 
+// One local table whose every brace-enclosed element zero-fills its record
+// before the listed members are stored: the shape of
+// assembly_test_gnu_compatible_spellings, scaled up. Each element's zero
+// value used to carve `layout.size * 8 + 64` task rows from the lowering
+// scratch and keep them until the function ended, so 20,000 elements of a
+// 40-byte record exhausted the 256 MiB scratch with an internal arena
+// validation failure (#2527). The task stack is now sized by the work and
+// released per element, so the whole table lowers.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_local_table_zero_scratch(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 const element_count = 20000;
+    String8 prefix = S8("typedef struct Text { const char* pointer; unsigned long length; } Text;\n"
+                        "struct Case { _Bool flag; Text text; unsigned char count; unsigned char bytes[12]; };\n"
+                        "int sink(struct Case const* cases, unsigned long count);\n"
+                        "int table(void)\n{\n    struct Case const cases[] = {\n");
+    String8 element_open = S8("        {1, (Text){\"c");
+    String8 element_middle = S8("\", 2}, 2, {");
+    String8 element_close = S8(", 7}},\n");
+    String8 suffix = S8("    };\n    return sink(cases, sizeof(cases) / sizeof(cases[0]));\n}\n");
+    Arena* persistent = arena_create((ArenaCreation){.reserved_size = BUSTER_GB(1), .flags = {.no_pool = true}});
+    BUSTER_TEST(arguments, persistent != 0);
+    if (persistent)
+    {
+        u64 source_capacity = prefix.length + (u64)element_count * (element_open.length + element_middle.length + element_close.length + 20) +
+                              suffix.length;
+        char8* source_bytes = arena_allocate(persistent, char8, source_capacity);
+        u64 source_length = 0;
+        c_test_append_source(source_bytes, source_capacity, &source_length, prefix);
+        for (u32 element = 0; element < element_count; element += 1)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length, element_open);
+            c_test_append_u32(source_bytes, source_capacity, &source_length, element % 10);
+            c_test_append_source(source_bytes, source_capacity, &source_length, element_middle);
+            c_test_append_u32(source_bytes, source_capacity, &source_length, element & 255);
+            c_test_append_source(source_bytes, source_capacity, &source_length, element_close);
+        }
+        c_test_append_source(source_bytes, source_capacity, &source_length, suffix);
+        String8 source = {.pointer = source_bytes, .length = source_length};
+        CPreprocessResult preprocess = c_preprocess(persistent, source, (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17,
+        });
+        CParseResult parse = c_parse(persistent, preprocess);
+        if (BUSTER_REQUIRE(arguments, !preprocess.diagnostic_count && !parse.diagnostic_count))
+        {
+            CIRLowerResult lowered = c_lower_to_ir(persistent, S8("local-table-zero-scratch.c"), preprocess, parse, target_native);
+            BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count && lowered.canonical_ir_certified,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("local table lowering was not certified"));
+            if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, module->lowered_function_count == 1 && module->rejected_function_count == 0);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+            }
+        }
+        BUSTER_TEST(arguments, arena_destroy(persistent, 1));
+    }
+    return result;
+}
+
 // Nested ?: inside sizeof builds one completed query per level, and every
 // request consults the completed-query memo. The memo is hash indexed; a linear
 // backward scan made this shape quadratic (issue #2666), so the depth here is
@@ -5174,6 +5234,91 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_empty_scalar_initializer_runtime(UnitT
         CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
         BUSTER_TEST(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE);
         c_test_scratch_end(temporary);
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// Nested local initializers keep a cursor per by-value container on the
+// current path. The cursors are sized from the initialized type's nesting
+// depth rather than the unit's type count (#2527), so cover the shapes that
+// walk deepest: brace elision through a six-level chain, a six-step
+// designator, designators that cross anonymous struct and union members,
+// GNU ranges in a nested array, and compound-literal members as S8 spells
+// them, then check every value at run time.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_initializer_cursor_depth_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_text = S8(
+        "typedef struct Text { const char* pointer; unsigned long length; } Text;\n"
+        "#define TEXT(s) ((Text){ s, sizeof(s) - 1 })\n"
+        "struct L5 { int v; };\n"
+        "struct L4 { struct L5 m; int w; };\n"
+        "struct L3 { struct L4 m; };\n"
+        "struct L2 { int pad; struct L3 m; };\n"
+        "struct L1 { struct L2 m; };\n"
+        "struct L0 { struct L1 m; int tail[3]; };\n"
+        "struct Anonymous { int head; union { struct { union { struct { int deep; int deeper; }; long wide; }; int side; }; double d; }; };\n"
+        "struct Case { _Bool flag; Text text; unsigned char count; unsigned char bytes[12]; };\n"
+        "int main(void)\n"
+        "{\n"
+        "    struct Case const cases[] = {\n"
+        "        {0, TEXT(\"first\"), 2, {0xb1, 0x80}},\n"
+        "        {1, TEXT(\"second\"), 0, {0}},\n"
+        "        {0, TEXT(\"third\"), 3, {0xc6, 0x07, 0x80}},\n"
+        "        [5] = {.text = TEXT(\"sixth\"), .bytes[11] = 9},\n"
+        "        {.count = 4, .bytes = {[1 ... 3] = 7}},\n"
+        "    };\n"
+        "    struct L0 elided[2] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};\n"
+        "    struct L0 designated = {.m.m.m.m.m.v = 11, .m.m.pad = 12, .m.m.m.m.w = 13, .tail[2] = 14};\n"
+        "    struct Anonymous anonymous[2] = {{.head = 1, .deeper = 2, .side = 3}, {4, 5, 6, 7}};\n"
+        "    int grid[2][3][2] = {{{1}, [2] = {2, 3}}, [1] = {[1 ... 2] = {4, 5}}};\n"
+        "    if (sizeof(cases) / sizeof(cases[0]) != 7) return 1;\n"
+        "    if (cases[0].text.length != 5 || cases[0].bytes[1] != 0x80 || cases[0].bytes[2] != 0) return 2;\n"
+        "    if (!cases[1].flag || cases[1].text.pointer[0] != 's' || cases[1].bytes[0] != 0) return 3;\n"
+        "    if (cases[2].count != 3 || cases[2].bytes[2] != 0x80) return 4;\n"
+        "    if (cases[3].text.pointer || cases[3].count || cases[4].bytes[11]) return 5;\n"
+        "    if (cases[5].text.length != 5 || cases[5].bytes[11] != 9 || cases[5].bytes[0]) return 6;\n"
+        "    if (cases[6].count != 4 || cases[6].bytes[0] || cases[6].bytes[1] != 7 || cases[6].bytes[3] != 7 || cases[6].bytes[4]) return 7;\n"
+        "    if (elided[0].m.m.pad != 1 || elided[0].m.m.m.m.m.v != 2 || elided[0].m.m.m.m.w != 3 || elided[0].tail[2] != 6) return 8;\n"
+        "    if (elided[1].m.m.pad != 7 || elided[1].m.m.m.m.m.v != 8 || elided[1].m.m.m.m.w != 9 || elided[1].tail[0] != 10) return 9;\n"
+        "    if (designated.m.m.m.m.m.v != 11 || designated.m.m.pad != 12 || designated.m.m.m.m.w != 13 || designated.tail[2] != 14 || designated.tail[0]) return 10;\n"
+        "    if (anonymous[0].head != 1 || anonymous[0].deeper != 2 || anonymous[0].side != 3 || anonymous[0].deep) return 11;\n"
+        "    if (anonymous[1].head != 4 || anonymous[1].deep != 5 || anonymous[1].deeper != 6 || anonymous[1].side != 7) return 12;\n"
+        "    if (grid[0][0][0] != 1 || grid[0][0][1] || grid[0][2][1] != 3 || grid[1][1][0] != 4 || grid[1][2][1] != 5 || grid[1][0][0]) return 13;\n"
+        "    return 0;\n"
+        "}\n");
+    String8 source = buster_test_temporary_path(arguments->arena, S8("nested-initializer-cursor-depth"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("nested-initializer-cursor-depth-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-o"), output, source};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                string_format(temporary.arena, S8("nested initializer cursor depth form={u32}: {S8}"), form, compiled.diagnostic));
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                        string_format(temporary.arena, S8("nested initializer cursor depth runtime form={u32}: status={u32} timed_out={u32}"),
+                            form, execution.platform_status, (u32)execution.timed_out));
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
     }
 #else
     BUSTER_UNUSED(arguments);
@@ -34161,10 +34306,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                         buster_test_process_failure_show(arguments, &probe_run_observation);
                                     }
                                 }
-                                else
-                                {
-                                    buster_test_process_failure_show(arguments, &probe_observation);
-                                }
+                                // A failed compile is reported once the probe is classified: as NOT_RUN
+                                // evidence for the exact refusal, or as a failure for every other outcome.
                             }
                             FileReadResult probe_output_read = file_read_checked(temporary.arena, probe_output, (FileReadOptions){0});
                             FileStats probe_output_stats = os_file_replacement_target_stats(probe_output);
@@ -34198,9 +34341,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                             };
                             bool healthy_control = dialect == 0 || healthy_gnu17[reference][optimization];
                             bool profile_authenticated = dialect == 1 && reference == 0 && gcc13_native_profiles[reference];
+                            // GCC 13 lacks only the -std=gnu23 spelling (GCC 14 added it). That exact,
+                            // authenticated refusal is a reference-version limit, so it stays NOT_RUN even
+                            // under --ci=1 (#2579); every other probe outcome is still a failure.
                             TestOracleProbeDisposition probe_disposition = buster_test_oracle_probe_disposition(
                                 &probe_observation, profile_authenticated, healthy_control, probe_runtime_valid,
-                                probe_output_absent, &probe_contract, program_flag_get(PROGRAM_FLAG_CI));
+                                probe_output_absent, &probe_contract, false);
                             if (dialect == 0 && probe_disposition == TEST_ORACLE_PROBE_CAPABLE)
                             {
                                 healthy_gnu17[reference][optimization] = true;
@@ -34212,25 +34358,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                     "case={S8} status=CAPABLE tool={S8} version={S8} target={S8} normalization=LC_ALL:C,no_color=1,no_caret=1,wrap=0\n"),
                                     probe_case, compiler, reference_versions[reference], reference_targets[reference]);
                             }
-                            else if (probe_disposition == TEST_ORACLE_PROBE_NOT_RUN ||
-                                     probe_disposition == TEST_ORACLE_PROBE_INCOMPLETE)
+                            else if (probe_disposition == TEST_ORACLE_PROBE_NOT_RUN)
                             {
-                                bool required_reference = probe_disposition == TEST_ORACLE_PROBE_INCOMPLETE;
                                 arguments->show(arguments, S8("TEST_ORACLE_V1 suite=compiler-driver fixture=function-parameter-compatibility "
-                                    "case={S8} status={S8} required={u32} tool={S8} version={S8} target={S8} "
-                                    "normalization=LC_ALL:C,no_color=1,no_caret=1,wrap=0 reason=compiler rejected known-valid dialect option\n"),
-                                    probe_case, required_reference ? S8("INCOMPLETE") : S8("NOT_RUN"), (u32)required_reference,
-                                    compiler, reference_versions[reference], reference_targets[reference]);
+                                    "case={S8} status=NOT_RUN required=0 tool={S8} version={S8} target={S8} "
+                                    "normalization=LC_ALL:C,no_color=1,no_caret=1,wrap=0 reason=compiler rejected the requested -std= dialect spelling\n"),
+                                    probe_case, compiler, reference_versions[reference], reference_targets[reference]);
                                 for (u64 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(probe_command); argument_index += 1)
                                 {
                                     arguments->show(arguments, S8("oracle_probe_argv[{u64}]={S8}\n"), argument_index, probe_command[argument_index]);
                                 }
                                 arguments->show(arguments, S8("oracle_probe_platform_status={u32} elapsed_us={u64} stderr={S8}\n"),
                                     probe_observation.wait.platform_status, probe_observation.elapsed_us, probe_error);
-                                if (required_reference)
-                                {
-                                    BUSTER_TEST(arguments, false);
-                                }
                                 skip_reference_subject = true;
                             }
                             else
@@ -61791,6 +61930,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_dynamic_object_size);
     C_TEST_FIXTURE(arguments, c_test_redefinition_names_previous_site);
     C_TEST_FIXTURE(arguments, c_test_empty_scalar_initializer_runtime);
+    C_TEST_FIXTURE(arguments, c_test_nested_initializer_cursor_depth_runtime);
     C_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
     C_TEST_FIXTURE(arguments, c_test_enum_bool_conversion);
     C_TEST_FIXTURE(arguments, c_test_enum_lowering);
@@ -61897,6 +62037,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_ir_lower_capacity_plan);
     C_TEST_FIXTURE(arguments, c_test_ir_lower_scratch_capacity);
     C_TEST_FIXTURE(arguments, c_test_ir_query_scratch_growth);
+    C_TEST_FIXTURE(arguments, c_test_ir_local_table_zero_scratch);
     C_TEST_FIXTURE(arguments, c_test_ir_row_streams);
     C_TEST_FIXTURE(arguments, c_test_label_values_gate);
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_growth);
