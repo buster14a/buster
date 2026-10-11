@@ -371,6 +371,31 @@ BUSTER_GLOBAL_LOCAL bool openssl_step(Arena* arena, String8 directory, String8 n
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool openssl_archive(Arena* arena, String8 directory, bool* stopped)
+{
+    String8 tar = executable_resolve_in_path(arena, S8("tar"));
+    String8 archive = path_join(arena, directory, S8("evidence.tar.gz"));
+    String8 tar_digest = {0};
+    bool valid = tar.length && !path_exists(arena, archive) && stage_object_sha256_file(arena, tar, &tar_digest);
+    if (valid)
+    {
+        String8 version[] = {tar, S8("--version")};
+        valid = openssl_step(arena, directory, S8("archiver"), (SliceString8)BUSTER_ARRAY_TO_SLICE(version), stopped);
+        String8 arguments[] = {tar, S8("--exclude=./evidence.tar.gz"), S8("-czf"), archive, S8("-C"), directory, S8(".")};
+        valid = openssl_step(arena, directory, S8("archive"), (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), stopped) && valid;
+    }
+    String8 digest = {0};
+    valid = valid && stage_object_sha256_file(arena, archive, &digest);
+    if (valid)
+    {
+        String8 identity = string_format(arena, S8("archiver={S8}\narchiver_sha256={S8}\narchive_sha256={S8}\n"),
+                                         tar, tar_digest, digest);
+        valid = clang_suite_write(arena, path_join(arena, directory, S8("archive-identity.txt")), identity);
+        string_print(S8("OPENSSL_ARCHIVE sha256={S8} path={S8}\n"), digest, archive);
+    }
+    return valid;
+}
+
 #include "openssl_compatibility_test.c"
 
 BUSTER_GLOBAL_LOCAL ProcessResult openssl_main(Arena* arena, SliceString8 arguments, String8 driver)
@@ -473,6 +498,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult openssl_main(Arena* arena, SliceString8 argume
             valid = clang_suite_write(arena, path_join(arena, output, S8("summary.tsv")),
                                       string_join_arena(arena, string8_list_to_slice(arena, summary), false)) && valid;
             valid = clang_suite_write(arena, path_join(arena, output, S8("receipt.txt")), receipt) && valid;
+            bool archived = openssl_archive(arena, output, &stopped);
+            valid = archived && valid;
         }
 #else
         BUSTER_UNUSED(driver);

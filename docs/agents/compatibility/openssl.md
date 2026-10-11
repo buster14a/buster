@@ -19,7 +19,7 @@ OpenSSL's library license. Test-asset and component-specific notice inventory
 remains incomplete. No source, keys or third-party code is copied into Buster.
 
 External prerequisites are Git, Perl with its core test modules, make,
-Clang, ar, ranlib, system libc and development headers. Their actual binaries
+Clang, ar, ranlib, tar for evidence transport, system libc and development headers. Their actual binaries
 and installed package/license inventory remain environment-specific.
 Upstream's unchanged [INSTALL.md](https://github.com/openssl/openssl/blob/45e844fa2a14ec92d146bd8f5778ac130b6625fb/INSTALL.md)
 and [NOTES-PERL.md](https://github.com/openssl/openssl/blob/45e844fa2a14ec92d146bd8f5778ac130b6625fb/NOTES-PERL.md)
@@ -81,12 +81,21 @@ TLS interoperability, mixed ABI, provider acceptance, security and performance
 explicitly incomplete even if every build/test cell passes. Child `.command`,
 `.stdout`, `.stderr`, `.status`, `.provenance` and artifact digests retain actual
 invocations and outcomes. Source Git inventory and configdata dump retain
-generated-input configuration. Children use existing bounded captures,
+generated-input configuration. The evidence is packed natively as `evidence.tar.gz`, with archiver/archive
+identities retained separately. This preserves upstream's deliberate colon-bearing
+test filenames, which GitHub's artifact uploader cannot accept directly. A native
+control checks that `file:server.pem` survives inside the archive.
+Children use existing bounded captures,
 deadlines and fail-closed cleanup; a timeout or truncated log cannot pass.
 The full upstream test suite has a 30-minute deadline per cell; other children
 retain the existing ten-minute bound. Final TAP progress/summary is also printed
 to the job log. The first portable reference attempt exceeded the shorter
-original deadline, so it is not a passing test result.
+original deadline, so it is not a passing test result. The
+[initial census](https://github.com/buster14a/buster/actions/runs/38131412845/job/114446340801)
+built both Clang references and passed optimized reference tests. Both Buster
+cells stopped on `-m64`, owned by [#3458](https://github.com/buster14a/buster/issues/3458)
+and [PR #3442](https://github.com/buster14a/buster/pull/3442). That run's artifact
+upload failed on the colon filename, so only its job log is retained.
 
 The [hosted intake](../../../.github/workflows/openssl-qualification.yml)
 runs only by explicit dispatch or pushes to the issue's owned experiment branch.

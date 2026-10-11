@@ -107,9 +107,28 @@ BUSTER_GLOBAL_LOCAL bool openssl_self_test(Arena* arena)
         string_print(S8("OPENSSL_INPUT_CONTROLS absent={u32} empty={u32} wrong_pin={u32} unknown_path={u32} populated={u32}\n"),
                      (u32)absent, (u32)empty, (u32)wrong_rejected, (u32)unknown_rejected, (u32)populated_rejected);
     }
+    bool archive_control = false;
+    if (claimed)
+    {
+        bool stopped = false;
+        String8 tar = executable_resolve_in_path(arena, S8("tar"));
+        String8 colon = path_join(arena, root, S8("file:server.pem"));
+        bool written = file_write(colon, BUSTER_SLICE_TO_BYTE_SLICE(S8("isolated filename fixture\n")));
+        bool packed = written && openssl_archive(arena, root, &stopped);
+        String8 list[] = {tar, S8("-tzf"), path_join(arena, root, S8("evidence.tar.gz"))};
+        RaddebuggerCommandResult listed = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(list), root, (String8){0}, RADDEBUGGER_ENVIRONMENT_INHERIT, &stopped);
+        String8 expected = S8("./file:server.pem\n");
+        bool found = false;
+        for (u64 i = 0; i + expected.length <= listed.output.length; i += 1)
+        {
+            found = string_equal(string_slice(listed.output, i, i + expected.length), expected) || found;
+        }
+        archive_control = packed && raddebugger_command_ok(listed) && found && !stopped;
+        string_print(S8("OPENSSL_ARCHIVE_CONTROL colon_filename={u32}\n"), (u32)archive_control);
+    }
     bool removed = !claimed || os_directory_delete(root);
     bool pristine = openssl_pristine_self_test(arena) == PROCESS_RESULT_SUCCESS;
-    bool result = routes && inputs && removed && pristine;
+    bool result = routes && inputs && archive_control && removed && pristine;
     string_print(S8("OPENSSL_SELF_TEST status={S8}\n"), result ? S8("pass") : S8("fail"));
     return result;
 }

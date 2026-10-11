@@ -91,10 +91,34 @@ jobs:
         with:
           name: openssl-intake-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            build/openssl-intake
+            build/openssl-intake/evidence.tar.gz
+            build/openssl-intake/archive-identity.txt
+            build/openssl-intake/archive.*
+            build/openssl-intake/summary.tsv
+            build/openssl-intake/receipt.txt
             build/CMakeCache.txt
             build/compile_commands.json
             build/machine-specifications
             docs/source-size-baseline.txt
           retention-days: 14
           if-no-files-found: warn
+  source-size-record:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Native controls and generated source-size record
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/openssl-driver"
+          "$RUNNER_TEMP/openssl-driver" test_openssl --self-test
+          "$RUNNER_TEMP/openssl-driver" source_size --write-baseline
+          cat docs/source-size-baseline.txt
