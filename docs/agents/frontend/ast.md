@@ -1333,4 +1333,14 @@ with base main `a6705764`:
   comparison is requested, so Zen 5 validation stays incomplete (#2761) and
   the hook stays opt-in.
 
+The further cut's hosted census is
+[`2026-10-11T110050Z`](../../performance-audits/2026-10-11T110050Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. The typer's counters are identical in B and C,
+  and the objects of all four arms are identical.
+- `c_ast_types_type_body` falls from 329.2 M to 274.2 M Ir (−16.7%), and the
+  pilot's compile by 54.2 M (−0.58%).
+- The default path is within −0.001% on `-fsyntax-only` and +0.001% on `-c`.
+- Zen 5 validation stays incomplete (#2761).
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
