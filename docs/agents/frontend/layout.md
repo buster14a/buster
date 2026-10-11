@@ -503,6 +503,24 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   refusing the type, the way the settled-table scan reports without refusing
   one: the report is what refuses the translation unit.
 
+## Nested tag scan bounds
+
+The default type machine reuses the translation unit's existing delimiter-pair
+index to skip complete nested aggregate bodies in layout, alignment, member
+range, storage-specifier and definition scans. Index construction is charged
+once; clipped ranges and malformed delimiter streams retain the scan's refusal
+semantics. Active aggregate-member frame count follows successful push,
+completion and failure discard, so deciding whether a core frame is nested
+takes one operation.
+
+`c_test_nested_tag_scan_growth` generates valid depth-1,000 and depth-2,000
+records and checks their layouts. Test-only counters cover actual index
+construction, delimiter operations, layout/alignment/member token visits and
+ancestor decisions. Each population must grow by at most 2.2 times. These
+deterministic work bounds are diagnostic correctness evidence, not a measured
+Zen 5 performance result. Before/after complete compiler instruction counts,
+object identity and the self-host fixed point are recorded on #3497.
+
 ## `_Alignof` over an object
 
 GNU `_Alignof`/`__alignof__` accept an expression, and over a named object they
