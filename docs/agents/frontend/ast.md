@@ -1830,4 +1830,36 @@ negative result, diagnostic only:
 - **Leaf budget fails.** The leaf grows by 0.53 M, or by 0.25 M when a first
   sight is probed only once. The code does not ship.
 
+For the storage-class hint (the plan's declaration hint also carries the
+storage-class set its `DECL_SPECIFIERS` items spell, and the hinted split
+skips its scan of the whole declaration for it), these budgets were declared
+before the measured runs. The input, flags and four Callgrind arms are the
+declarator hints' (`-g0 -fsyntax-only`, the self-host unity input,
+`--cache-sim=no --branch-sim=no`, tests-off `-march=x86-64-v3` builds). The
+base is main `680e16d3`, which carries the declarator hints (#3499). On the
+superseded block-declaration split's base (#3503, audit
+[`2026-10-11T104857Z`](../../performance-audits/2026-10-11T104857Z.md)) that
+scan was about 7 M Ir over 41.6 K declarations. The budgets:
+- **Correctness.**
+  - A new field-by-field model differential in the corpus gate
+    (`c_ast_corpus_models_differ`) shows 0 differences. It runs beside the
+    binding differential and compares every row of the type, entity, scope,
+    array-bound, alignment, declaration, identifier-use, member, enum-member
+    and parameter tables with and without the tree, over the corpus and the
+    frontend sources.
+  - A one-off run of the same comparison on the self-host unity input also
+    shows 0 differences.
+  - `-c` objects (`-g0` and `-g`) are byte-identical across the four arms.
+- **The hint's own effect (C against B).** The whole compile costs at least
+  2 M fewer instructions, with the hint's construction charged. A smaller
+  gain, or a loss, is recorded as a negative result. The code change then
+  does not ship, and only the differential does.
+- **The default path (D against A).** The split stays one always-inline
+  worker with a hintless and a hinted caller, so the default path runs no
+  hint code. The difference must stay within ±0.05% Ir, or else meet the
+  walk's work-equivalence criterion: identical callees and call counts, and
+  identical objects.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761).
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
