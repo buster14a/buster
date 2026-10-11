@@ -4143,8 +4143,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_32_writer_limits(UnitTestArgument
 // Issue 990: the priority split remaps COFF initializer relocations in one
 // placement pass, whatever the group count. Its ledger share is exactly R
 // when a group moved an entry and zero otherwise; the rest is object_write's
-// validation, the writer's census and its two per-section relocation sweeps
-// (issue 3407). The same
+// validation, the TLS index scan, the writer's census and its two
+// per-section relocation sweeps (issue 3407). The same
 // input is written twice, so the split must leave it untouched.
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_priority_split_ledger(UnitTestArguments* arguments)
 {
@@ -4229,9 +4229,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_priority_split_ledger(UnitTe
         };
         u32 split_sections = OBJECT_SECTION_COUNT + groups + (groups ? 1 : 0);
         u64 placement = groups ? RELOCATION_COUNT : 0;
-        // object_write's validation and the writer's census, the two sweeps
-        // and the placement.
-        u64 expected = 2 * (u64)RELOCATION_COUNT + 2 * (u64)split_sections * RELOCATION_COUNT + placement;
+        // object_write's validation, the TLS index scan and the writer's
+        // census, the two sweeps and the placement.
+        u64 expected = 3 * (u64)RELOCATION_COUNT + 2 * (u64)split_sections * RELOCATION_COUNT + placement;
         ObjectArtifact first = object_write(temporary.arena, &object, OBJECT_FORMAT_COFF);
         ObjectArtifact second = object_write(temporary.arena, &object, OBJECT_FORMAT_COFF);
         if (BUSTER_REQUIRE(arguments, first.error == OBJECT_ERROR_NONE && second.error == OBJECT_ERROR_NONE))
