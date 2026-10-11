@@ -357,6 +357,15 @@ fixture as well as compiling both architectures.
   the defining row's slot address (`machine_x64_emit_exact_frame_address`,
   `machine_a64_emit_frame_address`). This is sound because a slot whose address
   a row takes keeps its own storage for the whole function.
+- x86-64 selection gives a register-copy cast of an integer constant a constant
+  definition, so the recipe above covers it. A C null pointer is
+  `CAST(INTEGER_TO_POINTER)` of zero. `machine_x64_cast_copies_constant` follows
+  up to four integer-to-pointer, pointer-reinterpret or integer-reinterpret
+  casts between general-register scalars back to a `CONSTANT_INTEGER`, and such
+  a cast is selected as `MOV_RI` of that immediate instead of `MOV_RR`. A
+  constant or cast whose every use is such a cast is marked `fused_dead` and
+  selects into nothing. Edge arguments count as uses, so a value reaching a
+  block parameter keeps its row. AArch64 selection does not do this yet.
 - FAST/QUALITY start a join's or loop header's general block parameters in
   registers. `machine_fast_parameter_contract` gives each non-pinned,
   non-mutable general parameter a caller-saved (or already-saved) register
