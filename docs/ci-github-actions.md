@@ -732,7 +732,12 @@ planner before any workload job or matrix is allocated. Only its trusted
 native `no_code=true` output permits omission. Unknown or incomplete source
 inputs select the normal path. The core aggregate independently recompiles the
 trusted main driver and rechecks the complete source identity before completing
-a no-code decision; all core workload results must be skipped. Failure,
+a no-code decision; all core workload results must be skipped. Its workspace
+checkout stays at depth 1 on every route (#3395): the recheck fetches its own
+bare blobless candidate under `$RUNNER_TEMP` exactly as the planner does
+(tested commit plus trusted policy commit, token only in that command's
+environment) and runs with `GIT_NO_LAZY_FETCH=1`. A failed fetch or
+classification fails `CI complete`. Failure,
 cancellation, missing results and unexpected execution cannot pass that route.
 There is no platform-shaped no-op replacement.
 

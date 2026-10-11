@@ -737,9 +737,13 @@ The fixture then runs the subject comparisons; any capable compiler that
 disagrees with Buster remains a failed assertion.
 
 An optional local compiler refusal is reported as NOT_RUN. It is explicit
-non-participation, never a passing assertion. In required CI, the same narrowly
-authenticated refusal is INCOMPLETE and adds a failed assertion, so
-ide test --ci=1 cannot accept that required reference obligation as complete.
+non-participation, never a passing assertion. In required CI, the type-specifier
+fixture's narrowly authenticated `_Float16` refusal is INCOMPLETE and adds a
+failed assertion, so ide test --ci=1 cannot accept that required reference
+obligation as complete. The function-parameter fixture's GCC `-std=gnu23`
+rows are the exception (#2579): GCC 13 lacks only that dialect spelling, which
+GCC 14 added, so its exact authenticated refusal is NOT_RUN under --ci=1 too.
+A GCC 14 or newer host still runs those rows.
 Other outcomes are failures: missing tools, an unauthenticated profile, an
 unhealthy control, altered or additional diagnostics, unexpected stdout or
 artifacts, abnormal exit, timeout, capture loss, or cleanup failure. A refusal
