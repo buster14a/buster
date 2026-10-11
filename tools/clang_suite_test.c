@@ -1,6 +1,7 @@
 // Native Clang-corpus parser/checker controls, included after production helpers
 // by clang_suite.c. Self-tests exercise ledger, preprocessing, and disassembly
-// validation without launching external compilers.
+// validation, plus driver RUN/CHECK plans and verdicts, without launching
+// external compilers.
 
 BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_self_test(Arena* arena)
 {
@@ -144,6 +145,112 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_smoke_self_test(Arena* arena)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool clang_suite_driver_self_test(Arena* arena)
+{
+    typedef struct ClangSuiteDriverPlanTest ClangSuiteDriverPlanTest;
+    struct ClangSuiteDriverPlanTest
+    {
+        String8 name;
+        String8 source;
+        String8 unsupported;
+        bool expected;
+    };
+    ClangSuiteDriverRun runs[] = {
+        {S8("%clang -E %s | FileCheck --check-prefix=AA %s"), S8("AA"), CLANG_SUITE_DRIVER_ARGUMENTS(S8("-E"), S8("%s")), false, CLANG_SUITE_DRIVER_EXPECT_PASS, {0}, 0},
+        {S8("%clang -x c -fsyntax-only %s"), {0}, CLANG_SUITE_DRIVER_ARGUMENTS(S8("-x"), S8("c"), S8("-fsyntax-only"), S8("%s")), false, CLANG_SUITE_DRIVER_EXPECT_PASS, {0}, 0},
+    };
+    String8 first = S8("// RUN: %clang -E %s | FileCheck --check-prefix=AA %s\n");
+    String8 second = S8("// RUN: %clang -x c \\\n// RUN:   -fsyntax-only %s\n");
+    ClangSuiteDriverPlanTest tests[] = {
+        {S8("accepted"), string_format(arena, S8("{S8}// AA: alpha\n{S8}XAA: ignored\n"), first, second), {0}, true},
+        {S8("unsupported-matched"), string_format(arena, S8("// UNSUPPORTED: target=z\n{S8}// AA: alpha\n{S8}"), first, second), S8("target=z"), true},
+        {S8("unsupported-differs"), string_format(arena, S8("// UNSUPPORTED: target=y\n{S8}// AA: alpha\n{S8}"), first, second), S8("target=z"), false},
+        {S8("unsupported-unexpected"), string_format(arena, S8("// UNSUPPORTED: target=z\n{S8}// AA: alpha\n{S8}"), first, second), {0}, false},
+        {S8("unsupported-missing"), string_format(arena, S8("{S8}// AA: alpha\n{S8}"), first, second), S8("target=z"), false},
+        {S8("changed-run"), string_format(arena, S8("// RUN: %clang -E %s %s | FileCheck --check-prefix=AA %s\n// AA: alpha\n{S8}"), second), {0}, false},
+        {S8("missing-run"), string_format(arena, S8("{S8}// AA: alpha\n"), first), {0}, false},
+        {S8("extra-run"), string_format(arena, S8("{S8}// AA: alpha\n{S8}{S8}"), first, second, second), {0}, false},
+        {S8("dangling-continuation"), string_format(arena, S8("{S8}// AA: alpha\n// RUN: %clang -x c \\\n"), first), {0}, false},
+        {S8("split-continuation"), string_format(arena, S8("{S8}// AA: alpha\n// RUN: %clang -x c \\\n// note\n// RUN:   -fsyntax-only %s\n"), first), {0}, false},
+        {S8("modifier"), string_format(arena, S8("{S8}// AA: alpha\n// AA-NOT: beta\n{S8}"), first, second), {0}, false},
+        {S8("unused-default-prefix"), string_format(arena, S8("{S8}// AA: alpha\n// CHECK: beta\n{S8}"), first, second), {0}, false},
+        {S8("missing-checks"), string_format(arena, S8("{S8}{S8}"), first, second), {0}, false},
+        {S8("regex"), string_format(arena, S8("{S8}{S8}{S8}"), first, S8("// AA: {{alpha}}\n"), second), {0}, false},
+        {S8("variable"), string_format(arena, S8("{S8}// AA: [[NAME]]\n{S8}"), first, second), {0}, false},
+        {S8("empty-check"), string_format(arena, S8("{S8}// AA:\n{S8}"), first, second), {0}, false},
+        {S8("requires"), string_format(arena, S8("// REQUIRES: feature\n{S8}// AA: alpha\n{S8}"), first, second), {0}, false},
+        {S8("embedded-run"), string_format(arena, S8("{S8}// AA: alpha\n{S8}/* RUN: true */\n"), first, second), {0}, false},
+        {S8("binary-source"), string_format(arena, S8("{S8}\0// AA: alpha\n{S8}"), first, second), {0}, false},
+    };
+    bool result = true;
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(tests); i += 1)
+    {
+        ClangSuiteDriverCase test = {.name = tests[i].name, .unsupported = tests[i].unsupported, .run_count = BUSTER_ARRAY_LENGTH(runs)};
+        SliceString8 checks[BUSTER_ARRAY_LENGTH(runs)] = {0};
+        bool planned = clang_suite_driver_plan(arena, tests[i].source, test, runs, checks);
+        bool passed = planned == tests[i].expected && (!planned || (checks[0].length == 1 && string_equal(checks[0].pointer[0], S8("alpha")) && checks[1].length == 0));
+        if (!passed)
+        {
+            string_print(S8("error: Clang suite driver plan self-test {S8} failed\n"), tests[i].name);
+        }
+        result = passed && result;
+    }
+    String8 alpha[] = {S8("alpha")};
+    SliceString8 checks = BUSTER_ARRAY_TO_SLICE(alpha);
+    ClangSuiteDriverRun refusal = {.prefix = S8("AA"), .expectation = CLANG_SUITE_DRIVER_EXPECT_REFUSAL, .refusal = S8("unsupported option: -q")};
+    ClangSuiteDriverRun mismatch = {.prefix = S8("AA"), .expectation = CLANG_SUITE_DRIVER_EXPECT_MISMATCH};
+    ClangSuiteDriverRun merged = {.prefix = S8("AA"), .merge_error = true, .expectation = CLANG_SUITE_DRIVER_EXPECT_PASS};
+    ClangSuiteDriverRun separate = {.prefix = S8("AA"), .expectation = CLANG_SUITE_DRIVER_EXPECT_PASS};
+    typedef struct ClangSuiteDriverVerdictTest ClangSuiteDriverVerdictTest;
+    struct ClangSuiteDriverVerdictTest
+    {
+        ClangSuiteDriverRun run;
+        ClangSuiteCommand command;
+        bool reference;
+        ClangSuiteDriverVerdict expected;
+    };
+    ClangSuiteDriverVerdictTest verdicts[] = {
+        {refusal, {.result = PROCESS_RESULT_FAILED, .error = S8("cc: error: unsupported option: -q\n")}, false, CLANG_SUITE_DRIVER_VERDICT_EXPECTED_FAIL},
+        {refusal, {.result = PROCESS_RESULT_FAILED, .error = S8("cc: error: other\n")}, false, CLANG_SUITE_DRIVER_VERDICT_FAIL},
+        {refusal, {.result = PROCESS_RESULT_CRASH, .error = S8("unsupported option: -q")}, false, CLANG_SUITE_DRIVER_VERDICT_FAIL},
+        {refusal, {.result = PROCESS_RESULT_FAILED, .error = S8("unsupported option: -q"), .timed_out = true}, false, CLANG_SUITE_DRIVER_VERDICT_FAIL},
+        {refusal, {.result = PROCESS_RESULT_FAILED, .error = S8("unsupported option: -q"), .output_truncated = true}, false, CLANG_SUITE_DRIVER_VERDICT_FAIL},
+        {refusal, {.result = PROCESS_RESULT_NOT_EXISTENT, .launch_failed = true}, false, CLANG_SUITE_DRIVER_VERDICT_FAIL},
+        {refusal, {.result = PROCESS_RESULT_SUCCESS, .output = S8("alpha\n")}, false, CLANG_SUITE_DRIVER_VERDICT_UNEXPECTED_PASS},
+        {refusal, {.result = PROCESS_RESULT_SUCCESS, .output = S8("beta\n")}, false, CLANG_SUITE_DRIVER_VERDICT_FAIL},
+        {refusal, {.result = PROCESS_RESULT_SUCCESS, .output = S8("alpha\n")}, true, CLANG_SUITE_DRIVER_VERDICT_PASS},
+        {refusal, {.result = PROCESS_RESULT_FAILED, .error = S8("unsupported option: -q")}, true, CLANG_SUITE_DRIVER_VERDICT_FAIL},
+        {mismatch, {.result = PROCESS_RESULT_SUCCESS, .output = S8("beta\n")}, false, CLANG_SUITE_DRIVER_VERDICT_EXPECTED_FAIL},
+        {mismatch, {.result = PROCESS_RESULT_SUCCESS, .output = S8("alpha\n")}, false, CLANG_SUITE_DRIVER_VERDICT_UNEXPECTED_PASS},
+        {mismatch, {.result = PROCESS_RESULT_FAILED, .output = S8("beta\n")}, false, CLANG_SUITE_DRIVER_VERDICT_FAIL},
+        {mismatch, {.result = PROCESS_RESULT_SUCCESS, .output = S8("beta\n"), .capture_failed = true}, false, CLANG_SUITE_DRIVER_VERDICT_FAIL},
+        {merged, {.result = PROCESS_RESULT_SUCCESS, .error = S8("alpha\n")}, false, CLANG_SUITE_DRIVER_VERDICT_PASS},
+        {separate, {.result = PROCESS_RESULT_SUCCESS, .error = S8("alpha\n")}, false, CLANG_SUITE_DRIVER_VERDICT_FAIL},
+        {separate, {.result = PROCESS_RESULT_SUCCESS, .output = S8("alpha\n"), .cleanup_failed = true}, false, CLANG_SUITE_DRIVER_VERDICT_FAIL},
+    };
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(verdicts); i += 1)
+    {
+        ClangSuiteDriverVerdictTest test = verdicts[i];
+        bool passed = clang_suite_driver_verdict(arena, test.run, checks, test.command, test.reference) == test.expected;
+        if (!passed)
+        {
+            string_print(S8("error: Clang suite driver verdict self-test {u64} failed\n"), i);
+        }
+        result = passed && result;
+    }
+    bool expanded = string_equal(clang_suite_driver_expand(arena, S8("-working-directory=%S"), S8("/d/t.c"), S8("/d")), S8("-working-directory=/d")) &&
+                    string_equal(clang_suite_driver_expand(arena, S8("%S/t.c"), S8("/d/t.c"), S8("/d")), S8("/d/t.c")) &&
+                    string_equal(clang_suite_driver_expand(arena, S8("%s"), S8("/d/t.c"), S8("/d")), S8("/d/t.c")) &&
+                    string_equal(clang_suite_driver_expand(arena, S8("-x%"), S8("/d/t.c"), S8("/d")), S8("-x%"));
+    if (!expanded)
+    {
+        string_print(S8("error: Clang suite driver substitution self-test failed\n"));
+    }
+    result = expanded && result;
+    string_print(S8("CLANG_SUITE_DRIVER_SELF_TEST cases={u64} status={S8}\n"), (u64)(BUSTER_ARRAY_LENGTH(tests) + BUSTER_ARRAY_LENGTH(verdicts) + 1), result ? S8("pass") : S8("fail"));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool clang_suite_self_test(Arena* arena)
 {
     String8 sha = S8("0123456789012345678901234567890123456789");
@@ -193,7 +300,8 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_self_test(Arena* arena)
         valid = clang_suite_inventory(arena, changed, &inventory) && inventory.files == 7 && valid;
     }
     String8 duplicated = string_format(arena, S8("{S8}{S8}"), raw, raw);
-    valid = !clang_suite_inventory(arena, duplicated, &inventory) && clang_suite_smoke_self_test(arena) && clang_suite_intrinsics_self_test(arena) && valid;
+    valid = !clang_suite_inventory(arena, duplicated, &inventory) && clang_suite_smoke_self_test(arena) && clang_suite_intrinsics_self_test(arena) &&
+            clang_suite_driver_self_test(arena) && valid;
     string_print(S8("CLANG_SUITE_SELF_TEST status={S8}\n"), valid ? S8("pass") : S8("fail"));
     return valid;
 }
