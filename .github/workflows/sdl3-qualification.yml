@@ -103,7 +103,7 @@ jobs:
           git -C "$src" config --unset core.sparseCheckout
           GIT_INDEX_FILE="$RUNNER_TEMP/redirected-index" refuse environment
           pin=7f3ae3d57459e59943a4ecfefc8f6277ec6bf540
-          control=$(git -C "$src" -c user.name=SDL-control -c user.email=sdl-control@example.invalid commit-tree HEAD^{tree} -p HEAD -m control)
+          control=$(git -C "$src" -c user.name=SDL-control -c user.email=sdl-control@example.invalid commit-tree "HEAD^{tree}" -p HEAD -m control)
           git -C "$src" replace "$pin" "$control"
           refuse replacement
           git -C "$src" replace -d "$pin"
