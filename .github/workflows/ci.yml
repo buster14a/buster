@@ -137,6 +137,14 @@ jobs:
           python3 tools/new_audit.py --check
           python3 -B tools/check_markdown_links.py --self-test
           python3 -B tools/check_markdown_links.py
+      - name: Verify generated vendor builtin sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Hand edits to the generated c_vendor_builtin.c/.h that skip
+          # tools/c_vendor_builtin.*.in otherwise pass every hosted check (#3392).
+          python3 -B tools/generate_c_vendor_builtins.py --check
+          python3 -B tools/generate_c_vendor_builtins.py --describe __builtin_ia32_sha256rnds2 > /dev/null
       - name: Check bounded string sequence search work
         shell: bash
         run: python3 -B tools/string_first_sequence_work.py --output "$RUNNER_TEMP/string-sequence-work"
@@ -281,6 +289,14 @@ jobs:
           python3 tools/new_audit.py --check
           python3 -B tools/check_markdown_links.py --self-test
           python3 -B tools/check_markdown_links.py
+      - name: Verify generated vendor builtin sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Hand edits to the generated c_vendor_builtin.c/.h that skip
+          # tools/c_vendor_builtin.*.in otherwise pass every hosted check (#3392).
+          python3 -B tools/generate_c_vendor_builtins.py --check
+          python3 -B tools/generate_c_vendor_builtins.py --describe __builtin_ia32_sha256rnds2 > /dev/null
       - name: Check bounded string sequence search work
         shell: bash
         run: python3 -B tools/string_first_sequence_work.py --output "$RUNNER_TEMP/string-sequence-work"
