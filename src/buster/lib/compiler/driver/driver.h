@@ -530,6 +530,9 @@ struct CompilerDriverCAstPilotResult
     // segments and hints read from the tree, and bodies left to the token
     // walk and why. Zero when the analysis had no tree to use.
     CAstStatementStatistics statements;
+    // What lowering read from the tree (CAstLowerStatistics). Zero for
+    // -fsyntax-only and when lowering had no tree.
+    CAstLowerStatistics lower;
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;
