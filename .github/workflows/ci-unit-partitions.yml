@@ -43,14 +43,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.head_ref == 'codex/3620-schedule-unit-modules' && '[{"platform":"windows","runner":"windows-2025","python":"python","driver":"build/build.exe","binary":"build/ci-unit-tree/Release/ide.exe","llvm_target":"x86_64-windows"},{"platform":"linux","runner":"ubuntu-26.04","python":"python3","driver":"build/build","binary":"build/ci-unit-tree/Release/ide","llvm_target":"x86_64-linux"},{"platform":"linux-aarch64","runner":"ubuntu-26.04-arm","python":"python3","driver":"build/build","binary":"build/ci-unit-tree/Release/ide","llvm_target":"aarch64-linux"},{"platform":"macos-aarch64","runner":"macos-26","python":"python3","driver":"build/build","binary":"build/ci-unit-tree/Release/ide","llvm_target":""}]' || '[{"platform":"windows","runner":"windows-2025","python":"python","driver":"build/build.exe","binary":"build/ci-unit-tree/Debug/ide.exe","llvm_target":"x86_64-windows"},{"platform":"linux","runner":"ubuntu-26.04","python":"python3","driver":"build/build","binary":"build/ci-unit-tree/Debug/ide","llvm_target":"x86_64-linux"}]') }}
+        include: ${{ fromJSON(github.head_ref == 'codex/3620-schedule-unit-modules' && '[{"platform":"windows","runner":"windows-2025","python":"python","driver":"build/build.exe","binary":"build/ci-unit-tree/Release/ide.exe","llvm_target":"x86_64-windows"},{"platform":"linux","runner":"ubuntu-26.04","python":"python3","driver":"build/build","binary":"build/ci-unit-tree/Release/ide","llvm_target":"x86_64-linux"},{"platform":"linux-aarch64","runner":"ubuntu-26.04-arm","python":"python3","driver":"build/build","binary":"build/ci-unit-tree/Release/ide","llvm_target":"aarch64-linux"}]' || '[{"platform":"windows","runner":"windows-2025","python":"python","driver":"build/build.exe","binary":"build/ci-unit-tree/Debug/ide.exe","llvm_target":"x86_64-windows"},{"platform":"linux","runner":"ubuntu-26.04","python":"python3","driver":"build/build","binary":"build/ci-unit-tree/Debug/ide","llvm_target":"x86_64-linux"}]') }}
     env:
       BUSTER_TEST_JOBS: '2'
       BUSTER_TEST_UNIT_SCHEDULE: 'pair'
       BUSTER_TEST_TABLE_AUDITS: '0'
       BUSTER_UNIT_PAIRS: ${{ github.head_ref == 'codex/3620-schedule-unit-modules' && '3' || github.event_name == 'workflow_dispatch' && inputs.pairs || '1' }}
       BUSTER_UNIT_BASELINE_JOBS: ${{ github.head_ref == 'codex/3620-schedule-unit-modules' && '4' || github.event_name == 'workflow_dispatch' && inputs.baseline_jobs || '2' }}
-      BUSTER_UNIT_FUZZ: ${{ matrix.platform == 'macos-aarch64' && '--no-fuzz' || '--fuzz' }}
       BUSTER_UNIT_CONFIG: ${{ github.head_ref == 'codex/3620-schedule-unit-modules' && 'Release' || 'Debug' }}
       BUSTER_UNIT_BASELINE_TARGET: ${{ github.head_ref == 'codex/3620-schedule-unit-modules' && 'test_units_partitioned' || 'test_units' }}
       BUSTER_UNIT_CANDIDATE_SCHEDULE: ${{ github.head_ref == 'codex/3620-schedule-unit-modules' && 'modules' || 'pair' }}
@@ -176,7 +175,7 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/ci_unit_tests_campaign_test.py -v
           "$BUSTER_CI_PYTHON" tools/matrix_unit_observation_test.py -v
           "$BUSTER_UNIT_DRIVER" test_units_partitioned --self-test
-          "$BUSTER_UNIT_DRIVER" generate --build-directory build/ci-unit-tree --cc clang --ci --sanitize "$BUSTER_UNIT_FUZZ" --config "$BUSTER_UNIT_CONFIG"
+          "$BUSTER_UNIT_DRIVER" generate --build-directory build/ci-unit-tree --cc clang --ci --sanitize --fuzz --config "$BUSTER_UNIT_CONFIG"
           "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config "$BUSTER_UNIT_CONFIG" -t ide
           "$BUSTER_UNIT_DRIVER" build --build-directory build/ci-unit-tree --config "$BUSTER_UNIT_CONFIG" -t test_unit_inventory > "$RUNNER_TEMP/unit-partitions/inventory.log" 2>&1
 
@@ -210,6 +209,18 @@ jobs:
 
       # Leave ten minutes beyond the native child deadline for startup,
       # cleanup, replay and failure proof before the observer terminates it.
+      - name: Exercise isolated Windows OS module
+        if: ${{ matrix.platform == 'windows' && github.head_ref == 'codex/3620-schedule-unit-modules' }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:BUSTER_TEST_MODULE_GROUP = 'module:os_tests'
+          $env:BUSTER_TEST_JOBS = '2'
+          for ($Repeat = 1; $Repeat -le 3; $Repeat++) {
+            & $env:BUSTER_UNIT_BINARY test --verbose=1 --ci=1 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP "unit-partitions/isolated-os-$Repeat.log")
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
       - name: Serial baseline 1
         if: ${{ matrix.platform != 'windows' }}
         shell: bash

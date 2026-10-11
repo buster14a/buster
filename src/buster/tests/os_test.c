@@ -1547,7 +1547,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission(UnitTestArgume
         }
     }
     BUSTER_TEST(arguments, !os_test_regular_file_exists(marker));
-    BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources);
+    u64 resources_after = os_process_spawn_test_resource_count();
+    if (resources_after != resources)
+    {
+        arguments->show(arguments, S8("CAPTURE_SINK_RESOURCES_V1 before={u64} after={u64}\n"), resources, resources_after);
+    }
+    BUSTER_TEST(arguments, resources_after == resources);
     BUSTER_TEST(arguments, os_file_delete(marker));
 
     // These fields are deliberately invalid but ignored by their policies.
