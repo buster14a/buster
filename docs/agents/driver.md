@@ -1804,9 +1804,19 @@ suffix to classify, so it needs `-x c` or `-x cpp-output`, or `-E`, which reads
 it as C source; without either, or under another language, the parser refuses
 it, and it may appear only once. The source text travels in
 `CompilerDriverInvocation.standard_input`: the `cc` command reads standard
-input to EOF into it after parsing, and embedding callers fill it themselves. A
-null pointer there fails the input as a read error. Diagnostics and `__FILE__`
-name the input `-`, and `-c` without `-o` writes `-.o`, as Clang does.
+input to EOF into it after parsing, and API callers fill it themselves. A null
+pointer there fails the input as a read error. Diagnostics and `__FILE__` name
+the input `-`, and `-c` without `-o` writes `-.o`, as Clang does.
+
+The embedding facade instead sets the API-only
+`CompilerDriverInvocation.input_source` for one C input. A non-null pointer
+means the bytes are used directly and `input_paths[0]` supplies only the
+virtual filename for diagnostics, `__FILE__`, and quoted-include lookup; the
+driver does not open that path and assigns no filesystem identity. An empty
+source is valid when its pointer is non-null. `retain_object` is another
+API-only field: for a single `-c` input it keeps `result.object` in the caller's
+arena and suppresses file output. The public embedding module owns the arena
+through object serialization or JIT release.
 `compiler_driver_test_probe_spellings` covers the admission rules, both routes
 and the `-static`/`-mtune` spellings (GitHub #2851).
 

@@ -131,6 +131,7 @@
 #include <buster/tests/compiler/pdb/pdb_test.h>
 #include <buster/tests/compiler/object/object_test.h>
 #include <buster/tests/compiler/jit/jit_test.h>
+#include <buster/tests/compiler/embed/embed_test.h>
 #include <buster/tests/compiler/link/link_test.h>
 #include <buster/tests/compiler/gpu/gpu_test.h>
 #include <buster/tests/compiler/spirv/spirv_test.h>
@@ -197,6 +198,7 @@
 #include <buster/tests/compiler/pdb/pdb_test.c>
 #include <buster/tests/compiler/object/object_test.c>
 #include <buster/tests/compiler/jit/jit_test.c>
+#include <buster/tests/compiler/embed/embed_test.c>
 #include <buster/tests/compiler/link/link_test.c>
 #include <buster/tests/compiler/gpu/gpu_test.c>
 #include <buster/tests/compiler/spirv/spirv_test.c>
@@ -916,6 +918,7 @@ typedef enum TestId
     TEST_ID_PDB,
     TEST_ID_OBJECT,
     TEST_ID_JIT,
+    TEST_ID_EMBED,
     TEST_ID_LINK,
     TEST_ID_GPU_PIPELINE,
     TEST_ID_SPIRV_COMPUTE,
@@ -989,6 +992,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_PDB] = {S8_INITIALIZER("pdb_tests"), &pdb_tests, !BUSTER_IOS},
     [TEST_ID_OBJECT] = {S8_INITIALIZER("object_tests"), &object_tests},
     [TEST_ID_JIT] = {S8_INITIALIZER("jit_tests"), &jit_tests},
+    [TEST_ID_EMBED] = {S8_INITIALIZER("embed_tests"), &embed_tests},
     [TEST_ID_LINK] = {S8_INITIALIZER("link_tests"), &link_tests, !BUSTER_ANDROID && !BUSTER_IOS},
     [TEST_ID_GPU_PIPELINE] = {S8_INITIALIZER("gpu_pipeline_tests"), &gpu_pipeline_tests},
     [TEST_ID_SPIRV_COMPUTE] = {S8_INITIALIZER("spirv_compute_tests"), &spirv_compute_tests},
