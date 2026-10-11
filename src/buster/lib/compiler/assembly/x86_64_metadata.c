@@ -476,6 +476,11 @@ BUSTER_CT_CHECK(sizeof(BusterX86GeneratedCoverage) == 32);
 // operand_first (u32) then operand_count (u16) in a form record.
 #define BUSTER_X86_METADATA_FORM_OPERAND_RANGE_OFFSET 88u
 BUSTER_CT_CHECK(BUSTER_X86_METADATA_FORM_RECORD_SIZE <= BUSTER_X86_METADATA_RANGE_DECODE_CAPACITY);
+// The partition walk reads the two range fields from the three groups that
+// hold them: records start on a group boundary and the fields stay inside
+// those groups.
+BUSTER_CT_CHECK(BUSTER_X86_METADATA_FORM_RECORD_SIZE % 3u == 0);
+BUSTER_CT_CHECK(BUSTER_X86_METADATA_FORM_OPERAND_RANGE_OFFSET % 3u + 6u <= 9u);
 #define BUSTER_X86_METADATA_TEXT_RANGE_RECORD_SIZE 12u
 #define BUSTER_X86_METADATA_CANDIDATE_RECORD_SIZE 4u
 #define BUSTER_X86_METADATA_HASH_RANGE_RECORD_SIZE 16u
@@ -2666,13 +2671,30 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_operand_ranges_partition(void)
     for (u32 form_id = 0; partitions && form_id < BUSTER_X86_GENERATED_FORM_COUNT; form_id += 1)
     {
         // Only the six bytes of the two fields, decoded from their own
-        // groups; a form outside the blob reads as the zero record.
+        // groups; a form outside the blob reads as the zero record.  The
+        // three groups that hold them usually sit whole inside one chunk's
+        // string and decode straight from it; the rest take the general range
+        // decode, which handles chunk ends and short strings.
         u8 fields[6] = {0};
         if (buster_x86_metadata_form_record_in_blob(form_id))
         {
-            buster_x86_metadata_decode_blob_range(fields, BUSTER_X86_METADATA_BLOB(forms),
-                                                  (u64)form_id * BUSTER_X86_METADATA_FORM_RECORD_SIZE + BUSTER_X86_METADATA_FORM_OPERAND_RANGE_OFFSET,
-                                                  sizeof(fields));
+            BusterX86MetadataBlob blob = BUSTER_X86_METADATA_BLOB(forms);
+            u64 group = (u64)form_id * (BUSTER_X86_METADATA_FORM_RECORD_SIZE / 3u) + BUSTER_X86_METADATA_FORM_OPERAND_RANGE_OFFSET / 3u;
+            u64 chunk = group / BUSTER_X86_METADATA_BLOB_GROUPS_PER_CHUNK;
+            u64 within = group % BUSTER_X86_METADATA_BLOB_GROUPS_PER_CHUNK;
+            if (within + 3u <= BUSTER_X86_METADATA_BLOB_GROUPS_PER_CHUNK && chunk < blob.chunk_count &&
+                blob.chunk_lengths[chunk] >= (within + 3u) * 4u)
+            {
+                u8 groups[9];
+                buster_x86_metadata_decode_base64_chunk_scalar(groups, blob.chunks[chunk] + within * 4u, 12u, 3u);
+                memcpy(fields, groups + BUSTER_X86_METADATA_FORM_OPERAND_RANGE_OFFSET % 3u, sizeof(fields));
+            }
+            else
+            {
+                buster_x86_metadata_decode_blob_range(fields, blob,
+                                                      (u64)form_id * BUSTER_X86_METADATA_FORM_RECORD_SIZE + BUSTER_X86_METADATA_FORM_OPERAND_RANGE_OFFSET,
+                                                      sizeof(fields));
+            }
         }
         u32 operand_first = buster_x86_metadata_blob_u32(fields);
         u16 operand_count = buster_x86_metadata_blob_u16(fields + 4);
