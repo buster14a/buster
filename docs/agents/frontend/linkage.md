@@ -112,15 +112,27 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   arena allocation clears only the dirty overlap. BSS and thread-local BSS
   keep their virtual sizes without allocating serialized storage (GitHub #303).
 - **AMD64 COFF TLS-index REL32 fields use the ordinary inline addend convention.**
-  The reader normalizes the signed inline displacement B to canonical A=B-4,
-  including references named `__tls_index`. The writer restores B=A+4 for
+  The reader normalizes the signed inline displacement B to canonical A=B-4.
+  The writer restores B=A+4 for
   `OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32`, just as for ordinary PC32.
   The registered object regression constructs raw COFF bytes independently,
   checks both signed boundaries and a near-name ordinary-symbol control,
-  and inspects serialized fields across repeated read/write cycles. This
-  preserves addends within the current TLS model; platform TLS symbol spelling,
-  section conventions and runtime interoperability remain separate contracts
-  tracked by GitHub #1323.
+  and inspects serialized fields across repeated read/write cycles.
+- **COFF TLS index loads name the loader's `_tls_index`.** Codegen relocates
+  each Windows index load (x86-64 REL32, ARM64 ADRP/LDR pair) against the TLS
+  variable; `object_coff_bind_tls_index` rebinds only the serialized object to
+  an undefined global DATA `_tls_index` (`OBJECT_COFF_TLS_INDEX_NAME`), the
+  spelling MSVC, its CRT and LLD use. A program-defined `_tls_index` fails the
+  write. The reader recognizes the index load only for plain REL32 (or the
+  ARM64 pair) against that undefined DATA symbol; REL32_1..5 against it fail.
+  `link_pe_tls_index_symbol` resolves it to the image's synthesized
+  `AddressOfIndex` slot for both architectures instead of importing it, so a
+  program linked from a written object, from Clang's object, or in memory
+  loads the same slot. `lld-link` links Buster's objects given a CRT or stub
+  `_tls_index`. `link_test_pe_x64_tls_index` compares the decoded index load
+  with `AddressOfIndex` for both link routes (#1323 W1/W3). COFF TLS data
+  still uses `.tdata`/`.tbss` rather than `.tls$`; that section convention and
+  Mach-O `__thread_vars` descriptors remain open on GitHub #1323.
 - **COFF section alignment is a linker placement contract.** A nonzero
   `ObjectSection.alignment` is preserved in `IMAGE_SCN_ALIGN_*`; zero resolves
   through `object_section_default_alignment` for that kind. COFF represents
@@ -657,7 +669,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   SUB, ADDS and unrelated instructions. Type 7 ordinarily accepts the scaled
   unsigned-immediate load/store and PRFM encodings, preserving the operation
   and registers while clearing or restoring the immediate. Reserved,
-  unscaled and register-offset forms fail closed. The exact `__tls_index`
+  unscaled and register-offset forms fail closed. The exact `_tls_index`
   symbol remains a distinct DATA-symbol contract restricted to a 32-bit
   unsigned-immediate LDR; the writer binds index-pair relocations to that
   loader symbol. TLS section offsets use shifted ADD type 10
@@ -669,8 +681,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   fail before executable publication. Registered codegen, original raw-COFF
   and final PE byte tests cover both frontend forms, all allocators, carries,
   initialized/zero-fill placement and output retention. This fixes #1323 W2;
-  platform TLS-index spelling/section interoperability and Mach-O descriptors
-  remain separate work. Type 15 is `BRANCH19` and is not treated as TLS. ARM64
+  the `.tls$` section convention and Mach-O descriptors remain separate work. Type 15 is `BRANCH19` and is not treated as TLS. ARM64
   CodeView uses `SECREL` type 8 and the two-byte `SECTION` type 13, retaining
   checked inline addends. The PE linker applies all of these only after final
   layout and returns no executable bytes on a relocation failure.

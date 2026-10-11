@@ -132,7 +132,7 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12,
     // Ordinary Windows ARM64 page-address pairs.  Keep these separate from
     // the loader-owned TLS sequence even though COFF gives PAGEBASE_REL21
-    // the same numeric type as the __tls_index ADRP relocation.
+    // the same numeric type as the _tls_index ADRP relocation.
     OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21,
     OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A,
     OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L,
@@ -263,6 +263,10 @@ BUSTER_F_DECL bool object_aarch64_pe_tls_index_lo12_relocate(u32 word, u64 targe
 BUSTER_F_DECL bool object_aarch64_pe_tls_offset_relocate(ObjectRelocationKind kind, u32 word, u64 offset, s64 addend, u32* patched);
 
 #define OBJECT_SECTION_UNDEFINED UINT32_MAX
+// The PE loader stores a module's TLS slot in the variable that the image's
+// TLS directory names. MSVC's CRT and LLD spell it _tls_index; COFF objects
+// reference it from the x86-64 REL32 and ARM64 ADRP/LDR index loads.
+#define OBJECT_COFF_TLS_INDEX_NAME S8("_tls_index")
 
 typedef struct ObjectSection ObjectSection;
 struct ObjectSection
