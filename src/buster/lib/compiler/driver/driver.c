@@ -942,8 +942,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_invocation_has_c_input(CompilerDriverIn
     return result;
 }
 
-// Native code-generation policies need the native code generator, so the
-// pipeline a resolved invocation selects must be able to honor each one.
+// Code-generation policies require a pipeline that can honor each request.
+// Direct Wasm/eBPF writers have no source-debug payload; test debug_info itself
+// so API callers do not need the argv-only explicit marker.
 // argv_request enables the rules over state only argv fills in:
 // metrics_output_path belongs to `ide cc`, never to an API request.
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_codegen_request(CompilerDriverInvocation* invocation, bool argv_request)
@@ -959,6 +960,14 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_codegen_request(CompilerDriver
         {
             invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
             invocation->diagnostic = S8("-emit-llvm emits binary bitcode and cannot be combined with -E, -S, or -fsyntax-only");
+        }
+        else if (invocation->debug_info && native_codegen_action && !invocation->has_gpu_target && !invocation->emit_llvm_bitcode &&
+                 (compiler_driver_target_is_wasm(invocation->target) || invocation->target.cpu_arch == CPU_ARCH_BPFEL))
+        {
+            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation->diagnostic = compiler_driver_target_is_wasm(invocation->target)
+                                         ? S8("-g is not supported for direct WebAssembly module output")
+                                         : S8("-g is not supported for direct eBPF object output");
         }
         else if (invocation->verify_codegen && !(native_machine && native_codegen_action))
         {
