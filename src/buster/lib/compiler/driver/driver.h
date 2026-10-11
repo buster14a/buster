@@ -520,6 +520,9 @@ struct CompilerDriverCAstPilotResult
     // answered, and runs left to the type machine and why. Zero when the
     // analysis had no tree to use.
     CAstSpecifierStatistics specifiers;
+    // What lowering read from the tree (CAstLowerStatistics). Zero for
+    // -fsyntax-only and when lowering had no tree.
+    CAstLowerStatistics lower;
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;
