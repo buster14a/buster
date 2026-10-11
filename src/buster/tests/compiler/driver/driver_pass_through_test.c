@@ -132,6 +132,29 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_arguments(U
     String8 stdin_query[] = {S8("--target=x86_64-unknown-linux"), S8("-Wl,--version"), S8("-x"), S8("c"), S8("-")};
     CompilerDriverInvocation stdin_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(stdin_query));
     BUSTER_TEST(arguments, compiler_driver_execute_invocation(arena, stdin_invocation).error == COMPILER_DRIVER_ERROR_NONE);
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    // Observe the real CLI status/streams as well as the invocation API.
+    String8 cli_output = {0}, cli_error = {0};
+    String8 cli_queries[][5] = {
+        {S8("--target=x86_64-unknown-linux"), S8("-Wl,--version"), S8("-O0"), S8("-g"), absent},
+        {S8("--target=x86_64-unknown-linux"), S8("-Xlinker"), S8("--version"), S8("-x"), S8("c")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cli_queries); index += 1)
+    {
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(cli_queries[index]),
+                                                           &cli_output, &cli_error));
+        BUSTER_STRING_TEST(arguments, cli_output, S8("Buster native linker\nTarget: x86_64-unknown-linux-gnu\n"));
+        BUSTER_TEST(arguments, cli_error.length == 0);
+    }
+    BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(stdin_query),
+                                                       &cli_output, &cli_error));
+    BUSTER_STRING_TEST(arguments, cli_output, S8("Buster native linker\nTarget: x86_64-unknown-linux-gnu\n"));
+    BUSTER_TEST(arguments, cli_error.length == 0);
+    String8 invalid_cli[] = {S8("--target=x86_64-unknown-linux"), S8("-c"), S8("-Wl,--version"), absent};
+    BUSTER_TEST(arguments, !compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_cli),
+                                                        &cli_output, &cli_error));
+    BUSTER_TEST(arguments, cli_output.length == 0 && compiler_driver_test_string_contains(cli_error, S8("native linker --version")));
+#endif
     CompilerDriverInvocation api_query = {.target = meson.target, .query = COMPILER_DRIVER_QUERY_LINKER_VERSION};
     BUSTER_STRING_TEST(arguments, compiler_driver_execute_invocation(arena, api_query).output, compiler_driver_query_text(arena, &meson));
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modes); index += 1)
