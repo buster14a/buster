@@ -28,7 +28,9 @@ GCC 14 builds the reference kernel and HOSTCC utilities. The pin's x86
 compressed boot string compilation omits an explicit C dialect, so GCC 15's
 C23 default fails on its older bool/false definitions. The reference uses
 GCC 14 without patching source or changing Kbuild flags. ACPI and PCI are
-explicitly enabled for QEMU's clean guest poweroff. A separate static
+explicitly enabled for QEMU's clean guest poweroff. Kernel relocation is
+enabled, while address randomization stays disabled. Early serial output and
+QEMU guest-error/CPU-reset diagnostics expose failures before console startup. A separate static
 GCC/glibc init supplies seven named userspace controls: tmpfs file persistence,
 anonymous memory, fork/wait, pipe communication, monotonic timer, signal
 delivery, and guest loopback UDP. These are smoke controls, not upstream
@@ -75,7 +77,7 @@ kills the stage's process group and remains exit 124. Job limits are not
 evidence of successful kernel work.
 
 Native controls check argument preservation (spaces and empty arguments),
-nonzero exit attribution, timeout cleanup, malformed records, and C-action
+nonzero exit attribution, timeout cleanup, malformed records, ledger row/status parsing, and C-action
 classification with Clang and GCC warning-clean harness builds.
 
 ## Reading evidence
@@ -130,7 +132,12 @@ Integrate separately qualified #3179 userspace only after independent kernel
 and userspace controls pass. Keep #3186 open until its staged acceptance is
 actually satisfied.
 
-The harness and opt-in workflow add approximately 42 KiB of build-category
+The harness and opt-in workflow add approximately 44 KiB of build-category
 code. The native driver's generated source-size baseline acknowledges this
 new reference/control/provenance capability; it changes no compiler behavior
 or native-retirement identity bindings.
+
+QEMU exit zero alone is insufficient: a prior nonrelocatable reference exited
+in 0.09 s with an empty serial log and was rejected before candidate work.
+The declared fixture now enables relocation and early boot diagnostics;
+relocation's role in that earlier exit is not independently established.

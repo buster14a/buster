@@ -294,6 +294,13 @@ BUSTER_GLOBAL_LOCAL bool kernel_target_c(size_t count)
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL bool kernel_index_row(FILE* index, char const* record, char const* output, bool attempted, int status)
+{
+    int bytes = fprintf(index, "%s\t%s\t%s\t%d\n", record, output, attempted ? "attempted" : "unattempted", status);
+    bool valid = bytes > 0;
+    return valid;
+}
+
 typedef struct KernelSelection
 {
     char record[128];
@@ -358,7 +365,7 @@ BUSTER_GLOBAL_LOCAL int kernel_replay(void)
                         strcpy(kernel_selection[slot].record, entry->d_name);
                         strcpy(kernel_selection[slot].output, original_output);
                     }
-                    fprintf(index, "%s\t%s\tunattempted\t-1\n", entry->d_name, original_output);
+                    valid = kernel_index_row(index, entry->d_name, original_output, false, -1) && valid;
                 }
             }
         }
@@ -407,8 +414,7 @@ BUSTER_GLOBAL_LOCAL int kernel_replay(void)
                 int status = kernel_run(name, kernel_arguments[0], arguments, 15);
                 ++attempted;
                 passed += status == 0 ? 1u : 0u;
-                fprintf(index, "%s\t%s\tattempted\t%d\n", kernel_selection[row].record,
-                        kernel_selection[row].output, status);
+                valid = kernel_index_row(index, kernel_selection[row].record, kernel_selection[row].output, true, status) && valid;
             }
         }
     }
@@ -436,12 +442,12 @@ BUSTER_GLOBAL_LOCAL bool kernel_config_matches(void)
     char const* required[] = {"CONFIG_64BIT=y\n", "CONFIG_X86_64=y\n", "CONFIG_BINFMT_ELF=y\n",
         "CONFIG_BLK_DEV_INITRD=y\n", "CONFIG_SERIAL_8250_CONSOLE=y\n", "CONFIG_TMPFS=y\n",
         "CONFIG_FUTEX=y\n", "CONFIG_POSIX_TIMERS=y\n", "CONFIG_INET=y\n",
-        "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y\n"};
+        "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y\n", "CONFIG_RELOCATABLE=y\n", "CONFIG_PCI=y\n", "CONFIG_ACPI=y\n"};
     for (size_t i = 0; i < sizeof(required) / sizeof(required[0]) && valid; ++i)
     {
         valid = kernel_contains(path, required[i]);
     }
-    valid = valid && !kernel_contains(path, "CONFIG_RUST=y\n") && !kernel_contains(path, "CONFIG_MODULES=y\n");
+    valid = valid && !kernel_contains(path, "CONFIG_RUST=y\n") && !kernel_contains(path, "CONFIG_MODULES=y\n") && !kernel_contains(path, "CONFIG_RANDOMIZE_BASE=y\n");
     return valid;
 }
 
@@ -482,8 +488,8 @@ BUSTER_GLOBAL_LOCAL int kernel_frontier(char const* fragment)
     valid = kernel_path(kernel, context->reference, "arch/x86/boot/bzImage") && valid;
     char* boot[] = {"qemu-system-x86_64", "-machine", "pc,accel=tcg", "-cpu", "qemu64", "-smp", "1",
         "-m", "128", "-nodefaults", "-display", "none", "-serial", "stdio", "-monitor", "none", "-nic", "none",
-        "-no-reboot", "-kernel", kernel, "-initrd", context->initramfs,
-        "-append", "console=ttyS0 rdinit=/init panic=-1", 0};
+        "-no-reboot", "-d", "guest_errors,cpu_reset", "-kernel", kernel, "-initrd", context->initramfs,
+        "-append", "console=ttyS0 earlycon=uart8250,io,0x3f8,115200 rdinit=/init panic=-1", 0};
     valid = valid && kernel_run("reference-boot", context->source, boot, 90) == 0 &&
             kernel_path(log, context->output, "reference-boot.log") &&
             kernel_contains(log, "LINUX_CONTROL_SUMMARY attempted=7 passed=7 failed=0 skipped=0") &&
@@ -507,6 +513,37 @@ BUSTER_GLOBAL_LOCAL int kernel_frontier(char const* fragment)
             stat(clean_log, &clean_stat) == 0 && clean_stat.st_size == 0;
     int result = valid ? 0 : 1;
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool kernel_index_control(char const* path)
+{
+    FILE* file = fopen(path, "wb");
+    bool valid = file != 0;
+    if (file)
+    {
+        valid = kernel_index_row(file, "pending.argv", "pending.o", false, -1) &&
+                kernel_index_row(file, "success.argv", "success.o", true, 0) &&
+                kernel_index_row(file, "failure.argv", "failure.s", true, 37);
+        valid = fclose(file) == 0 && valid;
+    }
+    file = valid ? fopen(path, "rb") : 0;
+    valid = file != 0 && valid;
+    if (file)
+    {
+        char record[128], output[128], state[16];
+        int status = 0;
+        unsigned rows = 0, pending = 0, passed = 0, failed = 0;
+        while (fscanf(file, "%127[^\t]\t%127[^\t]\t%15[^\t]\t%d\n", record, output, state, &status) == 4)
+        {
+            ++rows;
+            pending += strcmp(state, "unattempted") == 0 && status == -1 ? 1u : 0u;
+            passed += strcmp(state, "attempted") == 0 && status == 0 ? 1u : 0u;
+            failed += strcmp(state, "attempted") == 0 && status == 37 ? 1u : 0u;
+        }
+        valid = feof(file) && !ferror(file) && rows == 3 && pending == 1 && passed == 1 && failed == 1;
+        valid = fclose(file) == 0 && valid;
+    }
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL int kernel_self_test(void)
@@ -541,6 +578,7 @@ BUSTER_GLOBAL_LOCAL int kernel_self_test(void)
             fixture[5] = "kernel.s";
             valid = valid && kernel_argv(path, temporary, fixture + 1) && kernel_read_record(path, &count) &&
                     kernel_target_c(count);
+            valid = valid && kernel_path(path, temporary, "ledger.tsv") && kernel_index_control(path);
             fixture[3] = "-E";
             valid = valid && kernel_argv(path, temporary, fixture + 1) && kernel_read_record(path, &count) &&
                     !kernel_target_c(count);

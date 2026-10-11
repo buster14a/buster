@@ -23,6 +23,7 @@ directory and removes the compiler and in-progress outputs.
 | sbase | [sbase](compatibility/sbase.md) |
 | DoomGeneric | [DoomGeneric](compatibility/doom.md) |
 | QuickJS and Test262 | [QuickJS](compatibility/quickjs.md) |
+| Linux kernel (minimal reference and blocker frontier) | [Linux kernel](compatibility/linux-kernel.md) |
 | musl | [musl](compatibility/musl.md) |
 | libc-test through the musl harness | [libc-test](compatibility/libc-test.md), after [musl](compatibility/musl.md) |
 | CPython | [CPython](compatibility/cpython.md) |
