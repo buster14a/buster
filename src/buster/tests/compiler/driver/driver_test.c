@@ -5234,7 +5234,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_declarator_group_cases(UnitTe
     return result;
 }
 
-// Declarators wrapped in redundant parentheses (GitHub #3215). The split read
+// Declarators wrapped in redundant parentheses (GitHub #3215, #3368). The split read
 // `int ((*pq))(int) = f;` as a function and `int (gd(int a)) { ... }` with
 // the declaration after it as one object, so both programs failed with an
 // undeclared name. The pilot publishes the split from the tree for all but
@@ -5252,6 +5252,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_redundant_declarator_gro
             "int main(void) { tp = id; return a + b + c[1] + (d != 0) + e() + (g != 0) + t[1] + tp(0) + (int)sizeof(t) - 8; }\n"),
          true},
         {S8("int (gv(int a, ...)) { return a; }\nint main(void) { return gv(0, 1, 2); }\n"), false},
+        // #3368: an old-style definition whose name sits in a redundant
+        // group; the split refuses its declaration list.
+        {S8("int (k(a)) int a; { return a; }\nint main(void) { return k(0); }\n"), false},
+        {S8("static int v;\nint z(void) { return 0; }\nint (k2)(a) int a; { return a; }\nint (*(k3(a))) int a; { v = a; return &v; }\n"
+            "int (*(k4(a)))(void) int a; { (void)a; return z; }\nint (k5(a, b)) int a; char *b; { return a + (b != 0); }\n"
+            "double ((k6)(a, d)) float d; int a; { return a + d; }\n"
+            "int main(void) { return k2(0) + *k3(0) + k4(1)() + k5(0, 0) + (int)k6(1, -1.0f); }\n"),
+         false},
+        {S8("typedef int a;\nint (k(a)) { return 0; }\nint x, (kd(int c));\nint (kd(int c)) { return c; }\n"
+            "int main(void) { return k(5) + kd(x); }\n"),
+         true},
     };
     return compiler_driver_declarator_group_cases(arguments, cases, BUSTER_ARRAY_LENGTH(cases));
 }
