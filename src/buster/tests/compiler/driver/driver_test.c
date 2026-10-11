@@ -3897,6 +3897,71 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bounded_address_space(Un
     return result;
 }
 
+// #1454: libSystem data (`stderr` is the FILE* variable `__stderrp`, beside
+// getopt's `optind`) reached from a Buster object must be bound through the
+// GOT by Apple's linker as well as by Buster's own. Before the GOT forms, the
+// x86-64 object named the data with a call relocation, so ld64 handed the
+// program a call stub's bytes, and the arm64 one addressed page zero.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_libsystem_data(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && BUSTER_MACOS && !BUSTER_IOS
+    String8 source = S8("extern void *__stderrp;\n"
+                        "extern int optind;\n"
+                        "int fputs(const char *, void *);\n"
+                        "int *optind_address(void) { return &optind; }\n"
+                        "int main(void) { return optind != 1 || optind_address() != &optind || !__stderrp || fputs(\"\", __stderrp) < 0; }\n");
+    String8 clang = executable_resolve_in_path(arguments->arena, S8("clang"));
+    BUSTER_TEST(arguments, clang.length != 0);
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+    {
+        for (u32 linker = 0; linker < 2; linker += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-mach-libsystem-data"), S8(".c"));
+            String8 object = buster_test_temporary_path(arena, S8("buster-mach-libsystem-data"), S8(".o"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-mach-libsystem-data"), S8(".exe"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+            {
+                String8 object_command[] = {S8("-nostdinc"), S8("-std=gnu17"), optimizations[optimization], S8("-g0"),
+                                            S8("-fverify-codegen"), S8("-c"), S8("-o"), object, input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                bool linked = false;
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE && linker == 0 && clang.length)
+                {
+                    // Apple's ld, an independent reading of the object's relocations.
+                    String8 link[] = {clang, object, S8("-o"), output};
+                    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link), (SliceString8){0}, (SliceString8){0},
+                                                                (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                    linked = spawn.handle && os_process_wait_deadline(arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+                    BUSTER_TEST(arguments, linked);
+                }
+                else if (compiled.error == COMPILER_DRIVER_ERROR_NONE && linker == 1)
+                {
+                    String8 link_command[] = {S8("-o"), output, object};
+                    compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    linked = compiled.error == COMPILER_DRIVER_ERROR_NONE;
+                }
+                if (linked)
+                {
+                    BUSTER_TEST(arguments, compiler_driver_test_process_success(arena, output));
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#else
+    (void)arguments;
+#endif
+    return result;
+}
+
 // The same sources reach the frontend through syntax-only and object actions.
 // Compare structured diagnostics as well as their rendered severity/location/
 // ordering; backend capability failures are deliberately absent from this corpus.
@@ -30340,6 +30405,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_c_ast_pilot);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_redundant_declarator_groups);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_void_function_pointer_roundtrip);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_libsystem_data);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_shared_ifunc_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_function_alignment_and_weakref);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_released_phase_fill);

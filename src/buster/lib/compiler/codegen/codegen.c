@@ -87,6 +87,8 @@ bool codegen_module_relocation_kind_is_aarch64(u8 kind)
     case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_ADD_LO12:
     case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_PAGE21:
     case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_LD64_LO12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12:
         return true;
     default:
         return false;
@@ -3839,11 +3841,16 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_relocation_kind(AssemblyRelocat
 
 // The relocation of one half of an AArch64 page-pair address. The selector
 // chose the pair's form per symbol and the encoder only says which half a site
-// is: Darwin has one pair, and ELF has the plain page pair and the GOT slot.
-BUSTER_GLOBAL_LOCAL CodegenModuleRelocationKind codegen_aarch64_page_relocation_kind(u8 reference, bool low)
+// is: each format has the plain page pair and the GOT slot, and only the
+// object format decides how the GOT pair is spelled.
+BUSTER_GLOBAL_LOCAL CodegenModuleRelocationKind codegen_aarch64_page_relocation_kind(u8 reference, bool low, bool mach)
 {
     CodegenModuleRelocationKind result = low ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12 : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21;
-    if (reference == MACHINE_SYMBOL_REFERENCE_GOT)
+    if (reference == MACHINE_SYMBOL_REFERENCE_GOT && mach)
+    {
+        result = low ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12 : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21;
+    }
+    else if (reference == MACHINE_SYMBOL_REFERENCE_GOT)
     {
         result = low ? CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_LD64_LO12 : CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_PAGE21;
     }
@@ -3862,6 +3869,7 @@ bool codegen_publish_machine_relocations(IrProgram* program, CodegenModule* resu
                                          u32 code_base, Target target)
 {
     u32 relocation_start = result->relocation_count;
+    bool mach = object_format_for_target(target) == OBJECT_FORMAT_MACH_O64;
     bool valid = relocation_start <= relocation_capacity &&
                  encoded->call_site_count <= relocation_capacity - relocation_start &&
                  encoded->inline_assembly_relocation_count <= relocation_capacity - relocation_start - encoded->call_site_count;
@@ -3895,7 +3903,7 @@ bool codegen_publish_machine_relocations(IrProgram* program, CodegenModule* resu
                                          ? codegen_aarch64_page_relocation_kind(
                                                function->call_target_references ? function->call_target_references[encoded->call_sites[site_index].target]
                                                                                 : (u8)MACHINE_SYMBOL_REFERENCE_DIRECT,
-                                               encoded->call_sites[site_index].page_low != 0)
+                                               encoded->call_sites[site_index].page_low != 0, mach)
                                      : encoded->call_sites[site_index].absolute ? CODEGEN_MODULE_RELOCATION_ABSOLUTE64
                                                                                : CODEGEN_MODULE_RELOCATION_AARCH64_CALL26),
                 };
@@ -3959,6 +3967,8 @@ bool codegen_publish_machine_relocations(IrProgram* program, CodegenModule* resu
                 {
                     addend += 4;
                 }
+                // A direct branch keeps its instruction identity for Mach-O.
+                kind = mach && relocation.is_branch ? CODEGEN_MODULE_RELOCATION_X86_64_PLT32 : kind;
             }
             IrSymbolId symbol = valid ? codegen_global_assembly_symbol(program, relocation.symbol, target, IR_SYMBOL_DATA) : IR_SYMBOL_ID_INVALID;
             valid = valid && symbol.value != IR_ID_UNDERLYING_INVALID;
@@ -4026,6 +4036,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_encode_instruction(Arena* arena
         {
             valid = valid && addend <= INT64_MAX - 4;
             addend += 4;
+            // A direct branch keeps its instruction identity for Mach-O.
+            kind = object_format_for_target(target) == OBJECT_FORMAT_MACH_O64 && assembly_x86_relocation_is_branch(encoded.bytes, relocation)
+                       ? CODEGEN_MODULE_RELOCATION_X86_64_PLT32
+                       : kind;
         }
         if (valid)
         {

@@ -1252,7 +1252,9 @@ struct MachineInlineAssemblyRelocation
     u8 kind;
     u8 is_block;
     u8 is_control;
-    u8 reserved;
+    // The rel32 of a direct CALL, JMP or Jcc (assembly_x86_relocation_is_branch),
+    // which Mach-O spells X86_64_RELOC_BRANCH rather than SIGNED.
+    u8 is_branch;
 };
 
 typedef struct MachineInlineAssembly MachineInlineAssembly;

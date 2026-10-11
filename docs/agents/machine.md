@@ -109,6 +109,18 @@ fixture as well as compiling both architectures.
   symbol rows own TLS/GOT/relocations, and offset folding never modifies them.
   These facts authorize no memory reordering or dereference. No `MachineAddress`
   MIR side table is produced; keep `MACHINE_REF_ADDRESS` stable.
+- A symbol row's `MachineSymbolReference` is chosen per symbol by
+  `machine_x64_symbol_reference` / `machine_a64_symbol_reference`, and the
+  object layer spells it per format. Mach-O relocation types name the
+  instruction, and ld64/lld resolve them with that meaning (#1454). An x86-64
+  direct call takes the PLT form, which the writer emits as
+  `X86_64_RELOC_BRANCH`. The address of a symbol the module does not define
+  takes the GOT form on both architectures: `GOT_LOAD`, or `GOT_LOAD_PAGE21`
+  and `GOT_LOAD_PAGEOFF12` on `adrp`+`ldr`. Every other rip-relative field is
+  `SIGNED`, or `SIGNED_1/2/4` when immediate bytes follow the field.
+  Inline/global assembly keeps a direct branch's identity through
+  `assembly_x86_relocation_is_branch`. `tools/test_mach_o_dylib_data_lld.sh`
+  is the independent-linker oracle for this contract.
 - `MachineFunction` owns CFG edges, block parameters, and incoming edge
   parallel-copy sources. Edge source `i` maps to destination block parameter
   `i`; keep these copies parallel through allocation so cycles are resolved as
