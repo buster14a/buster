@@ -21,7 +21,7 @@ jobs:
           requested-runner: ubuntu-26.04
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: edfcf75737f74612663f0db7fc3caa524863cd35
+          ref: 291ab4a4596e0612f48e5d139fd50a60d12c7929
           persist-credentials: false
           fetch-depth: 2
       - uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
@@ -40,13 +40,13 @@ jobs:
           "$RUNNER_TEMP/callback-driver" build --config Release -t ide
       - name: Independent C17 references
         run: |
-          clang -std=c17 -O0 -Wall -Wextra -Werror tests/basic_c_indexed_callback.c -o "$RUNNER_TEMP/callback-clang-o0"
+          clang -std=c17 -O0 -Wall -Wextra -Werror src/buster/tests/compiler/driver/fixtures/basic_c_indexed_callback.c -o "$RUNNER_TEMP/callback-clang-o0"
           "$RUNNER_TEMP/callback-clang-o0"
-          clang -std=c17 -O2 -Wall -Wextra -Werror tests/basic_c_indexed_callback.c -o "$RUNNER_TEMP/callback-clang-o2"
+          clang -std=c17 -O2 -Wall -Wextra -Werror src/buster/tests/compiler/driver/fixtures/basic_c_indexed_callback.c -o "$RUNNER_TEMP/callback-clang-o2"
           "$RUNNER_TEMP/callback-clang-o2"
-          gcc -std=c17 -O0 -Wall -Wextra -Werror tests/basic_c_indexed_callback.c -o "$RUNNER_TEMP/callback-gcc-o0"
+          gcc -std=c17 -O0 -Wall -Wextra -Werror src/buster/tests/compiler/driver/fixtures/basic_c_indexed_callback.c -o "$RUNNER_TEMP/callback-gcc-o0"
           "$RUNNER_TEMP/callback-gcc-o0"
-          gcc -std=c17 -O2 -Wall -Wextra -Werror tests/basic_c_indexed_callback.c -o "$RUNNER_TEMP/callback-gcc-o2"
+          gcc -std=c17 -O2 -Wall -Wextra -Werror src/buster/tests/compiler/driver/fixtures/basic_c_indexed_callback.c -o "$RUNNER_TEMP/callback-gcc-o2"
           "$RUNNER_TEMP/callback-gcc-o2"
       - name: Registered full Release suite
         run: |
@@ -84,7 +84,7 @@ jobs:
         if: always() && steps.ffmpeg.outcome != 'skipped'
         run: |
           cat evidence/ffmpeg.log
-          rg 'hevcdec|CANDIDATE|FAIL|error:' evidence/ffmpeg-census/buster/compiler-actions -g '*.stderr' || true
+          grep -r -E 'hevcdec|CANDIDATE|FAIL|error:' evidence/ffmpeg-census/buster/compiler-actions --include='*.stderr' || true
       - name: Retain diagnostic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -105,5 +105,109 @@ jobs:
             evidence/ffmpeg-census/receipt.txt
             evidence/ffmpeg-census/**/tests/data/fate/*.rep
             evidence/ffmpeg-census/**/tests/data/fate/*.err
+          if-no-files-found: error
+          retention-days: 14
+
+  baseline:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: ubuntu-26.04
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 8132c323e6dcd9abb29b994a454a9f449ddf76c4
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - name: Hosted native bootstrap
+        run: |
+          mkdir -p build evidence
+          git rev-parse HEAD > evidence/revision.txt
+          clang --version > evidence/clang.txt
+          gcc --version > evidence/gcc.txt
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/callback-driver"
+          "$RUNNER_TEMP/callback-driver" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          "$RUNNER_TEMP/callback-driver" build --config Release -t ide
+      - name: Independent C17 references
+        run: |
+          clang -std=c17 -O0 -Wall -Wextra -Werror tests/basic_c_indexed_callback.c -o "$RUNNER_TEMP/callback-clang-o0"
+          "$RUNNER_TEMP/callback-clang-o0"
+          clang -std=c17 -O2 -Wall -Wextra -Werror tests/basic_c_indexed_callback.c -o "$RUNNER_TEMP/callback-clang-o2"
+          "$RUNNER_TEMP/callback-clang-o2"
+          gcc -std=c17 -O0 -Wall -Wextra -Werror tests/basic_c_indexed_callback.c -o "$RUNNER_TEMP/callback-gcc-o0"
+          "$RUNNER_TEMP/callback-gcc-o0"
+          gcc -std=c17 -O2 -Wall -Wextra -Werror tests/basic_c_indexed_callback.c -o "$RUNNER_TEMP/callback-gcc-o2"
+          "$RUNNER_TEMP/callback-gcc-o2"
+      - name: Require the baseline lowering refusal in both forms
+        run: |
+          if build/Release/ide cc -std=c17 -target x86_64-linux -g0 -ffrontend-ssa tests/basic_c_indexed_callback.c -o "$RUNNER_TEMP/callback-baseline" > evidence/baseline-ssa.stdout 2> evidence/baseline-ssa.stderr; then
+            exit 1
+          fi
+          grep -F 'could not lower logical expression core' evidence/baseline-ssa.stderr
+          if build/Release/ide cc -std=c17 -target x86_64-linux -g0 -fno-frontend-ssa tests/basic_c_indexed_callback.c -o "$RUNNER_TEMP/callback-baseline" > evidence/baseline-memory.stdout 2> evidence/baseline-memory.stderr; then
+            exit 1
+          fi
+          grep -F 'could not lower logical expression core' evidence/baseline-memory.stderr
+      - name: Isolate the smallest subscript boundary
+        run: |
+          cat > "$RUNNER_TEMP/single.c" <<'EOF'
+          typedef void (*Callback)(void);
+          void run(Callback *table, int i) { table[i](); }
+          EOF
+          cat > "$RUNNER_TEMP/nested.c" <<'EOF'
+          typedef void (*Callback)(void);
+          void run(Callback (*table)[2], int i, int j) { table[i][j](); }
+          EOF
+          clang -std=c17 -Wall -Wextra -Werror -c "$RUNNER_TEMP/nested.c" -o "$RUNNER_TEMP/nested-clang.o"
+          gcc -std=c17 -Wall -Wextra -Werror -c "$RUNNER_TEMP/nested.c" -o "$RUNNER_TEMP/nested-gcc.o"
+          for form in -ffrontend-ssa -fno-frontend-ssa; do
+            build/Release/ide cc -std=c17 -target x86_64-linux -g0 "$form" -c "$RUNNER_TEMP/single.c" -o "$RUNNER_TEMP/single.o"
+            if build/Release/ide cc -std=c17 -target x86_64-linux -g0 "$form" -c "$RUNNER_TEMP/nested.c" -o "$RUNNER_TEMP/nested.o" > "evidence/minimum$form.stdout" 2> "evidence/minimum$form.stderr"; then
+              exit 1
+            fi
+            grep -F 'could not lower logical expression core' "evidence/minimum$form.stderr"
+          done
+      - name: Independent malformed neighbours
+        run: |
+          cat > "$RUNNER_TEMP/invalid.c" <<'EOF'
+          typedef int (*Unary)(int);
+          struct Dsp { Unary uni[2][2][2]; };
+          #if BAD_CASE == 1
+          int table[2][2]; int bad(void) { return table[1][0](3); }
+          #elif BAD_CASE == 2
+          int bad(struct Dsp *s) { return s->uni[1][0][1](); }
+          #elif BAD_CASE == 3
+          int bad(struct Dsp *s) { return s->uni[1][0][1](1, 2); }
+          #elif BAD_CASE == 4
+          int bad(struct Dsp *s) { return s->uni[1][0.5][1](3); }
+          #endif
+          EOF
+          for compiler in clang gcc; do
+            for badcase in 1 2 3 4; do
+              if "$compiler" -std=c17 -DBAD_CASE="$badcase" -c "$RUNNER_TEMP/invalid.c" -o "$RUNNER_TEMP/invalid.o" > "evidence/invalid-$compiler-$badcase.stdout" 2> "evidence/invalid-$compiler-$badcase.stderr"; then
+                exit 1
+              fi
+              cat "evidence/invalid-$compiler-$badcase.stderr"
+            done
+          done
+      - name: Baseline fixed point
+        run: |
+          "$RUNNER_TEMP/callback-driver" test_self_host --config Release > evidence/self-host.log 2>&1
+          cat evidence/self-host.log
+      - name: Retain diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: indexed-callback-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
           if-no-files-found: error
           retention-days: 14
