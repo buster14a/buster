@@ -4246,6 +4246,79 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_libsystem_data(Unit
     return result;
 }
 
+// #3547: a statically initialized pointer to a libSystem symbol is a dyld bind
+// site. Buster's linker used to refuse the data pointer and to store its own
+// call stub in the function pointer, which `dlsym` -- dyld's own answer, not
+// Buster's -- does not return. Apple's ld links the same objects as the
+// reference reading of their relocations.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_import_pointers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && BUSTER_MACOS && !BUSTER_IOS
+    String8 sources[] = {
+        S8("extern int optind;\n"
+           "int *optind_pointer = &optind;\n"
+           "void *dlsym(void *, const char *);\n"
+           "int main(void) { return *optind_pointer != 1 || (void *)optind_pointer != dlsym((void *)-2, \"optind\"); }\n"),
+        S8("int puts(const char *);\n"
+           "void *dlsym(void *, const char *);\n"
+           "int (*puts_pointer)(const char *) = puts;\n"
+           "int (*const puts_table[2])(const char *) = {0, puts};\n"
+           "static int local;\n"
+           "int *local_pointer = &local;\n"
+           "int main(void) {\n"
+           "    return puts_pointer(\"\") < 0 || (void *)puts_pointer != dlsym((void *)-2, \"puts\") || puts_table[1] != puts_pointer ||\n"
+           "           local_pointer != &local;\n"
+           "}\n"),
+    };
+    String8 clang = executable_resolve_in_path(arguments->arena, S8("clang"));
+    BUSTER_TEST(arguments, clang.length != 0);
+    for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
+    {
+        for (u32 linker = 0; linker < 2; linker += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-mach-import-pointers"), S8(".c"));
+            String8 object = buster_test_temporary_path(arena, S8("buster-mach-import-pointers"), S8(".o"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-mach-import-pointers"), S8(".exe"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(sources[source]))))
+            {
+                String8 object_command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-O0"), S8("-g0"), S8("-fverify-codegen"), S8("-c"), S8("-o"), object, input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                bool linked = false;
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE && linker == 0 && clang.length)
+                {
+                    String8 link[] = {clang, object, S8("-o"), output};
+                    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link), (SliceString8){0}, (SliceString8){0},
+                                                                (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                    linked = spawn.handle && os_process_wait_deadline(arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+                    BUSTER_TEST(arguments, linked);
+                }
+                else if (compiled.error == COMPILER_DRIVER_ERROR_NONE && linker == 1)
+                {
+                    String8 link_command[] = {S8("-o"), output, object};
+                    compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    linked = compiled.error == COMPILER_DRIVER_ERROR_NONE;
+                }
+                if (linked)
+                {
+                    BUSTER_TEST(arguments, compiler_driver_test_process_success(arena, output));
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#else
+    (void)arguments;
+#endif
+    return result;
+}
+
 // The same sources reach the frontend through syntax-only and object actions.
 // Compare structured diagnostics as well as their rendered severity/location/
 // ordering; backend capability failures are deliberately absent from this corpus.
@@ -32465,6 +32538,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_name_declarator_groups);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_void_function_pointer_roundtrip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_libsystem_data);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_import_pointers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_shared_ifunc_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_function_alignment_and_weakref);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_released_phase_fill);
