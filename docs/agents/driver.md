@@ -67,6 +67,56 @@ explicitly; the existing portable write-failure tests still run. This is
 controlled failure-path coverage, not a real disk-failure or crash-durability
 claim. Run `ide test --module=compiler_diagnostic_tests --verbose=1 --ci=1`.
 
+## In-memory execution (`ide run`)
+
+Use `ide run <C compiler options and inputs> [-- <program arguments>]`.
+Arguments before the first literal `--` are compiler options and inputs;
+everything after it is passed to the program, and omitting the separator means
+there are no program arguments. The first input path becomes `argv[0]` exactly
+as spelled, including `-` for source read from standard input. The program is
+called as `int main(int, char **, char **)`, with the current process
+environment as `envp`; a returned `int` becomes the `ide` process exit status.
+Calling `exit()` instead terminates the `ide` process directly.
+
+The command runs the ordinary C frontend, canonical-IR lowering, native
+code-generation and `link_objects` merge, then passes the merged object to
+`jit_link_object`. It creates neither an intermediate object file nor an
+executable image. Included headers are still read from the filesystem. When
+the source input is `-`, `ide` consumes standard input to EOF before calling
+the program, so the program sees its standard input at EOF.
+
+Failures exit with status 1, print `run: error:` to stderr, and execute no
+program code. Execution requires an x86-64 Linux host and an x86-64 Linux
+target; other hosts report
+`run: error: ide run supports only x86-64 Linux hosts`, and a foreign target
+is named in its refusal. Queries, non-link actions (`-c`, `-S`, `-E`,
+`-fsyntax-only`), explicit `-o`, `-shared`, `-pie`, LLVM bitcode, GPU targets,
+and linker/library/framework options including `-l` are refused. `ide run`
+binds only its documented host imports and loads no libraries.
+
+With `BUSTER_LINK_LIBC` on the supported host, the only imported functions
+bound by the command are:
+
+```text
+puts, putchar, printf, sprintf, snprintf, vprintf, vsnprintf, getchar,
+strlen, strcmp, strncmp, strcpy, strncpy, strcat, strchr, strrchr, strstr,
+memcpy, memmove, memset, memcmp, malloc, calloc, realloc, free, atoi, atol,
+strtol, strtoul, strtod, abs, labs, qsort, rand, srand, exit, abort, write,
+read, __errno_location
+```
+
+Without `BUSTER_LINK_LIBC`, the binding table is empty. Data imports such as
+`stdout`, `stderr` and `environ` are unsupported, as are TLS references;
+nonempty initializer/finalizer arrays are refused. The underlying JIT's Apple
+Silicon implementation remains subject to its one-`MAP_JIT`-region
+restriction, although `ide run` itself is supported only on x86-64 Linux.
+This is in-process execution, not a sandbox: the program has the `ide`
+process's privileges and can affect it. After a returned `main`, the JIT
+program is released and its arena is destroyed; when the program calls
+`exit()`, the operating system reclaims them as the process terminates.
+Executed test coverage is x86-64 Linux only; shebang execution is not
+implemented.
+
 ## Opt-in native translation-unit lanes
 
 `-fcompile-jobs=N` accepts a positive 32-bit worker request. Omission (or
@@ -1128,13 +1178,31 @@ with `INPUT`, `GROUP`, `AS_NEEDED`, `OUTPUT_FORMAT`, `OUTPUT_ARCH`, or
 whitespace and C block comments are accepted for this classification. The
 first script in search order stops lookup; a later ELF library cannot hide it.
 The driver neither interprets script members nor creates an image from them.
-Ordinary missing/malformed-library policy and automatic runtime-provider
+Other ELF missing/malformed-library policy and automatic runtime-provider
 lookup retain their existing behavior. `compiler_driver_test_elf_linker_scripts`
 covers literal script/non-script boundaries, both ELF CPUs, normal/exact
 library spellings, single/multi-input links, first-request error ordering,
 later-ELF/script precedence, and preservation of an existing output.
-General GNU linker-script interpretation and Apple's missing-library behavior
-remain separate #1285 work.
+General GNU linker-script interpretation remains separate work.
+
+On macOS and iOS, `-lNAME` searches explicit `-L` roots in order, probing
+`libNAME.tbd` before `libNAME.dylib` within each root, then
+`<sysroot>/usr/lib` when a sysroot was supplied. A compatible thin or fat
+Mach-O dylib contributes its `LC_ID_DYLIB` install name and current and
+compatibility versions to `LC_LOAD_DYLIB`; TAPI YAML TBD v1-v4 stubs provide
+the same metadata, and wrong-CPU or wrong-platform candidates are skipped.
+Mach-O dylib platforms come from `LC_BUILD_VERSION` and `LC_VERSION_MIN_*`;
+TBD v4 `targets:` entries must match both architecture and platform suffix,
+while TBD v1-v3 `archs:` entries match the CPU and an optional top-level
+`platform:` narrows the platform. Located versions are written verbatim,
+including zero; absent TBD current/compatibility versions default to 1.0.0,
+while a present malformed version makes the stub unusable. `-lc` and `-lm` keep
+their existing implicit behavior. Without a located candidate, only the
+allowlisted Apple system libraries retain the legacy `/usr/lib/libNAME.dylib`
+fallback; other requests fail with `cannot find -l<request>`. TBD v5 JSON is
+unsupported. `compiler_driver_test_mach_library_search` covers parser bounds,
+architecture selection, search order, versions, fallback, refusal and archive
+interaction on every host without running the cross-linked image.
 
 ELF executable data placement honors both page and requested object alignment.
 Align the final virtual address, not only its file offset: an initialized

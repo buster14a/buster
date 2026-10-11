@@ -69,6 +69,15 @@ its existing module-state policy; its lifecycle self-test covers both cases.
 Linking and releasing a JIT mapping do not execute runtime initialization or
 finalization.
 
+`ide run <C compiler options and inputs> [-- <program arguments>]` compiles C
+through the ordinary frontend, canonical IR, native code generation and
+`link_objects`, then links the merged object in memory with this JIT and calls
+`main(argc, argv, envp)` in-process, without an intermediate object or
+executable file. It binds only an explicit libc-function allowlist, is not a
+sandbox, and is executed and tested on x86-64 Linux hosts and targets only. See
+the [driver guide](../agents/driver.md#in-memory-execution-ide-run) for its
+full contract and refusals.
+
 ## Validation and work
 
 Use the existing [test/CI guide](../agents/testing.md), focused regression cases
