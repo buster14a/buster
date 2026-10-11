@@ -528,7 +528,7 @@ sys.exit(m.main(['--keeper',*sys.argv[5:]]))
 
     def test_shell_gate_refuses_missing_malformed_or_conflicting_supervisor_receipts(self):
         launcher = HELPER.with_name("launch_simulator.sh").read_text()
-        phase_function = launcher[launcher.index("run_lifecycle_phase() {"):
+        phase_function = HELPER.with_name("lifecycle_receipt.sh").read_text() + "\n" + launcher[launcher.index("run_lifecycle_phase() {"):
                                   launcher.index("simulator_udid_is_valid() {")]
         modes = ("valid", "missing-fields", "missing-named", "extra-field",
                  "named-mismatch", "duplicate-key", "duplicate-eof", "duplicate-native-reap",
