@@ -1750,6 +1750,24 @@ branches from. The budgets:
 - **Adoption of the hook as the default.** Unchanged: acceptance on the Zen 5
   route (#2761), with no 9700X comparison requested.
 
+The type-name runs' hosted census is
+[`2026-10-11T145510Z`](../../performance-audits/2026-10-11T145510Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes:
+  - the model and the bindings match over the corpus, the frontend sources
+    and the self-host unity input;
+  - verify mode finds the machine silent on all 45,547 skipped runs there;
+  - the objects of all four arms are identical.
+- On the self-host, 44,295 runs are skipped as no type name and 26,885 are read
+  (140 primitive, 26,745 typedef). Another 26 go to the machine as `input`. The
+  machine's root runs fall by exactly the 71,180 runs skipped and read.
+- The pilot's compile falls by 117.4 M Ir (−1.29%), with the 1.76 M bitmap
+  charged.
+- The default path is −0.0011%.
+- The skip's identity prepare and `typeof` definition never change a result on
+  any input tried. They stay, so the skip remains the machine's failure path.
+- Zen 5 validation stays incomplete (#2761), so the hook stays opt-in.
+
 For the split's [diagnostic probe](#declaration-split-from-the-tree)
 (`c_parser_tree_probe`), these budgets were declared before its measured runs.
 The probe classifies identifier lanes from their interned ids instead of
