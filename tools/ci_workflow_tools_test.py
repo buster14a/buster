@@ -145,12 +145,12 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         jobs = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:|\Z)",
                                source.split("\njobs:\n", 1)[1]))
         self.assertEqual(set(jobs), {"launch-trace", "fake-tools", "native-probes"})
-        for name, cap, artifact in (("launch-trace", 5, "ios-launch-trace"),
-                                    ("fake-tools", 10, "mobile-lifecycle")):
+        for name, runner, cap, artifact in (("launch-trace", "macos-26", 5, "ios-launch-trace"),
+                                            ("fake-tools", "macos-15", 10, "mobile-lifecycle")):
             with self.subTest(job=name):
                 job = jobs[name]
                 self.assertEqual(re.findall(r"(?m)^        os: \[(.*?)\]$", job),
-                                 ["ubuntu-26.04, macos-26"])
+                                 ["ubuntu-26.04, " + runner])
                 self.assertIn("    runs-on: ${{ matrix.os }}\n", job)
                 self.assertEqual(re.findall(r"(?m)^    timeout-minutes: (\d+)$", job), [str(cap)])
                 self.assertIn("fail-fast: false", job)
@@ -164,7 +164,11 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         native = jobs["native-probes"]
         self.assertEqual(re.findall(r"(?m)^    runs-on: (.+)$", native), ["macos-26"])
         self.assertEqual(re.findall(r"(?m)^    timeout-minutes: (\d+)$", native), ["30"])
-        self.assertNotIn("macos-15", source)
+        self.assertEqual(source.count("macos-15"), 1)
+        policy = (ROOT / "docs/apple-ci-policy.md").read_text()
+        for required in ("Temporary fake-tools version exception", "**Purpose:**", "**Evidence:**",
+                         "**Owner:**", "**Review condition:**", "#3479"):
+            self.assertIn(required, policy)
 
     def test_integrity_and_security_policy(self):
         for path in (ROOT / ".github/workflows").glob("*.yml"):
