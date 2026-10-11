@@ -721,3 +721,20 @@ results and an explicit assembler name. Supported desktop execution covers FAST
 and QUALITY and both forms with strict codegen verification. Standard,
 GNU and later-declaration non-returning helpers each exit through the explicitly
 marked `_Exit`; a continuation that executes instead fails the runtime oracle.
+
+## Nested indexed callback callees
+
+Prepared-call discovery consumes every adjacent subscript in a callback
+selection before requiring its named base. Its member-chain walk applies the
+same rule to a subscripted record, so both `s->dsp.uni[i][!!my][!!mx](value)`
+and `slots[i][j].callback(value)` retain their complete callee range.
+The existing expression machine lowers that range; discovery does not evaluate
+or rewrite indexes, arguments or callback dispatch.
+
+The registered `c_test_call_result_callees` regression reads the first-party
+`tests/basic_c_indexed_callback.c` reduction. It checks distinct callback
+selection, ordinary and weighted signatures, negative/nonzero Boolean indexes,
+grouped and lazy calls, and separate exactly-once callee/index/argument counters.
+Canonical call counts and validation span six native layouts, GNU17/GNU23 and
+both frontend forms; native execution uses FAST and QUALITY on desktop hosts.
+Scalar callees, wrong arity and noninteger indexes remain rejected.
