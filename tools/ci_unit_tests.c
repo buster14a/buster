@@ -111,6 +111,13 @@ BUSTER_GLOBAL_LOCAL bool ci_unit_clean(ProcessSpawnResult spawn, ProcessWaitResu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool ci_unit_cleanup_failed(ProcessWaitResult wait, bool destroyed)
+{
+    bool result = wait.process_tree_cleanup_failed || wait.process_group_reservation_retained ||
+        wait.process_group_ownership_lost || !destroyed;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL CiUnitProof ci_unit_parse_selection(String8 output, bool primary, bool audits, String8 module_name, bool inventory)
 {
     CiUnitProof proof = {.valid = true};
@@ -518,13 +525,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_schedule_run(Arena* arena, String8 pat
         if (work->inventory.modules[index].enabled)
         {
             CiUnitChild* child = work->children + index;
-            bool clean = child->clean;
-            if (child->arena)
-            {
-                clean = ci_unit_replay(child->wait) && clean;
-                clean = arena_destroy(child->arena, 1) && clean;
-            }
-            else { clean = false; }
+            bool replayed = child->arena && ci_unit_replay(child->wait);
+            bool destroyed = child->arena && arena_destroy(child->arena, 1);
+            bool clean = child->clean && replayed && destroyed;
             valid = valid && clean && UINT64_MAX - assertions >= child->proof.assertions &&
                 UINT64_MAX - external >= child->proof.external;
             modules += clean;
@@ -534,7 +537,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_schedule_run(Arena* arena, String8 pat
                 work->inventory.modules[index].name, index, work->workers, child->start ? child->start - epoch : 0,
                 child->finish ? child->finish - epoch : 0, child->finish - child->start, clean ? 0u : 1u, child->wait.platform_status,
                 (u32)child->wait.timed_out, (u32)(child->wait.capture_failed || child->wait.output_truncated || child->wait.capture_limit_exceeded),
-                (u32)(child->wait.process_tree_cleanup_failed || child->wait.process_group_reservation_retained || child->wait.process_group_ownership_lost),
+                (u32)ci_unit_cleanup_failed(child->wait, destroyed),
                 clean ? S8("pass") : S8("fail"));
         }
     }
@@ -1045,6 +1048,16 @@ BUSTER_GLOBAL_LOCAL bool ci_unit_self_test(void)
     wait.process_tree_cleanup_failed = 1; result = result && !ci_unit_clean(spawn, wait); wait.process_tree_cleanup_failed = 0;
     wait.process_group_reservation_retained = 1; result = result && !ci_unit_clean(spawn, wait); wait.process_group_reservation_retained = 0;
     wait.process_group_ownership_lost = 1; result = result && !ci_unit_clean(spawn, wait);
+    ProcessWaitResult cleanup_wait = {0};
+    bool cleanup_control = !ci_unit_cleanup_failed(cleanup_wait, true) && ci_unit_cleanup_failed(cleanup_wait, false);
+    cleanup_wait.process_tree_cleanup_failed = 1; cleanup_control = ci_unit_cleanup_failed(cleanup_wait, true) && cleanup_control;
+    cleanup_wait.process_tree_cleanup_failed = 0; cleanup_wait.process_group_reservation_retained = 1;
+    cleanup_control = ci_unit_cleanup_failed(cleanup_wait, true) && cleanup_control;
+    cleanup_wait.process_group_reservation_retained = 0; cleanup_wait.process_group_ownership_lost = 1;
+    cleanup_control = ci_unit_cleanup_failed(cleanup_wait, true) && cleanup_control;
+    string_print(S8("CI_UNIT_CLEANUP_CONTROL_V1 destroyed_ok=1 destroyed_failed=1 tree_failed=1 reservation_retained=1 ownership_lost=1 status={S8}\n"),
+        cleanup_control ? S8("pass") : S8("fail"));
+    result = cleanup_control && result;
     scratch_end(scratch);
     return result;
 }
@@ -1141,7 +1154,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_tests_main(Arena* arena, SliceString8 
                             i ? S8("rest") : S8("primary"), group_workers, child->start - epoch, child->finish - epoch, child->finish - child->start,
                             clean ? 0u : 1u, child->wait.platform_status, (u32)child->wait.timed_out,
                             (u32)(child->wait.capture_failed || child->wait.output_truncated || child->wait.capture_limit_exceeded),
-                            (u32)(child->wait.process_tree_cleanup_failed || child->wait.process_group_reservation_retained || child->wait.process_group_ownership_lost || !destroyed), clean ? S8("pass") : S8("fail"));
+                            (u32)ci_unit_cleanup_failed(child->wait, destroyed), clean ? S8("pass") : S8("fail"));
                         valid = valid && clean;
                         assertions += child->proof.assertions; modules += child->proof.selected;
                     }
