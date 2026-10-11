@@ -358,7 +358,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_files(UnitTes
     BUSTER_TEST(arguments, rule.prerequisite_count == BUSTER_ARRAY_LENGTH(expected_all));
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected_all) && index < rule.prerequisite_count; index += 1)
     {
-        BUSTER_TEST(arguments, compiler_driver_dependency_test_path_equal(rule.prerequisites[index], expected_all[index]));
+        String8 actual = rule.prerequisites[index];
+        String8 expected = expected_all[index];
+        BUSTER_TEST_RAW(arguments, compiler_driver_dependency_test_path_equal(actual, expected),
+                        string_format(arena, S8("actual ({u64})='{S8}', expected ({u64})='{S8}'"), actual.length, actual,
+                                      expected.length, expected));
     }
     for (u32 index = 0; index < rule.prerequisite_count; index += 1)
     {
@@ -376,7 +380,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_files(UnitTes
     String8 expected_user[] = {source, forced, middle, leaf, once, special};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected_user) && index < rule.prerequisite_count; index += 1)
     {
-        BUSTER_TEST(arguments, compiler_driver_dependency_test_path_equal(rule.prerequisites[index], expected_user[index]));
+        String8 actual = rule.prerequisites[index];
+        String8 expected = expected_user[index];
+        BUSTER_TEST_RAW(arguments, compiler_driver_dependency_test_path_equal(actual, expected),
+                        string_format(arena, S8("actual ({u64})='{S8}', expected ({u64})='{S8}'"), actual.length, actual,
+                                      expected.length, expected));
     }
 #if !BUSTER_ANDROID && !BUSTER_IOS
     String8 multi_directory = string_format_z(arena, S8("{S8}/multi"), directory);
