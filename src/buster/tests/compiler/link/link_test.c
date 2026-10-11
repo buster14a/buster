@@ -7576,6 +7576,50 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         relocations[1].addend = UINT16_MAX;
         BUSTER_TEST(arguments,
                     link_pe_resolved_codeview(arguments->arena, &object, &debug_module, object_output_sections, object_section_offsets, 5).length == 0);
+        relocations[1].addend = 0;
+        // Per-module grouping must match resolving each module against every
+        // relocation: relocations out of offset order, a second write to one
+        // field (the later relocation wins), an empty module, and modules
+        // that overlap or descend, which take the full-scan path.
+        ObjectRelocation reversed[BUSTER_ARRAY_LENGTH(relocations) + 1];
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(relocations); index += 1)
+        {
+            reversed[index] = relocations[BUSTER_ARRAY_LENGTH(relocations) - 1 - index];
+        }
+        reversed[BUSTER_ARRAY_LENGTH(relocations)] = relocations[2];
+        reversed[BUSTER_ARRAY_LENGTH(relocations)].addend = 7;
+        object.relocations = reversed;
+        object.relocation_count = BUSTER_ARRAY_LENGTH(reversed);
+        ObjectDebugModule layouts[][4] = {
+            {{.symbols_offset = 0, .symbols_size = 8}, {.symbols_offset = 8, .symbols_size = 0}, {.symbols_offset = 8, .symbols_size = 16}, {.symbols_offset = 24, .symbols_size = 24}},
+            {{.symbols_offset = 0, .symbols_size = 16}, {.symbols_offset = 8, .symbols_size = 16}, {.symbols_offset = 24, .symbols_size = 8}, {.symbols_offset = 32, .symbols_size = 16}},
+            {{.symbols_offset = 24, .symbols_size = 24}, {.symbols_offset = 0, .symbols_size = 8}, {.symbols_offset = 8, .symbols_size = 16}, {.symbols_offset = 40, .symbols_size = 8}},
+        };
+        for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(layouts); layout += 1)
+        {
+            object.debug_modules = layouts[layout];
+            object.debug_module_count = BUSTER_ARRAY_LENGTH(layouts[layout]);
+            ByteSlice grouped[BUSTER_ARRAY_LENGTH(layouts[layout])];
+            link_pe_resolved_codeview_modules(arguments->arena, &object, object_output_sections, object_section_offsets, 5, grouped);
+            for (u32 module = 0; module < object.debug_module_count; module += 1)
+            {
+                ByteSlice expected = link_pe_resolved_codeview(arguments->arena, &object, object.debug_modules + module, object_output_sections,
+                                                               object_section_offsets, 5);
+                BUSTER_TEST(arguments, grouped[module].length == expected.length &&
+                                           (!expected.length || memcmp(grouped[module].pointer, expected.pointer, expected.length) == 0));
+            }
+        }
+        object.debug_modules = layouts[0];
+        object.debug_module_count = BUSTER_ARRAY_LENGTH(layouts[0]);
+        ByteSlice last_write[BUSTER_ARRAY_LENGTH(layouts[0])];
+        link_pe_resolved_codeview_modules(arguments->arena, &object, object_output_sections, object_section_offsets, 5, last_write);
+        u32 overwritten = 0;
+        BUSTER_TEST(arguments, last_write[2].length == 16);
+        if (last_write[2].length == 16)
+        {
+            memcpy(&overwritten, last_write[2].pointer, sizeof(overwritten));
+            BUSTER_TEST(arguments, overwritten == (u32)((s64)symbols[1].value + (s64)expected_section_offsets[1] + 7));
+        }
     }
     Target target = target_native;
     {

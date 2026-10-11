@@ -11,7 +11,8 @@
 // refused by link_elf_eh_frame_header_write; link_elf_eh_frame_entries_sort
 // skips radix bytes no address varies in and already ordered tables),
 // PE export/import plumbing,
-// CodeView/PDB resolution (link_pe_resolved_codeview), SHA-256 for build
+// CodeView/PDB resolution (link_pe_resolved_codeview, grouped per module by
+// link_pe_resolved_codeview_modules), SHA-256 for build
 // ids — but each owns its image layout whole, because the formats agree
 // on almost nothing. A position-independent image (NativeImageKind SHARED
 // for -shared, PIE for -pie) has one writer,
@@ -10351,9 +10352,13 @@ BUSTER_GLOBAL_LOCAL bool link_pe_base_relocations_write(u8* bytes, u64 capacity,
     return output == end_output;
 }
 
-ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebugModule* debug_module,
-                                                       u32 const* object_output_sections, u64 const* object_section_offsets,
-                                                       u32 output_section_count)
+// Resolves one module's CodeView symbol records against the relocations
+// listed in `relocations`, in that order, or against every relocation of the
+// merged object when `relocations` is null. Relocations outside the module's
+// symbol range are skipped either way.
+BUSTER_GLOBAL_LOCAL ByteSlice link_pe_codeview_resolve(Arena* arena, ObjectFile* object, ObjectDebugModule* debug_module,
+                                                       u32 const* relocations, u32 relocation_count, u32 const* object_output_sections,
+                                                       u64 const* object_section_offsets, u32 output_section_count)
 {
     ByteSlice result = {0};
     if (arena && object && debug_module && object_output_sections && object_section_offsets && output_section_count &&
@@ -10362,9 +10367,10 @@ ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebu
     {
         u8* bytes = arena_allocate(arena, u8, debug_module->symbols_size);
         memcpy(bytes, object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.pointer + debug_module->symbols_offset, debug_module->symbols_size);
-        for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+        u32 count = relocations ? relocation_count : object->relocation_count;
+        for (u32 list_index = 0; list_index < count; list_index += 1)
         {
-            ObjectRelocation* relocation = object->relocations + relocation_index;
+            ObjectRelocation* relocation = object->relocations + (relocations ? relocations[list_index] : list_index);
             if (relocation->section != OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS || relocation->offset < debug_module->symbols_offset ||
                 relocation->offset - debug_module->symbols_offset >= debug_module->symbols_size || relocation->symbol >= object->symbol_count)
             {
@@ -10417,6 +10423,92 @@ ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebu
     }
 
     return result;
+}
+
+ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebugModule* debug_module,
+                                                       u32 const* object_output_sections, u64 const* object_section_offsets,
+                                                       u32 output_section_count)
+{
+    return link_pe_codeview_resolve(arena, object, debug_module, 0, 0, object_output_sections, object_section_offsets, output_section_count);
+}
+
+// Resolving each module against every relocation costs modules times
+// relocations. link_objects lays modules out in input order, so their symbol
+// ranges ascend without overlap; then each CodeView relocation belongs to at
+// most one module, found by binary search, and a counting pass groups them
+// per module while keeping relocation order, which is the order the full
+// scan applies them in. Modules out of order or overlapping fall back to the
+// full scan for every module.
+void link_pe_resolved_codeview_modules(Arena* arena, ObjectFile* object, u32 const* object_output_sections, u64 const* object_section_offsets,
+                                       u32 output_section_count, ByteSlice* symbols)
+{
+    u32 module_count = object->debug_module_count;
+    bool ordered = module_count > 1;
+    for (u32 module = 1; ordered && module < module_count; module += 1)
+    {
+        ObjectDebugModule* previous = object->debug_modules + module - 1;
+        ordered = previous->symbols_offset <= UINT64_MAX - previous->symbols_size &&
+                  previous->symbols_offset + previous->symbols_size <= object->debug_modules[module].symbols_offset;
+    }
+    u32* starts = 0;
+    u32* grouped = 0;
+    u32* owners = 0;
+    if (ordered)
+    {
+        starts = arena_allocate_zeroed(arena, u32, (u64)module_count + 1);
+        owners = arena_allocate(arena, u32, object->relocation_count ? object->relocation_count : 1);
+        for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+        {
+            ObjectRelocation* relocation = object->relocations + relocation_index;
+            u32 owner = UINT32_MAX;
+            if (relocation->section == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS)
+            {
+                // The last module starting at or before the offset.
+                u32 low = 0;
+                u32 high = module_count;
+                while (low < high)
+                {
+                    u32 middle = low + (high - low) / 2;
+                    if (object->debug_modules[middle].symbols_offset <= relocation->offset)
+                    {
+                        low = middle + 1;
+                    }
+                    else
+                    {
+                        high = middle;
+                    }
+                }
+                ObjectDebugModule* module = low ? object->debug_modules + low - 1 : 0;
+                if (module && relocation->offset - module->symbols_offset < module->symbols_size)
+                {
+                    owner = low - 1;
+                    starts[owner + 1] += 1;
+                }
+            }
+            owners[relocation_index] = owner;
+        }
+        for (u32 module = 0; module < module_count; module += 1)
+        {
+            starts[module + 1] += starts[module];
+        }
+        grouped = arena_allocate(arena, u32, starts[module_count] ? starts[module_count] : 1);
+        u32* cursors = arena_allocate(arena, u32, module_count);
+        memcpy(cursors, starts, (u64)module_count * sizeof(*cursors));
+        for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+        {
+            if (owners[relocation_index] != UINT32_MAX)
+            {
+                grouped[cursors[owners[relocation_index]]++] = relocation_index;
+            }
+        }
+    }
+    for (u32 module = 0; module < module_count; module += 1)
+    {
+        u32 const* list = ordered ? grouped + starts[module] : 0;
+        u32 list_count = ordered ? starts[module + 1] - starts[module] : 0;
+        symbols[module] = link_pe_codeview_resolve(arena, object, object->debug_modules + module, list, list_count, object_output_sections,
+                                                   object_section_offsets, output_section_count);
+    }
 }
 
 // An undefined global DATA _tls_index whose every reference is a loader TLS
@@ -12247,12 +12339,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             }
             PdbModule* pdb_modules = arena_allocate(arena, PdbModule, object->debug_module_count);
             PdbContribution* pdb_contributions = arena_allocate(arena, PdbContribution, object->debug_module_count);
+            ByteSlice* module_symbols = arena_allocate(arena, ByteSlice, object->debug_module_count);
+            link_pe_resolved_codeview_modules(arena, object, object_output_sections, object_section_offsets, pe_section_count, module_symbols);
             u64 identity_size = base_file_size;
             for (u32 module_index = 0; module_index < object->debug_module_count && result.error == LINK_ERROR_NONE; module_index += 1)
             {
                 ObjectDebugModule* source = object->debug_modules + module_index;
-                ByteSlice symbols =
-                    link_pe_resolved_codeview(arena, object, source, object_output_sections, object_section_offsets, pe_section_count);
+                ByteSlice symbols = module_symbols[module_index];
                 if (!link_pdb_module_validate(object, source, symbols, object_section_offsets[OBJECT_SECTION_TEXT], text_virtual_size, &identity_size))
                 {
                     result.error = LINK_ERROR_OBJECT_WRITE;
@@ -13420,12 +13513,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
             }
             PdbModule* pdb_modules = arena_allocate(arena, PdbModule, object->debug_module_count);
             PdbContribution* pdb_contributions = arena_allocate(arena, PdbContribution, object->debug_module_count);
+            ByteSlice* module_symbols = arena_allocate(arena, ByteSlice, object->debug_module_count);
+            link_pe_resolved_codeview_modules(arena, object, object_output_sections, object_section_offsets, pe_section_count, module_symbols);
             u64 identity_size = base_file_size;
             for (u32 module_index = 0; module_index < object->debug_module_count && result.error == LINK_ERROR_NONE; module_index += 1)
             {
                 ObjectDebugModule* source = object->debug_modules + module_index;
-                ByteSlice symbols =
-                    link_pe_resolved_codeview(arena, object, source, object_output_sections, object_section_offsets, pe_section_count);
+                ByteSlice symbols = module_symbols[module_index];
                 if (!link_pdb_module_validate(object, source, symbols, 0, sections[PE_SECTION_TEXT].virtual_size, &identity_size))
                 {
                     result.error = LINK_ERROR_OBJECT_WRITE;
