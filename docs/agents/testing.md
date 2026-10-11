@@ -912,6 +912,9 @@ separate from both live arena bytes and reserved address space.
 Use `BUSTER_TEST_FIXTURE(arguments, function)` for a direct fixture function that
 returns only `UnitTestResult` counts. It preserves call order, consumes counts,
 and rewinds the primary arena after the last assertion and diagnostic consumer.
+The macro calls the fixture through a volatile function pointer so it is not
+inlined into the dispatcher (a compile-time bound for sanitized builds, #2816);
+fixture functions must have exactly the `TestFunction` signature.
 For inline fixture groups, pair `buster_test_arena_begin` and
 `buster_test_arena_end` around the complete set of consumers. Names must be
 static, whitespace-free tokens; the ordinal distinguishes repeated invocations.
