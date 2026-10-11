@@ -22,10 +22,13 @@ The cell is Linux x86-64 host, `x86_64-softmmu`, TCG enabled and KVM disabled.
 The same explicit configure options are used for Clang and Buster:
 `--without-default-features --disable-download --disable-docs
 --disable-guest-agent --disable-tools --disable-fdt --disable-strip
---disable-install-blobs --disable-rust --extra-cflags="-O0 -g"`.
-The matched `--firmwarepath=<pinned-qemu-source>/pc-bios` option supplies the
-unchanged upstream firmware resource directory for QTests; firmware file hashes
-and its pinned README are retained before either compiler runs. Normal target
+--enable-install-blobs --disable-rust --extra-cflags="-O0 -g"`.
+The normal install-blob manifest supplies QEMU's build-local `qemu-bundle`
+firmware symlinks through its unchanged postconfigure script. No install target
+runs and no firmware binaries are uploaded. Disabling this manifest removes the
+ROM entries from the bundle and makes QTests fail resource lookup, even with an
+absolute firmwarepath. Firmware file hashes and its pinned README are retained
+before either compiler runs. Normal target
 device configuration stays upstream-owned. Optional features are
 declared before either compiler runs; a failure must not trigger feature removal.
 QEMU's defaults include optimization; the final extra flags request a matched

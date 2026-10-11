@@ -271,7 +271,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult qemu_compat_main(Arena* arena, SliceString8 ar
                     string_format(arena, S8("--host-cc={S8}"), compilers[variant]), string_format(arena, S8("--cross-cc-x86_64={S8}"), guest_cc),
                     S8("--target-list=x86_64-softmmu"), S8("--enable-tcg"), S8("--disable-kvm"), S8("--without-default-features"),
                     S8("--disable-download"), S8("--disable-docs"), S8("--disable-guest-agent"), S8("--disable-tools"), S8("--disable-fdt"),
-                    S8("--disable-strip"), S8("--disable-install-blobs"), string_format(arena, S8("--firmwarepath={S8}/pc-bios"), source),
+                    S8("--disable-strip"), S8("--enable-install-blobs"),
                     S8("--disable-rust"), S8("--extra-cflags=-O0 -g")};
                 String8 prefix = string_format(arena, S8("{S8}/{S8}-configure"), output, variants[variant]);
                 bool configured = variant_admitted && directory_created && raddebugger_command_ok(qemu_upstream_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(configure), directory, prefix, &stopped));
