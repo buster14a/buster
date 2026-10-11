@@ -335,7 +335,17 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_plan_graph(IrProgram* program, IrModule* modu
         {
             IrFunction* caller = module->functions + function;
             if (caller->state != IR_FUNCTION_LOWERED) continue;
-            for (u32 block = 0; block < caller->block_count && result; block += 1)
+            // Few callers name a required callee. A streaming pass over the
+            // dense row array rejects the rest without chasing block lists;
+            // every listed row is in that array, so no site is missed.
+            bool calls_required = false;
+            for (u32 row = 0; row < caller->instruction_count && !calls_required; row += 1)
+            {
+                IrInstruction const* candidate = caller->instructions + row;
+                calls_required = candidate->opcode == IR_OPCODE_CALL && candidate->symbol.value < program->symbols.count &&
+                                 program->symbols.symbols[candidate->symbol.value].always_inline;
+            }
+            for (u32 block = 0; block < caller->block_count && result && calls_required; block += 1)
             {
                 for (u32 row = caller->blocks[block].first_instruction.value; row != IR_INLINE_NONE && result;
                      row = caller->instructions[row].next.value)
