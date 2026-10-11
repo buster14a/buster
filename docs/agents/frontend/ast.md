@@ -1297,4 +1297,36 @@ the same way and diagnostic only:
 - The default path is within +0.006%.
 - Zen 5 validation stays incomplete (#2761).
 
+For the checked casts the typer still declines in the operand (236 on the
+unity self-host after the failing-operand rule: members, string runs, builtin
+calls and `&` over a declined member), these budgets were declared before any
+measured run. They use the stage-2 input and flags and four Callgrind arms on
+tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `a6705764`, which the candidate branches from. The budgets:
+- **Census first.** A throwaway build of the base, not committed, records
+  each of those checked casts by exact operand shape: which member rule
+  refused it, the length of a string run, the builtin's name, and the operand
+  of `&`. It charges the inclusive Ir of each one's machine run. A shape is a
+  candidate only when the machine provably appends no row and raises nothing
+  for it, or when an exact replay exists. If the candidate shapes' machine Ir
+  totals below 1 M, no candidate is built, and the negative result is
+  recorded.
+- **Correctness.**
+  - no verify mismatch over the corpus;
+  - identical diagnostics and type-table sizes with and without the tree;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **The gain that ships it (C against B).** At least 1 M fewer instructions
+  in the whole compile, with the eager pass, the query function and any wider
+  node flags charged, and fewer machine runs from queries. A smaller gain, or
+  a loss, is recorded as a negative result, and the code does not ship.
+- **Default path (D against A).** Within ±0.05% Ir on `-fsyntax-only` and on
+  `-c` (`-g0`).
+- **Acceptance.** Hosted counts are diagnostic. Zen 5 validation (#2761)
+  stays incomplete, and the hook stays opt-in.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
