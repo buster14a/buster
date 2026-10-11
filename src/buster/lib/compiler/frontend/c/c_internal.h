@@ -1606,14 +1606,14 @@ typedef enum CAstTypeStatus
     C_AST_TYPE_MISS,
     C_AST_TYPE_DECLINE,
     C_AST_TYPE_ANSWER,
-    // An answer that is the row a replay of the queried string literal
-    // appends; `type` is invalid until c_parse_expression_tree_query replays it.
+    // An answer that is the row a replay of the queried node appends: a
+    // string literal, whose `type` is invalid until
+    // c_parse_expression_tree_query replays it, or, when `node_kind` is
+    // MEMBER or MEMBER_ARROW, a member access over a const or volatile
+    // aggregate, whose `type` is that aggregate's row until the replay
+    // appends the member's qualified copy. One status keeps the query
+    // function's code as it was.
     C_AST_TYPE_STRING,
-    // An answer that is the row a replay of the queried `.` or `->` appends:
-    // the member's copy qualified as its const or volatile aggregate is.
-    // `type` is that aggregate's row until c_parse_expression_tree_query
-    // replays it.
-    C_AST_TYPE_QUALIFIED_MEMBER,
 } CAstTypeStatus;
 
 typedef struct CAstTypeAnswer CAstTypeAnswer;
@@ -1626,9 +1626,8 @@ struct CAstTypeAnswer
     // [replay_start, replay_end), when not empty, is a string-literal token
     // whose typing the answer must replay exactly as the machine's task would
     // (c_parse_expression_tree_query): a checked cast's operand, or under
-    // C_AST_TYPE_STRING the queried literal itself. Under
-    // C_AST_TYPE_QUALIFIED_MEMBER it is the member access's tokens, which
-    // end at the member's name.
+    // C_AST_TYPE_STRING the queried literal itself, or the queried member
+    // access's tokens, which end at the member's name.
     u32 replay_start;
     u32 replay_end;
     bool nonplace_projection;

@@ -1929,15 +1929,16 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_agree(CAstTypeBody const* body, CPr
 }
 
 // A `.` or `->` that the member rule declines only because its aggregate is
-// const or volatile (C_AST_TYPE_QUALIFIED_MEMBER), over a base it accepts.
+// const or volatile, over a base it accepts.
 // The machine types that base as the tree does, then makes two calls,
 // c_parse_member_type on the qualified aggregate and
 // c_parse_add_qualified_type on the member it finds
 // (c_parse_direct_expression_postfix). The second appends the member's
 // qualified copy, and that row is its answer. c_parse_expression_tree_query
 // makes the same two calls. A checked query needs a safe base, as the member
-// rule does. Called only from c_ast_types_answer's decline branch, off the
-// path that ordinary answers take.
+// rule does. The answer is C_AST_TYPE_STRING's replay with this node's kind.
+// Called only from c_ast_types_answer's decline branch, off the path that
+// ordinary answers take.
 BUSTER_GLOBAL_LOCAL bool c_ast_types_qualified_member(CAstTypeBody const* body, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                       u32 node, bool checked, CAstTypeAnswer* answer)
 {
@@ -1966,7 +1967,7 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_qualified_member(CAstTypeBody const* body, 
                     (!(base_flags & C_AST_TYPE_FLAG_LOOKUP_BELOW) || c_ast_types_lookups_agree(body, preprocess, result, scope, node - 1));
     if (answered)
     {
-        answer->status = C_AST_TYPE_QUALIFIED_MEMBER;
+        answer->status = C_AST_TYPE_STRING;
         answer->type = aggregate;
         answer->replay_start = body->first[relative];
         answer->replay_end = body->end[relative];
@@ -2380,7 +2381,7 @@ CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult prepro
             probe.nodes_typed = machine.ast_types->local_statistics.nodes_typed;
             probe.nodes_accepted = machine.ast_types->local_statistics.nodes_accepted;
             // A replayed answer's row exists only once the replay runs.
-            bool replayed = answer.status == C_AST_TYPE_STRING || answer.status == C_AST_TYPE_QUALIFIED_MEMBER;
+            bool replayed = answer.status == C_AST_TYPE_STRING;
             probe.status = replayed ? (u32)C_AST_TYPE_ANSWER : (u32)answer.status;
             probe.node_kind = answer.node_kind;
             probe.type = replayed ? C_TYPE_ID_INVALID : answer.type;

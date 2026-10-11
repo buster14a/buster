@@ -8366,7 +8366,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_tree_string(CTypeParseMachine* mach
     {
         type = machine->expression_queries[slot].type;
     }
-    else if (tree.status == C_AST_TYPE_QUALIFIED_MEMBER)
+    else if (tree.node_kind == C_AST_MEMBER || tree.node_kind == C_AST_MEMBER_ARROW)
     {
         // The member's name ends the access. A member that is not found
         // appends nothing, and the query goes to the machine.
@@ -8457,7 +8457,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_tree_query(CTypeParseMachine* machine,
 {
     CAstTypeAnswer tree = c_ast_types_answer(machine, preprocess, result, scope, start, end);
     bool answered = tree.status == C_AST_TYPE_ANSWER;
-    if (tree.status >= C_AST_TYPE_STRING)
+    if (tree.status == C_AST_TYPE_STRING)
     {
         answered = c_parse_expression_tree_string_answer(machine, preprocess, result, scope, end, slot, flags, tree, type_out, pending);
     }
