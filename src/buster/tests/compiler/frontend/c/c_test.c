@@ -61899,7 +61899,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_omitted_conditional(UnitTestArgume
 // released silently; the scope still ends, and the units are still released,
 // when the check fails. The thread's arena pool is drained afterwards, so
 // phase and translation-unit arenas one fixture parked do not add to the next
-// fixture's peak.
+// fixture's peak. As in BUSTER_TEST_FIXTURE, the volatile function pointer
+// keeps each fixture out of line in optimized builds (#2816, #3574).
 #define C_TEST_FIXTURE_UNIT_LIMIT 8
 #define C_FRONTEND_TEST_FIXTURE(arguments, function) \
     do \
@@ -61907,7 +61908,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_omitted_conditional(UnitTestArgume
         TestArenaScope fixture_scope_ = buster_test_arena_begin((arguments), (arguments)->arena, S8(#function), false); \
         u64 live_ = arena_test_live_reserved_bytes(); \
         u64 units_ = c_test_preprocess_unit_peak_reset(); \
-        UnitTestResult fixture_result_ = function(arguments); \
+        TestFunction* volatile fixture_function_ = function; \
+        UnitTestResult fixture_result_ = fixture_function_(arguments); \
         u64 left_ = arena_test_live_reserved_bytes(); \
         u64 held_ = c_test_preprocess_unit_peak() - units_; \
         result.test_count += fixture_result_.test_count; \
