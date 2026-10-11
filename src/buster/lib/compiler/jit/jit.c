@@ -3,8 +3,8 @@
 // resolves relocations against the object's symbols plus caller-supplied
 // explicit bindings (never dlsym-style implicit lookup), inserts
 // out-of-range call thunks where a target does not fit the relocation's
-// reach, places relative host-data references within range, and finalizes W^X — pages are writable during patching or
-// executable afterwards, never both. It is deliberately not a second
+// reach, places relative host-data references within range, and finalizes
+// W^X — pages are writable during patching or executable afterwards, never both. It is deliberately not a second
 // compiler: no frontend or IR types appear here, only the object model.
 
 #include <buster/lib/compiler/jit/jit.h>

@@ -968,22 +968,22 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
     // MAP_JIT contract permits only one region per process, while this test module
     // already links the native JIT fixture below.
 #if !BUSTER_SANITIZE && !BUSTER_MACOS && !BUSTER_IOS && !BUSTER_ANDROID
-    JitProgram bound_data_program =
+    JitProgram absolute_data_program =
         jit_link_object(&external_data_object, (JitOptions){.bindings = &external_data_binding, .binding_count = 1});
-    BUSTER_TEST(arguments, bound_data_program.error == JIT_ERROR_NONE);
-    BUSTER_TEST(arguments, bound_data_program.allocation_base && bound_data_program.section_addresses[0]);
-    if (bound_data_program.error == JIT_ERROR_NONE && bound_data_program.section_addresses[0])
+    BUSTER_TEST(arguments, absolute_data_program.error == JIT_ERROR_NONE);
+    BUSTER_TEST(arguments, absolute_data_program.allocation_base && absolute_data_program.section_addresses[0]);
+    if (absolute_data_program.error == JIT_ERROR_NONE && absolute_data_program.section_addresses[0])
     {
         u64 linked_address = 0;
-        memcpy(&linked_address, bound_data_program.section_addresses[0], sizeof(linked_address));
+        memcpy(&linked_address, absolute_data_program.section_addresses[0], sizeof(linked_address));
         BUSTER_TEST(arguments, linked_address == (u64)(uintptr_t)&external_data_value);
         external_data_value = UINT64_C(0x8877665544332211);
         u64 linked_value = 0;
         memcpy(&linked_value, (void*)(uintptr_t)linked_address, sizeof(linked_value));
         BUSTER_TEST(arguments, linked_value == external_data_value);
     }
-    jit_program_release(&bound_data_program);
-    BUSTER_TEST(arguments, !bound_data_program.allocation_base && !bound_data_program.object);
+    jit_program_release(&absolute_data_program);
+    BUSTER_TEST(arguments, !absolute_data_program.allocation_base && !absolute_data_program.object);
 
     absolute_import.addend = 8;
     JitProgram positive_addend_program =
