@@ -150,3 +150,4 @@ request: PR #3321 issue #3102 owner-requested exact-head comparison after the re
 canonical-inline-self-host-v1
 request: PR #3111 issue #48 per-function inline validation fix (f33940ae) after compiler-compare-v1 measured +4.51% at 15227131, and #3539 stage-2 harness repair (3a1b5a53); fresh exact-head compiler-compare-v1 and canonical-inline-self-host-v1 qualification
 request: PR #3111 issue #48 per-function inline validation fix (f33940ae) merged with main 65c89701 including the #3539 stage-2 harness repair; fresh exact-head compiler-compare-v1 and canonical-inline-self-host-v1 qualification
+request: PR #3111 issue #48 tiny inlining made opt-in at every -O level (8f3ac850) and mandatory-graph caller gate (2122d990) after compiler-compare-v1 measured +1.05% at 94b56786; merged main a08f96ff; fresh exact-head compiler-compare-v1 and canonical-inline-self-host-v1 qualification
