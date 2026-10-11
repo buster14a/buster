@@ -350,7 +350,11 @@ unchanged.
 - **File-scope initializers.** `c_parse_validate_static_initializers` made
   nearly all of the queries outside a typed body: 77,545 of 79,035 on the unity
   self-host, at about 190 M machine Ir, against at most 3 M for any other
-  validator (audit `2026-10-09T213311Z`). Before it validates a file-scope
+  validator (audit `2026-10-09T213311Z`). The other phases are left to the
+  machine: together they run about 3 M machine Ir, and almost none of it
+  could be answered (audit
+  [`2026-10-11T093053Z`](../../performance-audits/2026-10-11T093053Z.md)).
+  Before it validates a file-scope
   object's initializer, `c_ast_types_initializer_begin` reserves the arrays
   for that initializer's subtree, over the initializer's tokens, and they are
   released afterwards. The subtree is typed the same way, but only when the
@@ -1331,5 +1335,20 @@ The base is main `a6705764`, which the candidate branches from. The budgets:
 - **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
   requested, so Zen 5 validation stays incomplete (#2761), and the hook stays
   opt-in.
+
+The out-of-body census is
+[`2026-10-11T093053Z`](../../performance-audits/2026-10-11T093053Z.md),
+diagnostic only, and its result is negative. No candidate was built:
+- The phases outside a constant-evaluation mode run 3.00 M machine Ir in
+  all, not the 7 M listed earlier. File `_Static_assert` runs 0.90 M, and
+  deferred assertions, the validators after the body loop and variably
+  modified checks run 0.33 M or less each.
+- Only the binder reaches 1 M, at 1.41 M. 1.17 M of that is `S8()` compound
+  literals initializing locals. They are queried before the scalar rows are
+  published and while the interning window is shut, so the tree declines
+  them. The rest is 0.24 M.
+- The 17 constant-evaluation runs (3.22 M) are never the typer's.
+- 92% of the machine Ir still left under the pilot is declines and misses
+  inside typed bodies.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
