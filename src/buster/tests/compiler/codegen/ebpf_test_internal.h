@@ -1158,4 +1158,71 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_kernel_regressions(UnitTest
     return result;
 }
 
+// Each source is valid C the frontend lowers without diagnostics, so the eBPF
+// emitter alone must refuse it: no bytes, object or ELF image, the documented
+// error code, and the exact text the backend capability catalogue cites (#309).
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_rejections(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CodegenTestEbpfRejection CodegenTestEbpfRejection;
+    struct CodegenTestEbpfRejection
+    {
+        String8 source;
+        String8 diagnostic;
+        EbpfErrorCode code;
+        u8 reserved[4];
+    };
+    CodegenTestEbpfRejection rejections[] = {
+        {S8("struct pair { long first; long second; }; long helper(struct pair value) { return value.first + value.second; }"),
+         S8("aggregate eBPF subprogram arguments are unsupported"), EBPF_ERROR_UNSUPPORTED_ABI},
+        {S8("long sum(int count, ...) { return count; }"), S8("variadic functions are unsupported by eBPF"), EBPF_ERROR_VARIADIC},
+        {S8("long probe(long (*callee)(long), long value) { return callee(value); }"),
+         S8("indirect calls are unsupported by the eBPF backend"), EBPF_ERROR_INDIRECT_CALL},
+        {S8("long probe(long* counter, long value) { return __atomic_fetch_add(counter, value, __ATOMIC_SEQ_CST); }"),
+         S8("atomic IR operations are not yet lowered by the eBPF backend"), EBPF_ERROR_ATOMIC},
+        // A used vector result is refused earlier as an aggregate SSA value, so
+        // the discarded splat is what reaches the SIMD opcode itself.
+        {S8("void probe(void) { __builtin_buster_simd_splat_u8(7); }"),
+         S8("exact SIMD intrinsics are unsupported by eBPF; select an explicit source fallback"), EBPF_ERROR_SIMD},
+        {S8("_Thread_local long counter; long probe(long value) { return counter + value; }"),
+         S8("thread-local storage is unsupported by eBPF"), EBPF_ERROR_TLS},
+    };
+    Target target = {.cpu_arch = CPU_ARCH_BPFEL, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(rejections); fixture += 1)
+    {
+        CodegenTestEbpfRejection* rejection = rejections + fixture;
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        CPreprocessResult tokens = c_preprocess(arena, rejection->source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+        CParseResult parsed = c_parse(arena, tokens);
+        CIRLowerResult lowered = {0};
+        if (!tokens.error_count && !parsed.diagnostic_count)
+        {
+            lowered = c_lower_to_ir(arena, S8("ebpf-rejection.c"), tokens, parsed, target);
+        }
+        bool lowered_cleanly = !tokens.error_count && !parsed.diagnostic_count && lowered.program && lowered.diagnostic_count == 0;
+        if (!lowered_cleanly) arguments->show(arguments, S8("eBPF rejection {u32}: the C frontend refused the source\n"), fixture);
+        BUSTER_TEST(arguments, lowered_cleanly);
+        if (lowered_cleanly)
+        {
+            EbpfArtifact artifact = ebpf_emit_program(arena, lowered.program);
+            bool rejected = !artifact.success && artifact.error.code == rejection->code;
+            bool no_output = artifact.bytes.length == 0 && artifact.object.length == 0 && artifact.elf.length == 0;
+            bool exact = string_first_sequence(artifact.error.message, rejection->diagnostic) != BUSTER_STRING_NO_MATCH &&
+                         string_first_sequence(artifact.error.diagnostic, rejection->diagnostic) != BUSTER_STRING_NO_MATCH;
+            if (!rejected || !no_output || !exact)
+            {
+                arguments->show(arguments, S8("eBPF rejection {u32}: success {u32}, code {u32}, bytes {u64}: {S8}\n"), fixture,
+                                (u32)artifact.success, (u32)artifact.error.code, artifact.bytes.length, artifact.error.message);
+            }
+            BUSTER_TEST(arguments, rejected);
+            BUSTER_TEST(arguments, no_output);
+            BUSTER_TEST(arguments, exact);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 #endif
