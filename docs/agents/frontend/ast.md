@@ -2074,4 +2074,17 @@ sight's, above (`--cache-sim=no --branch-sim=no`):
 - **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
   requested, so Zen 5 validation stays incomplete (#2761).
 
+The initializer value typing census is
+[`2026-10-11T170541Z`](../../performance-audits/2026-10-11T170541Z.md),
+diagnostic only. The second candidate passes every budget and ships:
+- `-fsyntax-only` falls by 278.1 M Ir on the default path (−2.663%) and by
+  220.1 M under the pilot (−2.395%). `-c` falls by 278.2 M (−1.130%).
+- 633,657 typings and 966,073 string tests are no longer made.
+- Objects are byte-identical across the four arms at `-g0` and `-g`.
+- The first candidate reused every valid checked type, which saved 32 M
+  more. It dropped 397 unreferenced `char[N]` DWARF types from the `-g`
+  object, so it failed the identity budget. The base's re-query had
+  created them as type rows for string operands in casts. The candidate
+  that ships therefore reuses a type only when its typing appended no row.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
