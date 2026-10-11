@@ -5107,7 +5107,6 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
             *path_out = exact_name;
             result = object_archive_read_link(arena, archive_bytes, invocation.target);
             *map_out = archive_map;
-            done = true;
         }
         else
         {
