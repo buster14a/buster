@@ -283,25 +283,22 @@ publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
 the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
 not predefined at any level. `-mattr` overrides still refine the level.
 The psABI's LAHF-SAHF has no target feature and is implied by long mode.
-Without `-march`/`-mcpu` the CPU is the build host's. An invocation with no
-`-target`, or with `-target native`, starts from `target_native`
-(`compiler_driver_parse_arguments`), whose model and features
-`cpu_detect_model` probes at start-up. In effect this is `-march=native`: the
-feature set is the same, though `-v` prints the detected model name (for
-example `cpu=emeraldrapids`) where `-march=native` prints `cpu=native`. Clang
-and GCC differ here; their default is the portable `x86-64` baseline. Any
-other `-target`/`--target` triple starts from `baseline`
-(`target_parse_triple`), even one that names the host; `-target x86_64-linux`
-alone gives `cpu=baseline features=sse2`. Without a pinned CPU, three things
-follow the machine: object bytes, the predefined feature macros (`__AVX2__`,
-`__AVX512F__`, ...), and therefore which `#if`-guarded regions are compiled
-at all. Such output may use instructions that another machine lacks. For
-portable or cross-machine-comparable output, pass `-march=baseline`, a psABI
-level, or a named model. Tools that compare outputs across machines pin one:
-the native-retirement census uses `baseline` and the work ledger uses
-`znver3`. The host default is deliberate. It matches the
-`BUSTER_NATIVE_TARGET=native` host build and the compiler-throughput priority
-(GitHub #1557).
+Without `-march`/`-mcpu` the CPU model is `baseline`, matching Clang's and
+GCC's portable `x86-64` default. A command with no `-target` compiles for the
+host's architecture and operating system (`target_native`,
+`compiler_driver_parse_arguments`) but not for its CPU features. It is the
+same as naming the host triple: on x86-64, `-target x86_64-linux` alone gives
+`cpu=baseline features=sse2`, and AArch64 gets `fp-armv8,neon`, Apple targets
+included, where Apple Clang would pick `apple-m1`. So object bytes and the
+predefined feature macros (`__AVX2__`, `__AVX512F__`, ...) do not depend on
+the build machine. `-march=native`, or `-target native`, selects the host's
+detected model and features. Tests exercise native code unless they select a
+target: `ide test` and `ide metamorphic` set
+`compiler_driver_host_cpu_default`, so their in-process invocations keep the
+host CPU, while `compiler_driver_test_run_cc`, the build.c test gates and
+`test_self_host` stage compiles pass `-march=native`.
+The native-retirement census pins `baseline`, and the work ledger pins
+`znver3` (GitHub #1557).
 `-mtune=<model>` is accepted with any nonempty value, `native` included, and
 ignored: it selects only a scheduling model, and instruction selection here has
 no per-CPU tuning, so it never changes the emitted code (GitHub #2851).

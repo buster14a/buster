@@ -4328,6 +4328,9 @@ BUSTER_GLOBAL_LOCAL SliceString8 self_host_compile_arguments(Arena* arena, Strin
     os_argument_builder_append(&builder, S8("-DBUSTER_UNITY_BUILD=1"));
     os_argument_builder_append(&builder, S8("-DBUSTER_INCLUDE_TESTS=0"));
     os_argument_builder_append(&builder, S8("-g"));
+    // Stage compiles keep the host CPU so the fixed point still covers the
+    // compiler's own SIMD paths; the driver default is baseline (#1557).
+    os_argument_builder_append(&builder, S8("-march=native"));
     if (register_allocator_flag.length)
     {
         os_argument_builder_append(&builder, register_allocator_flag);
@@ -4411,6 +4414,9 @@ BUSTER_GLOBAL_LOCAL SliceString8 self_host_object_compile_arguments(Arena* arena
     os_argument_builder_append(&builder, S8("-DBUSTER_UNITY_BUILD=1"));
     os_argument_builder_append(&builder, S8("-DBUSTER_INCLUDE_TESTS=0"));
     os_argument_builder_append(&builder, S8("-g"));
+    // Stage compiles keep the host CPU so the fixed point still covers the
+    // compiler's own SIMD paths; the driver default is baseline (#1557).
+    os_argument_builder_append(&builder, S8("-march=native"));
     if (register_allocator_flag.length) { os_argument_builder_append(&builder, register_allocator_flag); }
     os_argument_builder_append(&builder, S8("-v"));
     os_argument_builder_append(&builder, source_metrics);
@@ -8887,7 +8893,7 @@ BUSTER_GLOBAL_LOCAL bool self_host_audit_probe(Arena* arena, String8 compiler, S
         String8 mode = string_format(arena, S8("-fregister-allocator={S8}"), modes[i]);
         String8 trace = string_format(arena, S8("-fbootstrap-trace={S8}"), output);
         String8 metrics = string_format(arena, S8("-fsource-metrics={S8}.metrics"), output);
-        String8 compile_arguments[] = {compiler, S8("cc"), mode, trace, metrics, S8("tests/self_host_bootstrap_probe.c"), S8("-o"), output};
+        String8 compile_arguments[] = {compiler, S8("cc"), S8("-march=native"), mode, trace, metrics, S8("tests/self_host_bootstrap_probe.c"), S8("-o"), output};
         SelfHostAuditRun compile = self_host_audit_run(arena, string_format_z(arena, S8("{S8}.compile"), output),
                                                       (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_arguments));
         valid = self_host_audit_process_ok(compile, false) && self_host_audit_artifacts(arena, output);
@@ -8915,7 +8921,7 @@ BUSTER_GLOBAL_LOCAL bool self_host_audit_probe(Arena* arena, String8 compiler, S
     if (valid)
     {
         String8 output = string_format_z(arena, S8("{S8}.rejected"), prefix);
-        String8 arguments[] = {compiler, S8("cc"), S8("tests/self_host_bootstrap_invalid.c"), S8("-o"), output};
+        String8 arguments[] = {compiler, S8("cc"), S8("-march=native"), S8("tests/self_host_bootstrap_invalid.c"), S8("-o"), output};
         SelfHostAuditRun rejected = self_host_audit_run(arena, output, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments));
         valid = self_host_audit_process_ok(rejected, true) && !path_exists(arena, output);
         if (valid && reference.length)
@@ -10564,6 +10570,8 @@ BUSTER_GLOBAL_LOCAL bool cjson_compile_buster(Arena* arena, String8 ide, String8
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    // Host build: keep the host CPU the driver used to default to (#1557).
+    os_argument_builder_append(&builder, S8("-march=native"));
     os_argument_builder_append(&builder, S8("-g0"));
     os_argument_builder_append(&builder, include_root);
     os_argument_builder_append(&builder, include_tests);
@@ -10838,6 +10846,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cjson_action(Arena* arena, void* data)
     String8 ide_arguments_array[] = {
         ide,
         S8("cc"),
+        S8("-march=native"),
         S8("-g0"),
         include_root,
         S8("-fregister-allocator=fast"),
@@ -11065,6 +11074,7 @@ BUSTER_GLOBAL_LOCAL bool stb_compile_buster(Arena* arena, String8 ide, String8 s
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-march=native"));
     os_argument_builder_append(&builder, S8("-g0"));
     os_argument_builder_append(&builder, include_root);
     os_argument_builder_append(&builder, S8("-DSTBI_NO_SIMD"));
@@ -11605,6 +11615,7 @@ BUSTER_GLOBAL_LOCAL bool zlib_compile_buster(Arena* arena, String8 ide, String8 
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-march=native"));
     os_argument_builder_append(&builder, S8("-g0"));
     os_argument_builder_append(&builder, S8("-O2"));
     os_argument_builder_append(&builder, include_root);
@@ -12281,6 +12292,7 @@ BUSTER_GLOBAL_LOCAL bool lua_compile_buster(Arena* arena, String8 ide, String8 s
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-march=native"));
     os_argument_builder_append(&builder, S8("-g0"));
     os_argument_builder_append(&builder, S8("-O2"));
     os_argument_builder_append(&builder, include_root);
@@ -13048,6 +13060,7 @@ BUSTER_GLOBAL_LOCAL bool yyjson_compile_buster(Arena* arena, String8 ide, String
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-march=native"));
     os_argument_builder_append(&builder, S8("-g0"));
     os_argument_builder_append(&builder, include_src);
     os_argument_builder_append(&builder, include_util);
@@ -13605,10 +13618,9 @@ BUSTER_GLOBAL_LOCAL bool lz4_compile_buster(Arena* arena, String8 ide, String8 s
     os_argument_builder_append(&builder, S8("-g0"));
     os_argument_builder_append(&builder, S8("-O2"));
     lz4_append_common_flags(&builder, flags);
-    if (cpu_flag.length)
-    {
-        os_argument_builder_append(&builder, cpu_flag);
-    }
+    // A host build without an explicit CPU keeps the host CPU the driver
+    // used to default to (#1557).
+    os_argument_builder_append(&builder, cpu_flag.length ? cpu_flag : S8("-march=native"));
     os_argument_builder_append(&builder, allocator_flag);
     os_argument_builder_append(&builder, metrics_flag);
     if (verbose)
@@ -15617,6 +15629,7 @@ BUSTER_GLOBAL_LOCAL bool sqlite_compile_buster(Arena* arena, String8 ide, String
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-march=native"));
     os_argument_builder_append(&builder, S8("-g0"));
     os_argument_builder_append(&builder, S8("-O2"));
     sqlite_append_defines(&builder, flags);
@@ -16319,6 +16332,7 @@ BUSTER_GLOBAL_LOCAL bool sbase_compile(Arena* arena, String8 compiler, bool bust
     if (buster)
     {
         os_argument_builder_append(&builder, S8("cc"));
+        os_argument_builder_append(&builder, S8("-march=native"));
     }
     else
     {
@@ -17572,6 +17586,7 @@ BUSTER_GLOBAL_LOCAL bool doom_compile_buster(Arena* arena, String8 ide, String8 
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-march=native"));
     os_argument_builder_append(&builder, S8("-g0"));
     os_argument_builder_append(&builder, S8("-O2"));
     doom_append_common_flags(&builder, include_flag);
@@ -19160,6 +19175,7 @@ BUSTER_GLOBAL_LOCAL bool quickjs_compile_buster(Arena* arena, String8 ide, Strin
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-march=native"));
     os_argument_builder_append(&builder, S8("-g0"));
     quickjs_append_common_flags(&builder, flags);
     os_argument_builder_append(&builder, allocator_flag);
@@ -21096,6 +21112,7 @@ BUSTER_GLOBAL_LOCAL bool musl_compile_buster(Arena* arena, String8 ide, String8 
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     os_argument_builder_append(&builder, ide);
     os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-march=native"));
     musl_append_common_flags(&builder, flags);
     os_argument_builder_append(&builder, allocator_flag);
     if (metrics_flag.length)
@@ -21153,7 +21170,7 @@ BUSTER_GLOBAL_LOCAL bool musl_compile_clang(Arena* arena, String8 clang, String8
 // the same command, which is the whole of what assembling a `.s` is.
 BUSTER_GLOBAL_LOCAL bool musl_assemble_buster(Arena* arena, String8 ide, String8 source, String8 output, u64* elapsed_us, String8* diagnostic)
 {
-    String8 arguments[] = {ide, S8("cc"), S8("-c"), S8("-o"), output, source};
+    String8 arguments[] = {ide, S8("cc"), S8("-march=native"), S8("-c"), S8("-o"), output, source};
     u64 start = os_now_microseconds();
     MuslCommandResult command = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), S8("."), true, false);
     if (elapsed_us)
@@ -21935,6 +21952,7 @@ BUSTER_GLOBAL_LOCAL bool libc_test_compile(Arena* arena, LibcTestBuild* build, L
     {
         os_argument_builder_append(&builder, build->ide);
         os_argument_builder_append(&builder, S8("cc"));
+        os_argument_builder_append(&builder, S8("-march=native"));
     }
     else
     {
@@ -23886,6 +23904,7 @@ BUSTER_GLOBAL_LOCAL bool cpython_build_buster_trampoline(Arena* arena, String8 i
     String8 arguments[] = {
         ide,
         S8("cc"),
+        S8("-march=native"),
         S8("-g"),
         S8("-fno-strict-aliasing"),
         S8("-DNDEBUG"),

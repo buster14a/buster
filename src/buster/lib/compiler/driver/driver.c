@@ -1689,7 +1689,14 @@ String8 compiler_driver_query_text(Arena* arena, CompilerDriverInvocation const*
     return result;
 }
 
+BUSTER_V_IMPL bool compiler_driver_host_cpu_default = false;
+
 CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments)
+{
+    return compiler_driver_parse_arguments_with_cpu_default(arena, arguments, compiler_driver_host_cpu_default);
+}
+
+CompilerDriverInvocation compiler_driver_parse_arguments_with_cpu_default(Arena* arena, SliceString8 arguments, bool host_cpu_default)
 {
     CompilerDriverInvocation invocation = {
         .target = target_native,
@@ -1708,6 +1715,15 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         // selectable below, including a whole-pipeline opt-out.
         .fast_passes = IR_FAST_ALL,
     };
+    // Like Clang and GCC, an absent -march selects the portable baseline
+    // rather than the build host (#1557); -march=native or -target native
+    // select the host. The host arch, OS and versions stay.
+    if (!host_cpu_default)
+    {
+        invocation.target.cpu_model = CPU_MODEL_BASELINE;
+        invocation.target.cpu_features_explicit = false;
+        invocation.target.cpu_features = target_cpu_features_empty();
+    }
     if (!arena)
     {
         invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
