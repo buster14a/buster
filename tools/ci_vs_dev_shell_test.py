@@ -30,6 +30,9 @@ PROBE_CLEANUP_SECONDS = 10
 
 
 NATIVE_PROBE_FIXTURE = r'''
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS 1
+#endif
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0602
 #endif
@@ -280,6 +283,7 @@ class HelperBehaviorTests(unittest.TestCase):
         source.write_text(NATIVE_PROBE_FIXTURE, encoding="utf-8")
         executable = cls.root / "probe-fixture.exe"
         subprocess.run([compiler, "-std=c11", "-Wall", "-Wextra", "-Werror",
+                        "-fwrapv", "-fno-strict-aliasing", "-funsigned-char",
                         str(source), "-o", str(executable)],
                        check=True, timeout=PROBE_TIMEOUT_SECONDS)
         vswhere = cls.root / "vswhere.exe"
