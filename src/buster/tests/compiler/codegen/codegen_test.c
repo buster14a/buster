@@ -3296,15 +3296,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_aarch64_symbol_addresses(UnitTes
             BUSTER_TEST(arguments, generated.statistics.fallback_reason_counts[CODEGEN_FALLBACK_TARGET_EXCLUDED] == 0);
             u32 pages = 0;
             u32 lows = 0;
+            u32 got_pages = 0;
+            u32 got_lows = 0;
             u32 absolutes = 0;
             u32 calls = 0;
             for (u32 index = 0; generated.error == CODEGEN_ERROR_NONE && index < generated.relocation_count; index += 1)
             {
                 CodegenModuleRelocation* relocation = generated.relocations + index;
-                bool high = relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21;
-                bool low = relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12;
-                pages += high;
-                lows += low;
+                // Darwin reaches the two undefined symbols through their GOT
+                // slots (#1454) and the two definitions through a page pair.
+                bool got_high = relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21;
+                bool got_low = relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12;
+                bool high = relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21 || got_high;
+                bool low = relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12 || got_low;
+                pages += high && !got_high;
+                lows += low && !got_low;
+                got_pages += got_high;
+                got_lows += got_low;
                 absolutes += relocation->kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64;
                 calls += relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_CALL26;
                 if (high || low)
@@ -3316,21 +3324,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_aarch64_symbol_addresses(UnitTes
                         u32 word = 0;
                         memcpy(&word, generated.code.pointer + relocation->offset, sizeof(word));
                         // Independent instruction masks require zero relocation
-                        // immediates and one destination/base register in ADD.
+                        // immediates and one destination/base register in the
+                        // ADD, or in the 64-bit LDR of a GOT slot.
+                        u32 low_opcode = got_low ? UINT32_C(0xf9400000) : UINT32_C(0x91000000);
                         BUSTER_TEST(arguments, high ? (word & UINT32_C(0xffffffe0)) == UINT32_C(0x90000000)
-                                                     : (word & UINT32_C(0xfffffc00)) == UINT32_C(0x91000000) &&
+                                                     : (word & UINT32_C(0xfffffc00)) == low_opcode &&
                                                        (word & 31u) == ((word >> 5) & 31u));
                     }
                     if (high)
                     {
                         CodegenModuleRelocation* next = index + 1 < generated.relocation_count ? relocation + 1 : 0;
-                        BUSTER_TEST(arguments, next && next->kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12 &&
+                        CodegenModuleRelocationKind next_kind = got_high ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12
+                                                                         : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12;
+                        BUSTER_TEST(arguments, next && next->kind == next_kind && !next->addend && !relocation->addend &&
                             next->symbol.value == relocation->symbol.value && next->offset == relocation->offset + 4);
                     }
                 }
             }
             BUSTER_TEST(arguments, calls == 1);
-            BUSTER_TEST(arguments, darwin ? pages == 4 && lows == 4 && absolutes == 0 : pages == 0 && lows == 0 && absolutes == 4);
+            BUSTER_TEST(arguments, darwin ? pages == 2 && lows == 2 && got_pages == 2 && got_lows == 2 && absolutes == 0
+                                          : pages == 0 && lows == 0 && got_pages == 0 && got_lows == 0 && absolutes == 4);
             if (generated.error == CODEGEN_ERROR_NONE)
             {
                 ObjectFile object = object_from_canonical_codegen_module(temporary.arena, lowered.program, &generated, target);

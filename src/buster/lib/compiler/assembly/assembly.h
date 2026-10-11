@@ -164,6 +164,17 @@ struct AssemblyEncodeResult
 // tables extend without changing this public contract.
 BUSTER_F_DECL AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncodeOptions options);
 
+// True when an x86 PC32 relocation is the rel32 of a direct CALL, JMP or Jcc
+// in `bytes`, the encoded buffer it was reported against. Mach-O spells that
+// field X86_64_RELOC_BRANCH and every other rip-relative field
+// X86_64_RELOC_SIGNED, so producers record the distinction where the
+// instruction is still known instead of leaving the object writer to guess.
+// `bytes` holds only instructions the assembler encoded (data directives never
+// reach it), so the byte before a field is that instruction's own: a
+// rip-relative memory field always follows a ModRM byte with mod=00 and rm=101
+// (0x05/0x0d/.../0x3d), which can be neither E8, E9 nor the 8x of 0F 8x.
+BUSTER_F_DECL bool assembly_x86_relocation_is_branch(ByteSlice bytes, AssemblyRelocation relocation);
+
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL bool assembly_test_aarch64_expand_private_short_branch(AssemblyRelocationKind kind, u32 word, u32 words[2]);
 // Narrow parser seam for delimiter and capacity regression tests.  Production

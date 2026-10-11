@@ -6596,6 +6596,114 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_stack_contract(UnitTestArgument
     return result;
 }
 
+// The text-relative address a rip-relative field at `field` (4 bytes, ending
+// its instruction) resolves to in a linked Mach-O image.
+BUSTER_GLOBAL_LOCAL u64 link_test_mach_rip_target(ByteSlice image, u64 text_header, u64 field)
+{
+    u64 text_address = link_read_u64(image.pointer, text_header + 32);
+    u32 text_offset = link_read_u32(image.pointer, text_header + 48);
+    s32 displacement = (s32)link_read_u32(image.pointer, text_offset + field);
+    return text_address + field + 4 + (u64)(s64)displacement;
+}
+
+// The address an AArch64 `adrp` at `high` and the `ldr`/`add` after it name.
+BUSTER_GLOBAL_LOCAL u64 link_test_mach_page_target(ByteSlice image, u64 text_header, u64 high, bool load)
+{
+    u64 text_address = link_read_u64(image.pointer, text_header + 32);
+    u32 text_offset = link_read_u32(image.pointer, text_header + 48);
+    u32 adrp = link_read_u32(image.pointer, text_offset + high);
+    u32 low = link_read_u32(image.pointer, text_offset + high + 4);
+    u64 immediate = (u64)(((adrp >> 29) & 3u) | (((adrp >> 5) & 0x7ffffu) << 2));
+    s64 pages = (s64)(immediate << 43) >> 43;
+    u64 page = ((text_address + high) & ~UINT64_C(0xfff)) + (u64)(pages * 4096);
+    return page + (u64)((low >> 10) & 0xfffu) * (load ? 8u : 1u);
+}
+
+// #1454: Buster's own Mach-O linker binds what the object's relocation types
+// say. A GOT load of imported data reads the import's bound slot in __got; a
+// GOT load of a definition is relaxed to that definition's address; a call
+// still reaches its stub. A direct reference to imported data has no meaning
+// (it would read the stub's code) and is refused rather than linked.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_mach_got_loads(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ObjectSymbol symbols[] = {
+        {.name = S8("main"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("imported_data"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        {.name = S8("imported_function"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+    };
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        bool x86 = architecture == 0;
+        Target target = {.cpu_arch = x86 ? CPU_ARCH_X86_64 : CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS};
+        // x86-64: movq imported_data@GOTPCREL(%rip), %rax; movq main@GOTPCREL(%rip), %rcx;
+        // call imported_function; ret.
+        u8 x86_text[] = {0x48, 0x8b, 0x05, 0, 0, 0, 0, 0x48, 0x8b, 0x0d, 0, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xc3};
+        ObjectRelocation x86_relocations[] = {
+            {.addend = -4, .offset = 3, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_X86_64_REX_GOTPCRELX},
+            {.addend = -4, .offset = 10, .section = OBJECT_SECTION_TEXT, .symbol = 0, .kind = OBJECT_RELOCATION_X86_64_REX_GOTPCRELX},
+            {.addend = -4, .offset = 15, .section = OBJECT_SECTION_TEXT, .symbol = 2, .kind = OBJECT_RELOCATION_X86_64_PLT32},
+        };
+        // AArch64: adrp x8, imported_data@GOTPAGE; ldr x8, [x8, imported_data@GOTPAGEOFF];
+        // adrp x9, main@GOTPAGE; ldr x9, [x9, main@GOTPAGEOFF]; bl imported_function; ret.
+        u32 aarch64_words[] = {0x90000008, 0xf9400108, 0x90000009, 0xf9400129, 0x94000000, 0xd65f03c0};
+        ObjectRelocation aarch64_relocations[] = {
+            {.offset = 0, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21},
+            {.offset = 4, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12},
+            {.offset = 8, .section = OBJECT_SECTION_TEXT, .symbol = 0, .kind = OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21},
+            {.offset = 12, .section = OBJECT_SECTION_TEXT, .symbol = 0, .kind = OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12},
+            {.offset = 16, .section = OBJECT_SECTION_TEXT, .symbol = 2, .kind = OBJECT_RELOCATION_AARCH64_CALL26},
+        };
+        ByteSlice text = x86 ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_text) : (ByteSlice){.pointer = (u8*)aarch64_words, .length = sizeof(aarch64_words)};
+        symbols[0].size = text.length;
+        ObjectFile object = link_test_object_make(arguments->arena, target, text, symbols, BUSTER_ARRAY_LENGTH(symbols),
+                                                  x86 ? x86_relocations : aarch64_relocations,
+                                                  x86 ? BUSTER_ARRAY_LENGTH(x86_relocations) : BUSTER_ARRAY_LENGTH(aarch64_relocations));
+        String8 output_path = link_test_temporary_executable_path(arguments->arena, x86 ? S8("buster-mach-got-x86") : S8("buster-mach-got-aarch64"), S8(""));
+        NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &object,
+                                                                   (NativeExecutableLinkOptions){.output_path = output_path, .entry_symbol = S8("main")});
+        u64 text_header = 0;
+        u64 got_header = 0;
+        bool found = linked.error == LINK_ERROR_NONE && link_test_mach_section_find(linked.executable, S8("__TEXT"), S8("__text"), &text_header) &&
+                     link_test_mach_section_find(linked.executable, S8("__DATA"), S8("__got"), &got_header);
+        if (BUSTER_REQUIRE(arguments, found))
+        {
+            ByteSlice image = linked.executable;
+            u64 text_address = link_read_u64(image.pointer, text_header + 32);
+            u32 text_offset = link_read_u32(image.pointer, text_header + 48);
+            u64 got_address = link_read_u64(image.pointer, got_header + 32);
+            u64 got_size = link_read_u64(image.pointer, got_header + 40);
+            u64 data_slot = x86 ? link_test_mach_rip_target(image, text_header, 3) : link_test_mach_page_target(image, text_header, 0, true);
+            u64 definition = x86 ? link_test_mach_rip_target(image, text_header, 10) : link_test_mach_page_target(image, text_header, 8, false);
+            BUSTER_TEST(arguments, data_slot >= got_address && data_slot < got_address + got_size && !(data_slot & 7));
+            BUSTER_TEST(arguments, definition == text_address);
+            if (x86)
+            {
+                // The import keeps its load; the definition's load became LEA.
+                BUSTER_TEST(arguments, image.pointer[text_offset + 1] == 0x8b && image.pointer[text_offset + 8] == 0x8d);
+                // The call reaches a stub past the object's own text, not a slot.
+                u64 call = link_test_mach_rip_target(image, text_header, 15);
+                BUSTER_TEST(arguments, call >= text_address + text.length && (call < got_address || call >= got_address + got_size));
+            }
+            else
+            {
+                BUSTER_TEST(arguments, (link_read_u32(image.pointer, text_offset + 4) & UINT32_C(0xffc00000)) == UINT32_C(0xf9400000) &&
+                                           (link_read_u32(image.pointer, text_offset + 12) & UINT32_C(0xffc00000)) == UINT32_C(0x91000000));
+            }
+        }
+        // A data import reached without its GOT slot is refused.
+        ObjectRelocation direct_relocation = x86 ? (ObjectRelocation){.addend = -4, .offset = 3, .section = OBJECT_SECTION_TEXT, .symbol = 1,
+                                                                       .kind = OBJECT_RELOCATION_X86_64_PC32}
+                                                 : (ObjectRelocation){.offset = 0, .section = OBJECT_SECTION_TEXT, .symbol = 1,
+                                                                      .kind = OBJECT_RELOCATION_AARCH64_MACH_PAGE21};
+        ObjectFile direct = link_test_object_make(arguments->arena, target, text, symbols, BUSTER_ARRAY_LENGTH(symbols), &direct_relocation, 1);
+        NativeExecutableLinkResult refused = link_native_executable(arguments->arena, &direct,
+                                                                    (NativeExecutableLinkOptions){.output_path = output_path, .entry_symbol = S8("main")});
+        BUSTER_TEST(arguments, refused.error == LINK_ERROR_RELOCATION && string_equal(refused.symbol, S8("imported_data")));
+    }
+    return result;
+}
+
 // Finds the single `mov eax, [rip + disp32]; ret` in .text and returns the
 // absolute address it loads together with the TLS directory's AddressOfIndex.
 BUSTER_GLOBAL_LOCAL bool link_test_pe_x64_tls_index_load(ByteSlice image, u64* load_address, u64* address_of_index)
@@ -6713,6 +6821,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_pe_x64_tls_index_object(UnitTestArg
 UnitTestResult link_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, link_test_mach_got_loads);
     BUSTER_TEST_FIXTURE(arguments, link_test_elf_stack_contract);
     UnitTestResult tls_membership = link_test_tls_membership(arguments);
     result.succeeded_test_count += tls_membership.succeeded_test_count;

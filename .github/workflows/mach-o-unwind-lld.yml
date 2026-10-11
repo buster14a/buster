@@ -4,10 +4,14 @@ on:
   pull_request:
     paths:
       - src/buster/lib/compiler/object/object.c
+      - src/buster/lib/compiler/codegen/codegen.c
+      - src/buster/lib/compiler/codegen/machine_aarch64.c
+      - src/buster/lib/compiler/codegen/machine_x86_64.c
       - src/buster/tests/compiler/object/object_test.c
       - tests/basic_c_mach_unwind_host.c
       - tests/basic_c_mach_unwind_subject.c
       - tools/test_mach_o_unwind_lld.sh
+      - tools/test_mach_o_dylib_data_lld.sh
       - docs/mach-o-unwind-linker-compatibility.md
       - .github/workflows/mach-o-unwind-lld.yml
   workflow_dispatch:
@@ -59,6 +63,11 @@ jobs:
         run: |
           set -euo pipefail
           tools/test_mach_o_unwind_lld.sh build/Release/ide "$RUNNER_TEMP/mach-o-unwind-lld"
+      - name: Bind dylib data references with ld64.lld
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools/test_mach_o_dylib_data_lld.sh build/Release/ide "$RUNNER_TEMP/mach-o-unwind-lld/dylib-data"
       - name: Retain machine records in existing evidence
         if: ${{ !cancelled() }}
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768

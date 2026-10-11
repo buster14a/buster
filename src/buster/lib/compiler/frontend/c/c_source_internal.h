@@ -60,6 +60,8 @@ struct CIncludeFileEntry
     u64 device;
     u64 index;
     u32 guard_symbol;
+    // Zero means unrecorded; otherwise this is the dependency index plus one.
+    u32 dependency_slot;
     bool physical;
     bool once;
     bool included;

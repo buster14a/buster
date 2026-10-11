@@ -43,6 +43,7 @@
 //   assembly_source_parse                          the parse phase driver
 //   assembly_relocation_append,                    the emit phase and the
 //   assembly_instructions_emit, assembly_encode    public entry point
+//   assembly_x86_relocation_is_branch              Mach-O BRANCH identity of a PC32
 
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
@@ -14745,6 +14746,17 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
     {
         builder->result.bytes.length = builder->output_count;
     }
+}
+
+bool assembly_x86_relocation_is_branch(ByteSlice bytes, AssemblyRelocation relocation)
+{
+    bool pc32 = relocation.kind == ASSEMBLY_RELOCATION_X86_PC32 && relocation.offset <= bytes.length &&
+                sizeof(u32) <= bytes.length - relocation.offset;
+    bool direct = pc32 && relocation.offset >= 1u &&
+                  (bytes.pointer[relocation.offset - 1u] == 0xe8u || bytes.pointer[relocation.offset - 1u] == 0xe9u);
+    bool conditional = pc32 && relocation.offset >= 2u && bytes.pointer[relocation.offset - 2u] == 0x0fu &&
+                       (bytes.pointer[relocation.offset - 1u] & 0xf0u) == 0x80u;
+    return direct || conditional;
 }
 
 AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncodeOptions options)
