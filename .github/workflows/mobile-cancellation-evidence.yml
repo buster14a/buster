@@ -1,0 +1,28 @@
+name: Mobile cancellation evidence
+on:
+  push:
+    branches: [codex/2684-mobile-cancellation-evidence]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  read-evidence:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Download exact failed artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: '11716679917'
+          path: ${{ runner.temp }}/evidence
+          github-token: ${{ github.token }}
+          run-id: '38179265215'
+      - name: Print bounded replacement-cancellation evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          rg --files "$RUNNER_TEMP/evidence" | rg 'ios-boot-cancel-recovery-create/.*(run\.log|xcrun\.log|recovery-create.*log|shutdown.*log)$' | head -n 24 >"$RUNNER_TEMP/selected"
+          while IFS= read -r path; do
+            printf '\nEvidence file: %s\n' "$path"
+            head -c 65536 "$path"
+          done <"$RUNNER_TEMP/selected"
