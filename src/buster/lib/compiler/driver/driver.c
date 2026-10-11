@@ -400,6 +400,22 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_warning_policy_promoted(CompilerDriverW
     return promotion == COMPILER_DRIVER_WARNING_PROMOTION_DEFAULT ? policy->werror : promotion == COMPILER_DRIVER_WARNING_PROMOTION_ERROR;
 }
 
+BUSTER_V_IMPL bool compiler_driver_host_cpu_default = false;
+
+// Like Clang and GCC, an absent -march selects the portable baseline rather
+// than the build host; -march=native or -target native select the host (#1557).
+Target compiler_driver_default_target(bool host_cpu_default)
+{
+    Target target = target_native;
+    if (!host_cpu_default)
+    {
+        target.cpu_model = CPU_MODEL_BASELINE;
+        target.cpu_features_explicit = false;
+        target.cpu_features = target_cpu_features_empty();
+    }
+    return target;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_driver_set_cpu_model(Arena* arena, CompilerDriverInvocation* invocation, String8 model_string)
 {
     CpuModel model = cpu_model_from_string(model_string);
@@ -1843,7 +1859,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_dependency_render(Arena* arena, Comp
 CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments)
 {
     CompilerDriverInvocation invocation = {
-        .target = target_native,
+        .target = compiler_driver_default_target(compiler_driver_host_cpu_default),
         .language = COMPILER_DRIVER_LANGUAGE_AUTOMATIC,
         .action = COMPILER_DRIVER_ACTION_LINK,
         .c_dialect = COMPILER_DRIVER_C_DIALECT_GNU17,
@@ -3060,15 +3076,17 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                                        runtime_omission_option);
     }
     compiler_driver_validate_spirv_invocation(&invocation);
-    // Only the x86-64 Linux writer places a position-independent image. The
-    // request is a link option, so a compile-only invocation carrying it in
-    // shared flags is not refused for it, as GCC ignores it there.
+    // Linux image writers are x86-64 only; Android x86-64 and AArch64 place
+    // executables as PIEs but have no shared-object writer. The request is a
+    // link option, so a compile-only invocation carrying it in shared flags
+    // is not refused for it, as GCC ignores it there.
     // Bionic loads only position-independent executables, so an Android
-    // x86-64 link is a PIE whether or not -pie was given, and -no-pie cannot
-    // select another image there; its C inputs are compiled for one as the
-    // NDK's are, -fno-pic included. Android has no shared-object writer.
+    // x86-64 or AArch64 link is a PIE whether or not -pie was given, and
+    // -no-pie cannot select another image there; its C inputs are compiled
+    // for one as the NDK's are, -fno-pic included. Android has no shared-object writer.
     bool android_executable_target = !invocation.has_gpu_target && invocation.action == COMPILER_DRIVER_ACTION_LINK &&
-                                     invocation.target.os == OPERATING_SYSTEM_ANDROID && invocation.target.cpu_arch == CPU_ARCH_X86_64;
+                                     invocation.target.os == OPERATING_SYSTEM_ANDROID &&
+                                     (invocation.target.cpu_arch == CPU_ARCH_X86_64 || invocation.target.cpu_arch == CPU_ARCH_AARCH64);
     if (android_executable_target && invocation.image_kind == NATIVE_IMAGE_EXECUTABLE)
     {
         invocation.image_kind = NATIVE_IMAGE_PIE;
@@ -8974,6 +8992,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.statements.initializer_hints += unit.c_ast.statements.initializer_hints;
         result.c_ast.statements.auto_skips += unit.c_ast.statements.auto_skips;
         result.c_ast.statements.declarator_declines += unit.c_ast.statements.declarator_declines;
+        result.c_ast.statements.braced += unit.c_ast.statements.braced;
         if (unit.c_ast.statements.fallbacks)
         {
             result.c_ast.statements.reason = unit.c_ast.statements.reason;

@@ -714,9 +714,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   nonzero REL instruction fields and nonzero RELA addends; canonical ELF
   writing, assembly printing and the shared image patcher enforce the same
   rule. A valid pair relaxes to ADRP/ADD of the symbol, including an imported
-  data symbol's copy slot; an undefined weak zero target becomes MOVZ/ADD
-  zero. Direct ADRP/ADD and scaled memory relocations retain their distinct
-  signed-addend rules. See [AAELF64 addends and relocation definitions](https://github.com/ARM-software/abi-aa/blob/a5e86d3fec7342719f3bd1f939ec1b8ac6438c4f/aaelf64/aaelf64.rst).
+  data symbol's copy slot. In AArch64 PIEs, an undefined weak GOT target uses
+  a zero-filled GOT slot and retains the LDR; direct PAGE21/ADR references
+  instead use MOVZ #0. Direct ADRP/ADD and scaled memory relocations retain
+  their distinct signed-addend rules. See [AAELF64 addends and relocation
+  definitions](https://github.com/ARM-software/abi-aa/blob/a5e86d3fec7342719f3bd1f939ec1b8ac6438c4f/aaelf64/aaelf64.rst).
 
 - Direct AArch64 ELF unsigned-immediate memory references use distinct
   `ELF_LDST8_LO12`, `ELF_LDST16_LO12`, `ELF_LDST32_LO12`, `ELF_LDST64_LO12`

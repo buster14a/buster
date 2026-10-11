@@ -375,7 +375,7 @@ BUSTER_GLOBAL_LOCAL String8 c_test_body_scratch_repeat(Arena* arena, String8 hea
 // slot table of an inferred initializer. The evaluator is also refused with
 // a later invalid body, which still reports its own finding.
 #define C_TEST_BODY_SCRATCH_EVALUATOR_TERMS 40
-#define C_TEST_BODY_SCRATCH_CASE_TERMS 30
+#define C_TEST_BODY_SCRATCH_CASE_TERMS 100
 // Two named clobbers and sixteen numbered registers, valid on x86-64
 // (xmm0..xmm15) and AArch64 (x0..x15).
 #define C_TEST_BODY_SCRATCH_CLOBBERS 18
@@ -434,16 +434,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_validation_scratch_families(UnitT
                                    string_equal(recovered.messages[1], bad_message));
     }
 
-    // Typed constants: a case label of 1 + 4 * terms tokens takes one task
-    // per token plus one.
+    // Typed constants: a case label of terms left-associative additions
+    // nests one task per term. The task stack starts at 32 rows and doubles
+    // toward one per token, so its first growth to 64 rows is the request
+    // to refuse.
     {
-        u64 tokens = 1 + 4 * (u64)C_TEST_BODY_SCRATCH_CASE_TERMS;
         String8 label = c_test_body_scratch_repeat(arguments->arena, S8("1"), S8(" + 0*1"), C_TEST_BODY_SCRATCH_CASE_TERMS, S8(""));
         String8 cases = string_format(arguments->arena,
             S8("int main(void){{int x=1; switch (x) {{case {S8}: x=2; break; case 3: x=4; break; default: break;} return x;}"), label);
         CTestBodyScratchRun open = c_test_body_scratch_run(arguments, cases, 0, trace);
         BUSTER_TEST(arguments, open.lowered);
-        u32 tasks = c_test_body_scratch_find_count(trace, open.trace_count, 0, 0, tokens + 1);
+        u32 initial = c_test_body_scratch_find_count(trace, open.trace_count, 0, 0, 32);
+        u32 tasks = initial < open.trace_count ? c_test_body_scratch_find(trace, open.trace_count, 0, trace[initial].element_size, 64) : UINT32_MAX;
+        BUSTER_TEST(arguments, initial < tasks && tasks < open.trace_count);
         c_test_body_scratch_refuse_at(arguments, &result, cases, trace, open.trace_count, 0, tasks, S8("main"));
     }
 
@@ -1680,6 +1683,73 @@ BUSTER_GLOBAL_LOCAL void c_test_append_u32(char8* destination, u64 capacity, u64
     {
         destination[(*length)++] = digits[--digit_count];
     }
+}
+
+// Semantic analysis of one large static initializer. It used to size two
+// work buffers by the tokens of the whole braced list: the typed-constant
+// task stack (72 bytes per token, asked whether the whole list is one
+// constant) aborted a 230,000-entry struct table (#3254), and the
+// array-count inference frames and continuations (56 bytes per token)
+// aborted a 4,000,000-element byte table (#2527), both with an arena
+// validation failure in the 256 MiB thread scratch. Both now grow with the
+// work or are bounded by the type count.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parse_large_static_initializers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    // A unit of 8,000,000 tokens needs the driver's own unit reservation.
+    Arena* persistent = arena_create((ArenaCreation){.reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE, .flags = {.no_pool = true}});
+    BUSTER_TEST(arguments, persistent != 0);
+    if (persistent)
+    {
+        for (u32 shape = 0; shape < 2; shape += 1)
+        {
+            u32 element_count = shape == 0 ? 230000 : 4000000;
+            String8 prefix = shape == 0 ? S8("struct R { int a; const char *s; short v[3]; };\nstruct R t[] = {")
+                                        : S8("unsigned char d[] = {");
+            String8 element_open = shape == 0 ? S8("{") : S8("");
+            String8 element_middle = shape == 0 ? S8(", \"n\", {1, 2, 3}}") : S8("");
+            String8 suffix = S8("};\n");
+            u64 source_capacity = prefix.length + (u64)element_count * (element_open.length + element_middle.length + 12) + suffix.length;
+            TemporalArena temporary = arena_begin_temporal(persistent);
+            char8* source_bytes = arena_allocate(persistent, char8, source_capacity);
+            u64 source_length = 0;
+            c_test_append_source(source_bytes, source_capacity, &source_length, prefix);
+            for (u32 element = 0; element < element_count; element += 1)
+            {
+                c_test_append_source(source_bytes, source_capacity, &source_length, element_open);
+                c_test_append_u32(source_bytes, source_capacity, &source_length, shape == 0 ? element : element & 255);
+                c_test_append_source(source_bytes, source_capacity, &source_length, element_middle);
+                c_test_append_source(source_bytes, source_capacity, &source_length, S8(","));
+            }
+            c_test_append_source(source_bytes, source_capacity, &source_length, suffix);
+            String8 source = {.pointer = source_bytes, .length = source_length};
+            CPreprocessResult preprocess = c_preprocess(persistent, source, (CPreprocessOptions){
+                .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17,
+            });
+            CParseResult parse = c_parse(persistent, preprocess);
+            BUSTER_TEST(arguments, !preprocess.diagnostic_count);
+            BUSTER_TEST_RAW(arguments, !parse.diagnostic_count,
+                parse.diagnostic_count ? parse.diagnostics[0].message : S8("large static initializer analysis"));
+            if (BUSTER_REQUIRE(arguments, parse.declaration_count == (shape == 0 ? 2u : 1u)))
+            {
+                CDeclaration declaration = parse.declarations[parse.declaration_count - 1];
+                CType* type = c_type_from_id(&parse, declaration.type);
+                bool array = type && type->kind == C_TYPE_ARRAY && type->array_bound < parse.array_bound_count;
+                if (BUSTER_REQUIRE(arguments, array))
+                {
+                    CArrayBound bound = parse.array_bounds[type->array_bound];
+                    BUSTER_TEST(arguments, bound.has_inferred_count && bound.inferred_count == element_count);
+                }
+            }
+            scratch_end(temporary);
+        }
+        BUSTER_TEST(arguments, arena_destroy(persistent, 1));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
 }
 
 // One local table whose every brace-enclosed element zero-fills its record
@@ -5320,6 +5390,92 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_initializer_cursor_depth_runtim
             c_test_scratch_end(temporary);
         }
     }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// One function holding a 5,000-entry local table: about 555,000 machine rows
+// in a single block. QUALITY placement and scheduling took more than the
+// 256 MiB thread scratch for it and aborted in arena validation (#3413);
+// machine scratch is now planned per function from its IR counts. Compile it
+// under both allocators and check every entry at run time.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_large_function_machine_scratch_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Not on Windows AArch64: the function is over 1 MiB of code, past what
+    // one PE ARM64 unwind record describes; the object writer refuses it
+    // there (#3578).
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS && !(BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64)
+    u32 const entry_count = 5000;
+    String8 prefix = S8("typedef struct Text { const char* pointer; unsigned long length; } Text;\n"
+                        "struct Case { _Bool flag; Text text; unsigned char count; unsigned char bytes[12]; };\n"
+                        "static unsigned long check(struct Case const* cases, unsigned long count)\n{\n"
+                        "    unsigned long bad = 0;\n"
+                        "    for (unsigned long i = 0; i < count; i += 1)\n    {\n"
+                        "        bad += cases[i].flag != (_Bool)(i & 1) || cases[i].text.length != 2 || cases[i].text.pointer[0] != 'c' ||\n"
+                        "               cases[i].text.pointer[1] != (char)('0' + i % 10) || cases[i].count != 2 ||\n"
+                        "               cases[i].bytes[0] != (unsigned char)(i & 255) || cases[i].bytes[1] != 7 || cases[i].bytes[11] != 0;\n"
+                        "    }\n    return bad;\n}\n"
+                        "int main(void)\n{\n    struct Case const cases[] = {\n");
+    String8 entry_open = S8("        {");
+    String8 entry_text = S8(", (Text){\"c");
+    String8 entry_bytes = S8("\", 2}, 2, {");
+    String8 entry_close = S8(", 7}},\n");
+    String8 suffix_open = S8("    };\n    return sizeof(cases) / sizeof(cases[0]) != ");
+    String8 suffix_close = S8(" || check(cases, sizeof(cases) / sizeof(cases[0])) != 0;\n}\n");
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u64 source_capacity = prefix.length + (u64)entry_count * (entry_open.length + entry_text.length + entry_bytes.length + entry_close.length + 16) +
+                          suffix_open.length + suffix_close.length + 16;
+    char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+    u64 source_length = 0;
+    c_test_append_source(source_bytes, source_capacity, &source_length, prefix);
+    for (u32 entry = 0; entry < entry_count; entry += 1)
+    {
+        c_test_append_source(source_bytes, source_capacity, &source_length, entry_open);
+        c_test_append_u32(source_bytes, source_capacity, &source_length, entry & 1);
+        c_test_append_source(source_bytes, source_capacity, &source_length, entry_text);
+        c_test_append_u32(source_bytes, source_capacity, &source_length, entry % 10);
+        c_test_append_source(source_bytes, source_capacity, &source_length, entry_bytes);
+        c_test_append_u32(source_bytes, source_capacity, &source_length, entry & 255);
+        c_test_append_source(source_bytes, source_capacity, &source_length, entry_close);
+    }
+    c_test_append_source(source_bytes, source_capacity, &source_length, suffix_open);
+    c_test_append_u32(source_bytes, source_capacity, &source_length, entry_count);
+    c_test_append_source(source_bytes, source_capacity, &source_length, suffix_close);
+    String8 source_text = {.pointer = source_bytes, .length = source_length};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("large-function-machine-scratch"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        String8 modes[] = {S8("-fregister-allocator=quality"), S8("-fregister-allocator=fast")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            TemporalArena run_temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(run_temporary.arena, S8("large-function-machine-scratch-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], S8("-o"), output, source};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(run_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(run_temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                string_format(run_temporary.arena, S8("large function machine scratch {S8}: {S8}"), modes[mode], compiled.diagnostic));
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(run_temporary.arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                        string_format(run_temporary.arena, S8("large function machine scratch runtime {S8}: status={u32} timed_out={u32}"),
+                            modes[mode], execution.platform_status, (u32)execution.timed_out));
+                }
+            }
+            c_test_scratch_end(run_temporary);
+        }
+    }
+    c_test_scratch_end(temporary);
 #else
     BUSTER_UNUSED(arguments);
 #endif
@@ -62105,6 +62261,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_redefinition_names_previous_site);
     C_TEST_FIXTURE(arguments, c_test_empty_scalar_initializer_runtime);
     C_TEST_FIXTURE(arguments, c_test_nested_initializer_cursor_depth_runtime);
+    C_TEST_FIXTURE(arguments, c_test_large_function_machine_scratch_runtime);
     C_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
     C_TEST_FIXTURE(arguments, c_test_enum_bool_conversion);
     C_TEST_FIXTURE(arguments, c_test_enum_lowering);
@@ -62212,6 +62369,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_ir_lower_scratch_capacity);
     C_TEST_FIXTURE(arguments, c_test_ir_query_scratch_growth);
     C_TEST_FIXTURE(arguments, c_test_ir_local_table_zero_scratch);
+    C_TEST_FIXTURE(arguments, c_test_parse_large_static_initializers);
     C_TEST_FIXTURE(arguments, c_test_ir_row_streams);
     C_TEST_FIXTURE(arguments, c_test_label_values_gate);
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_growth);
