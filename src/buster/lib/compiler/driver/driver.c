@@ -67,6 +67,9 @@
 // share target/sysroot search roots with static-library lookup; explicit -L
 // roots come first. compiler_driver_mach_library_locate resolves Apple dylibs
 // and TAPI stubs to their install names and versions.
+// compiler_driver_consume_linker_verbose removes option-position -v from
+// supported native Linux links; compiler_driver_native_link_report renders
+// the truthful CMake link-line record before compilation/linking can fail.
 // compiler_driver_elf_script_members validates bounded INPUT/GROUP/AS_NEEDED
 // scripts; compiler_driver_elf_requested_libraries expands them with a capped
 // explicit worklist and retains DSO SONAME identities in member order.
@@ -1019,9 +1022,10 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_request(Arena* aren
 // query cannot hide another linker option or select a non-native pipeline.
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_linker_query(CompilerDriverInvocation* invocation)
 {
-    bool raw_query = invocation->linker_argument_count == 1 && invocation->linker_arguments &&
-                     string_equal(invocation->linker_arguments[0], S8("--version"));
-    bool requested = raw_query || invocation->query == COMPILER_DRIVER_QUERY_LINKER_VERSION;
+    bool raw_query_requested = invocation->linker_argument_count && invocation->linker_arguments &&
+                               string_equal(invocation->linker_arguments[0], S8("--version"));
+    bool raw_query = raw_query_requested && invocation->linker_argument_count == 1;
+    bool requested = raw_query_requested || invocation->query == COMPILER_DRIVER_QUERY_LINKER_VERSION;
     if (invocation->error == COMPILER_DRIVER_ERROR_NONE && requested)
     {
         bool native = invocation->target.cpu_arch == CPU_ARCH_X86_64 || invocation->target.cpu_arch == CPU_ARCH_AARCH64;
@@ -1042,6 +1046,61 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_linker_query(CompilerDriverInv
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_linux_elf_link(CompilerDriverInvocation invocation)
+{
+    bool result = invocation.action == COMPILER_DRIVER_ACTION_LINK && !invocation.has_gpu_target && !invocation.emit_llvm_bitcode &&
+                  invocation.target.os == OPERATING_SYSTEM_LINUX &&
+                  (invocation.target.cpu_arch == CPU_ARCH_X86_64 || invocation.target.cpu_arch == CPU_ARCH_AARCH64);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_linker_argument_takes_operand(String8 argument)
+{
+    bool result = string_equal(argument, S8("-soname")) || string_equal(argument, S8("--soname")) ||
+                  string_equal(argument, S8("-h")) || string_equal(argument, S8("-z"));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_consume_linker_verbose(Arena* arena, CompilerDriverInvocation* invocation)
+{
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE && compiler_driver_native_linux_elf_link(*invocation) &&
+        invocation->linker_argument_count && invocation->linker_arguments)
+    {
+        bool operand = false;
+        bool found = false;
+        for (u32 index = 0; index < invocation->linker_argument_count; index += 1)
+        {
+            String8 argument = invocation->linker_arguments[index];
+            if (!operand && string_equal(argument, S8("-v")))
+            {
+                found = true;
+            }
+            operand = !operand && compiler_driver_linker_argument_takes_operand(argument);
+        }
+        if (found)
+        {
+            String8* linker_arguments = arena_allocate(arena, String8, invocation->linker_argument_count);
+            u32 linker_argument_count = 0;
+            operand = false;
+            for (u32 index = 0; index < invocation->linker_argument_count; index += 1)
+            {
+                String8 argument = invocation->linker_arguments[index];
+                if (!operand && string_equal(argument, S8("-v")))
+                {
+                    invocation->linker_verbose = true;
+                }
+                else
+                {
+                    linker_arguments[linker_argument_count++] = argument;
+                }
+                operand = !operand && compiler_driver_linker_argument_takes_operand(argument);
+            }
+            invocation->linker_arguments = linker_arguments;
+            invocation->linker_argument_count = linker_argument_count;
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_request(Arena* arena, CompilerDriverInvocation* invocation)
 {
     if (invocation->error == COMPILER_DRIVER_ERROR_NONE && invocation->has_gpu_target)
@@ -1051,6 +1110,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_request(Arena* arena, Compiler
     compiler_driver_validate_codegen_request(invocation, false);
     compiler_driver_validate_dependency_request(arena, invocation);
     compiler_driver_validate_linker_query(invocation);
+    compiler_driver_consume_linker_verbose(arena, invocation);
 }
 
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_request(Arena* arena, CompilerDriverInvocation* invocation)
@@ -3276,6 +3336,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
     }
     compiler_driver_validate_linker_query(&invocation);
+    compiler_driver_consume_linker_verbose(arena, &invocation);
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && !invocation.no_standard_includes && !invocation.has_gpu_target &&
         invocation.target.os != OPERATING_SYSTEM_UEFI && invocation.target.cpu_arch != CPU_ARCH_SPIRV_COMPUTE)
     {
@@ -3973,6 +4034,123 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_elf_library_roots(Arena* arena, Compiler
         roots[root_count++] = S8("/usr/lib");
     }
     return root_count;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_link_argument_safe(char8 byte)
+{
+    bool result = (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') || (byte >= '0' && byte <= '9') ||
+                  byte == '_' || byte == '.' || byte == '/' || byte == '=' || byte == ':' || byte == '+' || byte == ',' ||
+                  byte == '@' || byte == '%' || byte == '-';
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_quote(Arena* arena, String8 argument)
+{
+    bool safe = argument.length != 0;
+    u64 quote_count = 0;
+    for (u64 index = 0; index < argument.length; index += 1)
+    {
+        char8 byte = argument.pointer[index];
+        safe = safe && compiler_driver_native_link_argument_safe(byte);
+        quote_count += byte == '\'';
+    }
+    String8 result = argument;
+    if (!safe)
+    {
+        u64 length = argument.length + quote_count * 3 + 2;
+        char8* pointer = arena_allocate(arena, char8, length);
+        u64 position = 0;
+        pointer[position++] = '\'';
+        for (u64 index = 0; index < argument.length; index += 1)
+        {
+            char8 byte = argument.pointer[index];
+            if (byte == '\'')
+            {
+                pointer[position++] = '\'';
+                pointer[position++] = '\\';
+                pointer[position++] = '\'';
+                pointer[position++] = '\'';
+            }
+            else
+            {
+                pointer[position++] = byte;
+            }
+        }
+        pointer[position++] = '\'';
+        result = (String8){.pointer = pointer, .length = position};
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_report_argument(Arena* arena, String8 prefix, String8 value)
+{
+    String8 argument = string_format(arena, S8("{S8}{S8}"), prefix, value);
+    String8 quoted = compiler_driver_native_link_quote(arena, argument);
+    String8 result = string_format(arena, S8(" {S8}"), quoted);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_shared_library_input(String8 path)
+{
+    bool result = string_ends_with_sequence(path, S8(".so"));
+    for (u64 index = 0; !result && index + 4 <= path.length; index += 1)
+    {
+        result = string_equal(string_slice(path, index, index + 4), S8(".so.")) && index + 4 < path.length;
+    }
+    return result;
+}
+
+String8 compiler_driver_native_link_report(Arena* arena, CompilerDriverInvocation invocation)
+{
+    String8 result = {0};
+    if (compiler_driver_native_linux_elf_link(invocation) && (invocation.verbose || invocation.linker_verbose))
+    {
+        String8* roots = arena_allocate(arena, String8, 8);
+        u32 root_count = compiler_driver_elf_library_roots(arena, invocation, roots);
+        u64 part_capacity = (u64)invocation.library_path_count + root_count + invocation.input_count + invocation.library_count + 4;
+        String8* parts = arena_allocate(arena, String8, part_capacity);
+        u32 part_count = 0;
+        if (invocation.verbose)
+        {
+            String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
+            parts[part_count++] = S8(" buster-native-ld -o ");
+            parts[part_count++] = compiler_driver_native_link_quote(arena, output);
+            for (u32 index = 0; index < invocation.library_path_count; index += 1)
+            {
+                parts[part_count++] = compiler_driver_native_link_report_argument(arena, S8("-L"), invocation.library_paths[index]);
+            }
+            for (u32 index = 0; index < root_count; index += 1)
+            {
+                parts[part_count++] = compiler_driver_native_link_report_argument(arena, S8("-L"), roots[index]);
+            }
+            for (u32 index = 0; index < invocation.input_count; index += 1)
+            {
+                String8 input = invocation.input_paths[index];
+                if (compiler_driver_object_input(input) || compiler_driver_archive_input(input) ||
+                    compiler_driver_native_shared_library_input(input))
+                {
+                    parts[part_count++] = compiler_driver_native_link_report_argument(arena, (String8){0}, input);
+                }
+            }
+            for (u32 index = 0; index < invocation.library_count; index += 1)
+            {
+                String8 library = invocation.libraries[index];
+                if (!string_equal(library, S8("c")))
+                {
+                    parts[part_count++] = compiler_driver_native_link_report_argument(arena, S8("-l"), library);
+                }
+            }
+            parts[part_count++] = S8(" -lc\n");
+        }
+        if (invocation.linker_verbose)
+        {
+            CompilerDriverInvocation query = invocation;
+            query.query = COMPILER_DRIVER_QUERY_LINKER_VERSION;
+            parts[part_count++] = compiler_driver_query_text(arena, &query);
+        }
+        result = string_join_arena(arena, (SliceString8){.pointer = parts, .length = part_count}, false);
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_read_u32_le(ByteSlice bytes, u64 offset, u32* value)
@@ -9482,6 +9660,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.diagnostic = S8("link operation stream does not cover inputs and libraries in order");
         goto finish;
     }
+    result.linker_report = compiler_driver_native_link_report(arena, invocation);
     compiler_driver_validate_spirv_invocation(&invocation);
     if (invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {

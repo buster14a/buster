@@ -6,6 +6,100 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_arguments(U
     UnitTestResult result = {0};
     TemporalArena temporary = arena_begin_temporal(arguments->arena);
     Arena* arena = temporary.arena;
+    String8 linker_verbose_wl[] = {S8("--target=x86_64-linux-gnu"), S8("-Wl,-v"), S8("a.o"), S8("-o"), S8("out")};
+    CompilerDriverInvocation linker_verbose = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(linker_verbose_wl));
+    BUSTER_TEST(arguments, linker_verbose.error == COMPILER_DRIVER_ERROR_NONE && linker_verbose.linker_verbose &&
+                               linker_verbose.linker_argument_count == 0);
+    String8 linker_verbose_xlinker[] = {S8("--target=x86_64-linux-gnu"), S8("-Xlinker"), S8("-v"), S8("a.o"), S8("-o"), S8("out")};
+    CompilerDriverInvocation linker_verbose_split = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(linker_verbose_xlinker));
+    BUSTER_TEST(arguments, linker_verbose_split.error == COMPILER_DRIVER_ERROR_NONE && linker_verbose_split.linker_verbose &&
+                               linker_verbose_split.linker_argument_count == 0);
+    String8 linker_verbose_remaining[] = {S8("--target=x86_64-linux-gnu"), S8("-Wl,-v,--no-undefined"), S8("a.o")};
+    CompilerDriverInvocation linker_verbose_with_argument =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(linker_verbose_remaining));
+    BUSTER_TEST(arguments, linker_verbose_with_argument.error == COMPILER_DRIVER_ERROR_NONE &&
+                               linker_verbose_with_argument.linker_verbose && linker_verbose_with_argument.linker_argument_count == 1);
+    if (linker_verbose_with_argument.linker_argument_count == 1)
+    {
+        BUSTER_STRING_TEST(arguments, linker_verbose_with_argument.linker_arguments[0], S8("--no-undefined"));
+    }
+    String8 soname_verbose_operand[] = {S8("--target=x86_64-linux-gnu"), S8("-shared"), S8("-Wl,-soname,-v"), S8("a.o")};
+    CompilerDriverInvocation soname_verbose =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(soname_verbose_operand));
+    BUSTER_TEST(arguments, soname_verbose.error == COMPILER_DRIVER_ERROR_NONE && !soname_verbose.linker_verbose &&
+                               soname_verbose.linker_argument_count == 2);
+    if (soname_verbose.linker_argument_count == 2)
+    {
+        BUSTER_STRING_TEST(arguments, soname_verbose.linker_arguments[0], S8("-soname"));
+        BUSTER_STRING_TEST(arguments, soname_verbose.linker_arguments[1], S8("-v"));
+    }
+    String8 z_verbose_operand[] = {S8("--target=x86_64-linux-gnu"), S8("-Wl,-z,-v"), S8("a.o")};
+    CompilerDriverInvocation z_verbose = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(z_verbose_operand));
+    BUSTER_TEST(arguments, z_verbose.error == COMPILER_DRIVER_ERROR_ARGUMENT && !z_verbose.linker_verbose &&
+                               z_verbose.linker_argument_count == 2);
+    if (z_verbose.linker_argument_count == 2)
+    {
+        BUSTER_STRING_TEST(arguments, z_verbose.linker_arguments[0], S8("-z"));
+        BUSTER_STRING_TEST(arguments, z_verbose.linker_arguments[1], S8("-v"));
+    }
+    String8 windows_verbose[] = {S8("--target=x86_64-windows"), S8("-Wl,-v"), S8("a.o")};
+    CompilerDriverInvocation windows_linker_verbose =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(windows_verbose));
+    BUSTER_TEST(arguments, windows_linker_verbose.error == COMPILER_DRIVER_ERROR_ARGUMENT &&
+                               compiler_driver_test_string_contains(windows_linker_verbose.diagnostic, S8("-v")));
+    String8 compile_verbose[] = {S8("--target=x86_64-linux-gnu"), S8("-c"), S8("-Wl,-v"), S8("a.c")};
+    CompilerDriverInvocation compile_linker_verbose =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_verbose));
+    BUSTER_TEST(arguments, compile_linker_verbose.error == COMPILER_DRIVER_ERROR_ARGUMENT && !compile_linker_verbose.linker_verbose &&
+                               compiler_driver_test_string_contains(compile_linker_verbose.diagnostic, S8("-v")));
+    String8 query_verbose[] = {S8("--target=x86_64-linux-gnu"), S8("-Wl,--version,-v")};
+    CompilerDriverInvocation query_linker_verbose =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(query_verbose));
+    BUSTER_TEST(arguments, query_linker_verbose.error == COMPILER_DRIVER_ERROR_ARGUMENT && !query_linker_verbose.linker_verbose &&
+                               query_linker_verbose.linker_argument_count == 2);
+    String8 report_arguments[] = {S8("--target=x86_64-linux-gnu"), S8("-L/opt/x"), S8("-lm"), S8("a.o"), S8("b.a"),
+                                  S8("-o"), S8("out"), S8("-v")};
+    CompilerDriverInvocation report_invocation =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(report_arguments));
+    String8 expected_report = S8(" buster-native-ld -o out -L/opt/x -L/lib/x86_64-linux-gnu -L/usr/lib/x86_64-linux-gnu "
+                                 "-L/usr/x86_64-linux-gnu/lib -L/lib64 -L/usr/lib64 -L/lib -L/usr/lib a.o b.a -lm -lc\n");
+    BUSTER_TEST(arguments, report_invocation.error == COMPILER_DRIVER_ERROR_NONE && report_invocation.verbose);
+    BUSTER_STRING_TEST(arguments, compiler_driver_native_link_report(arena, report_invocation), expected_report);
+    String8 sysroot_report_arguments[] = {S8("--target=aarch64-linux-gnu"), S8("--sysroot=/sr"), S8("-L"), S8("/opt/arm lib"),
+                                          S8("-lm"), S8("a.o"), S8("-o"), S8("out"), S8("-v")};
+    CompilerDriverInvocation sysroot_report_invocation =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(sysroot_report_arguments));
+    String8 expected_sysroot_report =
+        S8(" buster-native-ld -o out '-L/opt/arm lib' -L/sr/lib/aarch64-linux-gnu -L/sr/usr/lib/aarch64-linux-gnu "
+           "-L/sr/lib64 -L/sr/usr/lib64 -L/sr/lib -L/sr/usr/lib a.o -lm -lc\n");
+    BUSTER_TEST(arguments, sysroot_report_invocation.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_STRING_TEST(arguments, compiler_driver_native_link_report(arena, sysroot_report_invocation), expected_sysroot_report);
+    String8 quoted_report_arguments[] = {S8("--target=x86_64-linux-gnu"), S8("a file.o"), S8("-o"), S8("out file"), S8("-v")};
+    CompilerDriverInvocation quoted_report_invocation =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(quoted_report_arguments));
+    String8 expected_quoted_report =
+        S8(" buster-native-ld -o 'out file' -L/lib/x86_64-linux-gnu -L/usr/lib/x86_64-linux-gnu -L/usr/x86_64-linux-gnu/lib "
+           "-L/lib64 -L/usr/lib64 -L/lib -L/usr/lib 'a file.o' -lc\n");
+    BUSTER_TEST(arguments, quoted_report_invocation.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_STRING_TEST(arguments, compiler_driver_native_link_report(arena, quoted_report_invocation), expected_quoted_report);
+    String8 identity_arguments[] = {S8("--target=x86_64-linux-gnu"), S8("-Wl,-v"), S8("a.o"), S8("-o"), S8("out")};
+    CompilerDriverInvocation identity_invocation =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(identity_arguments));
+    BUSTER_STRING_TEST(arguments, compiler_driver_native_link_report(arena, identity_invocation),
+                       S8("Buster native linker\nTarget: x86_64-unknown-linux-gnu\n"));
+    String8 both_report_arguments[] = {S8("--target=x86_64-linux-gnu"), S8("-Wl,-v"), S8("a.o"), S8("-o"), S8("out"), S8("-v")};
+    CompilerDriverInvocation both_report_invocation =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(both_report_arguments));
+    String8 expected_both_report = S8(" buster-native-ld -o out -L/lib/x86_64-linux-gnu -L/usr/lib/x86_64-linux-gnu "
+                                      "-L/usr/x86_64-linux-gnu/lib -L/lib64 -L/usr/lib64 -L/lib -L/usr/lib a.o -lc\n"
+                                      "Buster native linker\nTarget: x86_64-unknown-linux-gnu\n");
+    BUSTER_STRING_TEST(arguments, compiler_driver_native_link_report(arena, both_report_invocation), expected_both_report);
+    String8 libc_report_arguments[] = {S8("--target=x86_64-linux-gnu"), S8("-lc"), S8("-lm"), S8("a.o"), S8("-v")};
+    CompilerDriverInvocation libc_report_invocation =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(libc_report_arguments));
+    BUSTER_STRING_TEST(arguments, compiler_driver_native_link_report(arena, libc_report_invocation),
+                       S8(" buster-native-ld -o a.out -L/lib/x86_64-linux-gnu -L/usr/lib/x86_64-linux-gnu "
+                          "-L/usr/x86_64-linux-gnu/lib -L/lib64 -L/usr/lib64 -L/lib -L/usr/lib a.o -lm -lc\n"));
     String8 targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux"), S8("x86_64-pc-windows-msvc"),
                          S8("aarch64-pc-windows-msvc"), S8("x86_64-apple-macos"), S8("aarch64-apple-macos"),
                          S8("x86_64-linux-android"), S8("aarch64-linux-android"), S8("x86_64-unknown-uefi")};
