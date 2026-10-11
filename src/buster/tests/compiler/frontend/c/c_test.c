@@ -23667,6 +23667,63 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_simd_conditional_types(UnitTestArgumen
     return result;
 }
 
+// Keep this source outside the frozen retirement corpus.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_simd_conditional_header(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 path = S8("src/buster/tests/compiler/driver/fixtures/simd_conditional.c");
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+    {
+        String8 actions[] = {S8("-fsyntax-only"), S8("-c")};
+        for (u32 action = 0; action < BUSTER_ARRAY_LENGTH(actions); action += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_unique_path(temporary.arena, S8("simd-conditional-header"), S8(".o"));
+            String8 command[] = {S8("-Isrc"), S8("-std=gnu17"), S8("-target"), S8("x86_64-unknown-linux"),
+                S8("-march=znver5"), frontends[form], actions[action], S8("-fverify-codegen"), S8("-o"), output, path};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                string_format(temporary.arena, S8("SIMD conditional header {S8} {S8}: {S8}"), actions[action], frontends[form], compiled.diagnostic));
+            c_test_scratch_end(temporary);
+        }
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_unique_path(temporary.arena, S8("simd-conditional-header-run"), S8(".exe"));
+            String8 command[] = {S8("-Isrc"), S8("-std=gnu17"), S8("-march=native"), modes[mode], frontends[form],
+                S8("-fverify-codegen"), S8("-O0"), S8("-o"), output, path};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                string_format(temporary.arena, S8("SIMD conditional header {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                        string_format(temporary.arena, S8("SIMD conditional header execution {S8} {S8}: status={u32} timed_out={u32}"),
+                            modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // GNU vector subscripts are scalar lanes even inside conditional expressions.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vector_subscript_conditional_type(UnitTestArguments* arguments)
 {
@@ -62949,6 +63006,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_variadic_function_pointer_cast);
     C_TEST_FIXTURE(arguments, c_test_variadic_function_pointer_cast_runtime);
     C_TEST_FIXTURE(arguments, c_test_variadic_va_opt);
+    C_TEST_FIXTURE(arguments, c_test_simd_conditional_header);
     C_TEST_FIXTURE(arguments, c_test_simd_conditional_types);
     C_TEST_FIXTURE(arguments, c_test_vector_subscript_conditional_type);
     C_TEST_FIXTURE(arguments, c_test_vendor_builtin_admission);
