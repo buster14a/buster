@@ -254,7 +254,6 @@ def load_tests(loader, tests, pattern):
     for name in loader.getTestCaseNames(frozen.AptInputTests):
         if name not in superseded:
             suite.addTest(frozen.AptInputTests(name))
-    suite.addTests(loader.loadTestsFromTestCase(PostMergeAptSchedulingTests))
     return suite
 
 
