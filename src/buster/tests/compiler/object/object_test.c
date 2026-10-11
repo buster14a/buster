@@ -4284,6 +4284,71 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_priority_split_ledger(UnitTe
         }
         arena_set_position(temporary.arena, scope.position);
     }
+    // Relocations interleaved across two sections keep their input order
+    // within each section after grouping (from #3531): AArch64 adds the TLS
+    // binding copy, so validation, TLS, census, grouping and both sweeps
+    // make 7R.
+    {
+        TemporalArena scope = arena_begin_temporal(temporary.arena);
+        u8 text[32] = {0};
+        u8 data_bytes[32] = {0};
+        ObjectSection interleaved_sections[] = {
+            {.name = S8(".text"), .kind = OBJECT_SECTION_TEXT, .data = BUSTER_ARRAY_TO_SLICE(text), .alignment = 4},
+            {.name = S8(".data"), .kind = OBJECT_SECTION_DATA, .data = BUSTER_ARRAY_TO_SLICE(data_bytes), .alignment = 8},
+        };
+        ObjectSymbol interleaved_symbol = {.name = S8("target"), .section = 0, .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+        ObjectRelocation interleaved_relocations[] = {
+            {.addend = 0, .offset = 0, .section = 1, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.addend = 1, .offset = 8, .section = 0, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.addend = 2, .offset = 16, .section = 1, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.addend = 3, .offset = 24, .section = 0, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        };
+        u32 expected_order[OBJECT_SECTION_COUNT][2] = {
+            [OBJECT_SECTION_TEXT] = {1, 3},
+            [OBJECT_SECTION_DATA] = {0, 2},
+        };
+        ObjectFile interleaved = {
+            .sections = interleaved_sections,
+            .symbols = &interleaved_symbol,
+            .relocations = interleaved_relocations,
+            .target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+            .section_count = BUSTER_ARRAY_LENGTH(interleaved_sections),
+            .symbol_count = 1,
+            .relocation_count = BUSTER_ARRAY_LENGTH(interleaved_relocations),
+        };
+        ObjectArtifact artifact = object_write(temporary.arena, &interleaved, OBJECT_FORMAT_COFF);
+        if (BUSTER_REQUIRE(arguments, artifact.error == OBJECT_ERROR_NONE))
+        {
+            BUSTER_TEST(arguments, artifact.statistics.relocation_visits == 7 * BUSTER_ARRAY_LENGTH(interleaved_relocations));
+            ObjectFile read = object_read(temporary.arena, artifact.bytes, interleaved.target);
+            if (BUSTER_REQUIRE(arguments, read.error == OBJECT_ERROR_NONE &&
+                                           read.relocation_count == BUSTER_ARRAY_LENGTH(interleaved_relocations)))
+            {
+                u32 section_positions[OBJECT_SECTION_COUNT] = {0};
+                for (u32 index = 0; index < read.relocation_count; index += 1)
+                {
+                    ObjectRelocation* source = read.relocations + index;
+                    if (BUSTER_REQUIRE(arguments, source->section < OBJECT_SECTION_COUNT &&
+                                                       (source->section == OBJECT_SECTION_TEXT || source->section == OBJECT_SECTION_DATA)))
+                    {
+                        u32 section = source->section;
+                        u32 position = section_positions[section];
+                        BUSTER_TEST(arguments, position < BUSTER_ARRAY_LENGTH(expected_order[section]));
+                        if (position < BUSTER_ARRAY_LENGTH(expected_order[section]))
+                        {
+                            u32 input = expected_order[section][position];
+                            BUSTER_TEST(arguments, source->addend == input &&
+                                                       source->offset == interleaved_relocations[input].offset);
+                            section_positions[section] += 1;
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, section_positions[OBJECT_SECTION_TEXT] == BUSTER_ARRAY_LENGTH(expected_order[OBJECT_SECTION_TEXT]) &&
+                                           section_positions[OBJECT_SECTION_DATA] == BUSTER_ARRAY_LENGTH(expected_order[OBJECT_SECTION_DATA]));
+            }
+        }
+        arena_set_position(temporary.arena, scope.position);
+    }
     scratch_end(temporary);
     return result;
 }

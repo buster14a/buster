@@ -13327,6 +13327,9 @@ BUSTER_GLOBAL_LOCAL bool object_writer_32_arena_fits(Arena* arena, ObjectFile* o
     bool coff = format == OBJECT_FORMAT_COFF;
     u64 scratch = 64 + (u64)object->section_count * (coff ? 144u : 20u) + (u64)object->symbol_count * sizeof(u32) +
                   (coff ? 0 : (u64)object->relocation_count * 144);
+    // object_relocations_by_section: section counts and cursors, the grouped
+    // relocation indices, and their allocation alignment.
+    scratch += ((u64)object->section_count * 2 + 2) * sizeof(u32) + ((u64)object->relocation_count + 1) * sizeof(u32) + 24;
     if (coff && object->target.cpu_arch == CPU_ARCH_AARCH64)
     {
         // TLS index binding may append a symbol and copy both source arrays
