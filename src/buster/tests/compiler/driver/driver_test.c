@@ -99,7 +99,7 @@ struct CompilerDriverExecutableCleanupLanes
 
 BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_driver_test_executable_cleanup_lane(void* pointer)
 {
-    CompilerDriverExecutableCleanupLanes* state = pointer;
+    CompilerDriverExecutableCleanupLanes* state = (CompilerDriverExecutableCleanupLanes*)pointer;
     if (!lane_index()) { state->blocked = os_file_delete_checked(state->path); }
     // Both lanes see a real sharing failure before either releases its owner.
     lane_sync();
