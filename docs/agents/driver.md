@@ -333,6 +333,25 @@ publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
 the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
 not predefined at any level. `-mattr` overrides still refine the level.
 The psABI's LAHF-SAHF has no target feature and is implied by long mode.
+Without `-march`/`-mcpu` the CPU is the build host's. An invocation with no
+`-target`, or with `-target native`, starts from `target_native`
+(`compiler_driver_parse_arguments`), whose model and features
+`cpu_detect_model` probes at start-up. In effect this is `-march=native`: the
+feature set is the same, though `-v` prints the detected model name (for
+example `cpu=emeraldrapids`) where `-march=native` prints `cpu=native`. Clang
+and GCC differ here; their default is the portable `x86-64` baseline. Any
+other `-target`/`--target` triple starts from `baseline`
+(`target_parse_triple`), even one that names the host; `-target x86_64-linux`
+alone gives `cpu=baseline features=sse2`. Without a pinned CPU, three things
+follow the machine: object bytes, the predefined feature macros (`__AVX2__`,
+`__AVX512F__`, ...), and therefore which `#if`-guarded regions are compiled
+at all. Such output may use instructions that another machine lacks. For
+portable or cross-machine-comparable output, pass `-march=baseline`, a psABI
+level, or a named model. Tools that compare outputs across machines pin one:
+the native-retirement census uses `baseline` and the work ledger uses
+`znver3`. The host default is deliberate. It matches the
+`BUSTER_NATIVE_TARGET=native` host build and the compiler-throughput priority
+(GitHub #1557).
 `-mtune=<model>` is accepted with any nonempty value, `native` included, and
 ignored: it selects only a scheduling model, and instruction selection here has
 no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
@@ -1608,21 +1627,23 @@ With `-g`, named scalar locals that need more than one defining instruction to
 describe stay in distinct frame slots, so their location lists follow stores
 through reassignment and control-flow joins. A frame location starts after its
 first entry-block store. A local first stored on a later control-flow path
-gets per-block ranges from a forward must-initialized pass over the published
-CFG (`machine_debug_initialized_build`): the whole of each reachable block
-that every incoming path has written, else the rest of a block after its own
-first write. A write on only some paths therefore never reaches the join, and
-uninitialized frame bytes are never exposed. Ranges are produced in machine
-layout order, and `codegen_canonical_location_append` merges a seed into the
-previous one when it continues the same local with the same whole location,
-so back-to-back blocks become one location-list entry or CodeView
-`S_DEFRANGE_*` record. Past `MACHINE_DEBUG_INITIALIZED_CELL_LIMIT` block-local
-cells, or once a function's deferred ranges would exceed
-`MACHINE_DEBUG_INITIALIZED_RANGE_LIMIT`, the remaining locals stay
-unavailable. The CodeView symbol reserve counts every location range
-(`CODEVIEW_DEFRANGE_RECORD_BYTES`), and a range longer than the 16-bit
-`S_DEFRANGE_*` length is emitted as consecutive records of at most
-`CODEVIEW_DEFRANGE_MAX_LENGTH` bytes rather than clamped. Regressions:
+gets must-initialized ranges from the published CFG
+(`machine_debug_initialized_build`): the whole of each reachable block that
+every incoming path has written, else the rest of a block after its own first
+write. A write on only some paths therefore never reaches the join, and
+uninitialized frame bytes are never exposed. These per-block ranges are
+organized in machine layout order and emitted as one debug value for each
+layout-adjacent run; a partial-start block starts a new run. Machine blocks
+are published in selection layout order, with each block's line marks forming
+a contiguous row group, so adjacent block spans meet at a row boundary.
+Replaying the run therefore preserves the same seeds as separate block
+replay followed by `codegen_canonical_location_append`. Past
+`MACHINE_DEBUG_INITIALIZED_CELL_LIMIT` block-local cells, or once the
+per-block range budget `MACHINE_DEBUG_INITIALIZED_RANGE_LIMIT` is exceeded,
+the remaining locals stay unavailable. The CodeView symbol reserve counts
+every location range (`CODEVIEW_DEFRANGE_RECORD_BYTES`), and a range longer
+than the 16-bit `S_DEFRANGE_*` length is emitted as consecutive records of at
+most `CODEVIEW_DEFRANGE_MAX_LENGTH` bytes rather than clamped. Regressions:
 `codegen_test_debug_local_seed_coverage`,
 `machine_test_debug_value_initialized_blocks`,
 `machine_test_debug_value_initialized_budget`,
