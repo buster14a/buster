@@ -4024,15 +4024,32 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
      false, C_TYPE_INVALID, false, true},
     {S8_INITIALIZER("unsigned short const* f(void) { return u\"text\"; }"), S8_INITIALIZER("u\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_ANSWER,
      C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
+    // A member of a const or volatile aggregate over an accepted base: the
+    // answer is the qualified copy of the member's row that the replay of
+    // the machine's two calls appends, through `->` or `.`, in parentheses,
+    // and for a member that is itself an aggregate.
+    {S8_INITIALIZER("struct S { int a; }; int f(struct S const* p) { return p->a; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
+    {S8_INITIALIZER("struct S { char* name; }; char* f(struct S const s) { return s.name; }"), S8_INITIALIZER("s"), 1, 3,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
+    {S8_INITIALIZER("union U { long a; }; long f(union U volatile* p) { return (p->a); }"), S8_INITIALIZER("("), 1, 5,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
+    {S8_INITIALIZER("struct T { int x; }; struct S { struct T t; }; int f(struct S const* p) { return p->t.x; }"), S8_INITIALIZER("p"), 1, 3,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INVALID, false, C_TYPE_INVALID, false, true},
     // Declined: whatever would make the machine append a type row (a
-    // qualified member, a string, a cast to a type name with a qualified
+    // qualified member that is not the queried node, a member of a member of
+    // a qualified aggregate, a string, a cast to a type name with a qualified
     // typedef, a tag, a qualified or restrict pointer or a declarator other
     // than `*`, an array operand of `+`, a pointer conditional), a builtin
     // call, a parenthesized callee, and a conditional whose middle operand
     // holds an assignment, which the machine splits there instead. A string
     // literal of several tokens is left to the machine.
-    {S8_INITIALIZER("struct S { int a; }; int f(struct S const* p) { return p->a; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_DECLINE,
-     C_TYPE_INVALID},
+    {S8_INITIALIZER("struct S { int a; }; int f(struct S const* p) { return p->a + 1; }"), S8_INITIALIZER("p"), 1, 5,
+     C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("struct T { int x; }; struct S { struct T t; }; int f(struct S const* p) { return p->t.x; }"), S8_INITIALIZER("p"), 1, 5,
+     C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("struct S { int a; }; long f(struct S const* p) { return (long)p->a; }"), S8_INITIALIZER("("), 1, 6,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, true},
     {S8_INITIALIZER("char const* f(void) { return \"te\" \"xt\"; }"), S8_INITIALIZER("\"te\""), 0, 2, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
     {S8_INITIALIZER("typedef int T; T const* f(void* p) { return (const T*)p; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_DECLINE,
      C_TYPE_INVALID},
@@ -4187,6 +4204,35 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
     CTestAstTypeVerify verify = c_test_ast_type_verify_take();
     BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count && verify.probes == 4 && verify.probe_mismatches == 0);
     c_test_scratch_end(temporary);
+    // A member of a const aggregate whose type is an aligned typedef: the
+    // replay's qualified copy inherits the typedef's alignment record, and
+    // verify mode holds that record to the machine's, field by field. With
+    // the held record's range moved, the comparison must fail.
+    for (u32 perturb = 0; perturb < 2; perturb += 1)
+    {
+        temporary = scratch_begin(&arguments->arena, 1);
+        preprocess = c_ast_test_preprocess(temporary.arena,
+                                           S8("typedef int A __attribute__((aligned(16))); struct S { A a; }; A f(struct S const* p) { return p->a; }"),
+                                           C_PREPROCESS_DIALECT_GNU17);
+        built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        if (BUSTER_REQUIRE(arguments, built.complete))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.ast = &built.ast;
+            syntax.type_interning = true;
+            c_test_ast_type_verify_take();
+            c_test_ast_type_verify_set(true);
+            c_test_ast_type_verify_perturb_alignments(perturb != 0);
+            analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            c_test_ast_type_verify_perturb_alignments(false);
+            c_test_ast_type_verify_set(false);
+            verify = c_test_ast_type_verify_take();
+            BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count && verify.compared > 0);
+            BUSTER_TEST(arguments, perturb ? verify.mismatches > 0 && verify.first[0].reasons == C_TEST_AST_TYPE_MISMATCH_TABLES : verify.mismatches == 0);
+        }
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
     return result;
 }
 
