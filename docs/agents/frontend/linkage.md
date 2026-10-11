@@ -227,7 +227,18 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   that same module. The frontend keeps a static alias target alive -- an
   attribute names it, no identifier use does -- and diagnoses an alias whose
   target this translation unit does not define rather than emitting an
-  import. Both attributes are read inside the declaration's
+  import. Non-native outputs never drop an alias silently (#1338): LLVM
+  bitcode writes a `MODULE_CODE_ALIAS` record (`@name = alias T, ptr @target`
+  with the alias's own linkage and visibility, the target's value type and
+  thread-local mode) from `llvm_bc_add_alias_entity`, so an independent
+  Clang link resolves the name; the direct WebAssembly and eBPF emitters have
+  no second name for a definition and refuse the module with "WebAssembly
+  output does not represent symbol aliases" and "eBPF output does not
+  represent symbol aliases"; SPIR-V refuses any module with aliases. The
+  refusals live in the emitters rather than the frontend because
+  `-emit-llvm` for `wasm64-unknown-freestanding` and `bpfel-unknown-linux`
+  carries the alias. `llvm_bitcode_test_alias` and
+  `compiler_driver_test_alias_direct_emitters` cover them. Both attributes are read inside the declaration's
   `__attribute__((...))` list by `c_declaration_binding` in `c_gen.c`, never
   anywhere in its token range the way `section` and `asm` are matched: a
   marker attribute has no argument shape to recognise it by, and `weak` and
