@@ -43,25 +43,39 @@ jobs:
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/aggregate-build"
           "$RUNNER_TEMP/aggregate-build" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT
           "$RUNNER_TEMP/aggregate-build" build --config Release -t ide
-      - name: Independent reference reduction
+      - name: Independent reference reductions and invalid neighbors
         shell: bash
         run: |
           set -euo pipefail
-          clang -E -P -std=c99 src/buster/tests/compiler/driver/fixtures/local_flexible_initializers.c -o "$RUNNER_TEMP/aggregate-reduction.c"
-          clang -std=c99 -O0 -fno-strict-aliasing "$RUNNER_TEMP/aggregate-reduction.c" -o "$RUNNER_TEMP/aggregate-reference"
-          "$RUNNER_TEMP/aggregate-reference"
-      - name: Buster reduction FAST
+          for fixture in local_flexible_initializers tagged_array_type_names; do
+            clang -E -P -std=c99 "src/buster/tests/compiler/driver/fixtures/$fixture.c" -o "$RUNNER_TEMP/$fixture.c"
+            clang -std=c99 -O0 -fno-strict-aliasing "$RUNNER_TEMP/$fixture.c" -o "$RUNNER_TEMP/reference-$fixture"
+            "$RUNNER_TEMP/reference-$fixture"
+          done
+          for fixture in tagged_array_bad_function_subscript tagged_array_bad_bound_subscript; do
+            clang -E -P -std=c99 "src/buster/tests/compiler/driver/fixtures/$fixture.c" -o "$RUNNER_TEMP/$fixture.c"
+            if clang -std=c99 -fsyntax-only "$RUNNER_TEMP/$fixture.c" > "$RUNNER_TEMP/aggregate-evidence/reference-$fixture.log" 2>&1; then
+              echo "error: independent reference accepted invalid fixture $fixture"
+              exit 1
+            fi
+          done
+      - name: Buster reductions FAST and QUALITY
         shell: bash
         run: |
           set -euo pipefail
-          build/Release/ide cc -std=c99 -g0 -fregister-allocator=fast -fverify-codegen "$RUNNER_TEMP/aggregate-reduction.c" -o "$RUNNER_TEMP/aggregate-fast" 2>&1 | tee "$RUNNER_TEMP/aggregate-evidence/fast.log"
-          "$RUNNER_TEMP/aggregate-fast"
-      - name: Buster reduction QUALITY
-        shell: bash
-        run: |
-          set -euo pipefail
-          build/Release/ide cc -std=c99 -g0 -fregister-allocator=quality -fverify-codegen "$RUNNER_TEMP/aggregate-reduction.c" -o "$RUNNER_TEMP/aggregate-quality" 2>&1 | tee "$RUNNER_TEMP/aggregate-evidence/quality.log"
-          "$RUNNER_TEMP/aggregate-quality"
+          for allocator in fast quality; do
+            for fixture in local_flexible_initializers tagged_array_type_names; do
+              build/Release/ide cc -std=c99 -g0 -fregister-allocator="$allocator" -fverify-codegen "$RUNNER_TEMP/$fixture.c" -o "$RUNNER_TEMP/$fixture-$allocator" 2>&1 | tee "$RUNNER_TEMP/aggregate-evidence/$fixture-$allocator.log"
+              "$RUNNER_TEMP/$fixture-$allocator"
+            done
+          done
+          for fixture in tagged_array_bad_function_subscript tagged_array_bad_bound_subscript; do
+            if build/Release/ide cc -std=c99 -fsyntax-only "$RUNNER_TEMP/$fixture.c" > "$RUNNER_TEMP/aggregate-evidence/buster-$fixture.log" 2>&1; then
+              echo "error: Buster accepted invalid fixture $fixture"
+              exit 1
+            fi
+            rg -q 'could not form an indexed place' "$RUNNER_TEMP/aggregate-evidence/buster-$fixture.log"
+          done
       - name: Self-host fixed point
         shell: bash
         run: |

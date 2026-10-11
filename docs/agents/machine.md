@@ -38,7 +38,7 @@ This includes omitted flexible-array tails; only the fixed header belongs to
 the local object's initialization or copy. The registered
 `compiler_driver_test_flexible_initializers` checks zero and designated local
 initializers, nested array fields, one evaluation and untouched tail storage
-on six native targets, both allocators and both frontend forms. Matching desktop
+on six native targets, both allocators, both frontend forms and O0/O2. Matching desktop
 hosts execute its independent expected-value fixture.
 
 ## Machine instruction selection and scheduling
