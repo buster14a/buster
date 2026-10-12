@@ -809,11 +809,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
     {
         TemporalArena census_temporary = arena_begin_temporal(arguments->arena);
         IrConstructionCounters before = ir_construction_counters();
-        CIRLowerResult lowered = ir_promotion_lower(arguments->arena,
-                                                    S8("unsigned test(unsigned input){return input+1;} _Bool truth(void){return 0;}"), target_native);
+        CIRLowerResult form_lowered = ir_promotion_lower(arguments->arena,
+                                                         S8("unsigned test(unsigned input){return input+1;} _Bool truth(void){return 0;}"), target_native);
         IrConstructionCounters lowering = ir_construction_counters();
 #define IR_FOLD_CENSUS_DELTA(later, earlier, counter) ((later).values[IR_CONSTRUCTION_##counter] - (earlier).values[IR_CONSTRUCTION_##counter])
-        if (BUSTER_REQUIRE(arguments, lowered.program && !lowered.diagnostic_count))
+        if (BUSTER_REQUIRE(arguments, form_lowered.program && !form_lowered.diagnostic_count))
         {
             BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_NET_FUNCTIONS) == 2);
             BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_SIZE_ROWS_LT_64_FUNCTIONS) == 2);
@@ -828,7 +828,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
             // Re-take the census on the published rows. A literal or folded
             // result held outside the rows (a pending SSA store) is live, and
             // the held result is attributed to a store.
-            IrProgram* census_program = lowered.program;
+            IrProgram* census_program = form_lowered.program;
             IrFunction* census_function = census_program->modules->functions;
             u32 literal = UINT32_MAX;
             u32 folded = UINT32_MAX;
