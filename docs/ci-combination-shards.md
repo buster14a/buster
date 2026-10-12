@@ -310,12 +310,13 @@ the whole low-core budget (see [build guidance](agents/build.md)).
 CI trees expose `test_units_partitioned` and `test_unit_inventory` for the
 native `build.c test_units_partitioned <ide-path>` diagnostic. The partition
 driver normally schedules enabled modules across two process slots, starting
-with `c_frontend_tests` and `compiler_driver_tests`, then claiming contiguous
-batches of the remaining modules as slots finish (#3620). It shares one built executable, divides its
+with `c_frontend_tests` and `compiler_driver_tests`, prioritizing `c_ast_tests`,
+then claiming contiguous batches of at most four canonical descriptors as
+slots finish (#3620). It shares one built executable, divides its
 supplied test budget between the slots and replays captured output in canonical
 module order. Each child proves its exact selected inventory slice; the parent
-rejects duplicate or missing module coverage. Heavy modules keep separate
-children, while smaller modules share at most three batch children.
+rejects duplicate or missing module coverage. Priority modules keep separate
+children, while other modules share bounded batch children.
 `BUSTER_TEST_UNIT_SCHEDULE=pair` retains the historical primary/rest split:
 frontend primary except on Windows AArch64, where the driver is primary.
 An unset schedule under `BUSTER_CI_CHECKS_EVIDENCE` retains this pair protocol

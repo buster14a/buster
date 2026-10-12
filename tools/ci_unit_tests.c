@@ -9,6 +9,7 @@
 // Two workers per child retain OS multi-lane assertions.
 // ci_unit_source_revision resolves provenance; serial_run retains streaming.
 #define CI_UNIT_MAX_MODULES 512
+#define CI_UNIT_BATCH_MAX_DESCRIPTORS 4
 #define CI_UNIT_CAPTURE_LIMIT BUSTER_MB(64)
 #define CI_UNIT_TIMEOUT_US (5400ull * 1000000ull)
 #define CI_UNIT_IDENTITY_CAPTURE_LIMIT BUSTER_KB(4)
@@ -432,7 +433,7 @@ BUSTER_GLOBAL_LOCAL bool ci_unit_union_take(CiUnitProof* inventory, CiUnitProof*
 
 BUSTER_GLOBAL_LOCAL void ci_unit_schedule_order(CiUnitSchedule* work)
 {
-    String8 priority[] = {S8("c_frontend_tests"), S8("compiler_driver_tests")};
+    String8 priority[] = {S8("c_frontend_tests"), S8("compiler_driver_tests"), S8("c_ast_tests")};
     bool included[CI_UNIT_MAX_MODULES] = {0};
     work->count = 0;
     work->batch_count = 0;
@@ -452,8 +453,9 @@ BUSTER_GLOBAL_LOCAL void ci_unit_schedule_order(CiUnitSchedule* work)
             }
         }
     }
-    // A batch stops at either heavy module. Its enabled records are therefore
-    // contiguous in canonical order and can replay without splitting captures.
+    // Bound the amount of serial work a claimed batch can strand on one slot.
+    // Each slice stops at a priority module or four canonical descriptors, so
+    // output can still replay without splitting module captures.
     u64 begin = 0;
     while (begin < work->inventory.count)
     {
@@ -462,7 +464,7 @@ BUSTER_GLOBAL_LOCAL void ci_unit_schedule_order(CiUnitSchedule* work)
         {
             u64 end = begin;
             u64 enabled = 0;
-            while (end < work->inventory.count && !included[end])
+            while (end < work->inventory.count && !included[end] && end - begin < CI_UNIT_BATCH_MAX_DESCRIPTORS)
             {
                 enabled += work->inventory.modules[end].enabled;
                 end += 1;
@@ -1095,6 +1097,16 @@ BUSTER_GLOBAL_LOCAL bool ci_unit_schedule_self_test(Arena* arena, String8 execut
     batches.inventory.modules[5].enabled = false;
     ci_unit_schedule_order(&batches);
     result = result && batches.count == 2 && batches.batch_count == 2;
+    // Long non-priority intervals stay stealable, including a disabled hole.
+    batches.inventory.count = 9;
+    for (u64 index = 0; index < batches.inventory.count; index += 1)
+    {
+        batches.inventory.modules[index] = (CiUnitModule){.name = S8("ordinary"), .enabled = index != 4};
+    }
+    ci_unit_schedule_order(&batches);
+    result = result && batches.count == 8 && batches.batch_count == 3 &&
+        batches.order[0] == 0 && batches.ends[0] == 4 && batches.order[1] == 4 && batches.ends[1] == 8 &&
+        batches.order[2] == 8 && batches.ends[2] == 9;
     result = ci_unit_schedule_run(arena, executable, 4, S8("self-test"), S8("self-test"), true) == PROCESS_RESULT_SUCCESS && result;
     return result;
 }

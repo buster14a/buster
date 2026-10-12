@@ -1255,9 +1255,10 @@ are inferred from a successful preflight. See
 The native `test_units_partitioned <ide-path>` runner uses two process slots
 when `BUSTER_TEST_JOBS >= 4`. Each slot receives half the quota, retaining
 the multi-lane OS assertions. It first queries the complete inventory, starts
-`c_frontend_tests` and `compiler_driver_tests`, then dynamically claims
-contiguous inventory slices between those modules. Each heavy module retains
-its own child; the other modules share at most three batch children. This
+`c_frontend_tests` and `compiler_driver_tests`, then prioritizes `c_ast_tests`
+and dynamically claims contiguous inventory slices between those modules.
+Each priority module retains its own child; other batches contain at most
+four canonical descriptors, including disabled audit rows. This
 avoids repeating compiler prewarm and process startup for every small module
 while allowing either free slot to claim the next batch. Serial bootstraps
 and smaller quotas retain
