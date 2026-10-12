@@ -426,6 +426,7 @@ BUSTER_F_DECL OsDirectoryCreateResult os_make_directory(String8 path);
 // umask). Existing names are reported as collisions without claiming ownership.
 BUSTER_F_DECL OsDirectoryCreateResult os_make_directory_exclusive(String8 path);
 // Creates one owner-only directory or accepts an existing directory.
+// Empty, null and embedded-NUL paths fail without attempting creation.
 BUSTER_F_DECL bool os_make_directory_attempt(String8 path);
 
 BUSTER_F_DECL bool os_file_delete(String8 path);

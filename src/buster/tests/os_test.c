@@ -2072,6 +2072,26 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         String8 absent = string_format_z(arena, S8("{S8}/absent/child"), root);
         BUSTER_TEST(arguments, !os_make_directory_attempt(absent));
         BUSTER_TEST(arguments, !os_make_directory_attempt((String8){0}));
+        BUSTER_TEST(arguments, !os_make_directory_attempt((String8){.pointer = root.pointer, .length = 0}));
+        BUSTER_TEST(arguments, !os_make_directory_attempt((String8){.pointer = 0, .length = 1}));
+        // #3735: rejected NULs must fail even when the prefix is a directory.
+        char8 leading_nul[] = {0, 'x'};
+        BUSTER_TEST(arguments, !os_make_directory_attempt((String8){leading_nul, sizeof(leading_nul)}));
+        String8 missing_prefix = string_format_z(arena, S8("{S8}/nul-prefix"), root);
+        String8 prefixes[] = {missing_prefix, root};
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(prefixes); index += 1)
+        {
+            String8 prefix = prefixes[index];
+            char8* bytes = arena_allocate(arena, char8, prefix.length + 2);
+            memcpy(bytes, prefix.pointer, prefix.length);
+            bytes[prefix.length] = 0;
+            bytes[prefix.length + 1] = 'x';
+            BUSTER_TEST(arguments, !os_make_directory_attempt((String8){bytes, prefix.length + 1}));
+            BUSTER_TEST(arguments, !os_make_directory_attempt((String8){bytes, prefix.length + 2}));
+        }
+        // Exclusive creation proves the malformed calls did not create the prefix.
+        OsDirectoryCreateResult prefix_created = os_make_directory_exclusive(missing_prefix);
+        BUSTER_TEST(arguments, prefix_created.created && !prefix_created.error.v && !prefix_created.already_exists);
         OsDirectoryCreateResult missing_parent = os_make_directory(absent);
         BUSTER_TEST(arguments, missing_parent.error.v != 0 && !missing_parent.created && !missing_parent.existing_directory);
         u8 original[257];
@@ -2096,6 +2116,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, os_file_close(file));
         }
         OsDirectoryCreateResult file_collision = os_make_directory(path);
+        BUSTER_TEST(arguments, !os_make_directory_attempt(path));
         BUSTER_TEST(arguments, file_collision.error.v != 0 && file_collision.already_exists && !file_collision.existing_directory &&
                                    !file_collision.created);
         file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){ .read = 1 }, (OsFileCreateMode){0}, (OsFileShareFlags){ .read = 1 });

@@ -378,6 +378,13 @@ represent an observed native OS failure.
 
 ## Exclusive directory ownership
 
+`os_make_directory_attempt` accepts successful creation or an existing directory,
+and rejects regular-file collisions, native creation failures, empty/null slices
+and embedded NULs. Checked native-path conversion failure returns false on
+Windows and POSIX. Registered desktop `os_tests` cover leading, middle and
+trailing NULs with absent/existing directory prefixes and verify that rejection
+does not create the absent prefix.
+
 `os_make_directory_exclusive` is the namespace-ownership primitive for private
 workspaces. It succeeds only when the call created the exact requested name,
 uses mode 0700 on POSIX, and distinguishes a pre-existing file, directory, or

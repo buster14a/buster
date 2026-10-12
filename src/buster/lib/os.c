@@ -1335,6 +1335,10 @@ bool os_make_directory_attempt(String8 path)
                 result = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
             }
         }
+        else
+        {
+            result = false;
+        }
 #else
         String8Z terminated = {0};
         if (string8z_copy_arena(temp.arena, path, &terminated))
