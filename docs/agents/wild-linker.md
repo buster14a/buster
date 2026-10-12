@@ -45,6 +45,23 @@ clang --ld-path=wild main-buster.o probe-buster.o -Wl,--no-gc-sections -o extern
 
 This leaves `ide cc` native linking unchanged. The hosted fixture uses Buster-generated objects once, then links the identical files with each external linker and checks runtime, debug information and debugger stack/source behavior. Its small size does not rank large Buster-produced applications.
 
+## Zen 5 route
+
+The 9700X host (benchpress) has Wild installed. The owner-requested
+`profile: wild-linker-v1` line on the `compare-pull` route times that
+host-installed Wild against mold on the head's own `ide` objects. It uses
+the evidence report's direct link-only cells and link policy, through
+`tools/wild_linker_acceptance.c --link-only`. It never downloads a linker
+onto the host. Without mold it compares against the host's default GNU
+`ld` and states the substitution. A missing linker fails the leg with a
+recorded reason.
+
+The result is report-only. It is the Zen 5 evidence route for
+`tool:wild_linker_bench.c` and changes no default. The method, publisher
+validation and linker licenses are in
+[benchmarking.md](benchmarking.md#benchmarking-a-compiler-change-ab). The
+hosted workflows stay diagnostic.
+
 ## Evaluation and recommendation
 
 Retain optional support and existing defaults. Named hosted workloads show modest edit-build savings and some default-thread direct-link savings, with warm single-thread regressions and no demonstrated clean-build improvement. See the report for exact identities, policies, raw samples, uncertainties, failures and host limits. Fixed build IDs, no-fork and ICF controls in the research harness are measurement controls; they are not a new production default.
