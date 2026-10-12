@@ -2114,7 +2114,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             .tiny = false,
             .max_callee_instructions = IR_INLINE_TINY_INSTRUCTIONS,
             .max_function_growth = IR_INLINE_FUNCTION_GROWTH,
-            .max_module_growth = IR_INLINE_MODULE_GROWTH,
+            // Zero: relative to each module (ir_inline_module_growth_limit).
+            .max_module_growth = 0,
             .max_call_sites = IR_INLINE_CALL_SITES,
         },
     };
@@ -2941,8 +2942,15 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         if (string_equal(argument, S8("-fcanonical-fast")) || string_equal(argument, S8("-fno-canonical-fast")))
         {
+            // The whole-pipeline controls select the adopted recipe or nothing;
+            // they also clear an earlier opt-in -fcanonical-fast-cse.
             invocation.fast_passes = string_equal(argument, S8("-fcanonical-fast")) ? IR_FAST_ALL : 0;
-            fast_override_mask = IR_FAST_ALL;
+            fast_override_mask = IR_FAST_PASS_MASK;
+            continue;
+        }
+        if (string_equal(argument, S8("-fcanonical-fast-cse-strategy=window")) || string_equal(argument, S8("-fcanonical-fast-cse-strategy=table")))
+        {
+            invocation.fast_cse_window = string_equal(argument, S8("-fcanonical-fast-cse-strategy=window"));
             continue;
         }
         if (string_equal(argument, S8("-ftime-canonical-fast")))
@@ -2978,6 +2986,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             S8("-fcanonical-inline-function-growth="),
             S8("-fcanonical-inline-module-growth="),
             S8("-fcanonical-inline-call-sites="),
+            S8("-fcanonical-inline-caller-growth-shift="),
         };
         bool inline_budget_option = false;
         for (u32 budget = 0; budget < BUSTER_ARRAY_LENGTH(inline_budget_prefixes); budget += 1)
@@ -2993,7 +3002,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                     if (budget == 0) invocation.inline_options.max_callee_instructions = limit;
                     else if (budget == 1) invocation.inline_options.max_function_growth = limit;
                     else if (budget == 2) invocation.inline_options.max_module_growth = limit;
-                    else invocation.inline_options.max_call_sites = limit;
+                    else if (budget == 3) invocation.inline_options.max_call_sites = limit;
+                    else invocation.inline_options.caller_growth_shift = limit;
                 }
                 else
                 {
@@ -8823,6 +8833,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion || lowered.program->pin_debug_locals;
     lowered.program->fast_passes = invocation.fast_passes;
     lowered.program->measure_fast_passes = invocation.measure_fast_passes;
+    lowered.program->fast_cse_window = invocation.fast_cse_window;
     lowered.program->inline_options = invocation.inline_options;
     WORK_LEDGER_PHASE(PREPARE);
     IrValidationResult validation = ir_prepare_canonical_module(lowered.program, module,
@@ -11002,6 +11013,18 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.fast.passes[pass].visits += unit.fast.passes[pass].visits;
             result.fast.passes[pass].changes += unit.fast.passes[pass].changes;
         }
+        result.fast.cse.blocks += unit.fast.cse.blocks;
+        result.fast.cse.candidates += unit.fast.cse.candidates;
+        result.fast.cse.hits += unit.fast.cse.hits;
+        result.fast.cse.window_hits += unit.fast.cse.window_hits;
+        result.fast.cse.commuted_hits += unit.fast.cse.commuted_hits;
+        result.fast.cse.constant_hits += unit.fast.cse.constant_hits;
+        result.fast.cse.probes += unit.fast.cse.probes;
+        result.fast.cse.collisions += unit.fast.cse.collisions;
+        result.fast.cse.metadata_declines += unit.fast.cse.metadata_declines;
+        result.fast.cse.saturation_declines += unit.fast.cse.saturation_declines;
+        result.fast.cse.table_bytes += unit.fast.cse.table_bytes;
+        result.fast.cse.max_block_candidates = BUSTER_MAX(result.fast.cse.max_block_candidates, unit.fast.cse.max_block_candidates);
         result.fast.functions += unit.fast.functions;
         result.fast.validation_skips += unit.fast.validation_skips;
         compiler_driver_merge_fast_declines(arena, &result.fast, &unit.fast, invocation.input_paths[input_index], &fast_decline_capacity);

@@ -401,8 +401,8 @@ preprocessing (`-E`, including `-dM`) and frontend-only validation
 LLVM output and links—is deliberately refused with an explicit #3654
 diagnostic. I386 is supported only for Linux and freestanding targets; an
 execution-mode option on an x86 target with another OS is refused using the
-pre-mode target triple in its diagnostic. `-m64` remains unsupported and is
-tracked separately by #3458.
+pre-mode target triple in its diagnostic. `-m64` switches back to the existing
+x86-64 target as described above.
 
 Without `-march`/`-mcpu` the CPU model is `baseline`, matching Clang's and
 GCC's portable `x86-64` default. A command with no `-target` compiles for the
@@ -579,6 +579,12 @@ explicit control of each bit wins. Level/alias policy, fixed pass order and
 budgets are in [the FAST pipeline contract](../canonical-fast-pipeline.md#native-optimization-level-policy).
 Verbose output reports disabled as well as enabled passes. Timing is separate
 (`-ftime-canonical-fast -v`); register allocation selection is independent.
+The block-local CSE experiment (#3011) is selected only by
+`-fcanonical-fast-cse`; no level or whole-pipeline control enables it, and
+`-fcanonical-fast`/`-fno-canonical-fast` clear an earlier selection.
+`-fcanonical-fast-cse-strategy=window|table` picks the census's linear or
+hash-table arm (default `table`; the last one given wins). See
+[opt-in block-local CSE](../canonical-fast-pipeline.md#opt-in-block-local-cse-3011).
 
 Canonical inlining is separate from register allocation. Tiny direct-call
 inlining is opt-in at every optimization level: `-fcanonical-inline` enables
@@ -591,11 +597,18 @@ inlining is disabled; an impossible requirement produces a source-mapped
 `ir.inline-required` error. Positive 32-bit per-invocation limits are set with
 `-fcanonical-inline-max-callee=N`,
 `-fcanonical-inline-function-growth=N`,
-`-fcanonical-inline-module-growth=N`, and
-`-fcanonical-inline-call-sites=N`. These flags set budgets but do not enable
+`-fcanonical-inline-module-growth=N`,
+`-fcanonical-inline-call-sites=N`, and
+`-fcanonical-inline-caller-growth-shift=N`. These flags set budgets but do not enable
 tiny inlining; zero is rejected and zero-valued API options normalize to the
 named defaults. Budgets cap callee instruction count, added instructions per
-caller, added instructions per module, and accepted call sites, respectively.
+caller, added instructions per module, and accepted call sites, respectively;
+the shift sets the caller relocation bound described below.
+Without an explicit module limit, the module budget is relative: the larger of
+4096 rows and 1/32 of the module's lowered canonical instruction rows
+(`ir_inline_module_growth_limit`). A caller keeps optional splices only when
+their growth is at least 1/32 of its rows (`IR_INLINE_CALLER_GROWTH_SHIFT`);
+see the FAST pipeline contract for the measured memory tradeoff.
 Verbose output emits one `IR_INLINE` record when tiny inlining is enabled or
 inlining candidates were encountered. Its fields are `tiny`, `candidates`,
 `inlined`, `always_inlined`, `copied_instructions`, `growth`,

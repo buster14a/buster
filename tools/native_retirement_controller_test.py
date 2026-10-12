@@ -785,7 +785,7 @@ class SupersededAPI(CatchUpAPI):
     def push_run(self, workflow, run_id, number, head):
         self.workflow_runs[workflow].append({
             "id": run_id, "run_number": number, "event": "push", "head_branch": "main",
-            "status": "queued", "head_sha": head})
+            "status": "queued", "head_sha": head, "run_attempt": 1})
 
     def request(self, path, *, method="GET", body=None, **query):
         for workflow, runs in self.workflow_runs.items():
@@ -794,7 +794,8 @@ class SupersededAPI(CatchUpAPI):
                     raise self.inventory_error
                 if query.get("event") != "push" or query.get("branch") != "main":
                     raise AssertionError(query)
-                return {"workflow_runs": copy.deepcopy(runs)}
+                rows = [run for run in runs if run["head_sha"] == query.get("head_sha")]
+                return {"total_count": len(rows), "workflow_runs": copy.deepcopy(rows)}
         return super().request(path, method=method, body=body, **query)
 
 

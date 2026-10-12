@@ -256,6 +256,7 @@ typedef enum IrAbiConvention
     IR_ABI_CONVENTION_AAPCS64,
     IR_ABI_CONVENTION_DARWIN_AARCH64,
     IR_ABI_CONVENTION_WINDOWS_AARCH64,
+    IR_ABI_CONVENTION_SYSTEMV_I386,
     IR_ABI_CONVENTION_COUNT,
 } IrAbiConvention;
 
@@ -391,8 +392,8 @@ struct IrType
     // the C frontend sets and reads it.
     bool is_transparent_union;
     // A C complex type, modelled as the two-field struct the psABIs classify
-    // it as (see c_ir_complex_type). Only the C frontend sets and reads it;
-    // to the backends the type is an ordinary aggregate.
+    // it as (see c_ir_complex_type). The C frontend sets it; ABI classifiers
+    // retain the result conventions that differ from ordinary aggregates.
     bool is_complex;
     // A function type whose declarator spelled `noreturn`, so a call through
     // it ends control flow. The marker written on a function declaration is

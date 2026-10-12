@@ -520,8 +520,22 @@ hosts execute its independent expected-value fixture.
   the row's reservations (`row_reserved_mask`), active pins, unpaid
   callee-saved registers, and physical registers an earlier row wrote that no
   row has read yet (`physical_live_mask`: staged call arguments). A value
-  crossing the next call moves only into a paid callee-saved register. Dead,
+  crossing a later call moves only into a paid callee-saved register. Dead,
   rematerializable, or unplaceable occupants keep the eviction.
+- FAST/QUALITY decide whether a value crosses a call
+  (`machine_fast_crosses_call`) against the prepass's `next_call`, which runs
+  across block boundaries in layout order: a value whose last textual use lies
+  past any later call, in its own block or a later one, prefers a callee-saved
+  register at its definition, at every free reload pick, and when vacated.
+  Once there it survives every later call on every path, so joins stop losing
+  it. On unity `ide.c` this removed 4k–5.5k spills and 6k–9.5k reloads in each
+  mode and target, lowered boundary spills, boundary reloads, copies and code
+  bytes, and added about 3k callee-saved saves (from about 1.0 to 1.5 per
+  function) ([#56 census](https://github.com/buster14a/buster/issues/56#issuecomment-6123628660)).
+  The layout interval over-approximates through a sibling arm's call and
+  misses a loop-body call past the value's last textual use. Incoming argument
+  and call-result captures still bind in their ABI register; moving them to a
+  callee-saved register at entry was measured and deferred.
 - FAST/QUALITY remember the register each value was first bound to
   (`MachineFastState.preferred_registers`). A free pick for a reload
   (`machine_fast_ensure` with no fixed target) takes that register while it is
@@ -541,7 +555,12 @@ hosts execute its independent expected-value fixture.
 - Shared FAST/QUALITY placement colors frame storage by lifetime instead of
   giving every spilled value and every stack slot its own bytes. Selector slots
   close their touched rows through a block-level liveness fixed point over
-  covering writes and upward-exposed reads. Allocator-created spill homes use
+  covering writes and upward-exposed reads. That solve
+  (`machine_fast_solve_liveness`, shared with the prepass value liveness)
+  always visits the lowest-ranked pending block in reverse postorder of the
+  reversed CFG, so a value carried through a deep loop nest reaches every inner
+  block in one pass instead of one pass per nesting level (#3771); the order
+  changes only the work, never the least fixed point. Allocator-created spill homes use
   the same closure on a direct acyclic block chain: a spill covers the previous
   contents of a home, while a reload before that spill reads the value arriving
   from a predecessor. Retroactive edge repairs at one machine point have no
@@ -1390,14 +1409,15 @@ combination. The retired direct emitter had no such path; current `none`
 selects MIR-stack.
 
 `va_arg` of a MEMORY-class struct, union or array aligned past sixteen bytes
-(`_Alignas(32)` or `_Alignas(64)`, any size from 32 bytes) takes the same
+(`_Alignas(32)` and up, any size from 32 bytes) takes the same
 overflow-only path: `machine_x64_va_arg_metadata` admits it through
 `machine_x64_va_arg_over_aligned_memory` (a single MEMORY part, a power-of-two
-alignment up to `MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT`), and the row
+alignment up to `MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT`, 2^31, the largest
+the row's sign-extended imm32 `add`/`and` rounding encodes), and the row
 rounds the cursor up to the alignment before the exact chunked copy. The
 verifier accepts that shape only for the x86-64 row that copies the record
 exactly (`wide_memory` in `machine_verify_function`); AArch64 and Win64 keep
 their sixteen-byte limit and an over-aligned scalar or vector still falls back
 with a structured refusal. `compiler_driver_test_sysv_packed_x87_overaligned_va_arg`
-covers 32- and 64-byte alignments, a 96-byte record, an odd overflow slot and
+covers 32-, 64-, 128- and 256-byte alignments, a 96-byte record, an odd overflow slot and
 `va_copy` in both compiler directions.

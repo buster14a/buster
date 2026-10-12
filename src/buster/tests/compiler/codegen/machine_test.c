@@ -10587,6 +10587,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST(arguments, machine_fast_close_live_ranges_test(arguments->arena));
+    BUSTER_TEST(arguments, machine_fast_solve_liveness_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_close_slot_ranges_test(arguments->arena));
     BUSTER_TEST_FIXTURE(arguments, machine_test_fast_consumer_register_hint);
     BUSTER_TEST_FIXTURE(arguments, machine_test_source_writer_guards);
@@ -10953,8 +10954,15 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     slot_size = 24;
     BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
     // A MEMORY aggregate aligned past a sixteen-byte slot rounds the overflow
-    // area up to its alignment: any size from 32 bytes up, powers of two to the
-    // frame-copy limit, and only on x86-64 where the row copies it exactly.
+    // area up to its alignment: any size from 32 bytes up, powers of two no
+    // larger than the size, and only on x86-64 where the row copies it exactly.
+    va_arg.size = 256;
+    va_arg.stack_size = 256;
+    slot_size = 256;
+    va_arg.alignment = 128;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    va_arg.alignment = 256;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
     va_arg.size = 96;
     va_arg.stack_size = 96;
     slot_size = 96;
@@ -12813,11 +12821,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   // caller-saved file over every whole interval and the
                                   // callee-saved file cannot hold them all, so the only
                                   // register residency left for the rest is a split to the
-                                  // first loop. The pin candidate is the loop-body value
+                                  // first loop. The pin candidates are the loop-body values
                                   // with the weighted in-loop traffic to pay for a
-                                  // register: the variably modified declaration's stack
-                                  // checkpoint, stored at the body's head and reloaded at
-                                  // its tail. Loop bodies used to carry one whether or not
+                                  // register: the two variably modified declarations' stack
+                                  // checkpoints, stored at the body's head and reloaded at
+                                  // its tail. One checkpoint left QUALITY a three-move
+                                  // margin, which FAST's callee-saved binding of the keys
+                                  // crossing the later call loop (#56) absorbed. Loop bodies used to carry one whether or not
                                   // they allocated, and when that stopped this assertion
                                   // measured nothing; adding live values does not bring it
                                   // back, because candidacy is traffic and not pressure.
@@ -12838,6 +12848,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "        acc += k16 ^ (acc << 3); acc += k17 ^ (acc << 4); acc += k18 ^ (acc << 5); acc += k19 ^ (acc << 6);\n"
                                   "        acc += k20 ^ (acc << 7); acc += k21 ^ (acc << 1); acc += k22 ^ (acc << 2); acc += k23 ^ (acc << 3);\n"
                                   "        unsigned long lane[(rounds & 3) + 1]; lane[rounds & 3] = acc; acc += lane[rounds & 3];\n"
+                                  "        unsigned long wide[(acc & 3) + 1]; wide[0] = acc; acc ^= wide[0];\n"
                                   "    }\n"
                                   "    for (unsigned long round = 0; round < rounds; round += 1) { acc += sp_mix(acc ^ k0 ^ k23); }\n"
                                   "    return acc ^ k1 ^ k2 ^ k3 ^ k4 ^ k5 ^ k6 ^ k7 ^ k8 ^ k9 ^ k10 ^ k11 ^ k12 ^ k13 ^ k14 ^ k15 ^ k16 ^ k17 ^ k18 ^ k19 ^\n"

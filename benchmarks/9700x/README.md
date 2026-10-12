@@ -332,6 +332,19 @@ missing linker or a partial, failed or cancelled leg fails the check. Its
 method and the linkers' licenses are in
 [benchmarking.md](../../docs/agents/benchmarking.md).
 
+A fresh exact `profile: link-tls-v1` line, added once against every
+parent, adds the TLS companion link leg (#1915) after the corpus leg. The
+trusted revision's `tools/link_tls_bench.py` builds frozen TLS-heavy inputs
+with the host's clang and ar: 2,048 to 32,768 general-dynamic TLS sites as
+plain, `-fno-plt`, archive and PIE cells, plus a no-TLS control. Each of the
+two `ide` binaries links every cell once, and both images must be
+byte-identical and print the cell's frozen output. Only then does it time
+fresh `ide cc` link processes of both binaries, 2 warmups and 20
+alternating pairs per cell on CPU 2. It is report-only and cannot be
+combined with the other opt-in profiles. Its evidence is under `link_tls/`
+in the artifact, and a partial, failed or cancelled leg fails the check.
+Its method is in [benchmarking.md](../../docs/agents/benchmarking.md).
+
 V1 preserves its historical fixed 182-row qualification and 135-execution,
 47-alias candidate profile. V2 independently derives the ordered Release
 inventory and analyzer argument projection from the exact retained candidate
