@@ -2860,6 +2860,19 @@ class HarnessTest(unittest.TestCase):
         code, result, evidence = self.run_harness(self.head, floor="f" * 40)
         self.assert_unadmitted(code, result, evidence, "throughput harness admission could not place")
 
+    def test_harness_floor_probe_faults_retain_a_failed_receipt(self) -> None:
+        # A timed-out or unlaunchable floor probe is a retained refusal, never an escaped exception.
+        real = compiler_compare.captured_run
+        for fault in (subprocess.TimeoutExpired(["git"], 120), FileNotFoundError("git")):
+            def probe(argv, **options):
+                if argv[3:5] == ["merge-base", "--is-ancestor"] and argv[5] == self.base:
+                    raise fault
+                return real(argv, **options)
+            with self.subTest(fault=type(fault).__name__), mock.patch.object(compiler_compare, "captured_run", probe):
+                code, result, evidence = self.run_harness(self.head)
+                self.assert_unadmitted(code, result, evidence, "throughput harness admission probe failed")
+                self.assertIn(type(fault).__name__, result["reasons"][0])
+
     def test_harness_floor_is_the_fast_quality_retirement(self) -> None:
         # #3406's historical base 3bf9d004 predates the floor; current history contains it.
         floor = compiler_receipt.THROUGHPUT_HARNESS_FLOOR

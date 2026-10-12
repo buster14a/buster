@@ -860,12 +860,18 @@ def throughput_harness_problem(candidate: Path, base: str) -> str:
     """Why the base revision's corpus harness cannot run THROUGHPUT_PROFILE; '' when admitted (#3714).
 
     Only the commit graph is read, so the blob-less checkout fetches nothing. A floor git cannot
-    place fails closed, like a base that predates it.
+    place, and a probe that times out or cannot start, fail closed like a base that predates it,
+    as a reason the caller retains in the failed receipt.
     """
-    status = captured_run(["git", "-C", str(candidate), "merge-base", "--is-ancestor", THROUGHPUT_HARNESS_FLOOR, base],
-                          capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode
+    try:
+        status = captured_run(["git", "-C", str(candidate), "merge-base", "--is-ancestor", THROUGHPUT_HARNESS_FLOOR,
+                               base], capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode
+    except (subprocess.TimeoutExpired, OSError) as error:
+        status = f"{error.__class__.__name__}: {error}"
     problem = ""
-    if status == 1:
+    if isinstance(status, str):
+        problem = f"throughput harness admission probe failed ({status}); not measured"
+    elif status == 1:
         problem = (f"unsupported historical throughput harness: base {base} predates {THROUGHPUT_HARNESS_FLOOR}, "
                    f"so its --mode all is not the {THROUGHPUT_PROFILE['name']} FAST/QUALITY population; "
                    "not measured")
