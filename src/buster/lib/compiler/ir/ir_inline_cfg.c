@@ -263,8 +263,11 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_table_growth_bytes(IrFunction const* calle
     return valid ? cost : UINT64_MAX;
 }
 
+// `caller_checked` means the pass has already proven, once for the caller,
+// that every caller block ends in a terminator and that the caller's projected
+// edge count fits in u32; the per-site scans below then skip the caller.
 BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_supported(IrProgram* program, IrFunction* caller, IrBlockId call_block,
-                                    IrInstructionId call_id, IrFunction const* callee,
+                                    IrInstructionId call_id, IrFunction const* callee, bool caller_checked,
                                     u32* copied_rows_out, u32* growth_out)
 {
     u32 copied = 0;
@@ -335,7 +338,7 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_supported(IrProgram* program, IrFunction*
     // operands below.
     if (valid)
     {
-        for (u32 b = 0; b < caller->block_count; b += 1)
+        for (u32 b = 0; !caller_checked && b < caller->block_count; b += 1)
         {
             IrBlock const* block = caller->blocks + b;
             IrInstruction const* tail = block->last_instruction.value < caller->instruction_count
@@ -407,7 +410,7 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_supported(IrProgram* program, IrFunction*
     if (valid)
     {
         u64 edges = (u64)return_count + 1;
-        for (u32 b = 0; b < caller->block_count; b += 1)
+        for (u32 b = 0; !caller_checked && b < caller->block_count; b += 1)
             edges += caller->instructions[caller->blocks[b].last_instruction.value].target_count;
         for (u32 b = 0; b < callee->block_count; b += 1)
             edges += callee->instructions[callee->blocks[b].last_instruction.value].target_count;
@@ -551,13 +554,16 @@ BUSTER_GLOBAL_LOCAL IrValueId* ir_inline_cfg_local_values(Arena* arena, IrFuncti
     return result;
 }
 
+// Called only for a site ir_inline_module planned: the planner checked the
+// caller's block tails and projected edge count, and earlier splices into the
+// same caller keep every tail terminated.
 BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, IrFunction* caller, IrBlockId call_block,
                                IrInstructionId call_id, IrFunction const* callee, IrInlineCfgReserve* reserve,
                                u32* copied_rows_out)
 {
     u32 copied = 0;
     u32 growth = 0;
-    bool valid = arena && reserve && ir_inline_cfg_supported(program, caller, call_block, call_id, callee, &copied, &growth);
+    bool valid = arena && reserve && ir_inline_cfg_supported(program, caller, call_block, call_id, callee, true, &copied, &growth);
     if (valid)
     {
     IrInstruction call = caller->instructions[call_id.value];

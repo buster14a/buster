@@ -769,6 +769,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
 
                     u64 caller_edge_units = 0;
                     u64 caller_phi_units = 0;
+                    // Every block tail is checked once here instead of once
+                    // per call site; each splice keeps tails terminated.
+                    bool caller_tails_valid = true;
                     bool caller_preflight_exhausted = false;
                     for (u32 block_index = 0; block_index < original_blocks && !caller_preflight_exhausted; block_index += 1)
                     {
@@ -777,8 +780,14 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         if (block->last_instruction.value < caller->instruction_count)
                         {
                             IrInstruction const* terminator = caller->instructions + block->last_instruction.value;
+                            caller_tails_valid &= ir_instruction_is_terminator(terminator) &&
+                                                  terminator->next.value == IR_ID_UNDERLYING_INVALID;
                             caller_edge_units = ir_inline_storage_add(caller_edge_units, terminator->target_count);
                             block_work = ir_inline_storage_add(block_work, ir_inline_storage_add(1u, terminator->target_count));
+                        }
+                        else
+                        {
+                            caller_tails_valid = false;
                         }
                         total_work = ir_inline_storage_add(total_work, block_work);
                         module->inlining.visits = ir_inline_storage_add(module->inlining.visits, block_work);
@@ -1104,8 +1113,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             module->inlining.visits = ir_inline_storage_add(module->inlining.visits, candidate_work);
                             u32 copied = 0;
                             u32 growth = 0;
-                            bool shape = ir_inline_cfg_supported(program, caller, (IrBlockId){.value = block},
-                                                                    (IrInstructionId){.value = row}, callee, &copied, &growth);
+                            bool shape = caller_tails_valid && projected_edges <= UINT32_MAX &&
+                                         ir_inline_cfg_supported(program, caller, (IrBlockId){.value = block},
+                                                                 (IrInstructionId){.value = row}, callee, true, &copied, &growth);
                             if (!shape)
                             {
                                 module->inlining.shape_skips += 1;
