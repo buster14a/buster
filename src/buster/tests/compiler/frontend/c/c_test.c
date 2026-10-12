@@ -54921,7 +54921,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_nested_join_simplify(UnitTe
 // for every enclosing loop variable: N^2 parameters, refused past ~2000
 // levels, with the simplification user lists growing along each chain into
 // N^3 publication time (#3723). A header whose loop never writes a local now
-// forwards that read to the loop's entry, so the count stays linear.
+// forwards that read to the loop's entry, so the count stays linear. Nested
+// do-while reads walk past every inner condition block instead, and caching
+// every walk was N^2 slots, refused past ~2000 levels (#3771); the path cache
+// is now bounded.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_nested_loop_parameters(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -54929,8 +54932,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_nested_loop_parameters(Unit
     String8 shapes[][3] = {
         {S8("int tall(int x){"), S8("for(int i=0;i<x;i++)"), S8("x--;return x;}")},
         {S8("int tall(int x){"), S8("{int i=x;while(i--)"), S8("x--;")},
+        {S8("int tall(int x){"), S8("{int i=x;do "), S8("x--;")},
     };
-    String8 closers[] = {S8(""), S8("}")};
+    String8 closers[] = {S8(""), S8("}"), S8("while(--i>0);}")};
     for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(shapes); shape += 1)
     {
         TemporalArena temporary = scratch_begin(0, 0);
