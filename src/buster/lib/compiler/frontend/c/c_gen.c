@@ -102,7 +102,8 @@
 //   prepares it inside the block that actually runs.
 //
 // c_ir_type_identity_query consumes the retained semantic C answer for
-// generic selections and the GNU compatibility predicate. Canonical types
+// generic selections, __builtin_choose_expr choices (c_ir_selection_answer)
+// and the GNU compatibility predicate. Canonical types
 // represent the selected value; they never decide source type identity.
 //
 // Layout, in file order; each anchor is a definition to search for:
