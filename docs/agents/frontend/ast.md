@@ -3997,6 +3997,18 @@ The base is main `7bc92b2d`, which the candidate branches from. The budgets:
   requested. The report-only main comparison runs after the merge, and Zen 5
   validation stays incomplete (#2761).
 
+The hosted census is
+[`2026-10-12T220456Z`](../../performance-audits/2026-10-12T220456Z.md),
+diagnostic only:
+- **The type-word test ships on the token path.** Both arms fall by 8.98 M Ir
+  (−0.036% default, −0.039% pilot). `c_ir_lower_body_advance` makes no
+  spelling-ladder call, and the objects are byte-identical across the four
+  arms at `-g0` and `-g`.
+- **The label proof is negative.** No code ships for it.
+- **Leads, unclaimed:** the dead-code hop's proofs (2.19 M) and
+  `c_ir_query_execute`'s 48,392 spelling-ladder calls (4.98 M).
+- Zen 5 validation stays incomplete (#2761).
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
 
 ### Settling the name checks, second cut
