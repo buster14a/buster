@@ -258,7 +258,8 @@ resolved by folding. It also covers constants, table saturation and
 collisions, metadata declines, volatile rows and generation rollover.
 `driver_fast_test.c` executes the fixed-result C fixture for all 16 subsets in
 FAST/QUALITY with zero fallback on desktop hosts, plus the full recipe with
-`cse`. Android/iOS retain all 32
+`cse` (five constant hits). The fixture's bytes are frozen by the
+native-retirement support ledger, so CSE-specific shapes live in `ir_fast_cse_tests`. Android/iOS retain all 32
 native object-generation checks; their application process cannot launch
 generated executables. The registered native-level regression checks all
 accepted spellings, explicit override ordering, invalid levels, all four

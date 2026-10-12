@@ -38,16 +38,6 @@ static int address(int* pointer)
     *identity_pointer += 0;
     return *identity_pointer;
 }
-// Commuted, ordered and constant duplicates for the opt-in CSE pass (#3011).
-static unsigned common(unsigned a, unsigned b)
-{
-    unsigned x = (a + b) * (b + a);
-    unsigned y = (a - b) ^ (b - a);
-    unsigned z = (a & b) | (b & a);
-    return x + y + z + (a * b) + (b * a) + (a * 5u) + (b * 5u);
-}
-volatile unsigned common_left = 7u;
-volatile unsigned common_right = 3u;
 int main(void)
 {
     int result = 0;
@@ -63,7 +53,5 @@ int main(void)
     if ((negative >> 2) != -5) result |= 64;
     unsigned narrow = (unsigned char)511u;
     if (narrow != 255u) result |= 128;
-    // The exit status keeps only eight bits, all already assigned above.
-    if (common(common_left, common_right) != 187u) result = 255;
     return result;
 }
