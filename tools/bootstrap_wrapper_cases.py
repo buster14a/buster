@@ -169,6 +169,8 @@ class CaseProcess(bootstrap.WrapperProcess):
         }), flush=True)
 
     def launch_status(self):
+        if self.launch_terminal_record is not None:
+            return self.launch_terminal_record
         try:
             record = json.loads(self.launch_status_path.read_text())
         except (AttributeError, OSError, ValueError) as error:
