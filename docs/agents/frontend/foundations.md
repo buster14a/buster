@@ -76,8 +76,17 @@ independent fallback for every retained memory owner.
 The current-value table is sparse `(block, owner)` state, not a blocks × locals
 matrix. Unresolved reads create provisional block parameters. Sealing waits
 until all backedges and goto predecessors are known; an iterative queue fills
-incoming values, forwarding through single-predecessor chains. Trivial
-parameters and unused parameter cycles are removed. A parameter is trivial
+incoming values, forwarding through single-predecessor chains and through
+loop headers: `c_ir_ssa_finish_loops` checks each recorded `for`/`while`/`do`
+for a header with one predecessor from outside and no other loop block entered
+from outside (labels, case labels and gotos into a loop fail it), and a read of
+a local no block of that loop writes passes from the header straight to the
+entry. Without it, N nested loops that each declare their own variable placed
+a trivial parameter for every enclosing variable at every inner header: N^2
+parameters, refused past ~2000 levels (#3723). Trivial
+parameters and unused parameter cycles are removed; a replaced parameter hands
+its user rows on without those that can no longer requeue, so a chain of
+trivial parameters stays linear. A parameter is trivial
 when every edge out of a reachable block carries the same value; an edge out
 of an unreachable block never runs, so its value decides only when no
 reachable edge carries one; then every dead edge must agree, as before. A braced statement ending in `break`, `goto`,
@@ -2021,3 +2030,32 @@ The existing capacity and translation-unit lifetime are unchanged. Raw table
 readers must prove token kind and direction; a closer row is now populated.
 The registered position-index regression checks both directions, clipped ranges,
 malformed streams, dirty storage, scalar/shape parity and 64/4096 boundaries.
+
+## Logical-chain cast and reference work
+
+Label-address cast proofs reuse the matching-opener index. Before classifying a
+group's type words, `c_parse_label_address_group_may_be_type` rejects interiors
+containing an indexed `&& identifier`. The typedef-aware proof retains a scoped
+exception for a genuine leading `typeof` specifier, after qualifiers: its bounded
+operand has its own expression/type grammar and may contain a conjunction.
+The ordinary proof still rejects that punctuator. The exception's prefix probes
+are charged to the same work counter; a left-nested logical group starts with
+`(` and declines in constant work. The search reads the existing sorted position
+population. A miss keeps the complete proof; absent indexes and unmatched groups
+retain the scan fallback. The population rejects nested logical groups in
+logarithmic probes per group, rather than re-reading their growing parentheses.
+
+Checked lowering records whether any prepared callee has started at a `(`
+token. Every call-chain lookup still receives its independent reference check.
+When no callee has done so, publication proves that no row can have the source
+call's opening parenthesis as its key. Otherwise the full reference scan remains.
+The fact stays true across typeof rollback; a removed callee can cause extra
+checking, never a missed candidate. Release call-chain selection is unchanged.
+
+`c_test_logical_chain_work_growth` bounds counted work across all six shapes at
+three depths, includes a named label to exercise the semantic cast proof, and
+checks that a returned-function call retains the positive reference scan.
+`c_test_label_address_prefix_indexed_paths` also retains scalar/indexed parity
+for typeof and qualified-typeof casts plus their interior-conjunction negatives.
+The landed decorated-label runtime controls, original deep lowering and
+runtime-order fixtures remain separate.

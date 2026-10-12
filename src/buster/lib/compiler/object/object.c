@@ -12595,48 +12595,58 @@ BUSTER_GLOBAL_LOCAL bool object_codegen_functions_valid(CodegenModule* module)
 
 BUSTER_GLOBAL_LOCAL bool object_relocation_kind_from_codegen(CodegenModuleRelocationKind source, ObjectRelocationKind* destination)
 {
+    bool mapped;
     if (destination)
     {
         switch (source)
         {
-            case CODEGEN_MODULE_RELOCATION_X86_64_PC32: *destination = OBJECT_RELOCATION_X86_64_PC32; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_CALL26: *destination = OBJECT_RELOCATION_AARCH64_CALL26; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26: *destination = OBJECT_RELOCATION_AARCH64_JUMP26; return true;
-            case CODEGEN_MODULE_RELOCATION_ABSOLUTE32: *destination = OBJECT_RELOCATION_ABSOLUTE32; return true;
-            case CODEGEN_MODULE_RELOCATION_ABSOLUTE64: *destination = OBJECT_RELOCATION_ABSOLUTE64; return true;
-            case CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32: *destination = OBJECT_RELOCATION_X86_64_TPOFF32; return true;
-            case CODEGEN_MODULE_RELOCATION_X86_64_GOTTPOFF: *destination = OBJECT_RELOCATION_X86_64_GOTTPOFF; return true;
-            case CODEGEN_MODULE_RELOCATION_X86_64_TLSGD: *destination = OBJECT_RELOCATION_X86_64_TLSGD; return true;
-            case CODEGEN_MODULE_RELOCATION_X86_64_TLS_GET_ADDR_PLT32: *destination = OBJECT_RELOCATION_X86_64_PLT32; return true;
-            case CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32: *destination = OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32; return true;
-            case CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32: *destination = OBJECT_RELOCATION_PE_TLS_OFFSET32; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12: *destination = OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12: *destination = OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12; return true;
-            case CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32: *destination = OBJECT_RELOCATION_X86_64_MACH_TLV_PC32; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12: *destination = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_MACH_PAGE21; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12: *destination = OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_ELF_PAGE21; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_ADD_LO12: *destination = OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_LD64_LO12: *destination = OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21; return true;
-            case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12: *destination = OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12; return true;
+            case CODEGEN_MODULE_RELOCATION_X86_64_PC32: *destination = OBJECT_RELOCATION_X86_64_PC32; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_CALL26: *destination = OBJECT_RELOCATION_AARCH64_CALL26; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26: *destination = OBJECT_RELOCATION_AARCH64_JUMP26; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_ABSOLUTE32: *destination = OBJECT_RELOCATION_ABSOLUTE32; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_ABSOLUTE64: *destination = OBJECT_RELOCATION_ABSOLUTE64; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32: *destination = OBJECT_RELOCATION_X86_64_TPOFF32; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_X86_64_GOTTPOFF: *destination = OBJECT_RELOCATION_X86_64_GOTTPOFF; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_X86_64_TLSGD: *destination = OBJECT_RELOCATION_X86_64_TLSGD; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_X86_64_TLS_GET_ADDR_PLT32: *destination = OBJECT_RELOCATION_X86_64_PLT32; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32: *destination = OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32: *destination = OBJECT_RELOCATION_PE_TLS_OFFSET32; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12: *destination = OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12: *destination = OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12: *destination = OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12: *destination = OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_CALL: *destination = OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32: *destination = OBJECT_RELOCATION_X86_64_MACH_TLV_PC32; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12: *destination = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_MACH_PAGE21; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12: *destination = OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_ELF_PAGE21; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_ADD_LO12: *destination = OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_LD64_LO12: *destination = OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12: *destination = OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12; mapped = true; break;
             // The compiler emits MOV r64,[RIP+GOT], whose one-byte REX
             // prefix makes the relaxable spelling unambiguous.  Plain type 9 is
             // reserved for external legacy objects and is never decoded.
-            case CODEGEN_MODULE_RELOCATION_X86_64_GOTPCREL: *destination = OBJECT_RELOCATION_X86_64_REX_GOTPCRELX; return true;
-            case CODEGEN_MODULE_RELOCATION_X86_64_PLT32: *destination = OBJECT_RELOCATION_X86_64_PLT32; return true;
-            case CODEGEN_MODULE_RELOCATION_COUNT: return false;
+            case CODEGEN_MODULE_RELOCATION_X86_64_GOTPCREL: *destination = OBJECT_RELOCATION_X86_64_REX_GOTPCRELX; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_X86_64_PLT32: *destination = OBJECT_RELOCATION_X86_64_PLT32; mapped = true; break;
+            case CODEGEN_MODULE_RELOCATION_COUNT: mapped = false; break;
+            default: mapped = false; break;
         }
     }
+    else
+    {
+        mapped = false;
+    }
 
-    return false;
+    return mapped;
 }
 
 // The module writer hands the codegen line rows to the DWARF and CodeView

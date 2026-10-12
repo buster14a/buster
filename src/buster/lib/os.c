@@ -8,12 +8,17 @@
 // os_file_close_checked, os_file_flush), replacement publication
 // (os_file_replacement_target_stats, os_file_staging_create, os_file_replace),
 // process spawn/wait with deadlines, executable lookup, dynamic libraries, and
-// the crash/failure printers. Replacement publication follows os_file_close.
+// the crash/failure printers. Replacement publication follows os_file_close;
+// The opt-in fork-to-exit-early protocol (os_early_exit_arm/
+// os_early_exit_release, #3686) follows the spawn pipe helpers it reuses
+// (os_process_spawn_pipe_create), just before os_process_spawn.
 // Opt-in child resource witnesses in os_process_wait_deadline retain native
 // accounting scope; they do not alter process ownership or cleanup.
 // os_process_capture_step separates ordinary POSIX pipe drain transitions
 // from native observations in os_process_wait_deadline; its private replay
 // contract lives in os_internal.h, without process-group identity changes.
+// Test-only generated-image retention is isolated behind BUSTER_INCLUDE_TESTS
+// (os_image_retention_*); it owns executable registration and guarded cleanup.
 // The lane model's implementation lives at the bottom — lane_run dispatches through a
 // persistent LaneGang of workers that survives across phases
 // (lane_persistent_worker_entry_point); creating threads per phase is the
@@ -756,6 +761,51 @@ bool os_decommit(void* address, u64 size)
     return result;
 }
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsHugePageTestCounters os_huge_pages_test_state;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool os_huge_pages_test_refusal;
+
+OsHugePageTestCounters os_huge_pages_test_counters(void)
+{
+    return os_huge_pages_test_state;
+}
+
+void os_huge_pages_test_force_refusal(bool enabled)
+{
+    os_huge_pages_test_refusal = enabled;
+}
+#endif
+
+// Best-effort transparent-huge-page advice on a reserved range. On Linux,
+// madvise(MADV_HUGEPAGE) asks khugepaged and fault-time allocation to back
+// the range with huge pages under the `madvise` host policy. Even under
+// `always`, explicit advice can change compaction behavior. A refusal never
+// fails the reservation or changes whether its memory is usable.
+// Other targets expose no equivalent request, so the call is a no-op there.
+void os_advise_huge_pages(void* address, u64 size)
+{
+#if BUSTER_INCLUDE_TESTS
+    os_huge_pages_test_state.requests += 1;
+    os_huge_pages_test_state.bytes += size;
+    os_huge_pages_test_state.last_address = address;
+    os_huge_pages_test_state.last_size = size;
+    if (os_huge_pages_test_refusal)
+    {
+        os_huge_pages_test_refusal = false;
+        os_huge_pages_test_state.forced_refusals += 1;
+    }
+    else
+#endif
+    {
+#if defined(__linux__)
+        (void)madvise(address, size, MADV_HUGEPAGE);
+#else
+        BUSTER_UNUSED(address);
+        BUSTER_UNUSED(size);
+#endif
+    }
+}
+
 void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map)
 {
     void* address = 0;
@@ -1313,6 +1363,432 @@ String8 os_path_absolute_lexical(Arena* arena, String8 path, bool null_terminate
     return result;
 }
 
+#if BUSTER_INCLUDE_TESTS
+enum { OS_IMAGE_RETENTION_CAPACITY = 1 << 16 };
+
+typedef enum OsImageRetentionPathKind
+{
+    OS_IMAGE_RETENTION_PATH_MISSING,
+    OS_IMAGE_RETENTION_PATH_REGULAR,
+    OS_IMAGE_RETENTION_PATH_DIRECTORY,
+    OS_IMAGE_RETENTION_PATH_OTHER,
+} OsImageRetentionPathKind;
+
+typedef struct OsImageRetentionImage OsImageRetentionImage;
+struct OsImageRetentionImage
+{
+    bool shared_library;
+    bool loadable;
+};
+
+typedef struct OsImageRetentionTemporary OsImageRetentionTemporary;
+struct OsImageRetentionTemporary
+{
+    TemporalArena temporal;
+    Arena* arena;
+    Arena* owned_arena;
+};
+
+BUSTER_GLOBAL_LOCAL ProcessControlAtomic os_image_retention_active_flag;
+BUSTER_GLOBAL_LOCAL ProcessControlAtomic os_image_retention_set_lock;
+BUSTER_GLOBAL_LOCAL AtomicU64 os_image_retention_hash_count;
+BUSTER_GLOBAL_LOCAL AtomicU64 os_image_retention_hashes[OS_IMAGE_RETENTION_CAPACITY];
+BUSTER_GLOBAL_LOCAL AtomicU64 os_image_retention_registered_count;
+BUSTER_GLOBAL_LOCAL AtomicU64 os_image_retention_retained_file_count;
+BUSTER_GLOBAL_LOCAL AtomicU64 os_image_retention_retained_directory_count;
+BUSTER_GLOBAL_LOCAL AtomicU64 os_image_retention_overflow_count;
+
+BUSTER_GLOBAL_LOCAL OsImageRetentionTemporary os_image_retention_temporary_begin(void)
+{
+    OsImageRetentionTemporary result = {0};
+    if (thread_context_selected())
+    {
+        result.temporal = scratch_begin(0, 0);
+        result.arena = result.temporal.arena;
+    }
+    if (!result.arena)
+    {
+        result.owned_arena = arena_create((ArenaCreation){0});
+        result.arena = result.owned_arena;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void os_image_retention_temporary_end(OsImageRetentionTemporary temporary)
+{
+    if (temporary.temporal.arena) scratch_end(temporary.temporal);
+    if (temporary.owned_arena) arena_destroy(temporary.owned_arena, 1);
+}
+
+BUSTER_GLOBAL_LOCAL u64 os_image_retention_hash(String8 path)
+{
+    u64 result = 0;
+    OsImageRetentionTemporary temporary = os_image_retention_temporary_begin();
+    if (temporary.arena && path.pointer && path.length)
+    {
+        String8 absolute = os_path_absolute_lexical(temporary.arena, path, false);
+        if (absolute.pointer && absolute.length)
+        {
+            result = 14695981039346656037ull;
+            for (u64 index = 0; index < absolute.length; index += 1)
+            {
+                result ^= (u8)absolute.pointer[index];
+                result *= 1099511628211ull;
+            }
+            if (!result) result = 1;
+        }
+    }
+    os_image_retention_temporary_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL OsImageRetentionPathKind os_image_retention_path_kind(String8 path)
+{
+    OsImageRetentionPathKind result = OS_IMAGE_RETENTION_PATH_MISSING;
+    OsImageRetentionTemporary temporary = os_image_retention_temporary_begin();
+    if (temporary.arena && path.pointer && path.length)
+    {
+#if BUSTER_WINDOWS
+        String16Z wide = {0};
+        if (string16z_from_string8_arena(temporary.arena, path, &wide))
+        {
+            DWORD attributes = GetFileAttributesW(wide.pointer);
+            if (attributes != INVALID_FILE_ATTRIBUTES)
+            {
+                if (attributes & FILE_ATTRIBUTE_REPARSE_POINT)
+                {
+                    result = OS_IMAGE_RETENTION_PATH_OTHER;
+                }
+                else if (attributes & FILE_ATTRIBUTE_DIRECTORY)
+                {
+                    result = OS_IMAGE_RETENTION_PATH_DIRECTORY;
+                }
+                else
+                {
+                    result = OS_IMAGE_RETENTION_PATH_REGULAR;
+                }
+            }
+        }
+#elif defined(__linux__) || defined(__APPLE__)
+        String8Z terminated = {0};
+        if (string8z_copy_arena(temporary.arena, path, &terminated))
+        {
+            struct stat attributes;
+            int status;
+            do
+            {
+                status = lstat((const char*)terminated.pointer, &attributes);
+            } while (status != 0 && errno == EINTR);
+            if (status == 0)
+            {
+                if (S_ISREG(attributes.st_mode))
+                {
+                    result = OS_IMAGE_RETENTION_PATH_REGULAR;
+                }
+                else if (S_ISDIR(attributes.st_mode))
+                {
+                    result = OS_IMAGE_RETENTION_PATH_DIRECTORY;
+                }
+                else
+                {
+                    result = OS_IMAGE_RETENTION_PATH_OTHER;
+                }
+            }
+        }
+#endif
+    }
+    os_image_retention_temporary_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_image_retention_read_at(String8 path, u64 offset, u8* bytes, u64 length)
+{
+    bool result = false;
+    OsImageRetentionTemporary temporary = os_image_retention_temporary_begin();
+    if (temporary.arena && path.pointer && path.length && bytes && length && offset <= 0x7fffffffffffffffull)
+    {
+#if BUSTER_WINDOWS
+        String16Z wide = {0};
+        if (string16z_from_string8_arena(temporary.arena, path, &wide))
+        {
+            HANDLE file = CreateFileW(wide.pointer, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+            if (file != INVALID_HANDLE_VALUE)
+            {
+                LARGE_INTEGER distance = {.QuadPart = (LONGLONG)offset};
+                if (SetFilePointerEx(file, distance, 0, FILE_BEGIN))
+                {
+                    u64 transferred = 0;
+                    bool complete = true;
+                    while (complete && transferred < length)
+                    {
+                        DWORD amount = 0;
+                        DWORD requested = (DWORD)(length - transferred);
+                        if (!ReadFile(file, bytes + transferred, requested, &amount, 0) || !amount)
+                        {
+                            complete = false;
+                        }
+                        else
+                        {
+                            transferred += amount;
+                        }
+                    }
+                    result = complete && transferred == length;
+                }
+                CloseHandle(file);
+            }
+        }
+#elif defined(__linux__) || defined(__APPLE__)
+        String8Z terminated = {0};
+        if (string8z_copy_arena(temporary.arena, path, &terminated))
+        {
+            int flags = O_RDONLY | O_NONBLOCK;
+#if defined(O_CLOEXEC)
+            flags |= O_CLOEXEC;
+#endif
+            int file = open((const char*)terminated.pointer, flags);
+            if (file >= 0)
+            {
+                off_t position = lseek(file, (off_t)offset, SEEK_SET);
+                if (position >= 0 && (u64)position == offset)
+                {
+                    u64 transferred = 0;
+                    bool complete = true;
+                    while (complete && transferred < length)
+                    {
+                        ssize_t amount = read(file, bytes + transferred, (size_t)(length - transferred));
+                        if (amount < 0 && errno == EINTR)
+                        {
+                            continue;
+                        }
+                        if (amount <= 0)
+                        {
+                            complete = false;
+                        }
+                        else
+                        {
+                            transferred += (u64)amount;
+                        }
+                    }
+                    result = complete && transferred == length;
+                }
+                close(file);
+            }
+        }
+#endif
+    }
+    os_image_retention_temporary_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u16 os_image_retention_u16(const u8* bytes, bool little_endian)
+{
+    u16 result;
+    if (little_endian)
+    {
+        result = (u16)bytes[0] | (u16)((u16)bytes[1] << 8);
+    }
+    else
+    {
+        result = (u16)((u16)bytes[0] << 8) | (u16)bytes[1];
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 os_image_retention_u32(const u8* bytes, bool little_endian)
+{
+    u32 result;
+    if (little_endian)
+    {
+        result = (u32)bytes[0] | ((u32)bytes[1] << 8) | ((u32)bytes[2] << 16) | ((u32)bytes[3] << 24);
+    }
+    else
+    {
+        result = ((u32)bytes[0] << 24) | ((u32)bytes[1] << 16) | ((u32)bytes[2] << 8) | (u32)bytes[3];
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL OsImageRetentionImage os_image_retention_classify(String8 path)
+{
+    OsImageRetentionImage result = {0};
+    u8 header[64] = {0};
+    if (os_image_retention_path_kind(path) == OS_IMAGE_RETENTION_PATH_REGULAR &&
+        os_image_retention_read_at(path, 0, header, sizeof(header)))
+    {
+        if (header[0] == 0x7f && header[1] == 'E' && header[2] == 'L' && header[3] == 'F' &&
+            (header[5] == 1 || header[5] == 2))
+        {
+            bool little_endian = header[5] == 1;
+            u16 image_type = os_image_retention_u16(header + 16, little_endian);
+            result.shared_library = image_type == 3;
+            result.loadable = image_type == 2 || image_type == 3;
+        }
+        else
+        {
+            u32 magic = os_image_retention_u32(header, true);
+            bool mach_little_endian = magic == 0xfeedface || magic == 0xfeedfacf;
+            bool mach_big_endian = magic == 0xcefaedfe || magic == 0xcffaedfe;
+            if (mach_little_endian || mach_big_endian)
+            {
+                u32 file_type = os_image_retention_u32(header + 12, mach_little_endian);
+                result.shared_library = file_type == 6 || file_type == 8;
+                result.loadable = result.shared_library || file_type == 2;
+            }
+            else if (header[0] == 'M' && header[1] == 'Z')
+            {
+                u32 pe_offset = os_image_retention_u32(header + 0x3c, true);
+                u8 pe_header[24] = {0};
+                const u8* pe_bytes = 0;
+                bool pe_header_ready = false;
+                if ((u64)pe_offset + sizeof(pe_header) <= sizeof(header))
+                {
+                    pe_bytes = header + pe_offset;
+                    pe_header_ready = true;
+                }
+                else
+                {
+                    pe_header_ready = os_image_retention_read_at(path, pe_offset, pe_header, sizeof(pe_header));
+                    pe_bytes = pe_header;
+                }
+                if (pe_header_ready && pe_bytes[0] == 'P' && pe_bytes[1] == 'E' && !pe_bytes[2] && !pe_bytes[3])
+                {
+                    u16 characteristics = os_image_retention_u16(pe_bytes + 22, true);
+                    result.shared_library = (characteristics & 0x2000) != 0;
+                    result.loadable = true;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_image_retention_path_registered(String8 path)
+{
+    bool result = false;
+    u64 hash = os_image_retention_hash(path);
+    u64 count = atomic_u64_load(&os_image_retention_hash_count);
+    count = count < OS_IMAGE_RETENTION_CAPACITY ? count : OS_IMAGE_RETENTION_CAPACITY;
+    for (u64 index = 0; !result && hash && index < count; index += 1)
+    {
+        result = atomic_u64_load(&os_image_retention_hashes[index]) == hash;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_image_retention_keeps(String8 path)
+{
+    bool result = false;
+    if (os_image_retention_active())
+    {
+        OsImageRetentionPathKind kind = os_image_retention_path_kind(path);
+        if (kind != OS_IMAGE_RETENTION_PATH_MISSING)
+        {
+            result = os_image_retention_path_registered(path);
+            if (!result && kind == OS_IMAGE_RETENTION_PATH_REGULAR)
+            {
+                OsImageRetentionImage image = os_image_retention_classify(path);
+                bool overflowed = atomic_u64_load(&os_image_retention_overflow_count) != 0;
+                result = image.shared_library || (overflowed && image.loadable);
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_image_retention_directory_keeps(String8 root)
+{
+    bool result = false;
+    if (os_image_retention_path_kind(root) == OS_IMAGE_RETENTION_PATH_DIRECTORY)
+    {
+        Arena* arena = arena_create((ArenaCreation){0});
+        if (arena)
+        {
+            u64 capacity = 64;
+            u64 count = 1;
+            String8* paths = arena_allocate(arena, String8, capacity);
+            paths[0] = string_duplicate_arena(arena, root, false);
+            for (u64 index = 0; !result && index < count; index += 1)
+            {
+                OsImageRetentionPathKind kind = os_image_retention_path_kind(paths[index]);
+                if (kind == OS_IMAGE_RETENTION_PATH_REGULAR)
+                {
+                    result = os_image_retention_keeps(paths[index]);
+                }
+                else if (kind == OS_IMAGE_RETENTION_PATH_DIRECTORY)
+                {
+                    u32 name_count = 0;
+                    String8* names = os_directory_entry_names(arena, paths[index], &name_count);
+                    for (u32 name_index = 0; name_index < name_count; name_index += 1)
+                    {
+                        if (count == capacity)
+                        {
+                            capacity *= 2;
+                            String8* grown = arena_allocate(arena, String8, capacity);
+                            memcpy(grown, paths, sizeof(*paths) * count);
+                            paths = grown;
+                        }
+                        paths[count++] = string_format(arena, S8("{S8}/{S8}"), paths[index], names[name_index]);
+                    }
+                }
+            }
+            arena_destroy(arena, 1);
+        }
+    }
+    return result;
+}
+
+bool os_image_retention_set_active(bool active)
+{
+    bool acquired = false;
+    while (!acquired)
+    {
+        acquired = process_control_atomic_set_if_zero(&os_image_retention_set_lock, 1);
+    }
+    bool previous = process_control_atomic_load(&os_image_retention_active_flag) != 0;
+    process_control_atomic_store(&os_image_retention_active_flag, active);
+    process_control_atomic_store(&os_image_retention_set_lock, 0);
+    return previous;
+}
+
+bool os_image_retention_active(void)
+{
+    return process_control_atomic_load(&os_image_retention_active_flag) != 0;
+}
+
+void os_image_retention_register(String8 path)
+{
+    if (os_image_retention_active())
+    {
+        u64 hash = os_image_retention_hash(path);
+        if (hash)
+        {
+            u64 slot = atomic_u64_increment(&os_image_retention_hash_count);
+            atomic_u64_increment(&os_image_retention_registered_count);
+            if (slot < OS_IMAGE_RETENTION_CAPACITY)
+            {
+                atomic_u64_add(&os_image_retention_hashes[slot], hash);
+            }
+            else
+            {
+                atomic_u64_increment(&os_image_retention_overflow_count);
+            }
+        }
+    }
+}
+
+OsImageRetentionCounters os_image_retention_counters(void)
+{
+    OsImageRetentionCounters result = {
+        .registered = atomic_u64_load(&os_image_retention_registered_count),
+        .retained_files = atomic_u64_load(&os_image_retention_retained_file_count),
+        .retained_directories = atomic_u64_load(&os_image_retention_retained_directory_count),
+        .overflowed = atomic_u64_load(&os_image_retention_overflow_count),
+    };
+    return result;
+}
+#endif
+
 bool os_make_directory_attempt(String8 path)
 {
     bool result = path.pointer != 0 && path.length != 0;
@@ -1331,6 +1807,10 @@ bool os_make_directory_attempt(String8 path)
                 DWORD attributes = GetFileAttributesW(wide.pointer);
                 result = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
             }
+        }
+        else
+        {
+            result = false;
         }
 #else
         String8Z terminated = {0};
@@ -1970,8 +2450,21 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
 bool os_directory_delete(String8 path)
 {
     bool result = false;
+#if BUSTER_INCLUDE_TESTS
+    bool retention_kept = false;
+    if (os_image_retention_active() && os_image_retention_directory_keeps(path))
+    {
+        atomic_u64_increment(&os_image_retention_retained_directory_count);
+        result = true;
+        retention_kept = true;
+    }
+#endif
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
-    if (path.pointer && path.length)
+    if (path.pointer && path.length
+#if BUSTER_INCLUDE_TESTS
+        && !retention_kept
+#endif
+    )
     {
         // The walk retains its descriptor frames or pending Windows tasks
         // for the whole traversal. Own their arena so nested scratch scopes can
@@ -2657,8 +3150,14 @@ OsError os_file_delete_checked(String8 path)
 #if BUSTER_INCLUDE_TESTS
     const OsFileTestStep* step = os_file_test_selects(path) ? os_file_test_take(OS_FILE_TEST_DELETE) : 0;
     if (step) result.v = (u32)step->value;
+    bool retention_keeps_path = !result.v && os_image_retention_active() && os_image_retention_keeps(path);
+    if (retention_keeps_path) atomic_u64_increment(&os_image_retention_retained_file_count);
 #endif
-    if (!result.v)
+    if (!result.v
+#if BUSTER_INCLUDE_TESTS
+        && !retention_keeps_path
+#endif
+    )
     {
         OsTemporaryArenaScope scratch = os_temporary_arena_begin(0, 0);
         if (!scratch.arena)
@@ -3564,6 +4063,183 @@ BUSTER_GLOBAL_LOCAL int os_process_spawn_add_open_descriptor_closes(posix_spawn_
 #endif
 #endif
 
+// Early exit (#3686). The parent's whole job after os_early_exit_arm is the
+// blocking read in os_early_exit_parent_wait; everything else, including
+// every lane thread, exists only in the child. Desktop POSIX only: Android
+// starts an untracked stdio pump thread and iOS forbids fork.
+#if !defined(_WIN32) && !BUSTER_ANDROID && !BUSTER_IOS
+#define OS_EARLY_EXIT_AVAILABLE 1
+#else
+#define OS_EARLY_EXIT_AVAILABLE 0
+#endif
+
+#if OS_EARLY_EXIT_AVAILABLE
+// Both ends sit above the standard streams (os_process_spawn_pipe_create),
+// so neither a process started with 0-2 closed nor the release's dup2 onto
+// 0-2 can alias the one-byte status channel with compiler output.
+BUSTER_GLOBAL_LOCAL int os_early_exit_pipe = -1;
+BUSTER_GLOBAL_LOCAL OsFileDescriptor* os_early_exit_deferred[OS_EARLY_EXIT_DEFERRED_LIMIT];
+BUSTER_GLOBAL_LOCAL AtomicU64 os_early_exit_deferred_count;
+
+BUSTER_GLOBAL_LOCAL BUSTER_NORETURN void os_early_exit_parent_wait(int read_end, pid_t child)
+{
+    u8 status = 0;
+    ssize_t received;
+    do
+    {
+        received = read(read_end, &status, 1);
+    } while (received < 0 && errno == EINTR);
+    int exit_code = status;
+    if (received != 1)
+    {
+        // The child died or closed the pipe without reporting: its own
+        // status is the answer, as a shell would report it.
+        int wait_status = 0;
+        pid_t waited;
+        do
+        {
+            waited = waitpid(child, &wait_status, 0);
+        } while (waited < 0 && errno == EINTR);
+        exit_code = 1;
+        if (waited == child && WIFEXITED(wait_status))
+        {
+            exit_code = WEXITSTATUS(wait_status);
+        }
+        else if (waited == child && WIFSIGNALED(wait_status))
+        {
+            exit_code = 128 + WTERMSIG(wait_status);
+        }
+    }
+    _exit(exit_code);
+}
+#endif
+
+bool os_early_exit_arm(void)
+{
+    bool result = false;
+#if OS_EARLY_EXIT_AVAILABLE
+    // fork() copies only the calling thread. os_is_only_live_thread counts
+    // tracked threads only, so the caller must also start no untracked one
+    // (`ide cc` on desktop starts none before this point).
+    int ends[2] = {-1, -1};
+    ProcessSpawnFailure failure = PROCESS_SPAWN_FAILURE_NONE;
+    bool created = false;
+    if (os_early_exit_pipe < 0 && os_is_only_live_thread())
+    {
+#if BUSTER_INCLUDE_TESTS
+        // Test seam for the setup-failure fallback: fail the pipe's
+        // configuration step deterministically, then insist it happened, so
+        // a control relying on it can never pass through a real fork.
+        bool injected = string_equal(os_get_environment_variable(S8("BUSTER_TEST_EARLY_EXIT_PIPE_FAILURE")), S8("1"));
+        if (injected)
+        {
+            os_process_spawn_test_fail_on_call(OS_PROCESS_SPAWN_TEST_PIPE_CONFIGURATION, 0);
+        }
+#endif
+        created = os_process_spawn_pipe_create(ends, &failure) == 0;
+#if BUSTER_INCLUDE_TESTS
+        if (injected)
+        {
+            BUSTER_VALIDATE(os_process_spawn_test_end() && !created);
+        }
+#endif
+    }
+    if (created)
+    {
+        pid_t child = fork();
+        if (child == 0)
+        {
+            close(ends[0]);
+            os_early_exit_pipe = ends[1];
+            result = true;
+        }
+        else if (child > 0)
+        {
+            close(ends[1]);
+            os_early_exit_parent_wait(ends[0], child);
+        }
+        else
+        {
+            close(ends[0]);
+            close(ends[1]);
+        }
+    }
+#endif
+    return result;
+}
+
+bool os_early_exit_armed(void)
+{
+    bool result = false;
+#if OS_EARLY_EXIT_AVAILABLE
+    result = os_early_exit_pipe >= 0;
+#endif
+    return result;
+}
+
+bool os_early_exit_defer_close(OsFileDescriptor* file_descriptor)
+{
+    bool result = false;
+#if OS_EARLY_EXIT_AVAILABLE
+    if (file_descriptor && os_early_exit_pipe >= 0)
+    {
+        u64 slot = atomic_u64_increment(&os_early_exit_deferred_count);
+        if (slot < OS_EARLY_EXIT_DEFERRED_LIMIT)
+        {
+            os_early_exit_deferred[slot] = file_descriptor;
+            result = true;
+        }
+    }
+#else
+    BUSTER_UNUSED(file_descriptor);
+#endif
+    return result;
+}
+
+void os_early_exit_release(u8 exit_code)
+{
+#if OS_EARLY_EXIT_AVAILABLE
+    if (os_early_exit_pipe >= 0)
+    {
+        // Standard streams first: a build system reading this process's
+        // pipes waits for their EOF as well as for the parent's exit. The
+        // status pipe is above 2, so these dup2 calls cannot replace it.
+        int null_descriptor = open("/dev/null", O_RDWR | O_CLOEXEC);
+        if (null_descriptor >= 0)
+        {
+            for (int stream = 0; stream < 3; stream += 1)
+            {
+                if (stream != null_descriptor)
+                {
+                    (void)dup2(null_descriptor, stream);
+                }
+            }
+            if (null_descriptor > 2)
+            {
+                close(null_descriptor);
+            }
+        }
+        ssize_t sent;
+        do
+        {
+            sent = write(os_early_exit_pipe, &exit_code, 1);
+        } while (sent < 0 && errno == EINTR);
+        close(os_early_exit_pipe);
+        os_early_exit_pipe = -1;
+        // Closing the last reference to a replaced output frees its blocks;
+        // that now happens after the parent has reported.
+        u64 count = atomic_u64_load(&os_early_exit_deferred_count);
+        count = count < OS_EARLY_EXIT_DEFERRED_LIMIT ? count : OS_EARLY_EXIT_DEFERRED_LIMIT;
+        for (u64 index = 0; index < count; index += 1)
+        {
+            (void)os_file_close_checked(os_early_exit_deferred[index]);
+        }
+    }
+#else
+    BUSTER_UNUSED(exit_code);
+#endif
+}
+
 ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environment_keys, SliceString8 environment_values, ProcessSpawnOptions options)
 {
     TemporalArena temp = scratch_begin(0, 0);
@@ -3614,6 +4290,10 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
             }
         }
     }
+
+#if BUSTER_INCLUDE_TESTS
+    if (executable.length) os_image_retention_register(executable);
+#endif
 
 #if defined(_WIN32)
     HANDLE duplicated_standard[STANDARD_STREAM_COUNT] = {0};

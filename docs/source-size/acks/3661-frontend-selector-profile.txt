@@ -1,0 +1,4 @@
+# Source-size acknowledgement; see docs/source-size.md.
+schema buster-source-size-ack-v1
+build 35231
+reason frontend-selector-v1 9700X profile: frozen profile, validator, compare leg and publisher bundle checks (#2761, #3661).

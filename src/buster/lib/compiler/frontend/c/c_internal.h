@@ -824,6 +824,23 @@ typedef struct CMathLibmShape
 BUSTER_C_EXTERN CMathLibmShape c_semantic_math_libm_shape(String8 name);
 BUSTER_C_EXTERN bool c_semantic_math_link_is_long_double(String8 link_name);
 
+// The constant-valued special-float math builtins: positive infinity, or the
+// default quiet NaN of a `nan*("")` call, in the floating type `kind` names.
+typedef enum CMathSpecial
+{
+    C_MATH_SPECIAL_NONE,
+    C_MATH_SPECIAL_INFINITY,
+    C_MATH_SPECIAL_QUIET_NAN,
+} CMathSpecial;
+
+typedef struct CMathSpecialValue
+{
+    CTypeKind kind;
+    CMathSpecial special;
+} CMathSpecialValue;
+
+BUSTER_C_EXTERN CMathSpecialValue c_semantic_math_special_value(String8 link_name);
+
 struct CSymbolTable
 {
     Arena* arena;
@@ -1570,6 +1587,12 @@ struct CTypeParseMachine
     u32* ast_specifier_nodes;
     u32 ast_specifier_count;
     u32 ast_specifier_cursor;
+    // Beside it, one bit per token for the first token of every
+    // DECL_SPECIFIERS node, word-only or not, over `ast_specifier_first_limit`
+    // tokens: a type-name run whose first token has no bit begins no type
+    // name (c_parse_type_name_specifiers).
+    u64* ast_specifier_firsts;
+    u32 ast_specifier_first_limit;
     CAstTypeBodyIndex* ast_bodies;
     CAstTypeBody* ast_types;
     CParseExpressionQuery* expression_queries;
@@ -1917,6 +1940,7 @@ BUSTER_C_EXTERN bool c_ir_constant_float_to_integer(f64 floating, IrType* target
 BUSTER_C_EXTERN f64 c_ir_float16_round(f64 value);
 BUSTER_C_EXTERN f64 c_ir_bfloat16_round(f64 value);
 BUSTER_C_EXTERN bool c_ir_constant_float_literal_for_type(IrType const* type, String8 spelling, CIrConstantValue* result);
+BUSTER_C_EXTERN CIrConstantValue c_ir_constant_math_special(IrType const* type, CMathSpecial special);
 BUSTER_C_EXTERN bool c_ir_number_imaginary_spelling(Arena* arena, String8 spelling, String8* real_out);
 BUSTER_C_EXTERN bool c_ir_constant_wide_float_binary(IrTypeId integer_type, CConditionalOperator operation, CIrConstantValue left, CIrConstantValue right, IrType const* type, CIrConstantValue* result);
 
