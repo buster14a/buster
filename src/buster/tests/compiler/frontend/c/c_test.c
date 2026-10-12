@@ -43987,7 +43987,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deep_block_lookup_linear(UnitTestArgum
 // (c_ir_lower_body_advance). A label, a type keyword such as `int`, or any
 // name no entity binds failed that lookup only after climbing every enclosing
 // scope, so a nest with one at each level lowered in depth squared (#2676).
-// A symbol no entity was ever added under now fails at once.
+// A symbol no entity was ever added under now fails at once. Each goto also
+// found its label's scope by descending from the function's scope; it now
+// starts from the previous answer. Steps are lookup hops plus scope levels.
 enum
 {
     C_TEST_UNBOUND_PROBE_LABEL,
@@ -44019,11 +44021,12 @@ BUSTER_GLOBAL_LOCAL u64 c_test_unbound_probe_lowering_steps(u32 shape, u32 depth
     c_test_append_source(bytes, capacity, &length, S8(" return x; }"));
     CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){bytes, length}, (CPreprocessOptions){0});
     CParseResult parse = c_parse(temporary.arena, preprocess);
-    u64 before = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS);
+    u64 before = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS) + c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS);
     CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("unbound-probe.c"), preprocess, parse, target_native);
     if (length < capacity && preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0 && ir.diagnostic_count == 0 && ir.program)
     {
-        steps = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS) - before;
+        steps = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS) + c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS) -
+                before;
     }
     c_test_scratch_end(temporary);
     return steps;
@@ -44038,7 +44041,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unbound_first_token_probe_linear(UnitT
         u64 shallow = c_test_unbound_probe_lowering_steps(shape, SHALLOW);
         u64 deep = c_test_unbound_probe_lowering_steps(shape, DEEP);
         // The failing walks took some DEEP * DEEP / 2 = 524 K steps here.
-        BUSTER_TEST_RAW(arguments, shallow != UINT64_MAX && deep != UINT64_MAX && deep <= shallow * 5 + 64 && deep <= (u64)DEEP * 16,
+        BUSTER_TEST_RAW(arguments, shallow != UINT64_MAX && deep != UINT64_MAX && deep <= shallow * 5 + 64 && deep <= (u64)DEEP * 32,
                         string_format(arguments->arena, S8("unbound first-token probe steps shape={u32} shallow={u64} deep={u64}"), shape, shallow,
                                       deep));
     }

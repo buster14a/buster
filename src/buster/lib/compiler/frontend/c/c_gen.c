@@ -47247,10 +47247,7 @@ BUSTER_C_INTERNAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder, C
                 builder->failure_message = S8("asm goto target does not belong to this function");
                 return false;
             }
-            CScopeId root_scope = builder->declaration_index < builder->parse.declaration_count
-                                      ? builder->parse.declarations[builder->declaration_index].scope
-                                      : C_SCOPE_ID_INVALID;
-            CScopeId target_scope = c_parse_scope_for_token(&builder->parse, root_scope, label->token_index);
+            CScopeId target_scope = c_ir_scope_for_token(builder, label->token_index);
             if (c_ir_cleanup_target_has_calls(builder, target_scope, label->token_index))
             {
                 edge_targets[label_index] = c_ir_block_create(builder);
@@ -47304,10 +47301,7 @@ BUSTER_C_INTERNAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder, C
             {
                 return false;
             }
-            CScopeId root_scope = builder->declaration_index < builder->parse.declaration_count
-                                      ? builder->parse.declarations[builder->declaration_index].scope
-                                      : C_SCOPE_ID_INVALID;
-            CScopeId target_scope = c_parse_scope_for_token(&builder->parse, root_scope, label->token_index);
+            CScopeId target_scope = c_ir_scope_for_token(builder, label->token_index);
             if (!c_ir_emit_cleanup_calls(builder, 0, 0, target_scope, label->token_index, instruction_source) ||
                 !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &label->block, 1, instruction_source))
             {
@@ -49727,11 +49721,11 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     builder->failure_token_index = index + 1;
                     return false;
                 }
-                CScopeId label_scope = c_parse_scope_for_token(
-                    &builder->parse,
-                    builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
-                                                                                   : C_SCOPE_ID_INVALID,
-                    label ? label->token_index : UINT32_MAX);
+                // From the previous answer rather than the function's scope:
+                // a goto and its label are usually a few scopes apart, so a
+                // nest with one at each level no longer descends from the
+                // root per goto (#2676). The answer is the same.
+                CScopeId label_scope = c_ir_scope_for_token(builder, label ? label->token_index : UINT32_MAX);
                 IrSourceRange goto_source = c_ir_token_source_range(builder, first);
                 if (!label)
                 {
