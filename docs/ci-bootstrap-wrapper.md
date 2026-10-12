@@ -141,32 +141,38 @@ sequence `os_process_spawn` uses for process groups. Every descendant is
 therefore a kernel-tracked member from birth. No membership decision uses PID parent links or wall-clock creation
 times, which PID reuse and clock adjustment make unreliable.
 
-Before fixture removal, cleanup runs `drain` with the remaining part of the
-original ten-second cleanup deadline:
+The native launcher receives the original absolute payload deadline before
+startup. Its selected clock matches the caller's Windows monotonic clock
+(`QueryPerformanceCounter` or `GetTickCount64`). It enforces that deadline on
+the payload, then allows only the original separate ten-second cleanup budget.
+Collection can wait for both phases without extending payload runtime.
 
-- `drain` terminates the job and waits on each member. The launcher is not a
-  member; cleanup waits, within the same deadline, for it to exit with its
-  command before the frozen direct-child reap runs. A listed PID is waited on
-  only after `IsProcessInJob` confirms that the opened handle belongs to this
-  job, so a reused PID naming another process is never waited on or
-  terminated.
-- It finishes only when the job's active-process count shows no live member;
-  `WAIT_OBJECT_0` alone certifies each termination it observes. A terminated
-  member can leave the job's PID list before the drain lists it, so the
-  record's `waited` list is diagnostic, and the empty job is the proof. The
-  controls check retained handles directly. A successful termination
-  request is insufficient: a descendant can still hold its inherited
-  current-directory handle while exiting (#2985).
-- The caller accepts exactly one complete, newline-terminated record that
-  arrives by the deadline, with no pending or failed member. Silence, a partial
-  or repeated record, a late record, a timeout, any open/query/wait failure, and
-  a missing job while the launcher still runs all fail the owner. The frozen
-  direct-child reap still runs afterwards, and later cleanup cannot relabel a
-  failed owner as clean. The record is published as `job_drain` in
-  `BOOTSTRAP_COLLECTION`.
-- When the command exits by itself, the launcher drains the rest of its job
-  before exiting. Members that outlive the budget make it exit with 125, which
-  also fails the owner.
+Before fixture removal, the mechanical adapter requests cancellation by creating
+the private terminal path's `.cancel` file and waits under the original cleanup
+deadline. The native owner checks cancellation before creating or resuming the
+payload and at most every 25 milliseconds during its bounded wait. This avoids
+an external drain racing job creation or payload assignment. Only the native
+owner terminates and certifies its job; the launcher stays outside it.
+
+Native cleanup waits on retained root handles and on listed handles confirmed
+by `IsProcessInJob`, then requires zero active job members. A terminated member
+can leave the PID list before enumeration, so `waited` is diagnostic; controls
+retain live process handles before cancellation. A successful termination
+request alone cannot certify release of inherited current-directory handles
+(#2985).
+
+The owner atomically publishes a fresh terminal record after checked teardown
+and handle closes. The adapter requires a complete record bound to the exact
+deadline, ordered timing fields and the broker's exit: zero for certified normal
+completion or cancellation, 124 for certified runtime timeout, and 125 for
+lifecycle failure. Arbitrary payload statuses, including 124 and 125, are restored
+from the record to the original result. Native publication must also finish by
+the cleanup deadline. Missing, malformed, contradictory or late evidence fails;
+failure reaping shares the remaining cleanup deadline and never relabels an
+uncertified owner as clean. `BOOTSTRAP_COLLECTION.native_launch` retains the
+certificate and actual payload status. Later cleanup reuses the first certified
+record. The standalone `drain` CLI and its bounded malformed/late protocol
+controls remain available, but production cancellation uses the native owner.
 
 `./build.sh bootstrap_process_owner` (or `build.ps1 bootstrap_process_owner`)
 builds the helper through the native driver. It qualifies host Clang, applies
