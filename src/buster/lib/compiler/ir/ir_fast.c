@@ -568,15 +568,18 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             }
             if (inline_requested)
             {
-                // Expansion checks each caller and callee it reads, and each
-                // caller it rewrites, against the strict canonical form; a
-                // legacy certified shape stays a call when optional and
-                // reports its call when required. A module-wide scan here
-                // would repeat the FAST input guard on every default compile.
-                // Rewritten callers pass that check, so `validated` still
-                // describes the module.
+                // Expansion checks each caller and callee it reads against
+                // the strict canonical form; a legacy certified shape stays a
+                // call when optional and reports its call when required. A
+                // module-wide scan here would repeat the FAST input guard on
+                // every default compile. A rewritten caller with a mandatory
+                // splice is checked at once. When FAST will run, one whose
+                // splices were all optional is listed instead and proven by
+                // the next module-wide scan below, which already covers its
+                // rows (#48); otherwise it too is checked at once.
                 module->inlining = (IrInlineStatistics){0};
-                result = ir_inline_module(program, module);
+                result = ir_inline_module(program, module, program->fast_passes != 0);
+                if (module->inline_unchecked_count) validated = false;
             }
             module->inline_complete = result.error == IR_VALIDATION_NONE;
         }
@@ -653,7 +656,21 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             bool check_output = !input_certified || BUSTER_IR_TRANSFORM_CHECKS;
             u8* declined = 0;
             IrFastDecline* declines = 0;
-            for (u32 index = 0; index < module->function_count; index += 1)
+            // Callers whose optional splices skipped their own output check
+            // (ir_inline_module) are proven here by the same per-function input
+            // validation; one that fails is an inlining-output error, never a
+            // decline. Other failures keep their legacy decline.
+            u8* unchecked = 0;
+            if (!validated && module->inline_unchecked_count)
+            {
+                unchecked = arena_allocate_zeroed(scratch.arena, u8, module->function_count);
+                for (u32 listed = 0; listed < module->inline_unchecked_count; listed += 1)
+                {
+                    unchecked[module->inline_unchecked_callers[listed]] = 1;
+                }
+            }
+            module->inline_unchecked_count = 0;
+            for (u32 index = 0; index < module->function_count && result.error == IR_VALIDATION_NONE; index += 1)
             {
                 IrFunction* function = module->functions + index;
                 if (function->state == IR_FUNCTION_LOWERED)
@@ -663,7 +680,20 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                     {
                         input = ir_validate_canonical_function(program, function);
                     }
-                    if (input.error != IR_VALIDATION_NONE)
+                    if (input.error != IR_VALIDATION_NONE && unchecked && unchecked[index])
+                    {
+                        // A shared-scope failure says nothing about the
+                        // splice, so attribute only the caller's own rows.
+                        IrValidationResult own = scope.error == IR_VALIDATION_NONE
+                                                     ? input
+                                                     : ir_validate_canonical_function(program, function);
+                        if (own.error != IR_VALIDATION_NONE)
+                        {
+                            result = own;
+                            result.boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT;
+                        }
+                    }
+                    if (result.error == IR_VALIDATION_NONE && input.error != IR_VALIDATION_NONE)
                     {
                         if (!declines)
                         {
@@ -679,7 +709,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                         if (declined) declined[index] = 1;
                         module->fast.validation_skips += 1;
                     }
-                    else
+                    else if (result.error == IR_VALIDATION_NONE)
                     {
                         IR_CONSTRUCTION_RECORD(PREPARATION_FAST_FUNCTIONS, 1);
                         ir_fast_function(program, function, &module->fast);
@@ -688,7 +718,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             }
             u64 changes = 0;
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1) changes += module->fast.passes[pass].changes;
-            if (changes && check_output)
+            if (result.error == IR_VALIDATION_NONE && changes && check_output)
             {
                 IR_CONSTRUCTION_RECORD(PREPARATION_FAST_OUTPUT_VALIDATIONS, 1);
                 result = declined ? ir_validate_fast_output(program, module, declined) : ir_validate_canonical_module(program, module);
