@@ -354,7 +354,9 @@ class SchedulerTests(unittest.TestCase):
         for fixture, message in ((("silent",), "record malformed"),
                                  (("partial",), "record malformed"),
                                  (("malformed",), "record malformed"),
+                                 (("repeated",), "record malformed"),
                                  (("late", "600"), "termination incomplete.*'late': True"),
+                                 (("partial-late", "5000"), "exceeded its deadline"),
                                  (("sleep", "5000"), "exceeded its deadline")):
             with self.subTest(fixture=fixture):
                 with self.assertRaisesRegex(RuntimeError, message):

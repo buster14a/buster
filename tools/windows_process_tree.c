@@ -13,7 +13,7 @@
 //   named job and wait for each one within the budget; print one record. The
 //   launcher is not a member; it exits once its command has ended.
 // - `selftest` (Windows): membership controls with a real non-member process.
-// - `fixture <silent|partial|malformed|late <ms>|sleep <ms>>` (every host):
+// - `fixture <silent|partial|malformed|repeated|partial-late <ms>|late <ms>|sleep <ms>>` (every host):
 //   deliberately broken drain records for the scheduler's caller controls.
 // Map: tree_drain owns verification and waiting; tree_member is the only
 // identity test; tree_launch/tree_drain_main/tree_selftest are the modes.
@@ -83,6 +83,7 @@ BUSTER_GLOBAL_LOCAL int tree_fixture(int argc, char** argv)
 {
     int result = 0;
     u64 milliseconds = 0;
+    char const* complete = "{\"complete\":true,\"waited\":[],\"foreign\":[],\"pending\":[],\"failed\":[]}\n";
     if (argc >= 3 && strcmp(argv[2], "silent") == 0)
     {
     }
@@ -94,10 +95,20 @@ BUSTER_GLOBAL_LOCAL int tree_fixture(int argc, char** argv)
     {
         printf("{\"complete\":true}\n{\"complete\":true}\n");
     }
+    else if (argc >= 3 && strcmp(argv[2], "repeated") == 0)
+    {
+        printf("%s%s", complete, complete);
+    }
+    else if (argc >= 4 && strcmp(argv[2], "partial-late") == 0 && tree_decimal(argv[3], &milliseconds))
+    {
+        printf("{\"complete\":true,\"waited\":[");
+        fflush(stdout);
+        tree_sleep(milliseconds);
+    }
     else if (argc >= 4 && strcmp(argv[2], "late") == 0 && tree_decimal(argv[3], &milliseconds))
     {
         tree_sleep(milliseconds);
-        printf("{\"complete\":true,\"waited\":[],\"foreign\":[],\"pending\":[],\"failed\":[]}\n");
+        printf("%s", complete);
     }
     else if (argc >= 4 && strcmp(argv[2], "sleep") == 0 && tree_decimal(argv[3], &milliseconds))
     {
