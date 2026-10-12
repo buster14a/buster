@@ -3364,18 +3364,26 @@ The base is main `b71dfc89`, which the candidate branches from. The budgets:
   validation stays incomplete (#2761).
 
 The keyword gate's hosted census is
-[`2026-10-12T135905Z`](../../performance-audits/2026-10-12T135905Z.md), on
-candidate `51036154`, diagnostic only:
-- **Correctness passes.** The objects are byte-identical across the four
-  arms, at `-g0` and at `-g`. The reference-check builds found no
-  disagreement, `test_all` passes, and `test_self_host` keeps its fixed point.
-- **The compile falls by 23.57 M Ir on both paths.** That is −0.092% on the
-  default path and −0.099% under the pilot, which more than recovers the
-  extent table's +13.8 M. The gain is on the token path, not from the tree.
-- **The lookup budget is missed by 77.** The probe's scope lookups fall from
-  65,611 to 11,853, not to the declared 11,776. The census had counted `asm`
-  and `static_assert` as keywords, and the gate leaves those 77 tokens out
-  because it must stay exact.
+[`2026-10-12T135905Z`](../../performance-audits/2026-10-12T135905Z.md),
+diagnostic only. There were two candidates:
+- **The first, `51036154`, missed the lookup budget by 77.** It gated the
+  eleven words declared above, and its lookups fell to 11,853, not 11,776.
+  The census had counted the reserved `_Static_assert` (75) and `__asm__`
+  (2) among the keywords. The first candidate left them out on a wrong
+  rationale: that some dialect spells them as ordinary identifiers. That is
+  true only of plain `asm`. `_Static_assert` is the spelling C23's
+  `static_assert` is respelled to, and an older dialect's `static_assert`
+  keeps its own symbol. `__asm` and `__asm__` are always asm keywords.
+- **The second, `028ad7e0`, ships.** It also gates those three reserved
+  spellings, and plain `asm` stays probed.
+  - **Correctness.** The objects are byte-identical across the four arms,
+    at `-g0` and at `-g`. The reference-check builds found no disagreement.
+  - **The lookup budget passes.** Lookups fall from 65,611 to exactly
+    11,776.
+  - **The compile falls by 23.62 M Ir on both paths.** That is −0.093% on
+    the default path and −0.100% under the pilot, which more than recovers
+    the extent table's +13.8 M. The gain is on the token path, not from the
+    tree.
 - **Neither tree read is built.**
   - The switch label scan's call costs 0.22 M, which is under the 1 M bar.
   - The classification's ceiling, net of the gate, is under 30 M. A
