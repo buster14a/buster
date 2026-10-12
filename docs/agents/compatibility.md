@@ -27,6 +27,7 @@ directory and removes the compiler and in-progress outputs.
 | musl | [musl](compatibility/musl.md) |
 | libc-test through the musl harness | [libc-test](compatibility/libc-test.md), after [musl](compatibility/musl.md) |
 | CPython | [CPython](compatibility/cpython.md) |
+| QEMU (opt-in Linux x86-64 TCG census) | [QEMU](compatibility/qemu.md) |
 | RAD Debugger (Linux x86-64 diagnostic campaign) | [RAD Debugger](compatibility/raddebugger.md) |
 | curl/libcurl (Linux x86-64 blocker census) | [curl/libcurl](compatibility/curl.md) |
 | Clang test corpus | [Clang suite](compatibility/clang-suite.md) |

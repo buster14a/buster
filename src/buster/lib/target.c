@@ -976,6 +976,15 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatures target_cpu_features_x86_default(CpuModel m
     bool amd_wbnoinvd = model >= CPU_MODEL_AMD_ZEN_2 && model <= CPU_MODEL_AMD_ZEN_5;
     bool intel_wbnoinvd = (model >= CPU_MODEL_INTEL_ICELAKE_SERVER && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
                           model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    // RDTSCP is optional, unlike the PAUSE hint. Modern model profiles and
+    // native CPUID advertise it independently of vector state.
+    bool amd_rdtscp = model >= CPU_MODEL_AMD_AMD_FAMILY_10 && model <= CPU_MODEL_AMD_ZEN_5;
+    bool intel_rdtscp = model >= CPU_MODEL_INTEL_NEHALEM && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS &&
+                        model != CPU_MODEL_INTEL_BONNELL;
+    if (amd_rdtscp || intel_rdtscp)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_RDTSCP);
+    }
     if (amd_ssse3 || intel_ssse3)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSSE3);
@@ -1558,7 +1567,7 @@ bool target_cpu_features_are_valid(Target target)
             TARGET_CPU_FEATURE_X86_F16C, TARGET_CPU_FEATURE_X86_FMA, TARGET_CPU_FEATURE_X86_SSSE3,
             TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSE4_2, TARGET_CPU_FEATURE_X86_BMI2,
             TARGET_CPU_FEATURE_X86_ADX, TARGET_CPU_FEATURE_X86_MOVBE, TARGET_CPU_FEATURE_X86_RDRAND,
-            TARGET_CPU_FEATURE_X86_RDSEED, TARGET_CPU_FEATURE_X86_SHA, TARGET_CPU_FEATURE_X86_SHA512,
+            TARGET_CPU_FEATURE_X86_RDSEED, TARGET_CPU_FEATURE_X86_RDTSCP, TARGET_CPU_FEATURE_X86_SHA, TARGET_CPU_FEATURE_X86_SHA512,
             TARGET_CPU_FEATURE_X86_SM3, TARGET_CPU_FEATURE_X86_SM4, TARGET_CPU_FEATURE_X86_WAITPKG, TARGET_CPU_FEATURE_X86_PKU,
             TARGET_CPU_FEATURE_X86_PTWRITE, TARGET_CPU_FEATURE_X86_SERIALIZE, TARGET_CPU_FEATURE_X86_CLFLUSHOPT,
             TARGET_CPU_FEATURE_X86_CLWB, TARGET_CPU_FEATURE_X86_FSGSBASE, TARGET_CPU_FEATURE_X86_RTM,
@@ -2027,6 +2036,7 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("rdpid"), .feature = TARGET_CPU_FEATURE_X86_RDPID, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("rdrand"), .feature = TARGET_CPU_FEATURE_X86_RDRAND, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("rdseed"), .feature = TARGET_CPU_FEATURE_X86_RDSEED, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("rdtscp"), .feature = TARGET_CPU_FEATURE_X86_RDTSCP, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("rtm"), .feature = TARGET_CPU_FEATURE_X86_RTM, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sb"), .feature = TARGET_CPU_FEATURE_AARCH64_SB, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("serialize"), .feature = TARGET_CPU_FEATURE_X86_SERIALIZE, .arch = CPU_ARCH_X86_64},
@@ -2110,15 +2120,18 @@ bool target_cpu_feature_names_are_sorted(void)
 
 TargetCpuFeature target_cpu_feature_from_string(CpuArch arch, String8 name)
 {
+    TargetCpuFeature result = TARGET_CPU_FEATURE_NONE;
+    if (arch == CPU_ARCH_X86_64 && string_equal(name, S8("bmi"))) name = S8("bmi1");
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(target_cpu_feature_names); index += 1)
     {
         TargetCpuFeatureName entry = target_cpu_feature_names[index];
         if (target_cpu_feature_name_matches_arch(entry.arch, arch) && string_equal(entry.name, name))
         {
-            return entry.feature;
+            result = entry.feature;
+            break;
         }
     }
-    return TARGET_CPU_FEATURE_NONE;
+    return result;
 }
 
 String8 target_cpu_feature_to_string(TargetCpuFeature feature)

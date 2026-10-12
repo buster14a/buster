@@ -85,6 +85,10 @@ bool codegen_module_relocation_kind_is_aarch64(u8 kind)
     case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12:
     case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12:
     case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_CALL:
     case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21:
     case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
     case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21:
@@ -121,6 +125,10 @@ bool codegen_module_relocation_kind_is_thread_local(u8 kind)
     case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12:
     case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12:
     case CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_CALL:
     case CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32:
     case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21:
     case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
@@ -4070,6 +4078,14 @@ bool codegen_publish_machine_relocations(IrProgram* program, CodegenModule* resu
                                             ? (encoded->call_sites[site_index].thread_local_low
                                                 ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12
                                                 : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21)
+                                        : thread_local_site == MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_PAGE
+                                            ? CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21
+                                        : thread_local_site == MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_LOAD
+                                            ? CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12
+                                        : thread_local_site == MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_ADD
+                                            ? CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12
+                                        : thread_local_site == MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_CALL
+                                            ? CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_CALL
                                         : encoded->call_sites[site_index].thread_local_low
                                             ? CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12
                                             : CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12)
@@ -7119,7 +7135,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     // per-global terms -- for a module-level block and for an inline template
     // alike. The total is carried into both emitters, which are the only
     // producers that append after this array is sized.
-    u32 relocations_per_instruction = target.cpu_arch == CPU_ARCH_AARCH64 && target.os == OPERATING_SYSTEM_WINDOWS ? 4u : 3u;
+    // Windows TLS and ELF PIC descriptors each produce four sites per access.
+    u32 relocations_per_instruction = target.cpu_arch == CPU_ARCH_AARCH64 &&
+        (target.os == OPERATING_SYSTEM_WINDOWS || options.position_independent) ? 4u : 3u;
     u32 relocation_capacity = instruction_count * relocations_per_instruction + global_relocation_count +
                               (u32)BUSTER_MIN(assembly_capacity + inline_assembly_capacity, UINT32_MAX - global_relocation_count);
     result.relocations = arena_allocate(arena, CodegenModuleRelocation, relocation_capacity);

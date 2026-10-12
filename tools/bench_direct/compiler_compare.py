@@ -39,6 +39,10 @@ A fresh exact COMPILER_PROBES_REQUEST_LINE adds the compiler-probes leg (#2761):
 trusted native compiler_probes.c harness builds the FAST register-allocation and
 scheduler line-mark probes against both revisions in isolated clones and times
 them as pairs.
+A fresh exact WILD_LINKER_REQUEST_LINE adds the linker leg
+(#2761): the head's ide objects are built in an isolated clone of the head,
+then the trusted revision's wild_linker_acceptance.c --link-only times the
+host's installed Wild against mold (or the host's default ld) on them.
 
 The receipt records identities, the profile, toolchain versions, binary hashes
 and timings, and is written even when a step fails. The candidate's build runs
@@ -47,12 +51,14 @@ under the direct path's owner-only trust boundary, not a sealed result.
 
 Map: queue_head (pull-mode supersession), build (one ide), toolchain, export_tree (bounded evidence export),
 read_exported_json (classification reads the export, #2929), collect_evidence,
-measure_throughput (corpus leg), scaling_requested and measure_scaling (scaling leg),
+throughput_harness_problem (#3714 base-harness admission), measure_throughput (corpus leg),
+scaling_requested and measure_scaling (scaling leg),
 ast_pilot_request_selection and measure_ast_pilot (#3397 opt-in flag pair),
 real_source_request_selection and measure_real_source (#2761 real-source leg),
 production_profile_request_selection and measure_production_profile (#2761 PGO/LTO leg),
 compiler_probes_request_selection and measure_compiler_probes (#2761 probe leg),
-frontend_selector_request_selection and measure_frontend_selector (#2761 probes), main. Validity rules live in compiler_receipt.classify.
+frontend_selector_request_selection and measure_frontend_selector (#2761 probes),
+wild_linker_request_selection, host_linker and measure_wild_linker (#2761 linker leg), main. Validity rules live in compiler_receipt.classify.
 """
 
 from __future__ import annotations
@@ -68,6 +74,7 @@ import shutil
 import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -86,10 +93,13 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               compiler_probes_digest, validate_compiler_probes,
                               FRONTEND_SELECTOR_PROFILE, FRONTEND_SELECTOR_REQUEST_LINE, FRONTEND_SELECTOR_SCHEMA,
                               frontend_selector_digest, validate_frontend_selector,
+                              WILD_LINKER_PROFILE, WILD_LINKER_REQUEST_LINE, WILD_LINKER_SCHEMA, WILD_LINKER_COMPARATORS,
+                              wild_linker_bundle_files, wild_linker_digest, validate_wild_linker, WILD_IDENTITY,
+                              WILD_LINKER_LINKERS,
                               INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUEST_LINE,
                               ANALYZER_REQUEST_LINES,
                               ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, MAIN40_PROFILE, MAIN_PROFILES, named_main_profile, RECEIPT_SCHEMA, SCALING_PROFILE,
-                              SCALING_REQUEST, SHA, THROUGHPUT_PROFILE, classify, classify_scaling,
+                              SCALING_REQUEST, SHA, THROUGHPUT_HARNESS_FLOOR, THROUGHPUT_PROFILE, classify, classify_scaling,
                               classify_throughput, classify_throughput_exit, dumps, host_problem, inline_acceptance_requested,
                               render, scaling_digest, throughput_digest, validate_inline_acceptance,
                               analyzer_bootstrap_provenance, analyzer_profile_summary)
@@ -120,6 +130,14 @@ COMPILER_PROBES_TIMEOUT_SECONDS = 20 * 60
 FRONTEND_SCALING_TIMEOUT_SECONDS = 20 * 60
 SELECTION_TIMEOUT_SECONDS = 10 * 60
 IDE_BENCH_TIMEOUT_SECONDS = 30
+# Measured on a hosted 4-vCPU 2.3 GHz Xeon: the head's three input builds (two
+# generations, Release unity, Debug and Release separate, and the harness compile)
+# took 281 s together and the link-only harness 24 s (GNU ld as comparator, 3.4 MB
+# of evidence). The input steps share one deadline; the two bounds together stay
+# inside the unchanged 90-minute compare-pull job with its ordinary comparison.
+WILD_LINKER_BUILD_TIMEOUT_SECONDS = 20 * 60
+WILD_LINKER_HARNESS_TIMEOUT_SECONDS = 15 * 60
+WILD_LINKER_PROBE_TIMEOUT_SECONDS = 30
 ANALYZER_DRIVER_BUILD_TIMEOUT_SECONDS = 600
 ANALYZER_GENERATE_TIMEOUT_SECONDS = 900
 ANALYZER_HELPER_TIMEOUT_SECONDS = 76 * 60
@@ -147,6 +165,7 @@ PRODUCTION_PROFILE_HOST_TOOLS = ("clang", "ld.lld", "llvm-profdata", "llvm-reado
 SCALING_REQUIRED = ("scaling.json", "scaling-metadata.json")
 FRONTEND_SCALING_REQUIRED = ("provenance.json", "results.json")
 SELECTION_REQUIRED = ("report.json",)
+WILD_LINKER_REQUIRED = tuple(wild_linker_bundle_files().values())
 # Raw evidence without compiled outputs, per-run binary copies or perf data.
 EVIDENCE_IGNORE = ("*.exe", "instances", "*.data", "*.data.old", "*.o", "*.obj")
 # A scaling bundle keeps its reports, raw samples and per-sample logs; its
@@ -164,6 +183,9 @@ COMPILER_PROBES_IGNORE = (*EVIDENCE_IGNORE, "bin")
 # Frontend scaling keeps its JSON records; its generated sources (up to a few
 # MB, identified by hash in results.json) and objects are not evidence.
 FRONTEND_SCALING_IGNORE = (*EVIDENCE_IGNORE, "*.c")
+# The linker leg keeps its samples, command logs, argv and manifests; linked
+# images stay in the build trees, outside its evidence directory.
+WILD_LINKER_IGNORE = (*EVIDENCE_IGNORE, "*.elf")
 TOOLS = (("clang", "--version"), ("cmake", "--version"), ("ninja", "--version"), ("tcc", "-v"),
          ("perf", "--version"), ("taskset", "--version"), ("git", "--version"))
 
@@ -855,6 +877,31 @@ def scaling_requested(candidate: Path, base: str, head: str) -> bool:
     return bool(changed) and present
 
 
+def throughput_harness_problem(candidate: Path, base: str) -> str:
+    """Why the base revision's corpus harness cannot run THROUGHPUT_PROFILE; '' when admitted (#3714).
+
+    Only the commit graph is read, so the blob-less checkout fetches nothing. A floor git cannot
+    place, and a probe that times out or cannot start, fail closed like a base that predates it,
+    as a reason the caller retains in the failed receipt.
+    """
+    try:
+        status = captured_run(["git", "-C", str(candidate), "merge-base", "--is-ancestor", THROUGHPUT_HARNESS_FLOOR,
+                               base], capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode
+    except (subprocess.TimeoutExpired, OSError) as error:
+        status = f"{error.__class__.__name__}: {error}"
+    problem = ""
+    if isinstance(status, str):
+        problem = f"throughput harness admission probe failed ({status}); not measured"
+    elif status == 1:
+        problem = (f"unsupported historical throughput harness: base {base} predates {THROUGHPUT_HARNESS_FLOOR}, "
+                   f"so its --mode all is not the {THROUGHPUT_PROFILE['name']} FAST/QUALITY population; "
+                   "not measured")
+    elif status != 0:
+        problem = (f"throughput harness admission could not place {THROUGHPUT_HARNESS_FLOOR} before base {base} "
+                   f"(git exited {status}); not measured")
+    return problem
+
+
 def request_selector_count(candidate: Path, revision: str, selector: str) -> int | None:
     """Selector occurrences in one committed request file; None means git could not prove the blob."""
     object_name = f"{revision}:{ANALYZER_REQUEST_PATH}"
@@ -998,6 +1045,18 @@ def frontend_selector_request_selection(candidate: Path, head: str) -> tuple[boo
         return False, ""
     if any(delta != 1 for delta in deltas):
         return False, "the frontend-selector selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
+def wild_linker_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #2761's Wild linker leg only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, WILD_LINKER_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the wild-linker selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the wild-linker selector must be added exactly once relative to every head parent"
     return True, ""
 
 
@@ -1693,6 +1752,178 @@ def measure_frontend_selector(candidate: Path, bins: Path, work: Path, evidence:
     record["status"] = "complete" if not errors else "failed"
 
 
+def host_linker(command: str, log: Path) -> tuple[dict | None, str, bool]:
+    """(identity, problem, absent) of the host's installed `command`, found with `command -v`, never downloaded."""
+    identity, problem, found = None, "", ""
+    try:
+        found = captured_run(["/bin/sh", "-c", f"command -v {command}"], capture_output=True, text=True,
+                             timeout=WILD_LINKER_PROBE_TIMEOUT_SECONDS, check=False).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired) as error:
+        problem = f"could not look up the host's {command}: {error.__class__.__name__}"
+    absent = not problem and not (found.startswith("/") and os.path.isfile(found) and os.access(found, os.X_OK))
+    if absent:
+        problem = f"the host has no installed {command} (command -v {command} found {found!r})"
+    if not problem and ("'" in found or '"' in found):
+        problem = f"the host's {command} path {found!r} cannot be quoted for the harness"
+    if not problem:
+        try:
+            result = captured_run([found, "--version"], capture_output=True, text=True,
+                                  timeout=WILD_LINKER_PROBE_TIMEOUT_SECONDS, check=False)
+            lines = (result.stdout + result.stderr).strip().splitlines()
+            version = lines[0].strip() if result.returncode == 0 and lines else ""
+        except (OSError, subprocess.TimeoutExpired):
+            version = ""
+        if not version:
+            problem = f"the host's {command} at {found} did not report a version"
+        else:
+            real = os.path.realpath(found)
+            identity = {"command": command, "path": found, "realpath": real, "version": version,
+                        "sha256": sha256(Path(real))}
+    with log.open("a", encoding="utf-8") as stream:
+        stream.write(f"$ command -v {command}\n{found}\n{identity or problem}\n")
+    return identity, problem, absent
+
+
+def elf_comment(data: bytes) -> list[str] | None:
+    """The NUL-separated strings of a little-endian ELF64 image's .comment section, or None if it has none."""
+    strings = None
+    try:
+        if data[:4] == b"\x7fELF" and data[4] == 2 and data[5] == 1:
+            shoff, = struct.unpack_from("<Q", data, 0x28)
+            entsize, count, names = struct.unpack_from("<HHH", data, 0x3A)
+            sections = [struct.unpack_from("<IIQQQQ", data, shoff + index * entsize) for index in range(count)]
+            table = sections[names]
+            for name, _, _, _, offset, size in sections:
+                end = data.index(b"\0", table[4] + name)
+                if data[table[4] + name:end] == b".comment":
+                    strings = [item.decode("utf-8", "replace") for item in data[offset:offset + size].split(b"\0") if item]
+    except (struct.error, IndexError, ValueError):
+        strings = None
+    return strings
+
+
+def record_link_comment(tree: Path, output: Path, cell: str, linker: str) -> list[str]:
+    """Write the .comment strings of the harness's saved output for one cell and linker, after checking that the
+    saved image is the one whose hash the harness recorded; return the problems."""
+    problems: list[str] = []
+    image = tree / f"{cell}-{linker}.elf"
+    recorded = output / f"{cell}-{linker}.output.sha256"
+    try:
+        data = image.read_bytes()
+        expected = recorded.read_text(encoding="utf-8").strip()
+    except OSError as error:
+        data, expected = b"", None
+        problems.append(f"wild-linker {cell} {linker} output unreadable: {error.__class__.__name__}")
+    if expected is not None and hashlib.sha256(data).hexdigest() != expected:
+        problems.append(f"wild-linker {cell} {linker} saved output is not the image the harness hashed")
+    strings = elf_comment(data) if not problems else None
+    if strings is None and not problems:
+        problems.append(f"wild-linker {cell} {linker} output has no readable .comment section")
+    (output / f"{cell}-{linker}.comment.txt").write_text("".join(item + "\n" for item in strings or []),
+                                                        encoding="utf-8")
+    return problems
+
+
+def measure_wild_linker(candidate: Path, work: Path, evidence: Path, head: str, receipt: dict) -> None:
+    """Build the head's ide link inputs in an isolated clone, then time the host's Wild against its comparator."""
+    record = receipt["wild_linker"]
+    profile = WILD_LINKER_PROFILE
+    log = evidence / "wild-linker-build.log"
+    exported = evidence / "wild_linker"
+    errors: list[str] = []
+    status = None
+    linkers = {}
+    wild, problem, _ = host_linker("wild", log)
+    if wild is not None and not WILD_IDENTITY.fullmatch(wild["version"]):
+        problem = f"the host's wild at {wild['path']} reports {wild['version']!r}, not Wild's own identity"
+    if problem:
+        errors.append(problem)
+    else:
+        linkers["wild"] = {**wild, "kind": "wild", "policy": profile["wild"]["policy"],
+                           "threads1": profile["wild"]["threads1"]}
+        # The audit's comparator, mold; the host's default linker only when mold is not installed at all.
+        for kind, frozen in WILD_LINKER_COMPARATORS.items():
+            if "comparator" not in linkers and not errors:
+                comparator, problem, absent = host_linker(frozen["command"], log)
+                if comparator is not None and not comparator["version"].startswith(frozen["version"]):
+                    problem = f"the host's {frozen['command']} reports {comparator['version']!r}, not a {kind} version"
+                if not problem:
+                    linkers["comparator"] = {**comparator, "kind": kind, "policy": frozen["policy"],
+                                             "threads1": frozen["threads1"], "substituted": kind != "mold"}
+                elif not (absent and kind == "mold"):
+                    errors.append(f"comparator {kind}: {problem}")
+    source = work / "wild-linker-source"
+    output = work / "wild-linker"
+    tools = Path(__file__).resolve().parents[1]
+    harness_sources = {name: sha256(tools / name) for name in ("wild_linker_acceptance.c", "wild_linker_bench.c")
+                       if (tools / name).is_file()}
+    harness = work / "wild-linker-harness"
+    if len(linkers) == 2:
+        measured = time.monotonic()
+        # A shared clone keeps the candidate checkout and its build tree untouched for the closure checks.
+        steps = [(["git", "-c", "core.hooksPath=/dev/null", "clone", "--quiet", "--shared", "--no-checkout",
+                   str(candidate), str(source)], candidate, GIT_TIMEOUT_SECONDS),
+                 (["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null",
+                   "-C", str(source), "checkout", "--quiet", "--detach", head], candidate, GIT_TIMEOUT_SECONDS)]
+        for tree, arguments in profile["trees"].items():
+            steps.append((["./build.sh", "generate", "--build-directory", tree, *arguments], source,
+                          WILD_LINKER_BUILD_TIMEOUT_SECONDS))
+            steps.extend((["./build.sh", "build", "--build-directory", tree, "--config", config, "-t", "ide"], source,
+                          WILD_LINKER_BUILD_TIMEOUT_SECONDS) for built, config in profile["builds"] if built == tree)
+        steps.append((["clang", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-Wpedantic",
+                       str(tools / "wild_linker_acceptance.c"), "-o", str(harness)], candidate, GIT_TIMEOUT_SECONDS))
+        build_status = 0
+        # One deadline for every input step, so the leg's worst case is the two bounds together.
+        deadline = measured + WILD_LINKER_BUILD_TIMEOUT_SECONDS
+        for argv, cwd, timeout in steps:
+            if build_status == 0:
+                build_status = run(argv, cwd, log, max(1, min(timeout, int(deadline - time.monotonic()))))
+        receipt["timings"]["wild_linker_build_seconds"] = round(time.monotonic() - measured, 3)
+        record["build_exit"] = build_status
+        if build_status != 0:
+            errors.append(f"the wild-linker input build or harness compile exited {build_status} (see {log.name})")
+        else:
+            output.mkdir(parents=True, exist_ok=False)
+            measured = time.monotonic()
+            status = run(["taskset", "-c", ",".join(str(cpu) for cpu in profile["cpus"]), str(harness), "--link-only",
+                          str(output), str(source), linkers["wild"]["path"], linkers["comparator"]["path"],
+                          linkers["comparator"]["policy"], linkers["comparator"]["threads1"]],
+                         source, evidence / "wild-linker.log", WILD_LINKER_HARNESS_TIMEOUT_SECONDS)
+            receipt["timings"]["wild_linker_harness_seconds"] = round(time.monotonic() - measured, 3)
+            for linker in linkers.values():
+                try:
+                    linker["sha256_after"] = sha256(Path(linker["realpath"]))
+                except OSError:
+                    # Removed or replaced during the leg: recorded, and refused by validate_wild_linker.
+                    linker["sha256_after"] = None
+            inputs = {}
+            for cell in profile["cells"]:
+                manifest = output / f"{cell}-inputs.sha256"
+                inputs[cell] = sha256(manifest) if manifest.is_file() else None
+                for linker in WILD_LINKER_LINKERS if status == 0 else ():
+                    errors.extend(record_link_comment(source / profile["cell_trees"][cell][0], output, cell, linker))
+            identity = {"schema": WILD_LINKER_SCHEMA, "profile": profile["name"], "head": head, "cpu_model": cpu_model(),
+                        "cpus": profile["cpus"], "linkers": linkers, "harness": harness_sources, "inputs": inputs,
+                        "build_root": str(source), "exit": status}
+            (output / "wild-linker.json").write_text(dumps(identity) + "\n", encoding="utf-8")
+            record["identity"] = identity
+            problems, record["evidence_omissions"] = export_tree(output, exported, evidence, WILD_LINKER_IGNORE,
+                                                                 WILD_LINKER_REQUIRED)
+            errors.extend(problems)
+            files = {}
+            for key, name in wild_linker_bundle_files().items():
+                try:
+                    files[key] = (exported / name).read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as error:
+                    errors.append(f"exported evidence wild_linker/{name} unreadable: {error.__class__.__name__}")
+            errors.extend(validate_wild_linker(status, files, head, identity))
+            record["cells"] = wild_linker_digest(files.get("raw"), files.get("summary"))
+    record["linkers"] = linkers
+    record["exit"] = status
+    record["errors"] = errors
+    record["status"] = "complete" if not errors and status == 0 else "failed"
+
+
 def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path, bins: Path, log: Path,
             receipt: dict, summaries: list) -> None:
     """Build both revisions and run the lab, corpus and scaling legs; the lab summary goes to summaries."""
@@ -1767,6 +1998,18 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         if real_requested or ast_requested or production_requested or probes_requested:
             reasons.append("frontend-selector-v1 cannot be combined with real-source throughput, ast-pilot "
                            "acceptance, the PGO/LTO production profile or compiler-probes-v1")
+    linker_requested = arguments.mode == "pull" and getattr(arguments, "wild_linker_requested", False)
+    problem = getattr(arguments, "wild_linker_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if linker_requested:
+        receipt["wild_linker"] = {"requested": True, "request_line": WILD_LINKER_REQUEST_LINE,
+                                  "profile": WILD_LINKER_PROFILE, "status": "pending"}
+        # The long opt-in legs and its input builds together would not fit the compare-pull job, and one
+        # opt-in leg per attempt keeps a report from being shared between two profiles.
+        if real_requested or ast_requested or production_requested or probes_requested or selector_requested:
+            reasons.append("wild-linker-v1 cannot be combined with real-source throughput, ast-pilot acceptance, "
+                           "the PGO/LTO production profile, compiler-probes-v1 or the frontend-selector probes")
     if not reasons:
         for role, commit in (("baseline", arguments.base), ("candidate", arguments.head), ("closure", arguments.base)):
             mark(receipt, evidence, f"build-{role}")
@@ -1888,6 +2131,9 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         if selector_requested:
             mark(receipt, evidence, "frontend-selector")
             measure_frontend_selector(candidate, bins, work, evidence, receipt)
+        if linker_requested:
+            mark(receipt, evidence, "wild-linker")
+            measure_wild_linker(candidate, work, evidence, arguments.head, receipt)
         mark(receipt, evidence, "validate")
         raw_closure = {}
         if snapshot_closure:
@@ -1985,6 +2231,14 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             reasons.append("the frontend-selector probes were requested but did not reach their measurement phase")
         if record["status"] != "complete":
             receipt["state"] = "failed"
+    if linker_requested:
+        record = receipt["wild_linker"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("the wild-linker leg was requested but did not reach its measurement phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
 
 
 
@@ -2018,6 +2272,8 @@ def main(argv: list[str] | None = None) -> int:
         compiler_probes_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.frontend_selector_requested, arguments.frontend_selector_request_problem = (
         frontend_selector_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.wild_linker_requested, arguments.wild_linker_request_problem = (
+        wild_linker_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}
     utility = getattr(arguments, "utility_owned_phases", False)
     main_owned = getattr(arguments, "main_owned_phases", False)
@@ -2098,6 +2354,12 @@ def main(argv: list[str] | None = None) -> int:
     expected = (arguments.head, arguments.base, arguments.pull_head, arguments.head_tree, arguments.base_tree)
     if observed is not None and observed != expected:
         reasons.append(f"candidate checkout {observed} does not match the authorized identity {expected}")
+    # Admit the base revision's corpus harness before any build or lab (#3714). The
+    # MAIN-owned routes replay a sealed preflight and measure only main commits past the floor.
+    if not reasons and not early_owned and not analyzer_requested:
+        problem = throughput_harness_problem(candidate, arguments.base)
+        if problem:
+            reasons.append(problem)
 
     # Skip a pull request whose head already moved; an unknown answer measures.
     # A main commit stays on main as main moves on, so it is always measured.

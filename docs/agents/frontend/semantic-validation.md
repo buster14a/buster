@@ -418,6 +418,11 @@ frontend forms and both native allocators, with syntax/object diagnostic
 equivalence for a missing semicolon or attribute arguments.
 
 A modification destination is typed from its whole operand.
+Function-typed destinations are refused before assignment-source conversions,
+including direct, parenthesized and dereferenced designators in unevaluated
+operands. Function pointer objects retain their pointer type and remain valid
+assignment destinations. The driver diagnostic-equivalence corpus covers these
+negative and positive neighbors in C17/C23 and both frontend SSA forms (#3746).
 `c_parse_assignment_identifier_is_operand` is the one rule both assignment
 scans in `c_parse_validate_const_assignments` use for when the identifier in
 front of `=` is that whole operand: a member access, indirection, address-of

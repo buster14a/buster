@@ -4,6 +4,121 @@
 #include <buster/lib/os_internal.h>
 #include <buster/lib/arena_internal.h>
 
+BUSTER_GLOBAL_LOCAL UnitTestResult arena_test_huge_pages(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS
+    // A real child proves startup environment parsing and DEFAULT resolution,
+    // without mutating process-global policy while other test lanes exist.
+    if (string_equal(os_get_environment_variable(S8("BUSTER_TEST_HUGE_PAGE_CHILD")), S8("1")))
+    {
+        bool enabled = string_equal(os_get_environment_variable(S8("BUSTER_ARENA_HUGE_PAGES")), S8("1"));
+        OsHugePageTestCounters before = os_huge_pages_test_counters();
+        Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(4), .flags = {.no_pool = 1}});
+        OsHugePageTestCounters after = os_huge_pages_test_counters();
+        bool valid = arena != 0 && after.requests - before.requests == (u64)enabled;
+        if (arena)
+        {
+            valid = valid && arena->flags.huge_pages == (enabled ? ARENA_HUGE_PAGES_ENABLED : ARENA_HUGE_PAGES_DISABLED);
+            u8* bytes = arena_allocate(arena, u8, 16);
+            bytes[0] = 0x5a;
+            valid = valid && bytes[0] == 0x5a && arena_destroy(arena, 1);
+        }
+        os_exit(valid ? 0 : 1);
+    }
+
+    String8 values[] = {S8(""), S8("0"), S8("1"), S8("yes"), S8("10")};
+    for (u64 index = 0; index <= BUSTER_ARRAY_LENGTH(values); index += 1)
+    {
+        String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test"), S8("--module=arena_tests"), S8("--ci=1")};
+        String8 keys[] = {S8("BUSTER_TEST_HUGE_PAGE_CHILD"), S8("BUSTER_ARENA_HUGE_PAGES")};
+        String8 child_values[] = {S8("1"), index < BUSTER_ARRAY_LENGTH(values) ? values[index] : S8("")};
+        // The final case omits the option entirely.
+        u64 environment_count = index < BUSTER_ARRAY_LENGTH(values) ? 2 : 1;
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+            (SliceString8){.pointer = keys, .length = environment_count},
+            (SliceString8){.pointer = child_values, .length = environment_count},
+            (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_ERROR});
+        if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
+        {
+            ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+            BUSTER_TEST(arguments, !wait.timed_out);
+            BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+#endif
+
+    u64 sizes[] = {BUSTER_MB(4), BUSTER_MB(2), BUSTER_MB(4), BUSTER_MB(4)};
+    u64 counts[] = {1, 1, 3, 1};
+    u64 requests[] = {0, 0, 3, 1};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sizes); index += 1)
+    {
+        bool refuse = index == 3;
+        OsHugePageTestCounters before = os_huge_pages_test_counters();
+        os_huge_pages_test_force_refusal(refuse);
+        Arena* arena = arena_create((ArenaCreation){
+            .reserved_size = sizes[index], .count = counts[index],
+            .flags = {.no_pool = 1, .huge_pages = index == 0 ? ARENA_HUGE_PAGES_DISABLED : ARENA_HUGE_PAGES_ENABLED},
+        });
+        OsHugePageTestCounters after = os_huge_pages_test_counters();
+        os_huge_pages_test_force_refusal(false);
+        BUSTER_TEST(arguments, after.requests - before.requests == requests[index]);
+        BUSTER_TEST(arguments, after.forced_refusals - before.forced_refusals == (u64)refuse);
+        BUSTER_TEST(arguments, after.bytes - before.bytes == requests[index] * BUSTER_MB(2));
+        if (BUSTER_REQUIRE(arguments, arena != 0))
+        {
+            if (requests[index])
+            {
+                BUSTER_TEST(arguments, after.last_address == (u8*)arena + sizes[index] * (counts[index] - 1) + BUSTER_MB(2));
+                BUSTER_TEST(arguments, after.last_size == BUSTER_MB(2));
+            }
+            for (u64 slice = 0; slice < counts[index]; slice += 1)
+            {
+                Arena* member = (Arena*)((u8*)arena + sizes[index] * slice);
+                u8* bytes = arena_allocate(member, u8, 32);
+                bytes[0] = 0x35;
+                bytes[31] = 0x72;
+                BUSTER_TEST(arguments, bytes[0] == 0x35 && bytes[31] == 0x72);
+            }
+            BUSTER_TEST(arguments, arena_destroy(arena, counts[index]));
+        }
+    }
+
+    // An advised mapping cannot satisfy an explicitly disabled creation.
+    // Both policies stay reusable, without reissuing advice on a hit.
+    arena_pool_release_thread();
+    ArenaCreation disabled = {.reserved_size = BUSTER_MB(4), .flags = {.pool_reuse = 1, .huge_pages = ARENA_HUGE_PAGES_DISABLED}};
+    ArenaCreation enabled = disabled;
+    enabled.flags.huge_pages = ARENA_HUGE_PAGES_ENABLED;
+    Arena* plain = arena_create(disabled);
+    if (BUSTER_REQUIRE(arguments, plain != 0))
+    {
+        BUSTER_TEST(arguments, arena_destroy(plain, 1));
+        Arena* hinted = arena_create(enabled);
+        if (BUSTER_REQUIRE(arguments, hinted != 0))
+        {
+            BUSTER_TEST(arguments, hinted != plain);
+            BUSTER_TEST(arguments, arena_destroy(hinted, 1));
+            OsHugePageTestCounters before = os_huge_pages_test_counters();
+            Arena* plain_again = arena_create(disabled);
+            Arena* hinted_again = arena_create(enabled);
+            OsHugePageTestCounters after = os_huge_pages_test_counters();
+            BUSTER_TEST(arguments, plain_again == plain && hinted_again == hinted);
+            BUSTER_TEST(arguments, after.requests == before.requests);
+            if (plain_again)
+            {
+                BUSTER_TEST(arguments, arena_destroy(plain_again, 1));
+            }
+            if (hinted_again)
+            {
+                BUSTER_TEST(arguments, arena_destroy(hinted_again, 1));
+            }
+        }
+    }
+    arena_pool_release_thread();
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult arena_test_decommit_zeroed_reuse(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -198,6 +313,7 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, arena_test_huge_pages);
 
 #if BUSTER_BENCH_ALLOCATIONS
     {

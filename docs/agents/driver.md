@@ -384,6 +384,12 @@ publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
 the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
 not predefined at any level. `-mattr` overrides still refine the level.
 The psABI's LAHF-SAHF has no target feature and is implied by long mode.
+`-m64` selects x86-64 execution mode, including from an i386 target, and clears
+`code16`. Together with `-m16` and `-m32`, the last spelling wins independently
+of `--target` order. Repeated `-m64` preserves an existing x86-64 target's OS
+data model and CPU features. All three modes are refused for foreign and GPU
+targets; `-mx32` remains unsupported (#3458).
+
 For 32-bit x86, the canonical target architecture is `i386`; `i386`, `i486`,
 `i586` and `i686` are accepted architecture spellings, while `-march=i386`
 and `-march=i686` select explicit CPU models. The I386 baseline models GCC's
@@ -475,7 +481,17 @@ disables it. A later `-std=` restores that dialect's default (on in strict C99
 to C17, off in GNU modes and C23), so the last of these options wins, as in
 Clang. `-nostdlibinc` drops the system include directories but keeps the
 compiler resource directory (`stddef.h` and the other freestanding headers);
-`-nostdinc` drops both. `-working-directory=DIR` and `-working-directory DIR`
+`-nostdinc` drops both. Explicit `-I`, `-isystem` and `-idirafter`
+directories remain available with either switch. `-idirafter DIR` and
+`-idirafterDIR` add system-header directories after `-I`, `-isystem`, the
+compiler resource headers and the default system roots, preserving the order
+of repeated `-idirafter` options. Both quoted and angle includes consult them;
+quoted includes still search the including file\'s directory first. Headers
+resolved there are excluded by `-MMD`. External GPU pipelines refuse
+`-idirafter` explicitly because their system-path forwarding would lose its
+late search position. The registered
+`compiler_driver_test_idirafter` covers shadowed headers, sysroot defaults,
+`-nostdinc`/`-nostdlibinc`, `#include_next`, both spellings and MD/MMD classification. `-working-directory=DIR` and `-working-directory DIR`
 resolve relative input paths against `DIR` with host path rules (on POSIX only
 a leading `/` is absolute and `\` and `:` are ordinary filename bytes; on
 Windows `\x.c` takes the root name of `DIR` (`C:` or UNC `\\server`) and
@@ -926,6 +942,31 @@ source and encoder paths did for this snapshot; they do not supply an
 independent architectural oracle for every form. The broader #2931 issue
 remains open for unrelated encoding defects and further proof.
 
+X86 source forms also include baseline `pause`, `prefetcht0`/`prefetcht1`/
+`prefetcht2`/`prefetchnta`, `clflush`, and 32/64-bit `movnti` stores. PAUSE is
+an unconditional REP-NOP hint; prefetch and cache-flush rows map to the existing
+SSE/SSE2 baseline. ADX and PCLMUL metadata aliases use `adx` and `pclmul`.
+`rdtscp` is independently enableable with `-mattr=+rdtscp` or `-mrdtscp`, is
+included by modern AMD/Intel model profiles, and is detected from extended
+CPUID EDX bit 27 for `-march=native`. Its absence is a named feature refusal.
+
+AT&T `cvtsi2sd{l,q}`, `cvtsi2ss{l,q}` and `crc32{b,w,l,q}` suffixes describe
+the integer source, independently of the XMM/CRC accumulator width. CRC32 word
+sources use the 66 prefix with a 32-bit accumulator; qword sources require a
+64-bit accumulator. Register-controlled `bextr` selects BMI1's VEX form; an
+immediate control still selects the separately gated TBM XOP form. `-mbmi`
+and `-mattr=+bmi` alias `bmi1`. `kmovw` accepts mask/GPR32 and mask/memory16
+transfers, and `vpcompressd` accepts a masked memory destination with a dword
+element, including AT&T `(%rax){%k2}`. Zeroing a memory destination is refused.
+
+`assembly_test_x86_common_source_forms` checks GNU as 2.47 bytes in both
+dialects, public assembly units, baseline feature refusals, Zen 4/Skylake
+AVX-512 profiles and malformed neighbours. The driver's
+`compiler_driver_test_pause_conversion_round_trip` reassembles FAST/QUALITY
+Buster listings with byte-identical text and captured pristine GCC 16.2.1
+`-O2 -S` scalar conversions. These bounded witnesses do not claim every
+metadata form or arbitrary external listing is source-complete (#2931).
+
 On Mach-O, `.section SEGMENT,SECTION[,TYPE[,ATTRIBUTES]]` and
 `.pushsection` accept the pairs Buster's listing writer represents:
 `__TEXT,__text,regular,pure_instructions`, `__TEXT,__const`,
@@ -1360,6 +1401,29 @@ Its configured native Linux control builds a real archive with host compiler
 and archiver, links an independent host control, and runs both Buster's direct
 and sysroot-default named links.
 
+Native x86-64 and AArch64 Linux ELF image links also accept direct `.so`
+and versioned `.so.N` file operands (numeric version components), including the full paths returned by
+CMake's `find_library`. Classification uses the per-input language snapshot:
+`-x c`, `-x cpp-output` and `-x assembler` select source even with a
+`.so` suffix; `-x none` restores DSO admission. Automatic `.so.c`,
+`.so.i` and `.so.s` inputs keep their source phases.
+DSOs retain their position among `-l` occurrences
+and form a serial translation-unit boundary. The driver reads exactly the
+supplied path; `-L` and default roots cannot substitute for a missing or
+incompatible direct input. The ordinary ELF export/version reader supplies
+imports, and `DT_NEEDED` uses `DT_SONAME` when present, otherwise the
+operand's original spelling. Repeated identities are emitted once.
+The `-v` `buster-native-ld` line includes each original file operand.
+
+Direct DSOs are refused for compile-only, preprocessing, syntax-only,
+assembly, LLVM/GPU output, foreign/non-ELF targets and the in-memory
+retained-object route. Missing, malformed and target-incompatible files
+fail the link with the supplied path and preserve existing output.
+`compiler_driver_library_path_inputs` checks both ELF targets and allocators,
+SONAME/no-SONAME identity, versioned paths, mixed `-l` order, duplicates,
+linker scripts and refusals. `compiler_driver_library_path_native` compares
+native links and execution against the configured GCC/Clang.
+
 For requested Linux shared libraries, located GNU linker scripts support
 `INPUT(...)`, `GROUP(...)` and `AS_NEEDED(...)`, including nested commands,
 commas, quoted filenames, whitespace and C block comments. Members name ELF64
@@ -1616,9 +1680,11 @@ reference model (see the position-independent code bullets in
 acceptable to `ld.lld -shared -z text`; Buster's Linux `-shared` and `-pie`
 writers still exist only for x86-64. Android AArch64 executable links use the
 AArch64 PIC model automatically. Thread-local access under AArch64
-ELF PIC is refused by a named code-generation diagnostic (emitting TLSDESC is
-not implemented; foreign TLSDESC objects are relaxed at link time, see the
-AArch64 TLS paragraph below) and publishes no output. Cancellation, preprocessing,
+ELF PIC emits the general-dynamic descriptor sequence and its four TLSDESC
+relocations. Independent platform linkers can build shared objects from these
+objects; Buster's fixed-address AArch64 linker relaxes the descriptor to
+local-exec, using the same path as foreign TLSDESC objects (see the
+AArch64 TLS paragraph below). Cancellation, preprocessing,
 syntax-only and assembly/prebuilt-only input routes retain their behavior.
 Mach-O and COFF keep their existing target models; Wasm/eBPF compatibility
 behavior is unchanged. LLVM-bitcode and direct backend model requests remain
@@ -1939,6 +2005,15 @@ The supported subset is:
 - Linux and Android ELF links: `--no-undefined`, `-no-undefined`, and the
   two arguments `-z defs` require strong references to resolve. Executables
   already enforce this rule; on a shared object it overrides loader resolution.
+- x86-64 Linux executables, PIEs and shared objects: `-rpath DIR`,
+  `--rpath DIR`, `-rpath=DIR` and `--rpath=DIR` write a runtime search path.
+  Repeated paths are joined with `:` in command-line order. The default and
+  `--enable-new-dtags` write `DT_RUNPATH`; `--disable-new-dtags` writes
+  `DT_RPATH`, and the last dtag switch wins. Loader tokens such as `$ORIGIN`
+  are preserved literally (quote them in the shell). Each image's loader
+  expands `$ORIGIN` relative to that image. This is a runtime path, separate
+  from `-L` library discovery at link time; `-rpath-link` remains refused.
+  Missing or empty operands and unsupported targets fail before publication.
 - x86-64 Linux shared objects: `-soname NAME`, `--soname NAME`, `-h NAME`,
   `-soname=NAME`, and `--soname=NAME` set `DT_SONAME`.
 
@@ -2016,7 +2091,11 @@ independent installed GCC and Clang preprocessing of the matrix and includes.
 depfile path comes from the object path by removing only the basename's last
 extension and appending `.d`; `-MF` overrides it. `-MT` adds a raw target,
 `-MQ` adds an escaped target, and the default target is the escaped object path.
-Multiple target options retain command-line order. `-MP` adds phony rules for
+Multiple target options retain command-line order, including repeats and empty
+fragments. Parsing retains raw/quoted fragments and joins them once with checked
+sizing; target storage and copying grow linearly with argument and output bytes.
+`compiler_driver_test_dependency_target_scaling` bounds actual parser arena growth
+at 128 and 2,048 targets, directly and through response files. `-MP` adds phony rules for
 header prerequisites. `-MF`, `-MT`, `-MQ`, and `-MP` require `-MD` or `-MMD`;
 explicit `-MF`/target options cannot be used with multiple inputs.
 
@@ -2139,7 +2218,15 @@ The globals and publics streams index each module's top-level procedures
 `S_GDATA32`/`S_LDATA32`); global ones also get an `S_PUB32` and an entry in the
 publics address map, sorted by section and offset (`pdb_gsi_emit`). With these
 empty, DbgHelp loads the PDB only as "public symbols & lines". The regression is
-`pdb_test_global_indexes`.
+`pdb_test_global_indexes`. Bucket ordering retains the format hash and name
+comparison, with stable insertion sort capped at 16 entries and stable bottom-up
+merge sort for larger buckets (#3737). One scratch array sized to the largest
+bucket is reused, bounding comparisons to O(N log N) even for repeated-hash
+names. `pdb_test_gsi_sorting` checks comparison bounds and stable ties;
+`pdb_test_gsi_colliding_indexes` checks both emitted indexes. The existing
+mixed ASCII/non-ASCII comparator can be non-transitive (#3752); for such inputs the
+large-bucket merge order is deterministic but may differ from insertion order.
+No comparator or on-disk format change is made.
 
 CodeView names a frame-resident location with `S_DEFRANGE_REGISTER_REL`
 against RBP (x86-64) or X29 (AArch64), the base codegen normalizes FRAME offsets

@@ -43,6 +43,7 @@
 //   tools/ci_no_code.c                          conservative no-code admission plan
 //   tools/source_size.c                         source-size report and ratchet
 //   tools/ci_unit_tests.c                       isolated test-module partitions
+//   tools/qemu_compat.c                         opt-in pinned QEMU TCG blocker census
 //   tools/clang_suite.c                         pinned external Clang source ledger and preprocessing probes
 //   compat_ide_select, compat_ide_resolve       compatibility harness compiler selection
 //                                                and compatibility_ide_selection_self_test
@@ -157,6 +158,8 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_MODE_MATRIX,
     BUILD_COMMAND_TEST_DIFFERENTIAL,
     BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS,
+    BUILD_COMMAND_TEST_QEMU,
+    BUILD_COMMAND_QEMU_INPUT_SELF_TEST,
     BUILD_COMMAND_TEST_CLANG_SUITE,
     BUILD_COMMAND_TEST_GPU_TOOLCHAINS,
     BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS,
@@ -25506,6 +25509,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_OPTNONE_AUDIT:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS:
+        case BUILD_COMMAND_TEST_QEMU:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
         case BUILD_COMMAND_TEST_CURL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
@@ -25542,6 +25546,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
         {.command = BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK, .owns_arguments = true},
         {.command = BUILD_COMMAND_COMPILER_CLOSURE, .owns_arguments = true},
         {.command = BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION, .owns_arguments = true},
+        {.command = BUILD_COMMAND_TEST_QEMU, .owns_arguments = true},
+        {.command = BUILD_COMMAND_QEMU_INPUT_SELF_TEST, .owns_arguments = false},
         {.command = BUILD_COMMAND_TEST_CLANG_SUITE, .owns_arguments = true},
         {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
         {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
@@ -39607,6 +39613,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 #include "tools/ci_no_code.c"
 #include "tools/external_projects.c"
 #include "tools/ci_unit_tests.c"
+#include "tools/qemu_compat.c"
 #include "tools/clang_suite.c"
 #include "tools/compiler_profile_qualification.c"
 #include "tools/curl_compat.c"
@@ -39674,6 +39681,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_MODE_MATRIX] = S8_INITIALIZER("test_mode_matrix"),
         [BUILD_COMMAND_TEST_DIFFERENTIAL] = S8_INITIALIZER("test_differential"),
         [BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS] = S8_INITIALIZER("test_aarch64_assembly_census"),
+        [BUILD_COMMAND_TEST_QEMU] = S8_INITIALIZER("test_qemu"),
+        [BUILD_COMMAND_QEMU_INPUT_SELF_TEST] = S8_INITIALIZER("qemu_input_self_test"),
         [BUILD_COMMAND_TEST_CLANG_SUITE] = S8_INITIALIZER("test_clang_suite"),
         [BUILD_COMMAND_TEST_GPU_TOOLCHAINS] = S8_INITIALIZER("test_gpu_toolchains"),
         [BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS] = S8_INITIALIZER("native_retirement_census"),
@@ -39788,6 +39797,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_OPTNONE_AUDIT: result = optnone_audit_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_DIFFERENTIAL: result = differential_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS: result = aarch64_assembly_census_main(arena, owned_arguments, arguments.pointer[0]); break;
+            case BUILD_COMMAND_TEST_QEMU: result = qemu_compat_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_CLANG_SUITE: result = clang_suite_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_CURL: result = curl_compat_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS: result = native_retirement_census_main(arena, owned_arguments); break;
@@ -40858,6 +40868,11 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             result = lua_staging_self_test(arena);
         }
         break;
+        case BUILD_COMMAND_QEMU_INPUT_SELF_TEST:
+        {
+            result = qemu_self_test(arena);
+        }
+        break;
         case BUILD_COMMAND_COMPATIBILITY_SPAWN_SELF_TEST:
         {
             result = compatibility_spawn_self_test(arena);
@@ -41021,6 +41036,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS:
+        case BUILD_COMMAND_TEST_QEMU:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
         case BUILD_COMMAND_TEST_CURL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:

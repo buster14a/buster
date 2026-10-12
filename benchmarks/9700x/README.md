@@ -206,7 +206,10 @@ and these jobs follow `authorize`:
   `throughput-corpus-v2`: the default CI corpus under both retained FAST and
   QUALITY modes (12 workload/mode cells, 20 pairs in each of two rounds) on
   the same two binaries (#2761, #3053). Historical four-mode v1 receipts keep
-  their original identity. A head
+  their original identity. A merge base without the FAST/QUALITY retirement
+  (`compiler_receipt.THROUGHPUT_HARNESS_FLOOR`) has a four-mode `--mode all`
+  harness that cannot produce the v2 population, so it is rejected as an
+  unsupported historical harness before any build or lab (#3714). A head
   that moved before measurement is recorded as superseded.
 - `start-pull` (hosted) creates or adopts the exact attempt's queued
   `9700X compiler benchmark (pull request)` check after authorization, then
@@ -294,6 +297,23 @@ between the binaries; the timings are report-only. The profile cannot be
 combined with the other opt-in profiles. Its evidence is under
 `frontend_selector/` in the artifact, and a missing, partial, failed or
 cancelled leg fails the check. Its method is in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
+A fresh exact `profile: wild-linker-v1` line, added once against every
+parent, adds the host Wild linker leg (#2761, #2645) after the corpus leg.
+It uses the Wild installed on this host (`command -v wild`) and nothing is
+downloaded onto the host. Its comparator is mold, or the host's default
+GNU `ld` only when mold is not installed. The receipt records the paths,
+versions and SHA-256 of both linkers. The trusted revision's
+`tools/wild_linker_acceptance.c --link-only` times the audit's three
+direct link-only `ide` cells, at default threads and at one thread, on
+the head's own no-LTO objects, pinned to CPUs 2-5. The cells use the
+audit's link policy (`--no-gc-sections --icf=none --no-fork`, fixed build
+ID). Repeat links must be byte-identical, and the timings are
+report-only. The profile cannot be combined with the other opt-in
+profiles. Its evidence is under `wild_linker/` in the artifact, and a
+missing linker or a partial, failed or cancelled leg fails the check. Its
+method and the linkers' licenses are in
 [benchmarking.md](../../docs/agents/benchmarking.md).
 
 V1 preserves its historical fixed 182-row qualification and 135-execution,

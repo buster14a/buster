@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 
 # Select the Android CI payload watchdog from measured whole-suite baselines.
-# Debug uses about 42 seconds on a good hosted emulator and Release 16-18
-# seconds. The defaults leave a hung-payload watchdog well beyond 1.5x ordinary
-# host variance without turning Release's deadline into an unexamined copy of
-# Debug's. See docs/android-payload-deadlines.md.
+# After #3225's intended deep-chain coverage and #3265's overlap-scan fix,
+# #3258 measured 75s Debug on a fast host and a 180s cutoff at the same
+# checkout on a slow host (about 190s estimated completion). Debug's 240s
+# watchdog is 3.2x that fast baseline / about 1.26x the slow estimate.
+# Release remains 60s. See docs/android-payload-deadlines.md for the receipts.
 buster_android_payload_deadline_policy() {
     local build_config=$1
     local config_timeout_seconds=
@@ -12,7 +13,7 @@ buster_android_payload_deadline_policy() {
 
     case "$build_config" in
         Debug)
-            default_timeout_seconds=180
+            default_timeout_seconds=240
             config_timeout_seconds=${BUSTER_ANDROID_DEBUG_TEST_TIMEOUT_SECONDS:-}
             ;;
         Release)

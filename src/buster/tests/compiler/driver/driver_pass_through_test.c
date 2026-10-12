@@ -621,3 +621,170 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_images(Unit
 #endif
     return result;
 }
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_runtime_path_arguments(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    Arena* arena = temporary.arena;
+    String8 targets[] = {S8("x86_64-linux-gnu"), S8("aarch64-linux-gnu"), S8("x86_64-linux-android"),
+                         S8("x86_64-windows"), S8("x86_64-apple-macos")};
+    String8 paths[] = {S8("-Wl,-rpath,$ORIGIN/lib"), S8("-Wl,--rpath=/opt/lib"), S8("-Wl,-rpath=/opt/lib"),
+                       S8("-Wl,--rpath,$ORIGIN"), S8("-Wl,--disable-new-dtags,-rpath,$ORIGIN,--enable-new-dtags")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 path = 0; path < BUSTER_ARRAY_LENGTH(paths); path += 1)
+        {
+            String8 command[] = {S8("--target"), targets[target], paths[path], S8("main.o")};
+            CompilerDriverInvocation parsed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            BUSTER_TEST(arguments, (parsed.error == COMPILER_DRIVER_ERROR_NONE) == (target == 0));
+        }
+    }
+    String8 operands[] = {S8("-v"), S8("--version"), S8("--version-script=literal"), S8("--soname=literal"),
+                          S8("--disable-new-dtags"), S8("--no-undefined")};
+    for (u32 operand = 0; operand < BUSTER_ARRAY_LENGTH(operands); operand += 1)
+    {
+        String8 command[] = {S8("--target=x86_64-linux-gnu"), S8("-Xlinker"), S8("-rpath"), S8("-Xlinker"),
+                             operands[operand], S8("main.o"), S8("-Wl,-v")};
+        CompilerDriverInvocation parsed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, parsed.error == COMPILER_DRIVER_ERROR_NONE && parsed.linker_verbose && parsed.linker_argument_count == 2);
+        if (parsed.linker_argument_count == 2) BUSTER_STRING_TEST(arguments, parsed.linker_arguments[1], operands[operand]);
+    }
+    String8 literal_equals[] = {S8("-Wl,-rpath=/tmp/runtime="), S8("-Wl,--rpath=/tmp/runtime="),
+        S8("-Wl,-rpath=="), S8("-Wl,--rpath=="), S8("-Wl,-rpath,/tmp/runtime="), S8("-Wl,--rpath,=")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(literal_equals); index += 1)
+    {
+        String8 command[] = {S8("--target=x86_64-linux-gnu"), literal_equals[index], S8("main.o")};
+        BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)).error == COMPILER_DRIVER_ERROR_NONE);
+    }
+    String8 malformed[] = {S8("-Wl,-rpath"), S8("-Wl,--rpath"), S8("-Wl,-rpath="), S8("-Wl,--rpath="), S8("-Wl,-rpath,,/opt")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(malformed); index += 1)
+    {
+        String8 command[] = {S8("--target=x86_64-linux-gnu"), malformed[index], S8("main.o")};
+        BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+#if BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_runtime_path_tag(Arena* arena, String8 file, String8 path, u64 expected_tag)
+{
+    FileMapRead map = file_map_read(arena, file, (FileReadOptions){0});
+    u64 strings = 0, string_size = 0, address = 0, dynamic = 0, dynamic_size = 0;
+    bool valid = map.bytes.pointer &&
+        compiler_driver_test_elf_section_find(map.bytes, S8(".dynstr"), &strings, &string_size, &address) &&
+        compiler_driver_test_elf_section_find(map.bytes, S8(".dynamic"), &dynamic, &dynamic_size, &address);
+    if (valid)
+    {
+        u32 count = 0;
+        for (u64 entry = 0; entry + 16 <= dynamic_size; entry += 16)
+        {
+            u64 tag = 0, value = 0;
+            memcpy(&tag, map.bytes.pointer + dynamic + entry, 8);
+            memcpy(&value, map.bytes.pointer + dynamic + entry + 8, 8);
+            if (tag == 15 || tag == 29)
+            {
+                count += 1;
+                valid = valid && tag == expected_tag && value < string_size && string_size - value > path.length &&
+                    !memcmp(map.bytes.pointer + strings + value, path.pointer, path.length) &&
+                    map.bytes.pointer[strings + value + path.length] == 0;
+            }
+        }
+        valid = valid && count == 1;
+    }
+    file_map_unmap(map);
+    return valid;
+}
+
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_runtime_path_images(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    Arena* arena = temporary.arena;
+    String8 root = buster_test_temporary_path(arena, S8("buster-runtime-path"), S8(""));
+    String8 libraries = string_format_z(arena, S8("{S8}/lib"), root);
+    String8 dependencies = string_format_z(arena, S8("{S8}/deps"), root);
+    BUSTER_TEST(arguments, os_make_directory_attempt(root));
+    BUSTER_TEST(arguments, os_make_directory_attempt(libraries));
+    BUSTER_TEST(arguments, os_make_directory_attempt(dependencies));
+    String8 leaf_source = string_format_z(arena, S8("{S8}/leaf.c"), root);
+    String8 wrapper_source = string_format_z(arena, S8("{S8}/wrapper.c"), root);
+    String8 main_source = string_format_z(arena, S8("{S8}/main.c"), root);
+    String8 leaf = string_format_z(arena, S8("{S8}/libleaf.so"), dependencies);
+    String8 wrapper = string_format_z(arena, S8("{S8}/libwrapper.so"), libraries);
+    String8 executable = string_format_z(arena, S8("{S8}/main"), root);
+    BUSTER_TEST(arguments, file_write(leaf_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int leaf(void) { return 7; }\n"))));
+    BUSTER_TEST(arguments, file_write(wrapper_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("extern int leaf(void); int wrapper(void) { return leaf(); }\n"))));
+    BUSTER_TEST(arguments, file_write(main_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("extern int wrapper(void); int main(void) { return wrapper() - 7; }\n"))));
+    String8 leaf_command[] = {S8("-g0"), S8("-shared"), S8("-Wl,-soname,libleaf.so"), leaf_source, S8("-o"), leaf};
+    CompilerDriverResult leaf_result = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(leaf_command)));
+    BUSTER_TEST(arguments, leaf_result.error == COMPILER_DRIVER_ERROR_NONE);
+    String8 dtags[] = {S8("--enable-new-dtags"), S8("--disable-new-dtags"), S8("--disable-new-dtags,--enable-new-dtags")};
+    String8 modes[] = {S8("-no-pie"), S8("-pie")};
+    for (u32 tag = 0; tag < BUSTER_ARRAY_LENGTH(dtags); tag += 1)
+    {
+        String8 wrapper_command[] = {S8("-g0"), S8("-shared"), S8("-Wl,-soname,libwrapper.so"),
+            string_format_z(arena, S8("-Wl,-rpath,/missing,--rpath=$ORIGIN/../deps,{S8}"), dtags[tag]),
+            wrapper_source, string_format_z(arena, S8("-L{S8}"), dependencies), S8("-lleaf"), S8("-o"), wrapper};
+        CompilerDriverResult wrapper_result = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wrapper_command)));
+        if (BUSTER_REQUIRE(arguments, wrapper_result.error == COMPILER_DRIVER_ERROR_NONE))
+        {
+            BUSTER_TEST(arguments, compiler_driver_test_runtime_path_tag(arena, wrapper, S8("/missing:$ORIGIN/../deps"), tag == 1 ? 15u : 29u));
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                String8 command[] = {S8("-g0"), modes[mode], main_source, string_format_z(arena, S8("-L{S8}"), libraries), S8("-lwrapper"),
+                    string_format_z(arena, S8("-Wl,-rpath=/missing,-rpath,$ORIGIN/lib,{S8}"), dtags[tag]), S8("-o"), executable};
+                CompilerDriverResult linked = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                if (BUSTER_REQUIRE(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE))
+                {
+                    BUSTER_TEST(arguments, compiler_driver_test_runtime_path_tag(arena, executable, S8("/missing:$ORIGIN/lib"), tag == 1 ? 15u : 29u));
+                    String8 run[] = {executable};
+                    String8 keys[] = {S8("LD_LIBRARY_PATH"), S8("LD_PRELOAD"), S8("LD_BIND_NOW")};
+                    String8 values[] = {S8(""), S8(""), S8("")};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8)BUSTER_ARRAY_TO_SLICE(keys),
+                        (SliceString8)BUSTER_ARRAY_TO_SLICE(values), (ProcessSpawnOptions){0});
+                    BUSTER_TEST(arguments, child.handle && os_process_wait_sync(arena, child).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+        }
+    }
+    // A path on a program with no undefined symbols still needs .dynamic;
+    // the writer's freestanding shortcut must not silently drop it.
+    BUSTER_TEST(arguments, file_write(main_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
+    String8 standalone[] = {S8("-g0"), main_source, S8("-Wl,-rpath,$ORIGIN/lib"), S8("-o"), executable};
+    CompilerDriverResult simple = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(standalone)));
+    if (BUSTER_REQUIRE(arguments, simple.error == COMPILER_DRIVER_ERROR_NONE))
+    {
+        BUSTER_TEST(arguments, compiler_driver_test_runtime_path_tag(arena, executable, S8("$ORIGIN/lib"), 29));
+    }
+    String8 literal_flags[] = {S8("-Wl,-rpath=/tmp/runtime="), S8("-Wl,--rpath=/tmp/runtime="),
+        S8("-Wl,-rpath=="), S8("-Wl,--rpath=="), S8("-Wl,-rpath,/tmp/runtime="), S8("-Wl,--rpath,=")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(literal_flags); index += 1)
+    {
+        String8 command[] = {S8("-g0"), main_source, literal_flags[index], S8("-o"), executable};
+        CompilerDriverResult literal = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        if (BUSTER_REQUIRE(arguments, literal.error == COMPILER_DRIVER_ERROR_NONE))
+        {
+            String8 expected = index == 2 || index == 3 || index == 5 ? S8("=") : S8("/tmp/runtime=");
+            BUSTER_TEST(arguments, compiler_driver_test_runtime_path_tag(arena, executable, expected, 29));
+        }
+    }
+    os_file_delete(leaf_source);
+    os_file_delete(wrapper_source);
+    os_file_delete(main_source);
+    os_file_delete(leaf);
+    os_file_delete(wrapper);
+    os_file_delete(executable);
+    BUSTER_TEST(arguments, os_directory_delete(dependencies));
+    BUSTER_TEST(arguments, os_directory_delete(libraries));
+    BUSTER_TEST(arguments, os_directory_delete(root));
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
