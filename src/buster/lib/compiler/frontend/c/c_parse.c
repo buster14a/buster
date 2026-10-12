@@ -2673,6 +2673,20 @@ struct CParseLayoutContext
     bool* provisional;
     u32* pending;
     u32 pending_count;
+    // Ordered passes: the retry list (see c_parse_layout_pass_wait). By type
+    // id, the head of the chain of types waiting on it and the next link,
+    // each plus one, and the waiting state; the ready stack; the type being
+    // attempted and the last open type that attempt read, plus one. The head
+    // and state columns are cleared at the first wait, so a solve whose
+    // attempts never stop at an open type pays only for the carve.
+    u32* pass_waiter_head;
+    u32* pass_waiter_next;
+    u8* pass_wait_state;
+    u32* pass_ready;
+    u32 pass_ready_count;
+    u32 pass_current;
+    u32 pass_blocker;
+    bool pass_waits_cleared;
     // The demand-driven solve; null for the ordered passes.
     CParseLayoutAgenda* agenda;
     CTypeLayoutStatistics* statistics;
@@ -3077,9 +3091,44 @@ BUSTER_C_INTERNAL void c_parse_layout_agenda_publish(CParseLayoutContext* contex
 // each driver with a constant, the passes' copy has no agenda branch left.
 //
 // Whether `type_index` (below the query's type count) has resolved.
+// On the ordered passes an open read becomes the attempt's blocker; the last
+// one is kept, since an attempt stops right after the read that failed it.
 BUSTER_C_INTERNAL BUSTER_INLINE bool c_parse_layout_resolved(CParseLayoutContext* context, CParseLayoutAgenda* agenda, u32 type_index)
 {
-    return agenda ? c_parse_layout_agenda_resolved(context, type_index) : context->resolved[type_index];
+    bool result;
+    if (agenda)
+    {
+        result = c_parse_layout_agenda_resolved(context, type_index);
+    }
+    else
+    {
+        result = context->resolved[type_index];
+        if (!result)
+        {
+            context->pass_blocker = type_index + 1;
+        }
+    }
+    return result;
+}
+
+// The ordered passes' waiting states (CParseLayoutContext.pass_wait_state).
+#define C_PARSE_LAYOUT_PASS_FREE 0
+#define C_PARSE_LAYOUT_PASS_WAITING 1
+#define C_PARSE_LAYOUT_PASS_READY 2
+
+// A resolved type readies the types waiting on it for an attempt before the
+// pass moves on.
+BUSTER_C_INTERNAL void c_parse_layout_pass_wake(CParseLayoutContext* context, u32 type_index)
+{
+    u32 link = context->pass_waiter_head[type_index];
+    context->pass_waiter_head[type_index] = 0;
+    while (link)
+    {
+        u32 waiter = link - 1;
+        link = context->pass_waiter_next[waiter];
+        context->pass_wait_state[waiter] = C_PARSE_LAYOUT_PASS_READY;
+        context->pass_ready[context->pass_ready_count++] = waiter;
+    }
 }
 
 // The layout of a type c_parse_layout_resolved has answered true for.
@@ -3112,6 +3161,10 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_layout_publish(CParseLayoutContext*
         context->alignments[type_index] = alignment;
         context->provisional[type_index] = provisional;
         context->resolved[type_index] = true;
+        if (context->pass_waits_cleared && context->pass_waiter_head[type_index])
+        {
+            c_parse_layout_pass_wake(context, type_index);
+        }
     }
 }
 
@@ -3235,12 +3288,53 @@ BUSTER_C_INTERNAL u32 c_parse_layout_agenda_next(CParseLayoutContext* context)
     return result;
 }
 
-// The ordered passes' next attempt: the pending list in order from `*cursor`,
-// skipping what has resolved; the end of the list ends the pass and rewinds
-// the cursor.
+// An attempt that ended open after reading an open type waits on it, unless
+// it already waits or is ready, so each type sits on at most one list (#3312).
+// Without the list, a type listed before what it contains -- an outer record
+// before its nested ones, a record before the array type of its member --
+// resolved only on the pass after it, and a chain of D such links took D
+// passes over the whole pending list.
+BUSTER_C_INTERNAL void c_parse_layout_pass_wait(CParseLayoutContext* context, u32 waiter, u32 blocker)
+{
+    if (!context->pass_waits_cleared)
+    {
+        memset(context->pass_waiter_head, 0, sizeof(*context->pass_waiter_head) * context->type_count);
+        memset(context->pass_wait_state, 0, sizeof(*context->pass_wait_state) * context->type_count);
+        context->pass_waits_cleared = true;
+        WORK_LEDGER_RECORD(POPULATION_LAYOUT_SCRATCH_BYTES, (u64)context->type_count * (sizeof(*context->pass_waiter_head) + sizeof(*context->pass_wait_state)));
+    }
+    if (context->pass_wait_state[waiter] == C_PARSE_LAYOUT_PASS_FREE)
+    {
+        context->pass_wait_state[waiter] = C_PARSE_LAYOUT_PASS_WAITING;
+        context->pass_waiter_next[waiter] = context->pass_waiter_head[blocker];
+        context->pass_waiter_head[blocker] = waiter + 1;
+    }
+}
+
+// The ordered passes' next attempt. The attempt that just ended, if it is
+// still open, waits on its blocker. A type its blocker's resolution readied
+// comes first; otherwise the pending list in order from `*cursor`, skipping
+// what has resolved; the end of the list ends the pass and rewinds the
+// cursor. A retry only moves an attempt the next pass would make anyway
+// earlier, so the passes still end when one resolves nothing.
 BUSTER_C_INTERNAL BUSTER_INLINE u32 c_parse_layout_pass_next(CParseLayoutContext* context, u32* cursor)
 {
     u32 result = C_PARSE_LAYOUT_NONE;
+    u32 current = context->pass_current;
+    if (current != C_PARSE_LAYOUT_NONE && context->pass_blocker && !context->resolved[current])
+    {
+        c_parse_layout_pass_wait(context, current, context->pass_blocker - 1);
+    }
+    while (result == C_PARSE_LAYOUT_NONE && context->pass_ready_count)
+    {
+        context->pass_ready_count -= 1;
+        u32 type_index = context->pass_ready[context->pass_ready_count];
+        context->pass_wait_state[type_index] = C_PARSE_LAYOUT_PASS_FREE;
+        if (!context->resolved[type_index])
+        {
+            result = type_index;
+        }
+    }
     while (result == C_PARSE_LAYOUT_NONE && *cursor < context->pending_count)
     {
         u32 type_index = context->pending[*cursor];
@@ -3250,6 +3344,8 @@ BUSTER_C_INTERNAL BUSTER_INLINE u32 c_parse_layout_pass_next(CParseLayoutContext
             result = type_index;
         }
     }
+    context->pass_current = result;
+    context->pass_blocker = 0;
     if (result == C_PARSE_LAYOUT_NONE)
     {
         *cursor = 0;
@@ -4871,6 +4967,10 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_passes_run(CParseLayoutContext* conte
     u32* alignments = arena_allocate(arena, u32, type_count + 1);
     bool* resolved = arena_allocate(arena, bool, type_count + 1);
     bool* provisional = arena_allocate(arena, bool, type_count + 1);
+    u32* waiter_head = arena_allocate(arena, u32, type_count + 1);
+    u32* waiter_next = arena_allocate(arena, u32, type_count + 1);
+    u8* wait_state = arena_allocate(arena, u8, type_count + 1);
+    u32* ready = arena_allocate(arena, u32, type_count + 1);
     // Only this whole-table seeding counts as population work; a settled
     // c_parse_type_layout_agenda solve touches its request's closure alone.
     WORK_LEDGER_RECORD(POPULATION_LAYOUT_SOLVES, 1);
@@ -4901,6 +5001,14 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_passes_run(CParseLayoutContext* conte
     context->provisional = provisional;
     context->pending = pending;
     context->pending_count = pending_count;
+    context->pass_waiter_head = waiter_head;
+    context->pass_waiter_next = waiter_next;
+    context->pass_wait_state = wait_state;
+    context->pass_ready = ready;
+    context->pass_ready_count = 0;
+    context->pass_current = C_PARSE_LAYOUT_NONE;
+    context->pass_blocker = 0;
+    context->pass_waits_cleared = false;
     if (context->statistics)
     {
         context->statistics->pass_solves += 1;
@@ -4975,20 +5083,20 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_passes_run(CParseLayoutContext* conte
 }
 
 // The bytes c_parse_type_layout_passes_run carves from the query arena
-// beyond its arrays: one alignment pad before each of its five tables.
-#define C_PARSE_LAYOUT_PASSES_PADDING (5 * sizeof(u64))
+// beyond its arrays: one alignment pad before each of its nine tables.
+#define C_PARSE_LAYOUT_PASSES_PADDING (9 * sizeof(u64))
 
 // The ordered passes. In a function body's guarded scratch arena (#1256) the
 // pending list and the four per-type tables are checked against the body's
 // limit before any is carved: the pending list holds at most the cache's live
 // list plus every type the seeding adds and the offset replay, or the whole
-// table without a cache. A refusal leaves the type unanswered, and the body
+// table without a cache; the retry list adds four more per-type tables. A refusal leaves the type unanswered, and the body
 // reports its exhaustion.
 BUSTER_C_INTERNAL bool c_parse_type_layout_passes(CParseLayoutContext* context, CTypeLayoutCache* cache, u64* size_out, u32* alignment_out)
 {
     u64 type_count = context->result->type_count;
     u64 pending_bound = cache ? (u64)cache->pending_count + (type_count - BUSTER_MIN((u64)cache->pending_seeded, type_count)) + 2 : type_count + 1;
-    u64 bytes = pending_bound * sizeof(u32) + (type_count + 1) * (sizeof(u64) + sizeof(u32) + 2 * sizeof(bool)) + C_PARSE_LAYOUT_PASSES_PADDING;
+    u64 bytes = pending_bound * sizeof(u32) + (type_count + 1) * (sizeof(u64) + 4 * sizeof(u32) + 2 * sizeof(bool) + sizeof(u8)) + C_PARSE_LAYOUT_PASSES_PADDING;
     return c_parse_body_scratch_fits(context->arena, bytes, 1) && c_parse_type_layout_passes_run(context, cache, size_out, alignment_out);
 }
 
