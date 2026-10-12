@@ -227,7 +227,9 @@ jobs:
             $Log = Join-Path $PairRoot "$Arm\buster-ci\combinations.log"
             $Rows = @(Get-Content $Log | Where-Object { $_ -match '^TEST_MODULE_TIMING .* module=compiler_driver_tests ' } |
               ForEach-Object { $_ -replace ' duration_ns=\d+', '' } | Sort-Object)
-            if ($Rows.Count -ne 3) { throw "Expected three driver-module records for $Arm" }
+            # The matrix's configuration count changes over time; require a
+            # nonempty inventory here and identical inventories across arms below.
+            if ($Rows.Count -eq 0) { throw "Expected driver-module records for $Arm" }
             $Inventories[$Arm] = $Rows -join "`n"
           }
           if ($Inventories['baseline'] -cne $Inventories['candidate']) { throw 'Driver assertion inventory differs between arms' }

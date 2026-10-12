@@ -105,7 +105,7 @@ jobs:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     name: informative timing (macos-26)
     runs-on: macos-26
-    timeout-minutes: 60
+    timeout-minutes: 20
     outputs:
       baseline: ${{ steps.baseline.outputs.sha }}
       verdict: ${{ steps.report.outputs.verdict }}
