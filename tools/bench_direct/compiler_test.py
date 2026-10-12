@@ -2953,7 +2953,7 @@ class HarnessTest(unittest.TestCase):
 
         class StandInOwner:
             def __init__(self, driver, work, evidence, receipt, **_):
-                self.directory, self.stopped = evidence / "owned-phases", False
+                self.directory, self.stopped, self.receipt, self.work = evidence / "owned-phases", False, receipt, work
                 receipt["phase_ownership"] = {"phases": []}
 
             def execute(self, argv, cwd, log, timeout, **_):
@@ -2984,7 +2984,9 @@ class HarnessTest(unittest.TestCase):
     def test_pull_default_snapshot_builds_each_compiler_once(self) -> None:
         code, result, builds, operations = self.snapshot_pull()
         self.assertEqual(builds, [self.base, self.pull_head])
-        self.assertEqual(operations, ["snapshot", "restore", "verify"])
+        # The stand-in has no native corpus harness, so the attempt stops at the corpus; the
+        # complete snapshot/restore/verify producer and consumer run in compiler_ordinary_fixture_test.
+        self.assertEqual(operations, ["snapshot", "restore"])
         self.assertEqual(set(result["timings"]["build_seconds"]), {"baseline", "candidate"})
         self.assertIn("closure_checkout_seconds", result["timings"])
         self.assertEqual(result["preparation"], {"schema": compiler_receipt.PREPARATION_SELECTION_SCHEMA,
@@ -2992,9 +2994,9 @@ class HarnessTest(unittest.TestCase):
                                                  "policy": "snapshot-v1", "fallback": None})
         self.assertEqual(result["preparation_policy"], "snapshot-v1")
         self.assertEqual(result["closure"]["fallback"], None)
-        # The stand-in owner produces no native manifests, so the strict replay still refuses the attempt.
         self.assertEqual((code, result["state"]), (1, "failed"))
-        self.assertTrue(any("frozen baseline snapshot receipt/manifest missing" in reason for reason in result["reasons"]))
+        self.assertTrue(any("attempt aborted in phase throughput" in reason for reason in result["reasons"]),
+                        result["reasons"])
 
     def test_pull_default_snapshot_failure_fails_closed_without_a_rebuild(self) -> None:
         for failing in ("snapshot", "restore"):
