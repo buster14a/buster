@@ -1,4 +1,4 @@
 # Source-size acknowledgement; see docs/source-size.md.
 schema buster-source-size-ack-v1
-build 41674
+build 43768
 reason Native pre-execution Windows job ownership, separately enforced runtime/cleanup deadlines, atomic completion and cancellation protocol, and build.c helper authority replace snapshot/UTC ownership (#3690, PR #3706).
