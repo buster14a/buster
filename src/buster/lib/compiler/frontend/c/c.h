@@ -1958,6 +1958,12 @@ struct CParseResult
     CScope* scopes;
     CEntityId* entity_lookup_buckets;
     CEntityId* binding_by_symbol;
+    // One bit per interned symbol below binding_capacity, set when an entity
+    // with that symbol enters the lookup chains (c_parse_scope_add_entity)
+    // and never cleared. A clear bit proves no chain holds the symbol, so a
+    // lookup of it fails without walking the scopes (#2676); a set bit is
+    // only "maybe", because a rolled-back entity keeps its bit.
+    u64* symbol_bound_words;
     CParseBindingUndo* binding_undo;
     CScopeId binding_scope;
     // Borrowed while the lowering constraints are checked: the block-scope
