@@ -756,20 +756,49 @@ bool os_decommit(void* address, u64 size)
     return result;
 }
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsHugePageTestCounters os_huge_pages_test_state;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool os_huge_pages_test_refusal;
+
+OsHugePageTestCounters os_huge_pages_test_counters(void)
+{
+    return os_huge_pages_test_state;
+}
+
+void os_huge_pages_test_force_refusal(bool enabled)
+{
+    os_huge_pages_test_refusal = enabled;
+}
+#endif
+
 // Best-effort transparent-huge-page advice on a reserved range. On Linux,
 // madvise(MADV_HUGEPAGE) asks khugepaged and fault-time allocation to back
-// the range with 2 MiB pages under the `madvise` host policy, and is already
-// satisfied under `always`; a kernel that rejects the advice leaves a plain
-// base-page mapping, which is a refusal and never a reservation failure.
+// the range with huge pages under the `madvise` host policy. Even under
+// `always`, explicit advice can change compaction behavior. A refusal never
+// fails the reservation or changes whether its memory is usable.
 // Other targets expose no equivalent request, so the call is a no-op there.
 void os_advise_huge_pages(void* address, u64 size)
 {
-#if defined(__linux__)
-    (void)madvise(address, size, MADV_HUGEPAGE);
-#else
-    BUSTER_UNUSED(address);
-    BUSTER_UNUSED(size);
+#if BUSTER_INCLUDE_TESTS
+    os_huge_pages_test_state.requests += 1;
+    os_huge_pages_test_state.bytes += size;
+    os_huge_pages_test_state.last_address = address;
+    os_huge_pages_test_state.last_size = size;
+    if (os_huge_pages_test_refusal)
+    {
+        os_huge_pages_test_refusal = false;
+        os_huge_pages_test_state.forced_refusals += 1;
+    }
+    else
 #endif
+    {
+#if defined(__linux__)
+        (void)madvise(address, size, MADV_HUGEPAGE);
+#else
+        BUSTER_UNUSED(address);
+        BUSTER_UNUSED(size);
+#endif
+    }
 }
 
 void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map)

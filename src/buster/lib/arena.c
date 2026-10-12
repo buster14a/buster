@@ -6,6 +6,7 @@
 // Arena reservation, commitment, rewind and calling-thread reuse ownership.
 // arena_create/arena_destroy enter and leave that lifetime; arena_pool_eligible
 // bounds intrusive pool storage, and arena_pool_release_thread drains it.
+// arena_huge_pages_initialize resolves the default before worker startup.
 BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 
 BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(256);
@@ -16,6 +17,13 @@ BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(256);
 // source #1585 rejected — sparse touches in large arenas dominate the RSS
 // cost there.
 BUSTER_GLOBAL_LOCAL u64 arena_huge_page_exempt_size = BUSTER_MB(2);
+BUSTER_GLOBAL_LOCAL bool arena_default_huge_pages;
+
+void arena_huge_pages_initialize(String8 value)
+{
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
+    arena_default_huge_pages = value.length == 1 && value.pointer && value.pointer[0] == '1';
+}
 BUSTER_GLOBAL_LOCAL u64 initial_size_granularity_factor = 4;
 BUSTER_GLOBAL_LOCAL void arena_set_position_unchecked(Arena* arena, u64 position);
 
@@ -518,6 +526,11 @@ bool arena_destroy(Arena* arena, u64 count)
 Arena* arena_create(ArenaCreation original_creation)
 {
     ArenaCreation creation = arena_creation_parameters(original_creation);
+    BUSTER_VALIDATE(creation.flags.huge_pages <= ARENA_HUGE_PAGES_ENABLED);
+    if (creation.flags.huge_pages == ARENA_HUGE_PAGES_DEFAULT)
+    {
+        creation.flags.huge_pages = arena_default_huge_pages ? ARENA_HUGE_PAGES_ENABLED : ARENA_HUGE_PAGES_DISABLED;
+    }
     u64 count = creation.count;
     u64 individual_reserved_size = creation.reserved_size;
     // The ceiling is what lets every later allocation reason about `position`
@@ -539,7 +552,7 @@ Arena* arena_create(ArenaCreation original_creation)
         Arena* previous = 0;
         for (Arena* pooled = arena_pool_head; pooled; previous = pooled, pooled = *(Arena**)((u8*)pooled + arena_minimum_position))
         {
-            if (pooled->reserved_size != individual_reserved_size)
+            if (pooled->reserved_size != individual_reserved_size || pooled->flags.huge_pages != creation.flags.huge_pages)
             {
                 continue;
             }
@@ -588,10 +601,9 @@ Arena* arena_create(ArenaCreation original_creation)
 
         if (result)
         {
-            // Give `madvise`-policy hosts the huge pages an `always` host
-            // already supplies; the advice is advisory everywhere (#1585).
-            // Arenas reused from the pool carry their original advice.
-            if (individual_reserved_size > arena_huge_page_exempt_size)
+            // Only opted-in reservations receive advice (#1585). Reuse
+            // matches the resolved policy, so no advice leaks across modes.
+            if (creation.flags.huge_pages == ARENA_HUGE_PAGES_ENABLED && individual_reserved_size > arena_huge_page_exempt_size)
             {
                 for (u64 i = 0; i < count; i += 1)
                 {
