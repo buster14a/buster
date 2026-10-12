@@ -498,8 +498,19 @@ def ast_pilot_budget_verdict(cells: dict, retained_bytes: int, correctness: dict
     return {"outcome": outcome, "checks": checks, "budget": dict(AST_PILOT_BUDGET), "report_only": True}
 
 
+# A JSON integer is unbounded; math.isfinite and float arithmetic raise OverflowError past
+# the float range, so evidence numbers are bounded before any of them.
+EVIDENCE_INTEGER_LIMIT = 1 << 63
+
+
+def _number(value: object) -> bool:
+    """A finite float or an integer inside EVIDENCE_INTEGER_LIMIT; never raises, booleans excluded."""
+    return (type(value) is int and -EVIDENCE_INTEGER_LIMIT < value < EVIDENCE_INTEGER_LIMIT) or \
+        (type(value) is float and math.isfinite(value))
+
+
 def _finite_positive(value: object) -> bool:
-    return type(value) in (int, float) and math.isfinite(value) and value > 0
+    return _number(value) and value > 0
 
 
 def validate_throughput_real_source(status: object, summary: object, metadata: object, staging: object,
