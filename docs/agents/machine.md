@@ -951,11 +951,13 @@ hosts execute its independent expected-value fixture.
   declare RDX/X10 scratch clobbers. Darwin TLS descriptor rows have ordinary
   call effects; a following move captures RAX/X0 into an SSA value. Every
   relocation site distinguishes the index, value offset, or descriptor field.
+  AArch64 ELF PIC descriptor rows use the same call/result capture boundary.
   The thread-local model fixture requires zero fallback for admitted desktop
-  targets, allocators, frontend forms and code models, and named refusal with
-  no artifact for effective AArch64 ELF PIC requests (the TLSDESC model does
-  not exist yet; see the position-independent code bullets). Native hosts execute
-  the supported models with separate definitions and live repeated accesses.
+  targets, allocators, frontend forms and code models, including AArch64 ELF
+  PIC descriptors (see the position-independent code bullets). Native hosts
+  execute the supported models with separate definitions and live repeated
+  accesses; `compiler_driver_test_aarch64_pic_tlsdesc` also checks independent
+  shared-library linking and thread-local isolation on native AArch64 Linux.
 - x86-64 i128 bitwise complement reads both frame-backed limbs and emits
   ordinary three-operand XOR64 rows against one all-ones constant. Each limb
   result has one definition; do not use mutable NOT rows for this expansion.
