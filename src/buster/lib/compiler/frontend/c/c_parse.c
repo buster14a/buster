@@ -7521,10 +7521,20 @@ BUSTER_C_SHARED bool c_parse_update_operand_modifiable(CParseResult* result, CPr
     CEntityId entity = C_ENTITY_ID_INVALID;
     if (identifier)
     {
+        // A recorded use already names the entity. Only the fallback needs the
+        // operand's scope, whose descent from the file scope costs one level
+        // per enclosing block: an update in each of N nested blocks paid N^2
+        // levels (#3894).
         u32 use = c_parse_identifier_use_index(result, start);
-        CScopeId operand_scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, start);
-        entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
-                                                : c_parse_lookup_entity_token(result, preprocess.spelling_base, operand_scope, &preprocess.tokens[start]);
+        if (use != C_ID_UNDERLYING_INVALID)
+        {
+            entity = result->identifier_uses[use].entity;
+        }
+        else
+        {
+            CScopeId operand_scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, start);
+            entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, operand_scope, &preprocess.tokens[start]);
+        }
     }
     if (valid)
     {

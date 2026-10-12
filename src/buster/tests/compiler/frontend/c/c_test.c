@@ -44030,6 +44030,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_keyword_typedef_probes(UnitT
         "    return x;\n"
         "}\n"));
     BUSTER_TEST_RAW(arguments, labelled == 1, string_format(arguments->arena, S8("a labelled body made {u64} typedef probes"), labelled));
+    // A type keyword names no entity, so a declaration it begins is a type
+    // start without the lookup, which climbed every enclosing block (#3894).
+    u64 declarations = c_test_statement_keyword_typedef_probe_count(S8(
+        "int k(int x)\n"
+        "{\n"
+        "    int y = x;\n"
+        "    { unsigned z = (unsigned)y; { const int w = (int)z; x += w; } }\n"
+        "    return x;\n"
+        "}\n"));
+    BUSTER_TEST_RAW(arguments, declarations == 0,
+                    string_format(arguments->arena, S8("keyword-led declarations made {u64} typedef probes"), declarations));
     u64 typedefs = c_test_statement_keyword_typedef_probe_count(S8(
         "typedef int T;\n"
         "int g(int x)\n"
@@ -55992,6 +56003,74 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_nested_loop_parameters(Unit
     return result;
 }
 
+// The work for `{int i=x;do ` D times, `x--;`, then D closers
+// `while(--i>0);}`: `scope_levels` takes the scope levels semantic analysis
+// descends and `ssa_steps` the direct SSA read walk's steps in lowering, each
+// UINT64_MAX when its stage did not finish cleanly.
+BUSTER_GLOBAL_LOCAL void c_test_nested_do_while_work(u32 depth, u64* ssa_steps, u64* scope_levels)
+{
+    *ssa_steps = UINT64_MAX;
+    *scope_levels = UINT64_MAX;
+    TemporalArena temporary = scratch_begin(0, 0);
+    u64 capacity = (u64)depth * 32 + 256;
+    char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length, S8("int tall(int x){"));
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, S8("{int i=x;do "));
+    }
+    c_test_append_source(bytes, capacity, &length, S8("x--;"));
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, S8("while(--i>0);}"));
+    }
+    c_test_append_source(bytes, capacity, &length, S8("return x;}"));
+    CPreprocessResult tokens = c_preprocess(temporary.arena, (String8){bytes, length}, (CPreprocessOptions){0});
+    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+    u64 levels_before = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS);
+    CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+    if (length < capacity && !tokens.diagnostic_count && !syntax.diagnostic_count && !analysis.diagnostic_count && analysis.analysis_complete)
+    {
+        *scope_levels = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS) - levels_before;
+    }
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    u64 steps_before = c_test_ir_ssa_forward_steps();
+    CIRLowerResult direct = c_lower_to_ir(temporary.arena, S8("nested-do-while.c"), tokens, parse, target_native);
+    if (!tokens.diagnostic_count && !parse.diagnostic_count && !direct.diagnostic_count && direct.program &&
+        ir_validate_canonical_module(direct.program, direct.program->modules).error == IR_VALIDATION_NONE)
+    {
+        *ssa_steps = c_test_ir_ssa_forward_steps() - steps_before;
+    }
+    c_test_scratch_end(temporary);
+}
+
+// Each nested do-while reads its variable in its condition block, whose
+// forward links climb through every inner loop's condition and exit block
+// back to its own header: D^2 read-walk steps, and the const-assignment check
+// of each `--i` descended the scope tree from the file scope: D^2 levels
+// (#3894). A read now passes an inner loop that never names its local in one
+// step, and the check reuses the use's recorded entity, so both grow with the
+// depth.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_nested_do_while_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SHALLOW = 250, DEEP = 1000 };
+    u64 shallow_steps;
+    u64 shallow_levels;
+    u64 deep_steps;
+    u64 deep_levels;
+    c_test_nested_do_while_work(SHALLOW, &shallow_steps, &shallow_levels);
+    c_test_nested_do_while_work(DEEP, &deep_steps, &deep_levels);
+    BUSTER_TEST_RAW(arguments, shallow_steps != UINT64_MAX && deep_steps != UINT64_MAX && shallow_steps >= SHALLOW &&
+                                   deep_steps <= shallow_steps * 5 && deep_steps <= (u64)DEEP * 16,
+                    string_format(arguments->arena, S8("SSA read-walk steps shallow={u64} deep={u64}"), shallow_steps, deep_steps));
+    BUSTER_TEST_RAW(arguments, shallow_levels != UINT64_MAX && deep_levels != UINT64_MAX && deep_levels <= shallow_levels * 5 + DEEP &&
+                                   deep_levels <= (u64)DEEP * 32,
+                    string_format(arguments->arena, S8("scope levels shallow={u64} deep={u64}"), shallow_levels, deep_levels));
+    return result;
+}
+
 // The loop-header shortcut of #3723 holds only for a loop entered through its
 // header. Each function here also enters a loop past it -- a goto into the
 // body, a case label inside a do-while, a goto back before the loop -- with a
@@ -64716,6 +64795,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_join_simplify);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_loop_parameters);
+    C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_do_while_work);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_loop_entry_runtime);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
     C_TEST_FIXTURE(arguments, c_test_storage_class_contexts);

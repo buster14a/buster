@@ -43,6 +43,7 @@
     X(SSA_FINISH_SLOT_PROBES, ssa_finish_slot_probes) \
     X(SSA_SLOT_INSERTS, ssa_slot_inserts) \
     X(SSA_FORWARD_STEPS, ssa_forward_steps) \
+    X(SSA_FORWARD_LOOP_SKIPS, ssa_forward_loop_skips) \
     X(SSA_VALUE_CLEAR_BYTES, ssa_value_clear_bytes) \
     X(SSA_VALUE_SCRATCH_BYTES, ssa_value_scratch_bytes) \
     X(SSA_INITIALIZATION_WORK_VISITS, ssa_initialization_work_visits) \

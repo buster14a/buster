@@ -124,7 +124,13 @@ parameters, refused past ~2000 levels (#3723). The walk only looks slots up;
 it inserts one where it ends unresolved and caches its answer on the path
 within a budget of twice the other slots (plus a constant), since caching every
 walk past N nested `do` loops for each of their N variables needed N^2 slots
-(#3771). A skipped cache entry costs a later walk, never a different value. Trivial
+(#3771). A skipped cache entry costs a later walk, never a different value. A
+read whose only predecessor lies in such a closed loop it leaves, a loop that
+neither writes nor reads the local, passes to the loop's entry in one step when
+the predecessor's forward links climb to that loop's header (preorder intervals
+of the forward-link forest answer this). Otherwise each of N nested `do`
+conditions climbed through every inner condition and exit block: N^2 steps
+(#3894). Trivial
 parameters and unused parameter cycles are removed; a replaced parameter hands
 its user rows on without those that can no longer requeue, so a chain of
 trivial parameters stays linear. A parameter is trivial
