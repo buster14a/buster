@@ -2238,12 +2238,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_address_prefix_indexed_paths(Uni
                         "    (void)(((a)) && b);\n"
                         "    (void)(a && b);\n"
                         "    (void)((a) && (b));\n"
+                        "    (void)((a && b) && a);\n"
+                        "    (void)((__typeof__((a && b,(void*)0))) &&cast_typeof);\n"
+                        "    (void)((const __typeof__((a && b,(void*)0))) &&cast_qualified);\n"
                         "    switch (a) { case 0: &&case_label; break; }\n"
                         "body_start:\n"
                         "cast_int:\n"
                         "cast_void:\n"
                         "cast_struct:\n"
                         "cast_typedef:\n"
+                        "cast_typeof:\n"
+                        "cast_qualified:\n"
                         "case_label:\n"
                         "return_label:\n"
                         "    return &&return_label;\n"
@@ -2266,7 +2271,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_address_prefix_indexed_paths(Uni
     }
     BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
     BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-    bool expected_label_address_prefix_results[] = {true, false, true, true, true, true, false, false, false, false, false, true, true};
+    bool expected_label_address_prefix_results[] = {true, false, true, true, true, true, false, false, false, false, false, false, false, false, true, false, true, true, true};
     CParseResult parse_without_position_index = parse;
     parse_without_position_index.position_index = NULL;
     if (BUSTER_REQUIRE(arguments, body_start != UINT32_MAX && parse.position_index))
@@ -2299,6 +2304,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_address_prefix_indexed_paths(Uni
         }
         BUSTER_TEST(arguments, conjunction_count == BUSTER_ARRAY_LENGTH(expected_label_address_prefix_results));
     }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
+// Count the production cast-proof and checked-call reference work, rather
+// than timing the fixture. Retain the original deep fixture separately.
+// The named label also exercises the semantic label-value cast proof.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_logical_chain_work_growth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 depths[] = {128, 256, 512};
+    u64 previous_label[C_TEST_LOGICAL_CHAIN_SHAPE_COUNT] = {0};
+    u64 previous_calls[C_TEST_LOGICAL_CHAIN_SHAPE_COUNT] = {0};
+    for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+    {
+        u32 depth = depths[depth_index];
+        for (u32 shape = 0; shape < C_TEST_LOGICAL_CHAIN_SHAPE_COUNT; shape += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u64 capacity = 3 * (u64)(depth + 1) * 13 + 256;
+            char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+            u64 length = 0;
+            c_test_append_source(bytes, capacity, &length, S8("int f0(void); int f1(void); int tall(int i){ int x = "));
+            c_test_append_logical_chain(bytes, capacity, &length, (CTestLogicalChainShape)shape, depth);
+            c_test_append_source(bytes, capacity, &length, S8("; if ("));
+            c_test_append_logical_chain(bytes, capacity, &length, (CTestLogicalChainShape)shape, depth);
+            c_test_append_source(bytes, capacity, &length, S8(") x += i; goto done; done: return !"));
+            c_test_append_logical_chain(bytes, capacity, &length, (CTestLogicalChainShape)shape, depth);
+            c_test_append_source(bytes, capacity, &length, S8("; }"));
+            u64 label_start = c_test_logical_label_type_work();
+            u64 call_start = c_test_logical_call_reference_work();
+            CPreprocessResult preprocess = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, (String8){.pointer = bytes, .length = length},
+                                                         S8("logical-work-growth.c"), target_native, &preprocess, &parse);
+            u64 label_work = c_test_logical_label_type_work() - label_start;
+            u64 call_work = c_test_logical_call_reference_work() - call_start;
+            BUSTER_TEST(arguments, lowered.canonical_ir_certified && lowered.diagnostic_count == 0);
+            // The position rejection is logarithmic per queried group; its
+            // population grows with depth. A depth doubling stays below 3x.
+            BUSTER_TEST(arguments, label_work <= 256 * (u64)depth);
+            BUSTER_TEST(arguments, call_work <= 64 * (u64)depth);
+            if (depth_index)
+            {
+                BUSTER_TEST(arguments, label_work <= 3 * previous_label[shape] + 64);
+                BUSTER_TEST(arguments, call_work <= 3 * previous_calls[shape] + 64);
+            }
+            previous_label[shape] = label_work;
+            previous_calls[shape] = call_work;
+            c_test_scratch_end(temporary);
+        }
+    }
+    // A real returned-function chain starts a prepared callee at '(': the
+    // independent publication fact must retain its full reference scan.
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = {0};
+    CParseResult parse = {0};
+    u64 call_start = c_test_logical_call_reference_rows();
+    CIRLowerResult lowered = c_test_lower_source(temporary.arena,
+        S8("typedef int (*F)(int); F get(void); int chained(void){ return get()(3); }"),
+        S8("logical-work-positive-chain.c"), target_native, &preprocess, &parse);
+    BUSTER_TEST(arguments, lowered.canonical_ir_certified && lowered.diagnostic_count == 0);
+#if BUSTER_REFERENCE_CHECKS
+    BUSTER_TEST(arguments, c_test_logical_call_reference_rows() > call_start);
+#else
+    BUSTER_TEST(arguments, c_test_logical_call_reference_rows() == call_start);
+#endif
     c_test_scratch_end(temporary);
     return result;
 }
@@ -4272,6 +4344,95 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_successors(UnitTestArguments* arg
                 BUSTER_TEST(arguments, checked == BUSTER_ARRAY_LENGTH(expected));
             }
         }
+    }
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        TargetParseResult target = target_parse_triple(S8("i386-linux"));
+        BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+        if (target.error == TARGET_PARSE_ERROR_NONE)
+        {
+            CPreprocessOptions options = {
+                .target = target.target,
+                .data_layout = target_data_layout(target.target),
+                .dialect = C_PREPROCESS_DIALECT_GNU17,
+                .source_path = S8("i386-predefined-macros.c"),
+            };
+            String8 source = S8(
+                "#include <stddef.h>\n"
+                "#if !defined(__i386__) || !defined(__i386) || !defined(i386)\n#error missing i386 macros\n#endif\n"
+                "#if !defined(_ILP32) || !defined(__ILP32__) || !defined(__pentiumpro__)\n#error missing ILP32 CPU macros\n#endif\n"
+                "#if __GCC_ATOMIC_INT_LOCK_FREE != 2 || __GCC_ATOMIC_LLONG_LOCK_FREE != 2 || !defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8)\n#error incorrect i686 baseline atomics\n#endif\n"
+                "#if !defined(__REGISTER_PREFIX__)\n#error missing x86 register prefix macro\n#endif\n"
+                "#if !defined(__code_model_32__) || !defined(__LAHF_SAHF__) || __FLT_EVAL_METHOD__ != 2\n#error missing i386 target macros\n#endif\n"
+                "#if defined(__tune_i686__) || defined(__tune_pentiumpro__)\n#error unexpected i386 baseline tune macros\n#endif\n"
+                "#if defined(__x86_64__) || defined(__amd64__) || defined(__code_model_small__) || defined(__k8)\n#error leaked x86-64 macros\n#endif\n"
+                "#if defined(__SSE__) || defined(__SSE2__) || defined(__SSE3__) || defined(__MMX__)\n#error leaked SIMD macros\n#endif\n"
+                "#if defined(__SIZEOF_INT128__) || __SIZEOF_LONG_DOUBLE__ != 12 || __BIGGEST_ALIGNMENT__ != 16\n#error incorrect i386 layout macros\n#endif\n"
+                "_Static_assert(__builtin_types_compatible_p(__SIZE_TYPE__, unsigned int), \"size type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__PTRDIFF_TYPE__, int), \"ptrdiff type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__INTPTR_TYPE__, int), \"intptr type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__UINTPTR_TYPE__, unsigned int), \"uintptr type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__WCHAR_TYPE__, long int), \"wchar macro type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__WINT_TYPE__, unsigned int), \"wint macro type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__INT64_TYPE__, long long int), \"int64 macro type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__INTMAX_TYPE__, long long int), \"intmax macro type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__INT_FAST16_TYPE__, int), \"fast16 macro type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__UINT_FAST16_TYPE__, unsigned int), \"ufast16 macro type\");\n"
+                "_Static_assert(__INT_FAST16_WIDTH__ == 32 && __INT_FAST16_MAX__ == 2147483647, \"fast16 width and max\");\n"
+                "_Static_assert(__UINT_FAST16_MAX__ == 4294967295U, \"ufast16 max\");\n"
+                "_Static_assert(sizeof(size_t) == 4 && sizeof(ptrdiff_t) == 4, \"stddef types\");\n"
+                "_Static_assert(sizeof(wchar_t) == 4 && __builtin_types_compatible_p(wchar_t, long int), \"wchar_t\");\n"
+                "_Static_assert(sizeof(L\"\"[0]) == 4 && __builtin_types_compatible_p(__typeof__(L\"\"[0]), long int), \"wide string\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__typeof__(sizeof(int)), unsigned int), \"sizeof result\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__typeof__((int*)0 - (int*)0), int), \"pointer difference\");\n"
+                "_Static_assert(sizeof(long) == 4 && _Alignof(long) == 4, \"long layout\");\n"
+                "_Static_assert(sizeof(long long) == 8 && _Alignof(long long) == 4, \"long long layout\");\n"
+                "_Static_assert(sizeof(double) == 8 && _Alignof(double) == 4, \"double layout\");\n"
+                "_Static_assert(sizeof(long double) == 12 && _Alignof(long double) == 4, \"long double layout\");\n"
+                "_Static_assert(sizeof(void*) == 4 && _Alignof(void*) == 4, \"pointer layout\");\n"
+                "_Static_assert(offsetof(struct { char c; long long value; }, value) == 4, \"long long member offset\");\n"
+                "_Static_assert(offsetof(struct { char c; double value; }, value) == 4, \"double member offset\");\n"
+                "_Static_assert(offsetof(struct { char c; long double value; }, value) == 4, \"long double member offset\");\n"
+                "struct i386_bitfield_layout { unsigned int a : 1; unsigned int b : 31; int value; };\n"
+                "_Static_assert(offsetof(struct i386_bitfield_layout, value) == 4, \"bitfield layout\");\n"
+                "_Static_assert(sizeof(__INT64_TYPE__) == 8 && sizeof(__UINTPTR_TYPE__) == 4, \"integer type widths\");\n"
+                "_Static_assert(__LONG_MAX__ == 2147483647 && __LONG_LONG_MAX__ == 9223372036854775807LL, \"integer limit macros\");\n");
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, options);
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            syntax.string_literal_lengths_only = true;
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            bool valid = !tokens.diagnostic_count && !syntax.diagnostic_count && !semantic.diagnostic_count && semantic.analysis_complete;
+            String8 diagnostic = tokens.diagnostic_count ? tokens.diagnostics[0].message :
+                                 syntax.diagnostic_count ? syntax.diagnostics[0].message :
+                                 semantic.diagnostic_count ? semantic.diagnostics[0].message :
+                                                             S8("semantic analysis incomplete");
+            BUSTER_TEST_RAW(arguments, valid, diagnostic);
+            CPreprocessOptions strict_options = options;
+            strict_options.dialect = C_PREPROCESS_DIALECT_C23;
+            CPreprocessResult strict_macro = c_preprocess(temporary.arena, S8("#ifdef i386\n#error GNU-only i386 macro leaked\n#endif\n"),
+                                                           strict_options);
+            BUSTER_TEST(arguments, strict_macro.diagnostic_count == 0 && strict_macro.error_count == 0);
+            CpuModel atomic_models[] = {CPU_MODEL_X86_I386, CPU_MODEL_AMD_I486, CPU_MODEL_AMD_PENTIUM, CPU_MODEL_BASELINE};
+            String8 atomic_sources[] = {
+                S8("#if __GCC_ATOMIC_BOOL_LOCK_FREE != 1 || __GCC_ATOMIC_INT_LOCK_FREE != 1 || __GCC_ATOMIC_LLONG_LOCK_FREE != 1 || __CLANG_ATOMIC_INT_LOCK_FREE != 2 || __CLANG_ATOMIC_LLONG_LOCK_FREE != 1 || defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8)\n#error incorrect i386 atomics\n#endif\n"),
+                S8("#if __GCC_ATOMIC_BOOL_LOCK_FREE != 2 || __GCC_ATOMIC_LLONG_LOCK_FREE != 1 || __CLANG_ATOMIC_LLONG_LOCK_FREE != 1 || defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8)\n#error incorrect i486 atomics\n#endif\n"),
+                S8("#if __GCC_ATOMIC_BOOL_LOCK_FREE != 2 || __GCC_ATOMIC_LLONG_LOCK_FREE != 2 || __CLANG_ATOMIC_LLONG_LOCK_FREE != 2 || !defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8)\n#error incorrect pentium atomics\n#endif\n"),
+                S8("#if __GCC_ATOMIC_BOOL_LOCK_FREE != 2 || __GCC_ATOMIC_LLONG_LOCK_FREE != 2 || __CLANG_ATOMIC_LLONG_LOCK_FREE != 2 || !defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8)\n#error incorrect baseline atomics\n#endif\n"),
+            };
+            for (u32 model_index = 0; model_index < BUSTER_ARRAY_LENGTH(atomic_models); model_index += 1)
+            {
+                Target model_target = target.target;
+                model_target.cpu_model = atomic_models[model_index];
+                model_target.cpu_features = target_cpu_features_default(CPU_ARCH_I386, atomic_models[model_index]);
+                CPreprocessOptions model_options = options;
+                model_options.target = model_target;
+                model_options.data_layout = target_data_layout(model_target);
+                CPreprocessResult model_macros = c_preprocess(temporary.arena, atomic_sources[model_index], model_options);
+                BUSTER_TEST_RAW(arguments, model_macros.diagnostic_count == 0 && model_macros.error_count == 0,
+                                model_macros.diagnostic_count ? model_macros.diagnostics[0].message : S8("atomic macro error"));
+            }
+        }
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -25850,6 +26011,80 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_target_abi_macros(UnitTestArguments* a
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_i386_feature_macros(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CTestI386FeatureMacroCase CTestI386FeatureMacroCase;
+    struct CTestI386FeatureMacroCase
+    {
+        CpuModel model;
+        String8 source;
+    };
+    CTestI386FeatureMacroCase cases[] = {
+        {CPU_MODEL_INTEL_CORE_2,
+         S8("#if !defined(__MMX__) || !defined(__SSE__) || !defined(__SSE2__) || !defined(__SSE3__) || !defined(__SSSE3__) || !defined(__FXSR__)\n"
+            "#error incorrect core2 feature macros\n#endif\n")},
+        {CPU_MODEL_AMD_ZEN_1,
+         S8("#if !defined(__MMX__) || !defined(__SSE__) || !defined(__SSE2__) || !defined(__SSSE3__) || !defined(__POPCNT__) || !defined(__FXSR__)\n"
+            "#error incorrect znver1 feature macros\n#endif\n")},
+        {CPU_MODEL_AMD_ATHLON_XP,
+         S8("#if !defined(__MMX__) || !defined(__SSE__) || !defined(__3dNOW__) || !defined(__FXSR__)\n"
+            "#error incorrect athlon-xp feature macros\n#endif\n")},
+        {CPU_MODEL_AMD_PENTIUM,
+         S8("#if !defined(__i586__) || !defined(__tune_i586__) || !defined(__tune_pentium__) || defined(__MMX__)\n"
+            "#error incorrect pentium feature macros\n#endif\n")},
+    };
+    TargetParseResult parsed = target_parse_triple(S8("i386-unknown-linux-gnu"));
+    BUSTER_TEST(arguments, parsed.error == TARGET_PARSE_ERROR_NONE);
+    if (parsed.error == TARGET_PARSE_ERROR_NONE)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            Target target = parsed.target;
+            target.cpu_model = cases[index].model;
+            CPreprocessResult macros = c_preprocess(arguments->arena, cases[index].source,
+                                                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target),
+                                                                         .source_path = S8("i386-feature-macros.c")});
+            BUSTER_TEST(arguments, macros.diagnostic_count == 0);
+        }
+        Target target = parsed.target;
+        target.cpu_model = CPU_MODEL_INTEL_CORE_2;
+        target.cpu_features = target_cpu_features_x86_apply_with_closure(target_cpu_features_effective(target),
+                                                                          TARGET_CPU_FEATURE_X86_SSE, false);
+        target.cpu_features_explicit = true;
+        CPreprocessResult no_sse = c_preprocess(arguments->arena,
+                                                S8("#if defined(__SSE__) || defined(__SSE2__) || defined(__SSE3__) || defined(__SSSE3__) || !defined(__FXSR__)\n"
+                                                   "#error -mno-sse did not remove dependent features\n#endif\n"),
+                                                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target),
+                                                                     .source_path = S8("i386-no-sse-macros.c")});
+        BUSTER_TEST(arguments, no_sse.diagnostic_count == 0);
+
+        Target hosted_target = target_parse_triple(S8("x86_64-unknown-linux-gnu")).target;
+        CPreprocessResult hosted = c_preprocess(arguments->arena,
+                                                S8("#if __STDC_HOSTED__ != 1\n#error hosted default changed\n#endif\n"),
+                                                (CPreprocessOptions){.target = hosted_target,
+                                                                     .data_layout = target_data_layout(hosted_target),
+                                                                     .source_path = S8("hosted-default.c")});
+        CPreprocessResult freestanding = c_preprocess(arguments->arena,
+                                                      S8("#if __STDC_HOSTED__ != 0\n#error -ffreestanding not published\n#endif\n"),
+                                                      (CPreprocessOptions){.target = hosted_target,
+                                                                           .data_layout = target_data_layout(hosted_target),
+                                                                           .source_path = S8("freestanding.c"),
+                                                                           .freestanding = true});
+        BUSTER_TEST(arguments, hosted.diagnostic_count == 0 && freestanding.diagnostic_count == 0);
+
+        Target wasm32_target = target_parse_triple(S8("wasm32-wasip1")).target;
+        CPreprocessResult wasm_limits = c_preprocess(arguments->arena,
+                                                     S8("#include <limits.h>\n"
+                                                        "_Static_assert(__SIZEOF_LONG__ == 4 && LONG_MAX == 2147483647L, \"wasm32 long limits\");\n"),
+                                                     (CPreprocessOptions){.target = wasm32_target,
+                                                                          .data_layout = target_data_layout(wasm32_target),
+                                                                          .source_path = S8("wasm32-limits.c")});
+        BUSTER_TEST(arguments, wasm_limits.diagnostic_count == 0);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void c_test_gnu_common_predefined_macro_token(UnitTestArguments* arguments, UnitTestResult* outer_result,
                                                                   CPreprocessResult preprocess, String8 name, u64 index, CTokenKind kind,
                                                                   String8 spelling)
@@ -39058,6 +39293,201 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_type_prediction(UnitTestAr
         BUSTER_TEST(arguments, ir_validate_canonical_module(deep_ir.program, &deep_ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
     c_test_scratch_end(temporary);
+    return result;
+}
+
+// First-party GNU17/GNU23 witnesses: typeof's operand is not the outer
+// cast's type-word grammar. Conjunction and sizeof/alignof neighbors still
+// resolve the next name as an ordinary identifier, even when it is a label.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_label_address(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("int main(void) { void* p = (__typeof__((void*)0))&&done; done: return p != &&done; }"),
+        S8(
+        "int main(void) { int a=1,b=0;"
+        " void *p=(__typeof__((void*)0))&&done;"
+        " void *q=(__typeof(void*))&&done;"
+        " void *r=(typeof((void*)0))&&done;"
+        " void *s=(__typeof__((a && b,(void*)0)))&&done;"
+        "done: if (p!=&&done || q!=&&done || r!=&&done || s!=&&done) return 1; return 0; }"),
+        S8("int main(void) { void *p=(__typeof__((void*)0))&&done; int same=(p==&&done); done: return same!=1; }"),
+        S8("int main(void) { done: return (__typeof__((void*)0))&&done != &&done; }"),
+    };
+    typedef struct CTypeofLabelEscapeCase CTypeofLabelEscapeCase;
+    struct CTypeofLabelEscapeCase
+    {
+        String8 source;
+        String8 message;
+    };
+    CTypeofLabelEscapeCase escapes[] = {
+        {S8("void *f(void) { return (__typeof__((void*)0))&&done; done: return 0; }"),
+         S8("a label address may not escape through a function return")},
+        {S8("void take(void*); void f(void) { take((__typeof__((void*)0))&&done); done: ; }"),
+         S8("a label address may not escape through a function call")},
+        {S8("void *saved; int f(void) { saved=(__typeof__((void*)0))&&done; done: return 0; }"),
+         S8("a label address may not be stored in static storage")},
+        {S8("void *f(void) { void *p=&&done; return p==&&done ? p : 0; done: return 0; }"),
+         S8("a label address may not escape through a function return")},
+        {S8("void *f(void) { void *p=&&done; return (p!=&&done,p); done: return 0; }"),
+         S8("a label address may not escape through a function return")},
+    };
+    String8 invalid[] = {
+        S8("int main(void) { return (1) && done; done: return 0; }"),
+        S8("int main(void) { return sizeof(__typeof__((void*)0)) && done; done: return 0; }"),
+        S8("int main(void) { return _Alignof(__typeof__((void*)0)) && done; done: return 0; }"),
+        S8("int main(void) { void *p=(__typeof__((void*)unknown))&&done; done: return p!=&&done; }"),
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    // The scoped cast proof also supports callers without a position index.
+    // Its typeof operand contains an ordinary conjunction before the label.
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena,
+            S8("int main(void) { int a=1,b=0; void *p=(__typeof__((a && b,(void*)0)))&&done; done: return p!=&&done; }"),
+            (CPreprocessOptions){.target = target_native, .dialect = dialects[dialect]});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count);
+        CScopeId scope = C_SCOPE_ID_INVALID;
+        u32 body_start = UINT32_MAX;
+        for (u32 index = 0; index < parsed.declaration_count; index += 1)
+        {
+            CDeclaration* declaration = parsed.declarations + index;
+            if (declaration->kind == C_DECLARATION_FUNCTION && string_equal(declaration->name, S8("main")))
+            {
+                scope = declaration->scope;
+                body_start = declaration->body_start;
+            }
+        }
+        CParseResult scalar = parsed;
+        scalar.position_index = NULL;
+        bool expected[] = {false, true, true};
+        u32 conjunction = 0;
+        if (BUSTER_REQUIRE(arguments, body_start != UINT32_MAX))
+        {
+            for (u32 index = body_start; index < tokens.token_count; index += 1)
+            {
+                if (tokens.tokens[index].kind == C_TOKEN_PUNCTUATOR &&
+                    tokens.tokens[index].punctuator == C_PUNCTUATOR_AMPERSAND_AMPERSAND)
+                {
+                    if (BUSTER_REQUIRE(arguments, conjunction < BUSTER_ARRAY_LENGTH(expected)))
+                    {
+                        BUSTER_TEST(arguments, c_parse_label_address_prefix_with_typedef(&parsed, &tokens, scope, body_start, index) == expected[conjunction]);
+                        BUSTER_TEST(arguments, c_parse_label_address_prefix_with_typedef(&scalar, &tokens, scope, body_start, index) == expected[conjunction]);
+                    }
+                    conjunction += 1;
+                }
+            }
+            BUSTER_TEST(arguments, conjunction == BUSTER_ARRAY_LENGTH(expected));
+        }
+        scratch_end(temporary);
+    }
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        String8 source = sources[source_index];
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                    (CPreprocessOptions){.target = targets[target_index], .dialect = dialects[dialect]});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !semantic.diagnostic_count, source);
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("typeof-label.c"), tokens, semantic, targets[target_index],
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    if (BUSTER_REQUIRE(arguments, !lowered.diagnostic_count && lowered.program && lowered.program->module_count == 1))
+                    {
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    }
+                }
+                scratch_end(temporary);
+            }
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, invalid[index],
+                    (CPreprocessOptions){.target = target_native, .dialect = dialects[dialect]});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                bool undeclared = false;
+                for (u32 row = 0; row < semantic.diagnostic_count; row += 1)
+                {
+                    undeclared |= string_first_sequence(semantic.diagnostics[row].message, S8("use of undeclared identifier")) != BUSTER_STRING_NO_MATCH;
+                }
+                BUSTER_TEST_RAW(arguments, undeclared, invalid[index]);
+                scratch_end(temporary);
+            }
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(escapes); index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, escapes[index].source,
+                    (CPreprocessOptions){.target = target_native, .dialect = dialects[dialect]});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                bool found = false;
+                for (u32 row = 0; row < semantic.diagnostic_count; row += 1)
+                {
+                    found |= string_first_sequence(semantic.diagnostics[row].message, escapes[index].message) != BUSTER_STRING_NO_MATCH;
+                }
+                BUSTER_TEST_RAW(arguments, found, escapes[index].source);
+                scratch_end(temporary);
+            }
+        }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+        String8 path = buster_test_temporary_path(arguments->arena, S8("typeof-label"), S8(".c"));
+        if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 standards[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+            String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+            for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(standards); dialect += 1)
+            {
+                for (u32 pilot = 0; pilot < 2; pilot += 1)
+                {
+                    for (u32 form = 0; form < 2; form += 1)
+                    {
+                        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+                        {
+                            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                            String8 output = buster_test_temporary_unique_path(temporary.arena, S8("typeof-label-run"), S8(".exe"));
+                            String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), standards[dialect], modes[mode], S8("-fverify-codegen"),
+                                form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-o"), output, path};
+                            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                                (SliceString8){command + !pilot, BUSTER_ARRAY_LENGTH(command) - !pilot});
+                            invocation.reject_machine_fallback = true;
+                            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                            {
+                                String8 run[] = {output};
+                                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                    (ProcessSpawnOptions){.use_process_environment = true});
+                                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                                {
+                                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                                    BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                                }
+                            }
+                            scratch_end(temporary);
+                        }
+                    }
+                }
+            }
+        }
+#endif
+    }
     return result;
 }
 
@@ -63255,6 +63685,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_local_static_aggregates);
     C_TEST_FIXTURE(arguments, c_test_local_tls);
     C_TEST_FIXTURE(arguments, c_test_local_typedef_for_declaration);
+    C_TEST_FIXTURE(arguments, c_test_logical_chain_work_growth);
     C_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
     C_TEST_FIXTURE(arguments, c_test_lowering_nested_calls_and_wide_switch);
     C_TEST_FIXTURE(arguments, c_test_switch_late_overlap);
@@ -63383,6 +63814,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_tagged_member_declares_nothing);
     C_TEST_FIXTURE(arguments, c_test_tagged_member_microsoft_anonymous);
     C_TEST_FIXTURE(arguments, c_test_target_abi_macros);
+    C_TEST_FIXTURE(arguments, c_test_i386_feature_macros);
     C_TEST_FIXTURE(arguments, c_test_gnu_common_predefined_macros);
     C_TEST_FIXTURE(arguments, c_test_tgmath_runtime);
     C_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);
@@ -63408,6 +63840,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_typeof_conditional_type);
     C_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
     C_TEST_FIXTURE(arguments, c_test_typeof_invalid_operand_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_typeof_label_address);
     C_TEST_FIXTURE(arguments, c_test_typeof_malformed_operand_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_typeof_statement_expression_declarations);
     C_TEST_FIXTURE(arguments, c_test_u64_initializer_slots);

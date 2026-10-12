@@ -22,7 +22,7 @@ typedef enum CIrVendorGenericOperation
 
 BUSTER_C_INTERNAL bool c_ir_vendor_generic_supported(Target target, String8 name)
 {
-    bool result = (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64) &&
+    bool result = (cpu_arch_is_x86(target.cpu_arch) || target.cpu_arch == CPU_ARCH_AARCH64) &&
                   (string_equal(name, S8("__builtin_bit_cast")) || string_equal(name, S8("__builtin_convertvector")) ||
                    string_equal(name, S8("__builtin_shufflevector")) || string_equal(name, S8("__builtin_nondeterministic_value")));
     return result;
@@ -143,7 +143,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_generic(CIntegerIrBuilder* builder,
     IrSourceRange source = c_ir_token_source_range(builder, token);
     IrType* output = ir_type_from_id(&builder->program->types, result_type);
     bool valid = operation != C_IR_VENDOR_GENERIC_NONE && output && output->layout.resolved && output->layout.size &&
-                 (builder->target.cpu_arch == CPU_ARCH_X86_64 || builder->target.cpu_arch == CPU_ARCH_AARCH64);
+                 (cpu_arch_is_x86(builder->target.cpu_arch) || builder->target.cpu_arch == CPU_ARCH_AARCH64);
     u64 output_size = valid ? output->layout.size : 0;
     bool output_is_scalar = valid && c_ir_vendor_generic_scalar(output);
     IrTypeId output_element = IR_TYPE_ID_INVALID;

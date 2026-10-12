@@ -39446,7 +39446,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
                 S8("--candidate-id"), head_sha.length ? head_sha : S8("unspecified"),
                 S8("--output"), S8("build/throughput-ci-results"), S8("--profile"), S8("ci"),
                 S8("--mode"), S8("all"), S8("--pairs"), S8("20"), S8("--warmups"), S8("2"), S8("--timeout"), S8("120"),
-                S8("--cpu"), S8("auto")};
+#if BUSTER_MACOS
+                // macOS has no CPU affinity API, so `--cpu auto` finds no CPU;
+                // the informative hosted timing job (#2761) runs unpinned.
+#else
+                S8("--cpu"), S8("auto"),
+#endif
+            };
             bench_throughput_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(benchmark));
             result = PROCESS_RESULT_SUCCESS;
         }

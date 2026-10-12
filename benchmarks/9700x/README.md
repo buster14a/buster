@@ -256,6 +256,20 @@ evidence is under `throughput_real_source/` in the artifact, and a missing,
 partial, failed or cancelled leg fails the check. Its method is in
 [benchmarking.md](../../docs/agents/benchmarking.md).
 
+A fresh exact `profile: production-profile-v1` line, added once against every
+parent, adds the PGO/LTO production-profile leg (#2761) after the corpus leg.
+The head's own `./build.sh production_profile --no-benchmark` runs in an
+isolated clone of the head: it builds and trains the PGO compilers and runs
+`test_all` on the PGO+LTO one. The merge base's `bench_throughput run` then
+times that run's Release compiler against its PGO+LTO compiler on the same
+corpus as the ordinary leg. It is report-only and cannot be combined with the
+real-source or ast-pilot profiles. The host needs `ld.lld`, `llvm-profdata`,
+`llvm-readobj` and Clang's profile runtime; a missing tool fails the leg
+before the build starts. Its evidence is under
+`production_profile/` in the artifact, and a missing, partial, failed or
+cancelled leg fails the check. Its method is in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
 V1 preserves its historical fixed 182-row qualification and 135-execution,
 47-alias candidate profile. V2 independently derives the ordered Release
 inventory and analyzer argument projection from the exact retained candidate

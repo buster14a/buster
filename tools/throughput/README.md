@@ -28,7 +28,10 @@ use `build.ps1` from a configured native developer shell.
 The tool itself supports Linux, macOS and Windows; native harness tests run on
 all three. The macOS leg is `.github/workflows/throughput-harness-macos.yml`:
 it runs weekly, on demand, and for ready pull requests that change a harness
-input, so the Linux comparison never waits for a macOS runner. Hardware
+input, so the Linux comparison never waits for a macOS runner. Its separate
+`timing` job runs `bench_throughput_ci` unpinned on macOS, weekly and on
+dispatch only, as informative timing that is never Zen 5 evidence or a gate
+([native hosted timing](../../docs/agents/benchmarking.md#native-hosted-timing)). Hardware
 counters currently have a Linux implementation only.
 
 ### Hosted workflow requests

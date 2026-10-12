@@ -146,7 +146,7 @@ BUSTER_C_INTERNAL bool c_ir_vendor_generic_supported(Target target, String8 name
 
 BUSTER_C_SHARED bool c_semantic_vendor_builtin_supported(Target target, String8 name)
 {
-    bool result = (target.cpu_arch == CPU_ARCH_X86_64 &&
+    bool result = (cpu_arch_is_x86(target.cpu_arch) &&
                    (c_ir_vendor_rule(name) || c_ir_vendor_sha_name(name) || string_equal(name, S8("__builtin_ia32_xgetbv")))) ||
                   c_ir_vendor_generic_supported(target, name);
     return result;
@@ -799,7 +799,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_builtin(CIntegerIrBuilder* builder,
     IrValueId result = IR_VALUE_ID_INVALID;
     CIrVendorRule const* rule = c_ir_vendor_rule(name);
     IrSourceRange source = c_ir_token_source_range(builder, token);
-    bool valid = builder->target.cpu_arch == CPU_ARCH_X86_64 && arguments && rule && count == rule->arguments;
+    bool valid = cpu_arch_is_x86(builder->target.cpu_arch) && arguments && rule && count == rule->arguments;
     u32 immediate = 0;
     for (u32 argument = 0; valid && argument < count; argument += 1)
     {
@@ -897,11 +897,11 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_builtin(CIntegerIrBuilder* builder,
             break;
         }
     }
-    else if (builder->target.cpu_arch == CPU_ARCH_X86_64 && c_ir_vendor_sha_name(name))
+    else if (cpu_arch_is_x86(builder->target.cpu_arch) && c_ir_vendor_sha_name(name))
     {
         result = c_ir_emit_vendor_sha(builder, name, arguments, count, token);
     }
-    else if (builder->target.cpu_arch == CPU_ARCH_X86_64 && string_equal(name, S8("__builtin_ia32_xgetbv")))
+    else if (cpu_arch_is_x86(builder->target.cpu_arch) && string_equal(name, S8("__builtin_ia32_xgetbv")))
     {
         result = c_ir_emit_vendor_x86_query(builder, name, arguments, count, token);
     }

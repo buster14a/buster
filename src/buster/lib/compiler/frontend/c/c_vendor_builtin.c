@@ -3328,7 +3328,7 @@ BUSTER_C_SHARED bool c_vendor_builtin_lookup(Target target, String8 name, CVendo
 {
     bool result = false;
     *signature = (CVendorBuiltin){0};
-    u32 signature_index = target.cpu_arch == CPU_ARCH_X86_64 ? c_vendor_builtin_signature_index(name) : UINT32_MAX;
+    u32 signature_index = cpu_arch_is_x86(target.cpu_arch) ? c_vendor_builtin_signature_index(name) : UINT32_MAX;
     if (signature_index != UINT32_MAX)
     {
         CVendorBuiltinSignatureDefinition const* stored = c_vendor_builtin_signatures + signature_index;
@@ -3340,7 +3340,8 @@ BUSTER_C_SHARED bool c_vendor_builtin_lookup(Target target, String8 name, CVendo
             CVendorBuiltinTypeDefinition shape = c_vendor_builtin_types[stored->types[index]];
             if (shape.data_model == C_VENDOR_DATA_MODEL_SIZE)
             {
-                shape.type.kind = layout.unsigned_long_integer.size == layout.pointer.size ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG;
+                shape.type.kind = target.cpu_arch == CPU_ARCH_I386 ? C_TYPE_UNSIGNED_INT :
+                                  layout.unsigned_long_integer.size == layout.pointer.size ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG;
             }
             else if (shape.data_model == C_VENDOR_DATA_MODEL_INT64)
             {
@@ -3358,7 +3359,7 @@ BUSTER_C_SHARED bool c_vendor_builtin_lookup(Target target, String8 name, CVendo
         }
         result = true;
     }
-    else if (target.cpu_arch == CPU_ARCH_X86_64 && c_vendor_builtin_signature_index(name) == UINT32_MAX)
+    else if (cpu_arch_is_x86(target.cpu_arch) && c_vendor_builtin_signature_index(name) == UINT32_MAX)
     {
         CVendorBuiltinSupplement const* stored = c_vendor_builtin_supplement(name);
         if (stored)
@@ -3374,7 +3375,7 @@ BUSTER_C_SHARED bool c_vendor_builtin_lookup_alternate(Target target, String8 na
 {
     bool result = false;
     *signature = (CVendorBuiltin){0};
-    CVendorBuiltinSupplement const* stored = target.cpu_arch == CPU_ARCH_X86_64 &&
+    CVendorBuiltinSupplement const* stored = cpu_arch_is_x86(target.cpu_arch) &&
         c_vendor_builtin_signature_index(name) != UINT32_MAX ? c_vendor_builtin_supplement(name) : 0;
     if (stored)
     {

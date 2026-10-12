@@ -1558,6 +1558,18 @@ struct CTypeParseMachine
     CAstStatementStatistics* ast_statement_statistics;
     u32* ast_statement_bodies;
     u32 ast_statement_body_count;
+    // The declaration specifier read (c_parse_declaration_specifiers_type)
+    // reads the same tree: `ast_specifier_starts` holds the first token of
+    // every DECL_SPECIFIERS node, ascending, and `ast_specifier_nodes` the
+    // node at the same position, built once before the declarations are
+    // typed (count in `ast_specifier_count`, null without a tree), with the
+    // position of the last lookup in `ast_specifier_cursor`;
+    // `ast_specifier_statistics` the optional counts.
+    CAstSpecifierStatistics* ast_specifier_statistics;
+    u32* ast_specifier_starts;
+    u32* ast_specifier_nodes;
+    u32 ast_specifier_count;
+    u32 ast_specifier_cursor;
     CAstTypeBodyIndex* ast_bodies;
     CAstTypeBody* ast_types;
     CParseExpressionQuery* expression_queries;
@@ -1744,6 +1756,10 @@ BUSTER_C_EXTERN String8 c_parse_scalar_conversion_message(Target target, CTypeKi
 // Whether [start, end) has the shape of a place, the constraint the machine's
 // `&` checks.
 BUSTER_C_EXTERN bool c_parse_expression_place_shape(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end);
+// Whether [start, end) is a place `++` or `--` may modify, given its type and
+// whether it is a nonplace projection: the machine's checked update rule.
+BUSTER_C_EXTERN bool c_parse_update_operand_modifiable(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CTypeId type,
+                                                       bool nonplace_projection);
 // The binding strength the machine's operator scan gives a token: 1 for the
 // comma, 2 for the assignment family, then 4 (`||`) to 13 (`*`); 0 for none.
 BUSTER_C_EXTERN u32 c_parse_expression_operator_precedence(CToken token);
