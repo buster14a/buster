@@ -41159,14 +41159,14 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
     // A GNU statement expression has the type of the trailing expression
     // statement in its body, and void when it has no such statement --
     // glibc's assert expansion, which Lua's `LUA_USER_H="ltests.h"` build
-    // reaches, ends in a call to noreturn `__assert_fail`, and letting the
-    // generic identifier fallback see that name predicts an integer and makes
-    // a valid `(void)0 : assert(...)` conditional appear incompatible. Reading
-    // the trailing `;` alone as void was the cheaper approximation of the same
-    // rule, and it made `({ 11; })` void as well, so a conditional with a
-    // statement expression in one arm merged two voids and produced nothing.
-    // Keep this shape check ahead of the strict operand query, which is
-    // intentionally type-only and cannot see a body at all.
+    // reaches, ends in a call to noreturn `__assert_fail`. Without this shape
+    // check the operand would be untyped, and a valid `(void)0 : assert(...)`
+    // conditional would be rejected. Reading the trailing `;` alone as void
+    // was the cheaper approximation of the same rule, and it made `({ 11; })`
+    // void as well, so a conditional with a statement expression in one arm
+    // merged two voids and produced nothing. Keep this shape check ahead of
+    // the strict operand query, which is intentionally type-only and cannot
+    // see a body at all.
     u32 statement_start = start;
     if (statement_start < end && builder->preprocess.tokens[statement_start].kind == C_TOKEN_IDENTIFIER &&
         string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[statement_start]), S8("__extension__")))
@@ -41290,7 +41290,8 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
         }
     }
     // Unary integer operators keep the promoted operand type. In particular,
-    // a cast under `~` must not fall through to the s32 literal fallback.
+    // a cast under `~` is typed from its operand here; without this check the
+    // operand would be untyped.
     if (start < end && (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_TILDE) ||
                         c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_PLUS) ||
                         c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_MINUS)))
