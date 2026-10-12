@@ -504,6 +504,9 @@ WILD_LINKER_CELLS = ["ide-debug", "ide-unity-release", "ide-separate-release"]
 # refused by both checks.
 WILD_IDENTITY = re.compile(r"Wild (?:[0-9][0-9A-Za-z.+-]*(?: (?:[0-9a-f]{40}-modified|non-git-build))?"
                            r"|[0-9a-f]{40}) \(compatible with GNU linkers\)\Z")
+# Wild writes that identity into .comment behind this prefix (Layout's `format!("Linker: {}\0", ...)`,
+# libwild/src/layout.rs at e9a9b0cb); run 38255545884 refused the host's genuine output for lacking it.
+WILD_COMMENT_PREFIX = "Linker: "
 WILD_LINKER_LINKERS = ("comparator", "wild")
 # Every token of a retained Wild argv: inert inside double quotes and outside them, so the
 # canonical quoted join is one simple command whatever the shell.
@@ -1552,9 +1555,9 @@ def validate_wild_linker(status: object, files: object, head: str, expected_iden
         problems.extend(argv_problems)
         wild = linkers.get("wild", {}).get("version")
         comments = {linker: files[f"comment {cell} {linker}"].splitlines() for linker in WILD_LINKER_LINKERS}
-        if not isinstance(wild, str) or wild not in comments["wild"]:
+        if not isinstance(wild, str) or WILD_COMMENT_PREFIX + wild not in comments["wild"]:
             problems.append(f"wild-linker {cell} Wild output does not carry the recorded Wild identity in .comment")
-        if any(WILD_IDENTITY.fullmatch(line) for line in comments["comparator"]):
+        if any(WILD_IDENTITY.fullmatch(line.removeprefix(WILD_COMMENT_PREFIX)) for line in comments["comparator"]):
             problems.append(f"wild-linker {cell} comparator output carries a Wild identity in .comment")
     # Every timed command, and each validated and repeated link, is exactly the command derived from the
     # cell's retained argv and the frozen options: no other input, linker or shell text can run.
@@ -1624,6 +1627,10 @@ def _wild_argv_grammar_problems(cell: str, arguments: list[str], config: str) ->
                     (token == "-o" and operand != f"{config}/ide"):
                 problems.append(f"wild-linker {cell} retained argv gives {token} the unadmitted operand {operand!r}")
             index += 1
+        elif token == f"--dependency-file=CMakeFiles/ide.dir/{config}/link.d":
+            # CMake's linker-written link dependencies (CMAKE_LINK_DEPENDS_USE_LINKER) name a file in the
+            # target's own directory; cmake 4.4.4 on the 9700X passes it (run 38255545884).
+            pass
         elif token.startswith("-L"):
             if not _system_path(token[2:]):
                 problems.append(f"wild-linker {cell} retained argv searches {token[2:]!r}, which is not a system directory")
