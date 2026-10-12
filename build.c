@@ -45,6 +45,7 @@
 //   tools/ci_unit_tests.c                       isolated test-module partitions
 //   tools/qemu_compat.c                         opt-in pinned QEMU TCG blocker census
 //   tools/clang_suite.c                         pinned external Clang source ledger and preprocessing probes
+//   tools/userspace_qualification.c             pinned musl + BusyBox input controls and diagnostic cells
 //   compat_ide_select, compat_ide_resolve       compatibility harness compiler selection
 //                                                and compatibility_ide_selection_self_test
 //   compatibility_spawn_self_test              harness environment/script contracts
@@ -152,6 +153,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_DOOM,
     BUILD_COMMAND_TEST_QUICKJS,
     BUILD_COMMAND_TEST_MUSL,
+    BUILD_COMMAND_TEST_USERSPACE,
     BUILD_COMMAND_TEST_CPYTHON,
     BUILD_COMMAND_TEST_RADDEBUGGER,
     BUILD_COMMAND_TEST_CURL,
@@ -25625,6 +25627,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS:
         case BUILD_COMMAND_TEST_QEMU:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
+        case BUILD_COMMAND_TEST_USERSPACE:
         case BUILD_COMMAND_TEST_CURL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
@@ -25663,6 +25666,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
         {.command = BUILD_COMMAND_TEST_QEMU, .owns_arguments = true},
         {.command = BUILD_COMMAND_QEMU_INPUT_SELF_TEST, .owns_arguments = false},
         {.command = BUILD_COMMAND_TEST_CLANG_SUITE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_TEST_USERSPACE, .owns_arguments = true},
         {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
         {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
         {.command = BUILD_COMMAND_SOURCE_SIZE, .owns_arguments = true},
@@ -39730,6 +39734,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 #include "tools/qemu_compat.c"
 #include "tools/clang_suite.c"
 #include "tools/compiler_profile_qualification.c"
+#include "tools/userspace_qualification.c"
 #include "tools/curl_compat.c"
 
 ProcessResult process_arguments(void)
@@ -39789,6 +39794,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_DOOM] = S8_INITIALIZER("test_doom"),
         [BUILD_COMMAND_TEST_QUICKJS] = S8_INITIALIZER("test_quickjs"),
         [BUILD_COMMAND_TEST_MUSL] = S8_INITIALIZER("test_musl"),
+        [BUILD_COMMAND_TEST_USERSPACE] = S8_INITIALIZER("test_userspace"),
         [BUILD_COMMAND_TEST_CPYTHON] = S8_INITIALIZER("test_cpython"),
         [BUILD_COMMAND_TEST_RADDEBUGGER] = S8_INITIALIZER("test_raddebugger"),
         [BUILD_COMMAND_TEST_CURL] = S8_INITIALIZER("test_curl"),
@@ -39913,6 +39919,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS: result = aarch64_assembly_census_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_TEST_QEMU: result = qemu_compat_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_CLANG_SUITE: result = clang_suite_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_TEST_USERSPACE: result = userspace_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_TEST_CURL: result = curl_compat_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS: result = native_retirement_census_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UEFI: result = uefi_boot_main(arena, owned_arguments, arguments.pointer[0]); break;
@@ -41152,6 +41159,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS:
         case BUILD_COMMAND_TEST_QEMU:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
+        case BUILD_COMMAND_TEST_USERSPACE:
         case BUILD_COMMAND_TEST_CURL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:

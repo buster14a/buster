@@ -356,8 +356,27 @@ information; the debug model does not gain inline call-stack records.
 Positive decimal limits are configurable through
 `-fcanonical-inline-max-callee=N` (default 16 canonical instructions),
 `-fcanonical-inline-function-growth=N` (default 2048 copied rows per caller),
-`-fcanonical-inline-module-growth=N` (default 4096 copied rows per module), and
+`-fcanonical-inline-module-growth=N` (default: the larger of 4096 copied rows
+and 1/32 of the module's lowered canonical instruction rows), and
 `-fcanonical-inline-call-sites=N` (default 64 sites per caller).
+The fixed 4096-row module default stopped optional expansion of the unity
+self-host source after 243 sites, because callers are visited in module
+order; per-caller limits refused only 54 further sites once the module limit
+was raised (#48). An explicit module limit is absolute.
+A caller keeps its optional splices only when their planned row growth,
+shifted left by `IR_INLINE_CALLER_GROWTH_SHIFT` (5), reaches its instruction
+rows; otherwise every optional site in it stays a call. The first splice
+relocates the caller's exactly sized tables and the arena keeps the old copy,
+so one tiny site in a large caller costs more memory than it saves. On the
+unity self-host source with `-fcanonical-inline`, shifts 2 through 6 kept 801,
+1643, 2639, 3462 and 3739 of 3984 optional sites for +5, +11, +25, +42 and
++52 MB of peak RSS over tiny-off (unbounded: +80 MB). Generated stage-2
+self-host instructions under cachegrind fell 0.47%, 1.00% and 1.32% at shifts 3,
+4 and 5 (unbounded: 1.31%), so 5 keeps the measured benefit at about half the
+memory. Diagnostic only; 9700X qualification is separate. Mandatory sites are never
+dropped. `-fcanonical-inline-caller-growth-shift=N` and
+`IrInlineOptions.caller_growth_shift` override the shift (a zero API field
+selects the default, 32 or more keeps every planned site).
 The caller default is twice the 64-site times 16-row tiny-body budget. This leaves
 headroom for larger mandatory checked-arithmetic expansions; the module, work
 and storage guards still independently bound expansion.
@@ -368,8 +387,7 @@ planning and splicing share one module-wide work and retained-storage budget.
 Optional selection, like FAST, bounds work and retained storage per caller:
 splicing into a caller copies its exactly sized tables, so module-wide byte or
 work totals let the first few large callers starve every later one. Optional
-expansion across the module stays bounded by the module row-growth limit, which
-is the binding limit for the production unity source at default budgets.
+expansion across the module stays bounded by the module row-growth limit.
 The mandatory graph captures
 call sites in one bounded scan rather than
 rescanning every instruction to build reverse edges. Planning storage includes
@@ -385,7 +403,13 @@ caller-wide widening per site. Other repeated splice work stays charged per site
 counts rather than unrelated instruction/value payload counts; call membership
 checks stop when they reach the call. Growing table storage is charged from the caller's actual
 capacities through projected appends, including geometric growth floors and
-alignment. Callee payloads and clone maps remain charged per splice.
+alignment; that charge is an upper bound, because before a caller's first splice
+`ir_inline_cfg_reserve_tables` grows its block, instruction, value and extra
+tables once to the planned final counts instead of doubling them. Relocating a
+touched caller's exactly sized frontend tables still retains the old copy in the
+arena: on the unity self-host source, tiny inlining touches 809 callers whose
+tables total 65.5 MB, which is most of its peak-RSS cost (#48). Callee payloads
+and clone maps remain charged per splice.
 Tiny bodies are screened before payload scans. Mandatory expansion is still
 subject to resource guards,
 including bounded planning work and retained cloning storage. Expansion checks
@@ -393,10 +417,17 @@ strict canonical validity per function, never by a module-wide scan: each
 candidate's caller and callee once before they are read, and each spliced caller
 again after its last splice (an output failure reports the `inlining output`
 boundary). A mandatory call whose caller or callee is a legacy producer-certified
-shape that fails that check is diagnosed; an optional one stays a call. Rewritten
-callers pass the same check, so a module the input scan already proved stays proven
-and the FAST input guard described above still checks all functions on a
-producer-certified default compile. The verbose
+shape that fails that check is diagnosed; an optional one stays a call. When FAST
+is selected, a caller whose splices were all optional skips that output check:
+it is listed in `inline_unchecked_callers` and proven by the validation that
+follows anyway (the promotion output check of a checked build, else the FAST
+input guard's per-function check). A listed caller that fails reports the
+`inlining output` boundary instead of a FAST decline; a shared-scope failure is
+attributed to it only if its own rows also fail, and failures outside the list
+keep their legacy decline. This removed 0.87 G of 3.4 G inliner instructions
+from an uncapped tiny self-host compile under cachegrind (#48). Any other
+rewritten caller is checked at once, so the FAST input guard still checks all
+functions on a producer-certified default compile. The verbose
 `IR_INLINE` record reports candidates, accepted/mandatory calls, copied rows,
 growth, rejection categories and visits. These counts are diagnostics, not a
 performance result. Mandatory budget refusals additionally report the first

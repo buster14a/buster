@@ -4888,9 +4888,17 @@ struct CodegenMachineDebugIndex
     // operand occurrences and the SPILL/RELOAD edits naming it as subject.
     u32* subject_offsets;
     u32* subject_rows;
-    // Rows that write, clobber, or copy out of one physical register.
+    // Rows that write, clobber, or copy out of one physical register, except
+    // call rows for the registers in `call_clobbers`.
     u32* physical_offsets;
     u32* physical_rows;
+    // Ascending call rows. A call retires the same caller-saved set every
+    // time, so listing it once here instead of once per register bucket keeps
+    // the event count per call constant. A register in `call_clobbers` stops
+    // at its own rows and at these.
+    u32* call_rows;
+    u32 call_row_count;
+    u64 call_clobbers;
     // Rows whose SPILL edits publish one frame home, keyed by the home offset.
     CodegenMachineDebugRowGroups homes;
     // Rows whose REMATERIALIZE edits name one immediate subject.
@@ -5088,7 +5096,8 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_collect(Arena* arena, Machi
                                                               MachineStackPlacement const* placement,
                                                               CodegenMachineDebugIndex const* index, u8 const* referenced,
                                                               u32* subject_last_rows, u32* subject_counts, u32* physical_counts,
-                                                              MachineBuilderStream* subject_events, MachineBuilderStream* physical_events)
+                                                              MachineBuilderStream* subject_events, MachineBuilderStream* physical_events,
+                                                              MachineBuilderStream* call_events)
 {
     for (u32 row = 0; row < function->instruction_count; row += 1)
     {
@@ -5097,6 +5106,14 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_collect(Arena* arena, Machi
         MachineInstruction const* instruction = function->instructions + row;
         MachineOpcodeRow opcode_row = machine_instruction_opcode_row(function, instruction);
         u64 clobbers = codegen_machine_debug_row_clobbers(function, opcode_row);
+        // Marking the call set seen also drops any define of those registers
+        // in the same row: the call row already stops them.
+        if ((opcode_row.flags & MACHINE_OPCODE_ROW_CALL) && index->call_clobbers)
+        {
+            *(u32*)machine_stream_append(arena, call_events) = row;
+            physical_seen = index->call_clobbers;
+            clobbers &= ~index->call_clobbers;
+        }
         while (clobbers)
         {
             u32 physical = trailing_zeroes_u64(clobbers);
@@ -5225,13 +5242,22 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_build(Arena* arena, Machine
     MachineBuilderStream physical_events;
     machine_stream_initialize(&subject_events, sizeof(CodegenMachineDebugIndexEvent));
     machine_stream_initialize(&physical_events, sizeof(CodegenMachineDebugIndexEvent));
+    MachineBuilderStream call_events;
+    machine_stream_initialize(&call_events, sizeof(u32));
+    MachineTargetDescription const* machine_target = function->target;
+    index->call_clobbers = machine_target ? (machine_target->allocatable_mask | machine_target->vector_allocatable_mask) &
+                                                ~machine_target->callee_saved_mask
+                                          : 0;
     if (referenced_count)
     {
         u32* subject_last_rows = arena_allocate(event_scratch.arena, u32, subject_bucket_count);
         memset(subject_last_rows, 0xff, sizeof(*subject_last_rows) * (u64)subject_bucket_count);
         codegen_machine_debug_index_collect(event_scratch.arena, function, placement, index, referenced, subject_last_rows, subject_cursors,
-                                            physical_cursors, &subject_events, &physical_events);
+                                            physical_cursors, &subject_events, &physical_events, &call_events);
     }
+    index->call_row_count = call_events.total_count;
+    index->call_rows = arena_allocate(arena, u32, call_events.total_count ? call_events.total_count : 1u);
+    machine_stream_flatten(&call_events, index->call_rows);
     u32 subject_total = 0;
     for (u32 bucket = 0; bucket < subject_bucket_count; bucket += 1)
     {
@@ -5533,6 +5559,51 @@ BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_physical_next(CodegenMachineDebugI
     return low < end ? index->physical_rows[low] : UINT32_MAX;
 }
 
+// The first call row at or after `row` when either tracked register is in the
+// call-clobbered set. Replay rows only ascend, so the cursor never moves back;
+// a stop that skipped calls while no clobbered register was held searches the
+// remaining rows instead of walking them.
+BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_call_next(CodegenMachineDebugIndex const* index, s32 physical_register, s32 alternate_register,
+                                                         u32 row, u32* cursor)
+{
+    u64 tracked = 0;
+    tracked |= physical_register >= 0 && (u32)physical_register < CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT ? UINT64_C(1) << physical_register : 0;
+    tracked |= alternate_register >= 0 && (u32)alternate_register < CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT ? UINT64_C(1) << alternate_register : 0;
+    u32 next = UINT32_MAX;
+    if (tracked & index->call_clobbers)
+    {
+        u32 low = *cursor;
+        if (low < index->call_row_count && index->call_rows[low] < row)
+        {
+            // Gallop first: the next stop is usually a few calls ahead.
+            u32 step = 1u;
+            u32 high = low + 1u;
+            while (high < index->call_row_count && index->call_rows[high] < row)
+            {
+                low = high;
+                step *= 2u;
+                high = index->call_row_count - low > step ? low + step : index->call_row_count;
+            }
+            low += 1u;
+            while (low < high)
+            {
+                u32 middle = low + (high - low) / 2u;
+                if (index->call_rows[middle] < row)
+                {
+                    low = middle + 1u;
+                }
+                else
+                {
+                    high = middle;
+                }
+            }
+        }
+        *cursor = low;
+        next = low < index->call_row_count ? index->call_rows[low] : UINT32_MAX;
+    }
+    return next;
+}
+
 // The row the block cursor can still match, or none once it has fallen behind:
 // a whole-function replay consumes one block per row, so a block start the
 // walk has passed never matches again.
@@ -5632,6 +5703,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
         u32 alternate_bucket = UINT32_MAX;
         u32 alternate_cursor = 0;
         u32 unmapped_cursor = index->physical_offsets[CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT];
+        u32 call_cursor = 0;
         u32 block_cursor = 0;
         u32 row = 0;
         codegen_machine_debug_selection_push(entries, entry_count, capacity, codegen_machine_debug_sample(&state, 0, frame_offset, has_home),
@@ -5667,6 +5739,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
             next = BUSTER_MIN(next, codegen_machine_debug_physical_next(index, state.physical_register, row, &physical_bucket, &physical_cursor));
             // A copy's source can be overwritten while the copy stays tracked.
             next = BUSTER_MIN(next, codegen_machine_debug_physical_next(index, state.alternate_register, row, &alternate_bucket, &alternate_cursor));
+            next = BUSTER_MIN(next, codegen_machine_debug_call_next(index, state.physical_register, state.alternate_register, row, &call_cursor));
             if (unmapped_cursor < index->physical_offsets[CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT + 1u])
             {
                 // Identities outside the architectural file share one bucket,

@@ -1,0 +1,190 @@
+diff --git a/src/buster/lib/compiler/codegen/register_allocator_fast.c b/src/buster/lib/compiler/codegen/register_allocator_fast.c
+index e9ec0837..e7855623 100644
+--- a/src/buster/lib/compiler/codegen/register_allocator_fast.c
++++ b/src/buster/lib/compiler/codegen/register_allocator_fast.c
+@@ -2,6 +2,17 @@
+ #include <buster/lib/compiler/codegen/machine_schedule_internal.h>
+ #include <buster/lib/compiler/codegen/register_allocator_fast_internal.h>
+ #include <buster/lib/os.h>
++#ifdef __BUSTER__
++#define __rdtsc() 0ull
++#else
++#include <x86intrin.h>
++#endif
++#include <stdio.h>
++#include <stdlib.h>
++typedef struct PlacementProbe PlacementProbe;
++struct PlacementProbe { u64 last; u32 cur; u64 t[16]; u64 words[16]; u64 pops[16]; u64 close_bits; u64 tracked; u64 homes; u64 shareable; u64 retro; u64 edits; u64 slot_objects_closed; };
++static _Thread_local PlacementProbe placement_probe;
++#define PROBE(i) do { u64 probe_now = __rdtsc(); placement_probe.t[i] += probe_now - placement_probe.last; placement_probe.last = probe_now; placement_probe.cur = (i) + 1; } while (0)
+ 
+ // FRA stage 4: local fast register allocation over the compact machine IR.
+ // Included by machine.c in the backend-implementation-file pattern. A
+@@ -2044,6 +2055,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_solve_liveness(Arena* arena, u32 block_cou
+     {
+         u32 block_index = worklist[--work_count];
+         queued[block_index] = 0;
++        placement_probe.pops[placement_probe.cur] += 1;
+         u64 const* block_reads = reads + (u64)block_index * words;
+         u64 const* block_writes = writes + (u64)block_index * words;
+         u64* block_in = live_in + (u64)block_index * words;
+@@ -2056,6 +2068,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_solve_liveness(Arena* arena, u32 block_cou
+         u32 limit = predecessor_offsets[block_index + 1u];
+         // The block's own transfer plus one merge per predecessor edge.
+         WORK_LEDGER_RECORD(MACHINE_LIVENESS_WORD_UPDATES, (u64)words * (1u + limit - first));
++        placement_probe.words[placement_probe.cur] += (u64)words * (1u + limit - first);
+         for (u32 entry = first; entry < limit; entry += 1)
+         {
+             u32 predecessor = predecessor_list[entry];
+@@ -2700,11 +2713,14 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
+                 prepass.active_register_count = general_top;
+             }
+         }
++        PROBE(0);
+         prepass.valid = machine_fast_index_edges(arena, function, &prepass);
+         if (prepass.valid)
+         {
+             machine_fast_value_liveness(arena, function, &prepass);
+         }
++        placement_probe.tracked += prepass.live_words;
++        PROBE(1);
+     }
+ 
+     return prepass;
+@@ -2774,6 +2790,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_close_live_ranges(Arena* arena, MachineFun
+                     u32 object = 64u * word + trailing_zeroes_u64(present);
+                     present &= present - 1u;
+                     occupied_blocks[(u64)object * block_words + block_index / 64u] |= UINT64_C(1) << (block_index & 63u);
++                    placement_probe.close_bits += 1;
+                 }
+             }
+         }
+@@ -3978,6 +3995,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+         // 2,75 lanes of sixteen at a block's exit and 0,60 in its contract, so
+         // the fill was writing sixteen megabytes of a stage-1 compile that
+         // nothing reads. Four masks per block in one allocation is one clear.
++        PROBE(2);
+         u32 register_count = state.active_register_count;
+         u32 mask_count = function->block_count ? function->block_count : 1u;
+         u32* contract_owner = arena_allocate(arena, u32, (u64)function->block_count * register_count);
+@@ -4742,6 +4760,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+         // conforms are not, so they sort and merge behind it — after the
+         // terminator's own edits at the same point, which is the state every
+         // retroactive repair was computed against.
++        PROBE(3);
++        placement_probe.retro += retro_edits.total_count; placement_probe.edits += edits.total_count;
+         placement.edit_count = edits.total_count + retro_edits.total_count;
+         placement.edits = arena_allocate(arena, MachineEdit, placement.edit_count ? placement.edit_count : 1);
+         if (!retro_edits.total_count)
+@@ -4765,6 +4785,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+                 placement.edits[edit_index] = take_main ? main_edits[main_cursor++] : retro_flat[retro_cursor++];
+             }
+         }
++        PROBE(4);
+         // Frame layout runs after the scan: every touch of a vreg slot flows
+         // through the edit stream, so only edit subjects get backing slots.
+         // Values that never left their registers cost no frame bytes.
+@@ -4839,6 +4860,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+         // interval; the bounded block colorer below uses the closure's exact
+         // occupied blocks instead. Where that bound is exceeded, retain the
+         // older local-home rule.
++        PROBE(5);
+         bool linear_cfg = true;
+         u32* outgoing_counts = arena_allocate(arena, u32, function->block_count ? function->block_count : 1u);
+         memset(outgoing_counts, 0, (u64)(function->block_count ? function->block_count : 1u) * sizeof(*outgoing_counts));
+@@ -4894,6 +4916,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+                 memset(pool_indices, 0xff, (u64)value_count * sizeof(*pool_indices));
+             }
+         }
++        PROBE(6);
++        placement_probe.homes += home_count;
+         for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
+         {
+             // A home the edit rows bound is one this function both fills and
+@@ -4930,6 +4954,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+         // records name slots too, but what they name may not decide layout:
+         // the code a build emits with debug information has to be the code it
+         // emits without.
++        PROBE(7);
+         u32 slot_axis = function->stack_slot_count ? function->stack_slot_count : 1u;
+         u32* slot_starts = arena_allocate(arena, u32, slot_axis);
+         u32* slot_ends = arena_allocate(arena, u32, slot_axis);
+@@ -5012,6 +5037,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+         bool block_color_slots = coalesce_slots && !linear_cfg && shareable_slots &&
+                                  slot_plane_bytes <= MACHINE_FAST_BLOCK_COLOR_PLANE_LIMIT &&
+                                  slot_color_bytes <= MACHINE_FAST_BLOCK_COLOR_PLANE_LIMIT;
++        PROBE(8);
++        placement_probe.shareable += shareable_slots;
+         MachineFastBlockObjects slot_blocks = {0};
+         if (coalesce_slots)
+         {
+@@ -5020,6 +5047,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+         }
+         // Closure preserves the final eligibility count. An empty population
+         // leaves the caller's slot-group sentinels intact and needs no row histogram.
++        PROBE(9);
+         u32 group_count = slot_blocks.count
+                               ? machine_fast_color_block_objects(arena, function, &slot_blocks, false, false, slot_groups, group_sizes,
+                                                                  group_alignments)
+@@ -5033,6 +5061,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+         // Two pools, one per home width: the eight-byte scalar homes and the
+         // sixty-four-byte vector ones, so a rarely spilled vector never widens
+         // the slots the scalar homes share.
++        PROBE(10);
+         u32 pool_size = block_pool_size != UINT32_MAX && block_vector_pool_size != UINT32_MAX
+                             ? block_pool_size
+                             : machine_fast_color_homes(arena, function, slot_needed, home_starts, home_ends, false, pool_indices);
+@@ -5042,6 +5071,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+         // The pushed callee-saved registers sit between the frame base and the
+         // slots, so every offset starts past them, and the stack allocation
+         // keeps sixteen-alignment across an odd push count.
++        PROBE(11);
+         u32 push_count = 0;
+         for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
+         {
+diff --git a/src/buster/lib/compiler/codegen/register_allocator_predicate.c b/src/buster/lib/compiler/codegen/register_allocator_predicate.c
+index 4fb0df66..456b65c4 100644
+--- a/src/buster/lib/compiler/codegen/register_allocator_predicate.c
++++ b/src/buster/lib/compiler/codegen/register_allocator_predicate.c
+@@ -81,6 +81,9 @@ BUSTER_GLOBAL_LOCAL u32 machine_predicate_pick(MachinePredicateState* state, Mac
+ 
+ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_predicate_placement_build(Arena* arena, MachineFunction* function, bool quality)
+ {
++    placement_probe = (PlacementProbe){0};
++    placement_probe.last = __rdtsc();
++    u64 probe_begin = placement_probe.last;
+     bool inspect = function->target && function->target->predicate_allocatable_mask && !function->predicate_absence_certified;
+     u32 predicate_count = 0;
+     for (u32 value = 0; inspect && value < function->virtual_register_count; value += 1)
+@@ -179,6 +182,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_predicate_placement_build(Aren
+             projected.stack_slot_alignments[next_slot] = 8;
+         }
+     }
++    PROBE(14);
+     MachineStackPlacement placement;
+     if (quality)
+     {
+@@ -410,6 +414,23 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_predicate_placement_build(Aren
+         placement.edits = merged;
+         placement.edit_count = count;
+     }
++    PROBE(12);
++    {
++        static FILE* probe_file;
++        static int probe_opened;
++        if (!probe_opened) { probe_opened = 1; char const* path = getenv("PLACEMENT_PROBE"); probe_file = path ? fopen(path, "w") : 0; }
++        if (probe_file)
++        {
++            PlacementProbe* q = &placement_probe;
++            fprintf(probe_file, "F rows=%u blocks=%u vregs=%u edges=%u slots=%u tracked_words=%llu homes=%llu shareable=%llu edits=%llu retro=%llu close_bits=%llu total=%llu",
++                function->instruction_count, function->block_count, function->virtual_register_count, function->edge_count, function->stack_slot_count,
++                (unsigned long long)q->tracked, (unsigned long long)q->homes, (unsigned long long)q->shareable, (unsigned long long)q->edits, (unsigned long long)q->retro,
++                (unsigned long long)q->close_bits, (unsigned long long)(q->last - probe_begin));
++            for (u32 i = 0; i < 16; i += 1) fprintf(probe_file, " t%u=%llu", i, (unsigned long long)q->t[i]);
++            for (u32 i = 0; i < 16; i += 1) if (q->words[i]) fprintf(probe_file, " w%u=%llu p%u=%llu", i, (unsigned long long)q->words[i], i, (unsigned long long)q->pops[i]);
++            fprintf(probe_file, "\n");
++        }
++    }
+     return placement;
+ }
+ 
