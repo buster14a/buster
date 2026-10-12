@@ -197,14 +197,18 @@ invocation's native family (`compiler_driver_native_family_prepare`): all
 x86 per-form caches and exact plans for x86-64, or canonical-form validity and
 semantic blobs for AArch64. Prepared families are tracked in driver state.
 Parked workers count as live threads, so a later invocation on the same thread
-that needs the other family first releases the parked gang with
+that needs a family not yet prepared first releases the parked gang with
 `lane_release()`, prewarms that family serially, and lets the next `lane_run`
 recreate the gang. This applies to a later cohort and to a serial compile of
-the other family while a cohort's gang is parked: the serial compile fills x86
-tables lazily under a serial check. A process that never runs a cohort keeps
-the serial lazy path. Each family switch costs one gang re-creation; skipping
-the other family removed about 9% of the measured multi-lane entry cost on an
-x86-only compile (#53).
+that family while a cohort's gang is parked: the serial compile fills x86
+tables lazily under a serial check. Only a transition to a family not yet
+prepared releases the gang; once both are prepared, alternating targets reuses
+the parked gang.
+A process that never runs a cohort keeps the serial lazy path. The motivation
+is a baseline attribution, not a measurement of this design: the #53
+diagnostic split attributed about 9% of the both-family prewarm to the
+AArch64 half on an x86 input. The end-to-end effect awaits the 9700X
+`scaling-v1` rows.
 
 `compiler_parallel_prewarm()` still prepares both families. Embedding callers
 must call it before starting their own gang, or before calling the driver from
