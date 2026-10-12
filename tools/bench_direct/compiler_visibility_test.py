@@ -749,6 +749,17 @@ class PublishTest(unittest.TestCase):
                 legs = {entry["leg"]: entry["status"] for entry in shown["inventory_coverage"]["legs"]}
                 self.assertEqual(legs["scaling"], "not discharged: leg failed")
 
+    def test_malformed_production_profile_binaries_end_in_a_terminal_failure(self) -> None:
+        """Rendering a malformed role record must not raise before the check completes (#2761)."""
+        for label, role in (("object", {"sha256": 1}), ("list", [1]), ("string", "x"), ("boolean", True)):
+            with self.subTest(role=label):
+                recorded = receipt()
+                recorded["production_profile"] = {"requested": True, "status": "failed",
+                                                  "binaries": {"baseline": role, "candidate": role}}
+                api, started, unused_written = self.publish(machine_bytes(), recorded)
+                self.assertEqual((len(api.checks), started["status"], started["conclusion"]),
+                                 (1, "completed", "failure"))
+
     def test_publisher_completes_the_started_check_and_emits_the_entry(self) -> None:
         api, started, written = self.publish(machine_bytes())
         self.assertEqual(len(api.checks), 1)
