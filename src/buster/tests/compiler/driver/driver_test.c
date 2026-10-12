@@ -8293,6 +8293,34 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_object_text(ObjectFile const*
 
 // The GCC fixture is pristine GCC 16.2.1 -O2 -S output for the two scalar
 // conversions in #3732. GCC is an oracle used to capture it, not a test dependency.
+// Untouched GCC 16.2.1 -O2 -S output: #3740's maximum-skip directives and
+// #3732's REP NOP spelling must work together through the public driver.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_pause_listing(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 output = buster_test_temporary_path(arena, S8("gcc-pause-listing"), S8(".o"));
+    String8 args[] = {S8("-target"), S8("x86_64-linux"), S8("-march=baseline"), S8("-c"),
+        S8("src/buster/tests/compiler/assembly/fixtures/gcc_pause_alignment_spin.s"), S8("-o"), output};
+    CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(args)));
+    BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object, assembled.diagnostic);
+    if (assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object)
+    {
+        // GNU as places PAUSE at 16 and the load at 18. Buster keeps its
+        // single-byte NOP fill; executable instruction bytes/offsets agree.
+        u8 expected[] = {0xeb, 0x10, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+                         0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+                         0xf3, 0x90, 0x8b, 0x07, 0x85, 0xc0, 0x75, 0xf8, 0xc3};
+        ByteSlice actual = compiler_driver_test_object_text(&assembled.object);
+        BUSTER_TEST(arguments, actual.length == sizeof(expected) && memcmp(actual.pointer, expected, sizeof(expected)) == 0);
+    }
+    os_file_delete(output);
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pause_conversion_round_trip(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -35006,6 +35034,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bare_dwarf_sections);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_statements);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_quoted_assembly_round_trip);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_gcc_pause_listing);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pause_conversion_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_compiler_listing_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_assembly_round_trip);

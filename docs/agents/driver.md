@@ -967,6 +967,9 @@ AVX-512 profiles and malformed neighbours. The driver's
 Buster listings with byte-identical text and captured pristine GCC 16.2.1
 `-O2 -S` scalar conversions. These bounded witnesses do not claim every
 metadata form or arbitrary external listing is source-complete (#2931).
+`assembly_test_x86_rep_nop` checks the operand-free REP-NOP aliases and
+malformed operands in both dialects; `compiler_driver_test_gcc_pause_listing`
+assembles the pristine GCC PAUSE loop with its maximum-skip alignment directives.
 
 On Mach-O, `.section SEGMENT,SECTION[,TYPE[,ATTRIBUTES]]` and
 `.pushsection` accept the pairs Buster's listing writer represents:

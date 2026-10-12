@@ -20,12 +20,16 @@ repository filesystem. The test checks the same instruction offsets and branch d
 requiring GNU's multibyte NOP encodings.
 
 `gcc_pause_alignment_spin.c` and `.s` retain the original issue's pristine
-PAUSE specimen. After the alignment fix it reaches `rep nop`, a separate
-instruction-spelling refusal reported on
+PAUSE specimen. `compiler_driver_test_gcc_pause_listing` assembles it through
+the public driver at the baseline target, covering both the maximum-skip
+directive and the `rep nop` spelling reported on
 [#3732](https://github.com/buster14a/buster/issues/3732#issuecomment-6122548068).
-It is preserved as evidence, not registered as a passing regression until that
-instruction work lands. The active volatile-store loop isolates the directive
-and is also untouched GCC `-O2 -S` output.
+GNU as places PAUSE at byte 16, the volatile load at byte 18 and RET at byte 24;
+the regression checks the same instruction bytes, offsets and branch
+displacements with Buster's existing single-byte NOP padding. Both listings
+are untouched GCC `-O2 -S` output, generated from their adjacent C inputs copied
+to `spin.c` before invocation. The PAUSE listing's SHA-256 is
+`1bc029f2963b1734f4979f43289daa766954925b67abd5fc1835da95e1d674e5`.
 
 Buster's first-party license remains unselected per
 [LICENSES/README.md](../../../../../../LICENSES/README.md).
