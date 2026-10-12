@@ -36919,11 +36919,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inferred_initializer_element_checks(Un
         String8 source;
         String8 message;
     } expected[] = {
-        {S8("int a[] = {1, 2, \"x\"};\n"), S8("cannot convert from 'char *' to 'int'")},
-        {S8("int a[] = {1, \"x\", 2.0 + \"y\"};\n"), S8("cannot convert from 'char *' to 'int'")},
+        {S8("int a[] = {1, 2, \"x\"};\n"), S8("C IR lowering: cannot convert from 'char *' to 'int'")},
+        {S8("int a[] = {1, \"x\", 2.0 + \"y\"};\n"), S8("C IR lowering: cannot convert from 'char *' to 'int'")},
         {S8("struct P { int x; char *y; };\nstruct P p[] = {{1, \"a\"}, {2, 3.5}};\n"),
-         S8("cannot convert between a pointer and a floating-point type")},
-        {S8("int b[] = {1, 2, [5] = \"x\"};\n"), S8("cannot convert from 'char *' to 'int'")},
+         S8("C IR lowering: cannot convert between a pointer and a floating-point type")},
+        {S8("int b[] = {1, 2, [5] = \"x\"};\n"), S8("C IR lowering: cannot convert from 'char *' to 'int'")},
         {S8("struct P { int x; char *y; };\nstruct P q[] = {{1, \"a\"}, {2, 0}};\nint c[] = {1, 2, 3,};\nchar s[][4] = {\"ab\", \"cd\"};\n"
             "int d[][2] = {{1, 2}, {3, 4}};\nint e[sizeof(c) + sizeof(d) == 28 ? 1 : -1];\n"),
          S8("")},
