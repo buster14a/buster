@@ -22,6 +22,11 @@ attempt:
   adds the optional members within what is left. It takes the trees in export
   order, and each tree's members in bytewise path order. An earlier leg's
   optional data can never starve a later leg's required members.
+- A leg may still read a member it did not list as required, for example a
+  part exported with no required tuple. In that case `read_exported_json`
+  exports that one member first, within the remaining budget, using the same
+  no-follow walk. Validation therefore never sees a deferred member as
+  missing.
 - The exports stop 6 MiB and 3 entries short of the sealed bounds, so the
   control files always fit. Entries count directories as well as files, as
   the verifier does.

@@ -812,7 +812,7 @@ def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, 
         os.replace(staging, destination)
         if defer_optional:
             EVIDENCE_DEFERRED_OPTIONAL.append({"source": source, "destination": destination, "ignore": ignore,
-                                               "required": required, "created": created})
+                                               "required": required, "created": created, "evidence": evidence})
     except OSError as error:
         problems.append(f"evidence export of {destination.name} failed: {error}")
         shutil.rmtree(staging, ignore_errors=True)
@@ -828,6 +828,30 @@ def record_evidence_omissions(destination: Path, evidence: Path, omissions: list
     EVIDENCE_OMISSION_LEDGER.extend((prefix + item["path"], code) for item, code in zip(omissions, codes))
 
 
+def promote_deferred_member(path: Path) -> None:
+    """Export a deferred optional member now, because a leg is about to read it (#2918).
+
+    A sealed attempt defers every member a leg did not list as required, but some legs validate members
+    they never listed (for example a part exported with required=()). The member is admitted on demand
+    within the export budget, exactly as the final pass would; bulk optional data stays deferred.
+    """
+    for record in EVIDENCE_DEFERRED_OPTIONAL:
+        try:
+            relative = path.relative_to(record["destination"]).as_posix()
+        except ValueError:
+            continue
+        # Only a leaf the same nofollow walk would export: never through a symlinked or ignored directory.
+        leaves = dict(evidence_leaves(record["source"], record["ignore"])[0]) if not os.path.lexists(path) else {}
+        if relative in leaves:
+            omissions: list = []
+            codes: list[str] = []
+            admit_evidence_leaves([(relative, leaves[relative])], record["destination"], record["created"],
+                                  list(evidence_usage(record["evidence"])), set(), omissions, codes)
+            record_evidence_omissions(record["destination"], record["evidence"], omissions, codes)
+            record["omitted"] = record.get("omitted", []) + omissions
+        break
+
+
 def export_deferred_optional(evidence: Path, receipt_omissions: dict) -> None:
     """Add sealed attempts' optional members once every leg's required members are retained (#2918).
 
@@ -840,9 +864,12 @@ def export_deferred_optional(evidence: Path, receipt_omissions: dict) -> None:
         omissions: list = []
         codes: list[str] = []
         leaves, _ = evidence_leaves(record["source"], record["ignore"])
-        admit_evidence_leaves([leaf for leaf in leaves if leaf[0] not in record["required"]], record["destination"],
-                              record["created"], usage, set(), omissions, codes)
+        promoted = {item["path"] for item in record.get("omitted", [])}
+        admit_evidence_leaves([leaf for leaf in leaves if leaf[0] not in record["required"] and leaf[0] not in promoted and
+                               not os.path.lexists(record["destination"] / leaf[0])],
+                              record["destination"], record["created"], usage, set(), omissions, codes)
         record_evidence_omissions(record["destination"], evidence, omissions, codes)
+        omissions = record.get("omitted", []) + omissions  # on-demand omissions are already in the ledger
         if omissions:
             name = record["destination"].relative_to(evidence).as_posix()
             earlier = receipt_omissions.get(name, {"count": 0, "shown": []})
@@ -856,10 +883,12 @@ def read_exported_json(path: Path) -> tuple[object, str]:
 
     Classification must see the bytes the publisher will see, not the measurement tree they were copied
     from (#2929), so this reads the evidence member without following a symlink and within
-    EVIDENCE_MEMBER_LIMIT. Every failure is a returned reason, never an exception.
+    EVIDENCE_MEMBER_LIMIT. A member a sealed attempt deferred is exported first (promote_deferred_member).
+    Every failure is a returned reason, never an exception.
     """
     document: object = None
     problem = ""
+    promote_deferred_member(path)
     try:
         if not stat.S_ISREG(os.lstat(path).st_mode):
             problem = "not a regular file"

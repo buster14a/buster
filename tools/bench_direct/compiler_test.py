@@ -2819,6 +2819,65 @@ class ExportTest(unittest.TestCase):
         self.assertTrue((self.evidence / "ast_pilot_acceptance" / "diagnostic-0.log").is_file())
         self.assertIn("ast_pilot_acceptance", receipt_omissions)
 
+    def deferred_parts(self) -> Path:
+        """A leg shaped like #3901's self-host inline leg: three parts, each exported with required=()."""
+        root = self.root / "selfhost"
+        for part, name in (("stage1-baseline", "stage1.json"), ("stage1-candidate", "stage1.json"),
+                           ("compare", "result.json")):
+            (root / part).mkdir(parents=True)
+            (root / part / name).write_text("{\"ok\": true}")
+            (root / part / "trace.log").write_text("trace\n")
+        return root
+
+    def test_a_leg_reading_unlisted_members_still_sees_them_in_a_sealed_attempt(self) -> None:
+        # Deferral must not hide a member a leg validates without listing it as required (#3883 review).
+        root = self.deferred_parts()
+        exported = self.evidence / "selfhost_inline"
+        compiler_compare.EVIDENCE_OMISSION_LEDGER.clear()
+        compiler_compare.EVIDENCE_DEFERRED_OPTIONAL.clear()
+        receipt_omissions: dict = {}
+        with mock.patch.object(compiler_compare, "EVIDENCE_DEFER_ALL", True):
+            for part in ("stage1-baseline", "stage1-candidate", "compare"):
+                problems, _ = compiler_compare.export_tree(root / part, exported / part, self.evidence, ("*.exe",), ())
+                self.assertEqual(problems, [])
+            self.assertFalse((exported / "compare" / "trace.log").exists())
+            documents = [compiler_compare.read_exported_json(exported / name) for name in
+                         ("stage1-baseline/stage1.json", "stage1-candidate/stage1.json", "compare/result.json")]
+            self.assertEqual(documents, [({"ok": True}, "")] * 3)
+            self.assertFalse((exported / "compare" / "trace.log").exists())  # bulk optional data stays deferred
+            compiler_compare.export_deferred_optional(self.evidence, receipt_omissions)
+        files = sorted(path.relative_to(exported).as_posix() for path in exported.rglob("*") if path.is_file())
+        self.assertEqual(files, ["compare/result.json", "compare/trace.log", "stage1-baseline/stage1.json",
+                                 "stage1-baseline/trace.log", "stage1-candidate/stage1.json", "stage1-candidate/trace.log"])
+        self.assertEqual((receipt_omissions, compiler_compare.EVIDENCE_OMISSION_LEDGER), ({}, []))
+
+    def test_on_demand_export_follows_no_link_and_records_a_refusal_once(self) -> None:
+        root = self.deferred_parts()
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "secret.json").write_text("{}")
+        (root / "compare" / "linked").symlink_to(outside, target_is_directory=True)
+        exported = self.evidence / "selfhost_inline"
+        compiler_compare.EVIDENCE_OMISSION_LEDGER.clear()
+        compiler_compare.EVIDENCE_DEFERRED_OPTIONAL.clear()
+        receipt_omissions: dict = {}
+        with mock.patch.object(compiler_compare, "EVIDENCE_DEFER_ALL", True):
+            compiler_compare.export_tree(root / "compare", exported / "compare", self.evidence, ("*.exe",), ())
+            document, problem = compiler_compare.read_exported_json(exported / "compare" / "linked" / "secret.json")
+            self.assertIsNone(document)
+            self.assertFalse((exported / "compare" / "linked").exists())
+            with mock.patch.object(compiler_compare, "EVIDENCE_TOTAL_LIMIT", 0):
+                document, problem = compiler_compare.read_exported_json(exported / "compare" / "result.json")
+            self.assertIsNone(document)
+            compiler_compare.export_deferred_optional(self.evidence, receipt_omissions)
+        refused = [item for item in compiler_compare.EVIDENCE_OMISSION_LEDGER if item[0] == "selfhost_inline/compare/result.json"]
+        self.assertEqual(refused, [("selfhost_inline/compare/result.json", "byte-budget")])
+        # The linked directory was the leg's own export omission; the deferred section adds only result.json.
+        self.assertIn(("selfhost_inline/compare/linked", "excluded-type"), compiler_compare.EVIDENCE_OMISSION_LEDGER)
+        self.assertEqual(receipt_omissions["selfhost_inline/compare"]["count"], 1)
+        self.assertTrue((exported / "compare" / "trace.log").is_file())
+        self.assertFalse((exported / "compare" / "result.json").exists())
+
     def test_every_omission_reaches_the_ledger_with_its_fixed_code(self) -> None:
         (self.source / "big.txt").write_bytes(b"x" * 100)
         (self.source / "link.txt").symlink_to(self.source / "raw.txt")
