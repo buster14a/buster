@@ -1514,13 +1514,40 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission(UnitTestArgume
     String8 values[] = {S8("capture-sink-admission"), marker, S8("1")};
     OsTestEnvironment environment = os_test_environment(arena, keys, values, BUSTER_ARRAY_LENGTH(keys));
     String8 child[] = {program_state->input.arguments.pointer[0], S8("test")};
-    u64 resources = os_process_spawn_test_resource_count();
     ProcessSpawnOptions outer = {
         .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .new_process_group = 1,
     };
     outer.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = BUSTER_KB(4);
     outer.capture_limits.per_stream[STANDARD_STREAM_ERROR] = BUSTER_KB(4);
     outer.capture_limits.total = BUSTER_KB(8);
+#if BUSTER_WINDOWS
+    // A cold CreateProcess initializes process-lifetime tracing/registry state.
+    // Full-suite runs already reached it before this fixture; isolated OS runs
+    // must calibrate before the exact census, without accepting owned leaks.
+    u64 cold_resources = os_process_spawn_test_resource_count();
+    String8 warm_values[] = {S8("capture-small"), marker, S8("1")};
+    OsTestEnvironment warm_environment = os_test_environment(arena, keys, warm_values, BUSTER_ARRAY_LENGTH(keys));
+    ProcessSpawnResult warm_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child),
+        warm_environment.keys, warm_environment.values, outer);
+    BUSTER_VALIDATE(warm_spawn.handle != 0 && warm_spawn.process_group);
+    ProcessWaitResult warm_wait = os_process_wait_deadline(arena, warm_spawn, 30000000);
+    BUSTER_VALIDATE(warm_wait.result == PROCESS_RESULT_SUCCESS && !warm_wait.timed_out && !warm_wait.capture_failed &&
+        !warm_wait.output_truncated && !warm_wait.capture_limit_exceeded && !warm_wait.process_tree_cleanup_failed &&
+        !warm_wait.process_group_reservation_retained && !warm_wait.process_group_ownership_lost &&
+        warm_wait.streams[STANDARD_STREAM_OUTPUT].length == 5);
+    // Direct ownership checks cover the cold launch too, before taking a
+    // steady-state census that includes the native runtime's persistent state.
+    HANDLE owned[] = {(HANDLE)warm_spawn.handle, (HANDLE)warm_spawn.process_tree,
+        (HANDLE)warm_spawn.pipes[STANDARD_STREAM_OUTPUT][0], (HANDLE)warm_spawn.pipes[STANDARD_STREAM_ERROR][0]};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(owned); index += 1)
+    {
+        DWORD flags = 0;
+        BUSTER_VALIDATE(owned[index] && !GetHandleInformation(owned[index], &flags) && GetLastError() == ERROR_INVALID_HANDLE);
+    }
+    arguments->show(arguments, S8("OS_CAPTURE_CENSUS_WARMUP_V1 before={u64} after={u64} owned_handles=closed status=pass\n"),
+        cold_resources, os_process_spawn_test_resource_count());
+#endif
+    u64 resources = os_process_spawn_test_resource_count();
     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child), environment.keys, environment.values, outer);
     if (BUSTER_REQUIRE(arguments, spawn.handle != 0 && spawn.process_group))
     {
@@ -1550,7 +1577,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission(UnitTestArgume
         }
     }
     BUSTER_TEST(arguments, !os_test_regular_file_exists(marker));
-    BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources);
+    u64 resources_after = os_process_spawn_test_resource_count();
+    if (resources_after != resources)
+    {
+        arguments->show(arguments, S8("CAPTURE_SINK_RESOURCES_V1 before={u64} after={u64}\n"), resources, resources_after);
+    }
+    BUSTER_TEST(arguments, resources_after == resources);
     BUSTER_TEST(arguments, os_file_delete(marker));
 
     // These fields are deliberately invalid but ignored by their policies.
