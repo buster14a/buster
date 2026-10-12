@@ -3,7 +3,9 @@
 // ir_instruction_is_pure is the semantic DCE authority. ir_fast_fold performs
 // one forward pass and takes each scalar rule from ir_fast_fold_rule, which
 // the diagnostic-only ir_construction_fold_census also asks at C-builder
-// commit (#3010; ir_construction.fold_birth_*/fold_late_*); ir_fast_dce uses
+// commit (#3010; ir_construction.fold_birth_*/fold_late_*). That probe tags
+// the row, and ir_fast_fold_census_late/_entry/_exit match each late fold to
+// the tag (fold_match_*, fold_size_*, fold_survival_*, fold_net_*); ir_fast_dce uses
 // counts plus a deletion queue (no use CSR); ir_fast_parameters has a hard
 // sweep cap. The opt-in ir_fast_cse (#3011) value-numbers admitted rows within
 // each block through a bounded generation-tagged table and runs between address
@@ -182,17 +184,126 @@ BUSTER_CT_CHECK(IR_CONSTRUCTION_FOLD_BIRTH_BINARY_LEFT_IDENTITY - IR_CONSTRUCTIO
 BUSTER_CT_CHECK(IR_CONSTRUCTION_FOLD_LATE_BINARY_LEFT_IDENTITY - IR_CONSTRUCTION_FOLD_LATE_CAST_IDENTITY ==
                 IR_FAST_FOLD_RULE_BINARY_LEFT_IDENTITY - IR_FAST_FOLD_RULE_CAST_IDENTITY);
 
-BUSTER_GLOBAL_LOCAL void ir_fast_fold_census_late(IrFastFoldRule rule, bool replaced_roots)
+// Function-size buckets for the matched census, by rows at FAST entry.
+#define IR_FAST_FOLD_CENSUS_SMALL_ROWS 64u
+#define IR_FAST_FOLD_CENSUS_MEDIUM_ROWS 512u
+#define IR_FAST_FOLD_CENSUS_LARGE_ROWS 4096u
+
+BUSTER_GLOBAL_LOCAL bool ir_fast_fold_census_late_folded(IrFunction const* function, u32 value)
 {
+    u32 definition = value != IR_PROMOTE_NONE ? function->values[value].definition.value : IR_PROMOTE_NONE;
+    return definition < function->instruction_count && (function->instructions[definition].fold_census & IR_FOLD_CENSUS_LATE_FOLDED);
+}
+
+// Records one late fold by rule and matches it to the row's commit verdict:
+// the same rule then (category 1), probed with no rule then (category 2,
+// split by whether an operand was folded or replaced earlier in this scan),
+// a different rule, an inliner clone, or a row never probed. Called before a
+// constant rewrite clears the operands. Category 1 also records the logical
+// storage a birth fold leaves unallocated and marks the literal operand rows
+// so ir_fast_fold_census_exit can count the ones the fold leaves dead.
+BUSTER_GLOBAL_LOCAL void ir_fast_fold_census_late(IrFunction* function, IrInstruction* row, IrFastFoldRule rule, u32 first, u32 second,
+                                                  bool replaced_roots, bool identity)
+{
+    // The address pass reaches the identity path with no scalar rule.
     if (rule != IR_FAST_FOLD_RULE_NONE)
     {
         ir_construction_record((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_LATE_CAST_IDENTITY + (rule - IR_FAST_FOLD_RULE_CAST_IDENTITY)), 1);
         IR_CONSTRUCTION_RECORD(FOLD_LATE_REPLACED_ROOTS, replaced_roots);
+        u32 verdict = row->fold_census & IR_FOLD_CENSUS_VERDICT;
+        bool cascade = replaced_roots || ir_fast_fold_census_late_folded(function, first) || ir_fast_fold_census_late_folded(function, second);
+        IrConstructionCounter match = (row->fold_census & IR_FOLD_CENSUS_INLINED) ? IR_CONSTRUCTION_FOLD_MATCH_INLINED
+                                      : verdict == 0                              ? IR_CONSTRUCTION_FOLD_MATCH_UNPROBED
+                                      : verdict == IR_FOLD_CENSUS_PROBED + rule   ? IR_CONSTRUCTION_FOLD_MATCH_BIRTH
+                                      : verdict != IR_FOLD_CENSUS_PROBED          ? IR_CONSTRUCTION_FOLD_MATCH_OTHER_RULE
+                                      : cascade                                   ? IR_CONSTRUCTION_FOLD_MATCH_LATER_CASCADE
+                                                                                  : IR_CONSTRUCTION_FOLD_MATCH_LATER_OTHER;
+        ir_construction_record(match, 1);
+        u32 rows = function->instruction_count;
+        u32 bucket = rows < IR_FAST_FOLD_CENSUS_SMALL_ROWS ? 0 : rows < IR_FAST_FOLD_CENSUS_MEDIUM_ROWS ? 1 : rows < IR_FAST_FOLD_CENSUS_LARGE_ROWS ? 2 : 3;
+        if (match == IR_CONSTRUCTION_FOLD_MATCH_BIRTH)
+        {
+            ir_construction_record((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_SIZE_SMALL_BIRTH + bucket), 1);
+            IrConstructionCounter shape = IR_CONSTRUCTION_FOLD_MATCH_BIRTH_OTHER;
+            if (row->opcode == IR_OPCODE_CAST)
+            {
+                shape = row->conversion_operation == IR_CONVERSION_INTEGER_REINTERPRET  ? IR_CONSTRUCTION_FOLD_MATCH_BIRTH_REINTERPRET
+                        : row->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND ? IR_CONSTRUCTION_FOLD_MATCH_BIRTH_SIGN_EXTEND
+                        : row->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND ? IR_CONSTRUCTION_FOLD_MATCH_BIRTH_ZERO_EXTEND
+                        : row->conversion_operation == IR_CONVERSION_INTEGER_TRUNCATE    ? IR_CONSTRUCTION_FOLD_MATCH_BIRTH_TRUNCATE
+                                                                                         : shape;
+            }
+            else if (row->opcode == IR_OPCODE_BINARY && row->binary_operation == IR_BINARY_INTEGER_NOT_EQUAL)
+            {
+                shape = IR_CONSTRUCTION_FOLD_MATCH_BIRTH_NOT_EQUAL;
+            }
+            ir_construction_record(shape, 1);
+            // An identity needs none of the row's storage; a constant still needs
+            // its row and one immediate, which the late rewrite allocates anew
+            // after the operands it no longer reads.
+            u64 operand_bytes = (u64)row->operand_count * sizeof(IrValueId);
+            u64 source_bytes = function->instruction_canonical_sources ? sizeof(IrSourceRange) : 0;
+            IR_CONSTRUCTION_RECORD(FOLD_NET_ROW_BYTES, identity ? sizeof(IrInstruction) + sizeof(IrValue) + operand_bytes + source_bytes
+                                                                : operand_bytes + sizeof(u64));
+            for (u32 operand = 0; !identity && operand < row->operand_count; operand += 1)
+            {
+                u32 definition = function->values[row->operands[operand].value].definition.value;
+                if (definition < function->instruction_count && function->instructions[definition].opcode == IR_OPCODE_CONSTANT_INTEGER)
+                {
+                    function->instructions[definition].fold_census |= IR_FOLD_CENSUS_BIRTH_LITERAL;
+                }
+            }
+        }
+        else if (match == IR_CONSTRUCTION_FOLD_MATCH_LATER_CASCADE || match == IR_CONSTRUCTION_FOLD_MATCH_LATER_OTHER)
+        {
+            ir_construction_record((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_SIZE_SMALL_LATER + bucket), 1);
+        }
+        row->fold_census |= IR_FOLD_CENSUS_LATE_FOLDED;
     }
 }
-#define IR_FAST_FOLD_CENSUS_LATE(rule, replaced_roots) ir_fast_fold_census_late(rule, replaced_roots)
+
+// On FAST entry: clears the per-run marks and counts the birth-foldable,
+// non-cloned rows that reach an admitted function or sit in a skipped one.
+BUSTER_GLOBAL_LOCAL void ir_fast_fold_census_entry(IrFunction* function, bool admitted)
+{
+    u64 birth = 0;
+    for (u32 index = 0; index < function->instruction_count; index += 1)
+    {
+        IrInstruction* row = function->instructions + index;
+        row->fold_census &= (u8)~(IR_FOLD_CENSUS_LATE_FOLDED | IR_FOLD_CENSUS_BIRTH_LITERAL);
+        birth += !(row->fold_census & IR_FOLD_CENSUS_INLINED) && (row->fold_census & IR_FOLD_CENSUS_VERDICT) > IR_FOLD_CENSUS_PROBED;
+    }
+    if (admitted) IR_CONSTRUCTION_RECORD(FOLD_SURVIVAL_REACHED, birth);
+    else IR_CONSTRUCTION_RECORD(FOLD_SURVIVAL_SKIPPED, birth);
+}
+
+// After the passes and before compaction: birth-foldable rows FAST left
+// unfolded, and literal rows that fed a category-1 constant fold and that
+// the passes then deleted. Such a literal also had no other surviving
+// reader, so a birth fold would not have built it either.
+BUSTER_GLOBAL_LOCAL void ir_fast_fold_census_exit(IrFunction const* function, u8 const* removed)
+{
+    u64 source_bytes = function->instruction_canonical_sources ? sizeof(IrSourceRange) : 0;
+    for (u32 index = 0; index < function->instruction_count; index += 1)
+    {
+        IrInstruction const* row = function->instructions + index;
+        IR_CONSTRUCTION_RECORD(FOLD_SURVIVAL_UNFOLDED, !(row->fold_census & (IR_FOLD_CENSUS_INLINED | IR_FOLD_CENSUS_LATE_FOLDED)) &&
+                                                           (row->fold_census & IR_FOLD_CENSUS_VERDICT) > IR_FOLD_CENSUS_PROBED);
+        if (removed[index] && (row->fold_census & IR_FOLD_CENSUS_BIRTH_LITERAL) && row->opcode == IR_OPCODE_CONSTANT_INTEGER)
+        {
+            IR_CONSTRUCTION_RECORD(FOLD_NET_LITERAL_ROWS, 1);
+            IR_CONSTRUCTION_RECORD(FOLD_NET_LITERAL_BYTES, sizeof(IrInstruction) + sizeof(IrValue) + (u64)row->immediate_count * sizeof(u64) + source_bytes);
+        }
+    }
+}
+#define IR_FAST_FOLD_CENSUS_LATE(function, row, rule, first, second, replaced_roots, identity) \
+    ir_fast_fold_census_late(function, row, rule, first, second, replaced_roots, identity)
+#define IR_FAST_FOLD_CENSUS_ENTRY(function, admitted) ir_fast_fold_census_entry(function, admitted)
+#define IR_FAST_FOLD_CENSUS_EXIT(function, removed) ir_fast_fold_census_exit(function, removed)
 #else
-#define IR_FAST_FOLD_CENSUS_LATE(rule, replaced_roots) ((void)0)
+#define IR_FAST_FOLD_CENSUS_LATE(function, row, rule, first, second, replaced_roots, identity) ((void)0)
+#define IR_FAST_FOLD_CENSUS_ENTRY(function, admitted) ((void)0)
+#define IR_FAST_FOLD_CENSUS_EXIT(function, removed) ((void)0)
 #endif
 
 // The scalar rule ir_fast_fold applies to one CAST, UNARY or BINARY row whose
@@ -348,15 +459,16 @@ BUSTER_GLOBAL_LOCAL void ir_fast_fold(IrProgram* program, IrFunction* function, 
         {
             if (ir_fast_replacement_compatible(function, row->result.value, replacement))
             {
+                IR_FAST_FOLD_CENSUS_LATE(function, row, rule, first, second, replaced_roots, true);
                 replacements[row->result.value] = replacement;
                 removed[index] = 1;
                 statistics->changes += 1;
-                IR_FAST_FOLD_CENSUS_LATE(rule, replaced_roots);
             }
         }
         else if (rule != IR_FAST_FOLD_RULE_NONE)
         {
             IR_SEMANTIC_RECORD(FAST_FOLD_ACCEPTED, 1);
+            IR_FAST_FOLD_CENSUS_LATE(function, row, rule, first, second, replaced_roots, false);
             row->opcode = IR_OPCODE_CONSTANT_INTEGER;
             row->operands = 0;
             row->operand_count = 0;
@@ -365,7 +477,6 @@ BUSTER_GLOBAL_LOCAL void ir_fast_fold(IrProgram* program, IrFunction* function, 
             row->immediate_count = 1;
             row->immediate_is_negative = false;
             statistics->changes += 1;
-            IR_FAST_FOLD_CENSUS_LATE(rule, replaced_roots);
         }
     }
 }
@@ -373,13 +484,17 @@ BUSTER_GLOBAL_LOCAL void ir_fast_fold(IrProgram* program, IrFunction* function, 
 #if BUSTER_BENCH_ALLOCATIONS
 // The construction half of the #3010 census: asks ir_fast_fold_rule, with no
 // replacement map, whether a row the C builder just committed would already
-// fold from the operands committed before it. Probes neither change the row
-// nor count as semantic work. The bytes are logical row/value/operand storage
+// fold from the operands committed before it, and leaves the verdict in the
+// row's fold_census tag for ir_fast_fold_census_late. Probes change nothing
+// else and do not count as semantic work. The bytes are logical row/value/operand storage
 // a birth fold would not have filled (an identity needs none of them; a
 // constant still needs its row and immediate), not arena calls or RSS.
 void ir_construction_fold_census(IrProgram* program, IrFunction* function, IrInstructionId id)
 {
-    IrInstruction const* row = id.value < function->instruction_count ? function->instructions + id.value : 0;
+    IrInstruction* row = id.value < function->instruction_count ? function->instructions + id.value : 0;
+    // A committed row may be a copy of an earlier one; only this probe's
+    // verdict describes it.
+    if (row) row->fold_census = 0;
     if (row && row->result.value < function->value_count && row->operand_count && row->operands &&
         (row->opcode == IR_OPCODE_CAST || row->opcode == IR_OPCODE_UNARY || row->opcode == IR_OPCODE_BINARY))
     {
@@ -395,6 +510,7 @@ void ir_construction_fold_census(IrProgram* program, IrFunction* function, IrIns
             IR_CONSTRUCTION_RECORD(FOLD_BIRTH_METADATA_MISMATCHES, 1);
             rule = IR_FAST_FOLD_RULE_NONE;
         }
+        row->fold_census = (u8)(IR_FOLD_CENSUS_PROBED + rule);
         if (rule != IR_FAST_FOLD_RULE_NONE)
         {
             u64 operand_bytes = (u64)row->operand_count * sizeof(IrValueId);
@@ -769,8 +885,10 @@ BUSTER_GLOBAL_LOCAL void ir_fast_function(IrProgram* program, IrFunction* functi
     // Includes maps used only by compaction, the DCE queue/counts and padding.
     u64 scratch_bytes = (u64)function->value_count * 16 + (u64)function->instruction_count * 16 + 256;
     u64 retained_bytes = operands * sizeof(IrValueId) + (u64)function->instruction_count * sizeof(u64);
+    bool budget = scratch_bytes > IR_FAST_SCRATCH_BUDGET || retained_bytes + reopening_bytes > IR_FAST_RETAINED_BUDGET || work > IR_FAST_WORK_BUDGET;
+    IR_FAST_FOLD_CENSUS_ENTRY(function, !provenance && !budget);
     if (provenance) statistics->provenance_skips += 1;
-    else if (scratch_bytes > IR_FAST_SCRATCH_BUDGET || retained_bytes + reopening_bytes > IR_FAST_RETAINED_BUDGET || work > IR_FAST_WORK_BUDGET) statistics->budget_skips += 1;
+    else if (budget) statistics->budget_skips += 1;
     else
     {
         ir_function_invalidate_cfg(function);
@@ -814,6 +932,7 @@ BUSTER_GLOBAL_LOCAL void ir_fast_function(IrProgram* program, IrFunction* functi
             if (program->measure_fast_passes) measurement->nanoseconds += timestamp_ns_between(start, timestamp_take());
             changes += measurement->changes - before;
         }
+        IR_FAST_FOLD_CENSUS_EXIT(function, removed);
         if (changes)
         {
             TimeDataType start = program->measure_fast_passes ? timestamp_take() : (TimeDataType){0};

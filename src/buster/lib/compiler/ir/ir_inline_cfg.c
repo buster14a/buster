@@ -879,6 +879,11 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, Ir
         row.result = source->result.value == IR_ID_UNDERLYING_INVALID
                          ? IR_VALUE_ID_INVALID : value_map[source->result.value];
         row.canonical_local = ir_inline_cfg_local(source->canonical_local, old_local_count);
+#if BUSTER_BENCH_ALLOCATIONS
+        // The callee's commit verdict is not a fact about the caller's
+        // construction; the #3010 census reports clones separately.
+        row.fold_census = (u8)((source->fold_census & IR_FOLD_CENSUS_VERDICT) | IR_FOLD_CENSUS_INLINED);
+#endif
         if (source->operand_count)
         {
             row.operands = arena_allocate(arena, IrValueId, source->operand_count);

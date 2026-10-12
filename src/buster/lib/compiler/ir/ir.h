@@ -520,8 +520,26 @@ struct IrInstruction
     bool volatile_access;
     // An IrSimdOperation, narrowed like the rest of the enum tail.
     u8 simd_operation;
+#if BUSTER_BENCH_ALLOCATIONS
+    // The #3010 fold census's per-row tag (IR_FOLD_CENSUS_* in ir_fast.c),
+    // kept in what is otherwise the row's tail padding so the size check
+    // below holds in diagnostic builds too. Struct copies carry it through
+    // compaction and promotion; ordinary builds have no such field.
+    u8 fold_census;
+#endif
 };
 
+#if BUSTER_BENCH_ALLOCATIONS
+// IrInstruction.fold_census: the low three bits hold the commit-time verdict
+// (0 never probed, IR_FOLD_CENSUS_PROBED for no rule, or PROBED plus the
+// rule's IrFastFoldRule value); the flags record an inliner clone and two
+// per-FAST-run marks that ir_fast_function clears on entry.
+#define IR_FOLD_CENSUS_VERDICT 0x07u
+#define IR_FOLD_CENSUS_PROBED 0x01u
+#define IR_FOLD_CENSUS_INLINED 0x08u
+#define IR_FOLD_CENSUS_LATE_FOLDED 0x10u
+#define IR_FOLD_CENSUS_BIRTH_LITERAL 0x20u
+#endif
 BUSTER_CT_CHECK(IR_SIMD_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK((u32)IR_OPCODE_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK((u32)IR_CONVERSION_COUNT <= UINT8_MAX);
@@ -1534,7 +1552,8 @@ BUSTER_F_DECL void ir_semantic_record(IrSemanticCounter counter, u64 amount);
 BUSTER_F_DECL bool ir_semantic_suppress(bool suppressed);
 // The construction side of the scalar-fold census (#3010), under
 // ir_construction.fold_birth_*: whether the row just committed as `id` would
-// already fold under ir_fast_fold's rules. Changes nothing.
+// already fold under ir_fast_fold's rules. It changes only the row's
+// fold_census tag, which ir_fast_fold reads to match late folds to births.
 BUSTER_F_DECL void ir_construction_fold_census(IrProgram* program, IrFunction* function, IrInstructionId id);
 // One top-level evaluation of source range [start, end) of the token array at
 // `base`; a range any evaluator saw before counts as repeated work.

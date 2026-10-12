@@ -163,7 +163,33 @@
     X(FOLD_LATE_BINARY_CONSTANT, fold_late_binary_constant) \
     X(FOLD_LATE_BINARY_RIGHT_IDENTITY, fold_late_binary_right_identity) \
     X(FOLD_LATE_BINARY_LEFT_IDENTITY, fold_late_binary_left_identity) \
-    X(FOLD_LATE_REPLACED_ROOTS, fold_late_replaced_roots)
+    X(FOLD_LATE_REPLACED_ROOTS, fold_late_replaced_roots) \
+    X(FOLD_MATCH_BIRTH, fold_match_birth) \
+    X(FOLD_MATCH_OTHER_RULE, fold_match_other_rule) \
+    X(FOLD_MATCH_LATER_CASCADE, fold_match_later_cascade) \
+    X(FOLD_MATCH_LATER_OTHER, fold_match_later_other) \
+    X(FOLD_MATCH_INLINED, fold_match_inlined) \
+    X(FOLD_MATCH_UNPROBED, fold_match_unprobed) \
+    X(FOLD_MATCH_BIRTH_REINTERPRET, fold_match_birth_reinterpret) \
+    X(FOLD_MATCH_BIRTH_SIGN_EXTEND, fold_match_birth_sign_extend) \
+    X(FOLD_MATCH_BIRTH_ZERO_EXTEND, fold_match_birth_zero_extend) \
+    X(FOLD_MATCH_BIRTH_TRUNCATE, fold_match_birth_truncate) \
+    X(FOLD_MATCH_BIRTH_NOT_EQUAL, fold_match_birth_not_equal) \
+    X(FOLD_MATCH_BIRTH_OTHER, fold_match_birth_other) \
+    X(FOLD_SIZE_SMALL_BIRTH, fold_size_small_birth) \
+    X(FOLD_SIZE_MEDIUM_BIRTH, fold_size_medium_birth) \
+    X(FOLD_SIZE_LARGE_BIRTH, fold_size_large_birth) \
+    X(FOLD_SIZE_HUGE_BIRTH, fold_size_huge_birth) \
+    X(FOLD_SIZE_SMALL_LATER, fold_size_small_later) \
+    X(FOLD_SIZE_MEDIUM_LATER, fold_size_medium_later) \
+    X(FOLD_SIZE_LARGE_LATER, fold_size_large_later) \
+    X(FOLD_SIZE_HUGE_LATER, fold_size_huge_later) \
+    X(FOLD_SURVIVAL_REACHED, fold_survival_reached) \
+    X(FOLD_SURVIVAL_SKIPPED, fold_survival_skipped) \
+    X(FOLD_SURVIVAL_UNFOLDED, fold_survival_unfolded) \
+    X(FOLD_NET_ROW_BYTES, fold_net_row_bytes) \
+    X(FOLD_NET_LITERAL_ROWS, fold_net_literal_rows) \
+    X(FOLD_NET_LITERAL_BYTES, fold_net_literal_bytes)
 
 typedef enum IrConstructionCounter
 {

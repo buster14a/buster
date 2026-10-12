@@ -240,7 +240,51 @@ budget and provenance skips) and rows that later passes delete. Late counts
 include rows that SSA insertion, promotion and inlining add after commit. No
 per-row birth classification reaches FAST, so neither a birth/late ratio nor
 late minus birth attributes or bounds the late folds that were available at
-commit; that needs a matched per-row association.
+commit; that needs the matched association below.
+
+#### Matched per-row association
+
+The same diagnostic build carries the probe's verdict on the row itself, in
+`IrInstruction.fold_census`. That byte is tail padding on 64-bit hosts, so
+the row stays 64 bytes, and ordinary builds have no such field. Compaction and
+promotion copy whole rows, so the verdict survives them. The inliner marks
+its clones (`IR_FOLD_CENSUS_INLINED`) instead of passing the callee's verdict
+off as the caller's. Each late fold is then classified exactly once:
+
+- `fold_match_birth`: the same rule folded the row at commit (category 1).
+  `fold_match_birth_<shape>` splits it into `reinterpret`, `sign_extend`,
+  `zero_extend`, `truncate`, `not_equal` and `other`.
+  `fold_size_<bucket>_birth` splits it by the function's row count at FAST
+  entry: `small` below 64, `medium` below 512, `large` below 4096, `huge`
+  above that.
+- `fold_match_later_cascade`: probed with no rule at commit, and an operand
+  was folded or replaced earlier in the same scan (category 2).
+- `fold_match_later_other`: probed with no rule at commit, for any other
+  reason, such as promotion or SSA completion (category 2).
+  `fold_size_<bucket>_later` buckets both category-2 counters.
+- `fold_match_other_rule`: probed, but a different rule applied at commit.
+- `fold_match_inlined`: an inliner clone.
+- `fold_match_unprobed`: a row that no commit probe saw. That covers SSA
+  insertions and rows built outside `c_ir_append_instruction`.
+
+`fold_survival_reached` and `fold_survival_skipped` count non-cloned
+birth-foldable rows present when FAST admits or skips a function (budget or
+provenance). `fold_survival_unfolded` counts reached rows FAST did not fold.
+Birth-foldable rows absent from all three were deleted before FAST, or sat in
+a function FAST never visited (`-fno-canonical-fast` or a validation decline).
+
+`fold_net_row_bytes` counts the logical storage a birth fold would not have
+allocated for category-1 rows:
+
+- an identity saves its row, value, operands and source;
+- a constant saves its operand array and the immediate the late rewrite
+  allocates again.
+
+`fold_net_literal_rows` and `fold_net_literal_bytes` count `CONSTANT_INTEGER`
+operands of category-1 constant folds that FAST then deleted. These are an
+upper bound: a deleted literal may also have fed a category-2 fold, and a
+birth fold alone would not have removed that reader. None of these figures
+are arena calls or RSS.
 
 ## Opt-in block-local CSE (#3011)
 

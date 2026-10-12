@@ -800,8 +800,41 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, folded.passes[IR_FAST_FOLD].changes == 1);
             BUSTER_TEST(arguments, late.values[IR_CONSTRUCTION_FOLD_LATE_BINARY_RIGHT_IDENTITY] - probed.values[IR_CONSTRUCTION_FOLD_LATE_BINARY_RIGHT_IDENTITY] == 1);
             BUSTER_TEST(arguments, late.values[IR_CONSTRUCTION_FOLD_LATE_REPLACED_ROOTS] == probed.values[IR_CONSTRUCTION_FOLD_LATE_REPLACED_ROOTS]);
+            BUSTER_TEST(arguments, late.values[IR_CONSTRUCTION_FOLD_MATCH_BIRTH] - probed.values[IR_CONSTRUCTION_FOLD_MATCH_BIRTH] == 1);
+            BUSTER_TEST(arguments, late.values[IR_CONSTRUCTION_FOLD_SIZE_SMALL_BIRTH] - probed.values[IR_CONSTRUCTION_FOLD_SIZE_SMALL_BIRTH] == 1);
+            BUSTER_TEST(arguments, late.values[IR_CONSTRUCTION_FOLD_NET_ROW_BYTES] - probed.values[IR_CONSTRUCTION_FOLD_NET_ROW_BYTES] >=
+                                       sizeof(IrInstruction) + sizeof(IrValue) + 2 * sizeof(IrValueId));
         }
         scratch_end(census_temporary);
+    }
+    // Matched census: the literal 5 is committed as an int and narrowed, so
+    // that truncation matches its commit verdict and DCE deletes the literal
+    // that only fed it. The widening that reads the truncation had no
+    // constant operand at commit; it folds late only because the truncation
+    // folded first in the same scan.
+    {
+        TemporalArena matched_temporary = arena_begin_temporal(arguments->arena);
+        CIRLowerResult matched = ir_promotion_lower(arguments->arena, S8("long test(void){return (unsigned char)5;}"), target_native);
+        if (BUSTER_REQUIRE(arguments, matched.program && !matched.diagnostic_count))
+        {
+            IrProgram* matched_program = matched.program;
+            IrFunction* matched_function = matched_program->modules->functions;
+            IrConstructionCounters before = ir_construction_counters();
+            matched_program->fast_passes = IR_FAST_PASS_BIT(IR_FAST_FOLD) | IR_FAST_PASS_BIT(IR_FAST_DCE);
+            ir_test_fast_function(matched_program, matched_function);
+            IrConstructionCounters after = ir_construction_counters();
+            u64 birth = after.values[IR_CONSTRUCTION_FOLD_MATCH_BIRTH] - before.values[IR_CONSTRUCTION_FOLD_MATCH_BIRTH];
+            u64 truncations = after.values[IR_CONSTRUCTION_FOLD_MATCH_BIRTH_TRUNCATE] - before.values[IR_CONSTRUCTION_FOLD_MATCH_BIRTH_TRUNCATE];
+            u64 cascades = after.values[IR_CONSTRUCTION_FOLD_MATCH_LATER_CASCADE] - before.values[IR_CONSTRUCTION_FOLD_MATCH_LATER_CASCADE];
+            u64 reached = after.values[IR_CONSTRUCTION_FOLD_SURVIVAL_REACHED] - before.values[IR_CONSTRUCTION_FOLD_SURVIVAL_REACHED];
+            u64 unfolded = after.values[IR_CONSTRUCTION_FOLD_SURVIVAL_UNFOLDED] - before.values[IR_CONSTRUCTION_FOLD_SURVIVAL_UNFOLDED];
+            u64 literals = after.values[IR_CONSTRUCTION_FOLD_NET_LITERAL_ROWS] - before.values[IR_CONSTRUCTION_FOLD_NET_LITERAL_ROWS];
+            u64 literal_bytes = after.values[IR_CONSTRUCTION_FOLD_NET_LITERAL_BYTES] - before.values[IR_CONSTRUCTION_FOLD_NET_LITERAL_BYTES];
+            BUSTER_TEST(arguments, birth == 1 && truncations == 1 && cascades >= 1 && reached == 1 && unfolded == 0);
+            BUSTER_TEST(arguments, literals == 1 && literal_bytes >= sizeof(IrInstruction) + sizeof(IrValue) + sizeof(u64));
+            BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_FOLD_MATCH_UNPROBED] == before.values[IR_CONSTRUCTION_FOLD_MATCH_UNPROBED]);
+        }
+        scratch_end(matched_temporary);
     }
 #endif
     return result;
