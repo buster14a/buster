@@ -1699,6 +1699,251 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_internal_label_boundarie
     return result;
 }
 
+// Every `.Lbuster_<s>_<o>` the printed text mentions must be defined exactly
+// once, either as `name:` or as `.set name,` (#3517).
+BUSTER_GLOBAL_LOCAL bool object_test_assembly_label_unit(char8 letter)
+{
+    return (letter >= '0' && letter <= '9') || (letter >= 'a' && letter <= 'z') || (letter >= 'A' && letter <= 'Z') || letter == '_' ||
+           letter == '.';
+}
+
+BUSTER_GLOBAL_LOCAL u64 object_test_assembly_label_definitions(ByteSlice text, String8 name)
+{
+    u64 count = 0;
+    if (name.length <= text.length)
+    {
+        for (u64 index = 0; index + name.length <= text.length; index += 1)
+        {
+            bool whole_token = (index + name.length == text.length ||
+                                !object_test_assembly_label_unit((char8)text.pointer[index + name.length])) &&
+                               (index == 0 || !object_test_assembly_label_unit((char8)text.pointer[index - 1]));
+            bool definition = whole_token && memcmp(text.pointer + index, name.pointer, name.length) == 0 &&
+                              ((index + name.length < text.length && text.pointer[index + name.length] == ':') ||
+                               (index >= 5 && memcmp(text.pointer + index - 5, ".set ", 5) == 0));
+            count += definition;
+        }
+    }
+    return count;
+}
+
+// Shared tail of each interior-label case: the pinned spelling, the generic
+// exactly-once definition property, and reassembly through Buster's own
+// assembler with no `.Lbuster_*` left undefined.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_interior_expect(UnitTestArguments* arguments, ObjectFile* object, ByteSlice data,
+                                                                        String8 expected)
+{
+    UnitTestResult result = {0};
+    String8 assembly = object_print_assembly(arguments->arena, object);
+    BUSTER_STRING_TEST(arguments, assembly, expected);
+    ByteSlice text = BUSTER_SLICE_TO_BYTE_SLICE(assembly);
+    String8 names[64];
+    u64 name_count = 0;
+    for (u64 index = 0; index + 9 <= text.length && name_count < BUSTER_ARRAY_LENGTH(names); index += 1)
+    {
+        if (memcmp(text.pointer + index, ".Lbuster_", 9) != 0)
+        {
+            continue;
+        }
+        u64 end = index + 9;
+        while (end < text.length && object_test_assembly_label_unit((char8)text.pointer[end]))
+        {
+            end += 1;
+        }
+        String8 name = {.pointer = (char8*)text.pointer + index, .length = end - index};
+        bool known = false;
+        for (u64 entry = 0; entry < name_count && !known; entry += 1)
+        {
+            known = string_equal(names[entry], name);
+        }
+        if (!known)
+        {
+            names[name_count] = name;
+            name_count += 1;
+        }
+        index = end - 1;
+    }
+    BUSTER_TEST(arguments, name_count < BUSTER_ARRAY_LENGTH(names));
+    for (u64 entry = 0; entry < name_count; entry += 1)
+    {
+        BUSTER_TEST(arguments, object_test_assembly_label_definitions(text, names[entry]) == 1);
+    }
+    if (BUSTER_REQUIRE(arguments, assembly.length != 0))
+    {
+        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, assembly, (AssemblyEncodeOptions){.target = object->target});
+        BUSTER_TEST(arguments, unit.diagnostic_count == 0);
+        for (u32 symbol_index = 0; symbol_index < unit.symbol_count; symbol_index += 1)
+        {
+            AssemblyUnitSymbol* symbol = unit.symbols + symbol_index;
+            BUSTER_TEST(arguments, symbol->name.length < 9 || memcmp(symbol->name.pointer, ".Lbuster_", 9) != 0 || symbol->defined);
+        }
+        if (object->target.cpu_arch == CPU_ARCH_AARCH64 && BUSTER_REQUIRE(arguments, unit.diagnostic_count == 0 && unit.section_count != 0))
+        {
+            AssemblyUnitSection* text_section = unit.sections;
+            for (u32 section_index = 0; section_index < unit.section_count; section_index += 1)
+            {
+                if (unit.sections[section_index].kind == ASSEMBLY_UNIT_SECTION_TEXT)
+                {
+                    text_section = unit.sections + section_index;
+                }
+            }
+            BUSTER_TEST(arguments, text_section->data.length == data.length && memcmp(text_section->data.pointer, data.pointer, data.length) == 0);
+        }
+    }
+    return result;
+}
+
+// A marked target strictly inside an emitted unit is defined by `.set`
+// relative to the location just after that unit; a target at a unit start
+// still gets the plain `label:` form (#3517).
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_interior_internal_labels(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        // jmp -1 into its own displacement byte, ret, jmp +1 into a mov's
+        // immediate, ret.
+        u8 data[] = {0xeb, 0xff, 0xc3, 0xeb, 0x01, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3};
+        ObjectSection section = {.kind = OBJECT_SECTION_TEXT, .data = BUSTER_ARRAY_TO_SLICE(data)};
+        ObjectFile object = {.target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                             .sections = &section, .section_count = 1};
+        String8 expected = S8("\t.intel_syntax noprefix\n\t.text\n\tjmp .Lbuster_0_1\n\t.set .Lbuster_0_1, . - 1\n\tret\n"
+                              "\tjmp .Lbuster_0_6\n\tmov eax, 0x1\n\t.set .Lbuster_0_6, . - 4\n\tret\n"
+                              "\t.section .note.GNU-stack,\"\",@progbits\n");
+        UnitTestResult one = object_test_assembly_interior_expect(arguments, &object, section.data, expected);
+        result.test_count += one.test_count;
+        result.succeeded_test_count += one.succeeded_test_count;
+        scratch_end(temporary);
+    }
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        // b to the interior of an absolute64 relocation span, then ret.
+        u32 words[] = {UINT32_C(0x14000002), 0, 0, UINT32_C(0xd65f03c0)};
+        ObjectSection section = {.kind = OBJECT_SECTION_TEXT, .data = (ByteSlice){.pointer = (u8*)words, .length = sizeof(words)}};
+        ObjectSymbol symbol = {.name = S8("external"), .section = OBJECT_SECTION_UNDEFINED};
+        ObjectRelocation relocation = {.offset = 4, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+        ObjectFile object = {.target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+                             .sections = &section, .section_count = 1, .symbols = &symbol, .symbol_count = 1,
+                             .relocations = &relocation, .relocation_count = 1};
+        String8 expected = S8("\t.extern external\n\t.text\n\tb .Lbuster_0_8\n\t.quad external\n\t.set .Lbuster_0_8, . - 4\n\tret\n"
+                              "\t.section .note.GNU-stack,\"\",@progbits\n");
+        UnitTestResult one = object_test_assembly_interior_expect(arguments, &object, section.data, expected);
+        result.test_count += one.test_count;
+        result.succeeded_test_count += one.succeeded_test_count;
+        scratch_end(temporary);
+    }
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        // Two marked bytes inside one `mov eax, imm32`: aliases ascend by
+        // offset with the matching `. - k` distances.
+        u8 data[] = {0xeb, 0x04, 0xeb, 0x03, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3};
+        ObjectSection section = {.kind = OBJECT_SECTION_TEXT, .data = BUSTER_ARRAY_TO_SLICE(data)};
+        ObjectFile object = {.target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                             .sections = &section, .section_count = 1};
+        String8 expected = S8("\t.intel_syntax noprefix\n\t.text\n\tjmp .Lbuster_0_6\n\tjmp .Lbuster_0_7\n\tmov eax, 0x1\n"
+                              "\t.set .Lbuster_0_6, . - 3\n\t.set .Lbuster_0_7, . - 2\n\tret\n"
+                              "\t.section .note.GNU-stack,\"\",@progbits\n");
+        UnitTestResult one = object_test_assembly_interior_expect(arguments, &object, section.data, expected);
+        result.test_count += one.test_count;
+        result.succeeded_test_count += one.succeeded_test_count;
+        scratch_end(temporary);
+    }
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        // A target at a unit start keeps its `label:` form, no `.set`.
+        u8 data[] = {0xeb, 0x00, 0xc3};
+        ObjectSection section = {.kind = OBJECT_SECTION_TEXT, .data = BUSTER_ARRAY_TO_SLICE(data)};
+        ObjectFile object = {.target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                             .sections = &section, .section_count = 1};
+        String8 expected = S8("\t.intel_syntax noprefix\n\t.text\n\tjmp .Lbuster_0_2\n.Lbuster_0_2:\n\tret\n"
+                              "\t.section .note.GNU-stack,\"\",@progbits\n");
+        UnitTestResult one = object_test_assembly_interior_expect(arguments, &object, section.data, expected);
+        result.test_count += one.test_count;
+        result.succeeded_test_count += one.succeeded_test_count;
+        String8 assembly = object_print_assembly(arguments->arena, &object);
+        BUSTER_TEST(arguments, !object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(assembly), S8(".set .Lbuster_0_2")));
+        scratch_end(temporary);
+    }
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        // One `.set` alias per interior target overflows the first-guess
+        // capacity: the retry must come back at the exact measured size.
+        u64 jump_count = 1000;
+        u64 length = 2 * jump_count + 1;
+        u8* data = arena_allocate(arguments->arena, u8, length);
+        if (BUSTER_REQUIRE(arguments, data != 0))
+        {
+            for (u64 index = 0; index < jump_count; index += 1)
+            {
+                data[2 * index] = 0xeb;
+                data[2 * index + 1] = 0xff;
+            }
+            data[length - 1] = 0xc3;
+            ObjectSection section = {.kind = OBJECT_SECTION_TEXT, .data = (ByteSlice){.pointer = data, .length = length}};
+            ObjectSymbol symbol = {.name = S8("f"), .section = 0, .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+            ObjectFile object = {.target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                                 .sections = &section, .section_count = 1, .symbols = &symbol, .symbol_count = 1};
+            String8 assembly = object_print_assembly(arguments->arena, &object);
+            ByteSlice text = BUSTER_SLICE_TO_BYTE_SLICE(assembly);
+            if (BUSTER_REQUIRE(arguments, assembly.length != 0))
+            {
+                BUSTER_TEST(arguments, object_test_count_occurrences(text, S8("\t.set .Lbuster_0_")) == jump_count);
+                BUSTER_TEST(arguments,
+                            object_bytes_contain(text, S8("\tjmp .Lbuster_0_1\n\t.set .Lbuster_0_1, . - 1\n")));
+                BUSTER_TEST(arguments, object_bytes_contain(text, S8("\t.set .Lbuster_0_1999, . - 1\n\tret\n")));
+                String8 tail = S8("\t.section .note.GNU-stack,\"\",@progbits\n");
+                BUSTER_TEST(arguments, assembly.length >= tail.length &&
+                                           memcmp(assembly.pointer + assembly.length - tail.length, tail.pointer, tail.length) == 0);
+                for (u64 offset = 1; offset < 2 * jump_count; offset += 2)
+                {
+                    char8 name[32];
+                    char8* cursor = name;
+                    cursor = object_test_assembly_expected_label(cursor, 0, offset, false);
+                    String8 label = {.pointer = name, .length = (u64)(cursor - name) - 1};
+                    BUSTER_TEST(arguments, object_test_assembly_label_definitions(text, label) == 1);
+                }
+                AssemblyUnitResult unit =
+                    assembly_unit_encode(arguments->arena, assembly, (AssemblyEncodeOptions){.target = object.target});
+                BUSTER_TEST(arguments, unit.diagnostic_count == 0);
+                for (u32 symbol_index = 0; symbol_index < unit.symbol_count; symbol_index += 1)
+                {
+                    AssemblyUnitSymbol* unit_symbol = unit.symbols + symbol_index;
+                    BUSTER_TEST(arguments, unit_symbol->name.length < 9 || memcmp(unit_symbol->name.pointer, ".Lbuster_", 9) != 0 ||
+                                           unit_symbol->defined);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        // Fixed-width control: every `b .` defines its own offset, so the
+        // dense object carries only `label:` forms and no `.set` aliases.
+        u64 word_count = 1000;
+        u32* words = arena_allocate(arguments->arena, u32, word_count);
+        if (BUSTER_REQUIRE(arguments, words != 0))
+        {
+            for (u64 index = 0; index < word_count; index += 1)
+            {
+                words[index] = UINT32_C(0x14000000);
+            }
+            ObjectSection section = {.kind = OBJECT_SECTION_TEXT,
+                                     .data = (ByteSlice){.pointer = (u8*)words, .length = word_count * sizeof(u32)}};
+            ObjectFile object = {.target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+                                 .sections = &section, .section_count = 1};
+            String8 assembly = object_print_assembly(arguments->arena, &object);
+            if (BUSTER_REQUIRE(arguments, assembly.length != 0))
+            {
+                BUSTER_TEST(arguments,
+                            object_test_count_occurrences(BUSTER_SLICE_TO_BYTE_SLICE(assembly), S8(":\n\tb .Lbuster_0_")) ==
+                                word_count);
+                BUSTER_TEST(arguments, !object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(assembly), S8("\t.set ")));
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // COFF merges aligned same-kind contributions, including empty final ones.
 // Poisoned reader storage must not leak into the resulting gaps or tail.
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_merged_padding(UnitTestArguments* arguments)
@@ -5830,6 +6075,9 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     UnitTestResult label_boundaries = object_test_assembly_internal_label_boundaries(arguments);
     result.test_count += label_boundaries.test_count;
     result.succeeded_test_count += label_boundaries.succeeded_test_count;
+    UnitTestResult interior_labels = object_test_assembly_interior_internal_labels(arguments);
+    result.test_count += interior_labels.test_count;
+    result.succeeded_test_count += interior_labels.succeeded_test_count;
     UnitTestResult alignment_capacity = object_test_writer_alignment_capacity(arguments);
     result.test_count += alignment_capacity.test_count;
     result.succeeded_test_count += alignment_capacity.succeeded_test_count;

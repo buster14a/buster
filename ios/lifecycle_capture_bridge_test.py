@@ -377,7 +377,7 @@ fi
 ''')
         environment["BASH_ENV"] = str(shell_hook)
         source = LAUNCHER.read_text()
-        phase = source[source.index("run_lifecycle_phase() {"):source.index("simulator_udid_is_valid() {")]
+        phase = (SOURCE_ROOT / "ios/lifecycle_receipt.sh").read_text() + "\n" + source[source.index("run_lifecycle_phase() {"):source.index("simulator_udid_is_valid() {")]
         prefix = state / "console"
         script = state / "phase.sh"
         script.write_text("#!/bin/bash\nset -euo pipefail\nmonitor_command_timeout_seconds=1\n"
@@ -553,13 +553,107 @@ fi
                     self.assertTrue(destination.is_symlink())
                     self.assertEqual(destination.readlink(), sentinel)
 
+    def test_extracted_cleanup_cancellation_joins_shutdown_and_preserves_signal_status(self):
+        source = LAUNCHER.read_text()
+        start = source.index("cleanup() {")
+        cleanup = source[start:source.index("\n}", start) + 2]
+        helper = (SOURCE_ROOT / "ios/lifecycle_receipt.sh").read_text()
+        for signals, expected in (((signal.SIGINT, signal.SIGINT), 130),
+                                  ((signal.SIGTERM, signal.SIGTERM), 143),
+                                  ((signal.SIGINT, signal.SIGTERM), 143),
+                                  ((signal.SIGTERM, signal.SIGINT), 130)):
+            for initial, shutdown in ((0, 0), (1, 0), (0, 9), (1, 9)):
+                for stage in ("direct", "receipt-reader", "receipt-field"):
+                    with self.subTest(signals=signals, initial_status=initial, shutdown_status=shutdown, stage=stage):
+                        state = self.root / ("cleanup-%d-%d-%d-%d-%s" % (*signals, initial, shutdown, stage))
+                        state.mkdir()
+                        prefix = state / "console"
+                        script = state / "cleanup.sh"
+                        dispatch = "".join("    kill -" + str(number) + ' "$$"\n' for number in signals)
+                        reader = ("read() {\n" + dispatch + '    builtin read "$@"\n}\n'
+                                  if stage != "direct" else "")
+                        if stage == "receipt-reader":
+                            action = ('    lifecycle_receipt_read "$console_log_base.receipt"\n'
+                                      '    [[ $lifecycle_receipt_line == fixture ]]\n')
+                        elif stage == "receipt-field":
+                            action = ("    lifecycle_receipt_field 'helper_status=0' helper_status 0\n"
+                                      '    [[ $lifecycle_receipt_value == 0 ]]\n')
+                        else:
+                            action = dispatch
+                        script.write_text("#!/bin/bash\nset -euo pipefail\n"
+                            "udid=00000000-0000-0000-0000-000000000002\n"
+                            "console_log_base=" + shlex.quote(str(prefix)) + "\n"
+                            "shutdown_timeout_seconds=1\nshutdown_postcondition_eligible=0\n"
+                            "shutdown_postcondition_probe_status=not-run\n"
+                            "shutdown_postcondition_parser_status=not-run\n"
+                            "shutdown_postcondition_state=unavailable\nshutdown_disposition=not-attempted\n"
+                            + helper + "\n" + reader
+                            + 'printf "fixture\\n" >"$console_log_base.receipt"\n'
+                            "adopt_pending_create_identity() { :; }\n"
+                            "run_lifecycle_phase() {\n"
+                            '    [[ $1 == shutdown && $5 == xcrun && $6 == simctl && $7 == shutdown && $8 == "$udid" ]] || return 97\n'
+                            + action
+                            + '    printf "owned shutdown completed\\n" >"$console_log_base.shutdown-completed"\n'
+                            "    last_lifecycle_outcome=" + ("success" if shutdown == 0 else "command-failure") + "\n"
+                            "    return " + str(shutdown) + "\n"
+                            "}\n" + cleanup + "\ntrap cleanup EXIT\nexit " + str(initial) + "\n")
+                        result = subprocess.run(["/bin/bash", str(script)], capture_output=True, timeout=3)
+                        self.assertEqual(result.returncode, expected, result.stderr)
+                        self.assertEqual(Path(str(prefix) + ".shutdown-completed").read_text(),
+                                         "owned shutdown completed\n")
+                        receipt = Path(str(prefix) + ".shutdown.status.log").read_text()
+                        self.assertIn("prior_status=%d" % expected, receipt)
+                        self.assertIn("result_status=%d" % expected, receipt)
+                        self.assertIn("shutdown_status=%d shutdown_outcome=%s" %
+                                      (shutdown, "success" if shutdown == 0 else "command-failure"), receipt)
+
+    def test_extracted_phase_malformed_named_fields_refuse_without_shell_arithmetic_failure(self):
+        state = self.root / "phase-malformed-receipt"
+        state.mkdir()
+        source = LAUNCHER.read_text()
+        phase = (SOURCE_ROOT / "ios/lifecycle_receipt.sh").read_text() + "\n" + source[source.index("run_lifecycle_phase() {"):source.index("simulator_udid_is_valid() {")]
+        prefix = state / "console"
+        bridge = state / BRIDGE.name
+        bridge.write_text("""#!/bin/bash
+prefix=$2
+printf '1 0 0 Test0123 0 complete\\n' >"$prefix.caller-fields.log"
+printf 'BUSTER_IOS_CALLER version=1 generation=Test0123 admission=1 helper_status=0 invocation_status=0 command_monitor_status=0 reason=complete\\n' >"$prefix.caller-status.log"
+printf '0 0 0 0 0 0 0 exit none\\n' >"$prefix.supervisor-fields.log"
+printf 'BUSTER_IOS_SUPERVISOR version=1 command_status=0 native_status=0 capture_status=0 command_elapsed=0 capture_elapsed=0 deadline_reached=0 cleanup_status=0 native_kind=exit launch_error=none capture_eof=1 native_reaped=1 keeper_reaped=1 group_authority_released=1 bridge_generation=Test0123 command_monitor_status=0 command_authenticated=1 caller_lost=0 cancellation_signal=0 %s\\n' "$CONTROL_FIELDS" >"$prefix.supervisor-status.log"
+printf '0\\n' >"$prefix.native-status.log"
+printf 'BUSTER_IOS_CAPTURE total_bytes=0 retained_bytes=0 truncated=0\\n' >"$prefix.log.capture-status.log"
+""")
+        timer = state / "timer"
+        timer.write_text('#!/bin/bash\nshift 2\nexec "$@"\n')
+        timer.chmod(0o700)
+        script = state / "phase.sh"
+        script.write_text("#!/bin/bash\nset -euo pipefail\nmonitor_command_timeout_seconds=1\n"
+            "timeout_bin=" + shlex.quote(str(timer)) + "\nconsole_log_base=" + shlex.quote(str(prefix))
+            + "\ncollect_lifecycle_context() { :; }\n" + phase
+            + "\nif run_lifecycle_phase control Test " + shlex.quote(str(prefix))
+            + " 1 true; then exit 0; else exit $?; fi\n")
+        for fields, expected in (("native_launch=1 helper_error=none", 0),
+                                  ("native_launch=not_a_number helper_error=none", 1),
+                                  ("helper_error=none", 1),
+                                  ("native_launch=1 native_launch=1 helper_error=none", 1),
+                                  ("native_launch=1 helper_error=?", 1),
+                                  ("native_launch=1 helper_error=none helper_error=none", 1)):
+            with self.subTest(fields=fields):
+                result = subprocess.run(["/bin/bash", str(script)], capture_output=True,
+                    env=dict(os.environ, CONTROL_FIELDS=fields), timeout=3)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                status = Path(str(prefix) + ".control.status.log").read_text()
+                self.assertIn("outcome=" + ("success" if expected == 0 else "evidence-failure"), status)
+                self.assertNotIn(b"unbound variable", result.stderr)
+                self.assertNotIn(b"syntax error", result.stderr)
+
     def test_extracted_phase_partial_copy_is_evidence_failure_with_complete_private_owner(self):
         state = self.root / "phase-partial-copy"
         environment = self.copy_overlay(state, "partial")
         shutil.copyfile(HELPER, state / HELPER.name)
         shutil.copyfile(BRIDGE, state / BRIDGE.name)
         source = LAUNCHER.read_text()
-        phase = source[source.index("run_lifecycle_phase() {"):source.index("simulator_udid_is_valid() {")]
+        phase = (SOURCE_ROOT / "ios/lifecycle_receipt.sh").read_text() + "\n" + source[source.index("run_lifecycle_phase() {"):source.index("simulator_udid_is_valid() {")]
         prefix = state / "console"
         script = state / "phase.sh"
         script.write_text("#!/bin/bash\nset -euo pipefail\nmonitor_command_timeout_seconds=1\n"
@@ -1078,7 +1172,7 @@ fi
             "sys.exit(status)\n")
         monitor_shim.chmod(0o700)
         source = LAUNCHER.read_text()
-        phase = source[source.index("run_lifecycle_phase() {"):source.index("simulator_udid_is_valid() {")]
+        phase = (SOURCE_ROOT / "ios/lifecycle_receipt.sh").read_text() + "\n" + source[source.index("run_lifecycle_phase() {"):source.index("simulator_udid_is_valid() {")]
         prefix = state / "console"
         script = state / "phase.sh"
         script.write_text("#!/bin/bash\nset -euo pipefail\nmonitor_command_timeout_seconds=1\n"
@@ -1118,7 +1212,7 @@ fi
         shutil.copyfile(BRIDGE, state / BRIDGE.name)
         environment = self.python_overlay(state / "markers", "shim", "term", "0", "0")
         source = LAUNCHER.read_text()
-        phase = source[source.index("run_lifecycle_phase() {"):source.index("simulator_udid_is_valid() {")]
+        phase = (SOURCE_ROOT / "ios/lifecycle_receipt.sh").read_text() + "\n" + source[source.index("run_lifecycle_phase() {"):source.index("simulator_udid_is_valid() {")]
         prefix = state / "console"
         script = state / "phase.sh"
         script.write_text("#!/bin/bash\nset -euo pipefail\nmonitor_command_timeout_seconds=1\n"

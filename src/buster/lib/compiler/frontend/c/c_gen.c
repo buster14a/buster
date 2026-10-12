@@ -33442,12 +33442,26 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
 
     CSymbolBuiltin builtin = c_ir_token_builtin_kind(builder, token);
     if (builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC ||
-        builtin == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT)
+        builtin == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT || builtin == C_SYMBOL_BUILTIN_SIMD)
     {
         if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
             return false;
         u32 close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        if (close >= end || !c_ir_vendor_result_type_attempt(builder, start, close, type_out)) return false;
+        bool valid = close < end;
+        if (valid && builtin == C_SYMBOL_BUILTIN_SIMD)
+        {
+            // A builtin has no function entity. Its result shape, rather than
+            // an argument's type, supplies the type of a conditional arm.
+            u32 index = c_ir_simd_builtin(name);
+            *type_out = index != C_IR_SIMD_BUILTIN_NONE
+                ? c_ir_simd_result_type(builder, (IrSimdOperation)c_ir_simd_builtins[index].operation) : IR_TYPE_ID_INVALID;
+            valid = type_out->value != IR_ID_UNDERLYING_INVALID;
+        }
+        else if (valid)
+        {
+            valid = c_ir_vendor_result_type_attempt(builder, start, close, type_out);
+        }
+        if (!valid) return false;
         return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
     }
 
