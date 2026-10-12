@@ -4446,9 +4446,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
 // marked names no entity outside the file scope shares settles once and
 // answers its checks without a lookup; a name that a parameter or a local
 // also spells is checked by walking the query's subtree, and so is every
-// check of a region with more such names than it records. Each source is
-// analyzed with the tree, and again with every tree answer verified against
-// the machine.
+// check of a region with more such names than it records. A name's
+// file-scope answer is looked up once and reused by later regions. Each
+// source is analyzed with the tree, and again with every tree answer
+// verified against the machine.
 typedef struct CAstTypeLookupCase CAstTypeLookupCase;
 struct CAstTypeLookupCase
 {
@@ -4476,6 +4477,12 @@ BUSTER_GLOBAL_LOCAL CAstTypeLookupCase const c_ast_type_lookup_cases[] = {
     {S8_INITIALIZER("int g(int); int f(int (*h)(int)) { return g(0) + h(1) + h(2) + h(3) + h(4) + h(5) + h(6) + h(7) + h(8) + h(9) + h(10) + h(11) + "
                     "h(12) + h(13) + h(14) + h(15) + h(16) + h(17); }"),
      false, true, false},
+    // One callee in three regions: the regions after the first settle on the
+    // file scope's answer that the first looked up.
+    {S8_INITIALIZER("int g(int); int f(int a) { return g(a) + g(2); } int h(int a) { return g(a) + g(1); } int k(int a) { int r = g(a); return r; }"),
+     true, false, false},
+    // A callee declared, then defined between its uses.
+    {S8_INITIALIZER("int g(int); int f(int a) { return g(a); } int g(int a) { return a; } int h(int a) { return g(a) + g(1); }"), true, false, false},
     // File-scope initializers: unbound names and typedef names resolve in the
     // file scope; one a local elsewhere also spells is walked.
     {S8_INITIALIZER("typedef unsigned short U16; enum { A = 3 }; long x = (U16)A + 1;"), true, false, false},
