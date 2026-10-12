@@ -7,3 +7,4 @@
 # compiler_receipt.SCALING_PROFILE names. See README.md in this directory.
 #
 # request: issue #424 scaling-v1, first 9700X run
+# request: issue #53 lane-gate calibration, gate disabled (MIN_WORK=0), size series
