@@ -345,14 +345,16 @@ BUSTER_GLOBAL_LOCAL bool compiler_evidence_self_test(Arena* arena)
         compiler_evidence_expect(&test, mkdir((char*)tabbed_directory.pointer, 0700) == 0 && !compiler_evidence_try_seal(&test, bundle, ordinary, &problem),
             S8("refuse:empty-directory-path"), problem);
         String8 control_aliases[] = {S8("Receipt.json"), S8("EVIDENCE-SEAL.txt"), S8("Machine-Specifications/report.json")};
+        // Each alias joins a validly sealed bundle, so verify reaches the namespace guard itself.
         for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(control_aliases); index += 1)
         {
             bundle = compiler_evidence_fixture(&test, S8("10"), compiler_evidence_valid_omissions());
-            bool written = compiler_evidence_put(arena, bundle, control_aliases[index], S8("{}"));
-            if (index == 1) { written = written && compiler_evidence_put(arena, bundle, S8(COMPILER_EVIDENCE_SEAL), S8("x\n")); }
             problem = (String8){0};
-            bool refused = index == 1 ? !compiler_evidence_try_verify(&test, bundle, ordinary, &problem) :
-                !compiler_evidence_try_seal(&test, bundle, ordinary, &problem);
+            bool written = compiler_evidence_try_seal(&test, bundle, ordinary, &problem) &&
+                compiler_evidence_put(arena, bundle, control_aliases[index], S8("{}"));
+            problem = (String8){0};
+            bool refused = !compiler_evidence_try_verify(&test, bundle, ordinary, &problem) &&
+                string_first_sequence(problem, S8("alias after case folding")) != BUSTER_STRING_NO_MATCH;
             compiler_evidence_expect(&test, written && refused, string_format(arena, S8("refuse:control-alias-{u64}"), index), problem);
         }
 
