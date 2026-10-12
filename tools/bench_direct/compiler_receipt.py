@@ -404,8 +404,10 @@ FRONTEND_SCALING_CASES = (
     ("fresh-bindings", (0, 1, 4, 16, 64, 256, 1024, 4096, 16384, 65536), ("syntax", "object")),
 )
 SELECTION_WORK_FIELDS = ("functions", "fallback_functions", "ir_instructions", "mir_instructions")
-IDE_BENCH = re.compile(r"BENCH_C_FRONTEND path=(\S+) iterations=(\d+) bytes=(\d+) min_ns=(\d+) median_ns=(\d+) "
-                       r"throughput_mb_s=(\d+)")
+# Every count is captured as 1 to 19 digits, so int() never sees a token past Python's
+# integer-string conversion limit; a longer token simply leaves the line unparsed.
+IDE_BENCH = re.compile(r"BENCH_C_FRONTEND path=(\S+) iterations=([0-9]{1,19}) bytes=([0-9]{1,19}) "
+                       r"min_ns=([0-9]{1,19}) median_ns=([0-9]{1,19}) throughput_mb_s=([0-9]{1,19})")
 FRONTEND_SELECTOR_PROFILE = {
     "name": "frontend-selector-v1",
     "harness": "tools/benchmark_frontend_scaling.py and tools/selection_benchmark.py at the base revision; "

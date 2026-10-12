@@ -5033,6 +5033,11 @@ class FrontendSelectorTest(unittest.TestCase):
             ["quality"].update(wall_ns=huge),
             "ide bench median": lambda changed: [run.update(line=line.replace("median_ns=1000", "median_ns=" + "9" * 330))
                                                  for run in changed["bench"]["runs"][:2]],
+            # Past Python's 4300-digit integer-string conversion limit, where int() itself raises.
+            "ide bench 5000-digit median": lambda changed: [run.update(
+                line=line.replace("median_ns=1000", "median_ns=" + "9" * 5000)) for run in changed["bench"]["runs"][:2]],
+            "ide bench 5000-digit bytes": lambda changed: changed["bench"]["runs"][3].update(
+                line=line.replace("bytes=4096", "bytes=" + "1" * 5000)),
         }
         for name, mutate in cases.items():
             changed = copy.deepcopy(bundle)
@@ -5041,6 +5046,29 @@ class FrontendSelectorTest(unittest.TestCase):
                 self.assertTrue(self.validate(changed), name)
                 conclusion, unused_title, reasons = self.publish(record, changed)
                 self.assertEqual(conclusion, "failure", reasons)
+
+    def test_over_limit_integer_text_fails_closed(self) -> None:
+        """A BENCH_C_FRONTEND token or a JSON integer past the conversion limit is a structured refusal."""
+        record, bundle = frontend_selector_evidence()
+        line = bundle["bench"]["runs"][0]["line"]
+        for field in ("iterations=30", "bytes=4096", "min_ns=900", "median_ns=1000", "throughput_mb_s=4"):
+            key = field.split("=")[0]
+            with self.subTest(field=key):
+                self.assertIsNone(compiler_receipt.ide_bench_fields(line.replace(field, f"{key}={'7' * 5000}")))
+                self.assertIsNone(compiler_receipt.ide_bench_fields(line.replace(field, f"{key}={'7' * 20}")))
+        self.assertEqual(compiler_receipt.ide_bench_fields(line.replace("bytes=4096", "bytes=" + "9" * 18))["bytes"],
+                         int("9" * 18))
+        # A JSON member carrying such an integer is unreadable evidence, not an exception.
+        members = {"receipt.json": json.dumps(dict(receipt(), mode="pull", frontend_selector=record)),
+                   "lab/summary.json": json.dumps(summary()),
+                   "throughput/summary.json": json.dumps(corpus()["summary"]),
+                   "throughput/metadata.json": json.dumps(corpus()["metadata"]),
+                   **{path: json.dumps(bundle[key]) for key, path in compiler_publish.FRONTEND_SELECTOR_BUNDLE_FILES.items()}}
+        path = compiler_publish.FRONTEND_SELECTOR_BUNDLE_FILES["results"]
+        members[path] = members[path].replace('"count": 1,', '"count": ' + "1" * 5000 + ",", 1)
+        got = compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+        self.assertIn(path, got[2])
+        self.assertIsNone(got[4]["frontend_selector_bundle"])
 
     def test_any_wrongly_typed_field_fails_closed_without_raising(self) -> None:
         unused_record, bundle = frontend_selector_evidence()
