@@ -1951,6 +1951,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_path_inputs(UnitTestA
                         invocation.retain_linked_object = true;
                         CompilerDriverResult rejected = compiler_driver_execute_invocation(arena, invocation);
                         BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_INVALID_INPUT);
+                        String8 payload = string_format_z(arena, S8("{S8}/payload.so"), root);
+                        String8 other = string_format_z(arena, S8("{S8}/other.so.7"), root);
+                        String8 preprocessed = string_format_z(arena, S8("{S8}/automatic.so.i"), root);
+                        String8 assembly = string_format_z(arena, S8("{S8}/automatic.so.s"), root);
+                        String8 program = S8("int path_provider(void); int main(void) { return path_provider() != 42; }\n");
+                        bool languages_written = file_write(payload, BUSTER_SLICE_TO_BYTE_SLICE(program)) &&
+                                                 file_write(preprocessed, BUSTER_SLICE_TO_BYTE_SLICE(program)) &&
+                                                 file_write(other, BUSTER_SLICE_TO_BYTE_SLICE(S8("int path_anchor(void) { return 0; }\n")));
+                        if (BUSTER_REQUIRE(arguments, languages_written))
+                        {
+                            String8 languages[] = {S8("c"), S8("cpp-output")};
+                            for (u32 language = 0; language < BUSTER_ARRAY_LENGTH(languages); language += 1)
+                            {
+                                TemporalArena cell = arena_begin_temporal(arena);
+                                String8 compile[] = {S8("-target"), targets[target], S8("-nostdinc"), S8("-g0"), allocators[allocator],
+                                                     S8("-x"), languages[language], S8("-c"), payload, S8("-o"), object};
+                                CompilerDriverInvocation single = compiler_driver_parse_arguments(arena,
+                                    (SliceString8)BUSTER_ARRAY_TO_SLICE(compile));
+                                CompilerDriverResult source_result = compiler_driver_execute_invocation(arena, single);
+                                BUSTER_TEST_RAW(arguments, source_result.error == COMPILER_DRIVER_ERROR_NONE, source_result.diagnostic);
+                                // Legacy API language and parsed positional snapshots agree.
+                                single.input_languages = 0;
+                                single.input_language_count = 0;
+                                single.language = language ? COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT : COMPILER_DRIVER_LANGUAGE_C;
+                                CompilerDriverResult legacy = compiler_driver_execute_invocation(arena, single);
+                                BUSTER_TEST_RAW(arguments, legacy.error == COMPILER_DRIVER_ERROR_NONE, legacy.diagnostic);
+                                String8 mixed[] = {S8("-target"), targets[target], S8("--sysroot"), root, S8("-nostdinc"), S8("-g0"),
+                                                   allocators[allocator], S8("-v"), S8("-x"), languages[language], payload,
+                                                   S8("-x"), S8("cpp-output"), other, S8("-x"), S8("none"), library, S8("-o"), output};
+                                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena,
+                                    (SliceString8)BUSTER_ARRAY_TO_SLICE(mixed));
+                                invocation.compile_jobs = 2;
+                                invocation.keep_going = true;
+                                CompilerDriverResult linked = compiler_driver_execute_invocation(arena, invocation);
+                                BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+                                if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                                {
+                                    BUSTER_TEST(arguments, linked.input_result_count == 3 &&
+                                                           linked.inputs[0].status == COMPILER_DRIVER_INPUT_STATUS_OK &&
+                                                           linked.inputs[1].status == COMPILER_DRIVER_INPUT_STATUS_OK &&
+                                                           linked.inputs[2].status == COMPILER_DRIVER_INPUT_STATUS_PREBUILT);
+                                    BUSTER_TEST(arguments, compiler_driver_test_elf_needed_count(linked.native_link.executable, S8("libidentity.so.9")) == 1);
+                                    BUSTER_TEST(arguments, compiler_driver_test_elf_needed_count(linked.native_link.executable, payload) == 0);
+                                    BUSTER_TEST(arguments, compiler_driver_test_elf_needed_count(linked.native_link.executable, other) == 0);
+                                    BUSTER_TEST(arguments, string_first_sequence(linked.linker_report, library) != BUSTER_STRING_NO_MATCH);
+                                    BUSTER_TEST(arguments, string_first_sequence(linked.linker_report, payload) == BUSTER_STRING_NO_MATCH);
+                                    BUSTER_TEST(arguments, string_first_sequence(linked.linker_report, other) == BUSTER_STRING_NO_MATCH);
+                                }
+                                scratch_end(cell);
+                            }
+                            String8 automatic[] = {S8("-target"), targets[target], S8("-nostdinc"), S8("-g0"), allocators[allocator],
+                                                   S8("-c"), preprocessed, S8("-o"), object};
+                            CompilerDriverResult preprocessed_result = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena,
+                                (SliceString8)BUSTER_ARRAY_TO_SLICE(automatic)));
+                            BUSTER_TEST_RAW(arguments, preprocessed_result.error == COMPILER_DRIVER_ERROR_NONE, preprocessed_result.diagnostic);
+                            String8 listing[] = {S8("-target"), targets[target], S8("-nostdinc"), S8("-g0"), allocators[allocator],
+                                                 S8("-S"), S8("-x"), S8("c"), payload, S8("-o"), assembly};
+                            CompilerDriverResult listed = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena,
+                                (SliceString8)BUSTER_ARRAY_TO_SLICE(listing)));
+                            BUSTER_TEST_RAW(arguments, listed.error == COMPILER_DRIVER_ERROR_NONE, listed.diagnostic);
+                            String8 assemble[] = {S8("-target"), targets[target], S8("-c"), assembly, S8("-o"), object};
+                            CompilerDriverResult assembled = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena,
+                                (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble)));
+                            BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE, assembled.diagnostic);
+                        }
+                        String8 language_paths[] = {payload, other, preprocessed, assembly};
+                        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(language_paths); index += 1) { os_file_delete(language_paths[index]); }
                     }
                 }
                 String8 paths[] = {source, object, library, versioned, plain, extra, script, bad_script, malformed, alien, output};

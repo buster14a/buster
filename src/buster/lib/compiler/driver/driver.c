@@ -4334,7 +4334,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_report_argument(Arena* a
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_native_shared_library_input(String8 path)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_shared_library_path(String8 path)
 {
     // A directory named x.so.N does not classify the file beneath it.
     u64 first = 0;
@@ -4360,6 +4360,16 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_native_shared_library_input(String8 pat
             result = valid && digit;
         }
     }
+    return result;
+}
+
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_shared_library_input(CompilerDriverInvocation invocation, u32 input_index)
+{
+    // Explicit -x selects a source language for every suffix. Only automatic
+    // inputs may enter the DSO route, including API-built legacy invocations.
+    bool result = compiler_driver_input_language(invocation, input_index) == COMPILER_DRIVER_LANGUAGE_AUTOMATIC &&
+                  compiler_driver_native_shared_library_path(invocation.input_paths[input_index]);
     return result;
 }
 
@@ -4390,7 +4400,7 @@ String8 compiler_driver_native_link_report(Arena* arena, CompilerDriverInvocatio
             {
                 String8 input = invocation.input_paths[index];
                 if (compiler_driver_object_input(input) || compiler_driver_archive_input(input) ||
-                    compiler_driver_native_shared_library_input(input))
+                    compiler_driver_native_shared_library_input(invocation, index))
                 {
                     parts[part_count++] = compiler_driver_native_link_report_argument(arena, (String8){0}, input);
                 }
@@ -6477,7 +6487,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
     u32 shared_library_count = 0;
     for (u32 index = 0; index < invocation.input_count; index += 1)
     {
-        shared_library_count += compiler_driver_native_shared_library_input(invocation.input_paths[index]);
+        shared_library_count += compiler_driver_native_shared_library_input(invocation, index);
     }
     u32 library_capacity = shared_library_count + invocation.library_count + invocation.framework_count + default_library_count +
                            (invocation.target.os == OPERATING_SYSTEM_LINUX ? 1u : 0u);
@@ -6505,7 +6515,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         if (operation.kind == COMPILER_DRIVER_LINK_OPERATION_FILE)
         {
             String8 path = invocation.input_paths[operation.index];
-            if (compiler_driver_native_shared_library_input(path))
+            if (compiler_driver_native_shared_library_input(invocation, operation.index))
             {
                 // Read exactly the caller's path, retaining its spelling when
                 // the ELF has no SONAME. Dedupe after reading its identity.
@@ -9670,7 +9680,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_parallel_c_input(CompilerDriverInvocati
     bool native = invocation.target.cpu_arch == CPU_ARCH_X86_64 || invocation.target.cpu_arch == CPU_ARCH_AARCH64;
     return native && invocation.action == COMPILER_DRIVER_ACTION_LINK && !invocation.emit_llvm_bitcode &&
            !invocation.has_gpu_target && !compiler_driver_object_input(path) && !compiler_driver_archive_input(path) &&
-           !compiler_driver_native_shared_library_input(path) &&
+           !compiler_driver_native_shared_library_input(invocation, input_index) &&
            compiler_driver_c_input(language, path) &&
            !compiler_driver_assembly_input(language, path) && !compiler_driver_preprocessed_assembly_input(path);
 }
@@ -10054,7 +10064,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     for (u32 index = 0; index < invocation.input_count; index += 1)
     {
         String8 path = invocation.input_paths[index];
-        if (compiler_driver_native_shared_library_input(path) &&
+        if (compiler_driver_native_shared_library_input(invocation, index) &&
             (!compiler_driver_native_linux_elf_link(invocation) || invocation.retain_linked_object))
         {
             result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
@@ -10171,7 +10181,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         CompilerDriverLanguage language = compiler_driver_input_language(invocation, input_index);
         bool object_input = compiler_driver_object_input(path);
         bool archive_input = compiler_driver_archive_input(path);
-        bool shared_library_input = compiler_driver_native_shared_library_input(path);
+        bool shared_library_input = compiler_driver_native_shared_library_input(invocation, input_index);
         if ((object_input || archive_input || shared_library_input) && invocation.action != COMPILER_DRIVER_ACTION_LINK)
         {
             result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
@@ -10205,7 +10215,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     }
     if (invocation.input_count <= 1 && !invocation.library_count &&
         (!invocation.input_count || (!compiler_driver_object_input(invocation.input_paths[0]) && !compiler_driver_archive_input(invocation.input_paths[0]) &&
-                                    !compiler_driver_native_shared_library_input(invocation.input_paths[0]))))
+                                    !compiler_driver_native_shared_library_input(invocation, 0))))
     {
         CompilerDriverUnitMetrics single_metrics;
         CompilerDriverArenaWatch watch = {0};
@@ -10346,13 +10356,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         u32 input_index = operation.index;
         String8 input_path = invocation.input_paths[input_index];
         if (inputs && (compiler_driver_archive_input(input_path) || compiler_driver_object_input(input_path) ||
-                       compiler_driver_native_shared_library_input(input_path)))
+                       compiler_driver_native_shared_library_input(invocation, input_index)))
         {
             // Prebuilt link inputs are never compiled, and a malformed one
             // still stops the link even under -fkeep-going.
             inputs[input_index].status = COMPILER_DRIVER_INPUT_STATUS_PREBUILT;
         }
-        if (compiler_driver_native_shared_library_input(input_path))
+        if (compiler_driver_native_shared_library_input(invocation, input_index))
         {
             // The final export scan owns the mappings through ELF publication.
             // This operand remains a serial boundary in the ordered input walk.
