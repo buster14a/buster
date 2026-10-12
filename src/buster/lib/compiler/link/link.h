@@ -127,6 +127,9 @@ struct NativeDynamicLibrary
     // as ld does, so a library that calls back into the program or reads its
     // data finds the definition without -rdynamic.
     String8* referenced_symbols;
+    // ELF DT_NEEDED identities, used to keep DSO-only dependencies indirect.
+    String8* needed_names;
+    u32 needed_name_count;
     u32 exported_symbol_count;
     u32 exported_data_symbol_count;
     u32 versioned_symbol_count;

@@ -668,6 +668,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_runtime_path_arguments(U
 }
 
 #if BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_needed_tag(Arena* arena, String8 file, String8 name)
+{
+    ByteSlice image = file_read(arena, file, (FileReadOptions){0});
+    ByteSlice dynamic = compiler_driver_test_elf_section(image, S8(".dynamic"));
+    ByteSlice strings = compiler_driver_test_elf_section(image, S8(".dynstr"));
+    bool found = false;
+    for (u64 index = 0; index + 16 <= dynamic.length; index += 16)
+    {
+        u64 tag = 0, value = 0;
+        memcpy(&tag, dynamic.pointer + index, 8);
+        memcpy(&value, dynamic.pointer + index + 8, 8);
+        found |= tag == 1 && value < strings.length && strings.length - value > name.length &&
+                 !memcmp(strings.pointer + value, name.pointer, name.length) && strings.pointer[value + name.length] == 0;
+    }
+    return found;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_runtime_path_tag(Arena* arena, String8 file, String8 path, u64 expected_tag)
 {
     FileMapRead map = file_map_read(arena, file, (FileReadOptions){0});
@@ -752,6 +769,51 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_runtime_path_images(Unit
             }
         }
     }
+    // DSO-only demand keeps a later leaf only if wrapper does not already
+    // name it. A regular-object reference must retain it in either case.
+    // The direct input's filename differs from its SONAME loader identity.
+    String8 leaf_alias = string_format_z(arena, S8("{S8}/leaf-link.so"), root);
+    ByteSlice leaf_bytes = file_read(arena, leaf, (FileReadOptions){0});
+    BUSTER_TEST(arguments, leaf_bytes.length && file_write(leaf_alias, leaf_bytes));
+    for (u32 dependency = 0; dependency < 2; dependency += 1)
+    {
+        String8 wrapper_command[] = {S8("-g0"), S8("-shared"), S8("-Wl,-soname,libwrapper.so,-rpath,$ORIGIN/../deps"),
+            wrapper_source, string_format_z(arena, S8("-L{S8}"), dependencies),
+            dependency ? S8("-lleaf") : S8("-Wl,--as-needed"), S8("-o"), wrapper};
+        CompilerDriverResult wrapped = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wrapper_command)));
+        BUSTER_TEST(arguments, wrapped.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, compiler_driver_test_needed_tag(arena, wrapper, S8("libleaf.so")) == (dependency != 0));
+        for (u32 regular = 0; regular < 2; regular += 1)
+        {
+            String8 source = regular ? S8("extern int wrapper(void), leaf(void); int main(void) { return wrapper() + leaf() - 14; }\n")
+                                     : S8("extern int wrapper(void); int main(void) { return wrapper() - 7; }\n");
+            BUSTER_TEST(arguments, file_write(main_source, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 direct = 0; direct < 2; direct += 1)
+                {
+                    bool keep = regular || !dependency;
+                    String8 command[] = {S8("-g0"), modes[mode], main_source, S8("-Wl,--as-needed"),
+                        string_format_z(arena, S8("-L{S8}"), libraries), direct ? wrapper : S8("-lwrapper"),
+                        string_format_z(arena, S8("-L{S8}"), dependencies), direct ? leaf_alias : S8("-lleaf"),
+                        keep ? S8("-Wl,-rpath,$ORIGIN/lib:$ORIGIN/deps") : S8("-Wl,-rpath,$ORIGIN/lib"), S8("-o"), executable};
+                    CompilerDriverResult linked = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    if (BUSTER_REQUIRE(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE))
+                    {
+                        BUSTER_TEST(arguments, compiler_driver_test_needed_tag(arena, executable, S8("libwrapper.so")));
+                        BUSTER_TEST(arguments, compiler_driver_test_needed_tag(arena, executable, S8("libleaf.so")) == keep);
+                        String8 run[] = {executable};
+                        String8 keys[] = {S8("LD_LIBRARY_PATH"), S8("LD_PRELOAD"), S8("LD_BIND_NOW")};
+                        String8 values[] = {S8(""), S8(""), S8("")};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8)BUSTER_ARRAY_TO_SLICE(keys),
+                            (SliceString8)BUSTER_ARRAY_TO_SLICE(values), (ProcessSpawnOptions){0});
+                        BUSTER_TEST(arguments, child.handle && os_process_wait_sync(arena, child).result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+            }
+        }
+    }
+    os_file_delete(leaf_alias);
     // A path on a program with no undefined symbols still needs .dynamic;
     // the writer's freestanding shortcut must not silently drop it.
     BUSTER_TEST(arguments, file_write(main_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
@@ -845,23 +907,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_default_arguments(Un
 }
 
 #if BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
-BUSTER_GLOBAL_LOCAL bool compiler_driver_test_needed_tag(Arena* arena, String8 file, String8 name)
-{
-    ByteSlice image = file_read(arena, file, (FileReadOptions){0});
-    ByteSlice dynamic = compiler_driver_test_elf_section(image, S8(".dynamic"));
-    ByteSlice strings = compiler_driver_test_elf_section(image, S8(".dynstr"));
-    bool found = false;
-    for (u64 index = 0; index + 16 <= dynamic.length; index += 16)
-    {
-        u64 tag = 0, value = 0;
-        memcpy(&tag, dynamic.pointer + index, 8);
-        memcpy(&value, dynamic.pointer + index + 8, 8);
-        found |= tag == 1 && value < strings.length && strings.length - value > name.length &&
-                 !memcmp(strings.pointer + value, name.pointer, name.length) && strings.pointer[value + name.length] == 0;
-    }
-    return found;
-}
-
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_hardened_image(Arena* arena, String8 file)
 {
     ByteSlice image = file_read(arena, file, (FileReadOptions){0});

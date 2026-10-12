@@ -4157,48 +4157,59 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
     // supplies loader identity independently of the filename used to find it.
     String8 soname = {0};
     bool identity_valid = true;
-    for (u16 section_index = 0; header_valid && identity_valid && section_index < section_count; section_index += 1)
+    String8* needed_names = 0;
+    u32 needed_count = 0;
+    u32 needed_written = 0;
+    for (u32 pass = 0; pass < 2 && header_valid && identity_valid; pass += 1)
     {
-        u64 section = section_table + (u64)section_index * DRIVER_ELF_SECTION_HEADER_SIZE;
-        u32 section_type = 0;
-        u32 strings_index = 0;
-        u64 offset = 0;
-        u64 size = 0;
-        u64 strings_offset = 0;
-        u64 strings_size = 0;
-        compiler_driver_read_u32(bytes, section + 4, &section_type);
-        if (section_type == 6)
+        for (u16 section_index = 0; header_valid && identity_valid && section_index < section_count; section_index += 1)
         {
-            identity_valid = compiler_driver_read_u64(bytes, section + 24, &offset) &&
-                             compiler_driver_read_u64(bytes, section + 32, &size) &&
-                             compiler_driver_read_u32(bytes, section + 40, &strings_index) && strings_index < section_count &&
-                             offset <= bytes.length && size <= bytes.length - offset && size % 16 == 0;
-            u64 strings = section_table + (u64)strings_index * DRIVER_ELF_SECTION_HEADER_SIZE;
-            identity_valid = identity_valid && compiler_driver_read_u64(bytes, strings + 24, &strings_offset) &&
-                             compiler_driver_read_u64(bytes, strings + 32, &strings_size) &&
-                             strings_offset <= bytes.length && strings_size <= bytes.length - strings_offset;
-            for (u64 entry = 0; identity_valid && entry < size; entry += 16)
+            u64 section = section_table + (u64)section_index * DRIVER_ELF_SECTION_HEADER_SIZE;
+            u32 section_type = 0;
+            u32 strings_index = 0;
+            u64 offset = 0;
+            u64 size = 0;
+            u64 strings_offset = 0;
+            u64 strings_size = 0;
+            compiler_driver_read_u32(bytes, section + 4, &section_type);
+            if (section_type == 6)
             {
-                u64 tag = 0;
-                u64 name = 0;
-                compiler_driver_read_u64(bytes, offset + entry, &tag);
-                if (!tag) { break; }
-                if (tag == 14)
+                identity_valid = compiler_driver_read_u64(bytes, section + 24, &offset) &&
+                                 compiler_driver_read_u64(bytes, section + 32, &size) &&
+                                 compiler_driver_read_u32(bytes, section + 40, &strings_index) && strings_index < section_count &&
+                                 offset <= bytes.length && size <= bytes.length - offset && size % 16 == 0;
+                u64 strings = section_table + (u64)strings_index * DRIVER_ELF_SECTION_HEADER_SIZE;
+                identity_valid = identity_valid && compiler_driver_read_u64(bytes, strings + 24, &strings_offset) &&
+                                 compiler_driver_read_u64(bytes, strings + 32, &strings_size) &&
+                                 strings_offset <= bytes.length && strings_size <= bytes.length - strings_offset;
+                for (u64 entry = 0; identity_valid && entry < size; entry += 16)
                 {
-                    compiler_driver_read_u64(bytes, offset + entry + 8, &name);
-                    u64 length = 0;
-                    while (name < strings_size && length < strings_size - name && bytes.pointer[strings_offset + name + length])
+                    u64 tag = 0;
+                    u64 name = 0;
+                    compiler_driver_read_u64(bytes, offset + entry, &tag);
+                    if (!tag) { break; }
+                    if (tag == 1 || (tag == 14 && !pass))
                     {
-                        length += 1;
-                    }
-                    identity_valid = name < strings_size && length && length < strings_size - name && !soname.length;
-                    if (identity_valid)
-                    {
-                        soname = (String8){.pointer = (char8*)bytes.pointer + strings_offset + name, .length = length};
+                        compiler_driver_read_u64(bytes, offset + entry + 8, &name);
+                        u64 length = 0;
+                        while (name < strings_size && length < strings_size - name && bytes.pointer[strings_offset + name + length])
+                        {
+                            length += 1;
+                        }
+                        identity_valid = name < strings_size && length && length < strings_size - name &&
+                                         (tag != 14 || !soname.length) && (tag != 1 || pass || needed_count < UINT32_MAX);
+                        if (identity_valid)
+                        {
+                            String8 spelling = {.pointer = (char8*)bytes.pointer + strings_offset + name, .length = length};
+                            if (tag == 14) { soname = spelling; }
+                            else if (pass) { needed_names[needed_written++] = spelling; }
+                            else { needed_count += 1; }
+                        }
                     }
                 }
             }
         }
+        if (!pass && identity_valid) { needed_names = arena_allocate(arena, String8, needed_count); }
     }
     // .gnu.version_d as an index-keyed table.  The definitions form a linked
     // list whose entries carry their own index, so the highest index decides
@@ -4346,6 +4357,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
         // than a second copy of the same names in `exported_symbols`, which
         // stays the PE side's.
         if (soname.length) { library->name = string_duplicate_arena(arena, soname, true); }
+        library->needed_names = needed_names;
+        library->needed_name_count = needed_count;
         library->exports_known = true;
         result = true;
     }
@@ -5972,6 +5985,8 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
             library->versioned_symbol_count = 0;
             library->referenced_symbols = 0;
             library->referenced_symbol_count = 0;
+            library->needed_names = 0;
+            library->needed_name_count = 0;
             file_map_unmap(file);
         }
     }
@@ -5987,8 +6002,19 @@ struct CompilerDriverElfNeededInput
 // Reuse the incremental archive name index for a separate DSO-selection
 // view. Only already-seen objects and retained libraries can demand a DSO;
 // later inputs and undefined weak references cannot retroactively keep it.
-BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_library_needed(CompilerDriverArchiveState* state, NativeDynamicLibrary* library)
+enum { COMPILER_DRIVER_ELF_NEEDED_DSO_REFERENCE = 16 };
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_library_needed(CompilerDriverArchiveState* state, NativeDynamicLibrary* library,
+                                                           NativeDynamicLibrary* retained, u32 retained_count)
 {
+    bool indirect = false;
+    for (u32 index = 0; !indirect && index < retained_count; index += 1)
+    {
+        for (u32 dependency = 0; !indirect && dependency < retained[index].needed_name_count; dependency += 1)
+        {
+            indirect = string_equal(retained[index].needed_names[dependency], library->name);
+        }
+    }
     bool needed = false;
     for (u32 index = 0; !needed && state->capacity && index < library->versioned_symbol_count; index += 1)
     {
@@ -5996,7 +6022,11 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_library_needed(CompilerDriverArchiv
         if (symbol->has_default)
         {
             CompilerDriverArchiveSymbol* entry = compiler_driver_archive_slot(state, symbol->name);
-            needed = compiler_driver_archive_unresolved(entry->flags, false);
+            // Regular-object demand always counts. DSO-only demand counts
+            // only when no retained DSO already names this loader identity.
+            needed = !(entry->flags & COMPILER_DRIVER_ARCHIVE_DEFINED) &&
+                     ((entry->flags & COMPILER_DRIVER_ARCHIVE_STRONG) ||
+                      (!indirect && (entry->flags & COMPILER_DRIVER_ELF_NEEDED_DSO_REFERENCE)));
         }
     }
     return needed;
@@ -6011,7 +6041,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_needed_library_add(CompilerDriverAr
     }
     for (u32 index = 0; index < library->strong_referenced_symbol_count; index += 1)
     {
-        compiler_driver_archive_symbol(state, library->referenced_symbols[index])->flags |= COMPILER_DRIVER_ARCHIVE_STRONG;
+        compiler_driver_archive_symbol(state, library->referenced_symbols[index])->flags |= COMPILER_DRIVER_ELF_NEEDED_DSO_REFERENCE;
     }
 }
 
@@ -6145,7 +6175,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_requested_libraries(Arena* arena, C
             {
                 bool duplicate = false;
                 for (u32 index = 0; !duplicate && index < count; index += 1) { duplicate = string_equal(libraries[index].name, library.name); }
-                if (duplicate || (as_needed && !compiler_driver_elf_library_needed(&needed_state, &library)))
+                if (duplicate || (as_needed && !compiler_driver_elf_library_needed(&needed_state, &library, libraries, count)))
                 {
                     file_map_unmap(map);
                 }

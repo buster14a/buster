@@ -1985,8 +1985,10 @@ The supported subset is:
   operands in input order (the default is no-as-needed). Explicit `-x` source
   inputs retain their selected language. A DSO
   is retained when it satisfies a strong unresolved reference from preceding
-  objects or a previously retained DSO. Later objects and weak references do
-  not keep it. The driver consumes these switches before the native image API,
+  objects, or from a previously retained DSO when the candidate is absent
+  from every retained DSO's DT_NEEDED list (matched by SONAME identity).
+  DSO-only dependencies already named there remain indirect; a regular-object
+  demand still keeps them. Later objects and weak references do not keep it. The driver consumes these switches before the native image API,
   which receives the selected library list and still refuses raw policy flags
   without an ordered driver request. GNU linker-script `AS_NEEDED` remains
   unsupported.
