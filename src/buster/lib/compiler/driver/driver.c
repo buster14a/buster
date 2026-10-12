@@ -54,6 +54,8 @@
 // Dependency output follows successful C object or bounded -Wp assembly
 // publication: the preprocessor contributes identity-deduplicated prerequisites
 // and this driver renders their Makefile after the artifact writer succeeds.
+// The parser retains ordered -MT/-MQ fragments and joins them once, so
+// dependency target storage grows with argument and output bytes.
 // Every unit enters through compiler_driver_execute_unit. With
 // collect_input_metrics, compiler_driver_prime_arenas and the prewarm run
 // first, CompilerDriverUnitMetrics (compiler_driver_phase_begin marks the
@@ -2132,11 +2134,14 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     u64 linker_argument_capacity = arguments.length;
     u64 macro_prefix_map_capacity = 0;
     u64 after_include_capacity = 0;
+    u64 dependency_target_capacity = 0;
     for (u64 index = 0; index < arguments.length; index += 1)
     {
         String8 argument = arguments.pointer[index];
         macro_prefix_map_capacity += string_starts_with_sequence(argument, S8("-fmacro-prefix-map="));
         after_include_capacity += string_starts_with_sequence(argument, S8("-idirafter"));
+        dependency_target_capacity += string_starts_with_sequence(argument, S8("-MT")) ||
+                                      string_starts_with_sequence(argument, S8("-MQ"));
         if (string_starts_with_sequence(argument, S8("-Wl,")))
         {
             for (u64 offset = 4; offset < argument.length; offset += 1)
@@ -2200,7 +2205,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     String8 runtime_omission_option = {0};
     String8 dependency_option_without_mode = {0};
     bool direct_dependency_options = false;
-    u32 dependency_target_count = 0;
+    // The prepass may count option values too, but never undercounts targets.
+    // arguments.length is bounded above, so two fragments per target fit.
+    String8* dependency_fragments = dependency_target_capacity ? arena_allocate(arena, String8, 2 * dependency_target_capacity) : 0;
+    u64 dependency_fragment_count = 0;
     for (u64 argument_index = 0; argument_index < arguments.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; argument_index += 1)
     {
         String8 argument = arguments.pointer[argument_index];
@@ -2327,9 +2335,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                     CompilerDriverDependencyQuoteResult quoted = compiler_driver_dependency_quote(arena, value);
                     target = quoted.representable ? quoted.text : value;
                 }
-                invocation.dependency_targets =
-                    dependency_target_count ? string_format(arena, S8("{S8} {S8}"), invocation.dependency_targets, target) : target;
-                dependency_target_count += 1;
+                if (dependency_fragment_count)
+                {
+                    dependency_fragments[dependency_fragment_count++] = S8(" ");
+                }
+                dependency_fragments[dependency_fragment_count++] = target;
             }
             continue;
         }
@@ -3407,6 +3417,20 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), argument);
         break;
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && dependency_fragment_count)
+    {
+        if (dependency_fragment_count == 1)
+        {
+            invocation.dependency_targets = dependency_fragments[0];
+        }
+        else if (!string_join_arena_attempt(arena,
+                                           (SliceString8){.pointer = dependency_fragments, .length = dependency_fragment_count},
+                                           false, &invocation.dependency_targets))
+        {
+            invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation.diagnostic = S8("dependency targets exceed supported size");
+        }
     }
     // Standard input has no suffix to classify, so, as for Clang, it needs an
     // explicit C language or -E, which reads it as C source. It is one stream

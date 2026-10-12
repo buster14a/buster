@@ -942,6 +942,31 @@ source and encoder paths did for this snapshot; they do not supply an
 independent architectural oracle for every form. The broader #2931 issue
 remains open for unrelated encoding defects and further proof.
 
+X86 source forms also include baseline `pause`, `prefetcht0`/`prefetcht1`/
+`prefetcht2`/`prefetchnta`, `clflush`, and 32/64-bit `movnti` stores. PAUSE is
+an unconditional REP-NOP hint; prefetch and cache-flush rows map to the existing
+SSE/SSE2 baseline. ADX and PCLMUL metadata aliases use `adx` and `pclmul`.
+`rdtscp` is independently enableable with `-mattr=+rdtscp` or `-mrdtscp`, is
+included by modern AMD/Intel model profiles, and is detected from extended
+CPUID EDX bit 27 for `-march=native`. Its absence is a named feature refusal.
+
+AT&T `cvtsi2sd{l,q}`, `cvtsi2ss{l,q}` and `crc32{b,w,l,q}` suffixes describe
+the integer source, independently of the XMM/CRC accumulator width. CRC32 word
+sources use the 66 prefix with a 32-bit accumulator; qword sources require a
+64-bit accumulator. Register-controlled `bextr` selects BMI1's VEX form; an
+immediate control still selects the separately gated TBM XOP form. `-mbmi`
+and `-mattr=+bmi` alias `bmi1`. `kmovw` accepts mask/GPR32 and mask/memory16
+transfers, and `vpcompressd` accepts a masked memory destination with a dword
+element, including AT&T `(%rax){%k2}`. Zeroing a memory destination is refused.
+
+`assembly_test_x86_common_source_forms` checks GNU as 2.47 bytes in both
+dialects, public assembly units, baseline feature refusals, Zen 4/Skylake
+AVX-512 profiles and malformed neighbours. The driver's
+`compiler_driver_test_pause_conversion_round_trip` reassembles FAST/QUALITY
+Buster listings with byte-identical text and captured pristine GCC 16.2.1
+`-O2 -S` scalar conversions. These bounded witnesses do not claim every
+metadata form or arbitrary external listing is source-complete (#2931).
+
 On Mach-O, `.section SEGMENT,SECTION[,TYPE[,ATTRIBUTES]]` and
 `.pushsection` accept the pairs Buster's listing writer represents:
 `__TEXT,__text,regular,pure_instructions`, `__TEXT,__const`,
@@ -1114,7 +1139,15 @@ retain relocations because a linker can replace their addresses.
 Text alignment without an explicit fill uses x86-64 NOP bytes or complete
 little-endian AArch64 NOP instructions. A partial AArch64 instruction boundary
 is zero-filled before the NOPs; explicit fills remain repeated bytes on both
-targets. Data alignment defaults to zero fill.
+targets. Data alignment defaults to zero fill. `.p2align`, `.balign`, and
+`.align` accept `alignment[, fill[, maximum_skip]]`, including an omitted
+fill (`.p2align 4,,10`). A nonzero maximum suppresses the gap when the required
+padding exceeds it; equality permits padding and zero means unlimited. The
+section retains its requested alignment even when padding is suppressed.
+Maximum-skip expressions must be absolute and in 0..4294967295; malformed or
+out-of-range operands are diagnosed. Every branch-relaxation layout replay
+recomputes the gap and limit. `.align` keeps its target-specific interpretation:
+bytes on x86-64 ELF, a power of two on AArch64.
 
 Three things that layer owns rather than the instruction layer. Local numeric
 labels: `1:` becomes a generated name and `1f`/`1b` resolve to the nearest
@@ -2098,7 +2131,11 @@ independent installed GCC and Clang preprocessing of the matrix and includes.
 depfile path comes from the object path by removing only the basename's last
 extension and appending `.d`; `-MF` overrides it. `-MT` adds a raw target,
 `-MQ` adds an escaped target, and the default target is the escaped object path.
-Multiple target options retain command-line order. `-MP` adds phony rules for
+Multiple target options retain command-line order, including repeats and empty
+fragments. Parsing retains raw/quoted fragments and joins them once with checked
+sizing; target storage and copying grow linearly with argument and output bytes.
+`compiler_driver_test_dependency_target_scaling` bounds actual parser arena growth
+at 128 and 2,048 targets, directly and through response files. `-MP` adds phony rules for
 header prerequisites. `-MF`, `-MT`, `-MQ`, and `-MP` require `-MD` or `-MMD`;
 explicit `-MF`/target options cannot be used with multiple inputs.
 
@@ -2221,7 +2258,15 @@ The globals and publics streams index each module's top-level procedures
 `S_GDATA32`/`S_LDATA32`); global ones also get an `S_PUB32` and an entry in the
 publics address map, sorted by section and offset (`pdb_gsi_emit`). With these
 empty, DbgHelp loads the PDB only as "public symbols & lines". The regression is
-`pdb_test_global_indexes`.
+`pdb_test_global_indexes`. Bucket ordering retains the format hash and name
+comparison, with stable insertion sort capped at 16 entries and stable bottom-up
+merge sort for larger buckets (#3737). One scratch array sized to the largest
+bucket is reused, bounding comparisons to O(N log N) even for repeated-hash
+names. `pdb_test_gsi_sorting` checks comparison bounds and stable ties;
+`pdb_test_gsi_colliding_indexes` checks both emitted indexes. The existing
+mixed ASCII/non-ASCII comparator can be non-transitive (#3752); for such inputs the
+large-bucket merge order is deterministic but may differ from insertion order.
+No comparator or on-disk format change is made.
 
 CodeView names a frame-resident location with `S_DEFRANGE_REGISTER_REL`
 against RBP (x86-64) or X29 (AArch64), the base codegen normalizes FRAME offsets

@@ -5370,6 +5370,39 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         String8 expected_diagnostic;
         String8 dialect;
     } cases[] = {
+        // Function designators are never assignment places, even under sizeof (#3746).
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; f = g; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; return sizeof(f = g); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; (f) = g; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; return sizeof((f) = g); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; *f = g; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; return sizeof(*f = g); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; (*f) = g; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; return sizeof((*f) = g); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; (*p) = g; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; return sizeof((*p) = g); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; f += 1; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; return sizeof(f += 1); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; (*p) += 1; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; return sizeof((*p) += 1); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c17")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; void (**pp)(void) = &p; p = f; (p) = g; *pp = f; (*pp) = g; return 0; }\n"), true, false, {0}, S8("-std=c17")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; void (**pp)(void) = &p; return sizeof(p = g); }\n"), true, false, {0}, S8("-std=c17")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; f = g; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c23")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; return sizeof(f = g); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c23")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; (f) = g; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c23")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; return sizeof((f) = g); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c23")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; *f = g; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c23")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; return sizeof(*f = g); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c23")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; (*f) = g; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c23")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; return sizeof((*f) = g); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c23")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; (*p) = g; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c23")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; return sizeof((*p) = g); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c23")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; f += 1; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c23")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; return sizeof(f += 1); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c23")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; (*p) += 1; return 0; }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c23")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; return sizeof((*p) += 1); }\n"), false, false, S8("assignment operand is not a modifiable place"), S8("-std=c23")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; void (**pp)(void) = &p; p = f; (p) = g; *pp = f; (*pp) = g; return 0; }\n"), true, false, {0}, S8("-std=c23")},
+        {S8("void f(void); void g(void); unsigned long x(void) { void (*p)(void) = f; void (**pp)(void) = &p; return sizeof(p = g); }\n"), true, false, {0}, S8("-std=c23")},
         {S8("int f()[3]; int recovered;\n"), false, false, S8("a function cannot return an array")},
         {S8("int f()(void); int recovered;\n"), false, false, S8("a function cannot return a function")},
         {S8("typedef int A[3]; A f(void);\n"), false, false, S8("a function cannot return an array")},
@@ -8256,6 +8289,67 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_object_text(ObjectFile const*
         }
     }
     return text;
+}
+
+// The GCC fixture is pristine GCC 16.2.1 -O2 -S output for the two scalar
+// conversions in #3732. GCC is an oracle used to capture it, not a test dependency.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pause_conversion_round_trip(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 source = buster_test_temporary_path(arena, S8("pause-conversions"), S8(".c"));
+    String8 listing = buster_test_temporary_path(arena, S8("pause-conversions"), S8(".s"));
+    String8 direct_path = buster_test_temporary_path(arena, S8("pause-conversions-direct"), S8(".o"));
+    String8 round_path = buster_test_temporary_path(arena, S8("pause-conversions-round"), S8(".o"));
+    bool written = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+        "double l2d(long x) { return x; } float i2f(int x) { return x; }\n"
+        "float l2f(long x) { return x; } double i2d(int x) { return x; }\n"
+        "void spin(volatile int *p) { while (*p) __builtin_ia32_pause(); }\n")));
+    BUSTER_TEST(arguments, written);
+    String8 modes[] = {S8("fast"), S8("quality")};
+    for (u32 mode = 0; written && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    {
+        String8 allocator = string_format(arena, S8("-fregister-allocator={S8}"), modes[mode]);
+        String8 print_args[] = {S8("-target"), S8("x86_64-linux"), S8("-march=baseline"), S8("-g0"),
+                                S8("-O2"), allocator, S8("-S"), source, S8("-o"), listing};
+        String8 direct_args[] = {S8("-target"), S8("x86_64-linux"), S8("-march=baseline"), S8("-g0"),
+                                 S8("-O2"), allocator, S8("-c"), source, S8("-o"), direct_path};
+        String8 assemble_args[] = {S8("-target"), S8("x86_64-linux"), S8("-march=baseline"),
+                                   S8("-c"), listing, S8("-o"), round_path};
+        CompilerDriverResult printed = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(print_args)));
+        CompilerDriverResult direct = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(direct_args)));
+        BUSTER_TEST_RAW(arguments, printed.error == COMPILER_DRIVER_ERROR_NONE, printed.diagnostic);
+        BUSTER_TEST_RAW(arguments, direct.error == COMPILER_DRIVER_ERROR_NONE && direct.has_object, direct.diagnostic);
+        if (printed.error == COMPILER_DRIVER_ERROR_NONE && direct.error == COMPILER_DRIVER_ERROR_NONE && direct.has_object)
+        {
+            String8 text = BYTE_SLICE_TO_STRING(8, file_read(arena, listing, (FileReadOptions){0}));
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("pause")) != BUSTER_STRING_NO_MATCH);
+            CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble_args)));
+            BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object, assembled.diagnostic);
+            if (assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object)
+            {
+                ByteSlice expected = compiler_driver_test_object_text(&direct.object);
+                ByteSlice actual = compiler_driver_test_object_text(&assembled.object);
+                BUSTER_TEST_RAW(arguments, expected.length != 0 && expected.length == actual.length &&
+                    memcmp(expected.pointer, actual.pointer, expected.length) == 0, allocator);
+            }
+        }
+    }
+    String8 gcc_args[] = {S8("-target"), S8("x86_64-linux"), S8("-march=baseline"), S8("-c"),
+        S8("src/buster/tests/compiler/driver/fixtures/x86_scalar_conversions.gcc.s"), S8("-o"), round_path};
+    CompilerDriverResult gcc = compiler_driver_execute_invocation(arena,
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(gcc_args)));
+    BUSTER_TEST_RAW(arguments, gcc.error == COMPILER_DRIVER_ERROR_NONE && gcc.has_object, gcc.diagnostic);
+    os_file_delete(source);
+    os_file_delete(listing);
+    os_file_delete(direct_path);
+    os_file_delete(round_path);
+    scratch_end(temporary);
+    return result;
 }
 
 // #3593: Darwin -S is an assembler input, including TLS and unwind sections.
@@ -34887,6 +34981,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_runtime_path_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_default_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_depfiles);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_dependency_target_scaling);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_dependency_files);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_idirafter);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_macro_prefix_map);
@@ -34913,6 +35008,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bare_dwarf_sections);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_statements);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_quoted_assembly_round_trip);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pause_conversion_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_compiler_listing_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_assembly_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_macho_aarch64_listing_round_trip);
@@ -36038,7 +36134,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, invalid_ace_spelling.error == COMPILER_DRIVER_ERROR_ARGUMENT);
     BUSTER_STRING_TEST(arguments, invalid_ace_spelling.diagnostic, S8("unsupported target feature: ACE_1"));
     BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, feature_invocation.target),
-                       S8("avx,avx2,avx512bw,avx512f,avx512vl,bmi1,bmi2,cldemote,cx16,f16c,fma,fsgsbase,ibt,invpcid,lzcnt,movbe,movrs,pclmul,popcnt,prefetchi,rdrand,shstk,sse,sse2,sse3,sse4.1,sse4.2,ssse3,svm,vmx,xsave,xsaveopt"));
+                       S8("avx,avx2,avx512bw,avx512f,avx512vl,bmi1,bmi2,cldemote,cx16,f16c,fma,fsgsbase,ibt,invpcid,lzcnt,movbe,movrs,pclmul,popcnt,prefetchi,rdrand,rdtscp,shstk,sse,sse2,sse3,sse4.1,sse4.2,ssse3,svm,vmx,xsave,xsaveopt"));
     String8 invalid_avx512_dependency_command_line[] = {
         S8("--target=x86_64-linux"),
         S8("-mattr=+avx512f,+avx512vl,-avx2,+avx512bw"),
