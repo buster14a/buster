@@ -1104,7 +1104,15 @@ retain relocations because a linker can replace their addresses.
 Text alignment without an explicit fill uses x86-64 NOP bytes or complete
 little-endian AArch64 NOP instructions. A partial AArch64 instruction boundary
 is zero-filled before the NOPs; explicit fills remain repeated bytes on both
-targets. Data alignment defaults to zero fill.
+targets. Data alignment defaults to zero fill. `.p2align`, `.balign`, and
+`.align` accept `alignment[, fill[, maximum_skip]]`, including an omitted
+fill (`.p2align 4,,10`). A nonzero maximum suppresses the gap when the required
+padding exceeds it; equality permits padding and zero means unlimited. The
+section retains its requested alignment even when padding is suppressed.
+Maximum-skip expressions must be absolute and in 0..4294967295; malformed or
+out-of-range operands are diagnosed. Every branch-relaxation layout replay
+recomputes the gap and limit. `.align` keeps its target-specific interpretation:
+bytes on x86-64 ELF, a power of two on AArch64.
 
 Three things that layer owns rather than the instruction layer. Local numeric
 labels: `1:` becomes a generated name and `1f`/`1b` resolve to the nearest
