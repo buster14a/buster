@@ -344,6 +344,14 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   parent's clock and must not be subtracted across processes. A failed collector
   wait records its actual status before cleanup; expiry still fails with 124.
   The collector keeps its twenty-second cap and one-second kill grace.
+  `/bin/bash ios/launch_trace_monitor_test.sh --backpressure-only` runs both
+  transport controls for a focused reproduction. For a receipt-overhead
+  sensitivity experiment, `BUSTER_IOS_TEST_RECEIPT_DELAY=1` adds a finite
+  20 ms delay only when the fake grep reads caller/supervisor receipt files.
+  The hosted launch-trace lane enables this sensitivity control; the production
+  builtin field checks do not enter that delayed path.
+  This models a reachable delay class, not the cause of a historical runner
+  failure; it does not change any production deadline or fixture expectation.
   Failed launches report
   `BUSTER_IOS_TEST_PROGRESS` with the last completed `TEST_MODULE_TIMING`
   module/index and the last module observed in timing or arena records;
