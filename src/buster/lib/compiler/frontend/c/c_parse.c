@@ -35570,6 +35570,13 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
             assignment_type_id = entity->type;
             assignment_typed = true;
         }
+        // A function designator is not an object place. Check before source
+        // conversion, including when the assignment is unevaluated.
+        if (assignment && assignment_typed && result->types[assignment_type_id.value].kind == C_TYPE_FUNCTION)
+        {
+            c_parse_lowering_constraint_consider(diagnostic, S8("assignment operand is not a modifiable place"), index, operand_start);
+            continue;
+        }
         bool member_place = operand_end >= operand_start + 2 &&
                             (c_token_is_punctuator(&preprocess.tokens[operand_end - 2], C_PUNCTUATOR_DOT) ||
                              c_token_is_punctuator(&preprocess.tokens[operand_end - 2], C_PUNCTUATOR_ARROW));
