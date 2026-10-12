@@ -144,6 +144,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 c_shape_matching_delimiter(CTokenShap
 
 typedef struct CTypeParseMachine CTypeParseMachine;
 typedef struct CIrDecodedString CIrDecodedString;
+typedef struct CParseInitializerLog CParseInitializerLog;
+typedef struct CParseInitializerReplays CParseInitializerReplays;
 #define C_DECLARATION_KEYWORD_SLOT_COUNT 256
 
 /* Source/preprocessor tables consumed by the parser's keyword classifier. */
@@ -1622,6 +1624,13 @@ struct CTypeParseMachine
     // CParseResult.phase_released_bytes/phase_releases when analysis returns.
     u64 phase_released_bytes;
     u64 phase_releases;
+    // While c_parse_infer_file_array_bounds walks one list: where that walk
+    // records its element checks. Null at every other time.
+    CParseInitializerLog* initializer_log;
+    // The logs kept from those walks, for static-initializer validation to
+    // replay instead of walking the list again. Null until the first one; in
+    // the phase arena. See c_parse_initializer_replay_find.
+    CParseInitializerReplays* initializer_replays;
     CTypeLayoutCache layout_cache;
     // Owns a grown member-search workspace; the initial buffers stay in the
     // analysis machine arena. Released by semantic teardown, never a query rewind.

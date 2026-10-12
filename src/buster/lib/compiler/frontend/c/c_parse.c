@@ -99,6 +99,9 @@
 //   c_parse_infer_initializer_array_count_core    array-bound inference
 //   c_parse_initializer_slot_table                a walk's per-record slot
 //                                                 numbering, built once
+//   c_parse_initializer_replay_find,              element checks an inference
+//   c_parse_initializer_replay_run                walk logged, replayed by
+//                                                 shape validation
 //   c_parse_add_type, c_parse_tag_lookup,         type interning and
 //   c_parse_primitive_type                        construction, attributes
 //   c_parse_intern_type, c_parse_interned_type    shared primitive and pointer
@@ -11097,6 +11100,50 @@ struct CParseInitializerInferenceDesignator
     bool has_designator;
 };
 
+// One element check of an initializer walk: the value's destination and its
+// tokens, as c_parse_initializer_expression_constraint takes them.
+typedef struct CParseInitializerElement CParseInitializerElement;
+struct CParseInitializerElement
+{
+    CTypeId type;
+    u32 start;
+    u32 end;
+};
+
+// What one walk records, in walk order (#3102). A walk keeps its log only
+// when it reaches the frame loop and its path depends on nothing that can
+// change before validation: the tokens, the pair table, the member lists of
+// complete types and the bound being inferred. Every other step clears
+// replayable. record_only also skips the element checks, for the reference
+// re-walk.
+struct CParseInitializerLog
+{
+    CParseInitializerElement* elements;
+    u32 count;
+    u32 capacity;
+    bool replayable;
+    bool record_only;
+};
+
+// A kept log: the list it walked and the count the walk inferred.
+typedef struct CParseInitializerReplay CParseInitializerReplay;
+struct CParseInitializerReplay
+{
+    CParseInitializerElement* elements;
+    u64 inferred_count;
+    u32 start;
+    u32 end;
+    u32 element_count;
+};
+
+// The kept logs, by array bound index. Bounds made after the first log have
+// no entry and walk as before.
+struct CParseInitializerReplays
+{
+    CParseInitializerReplay** of_bound;
+    u32 bound_count;
+};
+
 BUSTER_C_INTERNAL bool c_parse_initializer_member_is_slot(CMember* member)
 {
     return member && !(member->is_bit_field && !member->name.length);
@@ -12016,13 +12063,13 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
     return true;
 }
 
+// Most of an element's tokens are none of these seven punctuators; one set
+// test passes them without the end scan's ladder (#3102).
+#define C_PARSE_INITIALIZER_VALUE_STOPS (C_PUNCTUATOR_SET_DELIMITER_OPEN | C_PUNCTUATOR_SET_DELIMITER_CLOSE | C_PUNCTUATOR_BIT(C_PUNCTUATOR_COMMA))
+
 BUSTER_C_INTERNAL u32 c_parse_initializer_value_end(CPreprocessResult preprocess, u32 start, u32 limit)
 {
-    // Most of an element's tokens are none of the seven punctuators below;
-    // one set test passes them without the ladder (#3102).
-    u64 stops = C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_PARENTHESIS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_PARENTHESIS) |
-        C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_BRACKET) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_BRACKET) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_BRACE) |
-        C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_BRACE) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_COMMA);
+    u64 stops = C_PARSE_INITIALIZER_VALUE_STOPS;
     u32 parentheses = 0;
     u32 brackets = 0;
     u32 braces = 0;
@@ -12183,6 +12230,9 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
                                                                     CTypeId element_type, u32 start, u32 end, u64* count_out,
                                                                     CTypeId aggregate_type, CParseInitializerDiagnostic* diagnostic)
 {
+    // Only this walk records: a walk nested in one of its queries sees none.
+    CParseInitializerLog* log = machine->initializer_log;
+    machine->initializer_log = 0;
     WORK_LEDGER_RECORD(REDERIVE_INITIALIZER_WALKS, 1);
     WORK_LEDGER_RECORD(REDERIVE_INITIALIZER_WALK_TOKENS, end > start ? end - start : 0);
     if (start >= end)
@@ -12253,6 +12303,8 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
     };
     bool workspace = frames && continuation_work;
     u32 frame_count = workspace ? 1 : 0;
+    // Only a list that reaches the frame loop has element checks to log.
+    if (log) log->replayable = workspace;
     if (workspace)
     {
         frames[0] = (CParseInitializerInferenceFrame){
@@ -12312,6 +12364,14 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             {
                 return false;
             }
+            // A vector's slots come from a layout, and a written bound from a
+            // constant query; either can answer differently at validation.
+            if (log && !frame->root)
+            {
+                CType const* slot_type = result->types + frame->type.value;
+                log->replayable &= slot_type->kind == C_TYPE_STRUCT || slot_type->kind == C_TYPE_UNION ||
+                                   (slot_type->kind == C_TYPE_ARRAY && result->array_bounds[slot_type->array_bound].has_inferred_count);
+            }
         }
         u64 slots = frame->slots;
         // An explicit brace list containing only one string initializes the
@@ -12331,6 +12391,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
                 c_parse_initializer_string_element_compatible(preprocess, result, string_element, decoded);
             if (string_contents)
             {
+                if (log) log->replayable = false;
                 if (decoded.element_count == UINT64_MAX || decoded.element_count > slots)
                 {
                     // Reuse the ordinary excess-element diagnostic below.
@@ -12375,6 +12436,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
         {
             return false;
         }
+        if (log) log->replayable &= !designator.has_designator && !frame->borrowed;
         if (frame->root)
         {
             count = BUSTER_MAX(count, designator.selected_end + 1);
@@ -12421,17 +12483,31 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             };
             continue;
         }
-        u32 value_end = c_parse_initializer_value_end(preprocess, designator.value_start, frame->limit);
+        // A one-token element followed by a comma or by the limit ends after
+        // its token, which is the scan's own answer; the scan runs for every
+        // other element (#3102).
+        u32 single_end = designator.value_start + 1;
+        bool single = !c_punctuator_in_set(preprocess.tokens[designator.value_start].punctuator, C_PARSE_INITIALIZER_VALUE_STOPS) &&
+                      (single_end == frame->limit || c_token_is_punctuator(&preprocess.tokens[single_end], C_PUNCTUATOR_COMMA));
+        u32 value_end = single ? single_end : c_parse_initializer_value_end(preprocess, designator.value_start, frame->limit);
+#if BUSTER_REFERENCE_CHECKS
+        BUSTER_CHECK(value_end == c_parse_initializer_value_end(preprocess, designator.value_start, frame->limit));
+#endif
         if (value_end <= designator.value_start)
         {
             return false;
         }
         // Only an aggregate subobject asks whether its value is a string.
         bool string_value = aggregate && c_ir_tokens_are_string_literals(preprocess, designator.value_start, value_end);
-        if (aggregate && !(string_value && c_parse_initializer_type_takes_string(result, value_type)) &&
+        bool takes_string = string_value && c_parse_initializer_type_takes_string(result, value_type);
+        // The aggregate-expression query types the value, which validation
+        // could answer differently.
+        if (log && aggregate && !takes_string && !string_value) log->replayable = false;
+        if (aggregate && !takes_string &&
             (string_value || !c_parse_initializer_value_is_aggregate_expression(machine, result_arena, preprocess, result, scope, designator.value_start, value_end,
                                                                                 designator.value_type)))
         {
+            if (log) log->replayable = false;
             if (frame_count + designator.continuation_count >= capacity)
             {
                 return false;
@@ -12456,7 +12532,14 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             };
             continue;
         }
-        if (diagnostic && machine->semantic_constant_queries &&
+        if (log)
+        {
+            if (log->count < log->capacity)
+                log->elements[log->count++] = (CParseInitializerElement){.type = designator.value_type, .start = designator.value_start, .end = value_end};
+            else
+                log->replayable = false;
+        }
+        if (diagnostic && machine->semantic_constant_queries && !(log && log->record_only) &&
             !c_parse_initializer_expression_constraint(machine, result, preprocess, scope, designator.value_type, designator.value_start, value_end, diagnostic))
         {
             return false;
@@ -12491,6 +12574,76 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count(CTypeParseMachine* 
                                                               count_out, C_TYPE_ID_INVALID, 0);
     scratch_end(temporary);
     return success;
+}
+
+// Whether arena can take size more bytes with three times as much left over
+// for whatever runs above them. A log that does not fit is not kept, and its
+// list walks again at validation.
+BUSTER_C_INTERNAL bool c_parse_initializer_log_fits(Arena* arena, u64 size)
+{
+    return arena && arena->reserved_size > arena->position && size <= (arena->reserved_size - arena->position) / 4;
+}
+
+// Keeps a replayable log of the list [start, end) for the bound it inferred,
+// in the phase arena, which outlives static-initializer validation.
+BUSTER_C_INTERNAL void c_parse_initializer_replay_keep(CTypeParseMachine* machine, CParseResult* result, u32 bound_index, u32 start, u32 end,
+                                                       u64 inferred_count, CParseInitializerLog const* log)
+{
+    Arena* arena = machine->phase_arena;
+    CParseInitializerReplays* replays = machine->initializer_replays;
+    u64 element_bytes = (u64)log->count * sizeof(CParseInitializerElement);
+    if (!replays && c_parse_initializer_log_fits(arena, (u64)result->array_bound_count * sizeof(CParseInitializerReplay*) + sizeof(*replays)))
+    {
+        replays = arena_allocate(arena, CParseInitializerReplays, 1);
+        replays->bound_count = result->array_bound_count;
+        replays->of_bound = arena_allocate(arena, CParseInitializerReplay*, replays->bound_count);
+        memset(replays->of_bound, 0, sizeof(*replays->of_bound) * replays->bound_count);
+        machine->initializer_replays = replays;
+    }
+    if (replays && bound_index < replays->bound_count && c_parse_initializer_log_fits(arena, element_bytes + sizeof(CParseInitializerReplay)))
+    {
+        CParseInitializerReplay* replay = arena_allocate(arena, CParseInitializerReplay, 1);
+        *replay = (CParseInitializerReplay){
+            .elements = log->count ? arena_allocate(arena, CParseInitializerElement, log->count) : 0,
+            .inferred_count = inferred_count,
+            .start = start,
+            .end = end,
+            .element_count = log->count,
+        };
+        if (log->count) memcpy(replay->elements, log->elements, element_bytes);
+        replays->of_bound[bound_index] = replay;
+    }
+}
+
+// The kept log for a file-scope list [start, end) of the array type value,
+// when its bound still holds the count that log's walk inferred; else null.
+BUSTER_C_INTERNAL CParseInitializerReplay const* c_parse_initializer_replay_find(CTypeParseMachine* machine, CParseResult* result, CScopeId scope,
+                                                                                 CType value, u32 start, u32 end)
+{
+    CParseInitializerReplays const* replays = machine->initializer_replays;
+    CParseInitializerReplay const* replay = 0;
+    if (replays && !scope.value && value.kind == C_TYPE_ARRAY && value.array_bound < replays->bound_count &&
+        value.array_bound < result->array_bound_count)
+    {
+        CArrayBound bound = result->array_bounds[value.array_bound];
+        replay = replays->of_bound[value.array_bound];
+        replay = replay && bound.has_inferred_count && !bound.token_count && bound.inferred_count == replay->inferred_count &&
+                         replay->start == start && replay->end == end ? replay : 0;
+    }
+    return replay;
+}
+
+// The element checks the walk of a kept list would make, in its order, up
+// to the first that fails, which is the walk's diagnostic.
+BUSTER_C_INTERNAL void c_parse_initializer_replay_run(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                      CParseInitializerReplay const* replay, CParseInitializerDiagnostic* diagnostic)
+{
+    bool valid = true;
+    for (u32 index = 0; valid && index < replay->element_count; index += 1)
+    {
+        CParseInitializerElement element = replay->elements[index];
+        valid = c_parse_initializer_expression_constraint(machine, result, preprocess, scope, element.type, element.start, element.end, diagnostic);
+    }
 }
 
 BUSTER_C_SHARED void c_parse_infer_file_array_bounds(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result)
@@ -12549,12 +12702,27 @@ BUSTER_C_SHARED void c_parse_infer_file_array_bounds(CTypeParseMachine* machine,
             end -= 1;
         }
         u64 count = 0;
-        if (c_parse_infer_initializer_array_count(machine, arena, preprocess, result, (CScopeId){.value = 0}, type.element_type, initializer, end, &count) &&
-            bound_index < result->array_bound_count)
+        // The walk logs its element checks for validation to replay. Each
+        // checked element is at least one token, and a comma or a brace
+        // follows it, so half the list's tokens bound the log.
+        u64 log_mark = machine->scratch_arena->position;
+        u32 log_capacity = (end - initializer) / 2 + 1;
+        CParseInitializerLog log = {0};
+        if (machine->phase_arena && c_parse_initializer_log_fits(machine->scratch_arena, (u64)log_capacity * sizeof(CParseInitializerElement)))
+        {
+            log.elements = arena_allocate(machine->scratch_arena, CParseInitializerElement, log_capacity);
+            log.capacity = log_capacity;
+            machine->initializer_log = &log;
+        }
+        bool inferred = c_parse_infer_initializer_array_count(machine, arena, preprocess, result, (CScopeId){.value = 0}, type.element_type, initializer, end, &count);
+        machine->initializer_log = 0;
+        if (inferred && bound_index < result->array_bound_count)
         {
             result->array_bounds[bound_index].inferred_count = count;
             result->array_bounds[bound_index].has_inferred_count = true;
+            if (log.replayable) c_parse_initializer_replay_keep(machine, result, bound_index, initializer, end, count, &log);
         }
+        arena_set_position(machine->scratch_arena, log_mark);
     }
 }
 
@@ -36805,8 +36973,37 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_initializer_shape
                     aggregate = C_TYPE_ID_INVALID;
                 }
             }
-            c_parse_infer_initializer_array_count_core(machine, result->arena, machine->scratch_arena, preprocess, result, scope,
-                                                       value.element_type, start, end, &count, aggregate, &diagnostic);
+            // A list inference walked replays that walk's element checks
+            // instead of walking again (#3102). Reference builds walk it
+            // anyway, recording only, and compare.
+            CParseInitializerReplay const* replay = c_parse_initializer_replay_find(machine, result, scope, value, start, end);
+            if (replay)
+            {
+                c_parse_initializer_replay_run(machine, result, preprocess, scope, replay, &diagnostic);
+#if BUSTER_REFERENCE_CHECKS
+                CParseInitializerLog check = {
+                    .elements = arena_allocate(machine->scratch_arena, CParseInitializerElement, replay->element_count + 1),
+                    .capacity = replay->element_count + 1,
+                    .record_only = true,
+                };
+                CParseInitializerDiagnostic unused = {0};
+                machine->initializer_log = &check;
+                bool walked = c_parse_infer_initializer_array_count_core(machine, result->arena, machine->scratch_arena, preprocess, result, scope,
+                                                                         value.element_type, start, end, &count, aggregate, &unused);
+                BUSTER_CHECK(walked && !unused.message.length && check.count == replay->element_count);
+                for (u32 index = 0; index < check.count && index < replay->element_count; index += 1)
+                {
+                    CParseInitializerElement walked_element = check.elements[index];
+                    CParseInitializerElement replayed = replay->elements[index];
+                    BUSTER_CHECK(walked_element.type.value == replayed.type.value && walked_element.start == replayed.start && walked_element.end == replayed.end);
+                }
+#endif
+            }
+            else
+            {
+                c_parse_infer_initializer_array_count_core(machine, result->arena, machine->scratch_arena, preprocess, result, scope,
+                                                           value.element_type, start, end, &count, aggregate, &diagnostic);
+            }
             machine->semantic_constant_queries = previous;
             arena_set_position(machine->scratch_arena, mark);
         }
