@@ -505,7 +505,23 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_plan_graph(IrProgram* program, IrModule* modu
     }
     return result;
 }
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrModule* module)
+u32 ir_inline_module_growth_limit(u32 max_module_growth, u64 module_rows)
+{
+    u32 result = max_module_growth;
+    if (!result)
+    {
+        u64 relative = module_rows >> IR_INLINE_MODULE_GROWTH_SHIFT;
+        result = relative > IR_INLINE_MODULE_GROWTH ? (u32)BUSTER_MIN(relative, (u64)UINT32_MAX) : IR_INLINE_MODULE_GROWTH;
+    }
+    return result;
+}
+
+// `defer_optional_output` lets a caller whose splices were all optional skip
+// its own strict output check and be listed in module->inline_unchecked_callers
+// instead. Preparation passes it only when the FAST input guard will scan the
+// whole module anyway, and attributes any failure of a listed caller to this
+// pass (the FAST input guard in ir_prepare_canonical_module).
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrModule* module, bool defer_optional_output)
 {
     IrValidationResult result = (IrValidationResult){.error = IR_VALIDATION_NONE, .boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT};
     if (!program || !program->arena || !module)
@@ -515,11 +531,14 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
     else if (!module->inline_complete)
     {
         module->inlining = (IrInlineStatistics){0};
+        module->inline_unchecked_callers = 0;
+        module->inline_unchecked_count = 0;
         IrInlineOptions options = program->inline_options;
         if (!options.max_callee_instructions) options.max_callee_instructions = IR_INLINE_TINY_INSTRUCTIONS;
         if (!options.max_function_growth) options.max_function_growth = IR_INLINE_FUNCTION_GROWTH;
-        if (!options.max_module_growth) options.max_module_growth = IR_INLINE_MODULE_GROWTH;
         if (!options.max_call_sites) options.max_call_sites = IR_INLINE_CALL_SITES;
+        if (!options.caller_growth_shift) options.caller_growth_shift = IR_INLINE_CALLER_GROWTH_SHIFT;
+        if (options.caller_growth_shift > 32u) options.caller_growth_shift = 32u;
         program->inline_options = options;
         bool has_required = false;
         for (u32 symbol = 0; symbol < program->symbols.count; symbol += 1)
@@ -527,13 +546,18 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
             has_required |= program->symbols.symbols[symbol].always_inline;
         }
         u64 planning_rows = 0;
+        u64 module_rows = 0;
         for (u32 function = 0; function < module->function_count; function += 1)
         {
             IrFunction* candidate = module->functions + function;
             if (candidate->state != IR_FUNCTION_LOWERED) continue;
             planning_rows = ir_inline_storage_add(planning_rows, candidate->block_count);
             planning_rows = ir_inline_storage_add(planning_rows, candidate->instruction_count);
+            module_rows = ir_inline_storage_add(module_rows, candidate->instruction_count);
         }
+        // A zero module limit stays relative in the program's options, so
+        // each module derives its own; only this pass uses the result.
+        options.max_module_growth = ir_inline_module_growth_limit(options.max_module_growth, module_rows);
         u64 planning_units = ir_inline_storage_add(module->function_count, program->symbols.count);
         if (has_required)
         {
@@ -637,6 +661,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                 memset(function_storage_used, 0, sizeof(u64) * (count ? count : 1u));
                 memset(function_sites_used, 0, sizeof(u32) * (count ? count : 1u));
                 u32 phase_count = options.tiny ? 2u : 1u;
+                IrTypeId void_type = ir_inline_cfg_void_type(program);
+                IrInlineDiscard discard = {0};
                 for (u32 phase = 0; phase < phase_count && result.error == IR_VALIDATION_NONE; phase += 1)
                 {
                     for (u32 order_index = 0; order_index < order_count && result.error == IR_VALIDATION_NONE; order_index += 1)
@@ -660,15 +686,18 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         bool possible_tiny_call = false;
                         u64 recursive_sites = 0;
                         bool caller_scan_exhausted = total_work > IR_FAST_WORK_BUDGET;
+                        // Rows and callee scans share one running count, added
+                        // to total_work and visits once after the scan.
+                        u64 scan_budget = IR_FAST_WORK_BUDGET - BUSTER_MIN(total_work, (u64)IR_FAST_WORK_BUDGET);
+                        u64 scan_used = 0;
                         for (u32 block = 0; block < caller->block_count && !possible_tiny_call && !caller_scan_exhausted; block += 1)
                         {
                             for (u32 row = caller->blocks[block].first_instruction.value;
                                  row != IR_INLINE_NONE && !possible_tiny_call && !caller_scan_exhausted;
                                  row = caller->instructions[row].next.value)
                             {
-                                total_work = ir_inline_storage_add(total_work, 1u);
-                                module->inlining.visits += 1;
-                                if (total_work > IR_FAST_WORK_BUDGET)
+                                scan_used += 1;
+                                if (scan_used > scan_budget)
                                 {
                                     caller_scan_exhausted = true;
                                     break;
@@ -698,10 +727,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                             callee_scan_work =
                                                 ir_inline_storage_add(callee_scan_work, callee->instruction_count);
                                         }
-                                        total_work = ir_inline_storage_add(total_work, callee_scan_work);
-                                        module->inlining.visits =
-                                            ir_inline_storage_add(module->inlining.visits, callee_scan_work);
-                                        if (total_work > IR_FAST_WORK_BUDGET)
+                                        scan_used = ir_inline_storage_add(scan_used, callee_scan_work);
+                                        if (scan_used > scan_budget)
                                         {
                                             caller_scan_exhausted = true;
                                             break;
@@ -712,6 +739,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 }
                             }
                         }
+                        total_work = ir_inline_storage_add(total_work, scan_used);
+                        module->inlining.visits = ir_inline_storage_add(module->inlining.visits, scan_used);
                         if (caller_scan_exhausted)
                         {
                             module->inlining.budget_skips += 1;
@@ -769,6 +798,10 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
 
                     u64 caller_edge_units = 0;
                     u64 caller_phi_units = 0;
+                    // Every block tail and the debug rows are checked once
+                    // here instead of once per call site; each splice keeps
+                    // tails terminated and debug scopes ordered.
+                    bool caller_tails_valid = ir_inline_cfg_debug_rows_valid(caller);
                     bool caller_preflight_exhausted = false;
                     for (u32 block_index = 0; block_index < original_blocks && !caller_preflight_exhausted; block_index += 1)
                     {
@@ -777,8 +810,14 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         if (block->last_instruction.value < caller->instruction_count)
                         {
                             IrInstruction const* terminator = caller->instructions + block->last_instruction.value;
+                            caller_tails_valid &= ir_instruction_is_terminator(terminator) &&
+                                                  terminator->next.value == IR_ID_UNDERLYING_INVALID;
                             caller_edge_units = ir_inline_storage_add(caller_edge_units, terminator->target_count);
                             block_work = ir_inline_storage_add(block_work, ir_inline_storage_add(1u, terminator->target_count));
+                        }
+                        else
+                        {
+                            caller_tails_valid = false;
                         }
                         total_work = ir_inline_storage_add(total_work, block_work);
                         module->inlining.visits = ir_inline_storage_add(module->inlining.visits, block_work);
@@ -815,6 +854,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     }
                     u32 function_growth = function_growth_used[caller_index];
                     u64 function_storage = function_storage_used[caller_index];
+                    u64 module_growth_before = module_growth;
+                    u64 module_storage_before = module_storage;
+                    u64 total_copies_before = total_copies;
                     u64 function_projected_units = 0;
                     u64 function_projected_blocks = 0;
                     u64 function_projected_locals = 0;
@@ -854,8 +896,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         {
                             position += 1;
                             planned_next[row] = position;
-                            total_work = ir_inline_storage_add(total_work, 1u);
-                            module->inlining.visits = ir_inline_storage_add(module->inlining.visits, 1u);
+                            // caller_main_scan above reserved these rows.
+                            total_work += 1;
+                            module->inlining.visits += 1;
                             caller_rows_scanned += 1;
                             IrInstruction* call = caller->instructions + row;
                             if (call->opcode != IR_OPCODE_CALL) continue;
@@ -915,8 +958,10 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 continue;
                             }
                             // A legacy certified shape stays a call when optional;
-                            // a source directive reports the call instead.
-                            if (!ir_inline_function_strict(program, module, strict, caller_index) ||
+                            // a source directive reports the call instead. An
+                            // optional site's caller is checked below, only once
+                            // the relocation bound keeps its planned sites.
+                            if ((required && !ir_inline_function_strict(program, module, strict, caller_index)) ||
                                 !ir_inline_function_strict(program, module, strict, callee_index))
                             {
                                 module->inlining.shape_skips += 1;
@@ -1104,8 +1149,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             module->inlining.visits = ir_inline_storage_add(module->inlining.visits, candidate_work);
                             u32 copied = 0;
                             u32 growth = 0;
-                            bool shape = ir_inline_cfg_supported(program, caller, (IrBlockId){.value = block},
-                                                                    (IrInstructionId){.value = row}, callee, &copied, &growth);
+                            bool shape = caller_tails_valid && projected_edges <= UINT32_MAX &&
+                                         ir_inline_cfg_supported(program, caller, (IrBlockId){.value = block},
+                                                                 (IrInstructionId){.value = row}, callee, true, &copied, &growth);
                             if (!shape)
                             {
                                 module->inlining.shape_skips += 1;
@@ -1308,7 +1354,45 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             total_copies += copied;
                         }
                     }
+                    // The first splice relocates the caller's exactly sized
+                    // tables, and the arena keeps the old copy. Optional sites
+                    // stay calls unless their planned growth is worth that
+                    // relocation (IrInlineOptions.caller_growth_shift); mandatory
+                    // sites are never dropped here. Only a caller that keeps
+                    // optional sites pays for its strict check, which a dropped
+                    // large caller would otherwise spend for nothing (#3854).
+                    u32 planned_sites = function_sites - function_sites_used[caller_index];
+                    bool relocation_bounded = phase == 1 && planned_sites &&
+                        ((u64)(function_growth - function_growth_used[caller_index]) << options.caller_growth_shift) <
+                            original_instructions;
+                    bool caller_invalid = phase == 1 && planned_sites && !relocation_bounded &&
+                                          !ir_inline_function_strict(program, module, strict, caller_index);
+                    if (relocation_bounded || caller_invalid)
+                    {
+                        if (relocation_bounded) module->inlining.budget_skips += planned_sites;
+                        else module->inlining.shape_skips += planned_sites;
+                        for (u32 block = 0; block < original_blocks; block += 1) planned_heads[block] = IR_INLINE_NONE;
+                        function_sites = function_sites_used[caller_index];
+                        function_growth = function_growth_used[caller_index];
+                        function_storage = function_storage_used[caller_index];
+                        module_growth = module_growth_before;
+                        module_storage = module_storage_before;
+                        total_copies = total_copies_before;
+                    }
                     bool changed = false;
+                    bool required_splice = false;
+                    if (function_sites != function_sites_used[caller_index])
+                    {
+                        // One growth per table, to exactly the counts admission
+                        // charged (as geometric growth from the current capacity),
+                        // so no table is reallocated when its final count still
+                        // fits. A splice adds exactly its planned rows.
+                        ir_inline_cfg_reserve_tables(program->arena, caller,
+                            ir_inline_storage_add(caller->block_count, function_projected_blocks),
+                            ir_inline_storage_add(caller->instruction_count, function_projected_instructions),
+                            ir_inline_storage_add(caller->value_count, function_projected_values),
+                            ir_inline_storage_add(caller->extra_count, function_projected_extras), &discard);
+                    }
                     IrInlineCfgReserve reserve = ir_inline_cfg_reserve(caller, function_projected_locals, function_projected_debug,
                                                                        function_projected_scopes);
                     for (u32 block = 0; block < original_blocks && result.error == IR_VALIDATION_NONE; block += 1)
@@ -1322,7 +1406,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         u32 copied = 0;
                         u32 rows_before = caller->instruction_count;
                         if (!callee || !ir_inline_cfg_call(program->arena, program, caller, (IrBlockId){.value = block},
-                                                           (IrInstructionId){.value = row}, callee, &reserve, &copied))
+                                                           (IrInstructionId){.value = row}, callee, &reserve, void_type, &copied))
                         {
                             result = ir_inline_callsite_error(caller, block, row);
                         }
@@ -1331,6 +1415,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             changed = true;
                             module->inlining.inlined += 1;
                             module->inlining.always_inlined += symbol && symbol->always_inline;
+                            required_splice |= symbol && symbol->always_inline;
                             module->inlining.copied_instructions += copied;
                             module->inlining.growth += caller->instruction_count - rows_before;
                         }
@@ -1345,12 +1430,26 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         // over-approximates, so no full-function remap or compaction is needed here.
                         ir_inline_cfg_rebuild_predecessors(program->arena, caller);
                         ir_function_invalidate_cfg(caller);
-                        IrValidationResult output = ir_validate_canonical_function(program, caller);
-                        strict[caller_index] = output.error == IR_VALIDATION_NONE ? IR_INLINE_STRICT_VALID : IR_INLINE_STRICT_INVALID;
-                        if (output.error != IR_VALIDATION_NONE)
+                        if (defer_optional_output && !required_splice)
                         {
-                            result = output;
-                            result.boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT;
+                            // Unknown again: a later read as a callee rechecks it.
+                            strict[caller_index] = 0;
+                            if (!module->inline_unchecked_callers)
+                            {
+                                module->inline_unchecked_callers = arena_allocate(program->arena, u32, count);
+                            }
+                            module->inline_unchecked_callers[module->inline_unchecked_count] = caller_index;
+                            module->inline_unchecked_count += 1;
+                        }
+                        else
+                        {
+                            IrValidationResult output = ir_validate_canonical_function(program, caller);
+                            strict[caller_index] = output.error == IR_VALIDATION_NONE ? IR_INLINE_STRICT_VALID : IR_INLINE_STRICT_INVALID;
+                            if (output.error != IR_VALIDATION_NONE)
+                            {
+                                result = output;
+                                result.boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT;
+                            }
                         }
                         module->local_promotion_complete = false;
                         module->local_promotion = (IrLocalPromotionStatistics){0};
@@ -1363,6 +1462,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     scratch_end(function_scratch);
                     }
                 }
+                // No pointer reads a relocated caller's old tables; hand the
+                // remaining open runs back before codegen peaks.
+                module->inlining.released_bytes += ir_inline_cfg_discard_release(&discard);
                 if (result.error == IR_VALIDATION_NONE) module->inline_complete = true;
                 }
                 scratch_end(planning);

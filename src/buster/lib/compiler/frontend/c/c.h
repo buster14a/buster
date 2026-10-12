@@ -1603,6 +1603,14 @@ struct CAstSpecifierStatistics
     u64 type_name_typedef_answers;
     u64 type_name_fallbacks;
     u64 type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_COUNT];
+    // Member specifier runs (c_parse_member_specifiers_type: the run each
+    // aggregate segment frame types, inside a tag definition's body): the
+    // runs read from the tree by base, and the runs left to the machine's
+    // scalar frame by reason.
+    u64 member_primitive_answers;
+    u64 member_typedef_answers;
+    u64 member_fallbacks;
+    u64 member_fallback_counts[C_AST_SPECIFIER_FALLBACK_COUNT];
     // The last fallback: its reason, and the run's first token.
     CAstSpecifierFallback reason;
     u32 fallback_token;
@@ -1798,6 +1806,12 @@ struct CTokenPositionIndex
     // validates the row against the live table, so rollbacks and private query
     // copies that share this index stay correct.
     u32* type_identity_rows_plus_one;
+    // Ascending positions of every typeof, __typeof, __typeof__ and
+    // typeof_unqual word in any dialect: the only places
+    // c_parse_define_typeof_aggregates has anything to define.
+    u32* typeof_positions;
+    u32 typeof_count;
+    u32 typeof_capacity;
 #if BUSTER_INCLUDE_TESTS
     // Diagnostics for tests: lookups, and rows read by the validating scan.
     u64 type_identity_lookups;
@@ -1852,6 +1866,12 @@ struct CTokenPositionIndex
     u32 brace_identifier_count;
     u32 statement_expression_count;
     u32 label_address_count;
+    // Natural expression endpoints, built backwards for one validated body.
+    // A query with an earlier bound clamps the endpoint to that bound.
+    CToken const* body_expression_tokens;
+    u32* body_expression_ends;
+    u32 body_expression_start;
+    u32 body_expression_count;
     // c_parse_scope_for_token's answer for every token of one function body
     // under one root scope (c_parse_body_scopes_build), installed while that
     // body's lowering constraints are checked so each query inside it is one
@@ -2148,6 +2168,9 @@ struct CIRLowerResult
 {
     CIRDirectSsaStatistics direct_ssa;
     CTypeLayoutStatistics type_layout;
+    // Attempts the lowering's type-mapping passes made, retries included, so
+    // a test can pin them to the unit's size (#3312).
+    u64 type_mapping_attempts;
     IrProgram* program;
     CDiagnostic* diagnostics;
     u32 diagnostic_count;

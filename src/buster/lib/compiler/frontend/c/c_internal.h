@@ -824,6 +824,23 @@ typedef struct CMathLibmShape
 BUSTER_C_EXTERN CMathLibmShape c_semantic_math_libm_shape(String8 name);
 BUSTER_C_EXTERN bool c_semantic_math_link_is_long_double(String8 link_name);
 
+// The constant-valued special-float math builtins: positive infinity, or the
+// default quiet NaN of a `nan*("")` call, in the floating type `kind` names.
+typedef enum CMathSpecial
+{
+    C_MATH_SPECIAL_NONE,
+    C_MATH_SPECIAL_INFINITY,
+    C_MATH_SPECIAL_QUIET_NAN,
+} CMathSpecial;
+
+typedef struct CMathSpecialValue
+{
+    CTypeKind kind;
+    CMathSpecial special;
+} CMathSpecialValue;
+
+BUSTER_C_EXTERN CMathSpecialValue c_semantic_math_special_value(String8 link_name);
+
 struct CSymbolTable
 {
     Arena* arena;
@@ -1228,7 +1245,8 @@ struct CParseExpressionTypeTask
     // The false arm of a conditional whose own top-level `?` and `:` its
     // parent already found sits in `split` and `colon`; it skips the scan.
     bool conditional_hinted;
-    u8 reserved[1];
+    // The parent proved this assignment suffix has no top-level comma.
+    bool assignment_rhs;
 };
 
 struct CTypeParseFrame
@@ -1291,6 +1309,7 @@ struct CTypeParseFrame
     // own range holds it.
     u32 shared_specifier_end;
     u32 mutation_mark;
+    // SIZEOF frames also use this as the type-row count at query entry.
     u32 definition_type_start;
     // PARAMETER frames: the diagnostic count at entry, so a failed type
     // specifier that said nothing can be named.
@@ -1923,6 +1942,7 @@ BUSTER_C_EXTERN bool c_ir_constant_float_to_integer(f64 floating, IrType* target
 BUSTER_C_EXTERN f64 c_ir_float16_round(f64 value);
 BUSTER_C_EXTERN f64 c_ir_bfloat16_round(f64 value);
 BUSTER_C_EXTERN bool c_ir_constant_float_literal_for_type(IrType const* type, String8 spelling, CIrConstantValue* result);
+BUSTER_C_EXTERN CIrConstantValue c_ir_constant_math_special(IrType const* type, CMathSpecial special);
 BUSTER_C_EXTERN bool c_ir_number_imaginary_spelling(Arena* arena, String8 spelling, String8* real_out);
 BUSTER_C_EXTERN bool c_ir_constant_wide_float_binary(IrTypeId integer_type, CConditionalOperator operation, CIrConstantValue left, CIrConstantValue right, IrType const* type, CIrConstantValue* result);
 

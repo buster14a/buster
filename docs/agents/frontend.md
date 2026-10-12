@@ -753,6 +753,19 @@ contexts. Its existing float counterpart is `__builtin_inff()`; admission
 and availability use the fixed math spelling census, without vendor metadata
 changes or a runtime library import.
 
+`c_semantic_math_special_value` is the one census of the constant-valued
+special-float builtins (#1269). `c_ir_math_builtin_link_name` folds
+`__builtin_huge_valf` onto `inff` and `__builtin_huge_vall`/`__builtin_infl`
+onto `infl`, so glibc's `HUGE_VALF`/`HUGE_VALL` spellings share the infinity
+path; `__builtin_nanl("")` joins `nan`/`nanf` as the default quiet NaN. Result
+types, arity checks, `__has_builtin`, every constant folder and runtime
+lowering read that census, and `c_ir_constant_math_special` encodes the value
+in the result type's own format (binary32/64, x87 or binary128 long double).
+The signaling `__builtin_nans*` forms stay unadvertised until their
+signaling-bit preservation contract is settled.
+`c_test_builtin_special_float_spellings` covers types, queries, arity,
+static and runtime bits on three long double layouts.
+
 Nested vector lane subscripts retain the original vector storage, including
 plain parenthesized groups. Standalone vector reads still produce copied values.
 The registered runtime fixture checks local arrays, globals, member arrays,

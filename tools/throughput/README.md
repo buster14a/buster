@@ -1030,6 +1030,18 @@ invalid counters, legacy rejection, optional probe completeness, and unchanged
 corpus hashing. On Linux it compares one allocation-and-sleep child's `wait4`
 counts with an independently obtained `getrusage(RUSAGE_CHILDREN)` delta,
 without another child between snapshots. Other platforms check unavailability.
+If the voluntary-switch equality fails, the test emits
+`THROUGHPUT_CHILD_COUNTER_MISMATCH_V1` with the actual child and waited PID,
+the original per-child `wait4` counters, both cumulative `RUSAGE_CHILDREN`
+snapshots, and the existing group-cleanup signal's result/errno. A Linux-only
+test snapshot copies these already observed facts after the timed interval;
+it adds no wait, signal, process discovery, result field or production wire
+schema. The original equality, workload and deadlines remain unchanged.
+Deterministic controls require silence for equal counters and verify the
+failure-only diagnostic using an injected mismatch. These facts can distinguish
+collector disagreement from cumulative accounting differences; they do not
+establish either explanation for the older #2335/#3149 failures.
+
 The existing Linux harness job additionally runs the suite under ASan/UBSan:
 
 ```sh

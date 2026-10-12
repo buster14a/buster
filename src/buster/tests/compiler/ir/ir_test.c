@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/ir/ir_test.h>
 #include <buster/lib/compiler/ir/ir_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/os.h>
 #include <buster/lib/time.h>
 #if BUSTER_INCLUDE_TESTS
 
@@ -1968,8 +1969,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, defaults_program->inline_options.max_callee_instructions == IR_INLINE_TINY_INSTRUCTIONS);
             BUSTER_TEST(arguments, defaults_program->inline_options.max_function_growth == IR_INLINE_FUNCTION_GROWTH);
             BUSTER_TEST(arguments, IR_INLINE_FUNCTION_GROWTH == 2048u);
-            BUSTER_TEST(arguments, defaults_program->inline_options.max_module_growth == IR_INLINE_MODULE_GROWTH);
+            // The module limit stays relative so each module derives its own.
+            BUSTER_TEST(arguments, defaults_program->inline_options.max_module_growth == 0);
+            BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, 0) == IR_INLINE_MODULE_GROWTH);
+            BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, (u64)IR_INLINE_MODULE_GROWTH << IR_INLINE_MODULE_GROWTH_SHIFT) ==
+                                       IR_INLINE_MODULE_GROWTH);
+            BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, 2000000u) == 2000000u / 32u);
+            BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, UINT64_MAX) == UINT32_MAX);
+            BUSTER_TEST(arguments, ir_inline_module_growth_limit(100u, 2000000u) == 100u);
             BUSTER_TEST(arguments, defaults_program->inline_options.max_call_sites == IR_INLINE_CALL_SITES);
+            BUSTER_TEST(arguments, defaults_program->inline_options.caller_growth_shift == IR_INLINE_CALLER_GROWTH_SHIFT);
             BUSTER_TEST(arguments, defaults_module->inline_complete);
             BUSTER_TEST(arguments, defaults_module->inlining.inlined >= 1);
             IrFunction* defaults_caller = ir_test_inline_find_function(defaults_module, S8("small_caller"));
@@ -1978,6 +1987,151 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, ir_validate_canonical_module(defaults_program, defaults_module).error == IR_VALIDATION_NONE);
         }
         scratch_end(defaults_temporary);
+    }
+
+    // With FAST selected, a caller whose splices were all optional defers its
+    // strict output check to the FAST input guard's module scan (#48). The
+    // normal path proves and clears it; a deferred caller that fails that scan
+    // is an inlining-output error, while the same defect in an unlisted
+    // function keeps the legacy FAST validation skip.
+    for (u32 variant = 0; variant < 3; variant += 1)
+    {
+        TemporalArena deferred_temporary = scratch_begin(&arguments->arena, 1);
+        String8 deferred_source = S8(
+            "static int small_leaf(int value) { return value + 1; }\n"
+            "int small_caller(int value) { return small_leaf(value); }\n");
+        CPreprocessResult deferred_preprocess = c_preprocess(deferred_temporary.arena, deferred_source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult deferred_analysis = c_parse(deferred_temporary.arena, deferred_preprocess);
+        CIRLowerResult deferred_lowered = {0};
+        if (!deferred_preprocess.error_count && !deferred_analysis.diagnostic_count)
+        {
+            deferred_lowered = c_lower_to_ir(deferred_temporary.arena, S8("canonical-inline-deferred.c"),
+                deferred_preprocess, deferred_analysis, target_native);
+        }
+        BUSTER_TEST(arguments, deferred_lowered.diagnostic_count == 0 && deferred_lowered.program != 0);
+        if (BUSTER_REQUIRE(arguments, deferred_lowered.program && deferred_lowered.program->module_count == 1))
+        {
+            IrProgram* deferred_program = deferred_lowered.program;
+            IrModule* deferred_module = deferred_program->modules;
+            deferred_program->fast_passes = IR_FAST_ALL;
+            deferred_program->inline_options = (IrInlineOptions){.tiny = true};
+            IrFunction* deferred_caller = ir_test_inline_find_function(deferred_module, S8("small_caller"));
+            BUSTER_TEST(arguments, deferred_caller != 0);
+            if (variant == 0)
+            {
+                IrValidationResult prepared = ir_prepare_canonical_module(deferred_program, deferred_module, true);
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, deferred_module->inlining.inlined == 1);
+                BUSTER_TEST(arguments, deferred_module->inline_unchecked_count == 0);
+                BUSTER_TEST(arguments, deferred_module->fast.validation_skips == 0);
+                BUSTER_TEST(arguments, deferred_caller &&
+                                           ir_test_direct_call_count(deferred_program, deferred_caller, S8("small_leaf")) == 0);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(deferred_program, deferred_module).error == IR_VALIDATION_NONE);
+            }
+            else if (deferred_caller)
+            {
+                // Stand in for a defective splice: keep the earlier stages
+                // complete and give the caller's return an out-of-range value.
+                IrInstruction* tail = deferred_caller->instructions +
+                                      deferred_caller->blocks[deferred_caller->entry.value].last_instruction.value;
+                BUSTER_TEST(arguments, tail->opcode == IR_OPCODE_RETURN && tail->operand_count == 1);
+                tail->operands[0].value = deferred_caller->value_count + 7u;
+                u32 caller_index = (u32)(deferred_caller - deferred_module->functions);
+                deferred_module->inline_complete = true;
+                deferred_module->local_promotion_complete = true;
+                deferred_module->fast_complete = false;
+                if (variant == 1)
+                {
+                    deferred_module->inline_unchecked_callers = arena_allocate(deferred_temporary.arena, u32, 1);
+                    deferred_module->inline_unchecked_callers[0] = caller_index;
+                    deferred_module->inline_unchecked_count = 1;
+                }
+                IrValidationResult prepared = ir_prepare_canonical_module(deferred_program, deferred_module, true);
+                if (variant == 1)
+                {
+                    BUSTER_TEST(arguments, prepared.error != IR_VALIDATION_NONE);
+                    BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_INLINE_OUTPUT);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, deferred_module->fast.validation_skips == 1);
+                }
+                BUSTER_TEST(arguments, deferred_module->inline_unchecked_count == 0);
+            }
+        }
+        scratch_end(deferred_temporary);
+    }
+
+    // A tiny site in a caller much larger than its growth stays a call by
+    // default (relocating the caller's tables would cost more than the site
+    // saves); an explicit caller_growth_shift of 32 keeps it (#48).
+    for (u32 variant = 0; variant < 2; variant += 1)
+    {
+        TemporalArena bound_temporary = scratch_begin(&arguments->arena, 1);
+        String8 bound_source = S8(
+            "static int bound_leaf(int value) { return value + 1; }\n"
+            "int bound_caller(int value)\n"
+            "{\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    return bound_leaf(value);\n"
+            "}\n");
+        CPreprocessResult bound_preprocess = c_preprocess(bound_temporary.arena, bound_source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult bound_analysis = c_parse(bound_temporary.arena, bound_preprocess);
+        CIRLowerResult bound_lowered = {0};
+        if (!bound_preprocess.error_count && !bound_analysis.diagnostic_count)
+        {
+            bound_lowered = c_lower_to_ir(bound_temporary.arena, S8("canonical-inline-bound.c"),
+                bound_preprocess, bound_analysis, target_native);
+        }
+        BUSTER_TEST(arguments, bound_lowered.diagnostic_count == 0 && bound_lowered.program != 0);
+        if (BUSTER_REQUIRE(arguments, bound_lowered.program && bound_lowered.program->module_count == 1))
+        {
+            IrProgram* bound_program = bound_lowered.program;
+            IrModule* bound_module = bound_program->modules;
+            IrFunction* bound_caller = ir_test_inline_find_function(bound_module, S8("bound_caller"));
+            IrFunction* bound_leaf = ir_test_inline_find_function(bound_module, S8("bound_leaf"));
+            BUSTER_TEST(arguments, bound_caller != 0 && bound_leaf != 0);
+            // The fixture only proves the bound if the caller outgrows the
+            // leaf by more than the default factor.
+            BUSTER_TEST(arguments, bound_caller && bound_leaf &&
+                                       ((u64)bound_leaf->instruction_count << IR_INLINE_CALLER_GROWTH_SHIFT) <
+                                           bound_caller->instruction_count);
+            bound_program->inline_options = (IrInlineOptions){.tiny = true, .caller_growth_shift = variant ? 32u : 0u};
+            IrValidationResult prepared = ir_prepare_canonical_module(bound_program, bound_module, false);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+            u32 remaining = bound_caller ? ir_test_direct_call_count(bound_program, bound_caller, S8("bound_leaf")) : 1u;
+            BUSTER_TEST(arguments, remaining == (variant ? 0u : 1u));
+            BUSTER_TEST(arguments, bound_module->inlining.inlined == variant);
+            BUSTER_TEST(arguments, variant || bound_module->inlining.budget_skips >= 1);
+            // Relocating the caller abandons its old instruction table, which
+            // spans whole pages here; the pass hands them back to the OS and
+            // the relocated caller still reads and validates (#3854). A caller
+            // the bound keeps as a call is never relocated.
+            u64 page_rows = os_get_page_size() / sizeof(IrInstruction);
+            BUSTER_TEST(arguments, !variant || !bound_caller || bound_caller->instruction_count < 2u * page_rows ||
+                                       bound_module->inlining.released_bytes >= os_get_page_size());
+            BUSTER_TEST(arguments, variant || bound_module->inlining.released_bytes == 0);
+            BUSTER_TEST(arguments, !bound_caller ||
+                                       ir_validate_canonical_module(bound_program, bound_module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(bound_temporary);
     }
 
     // Mandatory sites must be budgeted before optional sites, even when
@@ -2525,7 +2679,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
                 }
             }
             BUSTER_TEST(arguments, found && doubled_total > old_module_limit);
-            spread_program->inline_options = (IrInlineOptions){.tiny = true};
+            // These callers are deliberately large; keep their one tiny site
+            // despite the default relocation bound to exercise storage limits.
+            spread_program->inline_options = (IrInlineOptions){.tiny = true, .caller_growth_shift = 32u};
             IrValidationResult spread_prepared = ir_prepare_canonical_module(spread_program, spread_module, false);
             BUSTER_TEST(arguments, spread_prepared.error == IR_VALIDATION_NONE);
             BUSTER_TEST(arguments, spread_module->inline_complete);
@@ -2540,6 +2696,137 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         scratch_end(spread_temporary);
     }
 
+    return result;
+}
+
+typedef struct IrI386AbiTestCase IrI386AbiTestCase;
+struct IrI386AbiTestCase
+{
+    IrTypeKind kind;
+    u32 bits;
+    u32 size;
+    IrAbiClass result_class;
+    u32 result_parts;
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_i386_abi(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = target_parse_triple(S8("i386-linux-gnu")).target;
+    IrAbiConvention convention = ir_abi_convention_for_target(target);
+    BUSTER_TEST(arguments, convention != IR_ABI_CONVENTION_SYSTEMV_X86_64);
+    target.x86_code16 = true;
+    BUSTER_TEST(arguments, ir_abi_convention_for_target(target) == convention);
+    target.os = OPERATING_SYSTEM_FREESTANDING;
+    BUSTER_TEST(arguments, ir_abi_convention_for_target(target) == convention);
+    IrProgram program = ir_program_initialize(arguments->arena, 0, 64, 0, 0);
+    // Independent psABI/GCC -m32 expectations. Arguments are by-value memory;
+    // each result part describes EAX, EDX, or ST(0), never a stack word.
+    IrI386AbiTestCase cases[] = {
+        {IR_TYPE_BOOLEAN, 1, 1, IR_ABI_CLASS_INTEGER, 1},
+        {IR_TYPE_INTEGER, 8, 1, IR_ABI_CLASS_INTEGER, 1},
+        {IR_TYPE_INTEGER, 16, 2, IR_ABI_CLASS_INTEGER, 1},
+        {IR_TYPE_INTEGER, 32, 4, IR_ABI_CLASS_INTEGER, 1},
+        {IR_TYPE_ENUM, 32, 4, IR_ABI_CLASS_INTEGER, 1},
+        {IR_TYPE_INTEGER, 64, 8, IR_ABI_CLASS_INTEGER, 2},
+        {IR_TYPE_POINTER, 32, 4, IR_ABI_CLASS_POINTER, 1},
+        {IR_TYPE_VA_LIST, 32, 4, IR_ABI_CLASS_POINTER, 1},
+        {IR_TYPE_FLOAT, 32, 4, IR_ABI_CLASS_X87, 1},
+        {IR_TYPE_FLOAT, 64, 8, IR_ABI_CLASS_X87, 1},
+        {IR_TYPE_FLOAT, 80, 12, IR_ABI_CLASS_X87, 1},
+        {IR_TYPE_STRUCT, 0, 0, IR_ABI_CLASS_POINTER, 1},
+        {IR_TYPE_STRUCT, 0, 1, IR_ABI_CLASS_POINTER, 1},
+        {IR_TYPE_STRUCT, 0, 3, IR_ABI_CLASS_POINTER, 1},
+        {IR_TYPE_STRUCT, 0, 8, IR_ABI_CLASS_POINTER, 1},
+        {IR_TYPE_STRUCT, 0, 32, IR_ABI_CLASS_POINTER, 1},
+        {IR_TYPE_UNION, 0, 12, IR_ABI_CLASS_POINTER, 1},
+        {IR_TYPE_ARRAY, 0, 12, IR_ABI_CLASS_POINTER, 1},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        IrTypeId type = ir_program_add_type(&program, (IrType){
+            .kind = cases[index].kind, .bit_width = cases[index].bits,
+            .layout = {.size = cases[index].size, .alignment = BUSTER_MIN(cases[index].size, 4u), .resolved = true}});
+        IrAbiValue argument = ir_type_abi_value(&program, type, convention, IR_ABI_USE_ARGUMENT);
+        IrAbiValue variadic = ir_type_abi_value(&program, type, convention, IR_ABI_USE_VARIADIC_ARGUMENT);
+        IrAbiValue returned = ir_type_abi_value(&program, type, convention, IR_ABI_USE_RESULT);
+        BUSTER_TEST(arguments, argument.memory && !argument.indirect && argument.part_count == 1);
+        BUSTER_TEST(arguments, argument.parts[0].abi_class == IR_ABI_CLASS_MEMORY && argument.parts[0].size == cases[index].size);
+        BUSTER_TEST(arguments, memcmp(&argument, &variadic, sizeof(argument)) == 0);
+        bool indirect = cases[index].kind == IR_TYPE_STRUCT || cases[index].kind == IR_TYPE_UNION || cases[index].kind == IR_TYPE_ARRAY;
+        BUSTER_TEST(arguments, returned.part_count == cases[index].result_parts && returned.indirect == indirect && !returned.memory);
+        for (u32 part = 0; part < cases[index].result_parts; part += 1)
+        {
+            u32 size = indirect ? 4u : cases[index].result_parts == 2 ? 4u : cases[index].size;
+            BUSTER_TEST(arguments, returned.parts[part].abi_class == cases[index].result_class &&
+                                   returned.parts[part].size == size && returned.parts[part].value_offset == part * 4);
+        }
+    }
+    IrTypeId float32_type = ir_program_add_type(&program, (IrType){
+        .kind = IR_TYPE_FLOAT, .bit_width = 32, .layout = {.size = 4, .alignment = 4, .resolved = true}});
+    IrTypeId elements[] = {
+        float32_type,
+        ir_program_add_type(&program, (IrType){.kind = IR_TYPE_FLOAT, .bit_width = 64,
+            .layout = {.size = 8, .alignment = 4, .resolved = true}}),
+        ir_program_add_type(&program, (IrType){.kind = IR_TYPE_FLOAT, .bit_width = 80,
+            .layout = {.size = 12, .alignment = 4, .resolved = true}}),
+    };
+    // _Complex float has the same bytes as struct {float,float}, but returns
+    // its two bit images in EAX/EDX. Wider complex values use hidden pointers.
+    for (u32 complex = 0; complex < 2; complex += 1)
+    {
+        for (u32 element_index = 0; element_index < BUSTER_ARRAY_LENGTH(elements); element_index += 1)
+        {
+            IrTypeId element = elements[element_index];
+            u32 size = (u32)program.types.types[element.value].layout.size * 2;
+            IrField* fields = arena_allocate(arguments->arena, IrField, 2);
+            fields[0] = (IrField){.type = element, .offset = 0};
+            fields[1] = (IrField){.type = element, .offset = size / 2};
+            IrTypeId type = ir_program_add_type(&program, (IrType){
+                .kind = IR_TYPE_STRUCT, .is_complex = complex != 0, .element_type = element, .fields = fields, .field_count = 2,
+                .layout = {.size = size, .alignment = 4, .resolved = true}});
+            IrAbiValue returned = ir_type_abi_value(&program, type, convention, IR_ABI_USE_RESULT);
+            bool pair = complex && size == 8;
+            BUSTER_TEST(arguments, returned.part_count == (pair ? 2u : 1u) && returned.indirect == !pair);
+            BUSTER_TEST(arguments, returned.parts[0].abi_class == (pair ? IR_ABI_CLASS_INTEGER : IR_ABI_CLASS_POINTER) &&
+                                   returned.parts[0].size == 4);
+            if (pair)
+            {
+                BUSTER_TEST(arguments, returned.parts[1].abi_class == IR_ABI_CLASS_INTEGER &&
+                                       returned.parts[1].size == 4 && returned.parts[1].value_offset == 4);
+            }
+        }
+    }
+    u64 classified = program.abi_contexts[convention].classified_values;
+    for (u32 type = 0; type < program.types.count; type += 1)
+    {
+        ir_type_abi_value(&program, (IrTypeId){type}, convention, IR_ABI_USE_RESULT);
+    }
+    // The three scalar elements were only used as members before this loop.
+    BUSTER_TEST(arguments, program.abi_contexts[convention].classified_values == classified + BUSTER_ARRAY_LENGTH(elements));
+    ir_program_invalidate_abi(&program);
+    IrAbiValue after_invalidate = ir_type_abi_value(&program, float32_type, convention, IR_ABI_USE_RESULT);
+    BUSTER_TEST(arguments, after_invalidate.part_count == 1 && after_invalidate.parts[0].abi_class == IR_ABI_CLASS_X87);
+    IrType unsupported[] = {
+        {.kind = IR_TYPE_VOID, .layout = {.resolved = true}},
+        {.kind = IR_TYPE_VECTOR, .layout = {.size = 16, .alignment = 16, .resolved = true}},
+        {.kind = IR_TYPE_INTEGER, .bit_width = 128, .layout = {.size = 16, .alignment = 4, .resolved = true}},
+        {.kind = IR_TYPE_FLOAT, .bit_width = 16, .layout = {.size = 2, .alignment = 2, .resolved = true}},
+        {.kind = IR_TYPE_FLOAT, .bit_width = 128, .layout = {.size = 16, .alignment = 16, .resolved = true}},
+        {.kind = IR_TYPE_FLOAT, .bit_width = 80, .layout = {.size = 16, .alignment = 16, .resolved = true}},
+        {.kind = IR_TYPE_POINTER, .layout = {.size = 8, .alignment = 8, .resolved = true}},
+        {.kind = IR_TYPE_STRUCT, .layout = {.size = (u64)UINT32_MAX + 1, .alignment = 4, .resolved = true}},
+    };
+    IrAbiValue empty = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unsupported); index += 1)
+    {
+        IrTypeId type = ir_program_add_type(&program, unsupported[index]);
+        for (u32 use = 0; use < IR_ABI_USE_COUNT; use += 1)
+        {
+            IrAbiValue value = ir_type_abi_value(&program, type, convention, (IrAbiUse)use);
+            BUSTER_TEST(arguments, memcmp(&value, &empty, sizeof(value)) == 0);
+        }
+    }
     return result;
 }
 
@@ -2580,7 +2867,9 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     result.test_count += protocol.test_count;
     result.succeeded_test_count += protocol.succeeded_test_count;
     BUSTER_TEST_FIXTURE(arguments, ir_validate_equivalence_tests);
+    BUSTER_TEST_FIXTURE(arguments, ir_validate_incomplete_place_tests);
     BUSTER_TEST_FIXTURE(arguments, ir_test_va_instruction_type_storage);
+    BUSTER_TEST_FIXTURE(arguments, ir_test_i386_abi);
 
     IrFieldAccessPiece expected_field_access[][IR_FIELD_ACCESS_PIECE_CAPACITY] = {
         {{.offset = 0, .size = 1}},

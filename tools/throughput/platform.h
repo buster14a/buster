@@ -342,10 +342,25 @@ typedef struct TpDescriptorLaunch
     unsigned file_limit;
 } TpDescriptorLaunch;
 
+#if defined(__linux__) && defined(TP_PROCESS_TEST_OBSERVATIONS)
+/* Test-local facts only: no result field or production API. The serial harness
+ * copies existing wait/cleanup observations without another OS operation. */
+typedef struct TpProcessTestObservation
+{
+    pid_t child, waited;
+    struct rusage usage;
+    int wait_error, cleanup_attempted, cleanup_result, cleanup_error, descriptor_cleanup;
+} TpProcessTestObservation;
+static TpProcessTestObservation tp_process_test_observation;
+#endif
+
 static TpProcess tp_process_internal(char* const* args, char const* directory, char const* log_path,
                             unsigned timeout_seconds, TpCpuSet const* cpus, int counters, TpDescriptorLaunch const* descriptor)
 {
     TpProcess result = {0};
+#if defined(__linux__) && defined(TP_PROCESS_TEST_OBSERVATIONS)
+    tp_process_test_observation = (TpProcessTestObservation){0};
+#endif
     result.exit_code = -1;
     result.peak_rss_bytes = NAN;
     int counter_fds[TP_COUNTERS];
@@ -575,7 +590,16 @@ static TpProcess tp_process_internal(char* const* args, char const* directory, c
         {
             waited = wait4(pid, &status, 0, &usage);
         } while (waited < 0 && errno == EINTR);
+#if defined(__linux__) && defined(TP_PROCESS_TEST_OBSERVATIONS)
+        int observed_wait_error = waited < 0 ? errno : 0;
+#endif
         result.wall_seconds = (double)timestamp_ns_between(start, timestamp_take()) * 1e-9;
+#if defined(__linux__) && defined(TP_PROCESS_TEST_OBSERVATIONS)
+        tp_process_test_observation.child = pid;
+        tp_process_test_observation.waited = waited;
+        tp_process_test_observation.wait_error = observed_wait_error;
+        tp_process_test_observation.usage = usage;
+#endif
         alarm(0);
         tp_active_pid = 0;
         result.timed_out = tp_timeout_fired != 0;
@@ -629,7 +653,14 @@ static TpProcess tp_process_internal(char* const* args, char const* directory, c
         }
         /* Clean any helper that outlived the compiler (including failures).
          * All measured compiler work is required to have finished at exit. */
+#if defined(__linux__) && defined(TP_PROCESS_TEST_OBSERVATIONS)
+        tp_process_test_observation.cleanup_attempted = 1;
+        tp_process_test_observation.cleanup_result = kill(-pid, SIGKILL);
+        tp_process_test_observation.cleanup_error = tp_process_test_observation.cleanup_result < 0 ? errno : 0;
+        tp_process_test_observation.descriptor_cleanup = descriptor != NULL;
+#else
         (void)kill(-pid, SIGKILL);
+#endif
         if (descriptor)
         {
             /* The descriptor sampler is a subreaper. No descendant may

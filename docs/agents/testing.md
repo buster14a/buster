@@ -89,6 +89,12 @@
   `if (BUSTER_REQUIRE(arguments, prerequisite))`. It records the prerequisite
   with normal assertion accounting, evaluates it once, and skips only the
   guarded body when it fails; unrelated fixtures and modules continue.
+- The native GPU timeout log-retention assertion emits
+  `GPU_LOG_RETENTION_FAILURE_V1` only on failure: retained length/budget,
+  suffix/bound booleans, dropped/capture-truncation facts and at most 64 log
+  bytes in hex, with the omitted-byte count. This diagnoses #3780 without
+  changing its marker, one-second deadline or 27-byte retention budget;
+  a passing run does not explain the preserved original failure.
 - With a debugger attached, assertion failures stop through `os_fail()` after
   reporting the diagnostic. The arena, fixture-timing, and prerequisite harness
   self-tests set `UnitTestArguments.suppress_debugger_break` only around their

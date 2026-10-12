@@ -17,7 +17,9 @@
 // their first allocation; c_ir_ssa_grow_slots, c_ir_ssa_parameter and the
 // c_ir_ssa_finish_cfg / c_ir_ssa_finish_reserve_publish steps of c_ir_ssa_finish
 // check the direct-SSA rows whose size only the body decides (c_ir_ssa_refuse
-// records the refusal). The remaining phase/state graph is in
+// records the refusal); c_ir_ssa_finish_loops, which lets reads pass loop
+// headers from the loops c_ir_ssa_loop_record noted, drops its shortcut
+// rather than refusing. The remaining phase/state graph is in
 // docs/agents/compiler-phase-state.md.
 // By default lowering has no syntax tree: it re-walks token ranges directly,
 // resolving identifiers through the parse result's scopes and answering
@@ -32,8 +34,11 @@
 // _contains_range, kept current by _begin, _end and _rollback (a typeof
 // replay).
 // Without a tree, c_ir_root_conditional refuses a body range that holds no
-// `?` through the per-body prefix count c_ir_question_prefix_build, before
-// its scan.
+// `?` through the per-body token prefix table c_ir_token_prefix_build, before
+// its scan. The same table lets c_ir_lower_expression_core_step skip a control
+// prepass (c_ir_range_may_prepare_control), a call prepass
+// (c_ir_range_may_prepare_calls) or a postfix probe
+// (c_ir_range_may_hold_update) that cannot find anything.
 // c_ir_parameter_value_type and c_ir_emit_parameter keep callable values
 // separate from the declared qualification of parameter objects.
 // c_ir_windows_va_start_cursor_place bridges an addressed Windows CRT cursor
@@ -147,8 +152,8 @@
 //   c_ir_tree_root_conditional                    tree's CONDITIONAL nodes
 //   c_ir_cleanup_*                                __attribute__((cleanup))
 //   c_ir_inline_assembly_*                        GNU inline assembly
-//   c_ir_statement_end, c_ir_statement_end_find   memoized statement extents
-//                                                 for controlled bodies
+//   c_ir_statement_end, c_ir_statement_end_find,  memoized statement extents
+//   c_ir_statement_peels_file                     for controlled bodies
 //   CIrStatementExtents, c_ir_statement_extents_* controlled-body extents read
 //                                                 from the syntax tree under
 //                                                 -fc-ast-pilot (#3102)
@@ -2502,6 +2507,9 @@ typedef enum CIrSizeofOp
     C_IR_SIZEOF_OP_DEREFERENCE,
     C_IR_SIZEOF_OP_ADDRESS,
     C_IR_SIZEOF_OP_UNARY,
+    C_IR_SIZEOF_OP_COMPLEX_PART,
+    C_IR_SIZEOF_OP_ATOMIC_OBJECT,
+    C_IR_SIZEOF_OP_COMPLEX_COMPOSE,
     C_IR_SIZEOF_OP_STATEMENT_EXPRESSION,
     C_IR_SIZEOF_OP_PARENTHESIS,
     C_IR_SIZEOF_OP_FINISHED,
@@ -2813,12 +2821,11 @@ BUSTER_C_SHARED String8 c_ir_math_builtin_link_name(String8 name)
         {S8("__builtin_fmaxf"), S8("fmaxf")},   {S8("__builtin_fmax"), S8("fmax")},   {S8("__builtin_fmaxl"), S8("fmaxl")},
         {S8("__builtin_fminf"), S8("fminf")},   {S8("__builtin_fmin"), S8("fmin")},   {S8("__builtin_fminl"), S8("fminl")},
         {S8("__builtin_powif"), S8("powif")},   {S8("__builtin_powi"), S8("powi")},   {S8("__builtin_powil"), S8("powil")},
-        {S8("__builtin_nanf"), S8("nanf")},     {S8("__builtin_nan"), S8("nan")},
+        {S8("__builtin_nanf"), S8("nanf")},     {S8("__builtin_nan"), S8("nan")},     {S8("__builtin_nanl"), S8("nanl")},
         {S8("__builtin_signbit"), S8("signbit")}, {S8("__builtin_signbitf"), S8("signbitf")},
         {S8("__builtin_signbitl"), S8("signbitl")},
-        {S8("__builtin_inff"), S8("inff")},
-        {S8("__builtin_inf"), S8("huge_val")},
-        {S8("__builtin_huge_val"), S8("huge_val")},
+        {S8("__builtin_inff"), S8("inff")},     {S8("__builtin_inf"), S8("huge_val")}, {S8("__builtin_infl"), S8("infl")},
+        {S8("__builtin_huge_valf"), S8("inff")}, {S8("__builtin_huge_val"), S8("huge_val")}, {S8("__builtin_huge_vall"), S8("infl")},
         {S8("__builtin_isnanf"), S8("isnanf")}, {S8("__builtin_isnan"), S8("isnan")},
         {S8("__builtin_isinf_sign"), S8("isinf_sign")},
         {S8("__builtin_isinf"), S8("isinf")},   {S8("__builtin_isinff"), S8("isinff")},
@@ -3335,6 +3342,29 @@ struct CIrGroupFactsEntry
     u8 reserved[3];
 };
 
+// One gap of the body's token prefix table (c_ir_token_prefix_build): at body
+// offset o, how many body tokens before o are of each class the expression
+// core's probes look for, and the innermost delimiter group open at o. A range
+// [start, end) holds a class exactly when the two gaps' counts differ, and on a
+// body whose delimiters nest properly it is balanced exactly when the two gaps
+// sit in the same group.
+typedef struct CIrTokenPrefix CIrTokenPrefix;
+struct CIrTokenPrefix
+{
+    // `?`.
+    u32 questions;
+    // `?`, `&&`, `||` and the assignment operators: every group the control
+    // prepass prepares holds one of them.
+    u32 controls;
+    // `(`: every call the call prepass discovers is a token followed by one.
+    u32 parentheses;
+    // `++` and `--`.
+    u32 updates;
+    // Body offset plus one of the innermost open `(`, `[` or `{`; 0 at body
+    // level.
+    u32 group;
+};
+
 typedef struct CIrLowerFrame CIrLowerFrame;
 
 typedef struct CIrLowerMachine CIrLowerMachine;
@@ -3658,18 +3688,22 @@ struct CIntegerIrBuilder
     CIrGroupFactsEntry* group_facts_stack;
     bool group_facts_exact;
     bool group_facts_built;
-    // question_prefix[o]: how many body tokens before offset o spell `?`
-    // (body_token_count + 1 entries), filled by c_ir_question_prefix_build
-    // the first time c_ir_range_may_hold_question asks. A null pointer (any
-    // builder without a body) answers every range by the scan.
-    u32* question_prefix;
-    bool question_prefix_built;
-    // One past each body `if` statement's whole else-chain, plus one, indexed
-    // by the offset of its `if` token; 0 is unmeasured. c_ir_statement_end
-    // owns it, files every `if` its chain walk completes, and clears the array
-    // the first time it is asked (statement_ends_cleared), so a body without a
-    // nested or chained `if` never touches it. Without it every `else if` and
-    // every brace-less nested `if` re-walked the rest of its chain.
+    // token_prefix[o]: the body's token class counts and enclosing group at
+    // offset o (body_token_count + 1 entries), filled by
+    // c_ir_token_prefix_build the first time a range probe asks
+    // (c_ir_range_may_hold_question, c_ir_range_may_prepare_control,
+    // c_ir_range_may_prepare_calls, c_ir_range_may_hold_update). A null
+    // pointer (any builder without a body) answers every range by the scan.
+    CIrTokenPrefix* token_prefix;
+    bool token_prefix_built;
+    // One past each measured body statement, plus one, indexed by the offset
+    // of its first token past its labels; 0 is unmeasured. c_ir_statement_end
+    // owns it: it files every `if` its chain walk completes, with the whole
+    // else-chain, and every loop, `switch` and `do` header a span peeled, and
+    // clears the array the first time it files (statement_ends_cleared), so a
+    // body without a nested statement never touches it. Without it every
+    // `else if`, and every statement of a brace-less nest of `if`s or loops,
+    // re-walked the rest of its chain or nest.
     u32* statement_ends_plus_one;
     bool statement_ends_cleared;
     // The body's extent table from the syntax tree (c_ir_statement_extents),
@@ -4700,6 +4734,165 @@ BUSTER_C_INTERNAL const u8 c_ir_lazy_scan_classes[C_PUNCTUATOR_COUNT] = {
     [C_PUNCTUATOR_PIPE_PIPE] = C_IR_LAZY_SCAN_SHORT_CIRCUIT_OR,
     [C_PUNCTUATOR_AMPERSAND_AMPERSAND] = C_IR_LAZY_SCAN_SHORT_CIRCUIT_AND,
 };
+
+// The classes CIrTokenPrefix counts, by punctuator id. Each is the test the
+// scan it answers for applies to one token: c_token_is_punctuator for `?`,
+// `(`, `++` and `--`, c_ir_assignment_operator and the control operators of
+// c_ir_has_control_operator_anywhere for the control class, and the
+// punctuator ids c_ir_build_delimiter_index pairs for the groups.
+typedef enum CIrTokenPrefixClass
+{
+    C_IR_TOKEN_PREFIX_QUESTION = 1,
+    C_IR_TOKEN_PREFIX_CONTROL = 2,
+    C_IR_TOKEN_PREFIX_PARENTHESIS = 4,
+    C_IR_TOKEN_PREFIX_UPDATE = 8,
+    C_IR_TOKEN_PREFIX_OPEN = 16,
+    C_IR_TOKEN_PREFIX_CLOSE = 32,
+} CIrTokenPrefixClass;
+
+BUSTER_C_INTERNAL const u8 c_ir_token_prefix_classes[C_PUNCTUATOR_COUNT] = {
+    [C_PUNCTUATOR_QUESTION] = C_IR_TOKEN_PREFIX_QUESTION | C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_AMPERSAND_AMPERSAND] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_PIPE_PIPE] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_STAR_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_SLASH_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_PERCENT_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_PLUS_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_MINUS_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_SHIFT_LEFT_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_SHIFT_RIGHT_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_AMPERSAND_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_CARET_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_PIPE_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_LEFT_PARENTHESIS] = C_IR_TOKEN_PREFIX_PARENTHESIS | C_IR_TOKEN_PREFIX_OPEN,
+    [C_PUNCTUATOR_LEFT_BRACKET] = C_IR_TOKEN_PREFIX_OPEN,
+    [C_PUNCTUATOR_LEFT_BRACE] = C_IR_TOKEN_PREFIX_OPEN,
+    [C_PUNCTUATOR_RIGHT_PARENTHESIS] = C_IR_TOKEN_PREFIX_CLOSE,
+    [C_PUNCTUATOR_RIGHT_BRACKET] = C_IR_TOKEN_PREFIX_CLOSE,
+    [C_PUNCTUATOR_RIGHT_BRACE] = C_IR_TOKEN_PREFIX_CLOSE,
+    [C_PUNCTUATOR_PLUS_PLUS] = C_IR_TOKEN_PREFIX_UPDATE,
+    [C_PUNCTUATOR_MINUS_MINUS] = C_IR_TOKEN_PREFIX_UPDATE,
+};
+
+BUSTER_C_INTERNAL bool c_ir_assignment_operator(CToken token);
+
+// Fill the body's token prefix table in one pass. A close returns to the group
+// its open sat in, which is the group recorded at the open's own gap, so the
+// table is its own group stack. On a body whose delimiters do not nest
+// properly the groups are meaningless, and c_ir_range_balanced never reads
+// them there.
+BUSTER_C_INTERNAL void c_ir_token_prefix_build(CIntegerIrBuilder* builder)
+{
+    CIrTokenPrefix* prefix = builder->token_prefix;
+    CToken const* tokens = builder->preprocess.tokens + builder->body_token_start;
+    CIrTokenPrefix running = {0};
+    for (u32 offset = 0; offset < builder->body_token_count; offset += 1)
+    {
+        prefix[offset] = running;
+        u32 classes = c_ir_token_prefix_classes[tokens[offset].punctuator];
+#if BUSTER_REFERENCE_CHECKS
+        CToken token = tokens[offset];
+        BUSTER_CHECK(((classes & C_IR_TOKEN_PREFIX_CONTROL) != 0) ==
+                     (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) ||
+                      c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE) || c_ir_assignment_operator(token)));
+#endif
+        running.questions += (classes & C_IR_TOKEN_PREFIX_QUESTION) != 0;
+        running.controls += (classes & C_IR_TOKEN_PREFIX_CONTROL) != 0;
+        running.parentheses += (classes & C_IR_TOKEN_PREFIX_PARENTHESIS) != 0;
+        running.updates += (classes & C_IR_TOKEN_PREFIX_UPDATE) != 0;
+        if (classes & C_IR_TOKEN_PREFIX_OPEN)
+        {
+            running.group = offset + 1;
+        }
+        else if ((classes & C_IR_TOKEN_PREFIX_CLOSE) && running.group)
+        {
+            running.group = prefix[running.group - 1].group;
+        }
+    }
+    prefix[builder->body_token_count] = running;
+    builder->token_prefix_built = true;
+}
+
+// The table entry at the gap before `start`, or null when the table cannot
+// answer for [start, end): a builder without a body, or a range outside it.
+// The entry at the gap before `end` sits end - start entries later.
+BUSTER_C_INTERNAL BUSTER_INLINE CIrTokenPrefix* c_ir_token_prefix_at(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    CIrTokenPrefix* result = 0;
+    u32 body_start = builder->body_token_start;
+    if (builder->token_prefix && start >= body_start && end >= start && end - body_start <= builder->body_token_count)
+    {
+        if (!builder->token_prefix_built)
+        {
+            c_ir_token_prefix_build(builder);
+        }
+        result = builder->token_prefix + (start - body_start);
+    }
+    return result;
+}
+
+// Whether every `(`, `[` and `{` in [start, end) is known to close inside it.
+// On a body whose delimiters nest properly, two gaps in the same innermost
+// group bound a range that never leaves that group, so each group opened in
+// between closes before the range ends. Any other range may not.
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_range_balanced(CIntegerIrBuilder* builder, CIrTokenPrefix* first, u32 length)
+{
+    return builder->group_facts_exact && first[0].group == first[length].group;
+}
+
+// Whether c_ir_prepare_control_expressions_step over [start, end) can do more
+// than succeed having prepared nothing. Every group it prepares holds `?`,
+// `&&`, `||` or an assignment operator inside the range; it fails only on a
+// `(`, `[`, `_Generic` or `__builtin_choose_expr` group that does not close in
+// the range, or when the lowering machine has no frame left for it. A balanced
+// range with none of those tokens, with a frame to spare, answers no.
+BUSTER_C_INTERNAL bool c_ir_range_may_prepare_control(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool result = true;
+    CIrLowerMachine* machine = &builder->lower_machine;
+    CIrTokenPrefix* first = !machine->failed && machine->frame_count < machine->frame_capacity ? c_ir_token_prefix_at(builder, start, end) : 0;
+    if (first)
+    {
+        result = first[end - start].controls != first[0].controls || !c_ir_range_balanced(builder, first, end - start);
+    }
+    return result;
+}
+
+// Whether c_ir_prepare_calls_step over [start, end) can do more than succeed
+// having prepared nothing. A nested run, under preparing_calls, finishes at
+// once. Otherwise c_ir_prepare_calls_discover finds a call only at a token
+// followed by `(`, so at a `(` in [start + 1, end), and it fails only there or
+// when its scratch reservation does not fit; the frame push fails only when
+// the machine has no frame left.
+BUSTER_C_INTERNAL bool c_ir_range_may_prepare_calls(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool result = true;
+    CIrLowerMachine* machine = &builder->lower_machine;
+    if (!machine->failed && machine->frame_count < machine->frame_capacity)
+    {
+        if (builder->preparing_calls)
+        {
+            result = false;
+        }
+        else
+        {
+            CIrTokenPrefix* first = c_ir_token_prefix_at(builder, start, end);
+            u64 position = builder->temporary_arena->position;
+            result = !first || (end - start > 1 && first[end - start].parentheses != first[1].parentheses) ||
+                     !c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(u32), (u64)end - start + 1,
+                                                     BUSTER_ALIGN_OF(u32));
+        }
+    }
+    return result;
+}
+
+// Whether [start, end) may hold a `++` or `--`.
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_range_may_hold_update(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    CIrTokenPrefix* first = c_ir_token_prefix_at(builder, start, end);
+    return !first || first[end - start].updates != first[0].updates;
+}
 
 // An operand that only runs when a branch is taken -- either arm of a
 // conditional, the right operand of && or ||, the body of a GNU statement
@@ -5796,6 +5989,9 @@ BUSTER_C_INTERNAL IrInstructionId c_ir_append_instruction(CIntegerIrBuilder* bui
         builder->previous_instruction = builder->last_instruction;
         builder->previous_instruction_known = true;
         builder->last_instruction = id;
+#if BUSTER_BENCH_ALLOCATIONS
+        ir_construction_fold_census(builder->program, builder->function, id);
+#endif
     }
     return id;
 }
@@ -6454,6 +6650,26 @@ struct CIrSsaEvent
     bool named_load;
 };
 
+// A loop statement the body lowering recorded for c_ir_ssa_finish_loops: its
+// header, the other blocks created when the statement split, and the window
+// of block IDs created while its condition, body and increment lowered. A
+// window still UINT32_MAX was never opened or closed.
+typedef struct CIrSsaLoop CIrSsaLoop;
+struct CIrSsaLoop
+{
+    u32 header;
+    u32 members[2];
+    u32 window_begin;
+    u32 window_end;
+    // Finish facts: the enclosing loop, the predecessors of the header from
+    // outside the loop, and whether every other loop block is entered only
+    // from inside the loop.
+    u32 parent;
+    u32 entry;
+    u32 entry_count;
+    bool closed;
+};
+
 struct CIrDirectSsa
 {
     CIrSsaSlot* slots;
@@ -6475,8 +6691,19 @@ struct CIrDirectSsa
     CIrSsaParameter* last_parameter;
     u32 slot_count;
     u32 slot_capacity;
+    // Path-cache entries among slot_count (C_IR_SSA_SLOT_CACHE).
+    u32 cached_slot_count;
     u32 read_count;
     u32 read_capacity;
+    CIrSsaLoop* loops;
+    u32 loop_count;
+    u32 loop_capacity;
+    // Set by c_ir_ssa_finish_loops: per block, the loop plus one whose header
+    // a read may pass straight to its entry; per local, the blocks that write
+    // it, ascending (local_definition_offsets has local_count + 1 rows).
+    u32* loop_headers;
+    u32* local_definition_offsets;
+    u32* local_definition_blocks;
     // Set by c_ir_ssa_refuse once a scratch carve was refused. Finish stops
     // its walks on it and keeps the refusal's own diagnostic.
     bool scratch_exhausted;
@@ -6612,7 +6839,63 @@ BUSTER_C_INTERNAL void c_ir_ssa_refuse(CIntegerIrBuilder* builder, String8 messa
     builder->lower_machine.failed = true;
 }
 
-BUSTER_C_INTERNAL bool c_ir_ssa_grow_slots(CIntegerIrBuilder* builder)
+// Record a loop statement as it splits, returning its index plus one for the
+// tasks that open and close its block window, or zero when there is nothing
+// to record into. The record only enables a finish shortcut, so a refused
+// growth drops it silently rather than failing the function.
+BUSTER_C_INTERNAL u32 c_ir_ssa_loop_record(CIntegerIrBuilder* builder, IrBlockId header, IrBlockId first_member, IrBlockId second_member)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    u32 result = 0;
+    bool fits = ssa != 0;
+    if (fits && ssa->loop_count == ssa->loop_capacity)
+    {
+        u64 capacity = ssa->loop_capacity ? (u64)ssa->loop_capacity * 2 : 16;
+        u64 position = builder->scratch_arena->position;
+        fits = capacity <= UINT32_MAX &&
+               c_ir_arena_reservation_advance(builder->scratch_arena->reserved_size, &position, sizeof(CIrSsaLoop), capacity, BUSTER_ALIGN_OF(CIrSsaLoop));
+        if (fits)
+        {
+            CIrSsaLoop* loops = arena_allocate(builder->scratch_arena, CIrSsaLoop, capacity);
+            if (ssa->loop_count)
+            {
+                memcpy(loops, ssa->loops, sizeof(*loops) * ssa->loop_count);
+            }
+            ssa->loops = loops;
+            ssa->loop_capacity = (u32)capacity;
+        }
+    }
+    if (fits)
+    {
+        ssa->loops[ssa->loop_count++] = (CIrSsaLoop){
+            .header = header.value, .members = {first_member.value, second_member.value},
+            .window_begin = UINT32_MAX, .window_end = UINT32_MAX,
+        };
+        result = ssa->loop_count;
+    }
+    return result;
+}
+
+// The window opens once the loop's own blocks exist and before its condition
+// lowers, and closes when the task after the loop starts.
+BUSTER_C_INTERNAL void c_ir_ssa_loop_open(CIntegerIrBuilder* builder, u32 loop_plus_one)
+{
+    if (loop_plus_one && builder->direct_ssa && loop_plus_one <= builder->direct_ssa->loop_count)
+    {
+        builder->direct_ssa->loops[loop_plus_one - 1].window_begin = builder->function->block_count;
+    }
+}
+
+BUSTER_C_INTERNAL void c_ir_ssa_loop_close(CIntegerIrBuilder* builder, u32 loop_plus_one)
+{
+    if (loop_plus_one && builder->direct_ssa && loop_plus_one <= builder->direct_ssa->loop_count)
+    {
+        builder->direct_ssa->loops[loop_plus_one - 1].window_end = builder->function->block_count;
+    }
+}
+
+// A refused growth fails the function only when the caller needs the slot.
+BUSTER_C_INTERNAL bool c_ir_ssa_grow_slots(CIntegerIrBuilder* builder, bool required)
 {
     CIrDirectSsa* ssa = builder->direct_ssa;
     u64 capacity = ssa->slot_capacity ? (u64)ssa->slot_capacity * 2 : 64;
@@ -6650,20 +6933,33 @@ BUSTER_C_INTERNAL bool c_ir_ssa_grow_slots(CIntegerIrBuilder* builder)
         ssa->slot_indices = slot_indices;
         ssa->slot_capacity = (u32)capacity;
     }
-    else
+    else if (required)
     {
         c_ir_ssa_refuse(builder, S8("C frontend SSA slot capacity exceeds the lowering scratch reservation"));
     }
     return fits;
 }
 
-// The sparse slot for (block, local), inserted unresolved when new. A refused
-// table growth returns ssa->failed_slot, unresolved, after recording the refusal.
-BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot(CIntegerIrBuilder* builder, u32 block, u32 local)
+typedef enum CIrSsaSlotMode
+{
+    // Return the slot if present; never insert.
+    C_IR_SSA_SLOT_FIND,
+    // Insert when new; a refused growth fails the function.
+    C_IR_SSA_SLOT_INSERT,
+    // Insert a path-cache entry when new, within the cache budget and the
+    // reservation; otherwise insert nothing and fail nothing.
+    C_IR_SSA_SLOT_CACHE,
+} CIrSsaSlotMode;
+
+// The sparse slot for (block, local) per `mode`, or zero when none is present
+// or inserted. Cache entries only spare later walks, and a walk past N nested
+// loops for each of N loop variables would cache N^2 of them (#3771), so they
+// stay within twice the other entries plus a constant.
+BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot_lookup(CIntegerIrBuilder* builder, u32 block, u32 local, CIrSsaSlotMode mode)
 {
     CIrDirectSsa* ssa = builder->direct_ssa;
-    CIrSsaSlot* result = &ssa->failed_slot;
-    if (ssa->slot_capacity || c_ir_ssa_grow_slots(builder))
+    CIrSsaSlot* result = 0;
+    if (ssa->slot_capacity || (mode == C_IR_SSA_SLOT_INSERT && c_ir_ssa_grow_slots(builder, true)))
     {
         u32 slot = c_ir_ssa_hash(block + 1, local, ssa->slot_capacity - 1);
         IR_CONSTRUCTION_RECORD(SSA_FINISH_SLOT_PROBES, ssa->predecessor_offsets != 0);
@@ -6677,12 +6973,15 @@ BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot(CIntegerIrBuilder* builder, u32 bloc
             slot = (slot + 1) & (ssa->slot_capacity - 1);
         }
         bool present = ssa->slots[slot].block_plus_one != 0;
-        if (!present)
+        bool cache = mode == C_IR_SSA_SLOT_CACHE;
+        bool budget = mode == C_IR_SSA_SLOT_INSERT ||
+                      (cache && (u64)ssa->cached_slot_count < (u64)(ssa->slot_count - ssa->cached_slot_count) * 2 + 1024);
+        if (!present && budget)
         {
             // Only a new key needs capacity. Reads of existing values must not
             // rehash a half-full table before finding their unchanged entry.
             bool room = (u64)(ssa->slot_count + 1) * 2 < ssa->slot_capacity;
-            if (!room && c_ir_ssa_grow_slots(builder))
+            if (!room && c_ir_ssa_grow_slots(builder, !cache))
             {
                 room = true;
                 slot = c_ir_ssa_hash(block + 1, local, ssa->slot_capacity - 1);
@@ -6699,6 +6998,7 @@ BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot(CIntegerIrBuilder* builder, u32 bloc
             {
                 ssa->slots[slot] = (CIrSsaSlot){.block_plus_one = block + 1, .local = local, .value = IR_VALUE_ID_INVALID};
                 ssa->slot_indices[ssa->slot_count++] = slot;
+                ssa->cached_slot_count += cache;
                 IR_CONSTRUCTION_RECORD(SSA_SLOT_INSERTS, 1);
             }
         }
@@ -6707,9 +7007,19 @@ BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot(CIntegerIrBuilder* builder, u32 bloc
             result = ssa->slots + slot;
         }
     }
-    if (result == &ssa->failed_slot)
+    return result;
+}
+
+// The sparse slot for (block, local), inserted unresolved when new. A refused
+// table growth returns ssa->failed_slot, unresolved, after recording the refusal.
+BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot(CIntegerIrBuilder* builder, u32 block, u32 local)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    CIrSsaSlot* result = c_ir_ssa_slot_lookup(builder, block, local, C_IR_SSA_SLOT_INSERT);
+    if (!result)
     {
         ssa->failed_slot = (CIrSsaSlot){.value = IR_VALUE_ID_INVALID};
+        result = &ssa->failed_slot;
     }
     return result;
 }
@@ -6759,19 +7069,71 @@ BUSTER_C_INTERNAL IrValueId c_ir_ssa_parameter(CIntegerIrBuilder* builder, u32 b
     return slot->value;
 }
 
+// Whether `block` is among the ascending definition blocks [begin, end), or,
+// with `window`, whether one lies in [block, window_end).
+BUSTER_C_INTERNAL bool c_ir_ssa_definition_in(u32 const* blocks, u32 begin, u32 end, u32 block, u32 window_end, bool window)
+{
+    u32 last = end;
+    while (begin < end)
+    {
+        u32 middle = begin + (end - begin) / 2;
+        if (blocks[middle] < block)
+        {
+            begin = middle + 1;
+        }
+        else
+        {
+            end = middle;
+        }
+    }
+    return begin < last && (window ? blocks[begin] < window_end : blocks[begin] == block);
+}
+
+// The block a read of `local` at `block` takes its value from without a
+// parameter: the only predecessor, or the entry of a closed loop whose header
+// `block` is when no block of that loop writes `local` (#3723). Without that
+// second case a read after N nested loops placed a trivial parameter at every
+// inner header for every enclosing loop variable: N^2 parameters.
+BUSTER_C_INTERNAL u32 c_ir_ssa_forward_block(CIrDirectSsa* ssa, u32 block, u32 local)
+{
+    u32 result = UINT32_MAX;
+    if (ssa->predecessor_offsets[block + 1] - ssa->predecessor_offsets[block] == 1)
+    {
+        result = ssa->predecessors[ssa->predecessor_offsets[block]];
+    }
+    else if (ssa->loop_headers && ssa->loop_headers[block])
+    {
+        CIrSsaLoop* loop = ssa->loops + ssa->loop_headers[block] - 1;
+        u32 const* blocks = ssa->local_definition_blocks;
+        u32 begin = ssa->local_definition_offsets[local];
+        u32 end = ssa->local_definition_offsets[local + 1];
+        bool writes = c_ir_ssa_definition_in(blocks, begin, end, loop->window_begin, loop->window_end, true) ||
+                      c_ir_ssa_definition_in(blocks, begin, end, loop->header, 0, false) ||
+                      c_ir_ssa_definition_in(blocks, begin, end, loop->members[0], 0, false) ||
+                      c_ir_ssa_definition_in(blocks, begin, end, loop->members[1], 0, false);
+        if (!writes)
+        {
+            result = loop->entry;
+        }
+    }
+    return result;
+}
+
 // Once predecessor discovery is complete, forward through single-predecessor
-// blocks instead of allocating a parameter at every intervening block. Cache
-// the answer on the traversed path. A stamped cycle still creates one pending
-// parameter, so loop backedges terminate without C recursion. A refused slot or
-// parameter carve returns the unresolved value with the refusal recorded.
+// blocks instead of allocating a parameter at every intervening block. The walk
+// only looks slots up; it inserts one where it ends unresolved, for the
+// parameter, and caches the answer on the traversed path within the cache
+// budget. A stamped cycle still creates one pending parameter, so loop
+// backedges terminate without C recursion. A refused slot or parameter carve
+// returns the unresolved value with the refusal recorded.
 BUSTER_C_INTERNAL IrValueId c_ir_ssa_current(CIntegerIrBuilder* builder, u32 block, u32 local)
 {
     CIrDirectSsa* ssa = builder->direct_ssa;
     u32 path_count = 0;
-    CIrSsaSlot* slot = c_ir_ssa_slot(builder, block, local);
-    IrValueId value = slot->value;
-    bool refused = slot == &ssa->failed_slot;
-    if (!refused && value.value == IR_ID_UNDERLYING_INVALID && ssa->predecessor_offsets)
+    bool walk = ssa->predecessor_offsets != 0;
+    CIrSsaSlot* slot = c_ir_ssa_slot_lookup(builder, block, local, walk ? C_IR_SSA_SLOT_FIND : C_IR_SSA_SLOT_INSERT);
+    IrValueId value = slot ? slot->value : IR_VALUE_ID_INVALID;
+    if (walk && value.value == IR_ID_UNDERLYING_INVALID)
     {
         ssa->read_stamp += 1;
         if (!ssa->read_stamp)
@@ -6779,27 +7141,33 @@ BUSTER_C_INTERNAL IrValueId c_ir_ssa_current(CIntegerIrBuilder* builder, u32 blo
             memset(ssa->read_stamps, 0, sizeof(u32) * builder->function->block_count);
             ssa->read_stamp = 1;
         }
-        while (!refused && value.value == IR_ID_UNDERLYING_INVALID &&
-               ssa->predecessor_offsets[block + 1] - ssa->predecessor_offsets[block] == 1 &&
-               ssa->read_stamps[block] != ssa->read_stamp)
+        u32 forward = c_ir_ssa_forward_block(ssa, block, local);
+        while (forward != UINT32_MAX && ssa->read_stamps[block] != ssa->read_stamp)
         {
             ssa->read_stamps[block] = ssa->read_stamp;
             ssa->read_blocks[path_count++] = block;
             IR_CONSTRUCTION_RECORD(SSA_FORWARD_STEPS, 1);
-            block = ssa->predecessors[ssa->predecessor_offsets[block]];
-            slot = c_ir_ssa_slot(builder, block, local);
-            value = slot->value;
-            refused = slot == &ssa->failed_slot;
+            block = forward;
+            slot = c_ir_ssa_slot_lookup(builder, block, local, C_IR_SSA_SLOT_FIND);
+            value = slot ? slot->value : IR_VALUE_ID_INVALID;
+            forward = value.value == IR_ID_UNDERLYING_INVALID ? c_ir_ssa_forward_block(ssa, block, local) : UINT32_MAX;
         }
     }
-    if (!refused && value.value == IR_ID_UNDERLYING_INVALID)
+    bool refused = false;
+    if (value.value == IR_ID_UNDERLYING_INVALID)
     {
-        value = c_ir_ssa_parameter(builder, block, local, slot);
+        slot = c_ir_ssa_slot(builder, block, local);
+        refused = slot == &ssa->failed_slot;
+        value = refused ? IR_VALUE_ID_INVALID : c_ir_ssa_parameter(builder, block, local, slot);
         refused = value.value == IR_ID_UNDERLYING_INVALID;
     }
     for (u32 index = 0; index < path_count && !refused; index += 1)
     {
-        c_ir_ssa_slot(builder, ssa->read_blocks[index], local)->value = value;
+        CIrSsaSlot* cached = c_ir_ssa_slot_lookup(builder, ssa->read_blocks[index], local, C_IR_SSA_SLOT_CACHE);
+        if (cached)
+        {
+            cached->value = value;
+        }
     }
     return value;
 }
@@ -7360,6 +7728,205 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_cfg(CIntegerIrBuilder* builder, u8** memo
     return fits;
 }
 
+BUSTER_C_INTERNAL bool c_ir_ssa_loop_contains(CIrSsaLoop const* loop, u32 block)
+{
+    return (block >= loop->window_begin && block < loop->window_end) || block == loop->header || block == loop->members[0] ||
+           block == loop->members[1];
+}
+
+// Finish step one and a half: decide which recorded loops a read may pass
+// straight through (c_ir_ssa_forward_block). A loop's blocks are its header,
+// the other blocks its statement created and every block created inside its
+// window; loops nest, so each block has one innermost loop, and a block in a
+// loop is in every loop around it. A loop qualifies when its header has one
+// predecessor from outside and every other loop block is entered only from
+// inside: then every path to a back edge starts at the header, and a local no
+// loop block writes keeps the entry's value there. Labels, case labels, goto
+// and computed jumps into a loop fail that check rather than needing their
+// own rules. One pass over the edges; each walks outward only past loops the
+// edge enters. Then the blocks writing each local, ascending, from the
+// events. Like the shortcut itself, a refused carve or an inconsistent record
+// leaves every read on the general walk instead of failing the function.
+BUSTER_C_INTERNAL void c_ir_ssa_finish_loops(CIntegerIrBuilder* builder)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    IrFunction* function = builder->function;
+    u32 block_count = function->block_count;
+    u32 loop_count = ssa->loop_count;
+    u32 local_count = ssa->local_count;
+    u32 definition_count = 0;
+    for (u32 index = 0; index < ssa->event_count; index += 1)
+    {
+        definition_count += ssa->events[index].opcode != IR_OPCODE_LOAD;
+    }
+    u64 reserved_size = builder->scratch_arena->reserved_size;
+    u64 position = builder->scratch_arena->position;
+    bool fits = loop_count != 0 &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)local_count + 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), definition_count ? definition_count : 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), loop_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)block_count + 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), definition_count ? definition_count : 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), local_count ? local_count : 1, BUSTER_ALIGN_OF(u32));
+    if (fits)
+    {
+        u32* headers = arena_allocate(builder->scratch_arena, u32, block_count);
+        u32* definition_offsets = arena_allocate(builder->scratch_arena, u32, (u64)local_count + 1);
+        u32* definition_blocks = arena_allocate(builder->scratch_arena, u32, definition_count ? definition_count : 1);
+        TemporalArena temporary = arena_begin_temporal(builder->scratch_arena);
+        u32* innermost = arena_allocate(builder->scratch_arena, u32, block_count);
+        u32* stack = arena_allocate(builder->scratch_arena, u32, loop_count);
+        u32* block_offsets = arena_allocate(builder->scratch_arena, u32, (u64)block_count + 1);
+        u32* by_block = arena_allocate(builder->scratch_arena, u32, definition_count ? definition_count : 1);
+        u32* cursor = arena_allocate(builder->scratch_arena, u32, local_count ? local_count : 1);
+        memset(headers, 0, sizeof(*headers) * block_count);
+        // A usable record has both window ends and its blocks; windows open in
+        // record order. Anything else keeps the loop out of the nest.
+        bool consistent = true;
+        u32 previous_begin = 0;
+        for (u32 index = 0; index < loop_count; index += 1)
+        {
+            CIrSsaLoop* loop = ssa->loops + index;
+            bool usable = loop->window_begin <= loop->window_end && loop->window_end <= block_count && loop->header < block_count &&
+                          loop->members[0] < block_count && loop->members[1] < block_count;
+            consistent = consistent && (!usable || loop->window_begin >= previous_begin);
+            previous_begin = usable ? loop->window_begin : previous_begin;
+            loop->closed = usable;
+            loop->parent = UINT32_MAX;
+            loop->entry = UINT32_MAX;
+            loop->entry_count = 0;
+        }
+        // Sweep the windows in block order to find each block's innermost
+        // window; windows must nest.
+        u32 depth = 0;
+        u32 next = 0;
+        for (u32 block = 0; block < block_count && consistent; block += 1)
+        {
+            while (depth && ssa->loops[stack[depth - 1]].window_end <= block)
+            {
+                depth -= 1;
+            }
+            while (next < loop_count && consistent && (!ssa->loops[next].closed || ssa->loops[next].window_begin <= block))
+            {
+                CIrSsaLoop* loop = ssa->loops + next;
+                if (loop->closed && loop->window_end > loop->window_begin)
+                {
+                    consistent = !depth || loop->window_end <= ssa->loops[stack[depth - 1]].window_end;
+                    stack[depth++] = next;
+                }
+                next += 1;
+            }
+            innermost[block] = depth ? stack[depth - 1] : UINT32_MAX;
+        }
+        // A loop's own blocks were created directly inside its parent's
+        // window, and its window lies inside that one too; then a block in a
+        // loop is in every enclosing loop. Parents first, from the windows
+        // alone, then each loop claims its own blocks.
+        for (u32 index = 0; index < loop_count && consistent; index += 1)
+        {
+            CIrSsaLoop* loop = ssa->loops + index;
+            if (loop->closed)
+            {
+                u32 parent = innermost[loop->header];
+                CIrSsaLoop* outer = parent != UINT32_MAX ? ssa->loops + parent : 0;
+                consistent = innermost[loop->members[0]] == parent && innermost[loop->members[1]] == parent &&
+                             (!outer || (loop->window_begin >= outer->window_begin && loop->window_end <= outer->window_end));
+                loop->parent = parent;
+            }
+        }
+        for (u32 index = 0; index < loop_count && consistent; index += 1)
+        {
+            CIrSsaLoop* loop = ssa->loops + index;
+            if (loop->closed)
+            {
+                innermost[loop->header] = index;
+                innermost[loop->members[0]] = index;
+                innermost[loop->members[1]] = index;
+            }
+        }
+        for (u32 block = 0; block < block_count && consistent; block += 1)
+        {
+            for (u32 edge = ssa->predecessor_offsets[block]; edge < ssa->predecessor_offsets[block + 1]; edge += 1)
+            {
+                u32 predecessor = ssa->predecessors[edge];
+                u32 loop_index = innermost[block];
+                while (loop_index != UINT32_MAX && !c_ir_ssa_loop_contains(ssa->loops + loop_index, predecessor))
+                {
+                    CIrSsaLoop* loop = ssa->loops + loop_index;
+                    if (block == loop->header)
+                    {
+                        loop->entry = predecessor;
+                        loop->entry_count += 1;
+                    }
+                    else
+                    {
+                        loop->closed = false;
+                    }
+                    loop_index = loop->parent;
+                }
+            }
+        }
+        for (u32 index = 0; index < loop_count && consistent; index += 1)
+        {
+            CIrSsaLoop* loop = ssa->loops + index;
+            if (loop->closed && loop->entry_count == 1)
+            {
+                headers[loop->header] = index + 1;
+            }
+        }
+        // Writes per local in block order: bucket by block, then deal the
+        // buckets out to the locals in ascending block order.
+        memset(block_offsets, 0, sizeof(*block_offsets) * ((u64)block_count + 1));
+        memset(definition_offsets, 0, sizeof(*definition_offsets) * ((u64)local_count + 1));
+        for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
+        {
+            CIrSsaEvent* event = ssa->events + index;
+            consistent = event->block.value < block_count && event->local < local_count;
+            if (consistent && event->opcode != IR_OPCODE_LOAD)
+            {
+                block_offsets[event->block.value + 1] += 1;
+                definition_offsets[event->local + 1] += 1;
+            }
+        }
+        for (u32 block = 0; block < block_count; block += 1)
+        {
+            block_offsets[block + 1] += block_offsets[block];
+        }
+        for (u32 local = 0; local < local_count; local += 1)
+        {
+            definition_offsets[local + 1] += definition_offsets[local];
+            cursor[local] = definition_offsets[local];
+        }
+        for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
+        {
+            CIrSsaEvent* event = ssa->events + index;
+            if (event->opcode != IR_OPCODE_LOAD)
+            {
+                by_block[block_offsets[event->block.value]++] = index;
+            }
+        }
+        // The fill advanced each bucket's start to the next bucket's.
+        u32 begin = 0;
+        for (u32 block = 0; block < block_count && consistent; block += 1)
+        {
+            for (u32 row = begin; row < block_offsets[block]; row += 1)
+            {
+                definition_blocks[cursor[ssa->events[by_block[row]].local]++] = block;
+            }
+            begin = block_offsets[block];
+        }
+        scratch_end(temporary);
+        if (consistent)
+        {
+            ssa->loop_headers = headers;
+            ssa->local_definition_offsets = definition_offsets;
+            ssa->local_definition_blocks = definition_blocks;
+        }
+    }
+}
+
 // Revoke the declaration shortcut of every local whose scope a jump can enter
 // past its initializer: a recorded jump target lies in the scope after the
 // declarator starts, and a jump to it starts before the declarator ends (that
@@ -7513,13 +8080,15 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_parameters(CIntegerIrBuilder* builder, u8
             pending->forwarded = ssa->events[initializer].value;
             continue;
         }
-        if (offsets[pending->block + 1] - offsets[pending->block] == 1)
+        u32 forward = c_ir_ssa_forward_block(ssa, pending->block, pending->local);
+        if (forward != UINT32_MAX)
         {
             // Forward an initially unresolved read through a completed
-            // single-predecessor block without allocating an incoming row.
+            // single-predecessor block, or a loop header the loop never
+            // writes this local in, without allocating an incoming row.
             // Do not substitute yet: an eventual memory owner must retain
             // its load identities before any alias path compression.
-            pending->forwarded = c_ir_ssa_current(builder, predecessors[offsets[pending->block]], pending->local);
+            pending->forwarded = c_ir_ssa_current(builder, forward, pending->local);
             continue;
         }
         for (u32 index = offsets[pending->block]; index < offsets[pending->block + 1] && !ssa->scratch_exhausted; index += 1)
@@ -7555,14 +8124,16 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_reserve_publish(CIntegerIrBuilder* builde
     u64 count = function->value_count;
     u64 reserved_size = builder->scratch_arena->reserved_size;
     u64 position = builder->scratch_arena->position;
-    // Simplification files one user row per incoming row, plus the one row a
-    // closed forwarded cycle gains before it starts.
+    // Simplification files one user row per incoming row, plus the row per
+    // predecessor a closed forwarded cycle gains before it starts.
     u64 user_rows = 0;
     for (u32 block = 0; block < function->block_count; block += 1)
     {
+        u32* offsets = builder->direct_ssa ? builder->direct_ssa->predecessor_offsets : 0;
+        u32 predecessor_count = offsets ? offsets[block + 1] - offsets[block] : 1;
         for (IrBlockParameter* parameter = function->blocks[block].first_parameter; parameter; parameter = parameter->next)
         {
-            user_rows += (u64)parameter->incoming_count + 1;
+            user_rows += (u64)parameter->incoming_count + BUSTER_MAX(predecessor_count, 1);
         }
     }
     bool fits = c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
@@ -7762,29 +8333,54 @@ BUSTER_C_INTERNAL void c_ir_ssa_simplify_parameters(CIntegerIrBuilder* builder, 
             replacements[value] = same;
             // Every parameter reading this one now reads `same`. The full
             // sweep reaches a later position in this sweep, an earlier one
-            // in the next. Move the rows to `same` for its own replacement.
-            for (u32 user = user_first[value]; user != UINT32_MAX; user = users[user].next)
+            // in the next. Move the rows to `same` for its own replacement,
+            // minus those that can never requeue again: a replaced reader
+            // stays replaced, and `same` now reads itself. Carrying them
+            // would grow each list along a chain of trivial loop-header
+            // parameters, making N nested loops cost N^3 (#3723).
+            u32 kept_first = UINT32_MAX;
+            u32 kept_last = UINT32_MAX;
+            u32 user = user_first[value];
+            while (user != UINT32_MAX)
             {
+                u32 next = users[user].next;
                 u32 reader = users[user].parameter;
-                if (!queued[reader] && replacements[reader] == reader)
+                if (replacements[reader] == reader)
                 {
-                    queued[reader] = 1;
-                    u64 due = position[reader] > here ? sweep : sweep + 1;
-                    c_ir_ssa_retry_push(heap, &heap_count, due << 32 | position[reader]);
+                    if (!queued[reader])
+                    {
+                        queued[reader] = 1;
+                        u64 due = position[reader] > here ? sweep : sweep + 1;
+                        c_ir_ssa_retry_push(heap, &heap_count, due << 32 | position[reader]);
+                    }
+                    if (reader != same)
+                    {
+                        users[user].next = UINT32_MAX;
+                        if (kept_first == UINT32_MAX)
+                        {
+                            kept_first = user;
+                        }
+                        else
+                        {
+                            users[kept_last].next = user;
+                        }
+                        kept_last = user;
+                    }
                 }
+                user = next;
             }
-            if (user_first[value] != UINT32_MAX)
+            user_first[value] = UINT32_MAX;
+            if (kept_first != UINT32_MAX)
             {
                 if (user_first[same] == UINT32_MAX)
                 {
-                    user_first[same] = user_first[value];
+                    user_first[same] = kept_first;
                 }
                 else
                 {
-                    users[user_last[same]].next = user_first[value];
+                    users[user_last[same]].next = kept_first;
                 }
-                user_last[same] = user_last[value];
-                user_first[value] = UINT32_MAX;
+                user_last[same] = kept_last;
             }
         }
     }
@@ -7866,13 +8462,24 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_publish(CIntegerIrBuilder* builder, u8* m
             }
             else
             {
-                // Keep one representative of an otherwise closed cycle.
-                // Dead-cycle pruning decides whether it is observable.
-                IrIncoming* incoming = arena_allocate(builder->arena, IrIncoming, 1);
-                *incoming = (IrIncoming){.predecessor = {.value = predecessors[offsets[pending->block]]}, .value = {.value = root}};
+                // Keep one representative of an otherwise closed cycle,
+                // reading itself on every edge: a loop header forwarded to
+                // its entry has more than one. Dead-cycle pruning decides
+                // whether it is observable.
+                u32 first = offsets[pending->block];
+                u32 incoming_count = offsets[pending->block + 1] - first;
+                IrIncoming* incoming = arena_allocate(builder->arena, IrIncoming, incoming_count);
+                for (u32 index = 0; index < incoming_count; index += 1)
+                {
+                    incoming[index] = (IrIncoming){
+                        .next = index + 1 < incoming_count ? incoming + index + 1 : 0,
+                        .predecessor = {.value = predecessors[first + index]},
+                        .value = {.value = root},
+                    };
+                }
                 pending->parameter->first_incoming = incoming;
-                pending->parameter->last_incoming = incoming;
-                pending->parameter->incoming_count = 1;
+                pending->parameter->last_incoming = incoming + incoming_count - 1;
+                pending->parameter->incoming_count = incoming_count;
             }
         }
     }
@@ -8158,6 +8765,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
         valid = c_ir_ssa_finish_cfg(builder, &memory);
         if (valid)
         {
+            c_ir_ssa_finish_loops(builder);
             c_ir_ssa_finish_parameters(builder, memory);
             valid = !ssa->scratch_exhausted && c_ir_ssa_finish_reserve_publish(builder);
         }
@@ -14450,9 +15058,9 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_builtin(CIrExt80Fold* fold, CIrExt80Value
     if (token->kind == C_TOKEN_IDENTIFIER && fold->cursor + 1 < fold->limit &&
         c_token_is_punctuator(&fold->preprocess.tokens[fold->cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
-        String8 link_name = c_ir_math_builtin_link_name(c_token_spelling(fold->preprocess.spelling_base, *token));
-        bool quiet_nan = string_equal(link_name, S8("nan")) || string_equal(link_name, S8("nanf"));
-        bool infinity = string_equal(link_name, S8("inff")) || string_equal(link_name, S8("huge_val"));
+        CMathSpecialValue special = c_semantic_math_special_value(c_ir_math_builtin_link_name(c_token_spelling(fold->preprocess.spelling_base, *token)));
+        bool quiet_nan = special.special == C_MATH_SPECIAL_QUIET_NAN;
+        bool infinity = special.special == C_MATH_SPECIAL_INFINITY;
         if (quiet_nan || infinity)
         {
             u32 open = fold->cursor + 1;
@@ -14468,7 +15076,8 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_builtin(CIrExt80Fold* fold, CIrExt80Value
                 bool empty_payload = payload.length == 2 && payload.pointer[0] == '"' && payload.pointer[1] == '"';
                 if (quiet_nan ? empty_payload : close == open + 1)
                 {
-                    u8 rank = string_equal(link_name, S8("nanf")) || string_equal(link_name, S8("inff")) ? C_IR_EXT80_RANK_FLOAT : C_IR_EXT80_RANK_DOUBLE;
+                    u8 rank = special.kind == C_TYPE_FLOAT ? C_IR_EXT80_RANK_FLOAT
+                              : special.kind == C_TYPE_LONG_DOUBLE ? C_IR_EXT80_RANK_LONG_DOUBLE : C_IR_EXT80_RANK_DOUBLE;
                     *value_out = infinity ? c_ir_ext80_value_infinity(false, rank) : c_ir_ext80_value_default_nan(rank);
                     fold->cursor = close + 1;
                     folded = true;
@@ -16873,6 +17482,18 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_function_name(CIntegerIrBuilder* builder, 
 
 BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* builder, u32 start, u32 end);
 
+// c_ir_predict_expression_type answers the invalid type for an expression it
+// cannot type; it never guesses. A caller that needs the type reports that
+// here, unless a more specific failure is already recorded.
+BUSTER_C_INTERNAL void c_ir_report_untyped_expression(CIntegerIrBuilder* builder, u32 start)
+{
+    if (!builder->failure_message.length)
+    {
+        builder->failure_message = S8("cannot determine the type of this expression");
+        builder->failure_token_index = start;
+    }
+}
+
 BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type);
 
 // An empty String8 legitimately carries a null pointer, which buster_hash_64
@@ -17797,6 +18418,10 @@ struct CIrLowerFrame
             u32 end;
             u32 task_count;
             u32 task_capacity;
+            // The assignment's RHS remains in the comma-free range that
+            // was scanned before its place was lowered.
+            u32 comma_free_start;
+            u32 comma_free_end;
             u32 pending_assignment;
             CConditionalOperator pending_operation;
             IrBlockId pending_true_block;
@@ -21257,51 +21882,44 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_power_integer(CIntegerIrBuilder* bui
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CToken token, String8 link_name, IrValueId* arguments, u32 argument_count)
 {
-    // `__builtin_huge_val()` is a constant-valued compiler intrinsic.  Keep
-    // it in the math-builtin path so hosted headers can use the spelling
-    // without declaring a runtime symbol, but emit the IEEE positive
-    // infinity directly in canonical IR.
-    if (string_equal(link_name, S8("huge_val")))
+    // The infinity (`__builtin_inf*`, `__builtin_huge_val*`) and NaN
+    // (`__builtin_nan*`) constructors are constant-valued compiler
+    // intrinsics.  Hosted headers spell HUGE_VAL*, INFINITY and NAN with them
+    // before any runtime library declaration exists, so emit the positive
+    // infinity or default quiet NaN directly in the result type's own format
+    // and never import an `inf*`/`nan*` symbol.
+    CMathSpecialValue special = c_semantic_math_special_value(link_name);
+    if (special.special != C_MATH_SPECIAL_NONE)
     {
-        if (argument_count != 0)
-        {
-            return IR_VALUE_ID_INVALID;
-        }
+        bool nan = special.special == C_MATH_SPECIAL_QUIET_NAN;
+        IrTypeId value_type = c_ir_builder_scalar_type(builder, special.kind);
+        IrType const* type = ir_type_from_id(&builder->program->types, value_type);
         IrSourceRange source = c_ir_token_source_range(builder, token);
-        return c_ir_emit_builtin_float_bits(builder, builder->f64_type, UINT64_C(0x7ff0000000000000), source, S8("HUGE_VAL"));
-    }
-    // `__builtin_inff()` is the single-precision counterpart used by the
-    // hosted <math.h> INFINITY macro.  It is a constant-valued intrinsic, so
-    // do not require a runtime `inff` declaration or linker symbol.
-    if (string_equal(link_name, S8("inff")))
-    {
-        if (argument_count != 0)
+        IrValueId result = IR_VALUE_ID_INVALID;
+        if (argument_count == (nan ? 1u : 0u) && type && type->kind == IR_TYPE_FLOAT)
         {
-            return IR_VALUE_ID_INVALID;
+            CIrConstantValue constant = c_ir_constant_math_special(type, special.special);
+            String8 literal = nan ? S8("NAN") : special.kind == C_TYPE_FLOAT ? S8("INFF") : special.kind == C_TYPE_LONG_DOUBLE ? S8("HUGE_VALL") : S8("HUGE_VAL");
+            if (type->bit_width == 80)
+            {
+                result = c_ir_emit_f80_constant_bits(builder, source, literal, constant.integer, (u16)constant.integer_high);
+            }
+            else if (type->bit_width == 128)
+            {
+                result = c_ir_emit_f128_constant_bits(builder, source, literal, constant.integer, constant.integer_high);
+            }
+            else if (type->bit_width == 32)
+            {
+                result = c_ir_emit_builtin_float_bits(builder, value_type, nan ? UINT64_C(0x7fc00000) : UINT64_C(0x7f800000), source, literal);
+            }
+            else
+            {
+                u64 bits = 0;
+                memcpy(&bits, &constant.floating, sizeof(bits));
+                result = c_ir_emit_builtin_float_bits(builder, value_type, bits, source, literal);
+            }
         }
-        IrSourceRange source = c_ir_token_source_range(builder, token);
-        return c_ir_emit_builtin_float_bits(builder, builder->f32_type, UINT64_C(0x7f800000), source, S8("INFF"));
-    }
-    // The builtin NaN constructors are compile-time values.  Do not create
-    // an imported `nan*` symbol: hosted headers use these names before a
-    // runtime library declaration exists, and the quiet IEEE payload is
-    // target-independent for the f32/f64 types represented by canonical IR.
-    if (string_equal(link_name, S8("nanf")) || string_equal(link_name, S8("nan")))
-    {
-        if (argument_count != 1)
-        {
-            return IR_VALUE_ID_INVALID;
-        }
-        IrTypeId value_type = string_equal(link_name, S8("nanf")) ? builder->f32_type : builder->f64_type;
-        IrType* type = ir_type_from_id(&builder->program->types, value_type);
-        if (!type || type->kind != IR_TYPE_FLOAT)
-        {
-            return IR_VALUE_ID_INVALID;
-        }
-        IrSourceRange source = c_ir_token_source_range(builder, token);
-        return c_ir_emit_builtin_float_bits(builder, value_type, type->bit_width == 32 ? UINT64_C(0x7fc00000)
-                                                                                       : UINT64_C(0x7ff8000000000000),
-                                            source, S8("NAN"));
+        return result;
     }
     if (string_equal(link_name, S8("fabsf")) || string_equal(link_name, S8("fabs")))
     {
@@ -30565,6 +31183,21 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
         {
             body_open += 1;
         }
+        // An enumeration's fixed underlying type (C23 6.7.2.2) sits between
+        // the tag and the body: `sizeof(enum E : short {A = 1})`.
+        if (kind == C_TYPE_ENUM && body_open < end && c_token_is_punctuator(&builder->preprocess.tokens[body_open], C_PUNCTUATOR_COLON))
+        {
+            u32 underlying = body_open + 1;
+            while (underlying < end && !c_token_is_punctuator(&builder->preprocess.tokens[underlying], C_PUNCTUATOR_LEFT_BRACE) &&
+                   !c_token_is_punctuator(&builder->preprocess.tokens[underlying], C_PUNCTUATOR_SEMICOLON))
+            {
+                underlying += 1;
+            }
+            if (underlying < end && c_token_is_punctuator(&builder->preprocess.tokens[underlying], C_PUNCTUATOR_LEFT_BRACE))
+            {
+                body_open = underlying;
+            }
+        }
         if (body_open < end && c_token_is_punctuator(&builder->preprocess.tokens[body_open], C_PUNCTUATOR_LEFT_BRACE))
         {
             u32 body_close = c_ir_matching_delimiter_cached(builder, body_open, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
@@ -33541,6 +34174,31 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
     u32 chain_start = start + 1;
 
+    // C23's predefined constants and the predefined function-name objects
+    // have no entity for the lookup below to find; lowering emits them by
+    // spelling, so type them by spelling too.
+    bool c23 = c_preprocess_dialect_is_c23(builder->preprocess.dialect);
+    if ((c23 && (string_equal(name, S8("true")) || string_equal(name, S8("false")) || string_equal(name, S8("nullptr")))) ||
+        string_equal(name, S8("__func__")) || string_equal(name, S8("__FUNCTION__")) || string_equal(name, S8("__PRETTY_FUNCTION__")))
+    {
+        bool predefined = true;
+        if (string_equal(name, S8("nullptr")))
+        {
+            *type_out = builder->nullptr_type;
+        }
+        else if (string_equal(name, S8("true")) || string_equal(name, S8("false")))
+        {
+            *type_out = builder->bool_type;
+        }
+        else
+        {
+            CIrConstantValue object = c_ir_function_name_object(builder, token);
+            *type_out = object.type;
+            predefined = object.kind == C_IR_CONSTANT_LVALUE;
+        }
+        return predefined && c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, chain_start, end, promote_bit_fields);
+    }
+
     CSymbolBuiltin builtin = c_ir_token_builtin_kind(builder, token);
     if (builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC ||
         builtin == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT || builtin == C_SYMBOL_BUILTIN_SIMD)
@@ -33563,6 +34221,38 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
             valid = c_ir_vendor_result_type_attempt(builder, start, close, type_out);
         }
         if (!valid) return false;
+        return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
+    }
+
+    // These builtins have no function entity; their results follow the
+    // GCC prototypes. __builtin_expect is `long (long, long)` even though the
+    // lowering passes its first operand through unchanged.
+    if (builtin == C_SYMBOL_BUILTIN_EXPECT || builtin == C_SYMBOL_BUILTIN_OBJECT_SIZE || builtin == C_SYMBOL_BUILTIN_STRLEN ||
+        builtin == C_SYMBOL_BUILTIN_ASSUME_ALIGNED || builtin == C_SYMBOL_BUILTIN_FRAME_ADDRESS || builtin == C_SYMBOL_BUILTIN_RETURN_ADDRESS)
+    {
+        if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            return false;
+        u32 close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (close >= end) return false;
+        *type_out = builtin == C_SYMBOL_BUILTIN_EXPECT ? builder->scalar_types[C_TYPE_LONG]
+                    : builtin == C_SYMBOL_BUILTIN_OBJECT_SIZE || builtin == C_SYMBOL_BUILTIN_STRLEN
+                        ? builder->size_type
+                        : c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
+        return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
+    }
+
+    // `va_arg` is a call in spelling only: its type is the type name it
+    // names, and no signature carries that.
+    if (builtin == C_SYMBOL_BUILTIN_VA_ARG)
+    {
+        if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            return false;
+        u32 close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        u32 separator = close < end ? c_ir_va_arg_type_separator(builder, chain_start + 1, close) : UINT32_MAX;
+        if (separator >= close) return false;
+        *type_out = IR_TYPE_ID_INVALID;
+        c_ir_query_type_name(builder, separator + 1, close, true, type_out);
+        if (builder->queries->has_request || type_out->value == IR_ID_UNDERLYING_INVALID) return false;
         return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
     }
 
@@ -33590,9 +34280,12 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     // A count builtin has no declared function entity. Resolve its fixed
     // signed-int result before a surrounding conditional predicts the type
     // of either arm, even when the call has not been emitted yet.
+    // ffs, constant_p, types_compatible_p and classify_type answer int too,
+    // whatever the width of their operand.
     CTypeKind absolute_kind = c_semantic_absolute_value_kind(c_ir_token_builtin_kind(builder, token), name);
     if (c_semantic_integer_count_parameter_kind(c_ir_token_builtin_kind(builder, token), name) != C_TYPE_INVALID ||
-        absolute_kind != C_TYPE_INVALID)
+        absolute_kind != C_TYPE_INVALID || builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET || builtin == C_SYMBOL_BUILTIN_CONSTANT_P ||
+        builtin == C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P || builtin == C_SYMBOL_BUILTIN_CLASSIFY_TYPE)
     {
         if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
@@ -33890,10 +34583,12 @@ BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operator_scan(CIntegerIrBuilder* builder, u
         }
         else if (punctuator == C_PUNCTUATOR_NONE)
         {
-            // The sizeof/alignof words are prefix operators, so a `*` after one
-            // dereferences rather than multiplies.
+            // The sizeof/alignof words and __real__/__imag__ are prefix
+            // operators, so a `*` after one dereferences rather than multiplies.
+            CConditionalOperator complex_part = C_CONDITIONAL_REAL_PART;
             previous_is_operand =
-                token.kind != C_TOKEN_IDENTIFIER || (!string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("sizeof")) && !c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token)));
+                token.kind != C_TOKEN_IDENTIFIER || (!string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("sizeof")) && !c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token)) &&
+                                                     !c_ir_complex_part_operator(builder, token, &complex_part));
         }
         else if (punctuator == C_PUNCTUATOR_QUESTION)
         {
@@ -34165,6 +34860,13 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_classify(CIntegerIrBu
     {
         return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_ASSIGN, 0, start + 1, end, promote_bit_fields);
     }
+    CConditionalOperator complex_part = C_CONDITIONAL_REAL_PART;
+    if (c_ir_complex_part_operator(builder, first, &complex_part))
+    {
+        // __real__/__imag__ take a complex operand's element type and leave
+        // a real operand's type unchanged, without promotion.
+        return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_COMPLEX_PART, 0, start + 1, end, promote_bit_fields);
+    }
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
         u32 close = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
@@ -34294,9 +34996,8 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_classify(CIntegerIrBu
         // `__builtin_offsetof(T, member)` (and the spelling supplied by
         // <stddef.h>) is a size_t-valued expression, not a callable entity.
         // Recognizing it here keeps pointer arithmetic such as Lua's
-        // `getudatamem` macro in the strict type walk; otherwise the generic
-        // identifier fallback sees the final `nuvalue` member and predicts
-        // an integer result for the whole `char * + offset` expression.
+        // `getudatamem` macro in the strict type walk, which is the only
+        // typer for the whole `char * + offset` expression.
         String8 name = c_token_spelling(builder->preprocess.spelling_base, first);
         if ((string_equal(name, S8("__builtin_offsetof")) || string_equal(name, S8("offsetof"))) && start + 1 < end &&
             c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
@@ -34308,6 +35009,118 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_classify(CIntegerIrBu
             }
             *type_out = builder->size_type;
             return c_ir_sizeof_step_from_bool(c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields));
+        }
+        // `__builtin_choose_expr` and `_Generic` have the unconverted type of
+        // the expression they select, which the same choice lowering makes
+        // picks: the constant condition, or the semantic type-identity answer.
+        // The selected range continues as a parenthesized child, so the
+        // postfix chain after the closing parenthesis still applies.
+        CSymbolBuiltin selection = c_ir_token_builtin_kind(builder, first);
+        if ((selection == C_SYMBOL_BUILTIN_CHOOSE_EXPR || selection == C_SYMBOL_BUILTIN_GENERIC) && start + 1 < end &&
+            c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            u32 selected_start = UINT32_MAX;
+            u32 selected_end = UINT32_MAX;
+            if (close < end && selection == C_SYMBOL_BUILTIN_CHOOSE_EXPR)
+            {
+                // The condition is a query-machine constant request, never a
+                // fresh constant-evaluation root: a `sizeof` in it reaches
+                // this walk again, which a nested root would turn into host
+                // recursion per nesting level. The truth rule matches
+                // c_ir_constant_condition_evaluate: a whole
+                // __builtin_constant_p(x) asks whether x is constant, anything
+                // else must be a nonzero or zero integer constant.
+                u32 first_separator = c_ir_call_argument_separator(builder, start + 2, close);
+                u32 second_separator = first_separator < close ? c_ir_call_argument_separator(builder, first_separator + 1, close) : close;
+                u32 condition_start = start + 2;
+                u32 condition_end = first_separator;
+                while (condition_start + 1 < condition_end &&
+                       c_token_is_punctuator(&builder->preprocess.tokens[condition_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                       c_ir_matching_delimiter_cached(builder, condition_start, condition_end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                      C_PUNCTUATOR_RIGHT_PARENTHESIS) == condition_end - 1)
+                {
+                    condition_start += 1;
+                    condition_end -= 1;
+                }
+                bool probe = condition_start + 2 < condition_end &&
+                             c_ir_token_builtin_kind(builder, builder->preprocess.tokens[condition_start]) == C_SYMBOL_BUILTIN_CONSTANT_P &&
+                             c_token_is_punctuator(&builder->preprocess.tokens[condition_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                             c_ir_matching_delimiter_cached(builder, condition_start + 1, condition_end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                            C_PUNCTUATOR_RIGHT_PARENTHESIS) == condition_end - 1;
+                u32 query_start = probe ? condition_start + 2 : condition_start;
+                u32 query_end = probe ? condition_end - 1 : condition_end;
+                CIrConstantValue value = {0};
+                bool known = second_separator < close && c_ir_call_argument_separator(builder, second_separator + 1, close) == close &&
+                             query_start < query_end && c_ir_query_constant(builder, query_start, query_end, &value) &&
+                             value.kind != C_IR_CONSTANT_INVALID && value.kind != C_IR_CONSTANT_UNKNOWN;
+                if (builder->queries->has_request)
+                {
+                    return C_IR_SIZEOF_STEP_FAIL;
+                }
+                bool decided = probe || (known && value.kind == C_IR_CONSTANT_INTEGER);
+                bool condition = probe ? known : decided && !ir_integer_is_zero((IrInteger){.low = value.integer, .high = value.integer_high});
+                if (decided && second_separator < close)
+                {
+                    selected_start = condition ? first_separator + 1 : second_separator + 1;
+                    selected_end = condition ? second_separator : close;
+                }
+            }
+            else if (close < end)
+            {
+                CTypeIdentityQuery answer;
+                if (c_ir_type_identity_query(builder, start, close + 1, &answer) && answer.token_end == close + 1 &&
+                    answer.result_start != UINT32_MAX)
+                {
+                    selected_start = answer.result_start;
+                    selected_end = answer.result_end;
+                }
+            }
+            if (selected_start >= selected_end)
+            {
+                return C_IR_SIZEOF_STEP_FAIL;
+            }
+            return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_PARENTHESIS, close, selected_start, selected_end, promote_bit_fields);
+        }
+        // An atomic builtin has no function entity. Its result is void, a
+        // flag, or the value type of the object its first argument points to;
+        // that argument is typed as a child, so its nesting stays in frames.
+        if (selection == C_SYMBOL_BUILTIN_ATOMIC && start + 1 < end &&
+            c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            CIrAtomicBuiltinSpelling atomic = c_ir_atomic_builtin_spelling(name);
+            CIrAtomicBuiltin operation = atomic.builtin;
+            bool void_result = operation == C_IR_ATOMIC_BUILTIN_STORE || operation == C_IR_ATOMIC_BUILTIN_INIT ||
+                               operation == C_IR_ATOMIC_BUILTIN_THREAD_FENCE || operation == C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE ||
+                               operation == C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE || operation == C_IR_ATOMIC_BUILTIN_CLEAR ||
+                               (atomic.generic && operation != C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG);
+            bool flag_result = operation == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG || operation == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_WEAK ||
+                               operation == C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE || operation == C_IR_ATOMIC_BUILTIN_TEST_AND_SET ||
+                               operation == C_IR_ATOMIC_BUILTIN_SYNC_BOOL_COMPARE_AND_SWAP;
+            u32 object_end = close < end ? c_ir_call_argument_separator(builder, start + 2, close) : close;
+            CIrSizeofStep atomic_step = C_IR_SIZEOF_STEP_FAIL;
+            if (close < end && operation != C_IR_ATOMIC_BUILTIN_COUNT && (void_result || flag_result))
+            {
+                *type_out = void_result ? builder->void_type : builder->bool_type;
+                atomic_step = c_ir_sizeof_step_from_bool(c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields));
+            }
+            else if (close < end && operation != C_IR_ATOMIC_BUILTIN_COUNT && start + 2 < object_end)
+            {
+                atomic_step = c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_ATOMIC_OBJECT, close, start + 2, object_end, false);
+            }
+            return atomic_step;
+        }
+        // `__builtin_complex(re, im)` is the complex type of its real parts;
+        // the first one is typed as a child.
+        if (selection == C_SYMBOL_BUILTIN_COMPLEX && start + 1 < end &&
+            c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            u32 real_end = close < end ? c_ir_call_argument_separator(builder, start + 2, close) : close;
+            return close < end && start + 2 < real_end && real_end < close
+                       ? c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_COMPLEX_COMPOSE, close, start + 2, real_end, true)
+                       : C_IR_SIZEOF_STEP_FAIL;
         }
         return c_ir_sizeof_step_from_bool(c_ir_sizeof_operand_identifier_type_attempt(builder, start, end, type_out, promote_bit_fields));
     }
@@ -34332,6 +35145,18 @@ BUSTER_GLOBAL_LOCAL IrTypeId c_ir_sizeof_binary_type(CIntegerIrBuilder* builder,
     IrTypeId result = c_ir_usual_arithmetic_type(builder, left, right);
     IrType* left_value = ir_type_from_id(&builder->program->types, left);
     IrType* right_value = ir_type_from_id(&builder->program->types, right);
+    // A GNU vector operation has the vector's type; the lowering splats a
+    // scalar operand across the lanes (c_ir_apply_vector_operation).
+    bool left_vector = left_value && left_value->kind == IR_TYPE_VECTOR;
+    bool right_vector = right_value && right_value->kind == IR_TYPE_VECTOR;
+    if (left_vector || right_vector)
+    {
+        IrType* scalar = left_vector ? right_value : left_value;
+        bool splat = scalar && (scalar->kind == IR_TYPE_INTEGER || scalar->kind == IR_TYPE_FLOAT || scalar->kind == IR_TYPE_BOOLEAN ||
+                                scalar->kind == IR_TYPE_ENUM);
+        result = (left_vector && right_vector && left.value == right.value) || (left_vector != right_vector && splat)
+                     ? (left_vector ? left : right) : IR_TYPE_ID_INVALID;
+    }
     if (additive && result.value == IR_ID_UNDERLYING_INVALID && left_value && right_value)
     {
         bool minus = punctuator == C_PUNCTUATOR_MINUS;
@@ -34391,11 +35216,40 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_combine(CIntegerIrBui
     }
     case C_IR_SIZEOF_OP_DEREFERENCE:
     {
+        // A function designator decays to a pointer and `*` takes it straight
+        // back, so `*(*p)` through a function pointer is still the function.
         IrType* value = ir_type_from_id(&builder->program->types, returned);
-        if (value && (value->kind == IR_TYPE_POINTER || value->kind == IR_TYPE_ARRAY))
+        if (value && (value->kind == IR_TYPE_POINTER || value->kind == IR_TYPE_ARRAY || value->kind == IR_TYPE_FUNCTION))
         {
-            *type_out = value->element_type;
+            *type_out = value->kind == IR_TYPE_FUNCTION ? returned : value->element_type;
             step = C_IR_SIZEOF_STEP_DONE;
+        }
+        break;
+    }
+    case C_IR_SIZEOF_OP_COMPLEX_COMPOSE:
+    {
+        IrType* real = ir_type_from_id(&builder->program->types, returned);
+        IrTypeId complex = real && real->kind == IR_TYPE_FLOAT && !real->is_complex ? c_ir_complex_type_for_element(builder, returned)
+                                                                                    : IR_TYPE_ID_INVALID;
+        if (complex.value != IR_ID_UNDERLYING_INVALID)
+        {
+            *type_out = complex;
+            step = c_ir_sizeof_step_from_bool(c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, frame->index + 1, frame->end, frame->promote));
+        }
+        break;
+    }
+    case C_IR_SIZEOF_OP_ATOMIC_OBJECT:
+    {
+        // The returned type is the builtin's first argument, a pointer to the
+        // object; the value-returning forms answer the object's unqualified,
+        // non-atomic type, which the lowering's atomic place carries.
+        IrType* pointer = ir_type_from_id(&builder->program->types, returned);
+        IrType* object = pointer && (pointer->kind == IR_TYPE_POINTER || pointer->kind == IR_TYPE_ARRAY)
+                             ? ir_type_from_id(&builder->program->types, pointer->element_type) : 0;
+        if (object)
+        {
+            *type_out = object->is_atomic || object->is_volatile ? object->unqualified_type : pointer->element_type;
+            step = c_ir_sizeof_step_from_bool(c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, frame->index + 1, frame->end, frame->promote));
         }
         break;
     }
@@ -34407,10 +35261,22 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_combine(CIntegerIrBui
     {
         IrTypeId promoted = c_ir_usual_arithmetic_type(builder, returned, returned);
         IrType* promoted_value = ir_type_from_id(&builder->program->types, promoted);
+        // `~` is the integer complement, or the conjugate of a complex value.
         bool tilde = c_token_is_punctuator(&builder->preprocess.tokens[frame->start], C_PUNCTUATOR_TILDE);
-        if (promoted_value && !(tilde && promoted_value->kind != IR_TYPE_INTEGER))
+        if (promoted_value && !(tilde && promoted_value->kind != IR_TYPE_INTEGER && !promoted_value->is_complex))
         {
             *type_out = promoted;
+            step = C_IR_SIZEOF_STEP_DONE;
+        }
+        break;
+    }
+    case C_IR_SIZEOF_OP_COMPLEX_PART:
+    {
+        IrType* value = ir_type_from_id(&builder->program->types, returned);
+        if (value && (value->kind == IR_TYPE_INTEGER || value->kind == IR_TYPE_BOOLEAN || value->kind == IR_TYPE_ENUM ||
+                      value->kind == IR_TYPE_FLOAT || value->is_complex))
+        {
+            *type_out = value->is_complex ? value->element_type : returned;
             step = C_IR_SIZEOF_STEP_DONE;
         }
         break;
@@ -34705,10 +35571,9 @@ BUSTER_C_INTERNAL u32 c_ir_sizeof_operand_alignment(IrType* value)
 // Does this operand name an object whose array type never mapped to an IR
 // type? A bound that did not fold and an array still incomplete at the end of
 // the unit are the two ways to get there, and neither has a knowable size.
-// The expression-type prediction below guesses int for both, so `sizeof v`
-// answers 4 — and unlike every other use of `v`, which fails to lower, that
-// wrong answer carries no diagnostic. Refuse this unresolved shape rather
-// than guessing; clang rejects an incomplete array operand outright.
+// The expression-type prediction used to guess int for both, so `sizeof v`
+// answered 4 with no diagnostic. Refuse this unresolved shape with its own
+// message; clang rejects an incomplete array operand outright.
 // An `extern char v[];` some later declaration completes is not one of them:
 // the redeclaration merge adopts the completing type, so it maps and the
 // guard never sees it.
@@ -35788,22 +36653,32 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
             return;
         }
         frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_CONTROL;
-        // The child's kind is known here, so run its first step now instead
-        // of returning to the dispatch loop: the prepare pass completes
-        // without suspending in the common case, and the loop's indirect
-        // dispatch of the child and of this frame's resume both disappear.
-        // A suspension leaves the child's continuation on the machine stack
-        // and resumes through the loop unchanged.
-        u32 mark = machine->frame_count;
-        if (!c_ir_prepare_control_expressions_frame_push(builder, preparation_start, end))
+        // A range the prepass can only walk to an empty success skips it, and
+        // the stage below reads the success it would have finished with. On
+        // the self-host about 94% of the ranges hold no control token (#3445).
+        if (!c_ir_range_may_prepare_control(builder, preparation_start, end))
         {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            machine->child_result = (CIrLowerFrameResult){.value = IR_VALUE_ID_INVALID, .index = UINT32_MAX, .success = true};
         }
-        c_ir_prepare_control_expressions_step(builder, machine->frames + machine->frame_count - 1);
-        if (machine->frame_count != mark || machine->failed)
+        else
         {
-            return;
+            // The child's kind is known here, so run its first step now
+            // instead of returning to the dispatch loop: the prepare pass
+            // completes without suspending in the common case, and the loop's
+            // indirect dispatch of the child and of this frame's resume both
+            // disappear. A suspension leaves the child's continuation on the
+            // machine stack and resumes through the loop unchanged.
+            u32 mark = machine->frame_count;
+            if (!c_ir_prepare_control_expressions_frame_push(builder, preparation_start, end))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            c_ir_prepare_control_expressions_step(builder, machine->frames + machine->frame_count - 1);
+            if (machine->frame_count != mark || machine->failed)
+            {
+                return;
+            }
         }
     }
     if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_CONTROL)
@@ -35818,16 +36693,26 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
             return;
         }
         frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_CALLS;
-        u32 mark = machine->frame_count;
-        if (!c_ir_prepare_calls_frame_push(builder, preparation_start, end))
+        // The same for the call prepass: about 72% of the self-host's ranges
+        // hold no call, and a nested range under preparing_calls has nothing
+        // to discover at all.
+        if (!c_ir_range_may_prepare_calls(builder, preparation_start, end))
         {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            machine->child_result = (CIrLowerFrameResult){.value = IR_VALUE_ID_INVALID, .index = UINT32_MAX, .success = true};
         }
-        c_ir_prepare_calls_step(builder, machine->frames + machine->frame_count - 1);
-        if (machine->frame_count != mark || machine->failed)
+        else
         {
-            return;
+            u32 mark = machine->frame_count;
+            if (!c_ir_prepare_calls_frame_push(builder, preparation_start, end))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            c_ir_prepare_calls_step(builder, machine->frames + machine->frame_count - 1);
+            if (machine->frame_count != mark || machine->failed)
+            {
+                return;
+            }
         }
     }
     BUSTER_CHECK(frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_CALLS);
@@ -36113,7 +36998,11 @@ c_ir_expression_core_loop:
             index += 1;
             continue;
         }
-        if (expect_operand)
+        // A postfix update ends the unary expression at a `++` or `--` past
+        // its first token. Without one in the rest of the range the probe's
+        // answer is never used, so it is not measured: about 99.9% of the
+        // self-host's operands hold none (#3445).
+        if (expect_operand && c_ir_range_may_hold_update(builder, index + 1, end))
         {
             u32 operand_end = c_ir_unary_expression_end(builder, index, end);
             bool postfix = operand_end > index + 1 && (c_token_is_punctuator(&builder->preprocess.tokens[operand_end - 1], C_PUNCTUATOR_PLUS_PLUS) ||
@@ -36449,14 +37338,12 @@ c_ir_expression_core_loop:
                 // the alignment of an object's *type* is what GCC answers for
                 // one whose declaration asked for no more.
                 //
-                // The prediction guesses int for an operand it cannot type; an
-                // unmapped array object is such an operand, and a guess for one
-                // silently misfolds the answer, so it fails here instead.  A
-                // member chain the resolver proved wrong -- a
-                // resolved aggregate with no member of that name -- is not a
-                // shape to guess either: it is the diagnostic the walkers
-                // recorded, and predicting int for it is what made every
-                // autoconf AC_CHECK_MEMBER fallback probe answer yes.
+                // An unmapped array object and a member chain the resolver
+                // proved wrong -- a resolved aggregate with no member of that
+                // name -- carry diagnostics of their own, reported here before
+                // the prediction's generic one. The prediction once guessed
+                // int for both, which made every autoconf AC_CHECK_MEMBER
+                // fallback probe answer yes.
                 if (builder->sizeof_operand_constraint.length)
                 {
                     builder->failure_message = builder->sizeof_operand_constraint;
@@ -36488,6 +37375,20 @@ c_ir_expression_core_loop:
                 IrType* expression = ir_type_from_id(&builder->program->types, expression_type);
                 if (!expression || !expression->layout.resolved)
                 {
+                    // A type name reaches here only when it has no IR type at
+                    // all -- `__fp16` is storage-only -- so say that rather
+                    // than calling it an expression.
+                    if (!expression && parenthesized && !builder->failure_message.length &&
+                        c_parse_type_start_token(&builder->parse, builder->preprocess, c_ir_current_scope(builder),
+                                                 builder->preprocess.tokens[operand_start]))
+                    {
+                        builder->failure_message = S8("the operand's type has no canonical IR representation");
+                        builder->failure_token_index = operand_start;
+                    }
+                    if (!expression)
+                    {
+                        c_ir_report_untyped_expression(builder, operand_start);
+                    }
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
@@ -37463,38 +38364,14 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u3
 BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
                                                     u32* expression_end);
 
-// Count the body's `?` tokens once, as a prefix over body offsets. The test
-// is the scan's own (the punctuator field alone), so a range the count calls
-// empty is one the scan would find no `?` in.
-BUSTER_C_INTERNAL void c_ir_question_prefix_build(CIntegerIrBuilder* builder)
-{
-    u32* prefix = builder->question_prefix;
-    CToken const* tokens = builder->preprocess.tokens + builder->body_token_start;
-    u32 count = 0;
-    for (u32 offset = 0; offset < builder->body_token_count; offset += 1)
-    {
-        prefix[offset] = count;
-        count += tokens[offset].punctuator == C_PUNCTUATOR_QUESTION;
-    }
-    prefix[builder->body_token_count] = count;
-    builder->question_prefix_built = true;
-}
-
 // Whether [start, end) may hold a `?`. Only a range inside the body is
-// answered by the prefix count; any other range may.
+// answered by the token prefix table; any other range may. The table's test is
+// the scan's own (the punctuator field alone), so a range it calls empty is
+// one the scan would find no `?` in.
 BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_range_may_hold_question(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
-    bool result = true;
-    u32 body_start = builder->body_token_start;
-    if (builder->question_prefix && start >= body_start && end >= start && end - body_start <= builder->body_token_count)
-    {
-        if (!builder->question_prefix_built)
-        {
-            c_ir_question_prefix_build(builder);
-        }
-        result = builder->question_prefix[end - body_start] != builder->question_prefix[start - body_start];
-    }
-    return result;
+    CIrTokenPrefix* first = c_ir_token_prefix_at(builder, start, end);
+    return !first || first[end - start].questions != first[0].questions;
 }
 
 // Whether [start, end) is a `?:` at the root, and its tokens: from the syntax
@@ -38069,10 +38946,14 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             // The machine carries a void result as an integer placeholder, so
             // the scalar constraint (C 6.8.4.1, 6.8.5) is checked on the type.
             IrType* sequence_type = ir_type_from_id(&builder->program->types, c_ir_predict_expression_type(builder, task.start, task.end));
-            if (sequence_type && sequence_type->kind == IR_TYPE_VOID)
+            if (!sequence_type || sequence_type->kind == IR_TYPE_VOID)
             {
-                builder->failure_message = S8("controlling expression must have scalar type");
-                builder->failure_token_index = task.start;
+                if (sequence_type)
+                {
+                    builder->failure_message = S8("controlling expression must have scalar type");
+                    builder->failure_token_index = task.start;
+                }
+                c_ir_report_untyped_expression(builder, task.start);
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
             }
@@ -39593,6 +40474,14 @@ BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
 
 // The scan behind c_ir_root_conditional: find the root `?:` of [start, end)
 // after peeling redundant parentheses.
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_assignment_lower_work;
+u64 c_test_assignment_lower_work(void)
+{
+    return c_assignment_lower_work;
+}
+#endif
+
 BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question,
                                                     u32* colon, u32* expression_end)
 {
@@ -39609,9 +40498,11 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u3
     }
     u32 found_question = UINT32_MAX;
     u32 nested_questions = 0;
-    bool root_assignment = false;
     for (u32 index = start; index < end; index += 1)
     {
+#if BUSTER_INCLUDE_TESTS
+        c_assignment_lower_work += 1;
+#endif
         u32 punctuator = builder->preprocess.tokens[index].punctuator;
         CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
         if (scan == C_IR_GROUP_SCAN_SKIPPED)
@@ -39628,15 +40519,6 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u3
         }
         if (punctuator == C_PUNCTUATOR_QUESTION)
         {
-            // `lhs = condition ? true_value : false_value` has a
-            // conditional operator in the assignment's right operand, not
-            // at the root of the expression.  Treating it as a root
-            // conditional loses the assignment completion (the Lua
-            // luaV_fastgeti macro relies on this exact precedence).
-            if (root_assignment)
-            {
-                return false;
-            }
             if (found_question == UINT32_MAX)
             {
                 found_question = index;
@@ -39668,7 +40550,12 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u3
         }
         else if (found_question == UINT32_MAX && c_ir_assignment_operator(builder->preprocess.tokens[index]))
         {
-            root_assignment = true;
+            // `lhs = condition ? true_value : false_value` has a
+            // conditional operator in the assignment's right operand, not
+            // at the root of the expression.  Treating it as a root
+            // conditional loses the assignment completion (the Lua
+            // luaV_fastgeti macro relies on this exact precedence).
+            break;
         }
     }
     return false;
@@ -40331,18 +41218,14 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
         }
     }
     c_ir_expression_core_range(builder, &start, &end);
-    // Resolve complete arithmetic/cast expressions before the legacy
-    // identifier scan below.  That scan is intentionally a cheap fallback,
-    // but for `((int)(pointer_difference)) + index` it retained the last
-    // member's pointer type and made a surrounding conditional appear to
-    // merge `int` with `pointer`.  The strict operand resolver already knows
-    // the usual arithmetic conversions and pointer arithmetic, so use its
-    // result whenever the full range is unambiguous.
+    // The strict operand resolver knows the usual arithmetic conversions and
+    // pointer arithmetic, so its answer is the expression's type whenever it
+    // has one; the shapes below are the few it declines on purpose.
     IrTypeId strict_type = IR_TYPE_ID_INVALID;
     // A bare incomplete extern array is only its decayed element pointer as a
     // value; the strict walk refuses it so that sizeof can diagnose it, and
-    // the identifier fallback below guessed int, so `c ? tbl : "x"` looked
-    // int-versus-pointer (Lua's lapi.c, PCRE2's pcre2_compile.c).
+    // a guessed int once made `c ? tbl : "x"` look int-versus-pointer (Lua's
+    // lapi.c, PCRE2's pcre2_compile.c).
     bool strict_ready = c_ir_sizeof_operand_type_attempt(builder, start, end, &strict_type);
     if (!strict_ready)
     {
@@ -40393,13 +41276,10 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
             }
         }
     }
-    // An assignment expression has the unpromoted type of its left operand.
-    // The broad identifier scan below is intentionally only a fallback for
-    // incomplete expressions; for `(p)->field = value` it would otherwise
-    // retain `p`'s pointer type and make a surrounding conditional appear to
-    // produce a pointer.  That misprediction is observable when the
-    // conditional assignment is immediately compared (as in cJSON's boolean
-    // setter macro).
+    // An assignment expression has the unpromoted type of its left operand,
+    // not `p`'s pointer type in `(p)->field = value`; a misprediction is
+    // observable when the conditional assignment is immediately compared (as
+    // in cJSON's boolean setter macro).
     if (c_ir_has_root_assignment(builder, start, end))
     {
         IrTypeId assignment_type = IR_TYPE_ID_INVALID;
@@ -40529,347 +41409,13 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
             return cast_type;
         }
     }
-    IrTypeId result = IR_TYPE_ID_INVALID;
-    for (u32 index = start; index < end; index += 1)
-    {
-        CToken token = builder->preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            u32 type_close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            if (type_close + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[type_close + 1], C_PUNCTUATOR_LEFT_BRACE))
-            {
-                u32 initializer_close = c_ir_matching_delimiter_cached(builder, type_close + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
-                IrTypeId literal_type = IR_TYPE_ID_INVALID;
-                if (initializer_close < end)
-                {
-                    c_ir_query_compound_type(builder, index + 1, type_close, type_close + 1, initializer_close, &literal_type);
-                    if (builder->queries->has_request)
-                    {
-                        return IR_TYPE_ID_INVALID;
-                    }
-                }
-                if (initializer_close < end && literal_type.value != IR_ID_UNDERLYING_INVALID)
-                {
-                    return literal_type;
-                }
-            }
-        }
-        if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
-        {
-            IrTypeId candidate = builder->s32_type;
-            if (c_ir_number_is_float_at(builder, index))
-            {
-                candidate = c_ir_float_literal_type(builder, c_token_spelling(builder->preprocess.spelling_base, token));
-            }
-            else
-            {
-                u64 integer_value = 0;
-                IrTypeId integer_type = IR_TYPE_ID_INVALID;
-                if (c_ir_integer_literal_at(builder, index, &integer_value, &integer_type) && integer_type.value != IR_ID_UNDERLYING_INVALID)
-                {
-                    candidate = integer_type;
-                }
-            }
-            IrType* current = ir_type_from_id(&builder->program->types, result);
-            IrType* next = ir_type_from_id(&builder->program->types, candidate);
-            if (!current || (next && next->kind == IR_TYPE_FLOAT &&
-                             (current->kind != IR_TYPE_FLOAT || c_ir_float_conversion_rank(next) > c_ir_float_conversion_rank(current))))
-            {
-                result = candidate;
-            }
-            continue;
-        }
-        if (token.kind == C_TOKEN_CHARACTER_LITERAL)
-        {
-            String8 character_spelling = c_token_spelling(builder->preprocess.spelling_base, token);
-            u64 opening = 0;
-            while (opening < character_spelling.length && character_spelling.pointer[opening] != '\'')
-            {
-                opening += 1;
-            }
-            CTypeKind kind = C_TYPE_INT;
-            if (opening == 2)
-            {
-                kind = C_TYPE_UNSIGNED_CHAR;
-            }
-            else if (opening == 1)
-            {
-                kind = c_token_spelling(builder->preprocess.spelling_base, token).pointer[0] == 'u'                 ? C_TYPE_UNSIGNED_SHORT
-                       : c_token_spelling(builder->preprocess.spelling_base, token).pointer[0] == 'U'               ? C_TYPE_UNSIGNED_INT
-                       : target_uses_16_bit_wchar(builder->target) ? C_TYPE_UNSIGNED_SHORT
-                       : builder->target.cpu_arch == CPU_ARCH_I386 ? C_TYPE_LONG
-                                                                   : target_uses_unsigned_wchar(builder->target) ? C_TYPE_UNSIGNED_INT
-                                                                   : C_TYPE_INT;
-            }
-            result = builder->scalar_types[kind];
-            continue;
-        }
-        if (token.kind == C_TOKEN_STRING_LITERAL)
-        {
-            u32 literal_end = index + 1;
-            while (literal_end < end && builder->preprocess.tokens[literal_end].kind == C_TOKEN_STRING_LITERAL)
-            {
-                literal_end += 1;
-            }
-            CIrDecodedString decoded = {0};
-            if (!c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, index, literal_end, builder->parse.string_literals, &decoded))
-            {
-                return IR_TYPE_ID_INVALID;
-            }
-            result = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->scalar_types[decoded.element_kind]);
-            index = literal_end - 1;
-            continue;
-        }
-        if (token.kind != C_TOKEN_IDENTIFIER)
-        {
-            continue;
-        }
-        u32 candidate_token_index = index;
-        IrTypeId candidate = IR_TYPE_ID_INVALID;
-        if (c_preprocess_dialect_is_c23(builder->preprocess.dialect) && (string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("true")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("false"))))
-        {
-            result = builder->bool_type;
-            continue;
-        }
-        if (c_preprocess_dialect_is_c23(builder->preprocess.dialect) && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("nullptr")))
-        {
-            result = builder->nullptr_type;
-            continue;
-        }
-        CTypeIdentityQuery identity;
-        CSymbolBuiltin identity_kind = c_ir_token_builtin_kind(builder, token);
-        bool type_identity = (identity_kind == C_SYMBOL_BUILTIN_GENERIC || identity_kind == C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P ||
-         identity_kind == C_SYMBOL_BUILTIN_CLASSIFY_TYPE) &&
-            c_ir_type_identity_query(builder, index, end, &identity);
-        if (type_identity)
-        {
-            if (identity.result_start == UINT32_MAX)
-            {
-                candidate = builder->s32_type;
-            }
-            else if (!c_ir_query_prediction(builder, identity.result_start, identity.result_end, &candidate) && builder->queries->has_request)
-            {
-                return IR_TYPE_ID_INVALID;
-            }
-            u32 postfix = identity.token_end;
-            IrTypeId postfix_type = candidate;
-            if (postfix < end && c_ir_static_postfix_type(builder, &postfix_type, postfix, end))
-            {
-                candidate = postfix_type;
-                index = end - 1;
-            }
-            else
-            {
-                index = identity.token_end - 1;
-            }
-        }
-        else if (index + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            CIrPreparedCall* prepared_call = c_ir_prepared_call_find(builder, index);
-            u32 close = UINT32_MAX;
-            // `va_arg` is a call in spelling only: its type is the type name
-            // it names, and no signature carries that.  Without this the scan
-            // walks on into the parentheses and answers with the list
-            // operand's own type, which is how `f ? va_arg(*ap, int) : 0` --
-            // the shape musl's vfprintf reads every `*` field width through --
-            // looked like a conditional between a va_list and an int.
-            u32 va_arg_close = c_ir_token_builtin_kind(builder, token) == C_SYMBOL_BUILTIN_VA_ARG
-                                   ? c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
-                                                                     C_PUNCTUATOR_RIGHT_PARENTHESIS)
-                                   : UINT32_MAX;
-            u32 va_arg_separator = va_arg_close < end ? c_ir_va_arg_type_separator(builder, index + 2, va_arg_close) : UINT32_MAX;
-            if (va_arg_separator != UINT32_MAX && va_arg_separator < va_arg_close)
-            {
-                IrTypeId va_arg_type = IR_TYPE_ID_INVALID;
-                c_ir_query_type_name(builder, va_arg_separator + 1, va_arg_close, true, &va_arg_type);
-                if (builder->queries->has_request)
-                {
-                    return IR_TYPE_ID_INVALID;
-                }
-                candidate = va_arg_type;
-                close = va_arg_close;
-            }
-            else if (prepared_call && builder->function && prepared_call->emitted && prepared_call->result.value < builder->function->value_count)
-            {
-                candidate = builder->function->values[prepared_call->result.value].canonical_type;
-                close = prepared_call->close_index;
-            }
-            else
-            {
-                u32 declaration_index = c_ir_find_function_token(builder, token);
-                if (declaration_index != UINT32_MAX && builder->signatures)
-                {
-                    candidate = builder->signatures[declaration_index].return_type;
-                    close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                }
-            }
-            if (candidate.value != IR_ID_UNDERLYING_INVALID)
-            {
-                IrTypeId postfix_type = candidate;
-                if (close + 1 < end && c_ir_static_postfix_type(builder, &postfix_type, close + 1, end))
-                {
-                    candidate = postfix_type;
-                    index = end - 1;
-                }
-                else if (close < end)
-                {
-                    index = close;
-                }
-            }
-        }
-        else
-        {
-            CEntityId entity = c_ir_identifier_entity(builder, index);
-            CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
-            if (local)
-            {
-                candidate = local->type;
-                u32 postfix = index + 1;
-                bool consumed_postfix = false;
-                if (local->is_variable_length_array)
-                {
-                    u32 dimension = 0;
-                    while (dimension < local->vla_dimension_count && postfix < end &&
-                           c_token_is_punctuator(&builder->preprocess.tokens[postfix], C_PUNCTUATOR_LEFT_BRACKET))
-                    {
-                        u32 close = c_ir_matching_delimiter_cached(builder, postfix, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-                        if (close >= end)
-                        {
-                            candidate = IR_TYPE_ID_INVALID;
-                            break;
-                        }
-                        dimension += 1;
-                        postfix = close + 1;
-                        consumed_postfix = true;
-                    }
-                    if (candidate.value != IR_ID_UNDERLYING_INVALID && dimension == local->vla_dimension_count)
-                    {
-                        candidate = local->vla_element_type;
-                    }
-                }
-                else
-                {
-                    while (postfix < end)
-                    {
-                        IrType* base = ir_type_from_id(&builder->program->types, candidate);
-                        if (!base)
-                        {
-                            candidate = IR_TYPE_ID_INVALID;
-                            break;
-                        }
-                        if (c_token_is_punctuator(&builder->preprocess.tokens[postfix], C_PUNCTUATOR_LEFT_BRACKET))
-                        {
-                            u32 close = c_ir_matching_delimiter(builder->preprocess, postfix, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
-                            if (close >= end || (base->kind != IR_TYPE_ARRAY && base->kind != IR_TYPE_POINTER))
-                            {
-                                candidate = IR_TYPE_ID_INVALID;
-                                break;
-                            }
-                            candidate = base->element_type;
-                            postfix = close + 1;
-                            consumed_postfix = true;
-                            continue;
-                        }
-                        bool arrow = c_token_is_punctuator(&builder->preprocess.tokens[postfix], C_PUNCTUATOR_ARROW);
-                        if (!arrow && !c_token_is_punctuator(&builder->preprocess.tokens[postfix], C_PUNCTUATOR_DOT))
-                        {
-                            break;
-                        }
-                        if (arrow)
-                        {
-                            if (base->kind != IR_TYPE_POINTER)
-                            {
-                                candidate = IR_TYPE_ID_INVALID;
-                                break;
-                            }
-                            candidate = base->element_type;
-                            base = ir_type_from_id(&builder->program->types, candidate);
-                        }
-                        if (!base || (base->kind != IR_TYPE_STRUCT && base->kind != IR_TYPE_UNION) || postfix + 1 >= end ||
-                            builder->preprocess.tokens[postfix + 1].kind != C_TOKEN_IDENTIFIER)
-                        {
-                            candidate = IR_TYPE_ID_INVALID;
-                            break;
-                        }
-                        IrTypeId field_type = IR_TYPE_ID_INVALID;
-                        if (!c_ir_promoted_member_type(builder, candidate, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[postfix + 1]), &field_type))
-                        {
-                            candidate = IR_TYPE_ID_INVALID;
-                            break;
-                        }
-                        candidate = field_type;
-                        postfix += 2;
-                        consumed_postfix = true;
-                    }
-                }
-                if (consumed_postfix)
-                {
-                    index = postfix - 1;
-                }
-            }
-            else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT)
-            {
-                CTypeId c_type = builder->parse.entities[entity.value].type;
-                if (c_type.value < builder->parse.type_count)
-                {
-                    candidate = builder->c_type_ir_map[c_type.value];
-                    if (index + 1 < end)
-                    {
-                        IrTypeId postfix_type = candidate;
-                        if (c_ir_static_postfix_type(builder, &postfix_type, index + 1, end))
-                        {
-                            candidate = postfix_type;
-                            index = end - 1;
-                        }
-                    }
-                }
-            }
-            else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_ENUMERATOR)
-            {
-                CTypeId declared = builder->parse.entities[entity.value].type;
-                candidate = declared.value < builder->parse.type_count ? builder->c_type_ir_map[declared.value] : IR_TYPE_ID_INVALID;
-            }
-            else
-            {
-                u32 declaration_index = c_ir_find_function_token(builder, token);
-                if (declaration_index != UINT32_MAX && builder->declaration_functions && builder->declaration_functions[declaration_index])
-                {
-                    candidate = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->declaration_functions[declaration_index]->canonical_type);
-                }
-            }
-        }
-        if (candidate.value == IR_ID_UNDERLYING_INVALID)
-        {
-            continue;
-        }
-        if (candidate_token_index > start && c_token_is_punctuator(&builder->preprocess.tokens[candidate_token_index - 1], C_PUNCTUATOR_AMPERSAND))
-        {
-            candidate = c_ir_add_pointer_type(builder->program, builder->pointer_types, candidate);
-        }
-        else if (candidate_token_index > start && c_token_is_punctuator(&builder->preprocess.tokens[candidate_token_index - 1], C_PUNCTUATOR_STAR))
-        {
-            IrType* pointer = ir_type_from_id(&builder->program->types, candidate);
-            if (pointer && pointer->kind == IR_TYPE_POINTER)
-            {
-                candidate = pointer->element_type;
-            }
-        }
-        IrType* candidate_value = ir_type_from_id(&builder->program->types, candidate);
-        if (candidate_value && candidate_value->kind == IR_TYPE_ARRAY)
-        {
-            candidate = c_ir_add_pointer_type(builder->program, builder->pointer_types, candidate_value->element_type);
-        }
-        IrType* current = ir_type_from_id(&builder->program->types, result);
-        IrType* next = ir_type_from_id(&builder->program->types, candidate);
-        if (!current || (current->kind == IR_TYPE_BOOLEAN && next && next->kind != IR_TYPE_BOOLEAN) ||
-            (next && next->kind == IR_TYPE_FLOAT &&
-             (current->kind != IR_TYPE_FLOAT || c_ir_float_conversion_rank(next) > c_ir_float_conversion_rank(current))) ||
-            (next && current && next->kind == IR_TYPE_INTEGER && current->kind == IR_TYPE_INTEGER && next->bit_width > current->bit_width))
-        {
-            result = candidate;
-        }
-    }
-    return result.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : result;
+    // Every remaining shape is one the strict operand walk could not type.
+    // There used to be a scan here that kept the widest identifier or
+    // literal type in the range, defaulting to int; it typed `(int)u` by
+    // the cast's operand and silently became the C type of sizeof, of a
+    // conditional's result and of a block _Static_assert. An untyped
+    // expression now declines, and the caller reports it (#2531).
+    return IR_TYPE_ID_INVALID;
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type)
@@ -41173,7 +41719,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_attempt(CIntegerIrBuilde
 {
     if (start >= end)
     {
-        return builder->s32_type;
+        return IR_TYPE_ID_INVALID;
     }
     c_ir_expression_core_range(builder, &start, &end);
     u32 expression_start = 0;
@@ -41203,18 +41749,19 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_attempt(CIntegerIrBuilde
     {
         return IR_TYPE_ID_INVALID;
     }
-    return result.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : result;
+    return result;
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     WORK_LEDGER_RECORD(REDERIVE_LOWER_TYPE_PREDICTIONS, 1);
     CIrQueryFrame result = {0};
-    if (!c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_TYPE_PREDICTION}, &result) || !result.success)
+    IrTypeId type = IR_TYPE_ID_INVALID;
+    if (c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_TYPE_PREDICTION}, &result) && result.success)
     {
-        return builder->s32_type;
+        type = result.result_type;
     }
-    return result.result_type;
+    return type;
 }
 
 // Type immediate conditional children in postorder before flattening their
@@ -41256,6 +41803,10 @@ BUSTER_C_INTERNAL bool c_ir_selection_types(CIntegerIrBuilder* builder, CIrLower
             {
                 last = c_ir_predict_expression_type(builder, task->as.selection.start, task->as.selection.end);
                 success = last.value != IR_ID_UNDERLYING_INVALID;
+                if (!success)
+                {
+                    c_ir_report_untyped_expression(builder, task->as.selection.start);
+                }
                 count -= 1;
             }
         }
@@ -41854,6 +42405,8 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             return;
         }
         frame->as.expression.start = assignment + 1;
+        frame->as.expression.comma_free_start = assignment + 1;
+        frame->as.expression.comma_free_end = frame->as.expression.end;
         frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
     }
     else
@@ -42135,6 +42688,12 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                 IrTypeId false_type = c_ir_predict_expression_type(builder, conditional_colon + 1, conditional_end);
                 IrTypeId result_type = c_ir_conditional_result_type(builder, true_type, false_type, conditional_question + 1, conditional_colon,
                                                                     conditional_colon + 1, conditional_end);
+                if (result_type.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    c_ir_report_untyped_expression(builder, conditional_start);
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
                 IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[conditional_start]);
                 IrValueId place = c_ir_emit_temporary(builder, result_type, source);
                 IrBlockId final_block = c_ir_block_create(builder);
@@ -42331,8 +42890,12 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         // `f(g(h(...)))` quadratic.
         u32 last_comma = UINT32_MAX;
         u32 comma_conditionals = 0;
-        for (u32 index = start; index < end; index += 1)
+        bool comma_free = frame->as.expression.comma_free_end == end && start >= frame->as.expression.comma_free_start;
+        for (u32 index = start; !comma_free && index < end; index += 1)
         {
+#if BUSTER_INCLUDE_TESTS
+            c_assignment_lower_work += 1;
+#endif
             CToken token = builder->preprocess.tokens[index];
             CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
             if (scan == C_IR_GROUP_SCAN_UNCLOSED)
@@ -42380,6 +42943,9 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         CConditionalOperator assignment_operation = C_CONDITIONAL_OPERATOR_COUNT;
         for (u32 index = start; index < end && assignment == end; index += 1)
         {
+#if BUSTER_INCLUDE_TESTS
+            c_assignment_lower_work += 1;
+#endif
             CToken token = builder->preprocess.tokens[index];
             CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
             if (scan == C_IR_GROUP_SCAN_UNCLOSED)
@@ -42473,6 +43039,10 @@ struct CIrBodyTask
     CScopeId continue_scope;
     u32 break_token;
     u32 continue_token;
+    // A loop record plus one (c_ir_ssa_loop_record) whose block window this
+    // task opens when it starts, or closes: the task after the loop.
+    u32 ssa_loop_open;
+    u32 ssa_loop_close;
     bool allow_trailing_expression;
     bool restore_before_continuation;
     // A loop body: when a variably modified declaration inside it takes a
@@ -43581,6 +44151,48 @@ BUSTER_C_INTERNAL u32 c_ir_statement_labels_end(CPreprocessResult preprocess, u3
     return result;
 }
 
+// The memoized extent of the statement whose first token (past its labels) is
+// `statement`, as filed by c_ir_statement_end_store, or UINT32_MAX when it is
+// unmeasured or does not fit before `end`. A filed extent was measured by a
+// walk that read no token at or past it, so the same walk under any bound at or
+// past it measures the same statement. A shorter bound refuses the entry and
+// walks, which keeps such a query's answer exactly what the walk alone gives.
+BUSTER_C_INTERNAL u32 c_ir_statement_end_find(CIntegerIrBuilder* builder, u32 statement, u32 end)
+{
+    u32 result = UINT32_MAX;
+    if (builder->statement_ends_cleared && statement >= builder->body_token_start && statement - builder->body_token_start < builder->body_token_count)
+    {
+        u32 stored = builder->statement_ends_plus_one[statement - builder->body_token_start] - 1;
+        result = stored <= end ? stored : UINT32_MAX;
+    }
+
+    return result;
+}
+
+BUSTER_C_INTERNAL void c_ir_statement_end_store(CIntegerIrBuilder* builder, u32 statement, u32 statement_end)
+{
+    if (builder->statement_ends_plus_one && statement >= builder->body_token_start && statement - builder->body_token_start < builder->body_token_count)
+    {
+        if (!builder->statement_ends_cleared)
+        {
+            memset(builder->statement_ends_plus_one, 0, sizeof(u32) * (u64)builder->body_token_count);
+            builder->statement_ends_cleared = true;
+        }
+        builder->statement_ends_plus_one[statement - builder->body_token_start] = statement_end + 1;
+    }
+}
+
+// An `if` is filed only when its chain ended strictly before the bound it was
+// measured against: the walk then saw the token past it and found no `else`.
+// At the bound it never looked, and a longer bound might find one.
+BUSTER_C_INTERNAL void c_ir_statement_end_file(CIntegerIrBuilder* builder, u32 if_start, u32 if_end, u32 end)
+{
+    if (if_end < end)
+    {
+        c_ir_statement_end_store(builder, if_start, if_end);
+    }
+}
+
 // One statement's extent, as far as it can be measured without looking at the
 // statement's own substatements. `if` is the one form whose extent depends on
 // a chain of them -- an `else` picks up where the then-substatement ended --
@@ -43612,7 +44224,40 @@ struct CIrStatementSpan
     bool valid;
 };
 
-BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builder, u32 start, u32 end)
+// The headers c_ir_statement_span peeled on its way to the statement it
+// measured: each one's keyword token and the `do` headers peeled before it.
+// Each peeled header is a statement of its own. It ends where the measured
+// statement does, plus the tails of the `do` headers at or after it, so once
+// that end is known c_ir_statement_peels_file files all of them, and a
+// brace-less nest `while (c) while (c) ... x;` is peeled once in total instead
+// of once per enclosing loop (#2676). `starts` and `do_before` are allocated
+// from `arena` at the first peel, with one entry per token of the measured
+// range (`capacity`), since every peel takes at least one: a statement that
+// peels nothing, which is most of them, allocates nothing.
+typedef struct CIrStatementPeels CIrStatementPeels;
+struct CIrStatementPeels
+{
+    Arena* arena;
+    u32* starts;
+    u32* do_before;
+    u32 count;
+    u32 capacity;
+};
+
+BUSTER_C_INTERNAL void c_ir_statement_peels_push(CIrStatementPeels* peels, u32 start, u32 do_before)
+{
+    IR_CONSTRUCTION_RECORD(C_STATEMENT_EXTENT_PEELS, 1);
+    if (!peels->starts)
+    {
+        peels->starts = arena_allocate(peels->arena, u32, peels->capacity);
+        peels->do_before = arena_allocate(peels->arena, u32, peels->capacity);
+    }
+    peels->starts[peels->count] = start;
+    peels->do_before[peels->count] = do_before;
+    peels->count += 1;
+}
+
+BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builder, u32 start, u32 end, CIrStatementPeels* peels)
 {
     CPreprocessResult preprocess = builder->preprocess;
     IR_CONSTRUCTION_RECORD(C_STATEMENT_EXTENT_SPANS, 1);
@@ -43620,6 +44265,7 @@ BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builde
         .end = UINT32_MAX,
         .if_start = UINT32_MAX,
     };
+    peels->count = 0;
     u32 cursor = start;
     bool measured = false;
     while (!measured && cursor < end)
@@ -43629,6 +44275,16 @@ BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builde
         cursor = c_ir_statement_labels_end(preprocess, cursor, end);
         if (cursor >= end)
         {
+            measured = true;
+            continue;
+        }
+        // A statement already measured ends where it was filed, whatever it
+        // holds; the `do` headers peeled before it still owe their tails.
+        u32 known = c_ir_statement_end_find(builder, cursor, end);
+        if (known != UINT32_MAX)
+        {
+            span.end = known;
+            span.valid = true;
             measured = true;
             continue;
         }
@@ -43654,6 +44310,7 @@ BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builde
         }
         if (c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_DO))
         {
+            c_ir_statement_peels_push(peels, cursor, span.pending_do);
             span.pending_do += 1;
             cursor += 1;
             continue;
@@ -43675,6 +44332,7 @@ BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builde
             measured = true;
             continue;
         }
+        c_ir_statement_peels_push(peels, cursor, span.pending_do);
         cursor = header_close + 1;
     }
     u32 parentheses = 0;
@@ -43751,47 +44409,38 @@ BUSTER_C_INTERNAL u32 c_ir_statement_do_tail_end(CPreprocessResult preprocess, u
     return result;
 }
 
-// The memoized extent of the `if` statement whose keyword is `if_start`, as
-// filed by c_ir_statement_end_file, or UINT32_MAX when it is unmeasured or
-// does not fit before `end`. Only an extent that ended strictly before the
-// bound it was measured against is filed: the walk then saw the token past it
-// and found no `else`, and every token it read lies before that extent, so the
-// same walk under any bound at or past it measures the same statement. A
-// shorter bound refuses the entry and walks, which keeps such a query's
-// answer exactly what the walk alone would give.
-BUSTER_C_INTERNAL u32 c_ir_statement_end_find(CIntegerIrBuilder* builder, u32 if_start, u32 end)
+// Files every header a span peeled, given where the statement it measured
+// ends. The header that peeled k `do` headers before it ends past the tails of
+// the `pending_do - k` innermost ones, which the statement writes innermost
+// first, so the walk out from the innermost header consumes them in order.
+// The caller only passes an end no token at or past which was read: a span that
+// ended on its own, or an `if` chain that ended strictly before its bound.
+BUSTER_C_INTERNAL void c_ir_statement_peels_file(CIntegerIrBuilder* builder, CIrStatementPeels const* peels, u32 inner_end, u32 pending_do,
+                                                 u32 end)
 {
-    u32 result = UINT32_MAX;
-    if (builder->statement_ends_cleared && if_start >= builder->body_token_start && if_start - builder->body_token_start < builder->body_token_count)
+    u32 statement_end = inner_end;
+    u32 tails = 0;
+    for (u32 index = peels->count; index > 0 && statement_end != UINT32_MAX; index -= 1)
     {
-        u32 stored = builder->statement_ends_plus_one[if_start - builder->body_token_start] - 1;
-        result = stored <= end ? stored : UINT32_MAX;
-    }
-
-    return result;
-}
-
-BUSTER_C_INTERNAL void c_ir_statement_end_file(CIntegerIrBuilder* builder, u32 if_start, u32 if_end, u32 end)
-{
-    if (builder->statement_ends_plus_one && if_end < end && if_start >= builder->body_token_start &&
-        if_start - builder->body_token_start < builder->body_token_count)
-    {
-        if (!builder->statement_ends_cleared)
+        u32 peel = index - 1;
+        u32 owed = pending_do - peels->do_before[peel];
+        statement_end = c_ir_statement_do_tail_end(builder->preprocess, statement_end, end, owed - tails);
+        tails = owed;
+        if (statement_end != UINT32_MAX)
         {
-            memset(builder->statement_ends_plus_one, 0, sizeof(u32) * (u64)builder->body_token_count);
-            builder->statement_ends_cleared = true;
+            c_ir_statement_end_store(builder, peels->starts[peel], statement_end);
         }
-        builder->statement_ends_plus_one[if_start - builder->body_token_start] = if_end + 1;
     }
 }
 
 // One past the whole statement at `start`. Only `if` needs a stack: its extent
 // is its else-chain's, and each arm is a statement in its own right, so the
 // arms are walked with explicit frames rather than by recursing. Every `if`
-// the walk completes is filed (c_ir_statement_end_file), and an `if` already
-// filed is not walked again, so lowering an `else if` chain or a brace-less
-// nest of `if`s, which asks for each link's extent in turn, walks each link
-// once in total instead of once per enclosing link.
+// the walk completes is filed (c_ir_statement_end_file), and so is every loop,
+// `switch` and `do` header a span peeled (c_ir_statement_peels_file). A
+// statement already filed is not walked again, so lowering an `else if` chain
+// or a brace-less nest of `if`s or loops, which asks for each link's extent in
+// turn, walks each link once in total instead of once per enclosing link.
 BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     typedef struct CIfEndFrame CIfEndFrame;
@@ -43804,18 +44453,32 @@ BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CIntegerIrBuilder* builde
     };
     CPreprocessResult preprocess = builder->preprocess;
     u32 completed = UINT32_MAX;
-    CIrStatementSpan span = start < end ? c_ir_statement_span(builder, start, end) : (CIrStatementSpan){.end = UINT32_MAX, .if_start = UINT32_MAX};
+    // The arm spans of the walk below share the second set of peels.
+    u32 peel_capacity = start < end ? end - start : 1;
+    CIrStatementPeels peels = {
+        .arena = arena,
+        .capacity = peel_capacity,
+    };
+    CIrStatementPeels arm_peels = {
+        .arena = arena,
+        .capacity = peel_capacity,
+    };
+    CIrStatementSpan span =
+        start < end ? c_ir_statement_span(builder, start, end, &peels) : (CIrStatementSpan){.end = UINT32_MAX, .if_start = UINT32_MAX};
     u32 known_if_end = span.valid && span.if_start != UINT32_MAX ? c_ir_statement_end_find(builder, span.if_start, end) : UINT32_MAX;
     if (span.valid && span.if_start == UINT32_MAX)
     {
         completed = c_ir_statement_do_tail_end(preprocess, span.end, end, span.pending_do);
+        c_ir_statement_peels_file(builder, &peels, span.end, span.pending_do, end);
     }
     else if (known_if_end != UINT32_MAX)
     {
         completed = c_ir_statement_do_tail_end(preprocess, known_if_end, end, span.pending_do);
+        c_ir_statement_peels_file(builder, &peels, known_if_end, span.pending_do, end);
     }
     else if (span.valid)
     {
+        u32 outer_if_end = UINT32_MAX;
         CIfEndFrame* frames = arena_allocate(arena, CIfEndFrame, end - start + 1);
         u32 frame_count = 1;
         bool failed = false;
@@ -43862,6 +44525,7 @@ BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CIntegerIrBuilder* builde
                 c_ir_statement_end_file(builder, frame->start, if_end, end);
                 completed = c_ir_statement_do_tail_end(preprocess, if_end, end, frame->pending_do);
                 failed = completed == UINT32_MAX;
+                outer_if_end = frame_count == 1 ? if_end : outer_if_end;
                 frame_count -= 1;
                 if (frame_count && !failed)
                 {
@@ -43872,7 +44536,7 @@ BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CIntegerIrBuilder* builde
             {
                 continue;
             }
-            CIrStatementSpan child = c_ir_statement_span(builder, child_start, end);
+            CIrStatementSpan child = c_ir_statement_span(builder, child_start, end, &arm_peels);
             u32 child_if_end = child.valid && child.if_start != UINT32_MAX ? c_ir_statement_end_find(builder, child.if_start, end) : UINT32_MAX;
             if (!child.valid)
             {
@@ -43887,12 +44551,20 @@ BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CIntegerIrBuilder* builde
             }
             else
             {
-                u32 child_end = c_ir_statement_do_tail_end(preprocess, child.if_start != UINT32_MAX ? child_if_end : child.end, end, child.pending_do);
+                u32 child_inner_end = child.if_start != UINT32_MAX ? child_if_end : child.end;
+                u32 child_end = c_ir_statement_do_tail_end(preprocess, child_inner_end, end, child.pending_do);
                 failed = child_end == UINT32_MAX || child_end <= child_start;
                 frame->child_end = child_end;
+                c_ir_statement_peels_file(builder, &arm_peels, child_inner_end, child.pending_do, end);
             }
         }
         completed = failed ? UINT32_MAX : completed;
+        // The headers peeled before the outermost `if` end with its chain, on
+        // the same condition as the `if` itself is filed.
+        if (!failed && outer_if_end < end)
+        {
+            c_ir_statement_peels_file(builder, &peels, outer_if_end, span.pending_do, end);
+        }
     }
 
     return completed;
@@ -47642,6 +48314,32 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_finish_vla_declaration(CIntegerIrBuilder*
      C_SYMBOL_WELL_KNOWN_BIT(DEFAULT) | C_SYMBOL_WELL_KNOWN_BIT(DO) | C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(GOTO) |       \
      C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) |    \
      C_SYMBOL_WELL_KNOWN_BIT(STATIC_ASSERT) | C_IR_ASM_KEYWORD_SET)
+#if BUSTER_INCLUDE_TESTS
+// Typedef probes the statement walker has made of first tokens on this
+// thread, for the regression c_test_statement_keyword_typedef_probes.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_ir_first_token_typedef_probe_total;
+
+u64 c_test_ir_first_token_typedef_probes(void)
+{
+    return c_ir_first_token_typedef_probe_total;
+}
+#define C_IR_FIRST_TOKEN_TYPEDEF_PROBE() (c_ir_first_token_typedef_probe_total += 1)
+#else
+#define C_IR_FIRST_TOKEN_TYPEDEF_PROBE() ((void)0)
+#endif
+
+// The statement keywords that are keywords in every dialect: never a type
+// word and never an entity's name, so the typedef probe below always answers
+// false for them. STATIC_ASSERT is the reserved `_Static_assert` (C23's
+// `static_assert` is respelled to it; an older dialect's keeps its own
+// symbol), and ASM_GNU and ASM_GNU_ALT are the reserved `__asm` and
+// `__asm__`. Plain `asm` is left out: outside the GNU dialects it is an
+// ordinary identifier, and may name a typedef.
+#define C_IR_STATEMENT_ONLY_KEYWORD_SET                                                                                                    \
+    (C_SYMBOL_WELL_KNOWN_BIT(BREAK) | C_SYMBOL_WELL_KNOWN_BIT(CASE) | C_SYMBOL_WELL_KNOWN_BIT(CONTINUE) |                                  \
+     C_SYMBOL_WELL_KNOWN_BIT(DEFAULT) | C_SYMBOL_WELL_KNOWN_BIT(DO) | C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(GOTO) |       \
+     C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) |    \
+     C_SYMBOL_WELL_KNOWN_BIT(STATIC_ASSERT) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU_ALT))
 
 BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
 {
@@ -48030,6 +48728,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             {
                 return false;
             }
+            c_ir_ssa_loop_open(builder, task.ssa_loop_open);
+            c_ir_ssa_loop_close(builder, task.ssa_loop_close);
             if (task.kind == C_IR_BODY_TASK_CONDITION)
             {
                 state->task_count = task_count;
@@ -48179,16 +48879,32 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 first_entity.value < builder->parse.entity_count && builder->parse.entities[first_entity.value].kind == C_ENTITY_TYPEDEF;
             // An unbound prefix reads the token's own lexical scope, but a
             // declarator is not visible before itself: `for (T T = 0; ...)`
-            // still starts with the outer typedef name.
+            // still starts with the outer typedef name. A statement keyword
+            // is never a typedef name, so it skips the lookup; on the
+            // self-host they are four in five of the unbound first tokens
+            // (GitHub #3102).
             bool first_is_unbound_typedef_name = false;
-            if (first.kind == C_TOKEN_IDENTIFIER && first_entity.value == C_ID_UNDERLYING_INVALID)
+            bool first_is_statement_keyword = first.kind == C_TOKEN_IDENTIFIER &&
+                                              c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_STATEMENT_ONLY_KEYWORD_SET);
+            if (first.kind == C_TOKEN_IDENTIFIER && first_entity.value == C_ID_UNDERLYING_INVALID && !first_is_statement_keyword)
             {
+                C_IR_FIRST_TOKEN_TYPEDEF_PROBE();
                 CScopeId token_scope = c_ir_scope_for_token(builder, index);
                 CEntityId visible = c_parse_lookup_entity_at_token(&builder->parse, builder->preprocess, token_scope, index);
                 first_is_unbound_typedef_name = visible.value < builder->parse.entity_count
                                                     ? builder->parse.entities[visible.value].kind == C_ENTITY_TYPEDEF
                                                     : c_parse_type_start_token(&builder->parse, builder->preprocess, C_SCOPE_ID_INVALID, first);
             }
+#if BUSTER_REFERENCE_CHECKS
+            // The lookup the gate skips, kept as the reference: a Debug or
+            // sanitized build checks that it answers false for every gated keyword.
+            if (first_is_statement_keyword && first_entity.value == C_ID_UNDERLYING_INVALID)
+            {
+                CEntityId visible = c_parse_lookup_entity_at_token(&builder->parse, builder->preprocess, c_ir_scope_for_token(builder, index), index);
+                BUSTER_CHECK(visible.value >= builder->parse.entity_count &&
+                             !c_parse_type_start_token(&builder->parse, builder->preprocess, C_SCOPE_ID_INVALID, first));
+            }
+#endif
             if (c_ir_named_label_at(&builder->preprocess, task.start, index, task.end) &&
                 c_parse_label_candidate_at(&builder->parse, &builder->preprocess, task.start, index))
             {
@@ -48609,6 +49325,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     return false;
                 }
+                u32 loop = c_ir_ssa_loop_record(builder, body_block, condition_block, condition_block);
+                c_ir_ssa_loop_open(builder, loop);
                 tasks[task_count++] = (CIrBodyTask){
                     .start = condition_close + 2,
                     .end = task.end,
@@ -48616,6 +49334,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .continuation = task.continuation,
                     .break_block = task.break_block,
                     .continue_block = task.continue_block,
+                    .ssa_loop_close = loop,
                 };
                 c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
                 tasks[task_count++] = (CIrBodyTask){
@@ -48704,6 +49423,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     return false;
                 }
+                // The window opens with the condition task, after the
+                // initializer has lowered into the blocks that enter the loop.
+                u32 loop = c_ir_ssa_loop_record(builder, condition_block, body_block, increment_block);
                 tasks[task_count++] = (CIrBodyTask){
                     .start = after_body,
                     .end = task.end,
@@ -48711,6 +49433,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .continuation = task.continuation,
                     .break_block = task.break_block,
                     .continue_block = task.continue_block,
+                    .ssa_loop_close = loop,
                 };
                 c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
                 if (increment_block.value != condition_block.value)
@@ -48743,6 +49466,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .block = condition_block,
                     .true_block = body_block,
                     .false_block = exit_block,
+                    .ssa_loop_open = loop,
                 };
                 if (index + 2 < separators[0])
                 {
@@ -48794,6 +49518,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     return false;
                 }
+                u32 loop = c_ir_ssa_loop_record(builder, condition_block, body_block, body_block);
+                c_ir_ssa_loop_open(builder, loop);
                 IrSourceRange condition_source = c_ir_token_source_range(builder, first);
                 tasks[task_count++] = (CIrBodyTask){
                     .start = after_body,
@@ -48802,6 +49528,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .continuation = task.continuation,
                     .break_block = task.break_block,
                     .continue_block = task.continue_block,
+                    .ssa_loop_close = loop,
                 };
                 c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
                 tasks[task_count++] = (CIrBodyTask){
@@ -52679,7 +53406,10 @@ BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIr
             }
         }
     }
-    if (expression_type.value == IR_ID_UNDERLYING_INVALID)
+    // A braced list is an initializer, not an expression with a type: an
+    // element inside it never makes the list an aggregate value.
+    if (expression_type.value == IR_ID_UNDERLYING_INVALID &&
+        !(start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE)))
     {
         expression_type = c_ir_predict_expression_type(builder, start, end);
     }
@@ -57358,6 +58088,13 @@ BUSTER_C_INTERNAL CIrConstantValue c_ir_constant_float_special(IrType const* typ
     return result;
 }
 
+// The positive infinity or default quiet NaN a special-float math builtin
+// names, encoded in `type`'s own format.
+BUSTER_C_SHARED CIrConstantValue c_ir_constant_math_special(IrType const* type, CMathSpecial special)
+{
+    return c_ir_constant_float_special(type, false, special == C_MATH_SPECIAL_QUIET_NAN ? C_IR_FLOAT_NAN : C_IR_FLOAT_INFINITY);
+}
+
 // Round a rational once to binary128's 113 significant bits.  Division needs
 // two quotient limbs, not a host __float128 or an intervening x87/f64 value.
 BUSTER_C_INTERNAL u8 c_ir_ieee128_from_rational(CIrExt80Big const* numerator, CIrExt80Big const* denominator, s32 binary_exponent,
@@ -59888,9 +60625,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
             // the emitter that already knows the bits.
             if (token.kind == C_TOKEN_IDENTIFIER && index + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
-                String8 math_link_name = c_ir_math_builtin_link_name(c_token_spelling(builder->preprocess.spelling_base, token));
-                bool quiet_nan = string_equal(math_link_name, S8("nan")) || string_equal(math_link_name, S8("nanf"));
-                bool infinity = string_equal(math_link_name, S8("inff")) || string_equal(math_link_name, S8("huge_val"));
+                CMathSpecialValue special = c_semantic_math_special_value(c_ir_math_builtin_link_name(c_token_spelling(builder->preprocess.spelling_base, token)));
+                bool quiet_nan = special.special == C_MATH_SPECIAL_QUIET_NAN;
+                bool infinity = special.special == C_MATH_SPECIAL_INFINITY;
                 if (quiet_nan || infinity)
                 {
                     u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
@@ -59909,29 +60646,12 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                     {
                         return false;
                     }
-                    bool single = string_equal(math_link_name, S8("nanf")) || string_equal(math_link_name, S8("inff"));
-                    f64 floating = 0.0;
-                    if (single)
-                    {
-                        f32 narrowed = 0.0f;
-                        u32 bits = infinity ? UINT32_C(0x7f800000) : UINT32_C(0x7fc00000);
-                        memcpy(&narrowed, &bits, sizeof(narrowed));
-                        floating = (f64)narrowed;
-                    }
-                    else
-                    {
-                        u64 bits = infinity ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7ff8000000000000);
-                        memcpy(&floating, &bits, sizeof(floating));
-                    }
-                    if (value_count >= capacity)
+                    IrType const* special_type = ir_type_from_id(&builder->program->types, c_ir_builder_scalar_type(builder, special.kind));
+                    if (value_count >= capacity || !special_type || special_type->kind != IR_TYPE_FLOAT)
                     {
                         return false;
                     }
-                    values[value_count++] = (CIrConstantValue){
-                        .type = single ? builder->f32_type : builder->f64_type,
-                        .floating = floating,
-                        .kind = C_IR_CONSTANT_FLOAT,
-                    };
+                    values[value_count++] = c_ir_constant_math_special(special_type, special.special);
                     expect_operand = false;
                     index = close;
                     continue;
@@ -61438,8 +62158,8 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* buil
                 {
                     // The operand is an expression, not a type name. Resolve it
                     // through the sizeof query only: the type-prediction query
-                    // guesses int for anything it cannot resolve yet, and a
-                    // guessed size folded into an array bound lays the global
+                    // once guessed int for anything it could not resolve, and a
+                    // guessed size folded into an array bound laid the global
                     // out too small (the stage-1 stray-global-write incident of
                     // 2026-08-08). Failing here re-queues the bound for a later
                     // type-mapping pass instead.
@@ -61753,6 +62473,132 @@ BUSTER_C_INTERNAL bool c_ir_type_mapping_pending(CParseResult* parse, IrProgram*
         return !mapped || !mapped->layout.resolved;
     }
     return false;
+}
+
+// The mapping passes' retry list (#3312). An attempt that leaves its type
+// pending because a type it needs is unmapped or has no layout yet waits on
+// that type, and is retried as soon as an attempt of that type maps it or
+// completes its layout, before the pass moves on. Without it a type listed
+// before what it needs -- an aggregate before the array type of its member --
+// advanced one link per pass, so a chain of D links took D passes over the
+// worklist and re-evaluated every waiting array's bound on each.
+#define C_IR_TYPE_MAPPING_FREE 0
+#define C_IR_TYPE_MAPPING_WAITING 1
+#define C_IR_TYPE_MAPPING_READY 2
+
+typedef struct CIrTypeMappingWaits CIrTypeMappingWaits;
+struct CIrTypeMappingWaits
+{
+    // By C type id: the head of the chain of types waiting on it and the next
+    // link, each plus one, and the waiting state.
+    u32* head;
+    u32* next;
+    u8* state;
+    u32* ready;
+    u32 ready_count;
+    u64 attempts;
+    // The type being attempted, and its mapping and layout state before it.
+    u32 current;
+    IrTypeId current_map;
+    bool current_resolved;
+};
+
+BUSTER_C_INTERNAL bool c_ir_type_mapping_layout_resolved(IrProgram* program, IrTypeId type)
+{
+    IrType* mapped = type.value == IR_ID_UNDERLYING_INVALID ? 0 : ir_type_from_id(&program->types, type);
+    return mapped && mapped->layout.resolved;
+}
+
+// The first type a pending attempt of `type_index` still needs, by the branch
+// it takes, or UINT32_MAX when none is unmapped or unlaid. An element a
+// pointer names only needs a mapping.
+BUSTER_C_INTERNAL u32 c_ir_type_mapping_blocker(CParseResult* parse, IrProgram* program, IrTypeId* c_type_ir_map, u32 type_index)
+{
+    CType* c_type = &parse->types[type_index];
+    u32 result = UINT32_MAX;
+    if (c_type->has_unqualified_type || c_type->kind == C_TYPE_POINTER || c_type->kind == C_TYPE_ARRAY || c_type->kind == C_TYPE_VECTOR)
+    {
+        u32 needed = c_type->has_unqualified_type ? c_type->unqualified_type.value : c_type->element_type.value;
+        if (needed < parse->type_count &&
+            (c_type_ir_map[needed].value == IR_ID_UNDERLYING_INVALID ||
+             (c_type->kind != C_TYPE_POINTER && !c_ir_type_mapping_layout_resolved(program, c_type_ir_map[needed]))))
+        {
+            result = needed;
+        }
+    }
+    else if (c_type->kind == C_TYPE_STRUCT || c_type->kind == C_TYPE_UNION)
+    {
+        for (u32 member_index = 0; member_index < c_type->member_count && result == UINT32_MAX; member_index += 1)
+        {
+            u32 member_type = parse->members[c_type->member_start + member_index].type.value;
+            if (member_type < parse->type_count && !c_ir_type_mapping_layout_resolved(program, c_type_ir_map[member_type]))
+            {
+                result = member_type;
+            }
+        }
+    }
+    return result != type_index ? result : UINT32_MAX;
+}
+
+// Settles the attempt that just ended, then returns the next type to attempt:
+// a ready one first, otherwise the worklist from `*position`, or UINT32_MAX at
+// the end of the pass. An attempt that changed its type's mapping or layout
+// readies the types waiting on it; one that left its type pending waits on its
+// blocker. A retry only moves earlier an attempt the next pass would make.
+BUSTER_C_INTERNAL u32 c_ir_type_mapping_next(CIrTypeMappingWaits* waits, CParseResult* parse, IrProgram* program, IrTypeId* c_type_ir_map, u32 const* worklist,
+                                             u32 worklist_count, u32* position)
+{
+    u32 current = waits->current;
+    if (current != UINT32_MAX)
+    {
+        if ((c_type_ir_map[current].value != waits->current_map.value ||
+             c_ir_type_mapping_layout_resolved(program, c_type_ir_map[current]) != waits->current_resolved))
+        {
+            u32 link = waits->head[current];
+            waits->head[current] = 0;
+            while (link)
+            {
+                u32 waiter = link - 1;
+                link = waits->next[waiter];
+                waits->state[waiter] = C_IR_TYPE_MAPPING_READY;
+                waits->ready[waits->ready_count++] = waiter;
+            }
+        }
+        if (waits->state[current] == C_IR_TYPE_MAPPING_FREE && c_ir_type_mapping_pending(parse, program, c_type_ir_map, current))
+        {
+            u32 blocker = c_ir_type_mapping_blocker(parse, program, c_type_ir_map, current);
+            if (blocker != UINT32_MAX)
+            {
+                waits->state[current] = C_IR_TYPE_MAPPING_WAITING;
+                waits->next[current] = waits->head[blocker];
+                waits->head[blocker] = current + 1;
+            }
+        }
+    }
+    u32 result = UINT32_MAX;
+    while (result == UINT32_MAX && waits->ready_count)
+    {
+        waits->ready_count -= 1;
+        u32 type_index = waits->ready[waits->ready_count];
+        waits->state[type_index] = C_IR_TYPE_MAPPING_FREE;
+        if (c_ir_type_mapping_pending(parse, program, c_type_ir_map, type_index))
+        {
+            result = type_index;
+        }
+    }
+    if (result == UINT32_MAX && *position < worklist_count)
+    {
+        result = worklist[*position];
+        *position += 1;
+    }
+    waits->current = result;
+    if (result != UINT32_MAX)
+    {
+        waits->attempts += 1;
+        waits->current_map = c_type_ir_map[result];
+        waits->current_resolved = c_ir_type_mapping_layout_resolved(program, c_type_ir_map[result]);
+    }
+    return result;
 }
 
 // A function's construction rows are sized before its body is lowered, from
@@ -62123,7 +62969,11 @@ BUSTER_C_INTERNAL bool c_ir_function_scratch_tail_reservation(u64* position, u64
                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaSlot), rows * 2, BUSTER_ALIGN_OF(CIrSsaSlot)) &&
                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaParameter), lowering_capacity, BUSTER_ALIGN_OF(CIrSsaParameter)) &&
                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(u32), lowering_capacity * 24, BUSTER_ALIGN_OF(u32)) &&
-               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(void*), lowering_capacity * 2, BUSTER_ALIGN_OF(void*));
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(void*), lowering_capacity * 2, BUSTER_ALIGN_OF(void*)) &&
+               // Loop records (one per loop keyword, doubling) and the
+               // per-block, per-local and per-write rows c_ir_ssa_finish_loops carves.
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaLoop), body_capacity * 2, BUSTER_ALIGN_OF(CIrSsaLoop)) &&
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(u32), lowering_capacity * 8, BUSTER_ALIGN_OF(u32));
     }
     return fits;
 }
@@ -62614,6 +63464,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         }
     }
     u32* type_mapping_worklist = arena_allocate(temporary_arena, u32, parse.type_count);
+    CIrTypeMappingWaits type_mapping_waits = {
+        .head = arena_allocate(temporary_arena, u32, parse.type_count),
+        .next = arena_allocate(temporary_arena, u32, parse.type_count),
+        .state = arena_allocate(temporary_arena, u8, parse.type_count),
+        .ready = arena_allocate(temporary_arena, u32, parse.type_count),
+    };
     for (u32 type_mapping_round = 0; type_mapping_round < 2; type_mapping_round += 1)
     {
         // Rebuilt each round because c_ir_infer_incomplete_array_bounds below
@@ -62621,6 +63477,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         // array member.  Nothing inside the pass loop edits types or bounds.
         c_ir_collect_flexible_array_types(&parse, flexible_array_types);
         u32 type_mapping_worklist_count = 0;
+        memset(type_mapping_waits.head, 0, sizeof(*type_mapping_waits.head) * parse.type_count);
+        memset(type_mapping_waits.state, 0, sizeof(*type_mapping_waits.state) * parse.type_count);
         for (u32 type_index = 0; type_index < parse.type_count; type_index += 1)
         {
             if (c_ir_type_mapping_pending(&parse, program, c_type_ir_map, type_index))
@@ -62643,9 +63501,16 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                 kept_count += c_ir_type_mapping_pending(&parse, program, c_type_ir_map, kept_index);
             }
             type_mapping_worklist_count = kept_count;
-            for (u32 position = 0; position < type_mapping_worklist_count; position += 1)
+            u32 position = 0;
+            type_mapping_waits.current = UINT32_MAX;
+            // Every branch below leaves an attempt by `continue` or by
+            // falling through; c_ir_type_mapping_next settles it.
+            for (u32 type_index = c_ir_type_mapping_next(&type_mapping_waits, &parse, program, c_type_ir_map, type_mapping_worklist,
+                                                         type_mapping_worklist_count, &position);
+                 type_index != UINT32_MAX;
+                 type_index = c_ir_type_mapping_next(&type_mapping_waits, &parse, program, c_type_ir_map, type_mapping_worklist,
+                                                     type_mapping_worklist_count, &position))
             {
-                u32 type_index = type_mapping_worklist[position];
                 CType* c_type = &parse.types[type_index];
                 if (c_type->has_unqualified_type)
                 {
@@ -63370,6 +64235,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             }
         }
         constant_builder.sizeof_defers_unmapped_local_arrays = false;
+        result.type_mapping_attempts = type_mapping_waits.attempts;
         if (type_mapping_round == 0)
         {
             c_ir_infer_incomplete_array_bounds(&constant_builder, &result, arena, lowering_diagnostic_capacity);
@@ -64801,7 +65667,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u8), body_array_capacity, BUSTER_ALIGN_OF(u8)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrGroupFactsEntry), prepared_control_expression_capacity + 1,
                                           BUSTER_ALIGN_OF(CIrGroupFactsEntry)) &&
-            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity + 1, BUSTER_ALIGN_OF(u32)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrTokenPrefix), body_array_capacity + 1,
+                                          BUSTER_ALIGN_OF(CIrTokenPrefix)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32));
 #if BUSTER_REFERENCE_CHECKS
         u64 carve_end = position;
@@ -64983,7 +65850,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                  prepared_control_expression_capacity ? prepared_control_expression_capacity : 1);
         builder.group_facts = arena_allocate(lowering_temporary.arena, u8, body_array_capacity);
         builder.group_facts_stack = arena_allocate(lowering_temporary.arena, CIrGroupFactsEntry, prepared_control_expression_capacity + 1);
-        builder.question_prefix = arena_allocate(lowering_temporary.arena, u32, body_array_capacity + 1);
+        builder.token_prefix = arena_allocate(lowering_temporary.arena, CIrTokenPrefix, body_array_capacity + 1);
         builder.statement_ends_plus_one = arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
 #if BUSTER_REFERENCE_CHECKS
         // The carve above must end exactly where the preflight's carve list

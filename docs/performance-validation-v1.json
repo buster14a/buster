@@ -3,7 +3,7 @@
   "rule": "Every performance-validation test requires actual execution of its relevant workload on the approved Zen 5 benchmark host (AMD Ryzen 7 9700X). Without complete evidence matching the candidate, workload and configuration, performance validation is incomplete; hosted, simulated and static evidence is diagnostic.",
   "routes": {
     "main-compare": "9700x-direct-bench.yml job compare (every commit that lands on main, against its first parent or the nearest measured first-parent ancestor, #2752)",
-    "pull-compare": "9700x-direct-bench.yml job compare-pull (benchmarks/9700x/compiler-compare.request; compiler-compare-v1, throughput-corpus-v2, scaling-v1 or exact clang-analyze-full-v1/v2 opt-in, #2769)",
+    "pull-compare": "9700x-direct-bench.yml job compare-pull (benchmarks/9700x/compiler-compare.request; compiler-compare-v1, throughput-corpus-v2 (or throughput-corpus-historical-v1 for a pre-floor merge base, #3714), scaling-v1 or exact clang-analyze-full-v1/v2 opt-in, #2769)",
     "direct-workload": "9700x-direct-bench.yml job bench (benchmarks/9700x/*.c and *.data, #2704)",
     "sampling-qualification": "9700x-direct-bench.yml job sampling (disabled staged owner-fresh predeclared acquisition/pilot/confirm route; separate unqualified research check, #3212)"
   },
@@ -35,6 +35,17 @@
       "kind": "build-command",
       "validation": "performance",
       "measures": "#2761 fixed throughput-real-source-v1 on an owner request line: the base revision's bench_throughput run --real-source times the pinned cJSON 1.7.19, Lua 5.4.8 and SQLite 3.53.4 version-2 descriptors' compile_link_argv to a linked executable on the matched baseline/candidate binaries, FAST and QUALITY, two warmups and two rounds of 20 A/B pairs, on staged trees bound to pinned archive, descriptor and input-tree hashes; report-only with the guard off",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
+      "id": "build:bench_throughput@throughput-corpus-historical",
+      "kind": "build-command",
+      "validation": "performance",
+      "measures": "#3714 fixed throughput-corpus-historical-v1 on an owner request line, admitted only when hosted authorization finds the pull request's merge base predates the FAST/QUALITY harness floor 293132e4: tools/throughput at pinned main revision afe67cbe, built and run by that revision's bench_throughput in a detached worktree, times the throughput-corpus-v2 arguments and FAST/QUALITY population on the matched baseline/candidate binaries; report-only; it never discharges the v2 corpus row",
       "zen5": {
         "route": "pull-compare",
         "status": "covered",
@@ -248,6 +259,19 @@
         "consumer": "tools/bench_direct/compiler_publish.py",
         "profile": "wild-linker-v1",
         "request": "one exact fresh line, profile: wild-linker-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
+      }
+    },
+    {
+      "id": "tool:link_tls_bench.py",
+      "kind": "tool",
+      "validation": "performance",
+      "measures": "#1915 fixed link-tls-v1 on an owner request line: the trusted revision's link_tls_bench.py builds frozen TLS-heavy inputs (8192 to 32768 general-dynamic sites as object, -fno-plt object, archive and PIE cells, plus a no-TLS control) with the host clang, requires byte-identical images from the matched baseline and candidate ide binaries that print the frozen output, then times fresh ide cc link processes of both, 2 warmups and 20 alternating pairs per cell on CPU 2; report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "link-tls-v1",
+        "request": "one exact fresh line, profile: link-tls-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
       }
     },
     {
