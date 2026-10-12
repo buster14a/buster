@@ -1,0 +1,4 @@
+# Source-size acknowledgement; see docs/source-size.md.
+schema buster-source-size-ack-v1
+build 37034
+reason Pinned QEMU TCG census and immutable checkout/refusal controls (#3185, PR #3442); whole-project scheduling stays with the shared main-push owner.

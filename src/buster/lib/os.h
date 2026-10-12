@@ -426,6 +426,7 @@ BUSTER_F_DECL OsDirectoryCreateResult os_make_directory(String8 path);
 // umask). Existing names are reported as collisions without claiming ownership.
 BUSTER_F_DECL OsDirectoryCreateResult os_make_directory_exclusive(String8 path);
 // Creates one owner-only directory or accepts an existing directory.
+// Empty, null and embedded-NUL paths fail without attempting creation.
 BUSTER_F_DECL bool os_make_directory_attempt(String8 path);
 
 BUSTER_F_DECL bool os_file_delete(String8 path);
@@ -760,6 +761,11 @@ BUSTER_F_DECL bool os_commit_diagnose(void* address, u64 size, ProtectionFlags p
                                      OsCommitFailureContext* failure_context);
 BUSTER_F_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefault);
 BUSTER_F_DECL OsPrefaultResult os_prefault(void* address, u64 size);
+// Requests transparent huge pages for a reserved range. Advisory on every
+// target: refusal leaves the range usable. Explicit advice can increase RSS
+// and cause synchronous compaction even under an existing `always` policy.
+// It is a no-op where the target has no such facility.
+BUSTER_F_DECL void os_advise_huge_pages(void* address, u64 size);
 BUSTER_F_DECL bool os_protect(void* address, u64 size, ProtectionFlags protection);
 BUSTER_F_DECL bool os_decommit(void* address, u64 size);
 BUSTER_F_DECL bool os_unreserve(void* address, u64 size);

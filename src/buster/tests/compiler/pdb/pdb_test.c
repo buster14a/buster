@@ -1020,6 +1020,115 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_large_source_count(UnitTestArguments
     return result;
 }
 
+// Hand-authored keys give a numeric ordering oracle for the collision cases.
+// Repeating an eight-byte block cancels the XOR hash's four-byte chunks.
+BUSTER_GLOBAL_LOCAL String8 pdb_test_collision_name(Arena* arena, u32 key, bool upper)
+{
+    char8* bytes = arena_allocate(arena, char8, 16);
+    bytes[0] = upper ? 'F' : 'f';
+    for (u32 digit = 8; digit > 1; digit -= 1)
+    {
+        bytes[digit - 1] = (char8)('0' + key % 10);
+        key /= 10;
+    }
+    memcpy(bytes + 8, bytes, 8);
+    return (String8){.pointer = bytes, .length = 16};
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_gsi_sorting(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 counts[] = {0, 1, 15, 16, 17, 31, 257, 16000};
+    for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(counts) + 3; fixture += 1)
+    {
+        bool ascending = fixture == BUSTER_ARRAY_LENGTH(counts);
+        bool equal = fixture == BUSTER_ARRAY_LENGTH(counts) + 1;
+        bool distributed = fixture == BUSTER_ARRAY_LENGTH(counts) + 2;
+        u32 count = fixture < BUSTER_ARRAY_LENGTH(counts) ? counts[fixture] : distributed ? 257 : 16000;
+        String8* names = arena_allocate(arguments->arena, String8, count ? count : 1);
+        u32* order = arena_allocate(arguments->arena, u32, count ? count : 1);
+        u32* expected = arena_allocate(arguments->arena, u32, count ? count : 1);
+        u32 populations[4096] = {0};
+        for (u32 index = 0; index < count; index += 1)
+        {
+            u32 key = equal ? 0 : ascending ? index : count - index - 1;
+            names[index] = distributed ? string_format(arguments->arena, S8("symbol_{u32}_different"), key) :
+                                        pdb_test_collision_name(arguments->arena, key, (index & 1) != 0);
+            populations[pdb_test_hash_v1(names[index]) % 4096] += 1;
+            expected[index] = equal || ascending ? index : count - index - 1;
+        }
+        u32 present = 0;
+        for (u32 bucket = 0; bucket < BUSTER_ARRAY_LENGTH(populations); bucket += 1)
+        {
+            present += populations[bucket] != 0;
+        }
+        if (distributed)
+        {
+            // A small independent selection oracle orders (bucket, length,
+            // byte string); these ordinary names are lowercase ASCII.
+            for (u32 position = 0; position < count; position += 1)
+            {
+                u32 least = position;
+                for (u32 next = position + 1; next < count; next += 1)
+                {
+                    String8 left = names[expected[next]];
+                    String8 right = names[expected[least]];
+                    u32 a = pdb_test_hash_v1(left) % 4096;
+                    u32 b = pdb_test_hash_v1(right) % 4096;
+                    bool less = a < b || (a == b && (left.length < right.length ||
+                                (left.length == right.length && memcmp(left.pointer, right.pointer, left.length) < 0)));
+                    least = less ? next : least;
+                }
+                u32 swap = expected[position];
+                expected[position] = expected[least];
+                expected[least] = swap;
+            }
+        }
+        u64 comparisons = UINT64_MAX;
+        u32 observed = pdb_test_gsi_order(arguments->arena, (SliceString8){.pointer = names, .length = count}, order, &comparisons);
+        BUSTER_TEST(arguments, observed == present && (!count || memcmp(order, expected, (u64)count * sizeof(*order)) == 0));
+        u32 levels = 0;
+        for (u64 width = 1; width < count; width *= 2)
+        {
+            levels += 1;
+        }
+        u64 bound = (u64)count * BUSTER_MAX(levels, 16u);
+        BUSTER_TEST(arguments, comparisons <= bound);
+        BUSTER_TEST(arguments, distributed ? present > 32 : present == (count != 0));
+        if (count == 16000)
+        {
+            arguments->show(arguments, S8("PDB_GSI_ORDER count={u32} ascending={u32} equal={u32} comparisons={u64} bound={u64}\n"),
+                            count, (u32)ascending, (u32)equal, comparisons, bound);
+        }
+    }
+    // Length precedes name bytes; ASCII case ties and duplicate UTF-8 names
+    // retain their input record order across multiple merge runs.
+    String8 mixed[35];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(mixed); index += 1)
+    {
+        mixed[index] = index < 17 ? S8("zzzzzzzz") : S8("\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9");
+    }
+    u32 mixed_order[35];
+    u64 mixed_comparisons = 0;
+    pdb_test_gsi_order(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(mixed), mixed_order, &mixed_comparisons);
+    // Check stability independently of which of the two format buckets wins.
+    u32 previous[2] = {0};
+    bool seen[2] = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(mixed); index += 1)
+    {
+        u32 item = mixed_order[index];
+        if (BUSTER_REQUIRE(arguments, item < BUSTER_ARRAY_LENGTH(mixed)))
+        {
+            BUSTER_TEST(arguments, item == index);
+            u32 group = item >= 17;
+            BUSTER_TEST(arguments, !seen[group] || item > previous[group]);
+            previous[group] = item;
+            seen[group] = true;
+        }
+    }
+    return result;
+}
+
 // Bitwise reflected CRC-32, initial state zero and no final complement: an
 // independent restatement of the table-driven hash the PDB writer uses.
 BUSTER_GLOBAL_LOCAL u32 pdb_test_record_crc(u8 const* bytes, u64 length)
@@ -1085,6 +1194,83 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_dbghelp_consumer(UnitTestArguments* 
     (void)pdb;
     arguments->show(arguments, S8("PDB_DBGHELP status=unavailable reason=non-windows-host\n"));
 #endif
+    return result;
+}
+
+// Exercise both on-disk indexes, including equal ASCII keys separated by
+// other keys in the input. The numeric key and input ordinal are the oracle.
+BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_gsi_colliding_indexes(UnitTestArguments* arguments)
+{
+    enum { COUNT = 258, RECORD_SIZE = 32 };
+    UnitTestResult result = {0};
+    ByteWriter symbols = byte_writer_make(arena_allocate(arguments->arena, u8, 12 + COUNT * RECORD_SIZE), 12 + COUNT * RECORD_SIZE);
+    byte_writer_emit_u32_le(&symbols, 4);
+    byte_writer_emit_u32_le(&symbols, 0xf1);
+    byte_writer_emit_u32_le(&symbols, COUNT * RECORD_SIZE);
+    for (u32 index = 0; index < COUNT; index += 1)
+    {
+        // Two descending runs put each case-insensitive tie in another run.
+        u32 key = COUNT / 2 - 1 - index % (COUNT / 2);
+        String8 name = pdb_test_collision_name(arguments->arena, key, index >= COUNT / 2);
+        byte_writer_emit_u16_le(&symbols, RECORD_SIZE - 2);
+        byte_writer_emit_u16_le(&symbols, PDB_TEST_S_GDATA32);
+        byte_writer_emit_u32_le(&symbols, PDB_TEST_T_INT32);
+        byte_writer_emit_u32_le(&symbols, index * 4);
+        byte_writer_emit_u16_le(&symbols, 1);
+        byte_writer_emit_bytes(&symbols, name.pointer, name.length);
+        byte_writer_emit_zero(&symbols, 2);
+    }
+    PdbSection section = {.name = S8(".data"), .virtual_address = 0x1000, .virtual_size = COUNT * 4, .raw_size = COUNT * 4};
+    // Include a real type record so the Windows reader can load this PDB too.
+    String8 path = S8("colliding.c");
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4, .is_signed = true},
+        {.kind = DEBUG_TYPE_POINTER, .element_type = 0, .size = 8},
+    };
+    DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .valid = true};
+    CodeviewResult codeview = codeview_build(arguments->arena, (CodeviewInput){.model = &model, .file_paths = &path, .file_count = 1,
+        .machine = CODEVIEW_MACHINE_X64});
+    PdbModule module = {.name = S8("colliding.obj"), .codeview_symbols = {.pointer = symbols.bytes, .length = symbols.count},
+                        .codeview_types = codeview.types, .code_section = 1};
+    PdbInput input = {.module_name = S8("colliding.obj"), .codeview_symbols = {.pointer = symbols.bytes, .length = symbols.count},
+                      .sections = &section, .section_count = 1, .age = 1, .machine = 0x8664, .code_section = 1,
+                      .modules = &module, .module_count = 1};
+    BUSTER_TEST(arguments, !symbols.overflow && codeview.valid);
+    PdbResult built = pdb_build(arguments->arena, input);
+    PdbResult repeated = pdb_build(arguments->arena, input);
+    if (BUSTER_REQUIRE(arguments, built.valid && repeated.valid))
+    {
+        BUSTER_TEST(arguments, built.bytes.length == repeated.bytes.length && memcmp(built.bytes.pointer, repeated.bytes.pointer, built.bytes.length) == 0);
+        UnitTestResult consumer = pdb_test_dbghelp_consumer(arguments, built.bytes);
+        result.test_count += consumer.test_count;
+        result.succeeded_test_count += consumer.succeeded_test_count;
+        ByteSlice records = pdb_test_stream_bytes(arguments->arena, built.bytes, PDB_TEST_STREAM_SYMBOL_RECORDS);
+        for (u32 stream = PDB_TEST_STREAM_GLOBALS; stream <= PDB_TEST_STREAM_PUBLICS; stream += 1)
+        {
+            ByteSlice hash = pdb_test_stream_bytes(arguments->arena, built.bytes, stream);
+            if (stream == PDB_TEST_STREAM_PUBLICS && BUSTER_REQUIRE(arguments, hash.length >= 28))
+            {
+                hash = (ByteSlice){.pointer = hash.pointer + 28, .length = pdb_read_u32(hash, 0)};
+            }
+            u32 record_count = 0;
+            if (BUSTER_REQUIRE(arguments, pdb_test_check_gsi(hash, records, &record_count) && record_count == COUNT))
+            {
+                for (u32 index = 0; index < COUNT; index += 1)
+                {
+                    u32 ordinal = COUNT / 2 - 1 - index / 2 + (index % 2) * (COUNT / 2);
+                    u32 offset_plus_one = pdb_read_u32(hash, 16 + (u64)index * 8);
+                    u64 offset = offset_plus_one ? offset_plus_one - 1 : records.length;
+                    if (BUSTER_REQUIRE(arguments, offset + RECORD_SIZE <= records.length))
+                    {
+                        BUSTER_TEST(arguments, pdb_read_u32(records, offset + 8) == ordinal * 4);
+                        String8 name = pdb_test_record_name(records, (u32)offset);
+                        String8 expected = pdb_test_collision_name(arguments->arena, index / 2, ordinal >= COUNT / 2);
+                        BUSTER_TEST(arguments, name.length == expected.length && memcmp(name.pointer, expected.pointer, expected.length) == 0);
+                    }
+                }
+            }
+        }
+    }
     return result;
 }
 
@@ -1195,6 +1381,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_tpi_hashes(UnitTestArguments* argume
 UnitTestResult pdb_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = pdb_test_checksum_records(arguments);
+    UnitTestResult sorting = pdb_test_gsi_sorting(arguments);
+    result.test_count += sorting.test_count;
+    result.succeeded_test_count += sorting.succeeded_test_count;
+    UnitTestResult colliding = pdb_test_gsi_colliding_indexes(arguments);
+    result.test_count += colliding.test_count;
+    result.succeeded_test_count += colliding.succeeded_test_count;
     UnitTestResult hashes = pdb_test_tpi_hashes(arguments);
     result.test_count += hashes.test_count;
     result.succeeded_test_count += hashes.succeeded_test_count;
