@@ -3600,6 +3600,11 @@ struct CIntegerIrBuilder
     // row, for a chain that was never once non-empty.
     u32* prepared_call_token_heads;
     u32* prepared_call_token_next;
+#if BUSTER_REFERENCE_CHECKS
+    // Monotone across typeof replay: a removed parenthesized callee may
+    // leave this true, which only retains the full reference scan.
+    bool prepared_call_has_parenthesized_callee;
+#endif
     // Type-name probe answers per body token, indexed like
     // prepared_call_indices by the `(` that opens the probed group: 0 is
     // unprobed, 1 is "not a type name", anything else the IrTypeId plus two.
@@ -23479,16 +23484,43 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call(CIntegerIrBuilder* builder, u32 token
 // inner call by its first token follows that link outward before consuming.
 // A call still being emitted is its own callee's context and stays excluded,
 // which is what keeps the callee lowering consuming the inner value.
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_logical_call_reference_work;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_logical_call_reference_rows;
+u64 c_test_logical_call_reference_work(void)
+{
+    return c_logical_call_reference_work;
+}
+u64 c_test_logical_call_reference_rows(void)
+{
+    return c_logical_call_reference_rows;
+}
+#endif
+
 #if BUSTER_REFERENCE_CHECKS
 // The scan the chain replaces, kept as the reference: a Debug or sanitized
-// build checks every step of every walk against it.  It is not compiled into the Release
-// tree because that tree carries the tests (BUSTER_INCLUDE_TESTS=1) and
-// running the scan there would put back exactly the cost the chain removes.
+// build checks every step of every walk. An independent publication fact
+// proves negative lookups without a scan when no callee starts at '('.
+// The scan is not compiled into Release, even though that tree carries
+// tests (BUSTER_INCLUDE_TESTS=1), because it would restore the removed cost.
 BUSTER_C_INTERNAL void c_ir_prepared_call_chained_check(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 end, u32 answer)
 {
+    BUSTER_CHECK(call->open_index < builder->preprocess.token_count &&
+                 c_token_is_punctuator(&builder->preprocess.tokens[call->open_index], C_PUNCTUATOR_LEFT_PARENTHESIS));
     u32 reference = UINT32_MAX;
-    for (u32 index = 0; index < builder->prepared_call_count && reference == UINT32_MAX; index += 1)
+#if BUSTER_INCLUDE_TESTS
+    c_logical_call_reference_work += 1;
+#endif
+    // Every chain candidate keys on the source call's '(' token. If no
+    // published call ever started at '(', there can be no such candidate.
+    // This fact is recorded from publication, independently of the chain.
+    // Check every lookup; retain the full scan whenever the fact permits it.
+    for (u32 index = 0; builder->prepared_call_has_parenthesized_callee && index < builder->prepared_call_count && reference == UINT32_MAX; index += 1)
     {
+#if BUSTER_INCLUDE_TESTS
+        c_logical_call_reference_work += 1;
+        c_logical_call_reference_rows += 1;
+#endif
         CIrPreparedCall* candidate = builder->prepared_calls + index;
         if (candidate != call && candidate->token_index == call->open_index && candidate->close_index < end && !candidate->emitting)
         {
@@ -24695,6 +24727,10 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             .indirect = indirect,
             .parenthesized_callee = parenthesized_callee,
         };
+#if BUSTER_REFERENCE_CHECKS
+        builder->prepared_call_has_parenthesized_callee |=
+            c_token_is_punctuator(&builder->preprocess.tokens[callee_start], C_PUNCTUATOR_LEFT_PARENTHESIS);
+#endif
         if (parent_index != UINT32_MAX)
         {
             builder->prepared_calls[parent_index].last_child_index = prepared_call_index;
