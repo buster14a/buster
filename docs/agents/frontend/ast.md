@@ -1674,7 +1674,7 @@ differential tests pass.
 | `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, plain segments bound in one pass, and each block declarator's `,`, `=` and plain initializer. The token loop stays the engine, the default path and the per-body fallback; the type machine still reads specifiers and declarators from tokens (next row), and the switch and control-statement validators keep `c_parse_statement_end`, whose calls cost about 1 M instructions on the self-host. |
 | `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)), and so do the validators' plain type names; their runs where no type name begins are skipped ([type names](#type-names)). Tags, `typeof`, attributes, type names typed in machine frames, members and every declarator derivation stay with the machine. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
-| `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Controlled-body extents (`c_ir_controlled_body_range`, and through it `c_ir_statement_end*` and `c_ir_statement_labels_end`) are read under `-fc-ast-pilot` from the [extent table](#statement-extents-in-lowering). The walkers stay the default path and the per-body and per-query fallback. `c_ir_lower_body_advance`'s first-token classification is not migrated. |
+| `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Controlled-body extents (`c_ir_controlled_body_range`, and through it `c_ir_statement_end*` and `c_ir_statement_labels_end`) are read under `-fc-ast-pilot` from the [extent table](#statement-extents-in-lowering). The walkers stay the default path and the per-body and per-query fallback. `c_ir_lower_body_advance`'s first-token classification and the switch label scan stay on tokens: by census neither pays for a tree read ([keyword gate](#statement-keyword-gate-in-lowerings-classification)), and the classification skips its typedef probe for statement keywords instead. |
 | `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | `c_ir_root_conditional` is read under `-fc-ast-pilot` ([lowering from the tree](#lowering-from-the-tree)); the rest is not migrated. The evaluator's walk is designed in [Expression lowering from the tree](#expression-lowering-from-the-tree). Without the tree, `c_ir_root_conditional` refuses a body range that holds no `?` by a per-body prefix count (#3467). |
 | `c_ir_predict_expression_type*`, `c_ir_query_*` | type-name probes, operand types over token ranges | `TYPE_NAME` / `CAST` / `SIZEOF_*` nodes plus retained semantic facts | Not migrated. Only negative type-name answers are cheap to take from the tree, and an exact first-token gate removes most of those without it (audit [`2026-10-11T104652Z`](../../performance-audits/2026-10-11T104652Z.md)); the tree slice waits on that gate. |
 | `c_ir_build_delimiter_index`, `CTokenPositionIndex` matching delimiters | bracket matching for every structural query | subtree extents | Not migrated. Lowering's retirement plan is in [Delimiters (map row 8)](#delimiters-map-row-8). |
@@ -1711,6 +1711,12 @@ differential passes. The row is not retired, for three reasons:
   token;
 - `c_ir_control_substatement_position`, the switch's label scan, still reads
   tokens.
+
+Neither of the last two is planned for the tree. The census found that a
+tree read costs more than it replaces for both; the
+[keyword gate](#statement-keyword-gate-in-lowerings-classification) has the
+numbers. Retiring the row now waits on a token-to-node map, or on dropping the
+walkers as the default.
 
 Under `-fc-ast-pilot`, the third row's specifier machine no longer runs for a
 plain specifier run of a block declaration, a file-scope declaration or a
@@ -3356,5 +3362,25 @@ The base is main `b71dfc89`, which the candidate branches from. The budgets:
 - **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
   requested. The report-only main comparison runs after the merge, and Zen 5
   validation stays incomplete (#2761).
+
+The keyword gate's hosted census is
+[`2026-10-12T135905Z`](../../performance-audits/2026-10-12T135905Z.md), on
+candidate `51036154`, diagnostic only:
+- **Correctness passes.** The objects are byte-identical across the four
+  arms, at `-g0` and at `-g`. The reference-check builds found no
+  disagreement, `test_all` passes, and `test_self_host` keeps its fixed point.
+- **The compile falls by 23.57 M Ir on both paths.** That is −0.092% on the
+  default path and −0.099% under the pilot, which more than recovers the
+  extent table's +13.8 M. The gain is on the token path, not from the tree.
+- **The lookup budget is missed by 77.** The probe's scope lookups fall from
+  65,611 to 11,853, not to the declared 11,776. The census had counted `asm`
+  and `static_assert` as keywords, and the gate leaves those 77 tokens out
+  because it must stay exact.
+- **Neither tree read is built.**
+  - The switch label scan's call costs 0.22 M, which is under the 1 M bar.
+  - The classification's ceiling, net of the gate, is under 30 M. A
+    first-token table over its 155,771 statements would cost at least about
+    62 M at the extent table's per-entry cost.
+- Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
