@@ -738,3 +738,13 @@ grouped and lazy calls, and separate exactly-once callee/index/argument counters
 Canonical call counts and validation span six native layouts, GNU17/GNU23 and
 both frontend forms; native execution uses FAST and QUALITY on desktop hosts.
 Scalar callees, wrong arity and noninteger indexes remain rejected.
+
+## Builtin alloca conditional type
+
+The lowering type-only call resolver gives `__builtin_alloca(n)` its existing
+`void *` stack-allocation result before either conditional arm is emitted.
+Macro aliases such as glibc's `alloca` use the same builtin symbol. The result
+also supports unevaluated `sizeof` queries without evaluating the size operand.
+`c_test_conditional_alloca` covers both operand orders with `char *` and
+`void *`, both frontend forms, canonical validation, FAST/QUALITY execution,
+selected-arm effects and rejected pointer/floating controls.
