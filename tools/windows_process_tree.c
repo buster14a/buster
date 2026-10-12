@@ -11,6 +11,8 @@
 //   within the budget. Publish the command's status atomically; exit zero on
 //   certified normal completion, 124 on certified runtime timeout, or 125
 //   when lifecycle establishment, draining or publication fails.
+//   A fresh <status-path>.cancel file requests cancellation before launch or
+//   during the bounded payload wait; the launcher owns all teardown decisions.
 // - `drain <job-name> <budget-ms>` (Windows): terminate every member of the
 //   named job and wait for each one within the budget; print one record. The
 //   launcher is not a member; it exits once its command has ended.
@@ -51,6 +53,7 @@
 #define TREE_MEMBER_CAPACITY 4096
 #define TREE_COMMAND_CAPACITY 32768
 #define TREE_POLL_MILLISECONDS 10
+#define TREE_CONTROL_POLL_MILLISECONDS 25
 
 BUSTER_GLOBAL_LOCAL bool tree_decimal(char const* text, u64* output)
 {
@@ -329,6 +332,7 @@ typedef struct TreeLaunchStatus TreeLaunchStatus;
 struct TreeLaunchStatus
 {
     bool complete;
+    bool cancelled;
     bool runtime_timed_out;
     bool root_status_known;
     bool clock_valid;
@@ -392,6 +396,33 @@ BUSTER_GLOBAL_LOCAL u64 tree_clock_ns(TreeLaunchStatus* status)
     return result;
 }
 
+// The parent requests cancellation without racing creation/opening of the job.
+// Only this native owner decides whether to launch and certifies owned teardown.
+BUSTER_GLOBAL_LOCAL bool tree_cancel_requested(WCHAR const* status_path, bool* valid)
+{
+    static WCHAR path[TREE_COMMAND_CAPACITY];
+    size_t length = wcslen(status_path);
+    bool result = false;
+    bool readable = length + 8 < TREE_COMMAND_CAPACITY;
+    if (readable)
+    {
+        memcpy(path, status_path, length * sizeof(WCHAR));
+        memcpy(path + length, L".cancel", 8 * sizeof(WCHAR));
+        DWORD attributes = GetFileAttributesW(path);
+        if (attributes == INVALID_FILE_ATTRIBUTES)
+        {
+            readable = GetLastError() == ERROR_FILE_NOT_FOUND;
+        }
+        else
+        {
+            readable = (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+            result = readable;
+        }
+    }
+    *valid = *valid && readable;
+    return result;
+}
+
 // File-backed terminal evidence is published only after teardown and checked
 // handle closes. A fresh temporary and non-replacing rename reject stale data.
 BUSTER_GLOBAL_LOCAL bool tree_launch_status(WCHAR const* path, TreeLaunchStatus const* status)
@@ -415,9 +446,10 @@ BUSTER_GLOBAL_LOCAL bool tree_launch_status(WCHAR const* path, TreeLaunchStatus 
     if (result)
     {
         int bytes = snprintf(record, sizeof(record),
-            "{\"complete\":%s,\"runtime_timed_out\":%s,\"root_returncode\":%lld,\"root_pid\":%lu,"
+            "{\"complete\":%s,\"cancelled\":%s,\"runtime_timed_out\":%s,\"root_returncode\":%lld,\"root_pid\":%lu,"
             "\"runtime_deadline_ns\":%llu,\"root_finished_ns\":%llu,\"cleanup_started_ns\":%llu,\"cleanup_finished_ns\":%llu}\n",
-            status->complete ? "true" : "false", status->runtime_timed_out ? "true" : "false",
+            status->complete ? "true" : "false", status->cancelled ? "true" : "false",
+            status->runtime_timed_out ? "true" : "false",
             status->root_status_known ? (long long)status->root_returncode : -1LL, (unsigned long)status->root_pid,
             (unsigned long long)status->runtime_deadline_ns, (unsigned long long)status->root_finished_ns,
             (unsigned long long)status->cleanup_started_ns, (unsigned long long)status->cleanup_finished_ns);
@@ -450,8 +482,9 @@ BUSTER_GLOBAL_LOCAL int tree_launch(WCHAR const* name, u64 budget, WCHAR const* 
     Sleep(tree_test_startup_delay_ms);
 #endif
     u64 now = tree_clock_ns(&status);
-    status.runtime_timed_out = status.clock_valid && now >= deadline_ns;
-    if (!status.runtime_timed_out && status.clock_valid)
+    status.cancelled = tree_cancel_requested(status_path, &valid);
+    status.runtime_timed_out = !status.cancelled && status.clock_valid && now >= deadline_ns;
+    if (valid && !status.cancelled && !status.runtime_timed_out && status.clock_valid)
     {
         job = tree_owned_job(name);
         valid = job != 0 && wcslen(command_line) < TREE_COMMAND_CAPACITY;
@@ -463,37 +496,40 @@ BUSTER_GLOBAL_LOCAL int tree_launch(WCHAR const* name, u64 budget, WCHAR const* 
             startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
             memcpy(command, command_line, (wcslen(command_line) + 1) * sizeof(WCHAR));
             now = tree_clock_ns(&status);
-            status.runtime_timed_out = status.clock_valid && now >= deadline_ns;
-            if (status.clock_valid && !status.runtime_timed_out)
+            status.cancelled = tree_cancel_requested(status_path, &valid);
+            status.runtime_timed_out = !status.cancelled && status.clock_valid && now >= deadline_ns;
+            if (valid && !status.cancelled && status.clock_valid && !status.runtime_timed_out)
             {
                 valid = CreateProcessW(0, command, 0, 0, TRUE, CREATE_SUSPENDED, 0, 0, &startup, &child) != 0;
             }
         }
-        if (valid && status.clock_valid && !status.runtime_timed_out)
+        if (valid && !status.cancelled && status.clock_valid && !status.runtime_timed_out)
         {
             status.root_pid = child.dwProcessId;
             assigned = AssignProcessToJobObject(job, child.hProcess) != 0;
             valid = assigned;
             now = tree_clock_ns(&status);
-            status.runtime_timed_out = status.clock_valid && now >= deadline_ns;
-            if (valid && status.clock_valid && !status.runtime_timed_out)
+            status.cancelled = tree_cancel_requested(status_path, &valid);
+            status.runtime_timed_out = !status.cancelled && status.clock_valid && now >= deadline_ns;
+            if (valid && !status.cancelled && status.clock_valid && !status.runtime_timed_out)
             {
                 valid = ResumeThread(child.hThread) != (DWORD)-1;
             }
         }
-        bool waiting = valid && status.clock_valid && !status.runtime_timed_out;
+        bool waiting = valid && !status.cancelled && status.clock_valid && !status.runtime_timed_out;
         while (waiting)
         {
             now = tree_clock_ns(&status);
-            if (!status.clock_valid || now >= deadline_ns)
+            status.cancelled = tree_cancel_requested(status_path, &valid);
+            if (!valid || status.cancelled || !status.clock_valid || now >= deadline_ns)
             {
-                status.runtime_timed_out = status.clock_valid;
+                status.runtime_timed_out = !status.cancelled && status.clock_valid && now >= deadline_ns;
                 waiting = false;
             }
             else
             {
                 u64 remaining_ms = (deadline_ns - now + TREE_NS_PER_MILLISECOND - 1) / TREE_NS_PER_MILLISECOND;
-                DWORD slice = (DWORD)(remaining_ms < UINT32_MAX ? remaining_ms : UINT32_MAX - 1);
+                DWORD slice = (DWORD)(remaining_ms < TREE_CONTROL_POLL_MILLISECONDS ? remaining_ms : TREE_CONTROL_POLL_MILLISECONDS);
                 DWORD waited = WaitForSingleObject(child.hProcess, slice);
                 if (waited == WAIT_OBJECT_0)
                 {
