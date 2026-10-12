@@ -4376,6 +4376,105 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_record_dump(Arena* arena, Compi
 // -fsyntax-only, -c -g0 and -c -g. Valid controls must stay valid.
 // #1561 deliberately replaces alignment_redeclaration's frozen syntax-only
 // success with the later-declaration conflict shared by all three modes.
+// #3743: an unevaluated operand retains the address-of constraint. Check
+// structured diagnostic parity and absence of an object across driver routes.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        bool valid;
+    } cases[] = {
+        {S8("struct S{int b:2;}; long f(struct S s){return (long)&s.b;}"), false},
+        {S8("struct S{int b:2;}; unsigned long f(struct S s){return sizeof &s.b;}"), false},
+        {S8("struct S{int b:2;}; unsigned long f(struct S s){return sizeof(__extension__ &s.b);}"), false},
+        {S8("struct S{int b:2;}; unsigned long f(struct S s){return sizeof(&__extension__ s.b);}"), false},
+        {S8("struct S{int b:2;}; unsigned long f(struct S s){return sizeof(&(__extension__ (s.b)));}"), false},
+        {S8("struct S{int b:2;}; unsigned long f(struct S s){return sizeof(__extension__ &(__extension__ (__extension__ s.b)));}"), false},
+        {S8("struct S{int b:2; int c;}; unsigned long f(struct S s){return sizeof(__extension__ &s.c);}"), true},
+        {S8("struct S{int b:2; int c;}; unsigned long f(struct S s){return sizeof(&__extension__ s.c);}"), true},
+        {S8("struct S{int b:2; int c;}; unsigned long f(struct S s){return sizeof(&(__extension__ (s.c)));}"), true},
+        {S8("struct S{int b:2; int c;}; unsigned long f(struct S s){return sizeof(__extension__ &(__extension__ (__extension__ s.c)));}"), true},
+        {S8("struct S{int b:2;}; unsigned long f(struct S *p){return sizeof(&((p->b)));}"), false},
+        {S8("struct S{struct {int b:2;};}; unsigned long f(struct S s){return sizeof(&s.b);}"), false},
+        {S8("struct S{int b:2;}; struct T{struct S s;}; unsigned long f(struct T *p){return sizeof(&p->s.b);}"), false},
+        {S8("struct S{int b:2;}; unsigned long f(void){return sizeof(&((struct S){0}).b);}"), false},
+        {S8("struct S{int b:2;}; int f(struct S s){return _Generic(&s.b, default:1);}"), false},
+        {S8("struct S{int b:2;}; int f(struct S s){return _Generic(0, int:1, default:sizeof(&s.b));}"), false},
+        {S8("struct S{int b:2;}; int f(struct S s){return 0 && sizeof(&s.b);}"), false},
+        {S8("struct S{int b:2;} s; unsigned long n=sizeof(&s.b);"), false},
+        {S8("struct S{int b:2;} s; int a[sizeof(&s.b)];"), false},
+        {S8("struct S{int b:2;} s; _Static_assert(sizeof(&s.b)>0, \"address\");"), false},
+        {S8("struct S{int b:2;}; void f(struct S s){(void)&s.b;}"), false},
+        {S8("struct S{int b:2;}; typedef void V; void f(struct S s){(V)&s.b;}"), false},
+        {S8("struct S{int b:2;}; void f(struct S s){if(s.b) &s.b;}"), false},
+        {S8("struct S{int b:2;}; void f(struct S s){(void)&_Generic(0,int:s.b);}"), false},
+        {S8("struct S{int b:2;}; unsigned long f(struct S s){return sizeof(&_Generic(0,int:s.b));}"), false},
+        {S8("struct S{int b:2;}; unsigned long f(struct S s){return sizeof(&(_Generic(0,int:(_Generic(1,int:(s.b))))));}"), false},
+        {S8("struct S{int b:2;}; void f(struct S s){if(0){} &s.b;}"), false},
+        {S8("struct S{int b:2;}; int f(struct S s){return (int){1} & s.b;}"), true},
+        {S8("struct S{int b:2; int c;}; int *f(struct S *p){return &p->c;}"), true},
+        {S8("struct S{int b:2; int c;}; int *f(struct S *p){return &(*p).c;}"), true},
+        {S8("struct S{int b:2; int c;}; int *f(struct S *p){return &((p->c));}"), true},
+        {S8("struct S{int b:2;}; int f(int x,struct S s){return x & s.b;}"), true},
+        {S8("struct S{int b:2;}; int f(int x,struct S s){return (x) & s.b;}"), true},
+        {S8("struct S{int b:2;}; int f(struct S s){return sizeof(int) & s.b;}"), true},
+        {S8("struct S{int b:2;}; int f(int x,struct S s){return (int)x & s.b;}"), true},
+        {S8("struct S{int b:2;}; int g(void); int f(struct S s){return g() & s.b;}"), true},
+        {S8("int g(void); unsigned long f(int *p,int a[2]){return sizeof(&g)+sizeof(&a[1])+sizeof(&*p);}"), true},
+    };
+    String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17"), S8("-std=c23"), S8("-std=gnu23")};
+    String8 forms[] = {S8("-fc-ast-pilot"), S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 targets[] = {S8("--target=x86_64-linux-gnu"), S8("--target=aarch64-linux-gnu"), S8("--target=x86_64-windows-msvc")};
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            {
+                for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    Arena* arena = temporary.arena;
+                    String8 input = buster_test_temporary_path(arena, S8("buster-bit-field-address"), S8(".c"));
+                    String8 output = buster_test_temporary_path(arena, S8("buster-bit-field-address"), S8(".o"));
+                    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[row].source)));
+                    String8 syntax_command[] = {S8("-g0"), dialects[dialect], forms[form], targets[target], S8("-fsyntax-only"), input};
+                    String8 object_command[] = {S8("-g0"), dialects[dialect], forms[form], targets[target], S8("-c"), input, S8("-o"), output};
+                    CompilerDriverResult syntax = compiler_driver_execute_invocation(arena,
+                        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+                    CompilerDriverResult object = compiler_driver_execute_invocation(arena,
+                        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+                    String8 description = string_format(arena, S8("bit-field address row={u32} dialect={S8} form={S8} target={S8}\nsource={S8}\nsyntax={S8}\nobject={S8}"),
+                        row, dialects[dialect], forms[form], targets[target], cases[row].source, syntax.diagnostic, object.diagnostic);
+                    BUSTER_TEST_RAW(arguments, (syntax.error == COMPILER_DRIVER_ERROR_NONE) == cases[row].valid, description);
+                    BUSTER_TEST_RAW(arguments, syntax.error == object.error, description);
+                    BUSTER_TEST_RAW(arguments, object.has_object == cases[row].valid, description);
+                    if (!cases[row].valid)
+                    {
+                        BUSTER_TEST_RAW(arguments, syntax.diagnostic_count == 1 && object.diagnostic_count == 1, description);
+                        if (syntax.diagnostic_count == 1 && object.diagnostic_count == 1)
+                        {
+                            BUSTER_STRING_TEST(arguments, syntax.diagnostics[0].message, S8("cannot take address of bit-field"));
+                            BUSTER_STRING_TEST(arguments, syntax.diagnostics[0].code, S8("c.unsupported-semantics"));
+                            BUSTER_STRING_TEST(arguments, compiler_diagnostic_render(arena, syntax.diagnostics[0]),
+                                compiler_diagnostic_render(arena, object.diagnostics[0]));
+                        }
+                        OsFileDescriptor* file = os_file_open(output, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
+                        BUSTER_TEST(arguments, !file);
+                        if (file) os_file_close(file);
+                    }
+                    os_file_delete(input);
+                    os_file_delete(output);
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_record_diagnostic_equivalence(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -35618,6 +35717,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_released_phase_fill);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bounded_address_space);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_released_result_references);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_field_addresses);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_record_diagnostic_equivalence);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_spelled_byte_metrics_on_request);
 
