@@ -47654,12 +47654,16 @@ u64 c_test_ir_first_token_typedef_probes(void)
 
 // The statement keywords that are keywords in every dialect: never a type
 // word and never an entity's name, so the typedef probe below always answers
-// false for them. `asm` and `static_assert` are left out, because some
-// dialects spell ordinary identifiers that way.
+// false for them. STATIC_ASSERT is the reserved `_Static_assert` (C23's
+// `static_assert` is respelled to it; an older dialect's keeps its own
+// symbol), and ASM_GNU and ASM_GNU_ALT are the reserved `__asm` and
+// `__asm__`. Plain `asm` is left out: outside the GNU dialects it is an
+// ordinary identifier, and may name a typedef.
 #define C_IR_STATEMENT_ONLY_KEYWORD_SET                                                                                                    \
     (C_SYMBOL_WELL_KNOWN_BIT(BREAK) | C_SYMBOL_WELL_KNOWN_BIT(CASE) | C_SYMBOL_WELL_KNOWN_BIT(CONTINUE) |                                  \
      C_SYMBOL_WELL_KNOWN_BIT(DEFAULT) | C_SYMBOL_WELL_KNOWN_BIT(DO) | C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(GOTO) |       \
-     C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH) | C_SYMBOL_WELL_KNOWN_BIT(WHILE))
+     C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) |    \
+     C_SYMBOL_WELL_KNOWN_BIT(STATIC_ASSERT) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU_ALT))
 
 BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
 {

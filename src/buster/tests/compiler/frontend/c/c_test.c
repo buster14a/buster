@@ -43315,6 +43315,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_keyword_typedef_probes(UnitT
         "    for (; x < 3; x += 1) {}\n"
         "    do x += 1; while (x < 4);\n"
         "    switch (x) { case 1: x = 2; break; default: break; }\n"
+        "    _Static_assert(sizeof(int) >= 2, \"int\");\n"
+        "    __asm__ volatile(\"\" ::: \"memory\");\n"
         "    return x;\n"
         "}\n"));
     BUSTER_TEST_RAW(arguments, keywords == 0, string_format(arguments->arena, S8("keyword-led statements made {u64} typedef probes"), keywords));
