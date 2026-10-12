@@ -785,12 +785,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
             IrProgram* census_program = census_lowered.program;
             IrFunction* census_function = census_program->modules->functions;
             IrSemanticCounters semantic_before = ir_semantic_counters();
+            ArenaBenchmarkCounters arena_before = arena_benchmark_counters();
             for (u32 index = 0; index < census_function->instruction_count; index += 1)
             {
                 ir_construction_fold_census(census_program, census_function, (IrInstructionId){.value = index});
             }
+            ArenaBenchmarkCounters arena_after = arena_benchmark_counters();
             IrSemanticCounters semantic_after = ir_semantic_counters();
             BUSTER_TEST(arguments, memcmp(&semantic_before, &semantic_after, sizeof(semantic_before)) == 0);
+            // Birth tags live in the row's padding byte and cascade bits in a
+            // static cache, so probing allocates nothing.
+            BUSTER_TEST(arguments, memcmp(&arena_before, &arena_after, sizeof(arena_before)) == 0);
             IrConstructionCounters probed = ir_construction_counters();
             BUSTER_TEST(arguments, probed.values[IR_CONSTRUCTION_FOLD_BIRTH_BINARY_RIGHT_IDENTITY] -
                                        census_lowering.values[IR_CONSTRUCTION_FOLD_BIRTH_BINARY_RIGHT_IDENTITY] == 1);
@@ -802,6 +807,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, late.values[IR_CONSTRUCTION_FOLD_LATE_REPLACED_ROOTS] == probed.values[IR_CONSTRUCTION_FOLD_LATE_REPLACED_ROOTS]);
         }
         scratch_end(census_temporary);
+    }
+    // #3010 matched association: each fold ir_fast_fold applies after full
+    // preparation (inlining, promotion, FAST and their compactions) is
+    // classified by the birth tag its row carried from commit. Every late fold
+    // lands in exactly one of DIRECT, CASCADE and POST.
+    {
+        typedef struct IrFoldMatchCase IrFoldMatchCase;
+        struct IrFoldMatchCase
+        {
+            String8 source;
+            IrConstructionCounter counter;
+            u64 direct;
+            u64 cascade;
+            u64 post;
+            u64 unprobed;
+            u64 unfoldable;
+        };
+        IrFoldMatchCase const cases[] = {
+            // Direct: the zero is a committed constant when `+0` commits; the
+            // tag survives promotion of `input` and both compactions.
+            {S8("int test(int input){return input+0;}"), IR_CONSTRUCTION_FOLD_MATCH_DIRECT_BINARY_RIGHT_IDENTITY, 1, 0, 0, 0, 0},
+            // Cascade: the int zero is converted to unsigned by a birth
+            // cast_constant, and only that fold makes `+0` an identity.
+            {S8("unsigned test(unsigned input){return input+0;}"), IR_CONSTRUCTION_FOLD_MATCH_CASCADE_BINARY_RIGHT_IDENTITY, 1, 1, 0, 0, 0},
+            // Post (promotion): both operands are loads until promotion
+            // forwards the stored constants.
+            {S8("int test(void){int x=2;int y=3;return x+y;}"), IR_CONSTRUCTION_FOLD_MATCH_POST_BINARY_CONSTANT, 0, 0, 1, 0, 1},
+            // Post (inlining): the callee's `x+y` is not foldable at its own
+            // commit; the inlined copy folds only with the caller's arguments.
+            {S8("static inline __attribute__((always_inline)) int add(int x,int y){return x+y;}"
+                "int test(void){return add(2,3);}"), IR_CONSTRUCTION_FOLD_MATCH_POST_BINARY_CONSTANT, 0, 0, 1, 0, 1},
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            IrFoldMatchCase const* test_case = cases + index;
+            TemporalArena match_temporary = arena_begin_temporal(arguments->arena);
+            IrConstructionCounters before = ir_construction_counters();
+            CIRLowerResult lowered = ir_promotion_lower(arguments->arena, test_case->source, target_native);
+            if (BUSTER_REQUIRE(arguments, lowered.program && !lowered.diagnostic_count))
+            {
+                IrProgram* program = lowered.program;
+                program->fast_passes = IR_FAST_PASS_BIT(IR_FAST_FOLD);
+                IrValidationResult prepared = ir_prepare_canonical_module(program, program->modules, true);
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+                IrConstructionCounters after = ir_construction_counters();
+                BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+#define IR_FOLD_MATCH_DELTA(counter) (after.values[counter] - before.values[counter])
+                u64 late = 0, direct = 0, cascade = 0, post = 0;
+                for (u32 rule = 0; rule <= (u32)(IR_CONSTRUCTION_FOLD_LATE_BINARY_LEFT_IDENTITY - IR_CONSTRUCTION_FOLD_LATE_CAST_IDENTITY); rule += 1)
+                {
+                    late += IR_FOLD_MATCH_DELTA((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_LATE_CAST_IDENTITY + rule));
+                    direct += IR_FOLD_MATCH_DELTA((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_MATCH_DIRECT_CAST_IDENTITY + rule));
+                    cascade += IR_FOLD_MATCH_DELTA((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_MATCH_CASCADE_CAST_IDENTITY + rule));
+                    post += IR_FOLD_MATCH_DELTA((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_MATCH_POST_CAST_IDENTITY + rule));
+                }
+                BUSTER_TEST(arguments, late == direct + cascade + post);
+                BUSTER_TEST(arguments, IR_FOLD_MATCH_DELTA(test_case->counter) == 1);
+                BUSTER_TEST(arguments, direct == test_case->direct && cascade == test_case->cascade && post == test_case->post);
+                BUSTER_TEST(arguments, IR_FOLD_MATCH_DELTA(IR_CONSTRUCTION_FOLD_MATCH_POST_UNPROBED) == test_case->unprobed);
+                BUSTER_TEST(arguments, IR_FOLD_MATCH_DELTA(IR_CONSTRUCTION_FOLD_MATCH_POST_UNFOLDABLE_AT_BIRTH) == test_case->unfoldable);
+                BUSTER_TEST(arguments, IR_FOLD_MATCH_DELTA(IR_CONSTRUCTION_FOLD_MATCH_POST_UNPROBED) +
+                                           IR_FOLD_MATCH_DELTA(IR_CONSTRUCTION_FOLD_MATCH_POST_UNFOLDABLE_AT_BIRTH) +
+                                           IR_FOLD_MATCH_DELTA(IR_CONSTRUCTION_FOLD_MATCH_POST_RULE_CHANGED) == post);
+#undef IR_FOLD_MATCH_DELTA
+            }
+            scratch_end(match_temporary);
+        }
     }
 #endif
     return result;

@@ -163,7 +163,35 @@
     X(FOLD_LATE_BINARY_CONSTANT, fold_late_binary_constant) \
     X(FOLD_LATE_BINARY_RIGHT_IDENTITY, fold_late_binary_right_identity) \
     X(FOLD_LATE_BINARY_LEFT_IDENTITY, fold_late_binary_left_identity) \
-    X(FOLD_LATE_REPLACED_ROOTS, fold_late_replaced_roots)
+    X(FOLD_LATE_REPLACED_ROOTS, fold_late_replaced_roots) \
+    X(FOLD_BIRTH_CASCADE_CAST_IDENTITY, fold_birth_cascade_cast_identity) \
+    X(FOLD_BIRTH_CASCADE_CAST_CONSTANT, fold_birth_cascade_cast_constant) \
+    X(FOLD_BIRTH_CASCADE_UNARY_CONSTANT, fold_birth_cascade_unary_constant) \
+    X(FOLD_BIRTH_CASCADE_BINARY_CONSTANT, fold_birth_cascade_binary_constant) \
+    X(FOLD_BIRTH_CASCADE_BINARY_RIGHT_IDENTITY, fold_birth_cascade_binary_right_identity) \
+    X(FOLD_BIRTH_CASCADE_BINARY_LEFT_IDENTITY, fold_birth_cascade_binary_left_identity) \
+    X(FOLD_BIRTH_CASCADE_UNCACHED, fold_birth_cascade_uncached) \
+    X(FOLD_MATCH_DIRECT_CAST_IDENTITY, fold_match_direct_cast_identity) \
+    X(FOLD_MATCH_DIRECT_CAST_CONSTANT, fold_match_direct_cast_constant) \
+    X(FOLD_MATCH_DIRECT_UNARY_CONSTANT, fold_match_direct_unary_constant) \
+    X(FOLD_MATCH_DIRECT_BINARY_CONSTANT, fold_match_direct_binary_constant) \
+    X(FOLD_MATCH_DIRECT_BINARY_RIGHT_IDENTITY, fold_match_direct_binary_right_identity) \
+    X(FOLD_MATCH_DIRECT_BINARY_LEFT_IDENTITY, fold_match_direct_binary_left_identity) \
+    X(FOLD_MATCH_CASCADE_CAST_IDENTITY, fold_match_cascade_cast_identity) \
+    X(FOLD_MATCH_CASCADE_CAST_CONSTANT, fold_match_cascade_cast_constant) \
+    X(FOLD_MATCH_CASCADE_UNARY_CONSTANT, fold_match_cascade_unary_constant) \
+    X(FOLD_MATCH_CASCADE_BINARY_CONSTANT, fold_match_cascade_binary_constant) \
+    X(FOLD_MATCH_CASCADE_BINARY_RIGHT_IDENTITY, fold_match_cascade_binary_right_identity) \
+    X(FOLD_MATCH_CASCADE_BINARY_LEFT_IDENTITY, fold_match_cascade_binary_left_identity) \
+    X(FOLD_MATCH_POST_CAST_IDENTITY, fold_match_post_cast_identity) \
+    X(FOLD_MATCH_POST_CAST_CONSTANT, fold_match_post_cast_constant) \
+    X(FOLD_MATCH_POST_UNARY_CONSTANT, fold_match_post_unary_constant) \
+    X(FOLD_MATCH_POST_BINARY_CONSTANT, fold_match_post_binary_constant) \
+    X(FOLD_MATCH_POST_BINARY_RIGHT_IDENTITY, fold_match_post_binary_right_identity) \
+    X(FOLD_MATCH_POST_BINARY_LEFT_IDENTITY, fold_match_post_binary_left_identity) \
+    X(FOLD_MATCH_POST_UNPROBED, fold_match_post_unprobed) \
+    X(FOLD_MATCH_POST_UNFOLDABLE_AT_BIRTH, fold_match_post_unfoldable_at_birth) \
+    X(FOLD_MATCH_POST_RULE_CHANGED, fold_match_post_rule_changed)
 
 typedef enum IrConstructionCounter
 {

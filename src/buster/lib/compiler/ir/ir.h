@@ -520,6 +520,13 @@ struct IrInstruction
     bool volatile_access;
     // An IrSimdOperation, narrowed like the rest of the enum tail.
     u8 simd_operation;
+#if BUSTER_BENCH_ALLOCATIONS
+    // Diagnostic-only #3010 birth tag (IR_FAST_BIRTH_* in ir_fast.c), held in
+    // the row's one padding byte so the 64-byte layout is unchanged. Whole-row
+    // copies (compaction, promotion, CFG publication, inlining) carry it;
+    // every row initializer leaves it zero.
+    u8 fold_birth;
+#endif
 };
 
 BUSTER_CT_CHECK(IR_SIMD_COUNT <= UINT8_MAX);
