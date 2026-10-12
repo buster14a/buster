@@ -13,6 +13,7 @@ collector_timeout_bin=$(python3 "$repo_root/ios/gnu_timeout.py")
 cleanup() {
     local status=$?
     local path kind pid file
+    local files=()
     trap - EXIT INT TERM
     if [[ -n $active_state && $status -ne 0 ]]; then
         printf 'BUSTER_IOS_MONITOR_CASE event=failed status=%s runner=%s collector=%s elapsed_seconds=%s\n' "$status" "${runner:-none}" "${collector:-none}" "$SECONDS" >>"$active_state/case.log"
@@ -26,6 +27,13 @@ cleanup() {
                 ps -p "$pid" -o pid=,ppid=,pgid=,stat=,comm= >>"$active_state/children.log" 2>&1 || true
             done <"$active_state/pids"
         fi
+    fi
+    if [[ -n $active_state && $status -ne 0 ]]; then
+        for path in "$active_state/case.log" "$active_state/collector.log" "$active_state/children.log" "$active_state"/*.status.log; do
+            [[ -f $path ]] || continue
+            printf '%s\n' "----- ${path##*/} -----" >&2
+            cat "$path" >&2 || true
+        done
     fi
     if [[ -n $runner ]]; then
         kill -TERM "$runner" 2>/dev/null || true
@@ -54,10 +62,16 @@ cleanup() {
             [[ -d $path && ${path##*/} != bin ]] || continue
             mkdir -p "$evidence_root/${path##*/}"
             # Retain ordinary evidence only; never open a stalled FIFO to copy it.
+            files=()
             for file in "$path"/*; do
                 [[ -f $file ]] || continue
-                cp "$file" "$evidence_root/${path##*/}/" || true
+                files+=("$file")
             done
+            if [[ ${#files[@]} -gt 0 ]]; then
+                if ! cp "${files[@]}" "$evidence_root/${path##*/}/"; then
+                    if [[ $status -eq 0 ]]; then status=1; fi
+                fi
+            fi
         done
     fi
     rm -rf "$test_root"
@@ -74,6 +88,12 @@ cat >"$test_root/bin/grep" <<'TOOL'
 #!/usr/bin/env bash
 set -eu
 printf 'grep\n' >>"$RUNNER_TEMP/grep-invocations.log"
+# Finite process-start delay control for receipt verification overhead. Current
+# builtin receipt checks never enter this shim for these files.
+receipt_path=${!#}
+if [[ ${BUSTER_IOS_TEST_RECEIPT_DELAY:-0} == 1 && ( $receipt_path == *.caller-status.log || $receipt_path == *.supervisor-status.log ) ]]; then
+    sleep 0.02
+fi
 # Model bytes arriving between the launcher's empty size check and its first
 # app-record scan. The fake producer owns the FIFO but emits its marker later.
 if [[ $FAKE_RESULT == receipt-race && ${1:-} == -q && ${2:-} == '^BUSTER_IOS_LAUNCH_V1 ' && ! -e $RUNNER_TEMP/trace-written ]]; then
@@ -148,7 +168,8 @@ run_case() {
         # Darwin's smaller pipe. Exercise actual app-output backpressure.
         # shellcheck disable=SC2016
         "$collector_timeout_bin" --kill-after=1s 20s /bin/bash -c '
-            printf "event=collector-start elapsed_seconds=%s pid=%s\n" "$SECONDS" "$" >>"$RUNNER_TEMP/collector.log"
+            set -eu
+            printf "event=collector-start elapsed_seconds=%s pid=%s\n" "$SECONDS" "$$" >>"$RUNNER_TEMP/collector.log"
             while IFS= read -r line; do
                 printf "%s\n" "$line"
                 if [[ $line == Launching\ * ]]; then break; fi
@@ -255,11 +276,13 @@ run_case() {
 if [[ ${1:-} == --receipt-race-only ]]; then
     run_case receipt-race receipt-race 0 0 1
 else
-    run_case success success 0 0 1
-    run_case batch success 0 0 2
-    run_case delayed-success delayed-success 0 0 1
-    run_case trace-only trace-only 1 0 1
-    run_case receipt-race receipt-race 0 0 1
+    if [[ ${1:-} != --backpressure-only ]]; then
+        run_case success success 0 0 1
+        run_case batch success 0 0 2
+        run_case delayed-success delayed-success 0 0 1
+        run_case trace-only trace-only 1 0 1
+        run_case receipt-race receipt-race 0 0 1
+    fi
     # Sensitivity control: restore only the old stdout coupling in a private
     # script beside its unchanged helpers, then require a real deadline failure.
     baseline_launcher=$(mktemp "$repo_root/ios/launcher-backpressure.XXXXXX")

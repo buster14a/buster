@@ -162,6 +162,19 @@ jobs:
             printf 'BUSTER_3638_REPLAY baseline_status=%s\n' "$baseline_status"
             BUSTER_MOBILE_TEST_EVIDENCE_DIR="$RUNNER_TEMP/ios-launch-trace-evidence/current" \
               /bin/bash ios/launch_trace_monitor_test.sh
+            delayed_status=0
+            BUSTER_IOS_TEST_RECEIPT_DELAY=1 \
+              BUSTER_MOBILE_TEST_EVIDENCE_DIR="$RUNNER_TEMP/ios-launch-trace-evidence/delayed-old" \
+              BUSTER_IOS_TEST_LAUNCHER="$PWD/$old_launcher" \
+              /bin/bash ios/launch_trace_monitor_test.sh --backpressure-only || delayed_status=$?
+            printf 'BUSTER_3638_DELAYED_REPLAY baseline_status=%s\n' "$delayed_status"
+            [[ $delayed_status -eq 124 ]]
+            grep -q 'event=collector-exit status=124' "$RUNNER_TEMP/ios-launch-trace-evidence/delayed-old/backpressure-baseline/case.log"
+            [[ -s "$RUNNER_TEMP/ios-launch-trace-evidence/delayed-old/backpressure-baseline/collector.log" ]]
+            [[ -s "$RUNNER_TEMP/ios-launch-trace-evidence/delayed-old/backpressure-baseline/buster-ios-console.Debug.log" ]]
+            BUSTER_IOS_TEST_RECEIPT_DELAY=1 \
+              BUSTER_MOBILE_TEST_EVIDENCE_DIR="$RUNNER_TEMP/ios-launch-trace-evidence/delayed-current" \
+              /bin/bash ios/launch_trace_monitor_test.sh --backpressure-only
           } 2>&1 | tee "$RUNNER_TEMP/ios-launch-trace-monitor.log"
       - name: Retain machine records in existing evidence
         if: ${{ !cancelled() }}

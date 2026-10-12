@@ -335,6 +335,15 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   budget. The hosted Linux/macOS controls run in a separate five-minute lane,
   preserving the full lifecycle lane's ten-minute cap and artifact-retention
   headroom. No test selection, acceptance marker or process owner changes.
+  Set `BUSTER_MOBILE_TEST_EVIDENCE_DIR` for the launch-trace monitor to retain
+  each case's output, complete console file, lifecycle receipts, registered
+  child identities and case/collector timing before its private directory is
+  removed. The hosted launch-trace artifact includes this evidence on both
+  success and failure. Collector startup, stall, drain and real EOF observations
+  use that child's Bash `SECONDS` clock; parent case observations use the
+  parent's clock and must not be subtracted across processes. A failed collector
+  wait records its actual status before cleanup; expiry still fails with 124.
+  The collector keeps its twenty-second cap and one-second kill grace.
   Failed launches report
   `BUSTER_IOS_TEST_PROGRESS` with the last completed `TEST_MODULE_TIMING`
   module/index and the last module observed in timing or arena records;
