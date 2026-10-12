@@ -2028,41 +2028,50 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_inline_assembly_successors(MachineFunction
 // fixed point above the seeds is unique, so the visit order changes only the
 // work, never the result.
 //
-// Pending blocks are visited in sweeps over the reverse postorder of the
-// reversed CFG, rooted at the blocks without successors: a block comes after
+// The order is the reverse postorder of the reversed CFG, rooted at the
+// blocks without successors from the end of the layout, and the next block
+// visited is always the pending one of lowest rank. A block then comes after
 // the successors it is reached from, so a value read late in a function flows
-// up any chain of loop exits and back edges in one sweep. A layout-order
-// stack instead sweeps every enclosing loop once more per nesting level — a
-// value an outer loop carries reaches each inner header one level per pass —
-// which made a nest of depth N cost about N times its blocks times its words
-// (#3771). A block whose rank precedes the cursor waits for the next sweep.
+// up any chain of loop exits and back edges in one pass, and a loop that
+// re-pends its header converges before the blocks above it are revisited. A
+// layout-order stack instead swept every enclosing loop once more per nesting
+// level — a value an outer loop carries reached each inner header one level
+// per pass — so a nest of depth N cost about N times its blocks times its
+// words (#3771); on ordinary code this order also does less work than that
+// stack did. `pending` is a rank bitmap and `pending_words` marks its
+// nonzero words, so finding the lowest pending rank reads two short scans.
 // Returns the word updates performed, which the scaling test bounds.
+// Ranks one `pending_words` word covers: sixty-four pending words of
+// sixty-four ranks each.
+#define MACHINE_FAST_LIVENESS_SUMMARY_SPAN (64u * 64u)
 BUSTER_GLOBAL_LOCAL u64 machine_fast_solve_liveness(Arena* arena, u32 block_count, u32 const* predecessor_offsets, u32 const* predecessor_list,
                                                     u64 const* reads, u64 const* writes, u32 words, u64* live_in, u64* live_out)
 {
     u32 work_axis = block_count ? block_count : 1u;
     u32 rank_words = (work_axis + 63u) / 64u;
+    u32 summary_words = (rank_words + 63u) / 64u;
     u32* order = arena_allocate(arena, u32, work_axis);
     u32* rank = arena_allocate(arena, u32, work_axis);
     u32* stack_blocks = arena_allocate(arena, u32, work_axis);
     u32* stack_edges = arena_allocate(arena, u32, work_axis);
     u32* successor_counts = arena_allocate(arena, u32, work_axis);
     u64* pending = arena_allocate(arena, u64, rank_words);
+    u64* pending_words = arena_allocate(arena, u64, summary_words);
     memset(successor_counts, 0, (u64)work_axis * sizeof(*successor_counts));
     memset(rank, 0xff, (u64)work_axis * sizeof(*rank));
     for (u32 entry = 0; entry < predecessor_offsets[block_count]; entry += 1)
     {
         successor_counts[predecessor_list[entry]] += 1;
     }
-    // Iterative depth-first walk of the reversed graph: exits in ascending
-    // order first, then, for regions no exit reaches (a loop with no way
-    // out), the remaining blocks from the end of the layout. `rank` doubles
-    // as the visited mark (UINT32_MAX until a block is entered) and finishing
-    // order fills `order` from its end, which leaves reverse postorder.
+    // Iterative depth-first walk of the reversed graph: exits from the end of
+    // the layout first, then, for regions no exit reaches (a loop with no way
+    // out), the remaining blocks the same way. `rank` doubles as the visited
+    // mark (UINT32_MAX until a block is entered) and finishing order fills
+    // `order` from its end, which leaves reverse postorder.
     u32 finished = 0;
     for (u32 root_index = 0; root_index < 2u * block_count; root_index += 1)
     {
-        u32 root = root_index < block_count ? root_index : 2u * block_count - 1u - root_index;
+        u32 root = block_count - 1u - root_index % block_count;
         bool start = rank[root] == UINT32_MAX && (root_index >= block_count || successor_counts[root] == 0);
         u32 depth = 0;
         if (start)
@@ -2100,61 +2109,66 @@ BUSTER_GLOBAL_LOCAL u64 machine_fast_solve_liveness(Arena* arena, u32 block_coun
     {
         rank[order[position]] = position;
     }
-    memset(pending, 0xff, (u64)rank_words * sizeof(*pending));
-    pending[rank_words - 1u] = block_count % 64u ? (UINT64_C(1) << (block_count % 64u)) - 1u : (block_count ? UINT64_MAX : 0);
-    u32 pending_count = block_count;
-    u32 cursor = 0;
-    u64 updates = 0;
-    while (pending_count)
+    memset(pending, 0, (u64)rank_words * sizeof(*pending));
+    memset(pending_words, 0, (u64)summary_words * sizeof(*pending_words));
+    for (u32 position = 0; position < block_count; position += 1)
     {
-        // The first pending rank at or after the cursor, else the first one
-        // overall: a new sweep.
-        u32 word = cursor / 64u;
-        u64 bits = pending[word] & (UINT64_MAX << (cursor % 64u));
-        while (!bits)
+        pending[position / 64u] |= UINT64_C(1) << (position % 64u);
+        pending_words[position / MACHINE_FAST_LIVENESS_SUMMARY_SPAN] |= UINT64_C(1) << (position / 64u % 64u);
+    }
+    u32 summary = 0;
+    u64 updates = 0;
+    while (summary < summary_words)
+    {
+        // Lowest pending rank: skip summary words with nothing pending.
+        u64 marked = pending_words[summary];
+        if (marked)
         {
-            word = word + 1u < rank_words ? word + 1u : 0;
-            bits = pending[word];
-        }
-        u32 position = 64u * word + trailing_zeroes_u64(bits);
-        pending[word] &= ~(UINT64_C(1) << (position % 64u));
-        pending_count -= 1;
-        cursor = position + 1u < block_count ? position + 1u : 0;
-        u32 block_index = order[position];
-        u64 const* block_reads = reads + (u64)block_index * words;
-        u64 const* block_writes = writes + (u64)block_index * words;
-        u64* block_in = live_in + (u64)block_index * words;
-        u64 const* block_out = live_out + (u64)block_index * words;
-        for (u32 index = 0; index < words; index += 1)
-        {
-            block_in[index] = block_reads[index] | (block_out[index] & ~block_writes[index]);
-        }
-        u32 first = predecessor_offsets[block_index];
-        u32 limit = predecessor_offsets[block_index + 1u];
-        // The block's own transfer plus one merge per predecessor edge.
-        updates += (u64)words * (1u + limit - first);
-        for (u32 entry = first; entry < limit; entry += 1)
-        {
-            u32 predecessor = predecessor_list[entry];
-            u64* predecessor_out = live_out + (u64)predecessor * words;
-            bool predecessor_changed = false;
+            u32 word = 64u * summary + trailing_zeroes_u64(marked);
+            u32 position = 64u * word + trailing_zeroes_u64(pending[word]);
+            pending[word] &= pending[word] - 1u;
+            pending_words[summary] &= pending[word] ? UINT64_MAX : ~(UINT64_C(1) << (word % 64u));
+            u32 block_index = order[position];
+            u64 const* block_reads = reads + (u64)block_index * words;
+            u64 const* block_writes = writes + (u64)block_index * words;
+            u64* block_in = live_in + (u64)block_index * words;
+            u64 const* block_out = live_out + (u64)block_index * words;
             for (u32 index = 0; index < words; index += 1)
             {
-                u64 previous = predecessor_out[index];
-                u64 merged = previous | block_in[index];
-                if (merged != previous)
+                block_in[index] = block_reads[index] | (block_out[index] & ~block_writes[index]);
+            }
+            u32 first = predecessor_offsets[block_index];
+            u32 limit = predecessor_offsets[block_index + 1u];
+            // The block's own transfer plus one merge per predecessor edge.
+            updates += (u64)words * (1u + limit - first);
+            for (u32 entry = first; entry < limit; entry += 1)
+            {
+                u32 predecessor = predecessor_list[entry];
+                u64* predecessor_out = live_out + (u64)predecessor * words;
+                bool predecessor_changed = false;
+                for (u32 index = 0; index < words; index += 1)
                 {
-                    predecessor_out[index] = merged;
-                    predecessor_changed = true;
+                    u64 previous = predecessor_out[index];
+                    u64 merged = previous | block_in[index];
+                    if (merged != previous)
+                    {
+                        predecessor_out[index] = merged;
+                        predecessor_changed = true;
+                    }
+                }
+                u32 predecessor_rank = rank[predecessor];
+                u64 predecessor_bit = UINT64_C(1) << (predecessor_rank % 64u);
+                if (predecessor_changed)
+                {
+                    pending[predecessor_rank / 64u] |= predecessor_bit;
+                    pending_words[predecessor_rank / MACHINE_FAST_LIVENESS_SUMMARY_SPAN] |= UINT64_C(1) << (predecessor_rank / 64u % 64u);
+                    summary = BUSTER_MIN(summary, predecessor_rank / MACHINE_FAST_LIVENESS_SUMMARY_SPAN);
                 }
             }
-            u32 predecessor_rank = rank[predecessor];
-            u64 predecessor_bit = UINT64_C(1) << (predecessor_rank % 64u);
-            if (predecessor_changed && !(pending[predecessor_rank / 64u] & predecessor_bit))
-            {
-                pending[predecessor_rank / 64u] |= predecessor_bit;
-                pending_count += 1;
-            }
+        }
+        else
+        {
+            summary += 1;
         }
     }
     WORK_LEDGER_RECORD(MACHINE_LIVENESS_WORD_UPDATES, updates);
@@ -3044,7 +3058,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_solve_liveness_reference(u32 block_count, 
 // induction variables stay live through every inner loop (#3771): the old
 // layout-order stack swept each loop again per enclosing level, about
 // depth times blocks times words, and the reverse-CFG order converges in one
-// sweep, so the work stays within two visits per block. The second is a
+// pass, so the work stays within two visits per block. The second is a
 // seeded pseudo-random graph with irreducible regions, several exits, an
 // exitless cycle and live-out seeds, which only has to agree with the oracle.
 bool machine_fast_solve_liveness_test(Arena* arena)
