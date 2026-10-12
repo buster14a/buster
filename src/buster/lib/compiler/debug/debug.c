@@ -881,27 +881,9 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
         }
 
         // Emitted debug seeds follow code layout, while the IR module retains
-        // declaration order, so each seed finds its canonical locals by
-        // symbol. Index the module's functions by dense symbol id once --
-        // walking backwards leaves the first function per symbol, the one a
-        // forward search stops at -- instead of searching the module per seed.
-        TemporalArena temporary = scratch_begin(&arena, 1);
-        u32 symbol_count = input.program->symbols.count;
-        u32* function_by_symbol = 0;
-        if (input.module)
-        {
-            function_by_symbol = arena_allocate(temporary.arena, u32, symbol_count ? symbol_count : 1);
-            memset(function_by_symbol, 0xff, sizeof(*function_by_symbol) * (u64)symbol_count);
-            for (u32 module_index = input.module->function_count; module_index; module_index -= 1)
-            {
-                IR_CONSTRUCTION_RECORD(DEBUG_FUNCTION_INDEX_ROWS, 1);
-                u32 symbol = input.module->functions[module_index - 1].symbol.value;
-                if (symbol < symbol_count)
-                {
-                    function_by_symbol[symbol] = module_index - 1;
-                }
-            }
-        }
+        // declaration order, so each seed searches the module for its
+        // canonical locals by symbol. #987 revert probe: this restores the
+        // per-seed search that #1447 replaced; do not merge.
         for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
         {
             DebugFunctionSeed* seed = input.functions + function_index;
@@ -928,15 +910,8 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
                 function->name = result.source_paths[declaration.source];
             }
             IrFunction* module_function = 0;
-            if (function_by_symbol && seed->symbol.value < symbol_count)
+            if (input.module)
             {
-                u32 module_index = function_by_symbol[seed->symbol.value];
-                module_function = module_index != UINT32_MAX ? input.module->functions + module_index : 0;
-            }
-            else if (input.module)
-            {
-                // Codegen seeds always name a program symbol; only a
-                // hand-built seed outside the table reaches this search.
                 for (u32 module_index = 0; module_index < input.module->function_count; module_index += 1)
                 {
                     IR_CONSTRUCTION_RECORD(DEBUG_FUNCTION_SEED_SCAN_ROWS, 1);
@@ -956,7 +931,6 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
                 debug_add_canonical_locals(arena, &result, &input, function, seed, module_function, scope_capacity);
             }
         }
-        scratch_end(temporary);
         debug_add_canonical_globals(arena, &result, &input, variable_capacity);
 
         for (u32 inline_index = 0; inline_index < input.inline_site_count; inline_index += 1)
