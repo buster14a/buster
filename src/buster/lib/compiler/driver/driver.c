@@ -8656,6 +8656,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                 lowered.canonical_ir_certified && !invocation.bootstrap_trace_prefix.length && !invocation.verify_codegen);
     result.local_promotion = module->local_promotion;
     result.fast = module->fast;
+    for (u64 index = 0; index < result.fast.decline_count; index += 1)
+    {
+        result.fast.declines[index].source = invocation.input_paths[0];
+    }
     result.inlining = module->inlining;
     if (validation.error == IR_VALIDATION_INLINE_REQUIRED)
     {
@@ -9933,6 +9937,39 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_dependency_destination(Arena* arena,
     return absolute;
 }
 
+// Copy decline names out of TU arenas before their ordered destruction. The
+// ordinary no-decline path retains no records and allocates nothing here.
+BUSTER_GLOBAL_LOCAL void compiler_driver_merge_fast_declines(Arena* arena, IrFastStatistics* total, IrFastStatistics const* unit,
+                                                              String8 source, u64* capacity)
+{
+    if (unit->decline_count)
+    {
+        u64 needed = total->decline_count + unit->decline_count;
+        if (needed > *capacity)
+        {
+            *capacity = BUSTER_MAX(needed, *capacity * 2);
+            IrFastDecline* records = arena_allocate(arena, IrFastDecline, *capacity);
+            if (total->decline_count) memcpy(records, total->declines, sizeof(*records) * total->decline_count);
+            total->declines = records;
+        }
+        String8 retained_source = string_duplicate_arena(arena, source, false);
+        for (u64 index = 0; index < unit->decline_count; index += 1)
+        {
+            IrFastDecline record = unit->declines[index];
+            record.source = retained_source;
+            record.function_name = string_duplicate_arena(arena, record.function_name, false);
+            total->declines[total->decline_count++] = record;
+        }
+    }
+}
+
+#if BUSTER_INCLUDE_TESTS
+void compiler_driver_test_merge_fast_declines(Arena* arena, IrFastStatistics* total, IrFastStatistics const* unit, String8 source, u64* capacity)
+{
+    compiler_driver_merge_fast_declines(arena, total, unit, source, capacity);
+}
+#endif
+
 CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation)
 {
     CompilerDriverDiagnosticCollector warnings = {
@@ -9948,6 +9985,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     FileMapRead* library_archive_maps = 0;
     FileMapRead cpu_runtime_map = {0};
     u32 fallback_record_capacity = 0;
+    u64 fast_decline_capacity = 0;
     CompilerDriverUnit* unit_tasks = 0;
     u32 unit_task_count = 0;
     CSourceCache* owned_source_cache = 0;
@@ -10775,6 +10813,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         result.fast.functions += unit.fast.functions;
         result.fast.validation_skips += unit.fast.validation_skips;
+        compiler_driver_merge_fast_declines(arena, &result.fast, &unit.fast, invocation.input_paths[input_index], &fast_decline_capacity);
         result.fast.budget_skips += unit.fast.budget_skips;
         result.fast.provenance_skips += unit.fast.provenance_skips;
         result.fast.parameter_budget_hits += unit.fast.parameter_budget_hits;

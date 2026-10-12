@@ -1043,9 +1043,81 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_tag_array_type_names(Uni
     return result;
 }
 
+// Ordered publication must outlive both serial and lane-owned TU arenas.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast_decline_publication(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    IrFastStatistics total = {0};
+    u64 capacity = 0;
+    compiler_driver_test_merge_fast_declines(arguments->arena, &total, &total, S8("empty.c"), &capacity);
+    BUSTER_TEST(arguments, !total.declines && !capacity && !total.decline_count);
+    for (u32 unit = 0; unit < 3; unit += 1)
+    {
+        Arena* arena = arena_create((ArenaCreation){.flags = {.no_pool = true}});
+        if (BUSTER_REQUIRE(arguments, arena != 0))
+        {
+            IrFastStatistics measurement = {.decline_count = 2};
+            measurement.declines = arena_allocate(arena, IrFastDecline, 2);
+            for (u32 index = 0; index < 2; index += 1)
+            {
+                measurement.declines[index] = (IrFastDecline){
+                    .function_name = string_format(arena, S8("body_{u32}_{u32}"), unit, index),
+                    .validation = {.error = IR_VALIDATION_OPERATION, .function = {.value = index},
+                                   .instruction = {.value = unit}},
+                };
+            }
+            String8 source = string_format(arena, S8("input_{u32}.c"), unit);
+            compiler_driver_test_merge_fast_declines(arguments->arena, &total, &measurement, source, &capacity);
+            // Overwrite the borrowed bytes before release, so pooled reuse
+            // cannot accidentally make dangling strings appear correct.
+            memset(source.pointer, '?', source.length);
+            for (u32 index = 0; index < 2; index += 1)
+            {
+                String8 name = measurement.declines[index].function_name;
+                memset(name.pointer, '?', name.length);
+            }
+            arena_destroy(arena, 1);
+        }
+    }
+    BUSTER_TEST(arguments, total.decline_count == 6);
+    for (u64 index = 0; index < total.decline_count; index += 1)
+    {
+        IrFastDecline record = total.declines[index];
+        BUSTER_TEST(arguments, string_equal(record.source, string_format(arguments->arena, S8("input_{u32}.c"), (u32)(index / 2))));
+        BUSTER_TEST(arguments, string_equal(record.function_name, string_format(arguments->arena, S8("body_{u32}_{u32}"), (u32)(index / 2), (u32)(index % 2))));
+        BUSTER_TEST(arguments, record.validation.error == IR_VALIDATION_OPERATION && record.validation.function.value == index % 2 &&
+                               record.validation.instruction.value == index / 2);
+    }
+    // A real accepted legacy shape found by the #1602 musl/CPython census:
+    // the strict value check requires a layout for an incomplete extern PLACE,
+    // although native address-taking does not consume that object's layout.
+    String8 source = S8("struct Opaque;extern struct Opaque stream;extern int sink(struct Opaque*);"
+                        "int declined(void){return sink(&stream);}"
+                        "int kept(int a,int b){int x=a+0;return x*1+b;}");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-fast-decline"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 command[] = {S8("-nostdinc"), S8("-g0"), S8("-target"), S8("x86_64-linux"), S8("-c"), input};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        invocation.retain_object = true;
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(arguments->arena, invocation);
+        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.fast.functions == 1 &&
+                               compiled.fast.validation_skips == 1 && compiled.fast.decline_count == 1);
+        if (compiled.fast.decline_count == 1)
+        {
+            IrFastDecline record = compiled.fast.declines[0];
+            BUSTER_TEST(arguments, string_equal(record.source, input) && string_equal(record.function_name, S8("declined")) &&
+                                   record.validation.error == IR_VALIDATION_OPERATION);
+        }
+        os_file_delete(input);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast_decline_publication);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_optimization_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_flexible_initializers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_tag_array_type_names);

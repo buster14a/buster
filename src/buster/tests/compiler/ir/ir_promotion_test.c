@@ -107,10 +107,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_validation_tests(UnitTestArgumen
                         // A fault inside one certified function predates
                         // promotion, so the promotion-output check leaves it
                         // to the consumers that accept it without transform
-                        // checks; FAST still declines the module.
+                        // checks; FAST declines only that function.
                         BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE && module->local_promotion_complete);
                         BUSTER_TEST(arguments, module->local_promotion.promoted_locals > 0 && function->instruction_count < old_instructions);
-                        BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.functions == 0);
+                        BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.functions == 1);
                     }
                     else
                     {
@@ -177,7 +177,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_validation_tests(UnitTestArgumen
                     BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT);
                     BUSTER_TEST(arguments, ir_test_opcode_count(function, IR_OPCODE_LOCAL) == 0);
                     BUSTER_TEST(arguments, ir_test_opcode_count(other, IR_OPCODE_LOCAL) == 0);
-                    BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.functions == 0);
+                    BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.functions == 1);
                     IrValidationResult after = ir_validate_canonical_module(program, module);
                     BUSTER_TEST(arguments, after.error == original.error && after.function.value == other->id.value);
                 }

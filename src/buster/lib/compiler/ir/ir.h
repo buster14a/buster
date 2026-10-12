@@ -881,12 +881,16 @@ struct IrFastPassStatistics
     u64 visits;
     u64 changes;
 };
+typedef struct IrFastDecline IrFastDecline;
 typedef struct IrFastStatistics IrFastStatistics;
 struct IrFastStatistics
 {
     IrFastPassStatistics passes[IR_FAST_PASS_COUNT];
     u64 functions;
+    // Counts lowered functions declined, including each function in a scope failure.
     u64 validation_skips;
+    IrFastDecline* declines;
+    u64 decline_count;
     u64 budget_skips;
     u64 provenance_skips;
     u64 parameter_budget_hits;
@@ -1094,6 +1098,15 @@ struct IrValidationResult
     // Direct verifier calls and unchecked certified preparation leave this
     // UNSPECIFIED. This is diagnostic context, not a persistent certificate.
     IrValidationBoundary boundary;
+};
+
+// Retained only for declines, in function order. A scope failure keeps the
+// invalid function ID in validation while function_name names the declined body.
+struct IrFastDecline
+{
+    IrValidationResult validation;
+    String8 function_name;
+    String8 source; // Filled by the driver before ordered multi-input publication.
 };
 
 // The result of proving that every instruction of a function belongs to
