@@ -458,7 +458,10 @@ unchanged.
   file scope.
   - A region settles its marks once, at its first query that needs the check
     (`c_ast_types_lookups_settled`). Each mark is checked at the file scope
-    against its binding, which must be a file-scope entity or none.
+    against its binding, which must be a file-scope entity or none. The file
+    scope's answer for a symbol is looked up once per lookup generation and
+    kept beside the symbol table (`CAstTypeSymbol`), and the scan visits only
+    the mark bytes of each flag word.
   - Up to 16 marks per region that a non-file-scope entity also spells are
     recorded. A query over one of them walks its subtree as before. A region
     with more walks for every query.
@@ -3493,6 +3496,70 @@ the same way and diagnostic only:
   first and was measured without this refusal. When lowering has a tree for a
   body it takes the tree's answers, so the count is built only on the
   default path and for bodies the tree does not index.
+- Zen 5 validation stays incomplete (#2761).
+
+### Settling the name checks
+
+This section has its own anchor because other open AST branches append to
+the plan's final paragraph. After the settled name checks above,
+`c_ast_types_lookups_settled` is most of what the
+[tree expression typer](#tree-expression-typer)'s name checks still cost.
+A throwaway census build of main `b71dfc89` (not committed), on the stage-2
+input under `-fc-ast-pilot`, found:
+- 132,295 settled checks and 179 walks, over 6,022 settlements;
+- 1.93 M flag bytes scanned, for 125,907 lookup marks, 106 of them "other";
+- one table build per compile;
+- every one of the 125,801 file-scope lookups answered by the binding array,
+  so no lookup walks a chain.
+
+Its Callgrind split of the settlement, with noinline census wrappers:
+- 40.0 M inclusive in all;
+- 6.5 M of query-time checks;
+- 11.9 M in the flag scan;
+- 19.4 M in the per-mark checks, of which 6.8 M is the file-scope lookup
+  call and 3.8 M is finding a call's callee through
+  `c_ast_types_first_child`;
+- 2.3 M in the one table build.
+
+The candidate keeps every rule. It changes how the facts are found:
+- it answers each symbol's file-scope lookup once per lookup generation, from
+  the table the build already clears;
+- it reads a call's callee token beside its `(`, where the call rule
+  requires the callee to be;
+- it scans only the mark bytes of each flag word.
+
+These budgets were declared before its measured runs. They use the same
+stage-2 input, flags and four Callgrind arms (A to D) on tests-off
+`-march=x86-64-v3` builds, with main `b71dfc89` as the base:
+- **Correctness.** No answer changes:
+  - no verify mismatch over the corpus, with the existing
+    `c_ast_test_type_lookups` probes plus any new case;
+  - the typer's `-v` counters on the self-host, `lookups_settled` and
+    `lookups_walked` included, are identical in B and C;
+  - identical diagnostics with and without the flag;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **The settlement's own cost (C against B).**
+  `c_ast_types_lookups_settled`'s inclusive instructions, plus any increase in
+  `c_ast_types_type_body`'s, fall by at least 25%, and the whole compile falls
+  by at least 6 M Ir. Otherwise the result is recorded as negative and the
+  code does not ship.
+- **Default path (D against A).** Within ±0.05% Ir on `-fsyntax-only` and on
+  `-c` (`-g0`).
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete (#2761) and
+  the hook stays opt-in.
+
+The settlement's hosted census is
+[`2026-10-12T134656Z`](../../performance-audits/2026-10-12T134656Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. The typer's counters are identical in B and C,
+  and the objects of all four arms are identical at `-g0` and `-g`.
+- The settlement falls from 34.96 M to 24.28 M Ir (−30.5% with the eager
+  pass's +35 K charged), and the pilot's compile by 10.78 M (−0.120%). Lookups
+  in the settlement fall from 125,801 to 11,435, one per symbol.
+- The default path is −0.0027% on `-fsyntax-only` and −0.0001% on `-c`.
+- About 14 M remains, spread over the scan, the per-mark binding loads and the
+  query-time checks.
 - Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
