@@ -5142,7 +5142,26 @@ struct OsProcessGroupObservation
 BUSTER_GLOBAL_LOCAL u64 os_process_group_test_syscall_attempts;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool os_process_wait_test_expire_deadline_after_ready;
 #if BUSTER_LINUX
-BUSTER_GLOBAL_LOCAL pid_t os_linux_process_group_test_vanishing_process;
+typedef struct OsLinuxProcessGroupQuiescenceTrace OsLinuxProcessGroupQuiescenceTrace;
+struct OsLinuxProcessGroupQuiescenceTrace
+{
+    u32 attempts;
+    u32 skipped;
+    bool acquired;
+    bool context_valid;
+    bool resolved;
+    bool proven;
+    bool fatal;
+    bool observed;
+    bool exited;
+};
+
+// Census seams are per thread so a concurrently running test module cannot
+// consume another thread's synthetic disappearance or inherit its trace.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL pid_t os_linux_process_group_test_vanishing_process;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool os_linux_process_group_test_vanish_unrelated;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 os_linux_process_group_test_vanished;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsLinuxProcessGroupQuiescenceTrace os_linux_process_group_test_trace;
 #endif
 
 void os_process_wait_test_expire_deadline_after_ready_once(void)
@@ -5245,6 +5264,7 @@ struct OsLinuxProcessGroupCensus
 {
     OsLinuxProcessGroupMember* members;
     u32 count;
+    u32 skipped;
     bool valid;
     bool retry;
 };
@@ -5658,18 +5678,26 @@ BUSTER_GLOBAL_LOCAL OsLinuxProcessGroupCensus os_linux_process_group_census(Aren
             bool include_member = false;
             bool stat_valid = os_linux_process_stat_at(context->descriptor, process_id, &process_group, &state, &vanished);
 #if BUSTER_INCLUDE_TESTS
-            if (process_id == os_linux_process_group_test_vanishing_process)
+            bool vanish_unrelated = os_linux_process_group_test_vanish_unrelated && process_id != proc_leader;
+            if (process_id == os_linux_process_group_test_vanishing_process || vanish_unrelated)
             {
                 stat_valid = false;
                 vanished = true;
-                os_linux_process_group_test_vanishing_process = 0;
+                os_linux_process_group_test_vanished += 1;
+                if (process_id == os_linux_process_group_test_vanishing_process) { os_linux_process_group_test_vanishing_process = 0; }
             }
 #endif
-            // A directory entry may legitimately disappear before stat is
-            // opened, but omitting it could make two incomplete inventories
-            // appear equal. Retry the complete two-snapshot proof instead.
-            result.retry = vanished;
-            result.valid = stat_valid;
+            // procfs keeps an entry until its task is reaped, so a PID whose
+            // stat vanished before its group was read is no longer a member of
+            // any group and is omitted from this snapshot. Aborting instead
+            // lets unrelated host churn exhaust every bounded attempt. A live
+            // member never vanishes, and an exited member reaped between the
+            // snapshots makes them differ. Leader disappearance still retries;
+            // the reservation recheck then fails closed.
+            bool skipped = !stat_valid && vanished && process_id != proc_leader;
+            result.skipped += skipped;
+            result.retry = vanished && !skipped;
+            result.valid = stat_valid || skipped;
             if (stat_valid && process_group == proc_leader)
             {
                 result.valid = state == 'Z';
@@ -5753,6 +5781,9 @@ BUSTER_GLOBAL_LOCAL bool os_linux_process_group_is_quiescent(Arena* arena, const
 {
     enum {OS_LINUX_PROCESS_GROUP_CENSUS_ATTEMPTS = 8};
     pid_t leader = 0;
+#if BUSTER_INCLUDE_TESTS
+    os_linux_process_group_test_trace = (OsLinuxProcessGroupQuiescenceTrace){0};
+#endif
     bool result = os_process_group_reservation_acquire(reservation, OS_PROCESS_GROUP_QUERY, &leader);
     if (result)
     {
@@ -5772,15 +5803,32 @@ BUSTER_GLOBAL_LOCAL bool os_linux_process_group_is_quiescent(Arena* arena, const
                 fatal = (!first.valid && !first.retry) || (!second.valid && !second.retry && first.valid);
                 proven = first.valid && second.valid && os_linux_process_group_census_equal(first, second);
                 arena_set_position(arena, census_position);
+#if BUSTER_INCLUDE_TESTS
+                os_linux_process_group_test_trace.attempts = attempt + 1;
+                os_linux_process_group_test_trace.skipped += first.skipped + second.skipped;
+#endif
             }
         }
+#if BUSTER_INCLUDE_TESTS
+        os_linux_process_group_test_trace.context_valid = context.valid;
+        os_linux_process_group_test_trace.resolved = result;
+        os_linux_process_group_test_trace.proven = proven;
+        os_linux_process_group_test_trace.fatal = fatal;
+#endif
         result = result && proven;
         result = os_linux_proc_context_close(&context) && result;
         // Revalidate the exact child reservation immediately after the two
         // snapshots. No numeric group operation is permitted if it was lost.
         OsProcessGroupObservation observation = os_process_group_observe(reservation, true);
         result = result && observation.valid && observation.exited;
+#if BUSTER_INCLUDE_TESTS
+        os_linux_process_group_test_trace.observed = observation.valid;
+        os_linux_process_group_test_trace.exited = observation.exited;
+#endif
     }
+#if BUSTER_INCLUDE_TESTS
+    os_linux_process_group_test_trace.acquired = leader != 0;
+#endif
     return result;
 }
 
@@ -5908,14 +5956,29 @@ bool os_linux_process_group_churn_self_test(Arena* arena)
 
     OsProcessGroupObservation observation = {0};
     OsProcessGroupReservation reservation = {.leader = leader};
-    if (unrelated > 0)
-    {
-        observation = os_process_group_observe(&reservation, false);
-        os_linux_process_group_test_vanishing_process = unrelated;
-    }
-    bool quiescent = observation.valid && observation.exited &&
-        os_linux_process_group_is_quiescent(arena, &reservation);
+    if (unrelated > 0) { observation = os_process_group_observe(&reservation, false); }
+    bool observed = observation.valid && observation.exited;
+
+    // One unrelated PID disappears between readdir and stat. It must be
+    // omitted without spending a retry, and the seam must be consumed.
+    os_linux_process_group_test_vanished = 0;
+    os_linux_process_group_test_vanishing_process = observed ? unrelated : 0;
+    bool single_quiescent = observed && os_linux_process_group_is_quiescent(arena, &reservation);
+    OsLinuxProcessGroupQuiescenceTrace single = os_linux_process_group_test_trace;
+    bool single_consumed = os_linux_process_group_test_vanishing_process == 0 && os_linux_process_group_test_vanished == 1;
     os_linux_process_group_test_vanishing_process = 0;
+    bool single_valid = single_quiescent && single_consumed && single.attempts == 1 && single.skipped == 1;
+
+    // Persistent churn: every non-leader PID disappears in every snapshot,
+    // which previously exhausted all bounded attempts.
+    os_linux_process_group_test_vanished = 0;
+    os_linux_process_group_test_vanish_unrelated = observed;
+    bool persistent_quiescent = observed && os_linux_process_group_is_quiescent(arena, &reservation);
+    OsLinuxProcessGroupQuiescenceTrace persistent = os_linux_process_group_test_trace;
+    u64 persistent_vanished = os_linux_process_group_test_vanished;
+    os_linux_process_group_test_vanish_unrelated = false;
+    bool persistent_valid = persistent_quiescent && persistent.attempts == 1 && persistent_vanished >= 2 &&
+        persistent.skipped == persistent_vanished;
 
     bool leader_reaped = leader <= 0;
     if (leader > 0)
@@ -5941,7 +6004,21 @@ bool os_linux_process_group_churn_self_test(Arena* arena)
         } while (unrelated_wait < 0 && errno == EINTR);
         unrelated_reaped = kill_valid && unrelated_wait == unrelated;
     }
-    return group_ready && unrelated > 0 && quiescent && leader_reaped && unrelated_reaped;
+    os_linux_process_group_test_vanished = 0;
+    bool result = group_ready && unrelated > 0 && observed && single_valid && persistent_valid && leader_reaped && unrelated_reaped;
+    if (!result)
+    {
+        fprintf(stderr, "OS_LINUX_PROCESS_GROUP_CHURN_TEST_V1 group=%d unrelated=%d observed=%d "
+            "single=%d consumed=%d attempts=%u skipped=%u acquired=%d context=%d resolved=%d proven=%d fatal=%d exited=%d "
+            "persistent=%d vanished=%llu attempts=%u skipped=%u acquired=%d context=%d resolved=%d proven=%d fatal=%d exited=%d "
+            "leader_reaped=%d unrelated_reaped=%d\n", (int)group_ready, (int)(unrelated > 0), (int)observed,
+            (int)single_quiescent, (int)single_consumed, single.attempts, single.skipped, (int)single.acquired,
+            (int)single.context_valid, (int)single.resolved, (int)single.proven, (int)single.fatal, (int)(single.observed && single.exited),
+            (int)persistent_quiescent, (unsigned long long)persistent_vanished, persistent.attempts, persistent.skipped,
+            (int)persistent.acquired, (int)persistent.context_valid, (int)persistent.resolved, (int)persistent.proven,
+            (int)persistent.fatal, (int)(persistent.observed && persistent.exited), (int)leader_reaped, (int)unrelated_reaped);
+    }
+    return result;
 }
 #endif
 

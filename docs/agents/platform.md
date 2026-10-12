@@ -161,9 +161,23 @@ Registered `os_tests` retain an unread stat descriptor for an exited child,
 reap that exact child, then exercise the production descriptor reader. Both
 normal and capacity-probe reads must observe ESRCH without publishing a length.
 Live, empty, oversized and invalid-descriptor controls distinguish disappearance
-from other outcomes. The existing synthetic census-churn fixture remains a
-separate check. This regression proves the read-after-open defect; the original
-#2380 CI failure had no stage detail and is not attributed conclusively to it.
+from other outcomes. This regression proves the read-after-open defect.
+
+procfs keeps a PID's entry until the task is reaped, so a PID whose `stat`
+vanishes before its process group is read cannot be a live group member. The
+census omits it and counts it as skipped instead of discarding the snapshot;
+previously unrelated host churn (other test modules, concurrent builds) could
+make every one of the eight bounded attempts fail and leave a cleanly exited
+group unproven (#2380). Disappearance of the leader or of an identified member
+still retries, an exited member reaped between snapshots makes them differ, and
+live members, namespace identity and the reservation recheck are unchanged.
+
+`os_linux_process_group_churn_self_test` uses per-thread seams: one unrelated
+PID vanishes once, then every non-leader PID vanishes in every snapshot. Each
+case must be proven in one attempt, consume its seam and count the skips; on
+failure it prints an `OS_LINUX_PROCESS_GROUP_CHURN_TEST_V1` stage record with
+the quiescence trace (acquisition, context, leader resolution, attempts,
+skips, proof, fatal census and reservation recheck) and reaping results.
 
 Linux process-group cleanup reads `self/status` from its retained procfs
 descriptor. `NSpid` lists the procfs mount's namespace followed by successively
