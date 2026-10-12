@@ -6000,6 +6000,10 @@ class OutOfRangeEvidenceNumberTest(unittest.TestCase):
             changed["cells"]["object"]["metrics"][metric][key] = huge
             with self.subTest(ast_pilot=metric):
                 self.assertTrue(compiler_receipt.validate_ast_pilot_acceptance(changed, "a" * 40, "c" * 64))
+        changed = copy.deepcopy(acceptance)
+        changed["tree"]["retained_bytes"] = huge
+        problems = compiler_receipt.validate_ast_pilot_acceptance(changed, "a" * 40, "c" * 64)
+        self.assertTrue(any("tree retained bytes are missing" in problem for problem in problems), problems)
 
         self.assertEqual(compiler_receipt.classify(summary(), BINARIES), [])
         for key in ("ratio", "ci_low", "ci_high"):
@@ -6056,7 +6060,7 @@ class OutOfRangeEvidenceNumberTest(unittest.TestCase):
 
         def changed(path: tuple, raw: bool) -> tuple[dict, dict]:
             current, documents = copy.deepcopy(pull), copy.deepcopy(bundle)
-            targets = [current["ast_pilot_acceptance"]["summary"]["cells"], documents["acceptance"]["cells"]]
+            targets = [current["ast_pilot_acceptance"]["summary"], documents["acceptance"]]
             if raw:
                 targets = [documents]
             for target in targets:
@@ -6065,9 +6069,10 @@ class OutOfRangeEvidenceNumberTest(unittest.TestCase):
                 target[path[-1]] = self.HUGE
             return current, documents
         cases = {
-            "acceptance wall ratio": (("syntax-only", "metrics", "wall", "ratio"), False),
-            "acceptance instruction median": (("object", "metrics", "instructions", "b_median"), False),
-            "acceptance peak RSS": (("object", "metrics", "peak_rss", "a_median"), False),
+            "acceptance wall ratio": (("cells", "syntax-only", "metrics", "wall", "ratio"), False),
+            "acceptance instruction median": (("cells", "object", "metrics", "instructions", "b_median"), False),
+            "acceptance peak RSS": (("cells", "object", "metrics", "peak_rss", "a_median"), False),
+            "acceptance tree retained bytes": (("tree", "retained_bytes"), False),
             "raw cell wall median": (("object_summary", "metrics", "wall", "a_median"), True),
         }
         for name, (path, raw) in cases.items():

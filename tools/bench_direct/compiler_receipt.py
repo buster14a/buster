@@ -1746,7 +1746,9 @@ def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expec
         metrics[cell] = values
     tree = summary.get("tree")
     retained = tree.get("retained_bytes") if isinstance(tree, dict) else None
-    if type(retained) is not int or retained <= 0 or not isinstance(tree.get("nodes"), int) or tree["nodes"] <= 0 or \
+    # Bounded first: ast_pilot_budget_verdict multiplies retained bytes by a float.
+    if type(retained) is not int or not _finite_positive(retained) or not isinstance(tree.get("nodes"), int) or \
+            tree["nodes"] <= 0 or \
             tree.get("a_tree_lines") != 0:
         problems.append(f"{label} tree retained bytes are missing, or variant A built a tree")
     if problems:
