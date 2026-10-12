@@ -676,11 +676,7 @@ BUSTER_GLOBAL_LOCAL MachineSelectionAddress machine_selection_address_join(Machi
 MachineSelectionAddress machine_selection_address(Arena* arena, IrProgram* program, IrFunction* function,
                                                    MachineSelectionAddressCache* cache, IrValueId value)
 {
-    // Work in a local distinct from the returned value: building the result
-    // in the return slot with field stores and then copying it whole into a
-    // cache entry reloads those stores as one wide load, which cannot
-    // store-forward (#3291).
-    MachineSelectionAddress address = {
+    MachineSelectionAddress result = {
         .base_value = value,
         .index_value = IR_VALUE_ID_INVALID,
         .object_value = IR_VALUE_ID_INVALID,
@@ -704,46 +700,45 @@ MachineSelectionAddress machine_selection_address(Arena* arena, IrProgram* progr
             MachineSelectionAddressEntry* entry = cache->entries + (current.value & (MACHINE_SELECTION_ADDRESS_CACHE_CAPACITY - 1));
             if (entry->value_plus_one == current.value + 1)
             {
-                address = entry->address;
+                result = entry->address;
                 complete = true;
             }
             else
             {
-                address = machine_selection_address_step(program, function, cache, current);
-                if (address.base_value.value == current.value || count == MACHINE_SELECTION_ADDRESS_CHAIN_LIMIT)
+                result = machine_selection_address_step(program, function, cache, current);
+                if (result.base_value.value == current.value || count == MACHINE_SELECTION_ADDRESS_CHAIN_LIMIT)
                 {
                     // At the depth bound retain the original expression;
                     // preserving its producer also preserves any cycle in
                     // malformed unvalidated input without recursive traversal.
                     if (count == MACHINE_SELECTION_ADDRESS_CHAIN_LIMIT)
                     {
-                        address.base_value = current;
-                        address.index_value = IR_VALUE_ID_INVALID;
-                        address.displacement = 0;
-                        address.object_value = IR_VALUE_ID_INVALID;
-                        address.symbol = IR_SYMBOL_ID_INVALID;
+                        result.base_value = current;
+                        result.index_value = IR_VALUE_ID_INVALID;
+                        result.displacement = 0;
+                        result.object_value = IR_VALUE_ID_INVALID;
+                        result.symbol = IR_SYMBOL_ID_INVALID;
                     }
                     complete = true;
                 }
                 else
                 {
-                    pending[count++] = address;
-                    current = address.base_value;
+                    pending[count++] = result;
+                    current = result.base_value;
                 }
             }
         }
         while (count)
         {
-            MachineSelectionAddressEntry* entry = cache->entries + (address.expression_value.value & (MACHINE_SELECTION_ADDRESS_CACHE_CAPACITY - 1));
-            entry->address = address;
-            entry->value_plus_one = address.expression_value.value + 1;
-            address = machine_selection_address_join(pending[--count], address);
+            MachineSelectionAddressEntry* entry = cache->entries + (result.expression_value.value & (MACHINE_SELECTION_ADDRESS_CACHE_CAPACITY - 1));
+            entry->address = result;
+            entry->value_plus_one = result.expression_value.value + 1;
+            result = machine_selection_address_join(pending[--count], result);
         }
         MachineSelectionAddressEntry* entry = cache->entries + (value.value & (MACHINE_SELECTION_ADDRESS_CACHE_CAPACITY - 1));
-        entry->address = address;
+        entry->address = result;
         entry->value_plus_one = value.value + 1;
     }
-    MachineSelectionAddress result = address;
     return result;
 }
 
