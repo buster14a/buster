@@ -1234,7 +1234,10 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
      fall back to the host's default `ld`, which must report a GNU ld
      version. The check then states the substitution. Wild must report its
      own identity, `Wild <version> (compatible with GNU linkers)`, which is
-     what `Args::linker_identity` prints at wild `e9a9b0cb`. Each linker's
+     what `Args::linker_identity` prints at wild `e9a9b0cb`. `<version>` is
+     any form `wild/build.rs` writes: a release version, a merge-base hash,
+     `<release> <hash>-modified`, or `<release> non-git-build`, which is what
+     a distribution package such as the 9700X host's reports. Each linker's
      `command -v` path, resolved path, first `--version` line and SHA-256
      (before and after the leg) go into the receipt. A missing Wild, a
      missing comparator, a silent `--version`, or a `mold` that is not
