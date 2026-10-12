@@ -25,6 +25,9 @@
 //                                              phase-1/2 translation with
 //                                              SWAR/AVX-512/scalar variants
 //                                              kept in differential agreement
+//   c_source_trim_row_pair                     per-file token and checkpoint
+//                                              reservations trimmed to their
+//                                              counts after each file
 //   c_source_metrics_add,                      the SOURCE table counters and
 //   c_source_metrics_file_row                  the per-file attribution rows
 //   c_ucn_decode, c_ucn_identifier_allowed      dialect-owned identifier escapes
