@@ -8450,22 +8450,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 {
                     continue;
                 }
-                // A direct CALL names its function on the call row. Its
-                // function-value operand is not an address use; counting it
-                // would keep a dead LEA/GOT load and its relocation alive.
-                bool direct_symbol_callee = operand_index == 0 && instruction->opcode == IR_OPCODE_CALL &&
-                                            instruction->symbol.value != IR_ID_UNDERLYING_INVALID;
-                if (direct_symbol_callee)
-                {
-                    IrInstructionId definition = function->values[used].definition;
-                    direct_symbol_callee = definition.value < function->instruction_count &&
-                                           function->instructions[definition.value].opcode == IR_OPCODE_FUNCTION &&
-                                           function->instructions[definition.value].symbol.value == instruction->symbol.value;
-                }
-                if (direct_symbol_callee)
-                {
-                    continue;
-                }
+                // COUNTERFACTUAL (#1038 9700X experiment, never merge): count a
+                // direct CALL's own callee operand as a use, as before the fix.
                 MachineX64ValueUse* use = value_uses + used;
                 use->use_count += 1;
                 if (use->use_block == 0)
