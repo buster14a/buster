@@ -3364,8 +3364,10 @@ The base is main `b71dfc89`, which the candidate branches from. The budgets:
   validation stays incomplete (#2761).
 
 The keyword gate's hosted census is
-[`2026-10-12T135905Z`](../../performance-audits/2026-10-12T135905Z.md),
-diagnostic only. There were two candidates:
+[`2026-10-12T135905Z`](../../performance-audits/2026-10-12T135905Z.md), for
+the first candidate, and its follow-up
+[`2026-10-12T150330Z`](../../performance-audits/2026-10-12T150330Z.md), for
+the shipped one. Both are diagnostic only. There were two candidates:
 - **The first, `51036154`, missed the lookup budget by 77.** It gated the
   eleven words declared above, and its lookups fell to 11,853, not 11,776.
   The census had counted the reserved `_Static_assert` (75) and `__asm__`
