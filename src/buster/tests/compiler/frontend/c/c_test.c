@@ -44247,6 +44247,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_semantic_handoff(UnitTestArgume
             c_test_sizeof_handoff_set(false);
             c_test_sizeof_handoff_take();
             BUSTER_TEST(arguments, query.model_unchanged && on.sizeof_operand_type_count == rows_before);
+            // Every agreeing size whose lowering answer carried an integer
+            // type also agreed on signedness.
+            BUSTER_TEST_RAW(arguments, seen.signedness_compared != 0 &&
+                                           seen.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER][C_TEST_SIZEOF_HANDOFF_SIGNEDNESS_MISMATCH] == 0,
+                            string_format(temporary.arena, S8("sizeof handoff run {u32}: {u64} signedness comparisons"), run, seen.signedness_compared));
+            // The negative control: the validation rows' kinds flip signedness
+            // and keep their size. Lowering must see a signedness mismatch and
+            // no size mismatch, and the two static assertions' operands, whose
+            // constant rows keep the right kind, must conflict.
+            c_test_sizeof_handoff_set(true);
+            c_test_sizeof_handoff_perturb_set(1u << C_SIZEOF_OPERAND_PRODUCER_VALIDATION);
+            CAnalysisResult perturbed = c_analyze_semantics_only(temporary.arena, tokens, c_parse_ast(temporary.arena, tokens));
+            CIRLowerResult perturbed_lowered =
+                c_lower_to_ir_with_options(temporary.arena, S8("sizeof-handoff.c"), tokens, perturbed, target, options);
+            c_test_sizeof_handoff_perturb_set(0);
+            c_test_sizeof_handoff_set(false);
+            CTestSizeofHandoff control = c_test_sizeof_handoff_take();
+            u64 size_mismatches = control.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER][C_TEST_SIZEOF_HANDOFF_SIZE_MISMATCH] +
+                                  control.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_PREDICTION][C_TEST_SIZEOF_HANDOFF_SIZE_MISMATCH];
+            u64 signedness_mismatches = control.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER][C_TEST_SIZEOF_HANDOFF_SIGNEDNESS_MISMATCH] +
+                                        control.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_PREDICTION][C_TEST_SIZEOF_HANDOFF_SIGNEDNESS_MISMATCH];
+            BUSTER_TEST_RAW(arguments, perturbed_lowered.program && size_mismatches == 0 && signedness_mismatches != 0 && control.conflicts == 2,
+                            string_format(temporary.arena, S8("sizeof handoff control run {u32}: {u64} size and {u64} signedness mismatches, {u64} conflicts"),
+                                          run, size_mismatches, signedness_mismatches, control.conflicts));
+        }
+        c_test_scratch_end(temporary);
+    }
+    // The tall-expression sweep of c_test_tall_expression_types (heights 1 to
+    // 10000 around the old depth-64 boundary), with the comparison on: every
+    // height's runtime and static-assertion operands are kept and lowering's
+    // answers agree in size and signedness.
+    u32 heights[] = {1, 2, 63, 64, 65, 4096, 10000};
+    String8 tall_source = c_test_tall_expression_source(arguments->arena, heights, BUSTER_ARRAY_LENGTH(heights));
+    Target tall_target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, tall_source,
+            (CPreprocessOptions){.target = tall_target, .data_layout = target_data_layout(tall_target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        c_test_sizeof_handoff_take();
+        c_test_sizeof_handoff_set(true);
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, c_parse_ast(temporary.arena, tokens));
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("sizeof-handoff-tall.c"), tokens, analysis, tall_target,
+            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+        c_test_sizeof_handoff_set(false);
+        CTestSizeofHandoff tall = c_test_sizeof_handoff_take();
+        u64 agree = tall.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER][C_TEST_SIZEOF_HANDOFF_AGREE] +
+                    tall.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_PREDICTION][C_TEST_SIZEOF_HANDOFF_AGREE];
+        if (BUSTER_REQUIRE(arguments, !analysis.diagnostic_count && lowered.program && !lowered.diagnostic_count))
+        {
+            // Each height keeps its static-assertion operand twice (both
+            // producers), its runtime operand and `sizeof t`.
+            BUSTER_TEST_RAW(arguments, tall.first_count == 0 && tall.conflicts == 0 &&
+                                           tall.rows[C_SIZEOF_OPERAND_PRODUCER_CONSTANT] == BUSTER_ARRAY_LENGTH(heights) &&
+                                           tall.rows[C_SIZEOF_OPERAND_PRODUCER_VALIDATION] == 3 * BUSTER_ARRAY_LENGTH(heights) &&
+                                           agree >= 2 * BUSTER_ARRAY_LENGTH(heights) && tall.signedness_compared >= BUSTER_ARRAY_LENGTH(heights),
+                            string_format(temporary.arena,
+                                          S8("sizeof handoff tall form {u32}: {u32} disagreements, {u64} conflicts, {u64}/{u64} rows, {u64} agreeing, {u64} signed"),
+                                          form, tall.first_count, tall.conflicts, tall.rows[C_SIZEOF_OPERAND_PRODUCER_CONSTANT],
+                                          tall.rows[C_SIZEOF_OPERAND_PRODUCER_VALIDATION], agree, tall.signedness_compared));
         }
         c_test_scratch_end(temporary);
     }

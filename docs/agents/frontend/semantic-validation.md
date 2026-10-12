@@ -406,11 +406,16 @@ for the calling thread. While it is on:
   `c_parse_validate_sizeof_operands` walk asks for the operand type of
   runtime `sizeof`s for this comparison alone, because ordinary validation
   types nothing inside a `sizeof`.
+- Rows of the two producers for one keyword are also compared with each
+  other: a different kind or size is counted as a conflict. Each producer
+  keeps its own row and counts.
 - Lowering reports every size the `C_IR_QUERY_FRAME_SIZEOF` resolver settles,
-  and the body's prediction fallback, to `c_sizeof_handoff_compare`. The
-  outcomes are agree, size mismatch, declined, or unmatched (no row for that
-  keyword). Rows whose producer scope differs from the keyword's innermost
-  scope are counted separately.
+  and the body's prediction fallback, to `c_sizeof_handoff_compare`. Each path
+  of `c_ir_sizeof_expression_attempt` records the operand type it sized; when
+  that is an integer type, its signedness is compared as well as its size.
+  The outcomes are agree, size mismatch, signedness mismatch, declined, or
+  unmatched (no row for that keyword). Rows whose producer scope differs from
+  the keyword's innermost scope are counted separately.
 
 The fields exist only in builds with tests; there they add 16 bytes to
 `CParseResult`, which the default `ide` build also carries. When the
@@ -426,8 +431,20 @@ forms:
 - a shadowing block;
 - static assertions.
 
-It checks each row's kind, that the syntax-only and `-c` analyses keep
-identical rows, and that a protected query leaves them unchanged.
+It runs each case for Linux x86-64, Windows x86-64 and Linux AArch64 layouts.
+It checks:
+- each row's kind;
+- that the syntax-only and `-c` analyses keep identical rows;
+- that a protected query leaves the rows unchanged;
+- that signedness was compared and agreed.
+
+As a negative control, `c_test_sizeof_handoff_perturb_set` flips the
+validation rows' signedness while keeping their size. The comparison must then
+report signedness mismatches, no size mismatch, and a conflict for each static
+assertion operand that both producers keep. The fixture also runs the
+`c_test_tall_expression_types` heights (1, 2, 63, 64, 65, 4096 and 10000) with
+the comparison on. That is the sampled sweep the regression already uses; a
+dense 1 to 10,000 sweep would lower about 50 million operands.
 `c_ast_test_sizeof_handoff` runs the comparison over the `c_ast` corpus and
 the hosted frontend sources and enforces floors on both. At `4ed35b59` on
 Linux x86-64 it keeps about 7,230 rows (17 from constant contexts). Of those

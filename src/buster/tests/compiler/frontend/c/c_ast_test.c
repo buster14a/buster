@@ -3099,6 +3099,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_sizeof_handoff_unit(UnitTestArguments* 
             sum->extra_queries += taken.extra_queries;
             sum->outside_population += taken.outside_population;
             sum->scope_differs += taken.scope_differs;
+            sum->signedness_compared += taken.signedness_compared;
             for (u32 path = 0; path < C_TEST_SIZEOF_HANDOFF_PATHS; path += 1)
             {
                 for (u32 outcome = 0; outcome < C_TEST_SIZEOF_HANDOFF_OUTCOMES; outcome += 1)
@@ -3114,10 +3115,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_sizeof_handoff_unit(UnitTestArguments* 
                                                : (CSourceLocation){0};
                 BUSTER_TEST_RAW(arguments, false,
                                 string_format(arguments->arena,
-                                              S8("{S8}: sizeof at token {u32} (line {u32}, column {u32}): semantic kind {u32} size {u32} (producer {u32}), "
-                                                 "lowering size {u64} (path {u32})"),
+                                              S8("{S8}: sizeof at token {u32} (line {u32}, column {u32}): semantic kind {u32} size {u32} signed {u32} (producer {u32}), "
+                                                 "lowering size {u64} signed {u32} (path {u32})"),
                                               label, mismatch->keyword, location.line, location.column, (u32)mismatch->kind, (u32)mismatch->semantic_size,
-                                              (u32)mismatch->producer, mismatch->lowering_size, (u32)mismatch->path));
+                                              (u32)mismatch->semantic_signed, (u32)mismatch->producer, mismatch->lowering_size,
+                                              (u32)mismatch->lowering_signed, (u32)mismatch->path));
             }
         }
         c_preprocess_release(&preprocess);
@@ -3198,8 +3200,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_sizeof_handoff(UnitTestArguments* 
     // semantic disagreement with itself.
     BUSTER_TEST_RAW(arguments, sum.conflicts == 0, string_format(arguments->arena, S8("{u64} sizeof handoff rows conflict"), sum.conflicts));
     // Each disagreement was reported with its location by the unit above.
-    u64 mismatches = sum.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER][C_TEST_SIZEOF_HANDOFF_SIZE_MISMATCH] +
-                     sum.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_PREDICTION][C_TEST_SIZEOF_HANDOFF_SIZE_MISMATCH];
+    u64 mismatches = 0;
+    for (u32 path = 0; path < C_TEST_SIZEOF_HANDOFF_PATHS; path += 1)
+    {
+        mismatches += sum.outcomes[path][C_TEST_SIZEOF_HANDOFF_SIZE_MISMATCH] + sum.outcomes[path][C_TEST_SIZEOF_HANDOFF_SIGNEDNESS_MISMATCH];
+    }
     BUSTER_TEST_RAW(arguments, mismatches == 0, string_format(arguments->arena, S8("{u64} sizeof answers disagree with semantic analysis"), mismatches));
     BUSTER_TEST(arguments, lowered_units != 0);
     return result;

@@ -9009,10 +9009,16 @@ BUSTER_C_INTERNAL bool c_parse_type_identity_record(CParseResult* result, CTypeI
 // scope, so an answer read under the wrong bindings is visible.
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_sizeof_handoff_on;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestSizeofHandoff c_sizeof_handoff_state;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_sizeof_handoff_perturbed_producers;
 
 void c_test_sizeof_handoff_set(bool enabled)
 {
     c_sizeof_handoff_on = enabled;
+}
+
+void c_test_sizeof_handoff_perturb_set(u32 producer_mask)
+{
+    c_sizeof_handoff_perturbed_producers = producer_mask;
 }
 
 CTestSizeofHandoff c_test_sizeof_handoff_take(void)
@@ -9047,27 +9053,64 @@ BUSTER_GLOBAL_LOCAL CTypeKind c_parse_sizeof_handoff_kind(CParseResult const* re
     return kind;
 }
 
+// The same-width integer kind of the other signedness, for the negative
+// control (c_test_sizeof_handoff_perturb_set). Plain char becomes unsigned
+// char, which differs from it on targets whose plain char is signed.
+BUSTER_GLOBAL_LOCAL CTypeKind c_parse_sizeof_handoff_flipped_kind(CTypeKind kind)
+{
+    CTypeKind flipped;
+    switch (kind)
+    {
+    case C_TYPE_CHAR: case C_TYPE_SIGNED_CHAR: flipped = C_TYPE_UNSIGNED_CHAR; break;
+    case C_TYPE_UNSIGNED_CHAR: flipped = C_TYPE_SIGNED_CHAR; break;
+    case C_TYPE_SHORT: flipped = C_TYPE_UNSIGNED_SHORT; break;
+    case C_TYPE_UNSIGNED_SHORT: flipped = C_TYPE_SHORT; break;
+    case C_TYPE_INT: flipped = C_TYPE_UNSIGNED_INT; break;
+    case C_TYPE_UNSIGNED_INT: flipped = C_TYPE_INT; break;
+    case C_TYPE_LONG: flipped = C_TYPE_UNSIGNED_LONG; break;
+    case C_TYPE_UNSIGNED_LONG: flipped = C_TYPE_LONG; break;
+    case C_TYPE_LONG_LONG: flipped = C_TYPE_UNSIGNED_LONG_LONG; break;
+    case C_TYPE_UNSIGNED_LONG_LONG: flipped = C_TYPE_LONG_LONG; break;
+    case C_TYPE_INT128: flipped = C_TYPE_UNSIGNED_INT128; break;
+    case C_TYPE_UNSIGNED_INT128: flipped = C_TYPE_INT128; break;
+    default: flipped = kind; break;
+    }
+    return flipped;
+}
+
 // Keeps one producer's answer for the operand of the `sizeof` at `keyword`.
-// A key already kept counts as a repeat, or as a conflict when the answer
-// differs; it is never overwritten.
+// A key its producer already kept counts as a repeat, or as a conflict when
+// the answer differs, and is never overwritten. A row of another producer
+// for the same keyword is compared too: a different kind or size is a
+// conflict, while each producer keeps its own row and counts.
 BUSTER_GLOBAL_LOCAL void c_parse_sizeof_handoff_record(CParseResult* result, CScopeId scope, u32 keyword, u32 operand_end, CTypeId type, u64 size,
                                                        CSizeofOperandProducer producer)
 {
     CTestSizeofHandoff* state = &c_sizeof_handoff_state;
     CTypeKind kind = c_parse_sizeof_handoff_kind(result, type);
+    if ((c_sizeof_handoff_perturbed_producers >> producer) & 1u)
+    {
+        kind = c_parse_sizeof_handoff_flipped_kind(kind);
+    }
     bool fresh = kind != C_TYPE_INVALID && size && size <= UINT8_MAX;
     state->outside_population += !fresh;
+    bool other_conflict = false;
     for (u32 index = result->sizeof_operand_type_count; fresh && index;)
     {
         CSizeofOperandType const* row = result->sizeof_operand_types + --index;
-        if (row->keyword == keyword && row->scope.value == scope.value && row->producer == producer)
+        if (row->keyword == keyword && row->producer == producer && row->scope.value == scope.value)
         {
             fresh = false;
             bool same = row->kind == kind && row->size == size && row->operand_end == operand_end;
             state->repeats += same;
             state->conflicts += !same;
         }
+        else if (row->keyword == keyword && row->producer != producer)
+        {
+            other_conflict |= row->kind != kind || row->size != size;
+        }
     }
+    state->conflicts += fresh && other_conflict;
     if (fresh && result->sizeof_operand_type_count == result->sizeof_operand_type_capacity)
     {
         u32 capacity = result->sizeof_operand_type_capacity ? result->sizeof_operand_type_capacity * 2 : 64;
@@ -9098,7 +9141,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_sizeof_handoff_record(CParseResult* result, CSc
 }
 
 BUSTER_C_SHARED void c_sizeof_handoff_compare(CParseResult* result, CPreprocessResult const* preprocess, u32 keyword, bool answered, u64 size,
-                                              u32 path)
+                                              bool typed, bool lowering_signed, u32 path)
 {
     CTestSizeofHandoff* state = &c_sizeof_handoff_state;
     bool sizeof_keyword = keyword < preprocess->token_count &&
@@ -9112,11 +9155,17 @@ BUSTER_C_SHARED void c_sizeof_handoff_compare(CParseResult* result, CPreprocessR
         {
             matched += 1;
             state->scope_differs += row->scope.value != innermost.value;
-            u32 outcome = !answered ? C_TEST_SIZEOF_HANDOFF_DECLINED
-                        : size == row->size ? C_TEST_SIZEOF_HANDOFF_AGREE
-                                            : C_TEST_SIZEOF_HANDOFF_SIZE_MISMATCH;
+            CTypeKind kind = (CTypeKind)row->kind;
+            bool semantic_signed = kind == C_TYPE_CHAR ? target_data_layout(preprocess->target).plain_char_is_signed : c_parse_expression_signed_kind(kind);
+            bool sized = answered && size == row->size;
+            u32 outcome = !answered        ? C_TEST_SIZEOF_HANDOFF_DECLINED
+                        : !sized           ? C_TEST_SIZEOF_HANDOFF_SIZE_MISMATCH
+                        : typed && semantic_signed != lowering_signed ? C_TEST_SIZEOF_HANDOFF_SIGNEDNESS_MISMATCH
+                                                                      : C_TEST_SIZEOF_HANDOFF_AGREE;
             state->outcomes[path][outcome] += 1;
-            if (outcome == C_TEST_SIZEOF_HANDOFF_SIZE_MISMATCH && state->first_count < C_TEST_SIZEOF_HANDOFF_MISMATCH_KEPT)
+            state->signedness_compared += sized && typed;
+            if ((outcome == C_TEST_SIZEOF_HANDOFF_SIZE_MISMATCH || outcome == C_TEST_SIZEOF_HANDOFF_SIGNEDNESS_MISMATCH) &&
+                state->first_count < C_TEST_SIZEOF_HANDOFF_MISMATCH_KEPT)
             {
                 state->first[state->first_count++] = (CTestSizeofHandoffMismatch){
                     .keyword = keyword,
@@ -9126,6 +9175,8 @@ BUSTER_C_SHARED void c_sizeof_handoff_compare(CParseResult* result, CPreprocessR
                     .kind = row->kind,
                     .producer = row->producer,
                     .path = (u8)path,
+                    .semantic_signed = semantic_signed,
+                    .lowering_signed = lowering_signed,
                 };
             }
         }

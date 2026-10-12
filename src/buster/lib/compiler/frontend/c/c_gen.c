@@ -3778,6 +3778,11 @@ struct CIntegerIrBuilder
     // sizeof/_Alignof lowering clears both fields before each operand.
     String8 sizeof_operand_constraint;
     u32 sizeof_operand_constraint_token;
+#if BUSTER_INCLUDE_TESTS
+    // The operand type c_ir_sizeof_expression_attempt sized, where its path
+    // had one, for the sizeof handoff comparison (c_test_sizeof_handoff_set).
+    IrTypeId sizeof_handoff_type;
+#endif
     // Nonzero while a sizeof operand resolves a statement-expression tail,
     // where every array operand is evaluated and so decays.
     u32 sizeof_statement_expression_tail_depth;
@@ -4126,9 +4131,11 @@ BUSTER_C_INTERNAL CScopeId c_ir_current_scope(CIntegerIrBuilder* builder)
 // Reports the resolver's `sizeof` answer for the operand [start, end) to the
 // handoff comparison (c_test_sizeof_handoff_set). The keyword is the token
 // before the operand, or before its `(` when the operand fills that group;
-// the comparison ignores any other token.
+// the comparison ignores any other token. `type` is the operand type the
+// resolver sized, when it had one; only an integer type has a signedness to
+// compare.
 BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
-BUSTER_C_INTERNAL void c_ir_sizeof_handoff_report(CIntegerIrBuilder* builder, u32 start, u32 end, bool answered, u64 size)
+BUSTER_C_INTERNAL void c_ir_sizeof_handoff_report(CIntegerIrBuilder* builder, u32 start, u32 end, bool answered, u64 size, IrTypeId type)
 {
     CToken const* tokens = builder->preprocess.tokens;
     u32 keyword = UINT32_MAX;
@@ -4141,7 +4148,10 @@ BUSTER_C_INTERNAL void c_ir_sizeof_handoff_report(CIntegerIrBuilder* builder, u3
     {
         keyword = start - 2;
     }
-    c_sizeof_handoff_compare(&builder->parse, &builder->preprocess, keyword, answered, size, C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER);
+    IrType const* operand = answered ? ir_type_from_id(&builder->program->types, type) : 0;
+    bool typed = operand && operand->kind == IR_TYPE_INTEGER;
+    c_sizeof_handoff_compare(&builder->parse, &builder->preprocess, keyword, answered, size, typed, typed && operand->is_signed,
+                             C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER);
 }
 #endif
 
@@ -4298,11 +4308,14 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
             frame->success = frame->result_type.value != IR_ID_UNDERLYING_INVALID;
             break;
         case C_IR_QUERY_FRAME_SIZEOF:
+#if BUSTER_INCLUDE_TESTS
+            builder->sizeof_handoff_type = IR_TYPE_ID_INVALID;
+#endif
             frame->success = c_ir_sizeof_expression_attempt(builder, frame->start, frame->end, &frame->integer, &frame->alignment);
 #if BUSTER_INCLUDE_TESTS
             if (c_sizeof_handoff_enabled() && !machine->has_request)
             {
-                c_ir_sizeof_handoff_report(builder, frame->start, frame->end, frame->success, frame->integer);
+                c_ir_sizeof_handoff_report(builder, frame->start, frame->end, frame->success, frame->integer, builder->sizeof_handoff_type);
             }
 #endif
             break;
@@ -35695,6 +35708,9 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
         {
             *alignment_out = decoded.element_width;
         }
+#if BUSTER_INCLUDE_TESTS
+        builder->sizeof_handoff_type = IR_TYPE_ID_INVALID;
+#endif
         return true;
     }
     if (!dereference_count && start + 3 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
@@ -35716,6 +35732,9 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
                 {
                     *alignment_out = literal->layout.alignment;
                 }
+#if BUSTER_INCLUDE_TESTS
+                builder->sizeof_handoff_type = literal_type;
+#endif
                 return true;
             }
         }
@@ -35749,6 +35768,9 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
             {
                 *alignment_out = character->layout.alignment;
             }
+#if BUSTER_INCLUDE_TESTS
+            builder->sizeof_handoff_type = builder->char_type;
+#endif
             return true;
         }
     }
@@ -35799,6 +35821,9 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
                     {
                         *alignment_out = c_ir_sizeof_operand_alignment(value);
                     }
+#if BUSTER_INCLUDE_TESTS
+                    builder->sizeof_handoff_type = type;
+#endif
                     return true;
                 }
             }
@@ -35825,6 +35850,9 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
                 {
                     *alignment_out = c_ir_sizeof_operand_alignment(expression);
                 }
+#if BUSTER_INCLUDE_TESTS
+                builder->sizeof_handoff_type = expression_type;
+#endif
                 return true;
             }
         }
@@ -35935,6 +35963,9 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
             {
                 *alignment_out = c_ir_sizeof_operand_alignment(value);
             }
+#if BUSTER_INCLUDE_TESTS
+            builder->sizeof_handoff_type = type;
+#endif
             return true;
         }
     }
@@ -37236,7 +37267,9 @@ c_ir_expression_core_loop:
 #if BUSTER_INCLUDE_TESTS
                 if (is_sizeof && c_sizeof_handoff_enabled())
                 {
-                    c_sizeof_handoff_compare(&builder->parse, &builder->preprocess, index, true, value, C_TEST_SIZEOF_HANDOFF_PATH_PREDICTION);
+                    bool typed = expression->kind == IR_TYPE_INTEGER;
+                    c_sizeof_handoff_compare(&builder->parse, &builder->preprocess, index, true, value, typed, typed && expression->is_signed,
+                                             C_TEST_SIZEOF_HANDOFF_PATH_PREDICTION);
                 }
 #endif
             }
