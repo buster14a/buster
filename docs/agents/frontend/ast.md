@@ -1714,7 +1714,7 @@ differential tests pass.
 |---|---|---|---|
 | `c_parse_ast_run`, `c_parser_parse_function_body`, `c_parser_parse_declaration_expression` | declaration split, declarator name, body range, static-assert ranges | `DECLARATION`, `FUNCTION_DEFINITION`, `INIT_DECLARATOR`, `STATIC_ASSERT` | Retired under `-fc-ast-pilot` by the [declaration split](#declaration-split-from-the-tree). The walker stays the default path and the per-unit fallback. |
 | `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, plain segments bound in one pass, and each block declarator's `,`, `=` and plain initializer. The token loop stays the engine, the default path and the per-body fallback; the type machine still reads specifiers and declarators from tokens (next row), and the switch and control-statement validators keep `c_parse_statement_end`, whose calls cost about 1 M instructions on the self-host. |
-| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)), and so do the validators' plain type names; their runs where no type name begins are skipped ([type names](#type-names)). Tags, `typeof`, attributes, type names typed in machine frames, members and every declarator derivation stay with the machine. |
+| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)), and so do the validators' plain type names; their runs where no type name begins are skipped ([type names](#type-names)). So do members' plain runs inside tag definitions ([members](#members)). The rest of a tag definition (segment frames, alignment, declarators, layout attributes), tags, `typeof`, attributes, type names typed in machine frames (casts, below the gate) and every declarator derivation stay with the machine. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Controlled-body extents (`c_ir_controlled_body_range`, and through it `c_ir_statement_end*` and `c_ir_statement_labels_end`) are read under `-fc-ast-pilot` from the [extent table](#statement-extents-in-lowering). The walkers stay the default path and the per-body and per-query fallback. `c_ir_lower_body_advance`'s first-token classification is not migrated. |
 | `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | `c_ir_root_conditional` is read under `-fc-ast-pilot` ([lowering from the tree](#lowering-from-the-tree)); the rest is not migrated. The evaluator's walk is designed in [Expression lowering from the tree](#expression-lowering-from-the-tree). Without the tree, `c_ir_root_conditional` refuses a body range that holds no `?` by a per-body prefix count (#3467). |
@@ -1755,12 +1755,13 @@ differential passes. The row is not retired, for three reasons:
   tokens.
 
 Under `-fc-ast-pilot`, the third row's specifier machine no longer runs for a
-plain specifier run of a block declaration, a file-scope declaration or a
-parameter. Its consumers, the declaration typers, take the base type and the
-declarator start from `DECL_SPECIFIERS`, and the field-by-field model
-differential passes. The row is not retired. The machine still runs without
-the flag, for every run the read hands back, for type names, members and tag
-definitions, and for every pointer, array and function derivation.
+plain specifier run of a block declaration, a file-scope declaration, a
+parameter or a member. Its consumers, the declaration typers and the
+aggregate segment frames, take the base type and the declarator start from
+`DECL_SPECIFIERS`, and the field-by-field model differential passes. The row
+is not retired. The machine still runs without the flag, for every run the
+read hands back, for type names typed in its own frames, for the rest of a
+tag definition, and for every pointer, array and function derivation.
 
 The [tree expression typer](#tree-expression-typer) is the first consumer of
 the fourth row's replacement. Under `-fc-ast-pilot` it answers most of semantic
@@ -3150,6 +3151,24 @@ budgets:
   run, so the difference stays within ±0.05% Ir.
 - **Adoption of the hook as the default.** Unchanged and on hold: acceptance
   on the Zen 5 route (#2761), with no 9700X comparison requested.
+
+The member read's hosted census is
+[`2026-10-12T134037Z`](../../performance-audits/2026-10-12T134037Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes:
+  - the model, the bindings and the diagnostics match over the corpus, the
+    frontend sources and the self-host unity input;
+  - verify mode finds every read equal to the machine's scalar frame: 1,790
+    reads from the fixtures, 11,151 with the frontend sources and 9,695 on the
+    unity input;
+  - the objects of all four arms are identical.
+- On the self-host 9,691 member runs are read (1,246 primitive, 8,445
+  typedef), and 121 go to the scalar frame as `input`.
+- The pilot's compile falls by 13.80 M Ir (−0.154%).
+- The default path is +0.046%, all of it self cost in
+  `c_type_parse_machine_run`, where the new branch is inlined; the calls are
+  A's.
+- Zen 5 validation stays incomplete (#2761), so the hook stays opt-in.
 
 ### Initializer value typing
 
