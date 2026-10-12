@@ -406,10 +406,22 @@ struct ObjectDebugModule
     u64 types_size;
 };
 
-// `sections` holds one section per ObjectSectionKind, indexed by its kind,
-// and past OBJECT_SECTION_COUNT any sections of their own name: the ones
-// `__attribute__((section))` places and the C-identifier-named ones an ELF
-// object carries (issue 1276). Only ELF objects have those.
+// The most sections a COFF or Mach-O object can number. Regular COFF reserves
+// section numbers 0xff00 and above; a Mach-O symbol's one-byte n_sect counts
+// sections from 1 and spends 0 on NO_SECT.
+enum
+{
+    OBJECT_COFF_MAX_SECTIONS = 65279,
+    OBJECT_MACH_O_MAX_SECTIONS = 255,
+};
+
+// A codegen, reader or link object's `sections` holds one section per
+// ObjectSectionKind, indexed by its kind, and past OBJECT_SECTION_COUNT any
+// sections of their own name: the ones `__attribute__((section))` places and
+// the C-identifier-named ones an ELF object carries (issue 1276). Only ELF
+// objects of those producers have such sections. An assembled object instead
+// holds the sections its source declares, in declaration order, each with its
+// own name and kind, as many as the format can number.
 typedef struct ObjectFile ObjectFile;
 struct ObjectFile
 {

@@ -167,6 +167,9 @@
 #include "c_internal.h"
 #include <buster/lib/compiler/frontend/c/c_ast.h>
 #include <buster/lib/compiler/frontend/c/c_parse_internal.h>
+#if BUSTER_INCLUDE_TESTS
+#include <buster/lib/arena_internal.h>
+#endif
 
 BUSTER_C_INTERNAL bool c_declaration_keyword(String8 spelling)
 {
@@ -11085,6 +11088,64 @@ BUSTER_C_INTERNAL CMember* c_parse_initializer_member_at(CParseInitializerSlotCa
     return member;
 }
 
+// Expression typing can append more rows than the token-derived initial
+// table estimate. The member search's indexed visited set follows that live
+// count; its private arena survives scratch/phase rewinds until the next
+// growth or semantic teardown.
+BUSTER_C_INTERNAL bool c_parse_promoted_member_workspace(CTypeParseMachine* machine, CParseResult* result)
+{
+    bool available = machine->promoted_member_capacity && machine->promoted_member_work && machine->promoted_member_visited;
+    if (available && result->type_count > machine->promoted_member_capacity)
+    {
+        u64 doubled = (u64)machine->promoted_member_capacity * 2;
+        u32 capacity = doubled <= UINT32_MAX && doubled >= result->type_count ? (u32)doubled : result->type_count;
+        u64 size = arena_minimum_position;
+        bool sized = c_type_parse_buffer_size_add(&size, capacity, sizeof(CParsePromotedMemberWork), BUSTER_ALIGN_OF(CParsePromotedMemberWork)) &&
+                     c_type_parse_buffer_size_add(&size, capacity, sizeof(u32), BUSTER_ALIGN_OF(u32)) &&
+                     size <= ARENA_MAX_RESERVATION - (BUSTER_KB(64) - 1);
+        if (sized)
+        {
+            size = (size + BUSTER_KB(64) - 1) & ~(BUSTER_KB(64) - 1);
+        }
+        Arena* workspace = sized ? c_frontend_arena_create((ArenaCreation){
+            .reserved_size = size,
+            .granularity = BUSTER_KB(64),
+            .initial_size = size,
+            .flags = {.no_pool = true},
+        }, C_FRONTEND_RESERVATION_ANALYSIS) : 0;
+        available = workspace != 0;
+        if (available)
+        {
+            CParsePromotedMemberWork* work = arena_allocate(workspace, CParsePromotedMemberWork, capacity);
+            u32* visited = arena_allocate_zeroed(workspace, u32, capacity);
+            if (machine->promoted_member_arena)
+            {
+                BUSTER_VALIDATE(arena_destroy(machine->promoted_member_arena, 1));
+            }
+            machine->promoted_member_arena = workspace;
+            machine->promoted_member_work = work;
+            machine->promoted_member_visited = visited;
+            machine->promoted_member_capacity = capacity;
+            machine->promoted_member_generation = 0;
+        }
+        else
+        {
+            c_parse_diagnostic(result, (CSourceLocation){0}, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                sized ? S8("could not reserve C promoted-member workspace") : S8("C promoted-member workspace size overflow"));
+        }
+    }
+    return available;
+}
+
+BUSTER_C_INTERNAL void c_parse_promoted_member_workspace_release(CTypeParseMachine* machine)
+{
+    if (machine->promoted_member_arena)
+    {
+        BUSTER_VALIDATE(arena_destroy(machine->promoted_member_arena, 1));
+        machine->promoted_member_arena = 0;
+    }
+}
+
 // The search keeps its queue in the machine's promoted_member_work, and a
 // found member leaves in found_work_out/found_field_out the queue row that
 // declares it and that row's field index. The rows' parent/via_field links
@@ -11097,11 +11158,11 @@ BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, 
     {
         *ambiguous_out = false;
     }
-    u32 capacity = machine->promoted_member_capacity;
-    if (!capacity || result->type_count > capacity || !machine->promoted_member_work || !machine->promoted_member_visited)
+    if (!c_parse_promoted_member_workspace(machine, result))
     {
         return false;
     }
+    u32 capacity = machine->promoted_member_capacity;
     CParsePromotedMemberWork* work = machine->promoted_member_work;
     u32* visited = machine->promoted_member_visited;
     machine->promoted_member_generation += 1;
@@ -11194,6 +11255,65 @@ BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, 
     }
     return found && !ambiguous;
 }
+
+#if BUSTER_INCLUDE_TESTS
+CTestPromotedMemberWorkspace c_test_promoted_member_workspace(CParseResult* result, CTypeId root, String8 name)
+{
+    CTestPromotedMemberWorkspace report = {0};
+    u64 reserved_before = arena_test_live_reserved_bytes();
+    CParseResult probe = *result;
+    u32 symbol = result->symbols ? c_symbol_find(result->symbols, name) : 0;
+    CParsePromotedMemberWork initial_work[1] = {0};
+    u32 initial_visited[1] = {0};
+    CTypeParseMachine machine = {
+        .promoted_member_work = initial_work,
+        .promoted_member_visited = initial_visited,
+        .promoted_member_capacity = BUSTER_ARRAY_LENGTH(initial_work),
+    };
+    CTypeId member = C_TYPE_ID_INVALID;
+    u32 root_field = 0;
+    u32 found_work = 0;
+    u32 found_field = 0;
+    bool ambiguous = false;
+    report.initial_search = c_parse_promoted_member_type(&machine, &probe, root, symbol, name,
+        &member, &root_field, &ambiguous, &found_work, &found_field);
+    if (report.initial_search && machine.promoted_member_arena && probe.type_count == machine.promoted_member_capacity)
+    {
+        Arena* previous_arena = machine.promoted_member_arena;
+        CParsePromotedMemberWork* previous_work = machine.promoted_member_work;
+        u32* previous_visited = machine.promoted_member_visited;
+        u32 previous_capacity = machine.promoted_member_capacity;
+        u32 previous_generation = machine.promoted_member_generation;
+        CTypeId appended = c_parse_add_type(&probe, (CType){.kind = C_TYPE_INT});
+        if (appended.value < probe.type_count && probe.type_count > previous_capacity)
+        {
+            u32 diagnostics_before = probe.diagnostic_count;
+            u64 reserved_with_workspace = arena_test_live_reserved_bytes();
+            arena_test_fail_next_reserve();
+            bool found = c_parse_promoted_member_type(&machine, &probe, root, symbol, name,
+                &member, &root_field, &ambiguous, &found_work, &found_field);
+            report.failed_growth = !found;
+            report.fault_consumed = !arena_test_cancel_reserve_failure();
+            report.workspace_preserved = machine.promoted_member_arena == previous_arena &&
+                machine.promoted_member_work == previous_work && machine.promoted_member_visited == previous_visited &&
+                machine.promoted_member_capacity == previous_capacity && machine.promoted_member_generation == previous_generation &&
+                arena_test_live_reserved_bytes() == reserved_with_workspace;
+            report.structured_error = probe.diagnostic_count == diagnostics_before + 1 &&
+                probe.diagnostics[diagnostics_before].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
+                string_equal(probe.diagnostics[diagnostics_before].message, S8("could not reserve C promoted-member workspace"));
+            u64 previous_address = (u64)previous_arena;
+            report.recovered = c_parse_promoted_member_type(&machine, &probe, root, symbol, name,
+                &member, &root_field, &ambiguous, &found_work, &found_field);
+            report.member_type = member;
+            report.replacement = report.recovered && machine.promoted_member_capacity > previous_capacity &&
+                (u64)machine.promoted_member_arena != previous_address;
+        }
+    }
+    c_parse_promoted_member_workspace_release(&machine);
+    report.released = !machine.promoted_member_arena && arena_test_live_reserved_bytes() == reserved_before;
+    return report;
+}
+#endif
 
 BUSTER_C_INTERNAL bool c_parse_alignof_object_alignment(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                         CScopeId scope, u32 start, u32 end, u32* alignment);
@@ -25797,6 +25917,23 @@ BUSTER_C_INTERNAL bool c_parse_label_address_prefix_with_typedef_at(CParseResult
             else if (c_parse_type_start_token(result, *preprocess, scope, token))
             {
                 type_name = true;
+                // The operand belongs to typeof's expression/type grammar,
+                // not the enclosing cast's restricted type-word proof.
+                u16 words = c_parse_word_bits_token(*preprocess, token);
+                bool typeof_specifier = (words & C_WORD_TYPEOF) ||
+                                        (c_preprocess_dialect_is_c23(preprocess->dialect) && (words & C_WORD_TYPEOF_UNQUAL));
+                if (typeof_specifier && scan + 1 < index - 1 &&
+                    c_token_is_punctuator(&preprocess->tokens[scan + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    u32 close = result->position_index ? c_parse_matching_delimiter_indexed(result, *preprocess, scan + 1)
+                                                       : c_parse_matching_delimiter(*preprocess, scan + 1, index - 1,
+                                                                                     C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                                                     C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                    if (close < index - 1 && scan + 2 < close)
+                    {
+                        scan = close;
+                    }
+                }
             }
             else
             {
@@ -26700,11 +26837,10 @@ BUSTER_GLOBAL_LOCAL u32 c_parse_plan_terminator(CAst const* ast, CPreprocessResu
 // states it. Compound statements, and the statements whose last child is a
 // statement, are transparent: the chain runs node, node - 1, ... to a
 // statement whose last token an anchor gives, and each compound on the way
-// adds its `}`. `lasts` memoizes the answer per node - `begin` (last + 1,
+// adds its `}`. Lowering's extent table (c_gen.c) shares it. `lasts` memoizes the answer per node - `begin` (last + 1,
 // UINT32_MAX for none, 0 for not yet known), so nested statements share one
 // descent. `limit` is the body's `}`.
-BUSTER_GLOBAL_LOCAL u32 c_parse_plan_statement_last(CAst const* ast, CPreprocessResult const* preprocess, u32* lasts, u32 begin, u32 node,
-                                                    u32 limit)
+BUSTER_C_SHARED u32 c_parse_plan_statement_last(CAst const* ast, CPreprocessResult const* preprocess, u32* lasts, u32 begin, u32 node, u32 limit)
 {
     u32 cursor = node;
     u32 last = UINT32_MAX;
@@ -35431,8 +35567,20 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_initializer_shape
             u64 count = 0;
             bool previous = machine->semantic_constant_queries;
             machine->semantic_constant_queries = true;
+            CTypeId aggregate = type;
+            if (value.kind == C_TYPE_ARRAY && value.array_bound < result->array_bound_count)
+            {
+                CArrayBound bound = result->array_bounds[value.array_bound];
+                // Failed inference leaves an omitted outer bound unresolved.
+                // Still walk its elements/designators with the existing
+                // unbounded-root mode; no inferred count is published here.
+                if (!bound.token_count && !bound.has_inferred_count)
+                {
+                    aggregate = C_TYPE_ID_INVALID;
+                }
+            }
             c_parse_infer_initializer_array_count_core(machine, result->arena, machine->scratch_arena, preprocess, result, scope,
-                                                       value.element_type, start, end, &count, type, &diagnostic);
+                                                       value.element_type, start, end, &count, aggregate, &diagnostic);
             machine->semantic_constant_queries = previous;
             arena_set_position(machine->scratch_arena, mark);
         }
@@ -38886,6 +39034,13 @@ BUSTER_C_INTERNAL bool c_parse_label_address_cast_at(CParseResult* result, CPrep
             type = c_parse_pointer_chain(result, preprocess, type, &cursor, index - 1);
             label = type.value < result->type_count && cursor == index - 1;
         }
+        else
+        {
+            // The machineless reader cannot resolve typeof operands. The
+            // binder's scoped prefix proof admits their balanced group;
+            // ordinary semantic typing still validates the complete cast.
+            label = c_parse_label_address_prefix_with_typedef_at(result, &preprocess, scope, start, index, open);
+        }
     }
     return label;
 }
@@ -38980,6 +39135,45 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
                 }
             }
         }
+    }
+    if (label)
+    {
+        // Equality consumes a label pointer and produces an ordinary int,
+        // as canonical POINTER_EQUAL/NOT_EQUAL already do. Only a complete
+        // equality expression is a sink: conditional/comma/logical results
+        // and casts retain the existing conservative provenance policy.
+        u32 first = start;
+        u32 limit = end;
+        while (first < limit && c_token_is_punctuator(&preprocess.tokens[first], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+               c_parse_matching_delimiter_indexed(result, preprocess, first) + 1 == limit)
+        {
+            first += 1;
+            limit -= 1;
+        }
+        u32 root_precedence = UINT32_MAX;
+        for (u32 cursor = first; cursor < limit; cursor += 1)
+        {
+            CToken token = preprocess.tokens[cursor];
+            if (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
+            {
+                u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
+                cursor = close < limit ? close : limit;
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+            {
+                root_precedence = BUSTER_MIN(root_precedence, 3u);
+            }
+            else
+            {
+                u32 precedence = c_parse_expression_operator_precedence(token);
+                bool label_address = c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+                    c_parse_label_address_prefix_with_typedef(result, &preprocess, scope, first, cursor);
+                bool binary = precedence && cursor > first && cursor + 1 < limit && !label_address &&
+                    c_parse_expression_token_ends_operand(preprocess.tokens[cursor - 1]);
+                if (binary) root_precedence = BUSTER_MIN(root_precedence, precedence);
+            }
+        }
+        label = root_precedence != c_parse_expression_operator_precedence((CToken){.kind = C_TOKEN_PUNCTUATOR, .punctuator = C_PUNCTUATOR_EQUAL});
     }
     return label;
 }
@@ -41721,6 +41915,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     // The literal memo stays published: lowering reads the recorded bytes
     // and never records.
     scratch_end(machine_temporary);
+    c_parse_promoted_member_workspace_release(&machine);
     BUSTER_VALIDATE(arena_destroy(machine_buffer_arena, 1));
     if (phase_arena)
     {

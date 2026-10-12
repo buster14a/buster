@@ -287,6 +287,23 @@ enum
 };
 BUSTER_F_DECL u32 c_test_parse_word_classes(CPreprocessResult preprocess, CToken token);
 
+// A real member search around a failed private workspace replacement:
+// retain the old owner on failure, recover on retry, and release via teardown.
+typedef struct CTestPromotedMemberWorkspace CTestPromotedMemberWorkspace;
+struct CTestPromotedMemberWorkspace
+{
+    CTypeId member_type;
+    bool initial_search;
+    bool failed_growth;
+    bool fault_consumed;
+    bool workspace_preserved;
+    bool structured_error;
+    bool recovered;
+    bool replacement;
+    bool released;
+};
+BUSTER_F_DECL CTestPromotedMemberWorkspace c_test_promoted_member_workspace(CParseResult* result, CTypeId root, String8 name);
+
 typedef struct CTestTypeConstantQuery CTestTypeConstantQuery;
 struct CTestTypeConstantQuery
 {

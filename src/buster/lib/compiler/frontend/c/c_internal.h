@@ -1586,6 +1586,9 @@ struct CTypeParseMachine
     u64 phase_released_bytes;
     u64 phase_releases;
     CTypeLayoutCache layout_cache;
+    // Owns a grown member-search workspace; the initial buffers stay in the
+    // analysis machine arena. Released by semantic teardown, never a query rewind.
+    Arena* promoted_member_arena;
     CParsePromotedMemberWork* promoted_member_work;
     u32* promoted_member_visited;
     u32 promoted_member_capacity;
@@ -1751,6 +1754,12 @@ BUSTER_C_EXTERN bool c_parse_type_identity_sites_absent(CParseResult* result, u3
 // Whether c_parse_pending_enum_member could answer a single identifier: an
 // enumerator list still being parsed.
 BUSTER_C_EXTERN bool c_parse_pending_enum_possible(CParseResult const* result);
+
+// The last token of the statement at `node` by the statement plan's anchor
+// rules (c_parse.c), or UINT32_MAX when no rule states it. `lasts` memoizes
+// answers per node - `begin`, zeroed by the caller; `limit` is the body's `}`.
+// Lowering's extent table (c_gen.c) reads the same rules.
+BUSTER_C_EXTERN u32 c_parse_plan_statement_last(CAst const* ast, CPreprocessResult const* preprocess, u32* lasts, u32 begin, u32 node, u32 limit);
 
 // A tree answer held for verify mode; defined below for tests builds.
 typedef struct CAstTypePending CAstTypePending;

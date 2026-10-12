@@ -46,6 +46,7 @@
 //   compat_ide_select, compat_ide_resolve       compatibility harness compiler selection
 //                                                and compatibility_ide_selection_self_test
 //   compatibility_spawn_self_test              harness environment/script contracts
+//   tools/curl_compat.c                         opt-in pristine curl build-system census
 //   test_raddebugger_action                     pinned upstream unity compilation/link diagnostic
 //   test_cpython_reference_action              opt-in Clang-only harness replay
 //   process_arguments, main                      command dispatch
@@ -149,6 +150,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_MUSL,
     BUILD_COMMAND_TEST_CPYTHON,
     BUILD_COMMAND_TEST_RADDEBUGGER,
+    BUILD_COMMAND_TEST_CURL,
     BUILD_COMMAND_TEST_MODE_MATRIX,
     BUILD_COMMAND_TEST_DIFFERENTIAL,
     BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS,
@@ -25500,6 +25502,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
+        case BUILD_COMMAND_TEST_CURL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
         case BUILD_COMMAND_SOURCE_SIZE:
@@ -39465,6 +39468,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 #include "tools/ci_unit_tests.c"
 #include "tools/clang_suite.c"
 #include "tools/compiler_profile_qualification.c"
+#include "tools/curl_compat.c"
 
 ProcessResult process_arguments(void)
 {
@@ -39523,6 +39527,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_MUSL] = S8_INITIALIZER("test_musl"),
         [BUILD_COMMAND_TEST_CPYTHON] = S8_INITIALIZER("test_cpython"),
         [BUILD_COMMAND_TEST_RADDEBUGGER] = S8_INITIALIZER("test_raddebugger"),
+        [BUILD_COMMAND_TEST_CURL] = S8_INITIALIZER("test_curl"),
         [BUILD_COMMAND_TEST_MODE_MATRIX] = S8_INITIALIZER("test_mode_matrix"),
         [BUILD_COMMAND_TEST_DIFFERENTIAL] = S8_INITIALIZER("test_differential"),
         [BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS] = S8_INITIALIZER("test_aarch64_assembly_census"),
@@ -39638,6 +39643,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_TEST_DIFFERENTIAL: result = differential_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS: result = aarch64_assembly_census_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_TEST_CLANG_SUITE: result = clang_suite_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_TEST_CURL: result = curl_compat_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS: result = native_retirement_census_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UEFI: result = uefi_boot_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_SOURCE_SIZE: result = source_size_main(arena, owned_arguments); break;
@@ -40868,6 +40874,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
+        case BUILD_COMMAND_TEST_CURL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
         case BUILD_COMMAND_SOURCE_SIZE:
