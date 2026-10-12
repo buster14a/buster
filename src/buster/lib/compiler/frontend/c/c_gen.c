@@ -2504,6 +2504,7 @@ typedef enum CIrSizeofOp
     C_IR_SIZEOF_OP_DEREFERENCE,
     C_IR_SIZEOF_OP_ADDRESS,
     C_IR_SIZEOF_OP_UNARY,
+    C_IR_SIZEOF_OP_COMPLEX_PART,
     C_IR_SIZEOF_OP_STATEMENT_EXPRESSION,
     C_IR_SIZEOF_OP_PARENTHESIS,
     C_IR_SIZEOF_OP_FINISHED,
@@ -33955,9 +33956,12 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     // A count builtin has no declared function entity. Resolve its fixed
     // signed-int result before a surrounding conditional predicts the type
     // of either arm, even when the call has not been emitted yet.
+    // ffs, constant_p, types_compatible_p and classify_type answer int too,
+    // whatever the width of their operand.
     CTypeKind absolute_kind = c_semantic_absolute_value_kind(c_ir_token_builtin_kind(builder, token), name);
     if (c_semantic_integer_count_parameter_kind(c_ir_token_builtin_kind(builder, token), name) != C_TYPE_INVALID ||
-        absolute_kind != C_TYPE_INVALID)
+        absolute_kind != C_TYPE_INVALID || builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET || builtin == C_SYMBOL_BUILTIN_CONSTANT_P ||
+        builtin == C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P || builtin == C_SYMBOL_BUILTIN_CLASSIFY_TYPE)
     {
         if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
@@ -34255,10 +34259,12 @@ BUSTER_GLOBAL_LOCAL bool c_ir_sizeof_operator_scan(CIntegerIrBuilder* builder, u
         }
         else if (punctuator == C_PUNCTUATOR_NONE)
         {
-            // The sizeof/alignof words are prefix operators, so a `*` after one
-            // dereferences rather than multiplies.
+            // The sizeof/alignof words and __real__/__imag__ are prefix
+            // operators, so a `*` after one dereferences rather than multiplies.
+            CConditionalOperator complex_part = C_CONDITIONAL_REAL_PART;
             previous_is_operand =
-                token.kind != C_TOKEN_IDENTIFIER || (!string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("sizeof")) && !c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token)));
+                token.kind != C_TOKEN_IDENTIFIER || (!string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("sizeof")) && !c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token)) &&
+                                                     !c_ir_complex_part_operator(builder, token, &complex_part));
         }
         else if (punctuator == C_PUNCTUATOR_QUESTION)
         {
@@ -34530,6 +34536,13 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_classify(CIntegerIrBu
     {
         return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_ASSIGN, 0, start + 1, end, promote_bit_fields);
     }
+    CConditionalOperator complex_part = C_CONDITIONAL_REAL_PART;
+    if (c_ir_complex_part_operator(builder, first, &complex_part))
+    {
+        // __real__/__imag__ take a complex operand's element type and leave
+        // a real operand's type unchanged, without promotion.
+        return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_COMPLEX_PART, 0, start + 1, end, promote_bit_fields);
+    }
     if (c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
         u32 close = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
@@ -34674,6 +34687,78 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_classify(CIntegerIrBu
             *type_out = builder->size_type;
             return c_ir_sizeof_step_from_bool(c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields));
         }
+        // `__builtin_choose_expr` and `_Generic` have the unconverted type of
+        // the expression they select, which the same choice lowering makes
+        // picks: the constant condition, or the semantic type-identity answer.
+        // The selected range continues as a parenthesized child, so the
+        // postfix chain after the closing parenthesis still applies.
+        CSymbolBuiltin selection = c_ir_token_builtin_kind(builder, first);
+        if ((selection == C_SYMBOL_BUILTIN_CHOOSE_EXPR || selection == C_SYMBOL_BUILTIN_GENERIC) && start + 1 < end &&
+            c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            u32 selected_start = UINT32_MAX;
+            u32 selected_end = UINT32_MAX;
+            if (close < end && selection == C_SYMBOL_BUILTIN_CHOOSE_EXPR)
+            {
+                // The condition is a query-machine constant request, never a
+                // fresh constant-evaluation root: a `sizeof` in it reaches
+                // this walk again, which a nested root would turn into host
+                // recursion per nesting level. The truth rule matches
+                // c_ir_constant_condition_evaluate: a whole
+                // __builtin_constant_p(x) asks whether x is constant, anything
+                // else must be a nonzero or zero integer constant.
+                u32 first_separator = c_ir_call_argument_separator(builder, start + 2, close);
+                u32 second_separator = first_separator < close ? c_ir_call_argument_separator(builder, first_separator + 1, close) : close;
+                u32 condition_start = start + 2;
+                u32 condition_end = first_separator;
+                while (condition_start + 1 < condition_end &&
+                       c_token_is_punctuator(&builder->preprocess.tokens[condition_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                       c_ir_matching_delimiter_cached(builder, condition_start, condition_end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                      C_PUNCTUATOR_RIGHT_PARENTHESIS) == condition_end - 1)
+                {
+                    condition_start += 1;
+                    condition_end -= 1;
+                }
+                bool probe = condition_start + 2 < condition_end &&
+                             c_ir_token_builtin_kind(builder, builder->preprocess.tokens[condition_start]) == C_SYMBOL_BUILTIN_CONSTANT_P &&
+                             c_token_is_punctuator(&builder->preprocess.tokens[condition_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                             c_ir_matching_delimiter_cached(builder, condition_start + 1, condition_end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                            C_PUNCTUATOR_RIGHT_PARENTHESIS) == condition_end - 1;
+                u32 query_start = probe ? condition_start + 2 : condition_start;
+                u32 query_end = probe ? condition_end - 1 : condition_end;
+                CIrConstantValue value = {0};
+                bool known = second_separator < close && c_ir_call_argument_separator(builder, second_separator + 1, close) == close &&
+                             query_start < query_end && c_ir_query_constant(builder, query_start, query_end, &value) &&
+                             value.kind != C_IR_CONSTANT_INVALID && value.kind != C_IR_CONSTANT_UNKNOWN;
+                if (builder->queries->has_request)
+                {
+                    return C_IR_SIZEOF_STEP_FAIL;
+                }
+                bool decided = probe || (known && value.kind == C_IR_CONSTANT_INTEGER);
+                bool condition = probe ? known : decided && !ir_integer_is_zero((IrInteger){.low = value.integer, .high = value.integer_high});
+                if (decided && second_separator < close)
+                {
+                    selected_start = condition ? first_separator + 1 : second_separator + 1;
+                    selected_end = condition ? second_separator : close;
+                }
+            }
+            else if (close < end)
+            {
+                CTypeIdentityQuery answer;
+                if (c_ir_type_identity_query(builder, start, close + 1, &answer) && answer.token_end == close + 1 &&
+                    answer.result_start != UINT32_MAX)
+                {
+                    selected_start = answer.result_start;
+                    selected_end = answer.result_end;
+                }
+            }
+            if (selected_start >= selected_end)
+            {
+                return C_IR_SIZEOF_STEP_FAIL;
+            }
+            return c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_PARENTHESIS, close, selected_start, selected_end, promote_bit_fields);
+        }
         return c_ir_sizeof_step_from_bool(c_ir_sizeof_operand_identifier_type_attempt(builder, start, end, type_out, promote_bit_fields));
     }
     return C_IR_SIZEOF_STEP_FAIL;
@@ -34772,10 +34857,22 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_combine(CIntegerIrBui
     {
         IrTypeId promoted = c_ir_usual_arithmetic_type(builder, returned, returned);
         IrType* promoted_value = ir_type_from_id(&builder->program->types, promoted);
+        // `~` is the integer complement, or the conjugate of a complex value.
         bool tilde = c_token_is_punctuator(&builder->preprocess.tokens[frame->start], C_PUNCTUATOR_TILDE);
-        if (promoted_value && !(tilde && promoted_value->kind != IR_TYPE_INTEGER))
+        if (promoted_value && !(tilde && promoted_value->kind != IR_TYPE_INTEGER && !promoted_value->is_complex))
         {
             *type_out = promoted;
+            step = C_IR_SIZEOF_STEP_DONE;
+        }
+        break;
+    }
+    case C_IR_SIZEOF_OP_COMPLEX_PART:
+    {
+        IrType* value = ir_type_from_id(&builder->program->types, returned);
+        if (value && (value->kind == IR_TYPE_INTEGER || value->kind == IR_TYPE_BOOLEAN || value->kind == IR_TYPE_ENUM ||
+                      value->kind == IR_TYPE_FLOAT || value->is_complex))
+        {
+            *type_out = value->is_complex ? value->element_type : returned;
             step = C_IR_SIZEOF_STEP_DONE;
         }
         break;
