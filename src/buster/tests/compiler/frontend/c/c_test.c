@@ -44683,25 +44683,89 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArgument
         }
         c_test_scratch_end(temporary);
     }
-    // The parser settles a choice whose condition is itself a choice without
-    // a nested walk: the inner one starts later, so it is recorded first.
-    // Lowering cannot yet take a choice as a choice's condition, so this
-    // source is checked by the parser only.
+    // A choice whose condition is itself a choice is settled by the parser
+    // without a nested walk: the inner one starts later, so it is recorded
+    // first. Lowering follows that retained selection for prepared calls, the
+    // constant evaluator, the strict sizeof walk, deferred _Static_assert
+    // re-evaluation and static-storage array bounds (GitHub #3860), so the
+    // program lowers in both frontend forms and, on hosts that run it,
+    // returns 0 as Clang's build does. Only the selected arm's call runs.
+    String8 choice_source = S8(
+        "#define SAME(e, T) _Static_assert(sizeof(e) == sizeof(T) && _Generic(e, T: 1, default: 0), #e)\n"
+        "enum { CHOICE_ON = 1 };\n"
+        "static int hits;\n"
+        "static int mark(int v) { hits += 1; return v; }\n"
+        "int global_choice[__builtin_choose_expr(1, 3, 9)];\n"
+        "static int nested_value(void) { int x = __builtin_choose_expr(__builtin_choose_expr(1, 0, 1), 0, 1); return x; }\n"
+        "static int nested_bound(void) { int a[__builtin_choose_expr(__builtin_choose_expr(1, 0, 1), 1, 2)]; return sizeof a; }\n"
+        "static int nested_call(void) { return __builtin_choose_expr(__builtin_choose_expr(0, 0, 1), mark(5), mark(6)); }\n"
+        "static int static_bound(void) { static int local[__builtin_choose_expr(1, 3, 9)]; local[2] = 4; return sizeof local + local[2]; }\n"
+        "static int probed(int i) { return __builtin_choose_expr(__builtin_constant_p(1), 7, 8) + __builtin_choose_expr(__builtin_constant_p(i), 70, 80); }\n"
+        "static int deferred(int i, long l) {\n"
+        "    SAME(__builtin_choose_expr(__builtin_choose_expr(1, 0, 1), i, (char)l), char);\n"
+        "    SAME(__builtin_choose_expr(CHOICE_ON, i, l), int);\n"
+        "    _Static_assert(__builtin_choose_expr(__builtin_choose_expr(0, 0, 1), 5, l) == 5, \"nested constant\");\n"
+        "    _Static_assert(__builtin_choose_expr(1, 1, 0) && _Generic(i, int: 1), \"selected value\");\n"
+        "    _Static_assert(sizeof(__builtin_choose_expr(__builtin_choose_expr(1, 0, 1), i, (char)l)) == 1 && _Generic(i, int: 1), \"nested sizeof\");\n"
+        "    return 0;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    global_choice[2] = 9;\n"
+        "    if (nested_value() != 1 || nested_bound() != 2 * (int)sizeof(int)) return 1;\n"
+        "    if (nested_call() != 5 || hits != 1) return 2;\n"
+        "    if (sizeof global_choice != 3 * sizeof(int) || global_choice[2] != 9) return 3;\n"
+        "    if (static_bound() != 3 * (int)sizeof(int) + 4) return 4;\n"
+        "    return deferred(1, 2) || probed(1) != 87 ? 5 : 0;\n"
+        "}\n");
+    for (u32 form = 0; form < 2; form += 1)
     {
         TemporalArena temporary = scratch_begin(0, 0);
-        CPreprocessResult tokens = c_preprocess(temporary.arena, S8(
-            "#define SAME(e, T) _Static_assert(sizeof(e) == sizeof(T) && _Generic(e, T: 1, default: 0), #e)\n"
-            "enum { CHOICE_ON = 1 };\n"
-            "int nested_choice(int i, long l) {\n"
-            "    SAME(__builtin_choose_expr(__builtin_choose_expr(1, 0, 1), i, (char)l), char);\n"
-            "    SAME(__builtin_choose_expr(CHOICE_ON, i, l), int);\n"
-            "    _Static_assert(__builtin_choose_expr(__builtin_choose_expr(0, 0, 1), 5, l) == 5, \"nested constant\");\n"
-            "    return 0;\n"
-            "}\n"), (CPreprocessOptions){0});
+        CPreprocessResult tokens = c_preprocess(temporary.arena, choice_source, (CPreprocessOptions){0});
         CParseResult parsed = c_parse(temporary.arena, tokens);
-        BUSTER_TEST(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count);
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("builtin-nested-choice.c"), tokens, parsed, target_native,
+            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+        BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program,
+            string_format(temporary.arena, S8("nested choice form={u32}: {S8}"), form,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : parsed.diagnostic_count ? parsed.diagnostics[0].message : S8("")));
+        if (lowered.program)
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+        }
         c_test_scratch_end(temporary);
     }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 choice_path = buster_test_temporary_path(arguments->arena, S8("nested-choice"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(choice_path, BUSTER_SLICE_TO_BYTE_SLICE(choice_source))))
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("nested-choice-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
+                S8("-fverify-codegen"), S8("-o"), output, choice_path};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                string_format(temporary.arena, S8("nested choice form={u32}: {S8}"), form, compiled.diagnostic));
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                        string_format(temporary.arena, S8("nested choice form={u32}: status={u32} timed_out={u32}"),
+                            form, execution.platform_status, (u32)execution.timed_out));
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#endif
     // GNU requires an integer constant condition. A pointer constant selects
     // nothing, so the operand has no type and the assertion is rejected.
     {

@@ -104,7 +104,8 @@
 //   prepares it inside the block that actually runs.
 //
 // c_ir_type_identity_query consumes the retained semantic C answer for
-// generic selections and the GNU compatibility predicate. Canonical types
+// generic selections, __builtin_choose_expr choices (c_ir_selection_answer)
+// and the GNU compatibility predicate. Canonical types
 // represent the selected value; they never decide source type identity.
 //
 // Layout, in file order; each anchor is a definition to search for:
@@ -23589,10 +23590,14 @@ BUSTER_C_INTERNAL bool c_ir_type_identity_query(CIntegerIrBuilder* builder, u32 
     return valid;
 }
 
-BUSTER_C_INTERNAL bool c_ir_generic_selection(CIntegerIrBuilder* builder, u32 token_index, u32 end, u32* selected_start_out, u32* selected_end_out)
+// The range a _Generic or __builtin_choose_expr selection [token_index, end)
+// selects, from the parser's retained row; false when the parser recorded no
+// selection for exactly that range.
+BUSTER_C_INTERNAL bool c_ir_selection_answer(CIntegerIrBuilder* builder, u32 token_index, u32 end, u32* selected_start_out, u32* selected_end_out)
 {
     CTypeIdentityQuery answer;
-    bool valid = c_ir_type_identity_query(builder, token_index, end, &answer) && answer.result_start != UINT32_MAX;
+    bool valid = c_ir_type_identity_query(builder, token_index, end, &answer) && answer.token_end == end &&
+                 answer.result_start != UINT32_MAX && answer.result_start < answer.result_end;
     if (valid)
     {
         *selected_start_out = answer.result_start;
@@ -26205,12 +26210,24 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             else if (selected->builtin_choose_expr)
             {
+                // The parser's retained selection decides the arm, so a
+                // choice in the condition is already settled. Only a
+                // condition it leaves to lowering (__builtin_constant_p) has
+                // no row and is folded here.
+                u32 selected_start = UINT32_MAX;
+                u32 selected_end = UINT32_MAX;
                 u64 condition = 0;
-                if (argument_count != 3 || !c_ir_constant_condition_evaluate(builder, starts[0], ends[0], &condition))
+                if (argument_count != 3 ||
+                    (!c_ir_selection_answer(builder, selected->token_index, selected->close_index + 1, &selected_start, &selected_end) &&
+                     !c_ir_constant_condition_evaluate(builder, starts[0], ends[0], &condition)))
                 {
                     return false;
                 }
-                u32 branch = condition ? 1 : 2;
+                if (selected_start == UINT32_MAX)
+                {
+                    selected_start = condition ? starts[1] : starts[2];
+                    selected_end = condition ? ends[1] : ends[2];
+                }
                 if (continuation == C_IR_PREPARED_CALL_CONTINUATION_CHOOSE)
                 {
                     if (!child_success)
@@ -26221,7 +26238,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 }
                 else
                 {
-                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_CHOOSE, starts[branch], ends[branch], false);
+                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_CHOOSE, selected_start, selected_end, false);
                 }
             }
             else if (selected->builtin_types_compatible_p || selected->builtin_classify_type)
@@ -26344,7 +26361,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             u32 association_start = 0;
             u32 association_end = 0;
             bool selection_valid =
-                c_ir_generic_selection(builder, selected->token_index, selected->close_index + 1, &association_start, &association_end);
+                c_ir_selection_answer(builder, selected->token_index, selected->close_index + 1, &association_start, &association_end);
             if (!selection_valid)
             {
                 return false;
@@ -35179,7 +35196,7 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_classify(CIntegerIrBu
         }
         // `__builtin_choose_expr` and `_Generic` have the unconverted type of
         // the expression they select, which the same choice lowering makes
-        // picks: the constant condition, or the semantic type-identity answer.
+        // picks: the parser's retained selection (c_ir_selection_answer).
         // The selected range continues as a parenthesized child, so the
         // postfix chain after the closing parenthesis still applies.
         CSymbolBuiltin selection = c_ir_token_builtin_kind(builder, first);
@@ -35189,8 +35206,11 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_classify(CIntegerIrBu
             u32 close = c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             u32 selected_start = UINT32_MAX;
             u32 selected_end = UINT32_MAX;
-            if (close < end && selection == C_SYMBOL_BUILTIN_CHOOSE_EXPR)
+            bool retained = close < end && c_ir_selection_answer(builder, start, close + 1, &selected_start, &selected_end);
+            if (!retained && close < end && selection == C_SYMBOL_BUILTIN_CHOOSE_EXPR)
             {
+                // Only a condition the parser leaves to lowering
+                // (__builtin_constant_p) has no retained selection.
                 // The condition is a query-machine constant request, never a
                 // fresh constant-evaluation root: a `sizeof` in it reaches
                 // this walk again, which a nested root would turn into host
@@ -35231,16 +35251,6 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_classify(CIntegerIrBu
                 {
                     selected_start = condition ? first_separator + 1 : second_separator + 1;
                     selected_end = condition ? second_separator : close;
-                }
-            }
-            else if (close < end)
-            {
-                CTypeIdentityQuery answer;
-                if (c_ir_type_identity_query(builder, start, close + 1, &answer) && answer.token_end == close + 1 &&
-                    answer.result_start != UINT32_MAX)
-                {
-                    selected_start = answer.result_start;
-                    selected_end = answer.result_end;
                 }
             }
             if (selected_start >= selected_end)
@@ -60716,8 +60726,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
             // then schedule only that association on the explicit constant-query
             // stack. Unselected expressions remain semantically checked by the
             // ordinary generic-selection walk but are never evaluated here.
-            if (token.kind == C_TOKEN_IDENTIFIER && index + 1 < end &&
-                string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("_Generic")) &&
+            // __builtin_choose_expr is the same retained selection: the parser
+            // settled its condition, nested choices included, so the selected
+            // arm is the only sub-query.
+            CSymbolBuiltin selection_builtin = token.kind == C_TOKEN_IDENTIFIER ? c_ir_token_builtin_kind(builder, token) : C_SYMBOL_BUILTIN_NONE;
+            if ((selection_builtin == C_SYMBOL_BUILTIN_GENERIC || selection_builtin == C_SYMBOL_BUILTIN_CHOOSE_EXPR) && index + 1 < end &&
                 c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
                 u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
