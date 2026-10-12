@@ -2,7 +2,7 @@
 
 Observed 2026-10-12 on Linux x86-64, Clang 23.1.1 trusted Release `ide`,
 tests enabled. Baseline `fab5f0ed259c424f6f7a5a8fcf2d42e5621bd781`;
-candidate source `fe4b7e45919048e8d6fcfc865120b47dce1f8ac7`.
+candidate source `b9ef5627c6f2fb781b6fed882d4dcc913a10f2bf`.
 Compiler SHA-256 values and every attempted source/result are in the
 [complete census evidence](compatibility-censuses/1602-fast-declines.json).
 This is a compile-only diagnosis, with no compiler-throughput or runtime
