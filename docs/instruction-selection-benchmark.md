@@ -32,13 +32,18 @@ argument and result, signed extension, indexed memory, and loop/branch forms.
 Python computes independent integer checksums modulo 2^64. `--check` executes
 them under each requested allocator and requires zero exit status and identical
 stdout/stderr bytes. It also exercises malformed command lines, empty and
-invalid sources and declaration-only input. Its former 25-argument selector
-fallback fixture was dropped once that function began to select (since the
-removal of stack-only code generation; `--check` then failed on every run).
-No source is currently known to fall back, so live fallback rejection has no
-fixture. `parse_report` and the C command still refuse any result with
-`fallback_functions` above zero. Restore a fixture deliberately when an
-unsupported construct is identified.
+invalid sources and declaration-only input. It also feeds one valid function
+that the selector refuses: a 4 GiB aggregate passed by value. The x86-64 and
+AArch64 signature gates (`machine_x64_value_shape`, `machine_a64_value_shape`)
+reject any aggregate larger than `UINT32_MAX - 7` bytes before body selection,
+so the refusal does not depend on opcode coverage. `--check` requires the
+command's `invalid workload` line with `fallback_functions=1` and no timing row;
+an earlier source or IR failure does not count. `ide cc` refuses the same
+source as `codegen.unsupported-abi` with `reason=signature`. The former
+25-argument fixture began to select once stack-only code generation was
+removed ([#3660](https://github.com/buster14a/buster/issues/3660)). If this
+fixture ever selects, replace it with another refused input deliberately; do
+not silently stop testing fallback rejection.
 
 `--source path.c` is repeatable. Inputs must be self-contained: external
 include lookup is disabled. The input arena and macro-expansion budget are
