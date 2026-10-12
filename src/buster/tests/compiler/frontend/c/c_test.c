@@ -43574,6 +43574,62 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_control_work_growth(UnitTestArg
     return result;
 }
 
+// Bound actual semantic tail visits and scope levels, including lowering,
+// rather than elapsed time. The old walk retyped every nested tail under
+// every ancestor, and each query missed the one-root body map (#3724).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_work_growth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 depths[] = {200, 800, 10000};
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        u64 previous_tails = 0;
+        u64 previous_levels = 0;
+        bool bounded = true;
+        for (u32 sample = 0; bounded && sample < BUSTER_ARRAY_LENGTH(depths); sample += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u32 depth = depths[sample];
+            u64 capacity = (u64)depth * 5 + 64;
+            char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+            u64 length = 0;
+            c_test_append_source(bytes, capacity, &length, S8("int f(int x) { return "));
+            for (u32 level = 0; level < depth; level += 1)
+                c_test_append_source(bytes, capacity, &length, S8("({"));
+            c_test_append_source(bytes, capacity, &length, S8("x;"));
+            for (u32 level = 0; level < depth; level += 1)
+                c_test_append_source(bytes, capacity, &length, S8("});"));
+            c_test_append_source(bytes, capacity, &length, S8("}"));
+            CPreprocessOptions options = {.dialect = form ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17, .target = target_native,
+                                          .data_layout = target_data_layout(target_native)};
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){.pointer = bytes, .length = length}, options);
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            u64 before_tails = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_STATEMENT_EXPRESSION_TAILS);
+            u64 before_levels = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS);
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            CIRLowerResult ir = c_lower_to_ir_with_options(temporary.arena, S8("statement-expression-growth.c"), preprocess, analysis, target_native,
+                                                          (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            u64 tails = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_STATEMENT_EXPRESSION_TAILS) - before_tails;
+            u64 levels = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS) - before_levels;
+            BUSTER_TEST(arguments, !preprocess.diagnostic_count && !syntax.diagnostic_count && !analysis.diagnostic_count && !ir.diagnostic_count);
+            if (BUSTER_REQUIRE(arguments, ir.program && ir.program->module_count == 1))
+                BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, ir.program->modules).error == IR_VALIDATION_NONE);
+            bounded = tails >= depth && tails <= (u64)depth * 8 && levels <= (u64)depth * 16;
+            BUSTER_TEST_RAW(arguments, bounded,
+                string_format(arguments->arena, S8("statement expressions form={u32} depth={u32} tails={u64} scope_levels={u64}"),
+                              form, depth, tails, levels));
+            if (sample == 1)
+            {
+                BUSTER_TEST(arguments, tails <= previous_tails * 5 && levels <= previous_levels * 5 + 16);
+            }
+            previous_tails = tails;
+            previous_levels = levels;
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 c_test_nested_tag_source(Arena* arena, u32 depth)
 {
     u64 capacity = (u64)depth * 96 + 128;
@@ -64347,6 +64403,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
     C_TEST_FIXTURE(arguments, c_test_label_lookup_work_growth);
     C_TEST_FIXTURE(arguments, c_test_nested_control_work_growth);
+    C_TEST_FIXTURE(arguments, c_test_statement_expression_work_growth);
     C_TEST_FIXTURE(arguments, c_test_nested_tag_scan_growth);
     C_TEST_FIXTURE(arguments, c_test_nested_vector_lane_stores);
     C_TEST_FIXTURE(arguments, c_test_promoted_offsetof_static_tables);
