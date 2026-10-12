@@ -44115,7 +44115,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArgument
 // and -c analyse it and lowered in both frontend forms, with the comparison
 // off and on; the output must not change and the two analyses keep the same
 // rows. A protected constant query copies the rows on its first append, so
-// the caller's rows are unchanged after it.
+// the caller's rows are unchanged after it. Each runs for Linux x86-64,
+// Windows x86-64 and Linux AArch64.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_semantic_handoff(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -44150,19 +44151,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_semantic_handoff(UnitTestArgume
         "}\n");
     // The validation producer's kinds in source order, and the constant
     // producer's: the static assertions' operands.
+    // The enum's kind follows the target: Windows gives an enum `int`.
+    enum
+    {
+        C_TEST_SIZEOF_HANDOFF_ENUM_ROW = 3,
+    };
     CTypeKind validation_kinds[] = {
         C_TYPE_INT, C_TYPE_SHORT, C_TYPE_INT, C_TYPE_UNSIGNED_INT, C_TYPE_INT, C_TYPE_UNSIGNED_INT, C_TYPE_UNSIGNED_LONG,
         C_TYPE_CHAR, C_TYPE_CHAR, C_TYPE_UNSIGNED_LONG, C_TYPE_LONG, C_TYPE_LONG, C_TYPE_INT, C_TYPE_SHORT,
     };
     CTypeKind constant_kinds[] = {C_TYPE_INT, C_TYPE_SHORT};
-    for (u32 form = 0; form < 2; form += 1)
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 run = 0; run < 2 * BUSTER_ARRAY_LENGTH(targets); run += 1)
     {
+        u32 form = run % 2;
+        Target target = targets[run / 2];
+        validation_kinds[C_TEST_SIZEOF_HANDOFF_ENUM_ROW] = target.os == OPERATING_SYSTEM_WINDOWS ? C_TYPE_INT : C_TYPE_UNSIGNED_INT;
         TemporalArena temporary = scratch_begin(0, 0);
-        CPreprocessResult tokens = c_preprocess(temporary.arena, source_text, (CPreprocessOptions){0});
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source_text,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
         CIRLowerOptions options = {.disable_direct_ssa = form != 0};
         c_test_sizeof_handoff_take();
         CAnalysisResult off = c_analyze_semantics_only(temporary.arena, tokens, c_parse_ast(temporary.arena, tokens));
-        CIRLowerResult off_lowered = c_lower_to_ir_with_options(temporary.arena, S8("sizeof-handoff.c"), tokens, off, target_native, options);
+        CIRLowerResult off_lowered = c_lower_to_ir_with_options(temporary.arena, S8("sizeof-handoff.c"), tokens, off, target, options);
         CTestSizeofHandoff idle = c_test_sizeof_handoff_take();
         CTestSizeofHandoff zero = {0};
         BUSTER_TEST(arguments, off.sizeof_operand_types == 0 && off.sizeof_operand_type_count == 0 && memcmp(&idle, &zero, sizeof(idle)) == 0);
@@ -44172,7 +44187,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_semantic_handoff(UnitTestArgume
         CAnalysisResult syntax_only = c_analyze_semantics_only(temporary.arena, tokens, syntax_only_syntax);
         CTestSizeofHandoff syntax_only_counts = c_test_sizeof_handoff_take();
         CAnalysisResult on = c_analyze_semantics_only(temporary.arena, tokens, c_parse_ast(temporary.arena, tokens));
-        CIRLowerResult on_lowered = c_lower_to_ir_with_options(temporary.arena, S8("sizeof-handoff.c"), tokens, on, target_native, options);
+        CIRLowerResult on_lowered = c_lower_to_ir_with_options(temporary.arena, S8("sizeof-handoff.c"), tokens, on, target, options);
         c_test_sizeof_handoff_set(false);
         CTestSizeofHandoff seen = c_test_sizeof_handoff_take();
         if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !off.diagnostic_count && !on.diagnostic_count && !syntax_only.diagnostic_count &&
@@ -44201,7 +44216,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_semantic_handoff(UnitTestArgume
                 CTypeKind expected = validation ? (position < BUSTER_ARRAY_LENGTH(validation_kinds) ? validation_kinds[position] : C_TYPE_INVALID)
                                                 : (position < BUSTER_ARRAY_LENGTH(constant_kinds) ? constant_kinds[position] : C_TYPE_INVALID);
                 BUSTER_TEST_RAW(arguments, row.kind == expected && string_equal(c_token_spelling(tokens.spelling_base, tokens.tokens[row.keyword]), S8("sizeof")),
-                                string_format(temporary.arena, S8("sizeof handoff row {u32}: producer {u32}, kind {u32}, expected {u32}"), index,
+                                string_format(temporary.arena, S8("sizeof handoff run {u32} row {u32}: producer {u32}, kind {u32}, expected {u32}"), run, index,
                                               (u32)row.producer, (u32)row.kind, (u32)expected));
             }
             BUSTER_TEST(arguments, validation_seen == BUSTER_ARRAY_LENGTH(validation_kinds) && constant_seen == BUSTER_ARRAY_LENGTH(constant_kinds));
@@ -44214,7 +44229,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_semantic_handoff(UnitTestArgume
             // and the static assertions' operands are not lowered again.
             BUSTER_TEST_RAW(arguments, seen.first_count == 0 && agree == 12 &&
                                            seen.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER][C_TEST_SIZEOF_HANDOFF_UNMATCHED] == 1,
-                            string_format(temporary.arena, S8("sizeof handoff: {u32} disagreements, {u64} agreeing answers"), seen.first_count, agree));
+                            string_format(temporary.arena, S8("sizeof handoff run {u32}: {u32} disagreements, {u64} agreeing answers, {u64} unmatched"), run, seen.first_count, agree, seen.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER][C_TEST_SIZEOF_HANDOFF_UNMATCHED]));
             for (u32 index = 0; index < seen.first_count; index += 1)
             {
                 CTestSizeofHandoffMismatch mismatch = seen.first[index];
