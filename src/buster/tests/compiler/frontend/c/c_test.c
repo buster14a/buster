@@ -2308,11 +2308,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_address_prefix_indexed_paths(Uni
     return result;
 }
 
-// Count the production cast-proof and checked-call reference work, rather
-// than timing the fixture. Retain the original deep fixture separately.
-// The named label also exercises the semantic label-value cast proof.
-// Observe the actual task and token walks, including semantic validation
-// and lowering, so timing noise cannot hide assignment-suffix rescans.
+// Shared inputs for counted-work checks and native CLI timing receipts.
+BUSTER_GLOBAL_LOCAL String8 c_test_assignment_chain_source(Arena* arena, u32 shape, u32 depth)
+{
+    u64 capacity = (u64)depth * 48 + 256;
+    char8* bytes = arena_allocate(arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length, S8("int f(int x){"));
+    if (shape == 0 || shape == 3) c_test_append_source(bytes, capacity, &length, S8("int a;"));
+    if (shape == 2) c_test_append_source(bytes, capacity, &length, S8("int a[1]={0};"));
+    for (u32 link = 0; shape == 1 && link < depth; link += 1)
+        c_test_append_source(bytes, capacity, &length, string_format(arena, S8("int a{u32};"), link));
+    for (u32 link = 0; link < depth; link += 1)
+    {
+        String8 operand = shape == 0 || shape == 3 ? S8("a=") : shape == 2 ? S8("a[0]+=")
+            : string_format(arena, S8("a{u32}="), link);
+        c_test_append_source(bytes, capacity, &length, operand);
+    }
+    c_test_append_source(bytes, capacity, &length, shape == 3 ? S8("x?x+1:x-1;return a;}") : shape == 0 ? S8("x;return a;}")
+        : shape == 1 ? S8("x;return a0;}") : S8("x;return a[0];}"));
+    return (String8){.pointer = bytes, .length = length};
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_assignment_chain_runtime(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2362,6 +2379,35 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_assignment_chain_runtime(UnitTestArgum
             }
         }
     }
+    // Report actual CLI object compilation as a diagnostic receipt. Work
+    // bounds, rather than wall-clock thresholds, remain the regression gate.
+    String8 shapes[] = {S8("simple"), S8("distinct"), S8("compound")};
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(shapes); shape += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 large = c_test_assignment_chain_source(temporary.arena, shape, 20000);
+        String8 output = buster_test_temporary_unique_path(temporary.arena, S8("assignment-chain-object"), S8(".o"));
+        if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(large))))
+        {
+            String8 command[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-nostdinc"), S8("-std=gnu17"), S8("-w"),
+                S8("-g0"), S8("-c"), S8("-fregister-allocator=fast"), S8("-ffrontend-ssa"), S8("-o"), output, source};
+            TimeDataType start = timestamp_take();
+            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                (ProcessSpawnOptions){.use_process_environment = true});
+            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+            {
+                ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                u64 elapsed_ns = timestamp_ns_between(start, timestamp_take());
+                bool success = !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS;
+                BUSTER_TEST_RAW(arguments, success, string_format(temporary.arena, S8("assignment object shape={S8} exit={u32}"),
+                    shapes[shape], execution.platform_status));
+                arguments->show(arguments, S8("ASSIGNMENT_CHAIN_COMPILE_V1 shape={S8} links=20000 elapsed_ns={u64} status={S8} "
+                    "optimize={u32} sanitize={u32} allocator=fast frontend_ssa=1 measurement=process-wall diagnostic=1\n"),
+                    shapes[shape], elapsed_ns, success ? S8("pass") : S8("fail"), (u32)BUSTER_OPTIMIZE, (u32)BUSTER_SANITIZE);
+            }
+        }
+        c_test_scratch_end(temporary);
+    }
 #else
     BUSTER_UNUSED(arguments);
 #endif
@@ -2384,6 +2430,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_assignment_chain_boundaries(UnitTestAr
     return result;
 }
 
+// Observe real semantic and lowering work independently of timing noise.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_assignment_chain_work_growth(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2399,25 +2446,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_assignment_chain_work_growth(UnitTestA
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                 u32 depth = depths[size];
-                u64 capacity = (u64)depth * 48 + 256;
-                char8* bytes = arena_allocate(temporary.arena, char8, capacity);
-                u64 length = 0;
-                c_test_append_source(bytes, capacity, &length, S8("int f(int x){"));
-                if (shape == 0 || shape == 3) c_test_append_source(bytes, capacity, &length, S8("int a;"));
-                if (shape == 2) c_test_append_source(bytes, capacity, &length, S8("int a[1]={0};"));
-                for (u32 link = 0; shape == 1 && link < depth; link += 1)
-                    c_test_append_source(bytes, capacity, &length, string_format(temporary.arena, S8("int a{u32};"), link));
-                for (u32 link = 0; link < depth; link += 1)
-                {
-                    String8 operand = shape == 0 || shape == 3 ? S8("a=") : shape == 2 ? S8("a[0]+=")
-                        : string_format(temporary.arena, S8("a{u32}="), link);
-                    c_test_append_source(bytes, capacity, &length, operand);
-                }
-                c_test_append_source(bytes, capacity, &length, shape == 3 ? S8("x?x+1:x-1;return a;}") : shape == 0 ? S8("x;return a;}")
-                    : shape == 1 ? S8("x;return a0;}") : S8("x;return a[0];}"));
+                String8 source = c_test_assignment_chain_source(temporary.arena, shape, depth);
                 u64 parse_start = c_test_assignment_chain_work();
                 u64 lower_start = c_test_assignment_lower_work();
-                CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){.pointer = bytes, .length = length},
+                CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
                     (CPreprocessOptions){.source_path = S8("assignment-chain.c"), .target = target_native});
                 CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
                 CParseResult parsed = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
@@ -2444,6 +2476,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_assignment_chain_work_growth(UnitTestA
     return result;
 }
 
+// Count the production cast-proof and checked-call reference work, rather
+// than timing the fixture. Retain the original deep fixture separately.
+// The named label also exercises the semantic label-value cast proof.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_logical_chain_work_growth(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};

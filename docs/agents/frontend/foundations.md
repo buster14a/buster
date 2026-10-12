@@ -35,7 +35,10 @@ new scan. `c_ir_root_conditional_scan` stops once an assignment proves that a
 later conditional belongs to its right operand. Assignment completions keep
 their original order, conversions and stores. Counted chain regressions cover
 simple, distinct-local and compound assignments through both frontend SSA
-forms; executable controls cover narrowing, mixed compound operators, comma
+forms. The native runtime fixture also compiles the three 20,000-link object
+inputs through the real CLI and reports process wall time as a diagnostic
+receipt, with optimization/sanitizer flags; elapsed time is not a test gate.
+Executable controls cover narrowing, mixed compound operators, comma
 and conditional operands, aggregate/pointer values and single evaluation.
 
 ## Logical constant eligibility
