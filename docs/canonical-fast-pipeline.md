@@ -258,7 +258,14 @@ A caller keeps its optional splices only when their planned row growth,
 shifted left by `IR_INLINE_CALLER_GROWTH_SHIFT` (5), reaches its instruction
 rows; otherwise every optional site in it stays a call. The first splice
 relocates the caller's exactly sized tables and the arena keeps the old copy,
-so one tiny site in a large caller costs more memory than it saves. On the
+so one tiny site in a large caller costs more memory than it saves. After its
+last splice the pass hands the complete pages of every abandoned table back to
+the OS (`ir_inline_cfg_discard_release`, `os_discard`); the range stays mapped
+and writable. Ranges are merged per table kind first, because the C frontend
+carves each kind out of one row stream in module order and callers are visited
+in that order, so neighbouring relocated callers also free the page they share.
+The verbose record reports the released bytes (#3854). The shift measurements
+below predate this release. On the
 unity self-host source with `-fcanonical-inline`, shifts 2 through 6 kept 801,
 1643, 2639, 3462 and 3739 of 3984 optional sites for +5, +11, +25, +42 and
 +52 MB of peak RSS over tiny-off (unbounded: +80 MB). Generated stage-2
@@ -299,16 +306,25 @@ alignment; that charge is an upper bound, because before a caller's first splice
 tables once to the planned final counts instead of doubling them. Relocating a
 touched caller's exactly sized frontend tables still retains the old copy in the
 arena: on the unity self-host source, tiny inlining touches 809 callers whose
-tables total 65.5 MB, which is most of its peak-RSS cost (#48). Callee payloads
+tables total 65.5 MB, which is most of its peak-RSS cost (#48). At the default
+shift, 639 table relocations abandon 34.6 MB, of which 29.3 MB lies in complete
+pages that the pass now releases; a local stage-1 tiny-on/off peak-RSS ratio
+fell from 1.049 to 1.019 (diagnostic, #3854). Callee payloads
 and clone maps remain charged per splice.
 Tiny bodies are screened before payload scans. Mandatory expansion is still
 subject to resource guards,
 including bounded planning work and retained cloning storage. Expansion checks
 strict canonical validity per function, never by a module-wide scan: each
-candidate's caller and callee once before they are read, and each spliced caller
-again after its last splice (an output failure reports the `inlining output`
-boundary). A mandatory call whose caller or callee is a legacy producer-certified
-shape that fails that check is diagnosed; an optional one stays a call. When FAST
+candidate's callee once before it is read, each mandatory candidate's caller
+likewise, an optional candidate's caller once its planned sites survive the
+caller relocation bound and before its first splice (so a large caller that
+the bound keeps as calls is never checked by this pass, #3854), and each
+spliced caller again after its last splice (an output failure reports the
+`inlining output` boundary). The strict validator does not check debug rows,
+so the planner checks a caller's debug-local scopes and scope parents once
+rather than once per site. A mandatory call whose caller or callee is a legacy producer-certified
+shape that fails that check is diagnosed; an optional one stays a call (all of
+an invalid caller's planned optional sites count as shape skips). When FAST
 is selected, a caller whose splices were all optional skips that output check:
 it is listed in `inline_unchecked_callers` and proven by the validation that
 follows anyway (the promotion output check of a checked build, else the FAST
@@ -320,7 +336,7 @@ from an uncapped tiny self-host compile under cachegrind (#48). Any other
 rewritten caller is checked at once, so the FAST input guard still checks all
 functions on a producer-certified default compile. The verbose
 `IR_INLINE` record reports candidates, accepted/mandatory calls, copied rows,
-growth, rejection categories and visits. These counts are diagnostics, not a
+growth, rejection categories, visits and released relocation bytes. These counts are diagnostics, not a
 performance result. Mandatory budget refusals additionally report the first
 resource category, requested amount and applicable limit in the source diagnostic.
 

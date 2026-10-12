@@ -48,6 +48,7 @@
 #include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 
 #include <buster/lib/file.h>
+#include <buster/lib/os.h>
 #include <buster/lib/simd.h>
 #include <buster/lib/string.h>
 

@@ -606,8 +606,9 @@ see the FAST pipeline contract for the measured memory tradeoff.
 Verbose output emits one `IR_INLINE` record when tiny inlining is enabled or
 inlining candidates were encountered. Its fields are `tiny`, `candidates`,
 `inlined`, `always_inlined`, `copied_instructions`, `growth`,
-`budget_skips`, `shape_skips`, `linkage_skips`, `recursion_skips`, and
-`visits`. It is compile-work telemetry, not generated-code runtime.
+`budget_skips`, `shape_skips`, `linkage_skips`, `recursion_skips`, `visits`,
+and `released_bytes` (pages of relocated caller tables handed back to the OS).
+It is compile-work telemetry, not generated-code runtime.
 
 `-fno-frontend-ssa` selects the original memory-form C lowering;
 `-ffrontend-ssa` restores direct SSA for the bounded supported subset. The last
