@@ -8120,7 +8120,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         .function = function,
         .builder = machine_function_builder_begin(arena),
         .target = target,
-        .vector_registers_supported = ir_simd_operation_supported(target, IR_SIMD_SPLAT_U8),
+        .vector_registers_supported = module->x64_vector_registers_supported,
         .module = module,
         .type_classes = module->type_classes,
         .type_class_count = module->type_count,

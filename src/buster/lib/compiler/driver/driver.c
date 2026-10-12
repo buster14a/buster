@@ -2114,7 +2114,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             .tiny = false,
             .max_callee_instructions = IR_INLINE_TINY_INSTRUCTIONS,
             .max_function_growth = IR_INLINE_FUNCTION_GROWTH,
-            .max_module_growth = IR_INLINE_MODULE_GROWTH,
+            // Zero: relative to each module (ir_inline_module_growth_limit).
+            .max_module_growth = 0,
             .max_call_sites = IR_INLINE_CALL_SITES,
         },
     };
@@ -2978,6 +2979,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             S8("-fcanonical-inline-function-growth="),
             S8("-fcanonical-inline-module-growth="),
             S8("-fcanonical-inline-call-sites="),
+            S8("-fcanonical-inline-caller-growth-shift="),
         };
         bool inline_budget_option = false;
         for (u32 budget = 0; budget < BUSTER_ARRAY_LENGTH(inline_budget_prefixes); budget += 1)
@@ -2993,7 +2995,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                     if (budget == 0) invocation.inline_options.max_callee_instructions = limit;
                     else if (budget == 1) invocation.inline_options.max_function_growth = limit;
                     else if (budget == 2) invocation.inline_options.max_module_growth = limit;
-                    else invocation.inline_options.max_call_sites = limit;
+                    else if (budget == 3) invocation.inline_options.max_call_sites = limit;
+                    else invocation.inline_options.caller_growth_shift = limit;
                 }
                 else
                 {
