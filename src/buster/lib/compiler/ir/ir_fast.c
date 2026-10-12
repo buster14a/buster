@@ -443,10 +443,10 @@ typedef enum IrFoldCensusConsumer
 } IrFoldCensusConsumer;
 
 BUSTER_CT_CHECK(IR_CONSTRUCTION_FOLD_FORM_OTHER_UNUSED - IR_CONSTRUCTION_FOLD_FORM_REINTERPRET_STORE + 1 ==
-                IR_FOLD_CENSUS_SHAPE_COUNT * IR_FOLD_CENSUS_CONSUMER_COUNT);
+                (u32)IR_FOLD_CENSUS_SHAPE_COUNT * (u32)IR_FOLD_CENSUS_CONSUMER_COUNT);
 BUSTER_CT_CHECK(IR_CONSTRUCTION_FOLD_FORM_TRUNCATE_STORE - IR_CONSTRUCTION_FOLD_FORM_REINTERPRET_STORE ==
-                IR_FOLD_CENSUS_SHAPE_TRUNCATE * IR_FOLD_CENSUS_CONSUMER_COUNT);
-BUSTER_CT_CHECK(IR_CONSTRUCTION_FOLD_FORM_REINTERPRET_BRANCH - IR_CONSTRUCTION_FOLD_FORM_REINTERPRET_STORE == IR_FOLD_CENSUS_CONSUMER_BRANCH);
+                (u32)IR_FOLD_CENSUS_SHAPE_TRUNCATE * (u32)IR_FOLD_CENSUS_CONSUMER_COUNT);
+BUSTER_CT_CHECK(IR_CONSTRUCTION_FOLD_FORM_REINTERPRET_BRANCH - IR_CONSTRUCTION_FOLD_FORM_REINTERPRET_STORE == (u32)IR_FOLD_CENSUS_CONSUMER_BRANCH);
 
 // Upper row bounds of the size buckets; the last bucket is unbounded.
 BUSTER_GLOBAL_LOCAL u32 const ir_fold_census_size_limits[] = {64, 256, 1024, 4096};
@@ -652,7 +652,7 @@ void ir_construction_fold_census_end(IrProgram* program, IrFunction* function, I
                                                                                        : ir_fold_census_consumer(row->opcode);
                     u32 shape = (u32)(mark & IR_FOLD_CENSUS_MARK_SHAPE) - 1;
                     ir_construction_record((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_FORM_REINTERPRET_STORE +
-                                                                   shape * IR_FOLD_CENSUS_CONSUMER_COUNT + consumer), 1);
+                                                                   shape * (u32)IR_FOLD_CENSUS_CONSUMER_COUNT + (u32)consumer), 1);
                     marks[value] = (u8)(mark | IR_FOLD_CENSUS_MARK_CONSUMED);
                 }
             }
@@ -670,7 +670,7 @@ void ir_construction_fold_census_end(IrProgram* program, IrFunction* function, I
                                                                : IR_FOLD_CENSUS_CONSUMER_UNUSED;
                 u32 shape = (u32)(mark & IR_FOLD_CENSUS_MARK_SHAPE) - 1;
                 ir_construction_record((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_FORM_REINTERPRET_STORE +
-                                                               shape * IR_FOLD_CENSUS_CONSUMER_COUNT + consumer), 1);
+                                                               shape * (u32)IR_FOLD_CENSUS_CONSUMER_COUNT + (u32)consumer), 1);
                 marks[result] = (u8)(mark | IR_FOLD_CENSUS_MARK_CONSUMED);
             }
             for (u32 operand = 0; (mark & IR_FOLD_CENSUS_MARK_SHAPE) && operand < row->operand_count; operand += 1)
