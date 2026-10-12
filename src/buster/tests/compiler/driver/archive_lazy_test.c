@@ -1829,7 +1829,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_path_inputs(UnitTestA
         {
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             Arena* arena = temporary.arena;
-            String8 root = buster_test_temporary_path(arena, S8("buster-shared-path-inputs"), S8(""));
+            String8 root = buster_test_temporary_path(arena, S8("buster-shared.so.7-inputs"), S8(""));
             if (BUSTER_REQUIRE(arguments, os_make_directory_attempt(root)))
             {
                 String8 source = string_format_z(arena, S8("{S8}/main.c"), root);
@@ -1844,8 +1844,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_path_inputs(UnitTestA
                 String8 alien = string_format_z(arena, S8("{S8}/libalien.so"), root);
                 String8 missing = string_format_z(arena, S8("{S8}/absent/libpath.so"), root);
                 String8 output = string_format_z(arena, S8("{S8}/linked.elf"), root);
-                String8 absolute = os_path_absolute(arena, library, false);
-                String8 absolute_versioned = os_path_absolute(arena, versioned, false);
+                // Canonicalize the existing directory; realpath-style lookup
+                // of the not-yet-created library itself returns an empty path.
+                String8 absolute_root = os_path_absolute(arena, root, false);
+                BUSTER_TEST(arguments, absolute_root.length != 0);
+                String8 absolute = string_format_z(arena, S8("{S8}/libpath.so"), absolute_root);
+                String8 absolute_versioned = string_format_z(arena, S8("{S8}/libpath.so.7"), absolute_root);
                 ByteSlice elf = compiler_driver_test_elf_shared_library(arena, machines[target], &exported, 1);
                 ByteSlice with_soname = compiler_driver_test_elf_script_soname(arena, elf, S8("libidentity.so.9"));
                 ByteSlice extra_elf = compiler_driver_test_elf_shared_library(arena, machines[target], &extra_exported, 1);
@@ -1975,7 +1979,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_path_native(UnitTestA
             String8 provider = string_format_z(arena, S8("{S8}/provider.c"), root);
             String8 source = string_format_z(arena, S8("{S8}/main.c"), root);
             String8 library = string_format_z(arena, S8("{S8}/libactual.so.7"), root);
-            String8 identity = os_path_absolute(arena, string_format_z(arena, S8("{S8}/libidentity.so.9"), root), false);
+            String8 absolute_root = os_path_absolute(arena, root, false);
+            BUSTER_TEST(arguments, absolute_root.length != 0);
+            String8 identity = string_format_z(arena, S8("{S8}/libidentity.so.9"), absolute_root);
             String8 object = string_format_z(arena, S8("{S8}/main.o"), root);
             String8 output = string_format_z(arena, S8("{S8}/buster.elf"), root);
             String8 reference = string_format_z(arena, S8("{S8}/reference.elf"), root);
