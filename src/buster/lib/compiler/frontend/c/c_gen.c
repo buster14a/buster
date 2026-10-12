@@ -23419,19 +23419,6 @@ BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains(CIntegerIrBuild
     return covered;
 }
 
-// A language type-identity question never reaches canonical type ids. The
-// semantic source-range answer is also used by enumerators and validation.
-BUSTER_C_INTERNAL bool c_ir_type_identity_query(CIntegerIrBuilder* builder, u32 start, u32 end, CTypeIdentityQuery* answer)
-{
-    CScopeId root = c_ir_current_scope(builder);
-    if (root.value == C_SCOPE_ID_INVALID.value && builder->parse.scope_count) root = (CScopeId){0};
-    CScopeId scope = c_parse_scope_for_token(&builder->parse, root, start);
-    String8 message = {0};
-    bool valid = c_semantic_type_identity_query(builder->temporary_arena, builder->preprocess, &builder->parse, scope, start, end, answer, &message);
-    if (!valid && message.length) builder->failure_message = message;
-    return valid;
-}
-
 // The size and alignment of an unevaluated sizeof/_Alignof operand typed by
 // storage-only __fp16, which has no canonical IR type: the semantic C layout
 // answers, in the same scope a type-identity question uses.
@@ -23443,6 +23430,19 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_storage_half_layout(CIntegerIrBuilder* builde
     CScopeId scope = c_parse_scope_for_token(&builder->parse, root, start);
     return c_semantic_storage_half_operand_layout(builder->temporary_arena, builder->preprocess, &builder->parse, scope, start, end, type_name,
                                                   size_out, alignment_out);
+}
+
+// A language type-identity question never reaches canonical type ids. The
+// semantic source-range answer is also used by enumerators and validation.
+BUSTER_C_INTERNAL bool c_ir_type_identity_query(CIntegerIrBuilder* builder, u32 start, u32 end, CTypeIdentityQuery* answer)
+{
+    CScopeId root = c_ir_current_scope(builder);
+    if (root.value == C_SCOPE_ID_INVALID.value && builder->parse.scope_count) root = (CScopeId){0};
+    CScopeId scope = c_parse_scope_for_token(&builder->parse, root, start);
+    String8 message = {0};
+    bool valid = c_semantic_type_identity_query(builder->temporary_arena, builder->preprocess, &builder->parse, scope, start, end, answer, &message);
+    if (!valid && message.length) builder->failure_message = message;
+    return valid;
 }
 
 BUSTER_C_INTERNAL bool c_ir_generic_selection(CIntegerIrBuilder* builder, u32 token_index, u32 end, u32* selected_start_out, u32* selected_end_out)
