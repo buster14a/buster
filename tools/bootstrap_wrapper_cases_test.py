@@ -273,13 +273,14 @@ class SchedulerTests(unittest.TestCase):
     def check_windows_cleanup_order(self, wait_error=None, capture_error=None, close_error=None):
         events = []
         tree = mock.Mock()
-        tree.handles = [(24, "owned-descendant")]
-        tree.wait_until.side_effect = lambda deadline: events.append(("wait", deadline))
+        tree.captured = [24]
+        tree.excluded = [{"pid": 30, "parent": 123, "created": 50, "parent_created": 100}]
+        tree.wait.side_effect = lambda: events.append(("wait",))
         if wait_error is not None:
-            def failed_wait(deadline):
-                events.append(("wait", deadline))
+            def failed_wait():
+                events.append(("wait",))
                 raise wait_error
-            tree.wait_until.side_effect = failed_wait
+            tree.wait.side_effect = failed_wait
         def close_tree():
             events.append(("close",))
             if close_error is not None:
@@ -290,6 +291,7 @@ class SchedulerTests(unittest.TestCase):
         child.cleanup_seconds = 0.0
         child.descendant_cleanup_error = None
         child.descendant_waited_pids = []
+        child.descendant_excluded = []
         child.cleaned = False
         child.process = mock.Mock(pid=123)
         child.process.poll.return_value = None
@@ -316,90 +318,94 @@ class SchedulerTests(unittest.TestCase):
                     child.cleanup()
             else:
                 child.cleanup()  # Already cleaned; do not recapture stale numeric PIDs.
-        factory.assert_called_once_with(123, child.process._handle)
+        factory.assert_called_once_with(123, 100 + scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS)
         self.assertEqual(child.descendant_waited_pids, [] if wait_error or capture_error else [24])
+        self.assertEqual(child.descendant_excluded, [] if capture_error else tree.excluded)
         expected = [("direct",)]
         if capture_error is None:
-            expected += [("wait", 100 + scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS), ("close",)]
+            expected += [("wait",), ("close",)]
         expected += [("fixture",)]
         if error is None:
             expected += [("direct",)]
         self.assertEqual(events, expected)
 
-
-    def test_windows_descendant_wait_shares_deadline_and_keeps_all_identities(self):
-        tree = scheduler.WindowsFixtureTree.__new__(scheduler.WindowsFixtureTree)
-        tree.kernel = mock.Mock()
-        tree.handles = [(23, "first-handle"), (24, "second-handle")]
-        tree.kernel.WaitForSingleObject.side_effect = [258, 0]
-        with mock.patch.object(scheduler.time, "monotonic", side_effect=[105, 111]):
-            with self.assertRaisesRegex(RuntimeError, "pending_pids.*23"):
-                tree.wait_until(110)
-        self.assertEqual(tree.kernel.WaitForSingleObject.call_args_list,
-                         [mock.call("first-handle", 5000), mock.call("second-handle", 0)])
-        tree.close()
-        self.assertEqual(tree.kernel.CloseHandle.call_args_list,
-                         [mock.call("first-handle"), mock.call("second-handle")])
-        self.assertEqual(tree.handles, [])
-
-
-    def unwalked_tree(self):
-        tree = scheduler.WindowsFixtureTree.__new__(scheduler.WindowsFixtureTree)
-        tree.kernel = mock.Mock()
-        tree.handles = []
-        tree.rejected = []
-        tree.parent_created = 100
-        tree.snapshot_started = 200
-        return tree
-
-    def test_windows_capture_refuses_reused_and_stale_parent_identities(self):
-        tree = self.unwalked_tree()
-        for created in (99, 201):
-            with self.subTest(created=created):
-                self.assertFalse(tree.retain_handle(23, "replacement-handle", created))
-                self.assertEqual(tree.handles, [])
-        self.assertEqual(tree.kernel.CloseHandle.call_args_list,
-                         [mock.call("replacement-handle")] * 2)
-        self.assertEqual([row["created"] for row in tree.rejected], [99, 201])
-        self.assertTrue(tree.retain_handle(24, "original-handle", 150))
-        self.assertEqual(tree.handles, [(24, "original-handle")])
-
-    def test_windows_rejected_handle_close_failure_is_not_ignored(self):
-        tree = self.unwalked_tree()
-        tree.kernel.CloseHandle.return_value = False
-        with self.assertRaisesRegex(RuntimeError, "rejected descendant handle closure failed: 23"):
-            tree.retain_handle(23, "replacement-handle", 99)
-        self.assertEqual(tree.handles, [])
+    def walk(self, *entries, root_created=100, cutoff=200):
+        # The native admission over a synthetic snapshot; root PID is 1.
+        command = scheduler.tree_helper() + ["walk", "1", str(root_created), str(cutoff)] + list(entries)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        return result.returncode, json.loads(result.stdout)
 
     def test_windows_walk_checks_each_edge_against_its_own_parent(self):
         # 30 is an older unrelated process whose dead parent's PID now names
-        # the fixture (#3690); neither it nor its children are descendants.
-        tree = self.unwalked_tree()
-        parents = {1: 0, 23: 1, 24: 23, 25: 23, 26: 24, 27: 24, 30: 1, 31: 30, 40: 9, 23 + 1000: 40}
-        created = {23: 110, 24: 120, 26: 130, 27: 115, 30: 50, 31: 150, 40: 10, 1023: 160}
-        opened = []
+        # the fixture (#3690); neither it nor its children are opened. 27 is
+        # older than its own recorded parent 24, though newer than the root.
+        status, record = self.walk("1:0:100", "23:1:110", "24:23:120", "25:23:exited", "26:24:130",
+                                   "27:24:115", "30:1:50", "31:30:150", "40:9:10", "1023:40:160")
+        self.assertEqual(status, 0, record)
+        self.assertNotIn("failure", record)
+        self.assertEqual(sorted(row["pid"] for row in record["captured"]), [23, 24, 26])
+        self.assertEqual(sorted((row["pid"], row["parent"], row["created"], row["parent_created"])
+                                for row in record["excluded"]), [(27, 24, 115, 120), (30, 1, 50, 100)])
+        self.assertEqual([row["pid"] for row in record["exited"]], [25])
 
-        def open_child(child):
-            opened.append(child)
-            return None if child == 25 else ("handle-%d" % child, created[child])
+    def test_windows_walk_fails_replacement_and_open_failures(self):
+        # A PID replaced after the pre-snapshot cutoff, or an identity that
+        # cannot be queried, fails capture instead of being waited on.
+        for entries, failure, pid in (
+                (("23:1:110", "24:23:201"), "replacement", 24),
+                (("23:1:110", "24:23:error"), "open", 24)):
+            with self.subTest(failure=failure):
+                status, record = self.walk(*entries)
+                self.assertEqual(status, 1, record)
+                self.assertEqual((record["failure"], record["pid"]), (failure, pid))
+                self.assertEqual([row["pid"] for row in record["captured"]], [23])
+                self.assertEqual(record["excluded"], [])
 
-        tree.admit_descendants(1, parents, open_child)
-        self.assertEqual(sorted(tree.handles), [(23, "handle-23"), (24, "handle-24"), (26, "handle-26")])
-        self.assertEqual(sorted((row["pid"], row["parent_created"]) for row in tree.rejected),
-                         [(27, 120), (30, 100)])
-        self.assertEqual(sorted(opened), [23, 24, 25, 26, 27, 30])
-        self.assertEqual(sorted(call.args[0] for call in tree.kernel.CloseHandle.call_args_list),
-                         ["handle-27", "handle-30"])
+    def test_windows_walk_bounds_children_of_exited_parents_by_nearest_ancestor(self):
+        # 23 exited before it could be opened: its children are checked
+        # against the root, so ambiguity adds waits instead of exclusions.
+        status, record = self.walk("23:1:exited", "24:23:105", "25:23:90")
+        self.assertEqual(status, 0, record)
+        self.assertEqual([row["pid"] for row in record["captured"]], [24])
+        self.assertEqual([(row["pid"], row["parent_created"]) for row in record["excluded"]], [(25, 100)])
 
-    def test_windows_handle_close_failure_is_not_ignored(self):
-        tree = scheduler.WindowsFixtureTree.__new__(scheduler.WindowsFixtureTree)
-        tree.kernel = mock.Mock()
-        tree.handles = [(23, "first-handle"), (24, "second-handle")]
-        tree.kernel.CloseHandle.side_effect = [False, True]
-        with self.assertRaisesRegex(RuntimeError, "closure failed.*23"):
+    def fake_tree(self, capture, wait="", exit_code=0):
+        # Script the helper protocol: one capture record, then a wait record
+        # after the termination line arrives on stdin.
+        script = ("import sys\n"
+                  "print(%r, flush=True)\n"
+                  "sys.stdin.readline()\n"
+                  "print(%r, flush=True)\n"
+                  "sys.exit(%d)\n") % (capture, wait, exit_code)
+        with mock.patch.object(scheduler, "tree_helper", return_value=[sys.executable, "-c", script]):
+            return scheduler.WindowsFixtureTree(123, time.monotonic() + 10)
+
+    def test_windows_capture_publishes_exclusions_and_waits(self):
+        excluded = {"pid": 30, "parent": 123, "created": 50, "parent_created": 100, "image": "old.exe"}
+        tree = self.fake_tree(json.dumps({"captured": [{"pid": 24}], "excluded": [excluded], "exited": []}),
+                              json.dumps({"pending": [], "failed": [], "close_failed": []}))
+        try:
+            self.assertEqual((tree.captured, tree.excluded), ([24], [excluded]))
+            tree.wait()
+        finally:
             tree.close()
-        self.assertEqual(tree.kernel.CloseHandle.call_count, 2)
-        self.assertEqual(tree.handles, [])
+
+    def test_windows_capture_failure_and_incomplete_wait_are_errors(self):
+        with self.assertRaisesRegex(RuntimeError, "identity changed during capture.*replacement"):
+            self.fake_tree(json.dumps({"failure": "replacement", "pid": 24, "captured": []}))
+        with self.assertRaisesRegex(RuntimeError, "capture failed.*no capture record"):
+            self.fake_tree("")
+        for wait, exit_code in ((json.dumps({"pending": [24], "failed": [], "close_failed": []}), 1),
+                                (json.dumps({"pending": [], "failed": [], "close_failed": [24]}), 1),
+                                (json.dumps({"pending": [], "failed": [], "close_failed": []}), 3),
+                                ("", 0)):
+            with self.subTest(wait=wait, exit_code=exit_code):
+                tree = self.fake_tree(json.dumps({"captured": [{"pid": 24}], "excluded": []}), wait, exit_code)
+                try:
+                    with self.assertRaisesRegex(RuntimeError, "termination incomplete"):
+                        tree.wait()
+                finally:
+                    tree.close()
 
     def test_cleanup_error_cannot_be_a_success(self):
         cleanup = scheduler.CaseProcess.cleanup

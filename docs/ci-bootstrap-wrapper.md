@@ -138,12 +138,37 @@ fixture removal. A successful termination request alone is insufficient: a
 descendant can still hold its inherited current-directory handle while exiting
 (#2985). All descendant waits share the original ten-second cleanup deadline;
 expired/failed waits and snapshot failures remain errors, and later cleanup
-cannot relabel that owner as clean. Snapshot capture adds no PID signal targets. Native creation times must fall
-between the retained parent's creation and the pre-snapshot UTC cutoff; a PID
-replacement acquired after snapshot admission or a stale parent ID fails capture
-without waiting on that handle. These are stable, readiness-published fixture
-trees; they do not admit new descendant spawning during cleanup. Clock/identity
-ambiguity fails the owner instead of authorizing a numeric-PID wait.
+cannot relabel that owner as clean. Snapshot capture adds no PID signal targets.
+
+Capture is native: `tools/windows_process_tree.c` is built once per scheduler
+process, before any lane starts, with the host `clang` (or `gcc`). A missing
+compiler or a failed build fails the run. The helper opens the direct child by
+PID; the scheduler's open `Popen` handle to that unreaped child keeps the
+number from being reused. It walks the Toolhelp snapshot one parent edge at a
+time and holds the native handles while the scheduler runs `taskkill`, then
+waits on all of them within the shared deadline.
+
+Windows keeps a dead parent's PID in `th32ParentProcessID`, and PID numbers
+are reused (#3690). A snapshot link therefore proves descent only when the
+child was created no earlier than the parent it names:
+
+- A process older than its recorded parent is a stale link, not a
+  descendant. It is excluded, its handle is closed, and nothing beneath it is
+  opened. Every exclusion (PID, parent, both creation times and image) is
+  published as `descendant_excluded` in `BOOTSTRAP_COLLECTION` and as
+  `excluded_descendants` in `BOOTSTRAP_CASE_SUMMARY`.
+- A process created after the pre-snapshot UTC cutoff is a PID replacement, or
+  a late spawn, and fails capture without a wait. So does a failure to snapshot,
+  to open the root or a descendant, or to query its creation time.
+- An intermediate that exited before it could be opened passes its nearest
+  verified ancestor's creation time to its children. Ambiguity can only add
+  waits, never exclusions.
+
+These are stable, readiness-published fixture trees; they do not admit new
+descendant spawning during cleanup. Clock or identity ambiguity fails the owner
+instead of authorizing a numeric-PID wait. The helper's `walk` mode runs the
+same admission over a synthetic snapshot, so the edge rules are controlled on
+every host.
 Unix uses isolated process groups. Direct children retain the ten-second cleanup
 deadline. Workers finish before
 module state is restored; the registry releases native handles between runs.

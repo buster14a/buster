@@ -3,10 +3,12 @@
 
 run_cases owns a persistent bounded worker gang and ordered result slots.
 CaseProcess adds cancellation ownership and timing to the existing child owner.
+WindowsFixtureTree runs the native capture in tools/windows_process_tree.c.
 The six-writer publication scenario runs alone after the independent cases.
 No test assertions, fake compiler, shell selection or deadlines live here.
 """
 import argparse
+import atexit
 import io
 import json
 import os
@@ -14,7 +16,9 @@ from pathlib import Path
 import platform
 import shutil
 import signal
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -71,149 +75,86 @@ class CaseOwnership:
 
 
 
+class TreeHelper:
+    """Native Windows descendant capture, built once per process before lanes start."""
+    SOURCE = Path(__file__).resolve().parent / "windows_process_tree.c"
+    # Helper exit and record publication after its own shared wait deadline.
+    EXIT_GRACE_SECONDS = 5
+    lock = threading.Lock()
+    command = None
+
+
+def tree_helper():
+    with TreeHelper.lock:
+        if TreeHelper.command is None:
+            compiler = shutil.which("clang") or shutil.which("gcc")
+            if not compiler:
+                raise RuntimeError("bootstrap descendant capture requires a C compiler")
+            directory = Path(tempfile.mkdtemp(prefix="buster-process-tree-"))
+            atexit.register(shutil.rmtree, directory, True)
+            executable = directory / ("windows_process_tree" + (".exe" if os.name == "nt" else ""))
+            result = subprocess.run([compiler, "-I" + str(TreeHelper.SOURCE.parents[1] / "src"), "-Wall", "-Werror",
+                                     "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", "-O1",
+                                     str(TreeHelper.SOURCE), "-o", str(executable)],
+                                    capture_output=True, text=True, timeout=90)
+            if result.returncode:
+                raise RuntimeError("bootstrap descendant capture helper build failed: " +
+                                   result.stdout + result.stderr)
+            TreeHelper.command = [str(executable)]
+        return list(TreeHelper.command)
+
+
 class WindowsFixtureTree:
-    """Retain descendant identities before taskkill; wait for termination, not its request."""
-    def __init__(self, pid, parent_handle):
-        import ctypes
-        from ctypes import wintypes
+    """Retain descendant identities before taskkill; wait for termination, not its request.
 
-        class ProcessEntry(ctypes.Structure):
-            _fields_ = [
-                ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
-                ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
-                ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
-                ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", wintypes.LONG),
-                ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260),
-            ]
-
-        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel = self.kernel
-        kernel.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
-        kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-        kernel.Process32FirstW.argtypes = (wintypes.HANDLE, ctypes.POINTER(ProcessEntry))
-        kernel.Process32FirstW.restype = wintypes.BOOL
-        kernel.Process32NextW.argtypes = kernel.Process32FirstW.argtypes
-        kernel.Process32NextW.restype = wintypes.BOOL
-        kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-        kernel.OpenProcess.restype = wintypes.HANDLE
-        kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-        kernel.WaitForSingleObject.restype = wintypes.DWORD
-        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
-        kernel.CloseHandle.restype = wintypes.BOOL
-        kernel.GetProcessTimes.argtypes = (wintypes.HANDLE,) + (ctypes.POINTER(wintypes.FILETIME),) * 4
-        kernel.GetProcessTimes.restype = wintypes.BOOL
-        kernel.GetSystemTimePreciseAsFileTime.argtypes = (ctypes.POINTER(wintypes.FILETIME),)
-        kernel.GetSystemTimePreciseAsFileTime.restype = None
-        self.handles = []
-        self.rejected = []
-        self.parent_created = self.creation_time(parent_handle)
-        cut = wintypes.FILETIME()
-        kernel.GetSystemTimePreciseAsFileTime(ctypes.byref(cut))
-        self.snapshot_started = (cut.dwHighDateTime << 32) | cut.dwLowDateTime
-        snapshot = kernel.CreateToolhelp32Snapshot(2, 0)  # TH32CS_SNAPPROCESS.
-        if snapshot == wintypes.HANDLE(-1).value:
-            raise ctypes.WinError(ctypes.get_last_error())
+    windows_process_tree.c owns the snapshot walk, identity checks and native
+    handles. Excluded stale-parent links are published, never silently dropped.
+    """
+    def __init__(self, pid, deadline):
+        self.deadline = deadline
+        self.captured = []
+        self.excluded = []
+        budget = max(0, int((deadline - time.monotonic()) * 1000))
+        self.helper = subprocess.Popen(tree_helper() + ["capture", str(pid), str(budget)],
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
-            parents = {}
-            entry = ProcessEntry()
-            entry.dwSize = ctypes.sizeof(entry)
-            present = kernel.Process32FirstW(snapshot, ctypes.byref(entry))
-            while present:
-                parents[entry.th32ProcessID] = entry.th32ParentProcessID
-                present = kernel.Process32NextW(snapshot, ctypes.byref(entry))
-            if ctypes.get_last_error() != 18:  # ERROR_NO_MORE_FILES.
-                raise ctypes.WinError(ctypes.get_last_error())
-            def open_child(child):
-                # Query creation identity as well as waiting. A numeric snapshot
-                # PID can be reused before OpenProcess acquires a native handle.
-                identity = None
-                handle = kernel.OpenProcess(0x101000, False, child)  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION.
-                if handle:
-                    try:
-                        identity = (handle, self.creation_time(handle))
-                    except BaseException:
-                        kernel.CloseHandle(handle)
-                        raise
-                elif ctypes.get_last_error() != 87:  # ERROR_INVALID_PARAMETER: exited PID.
-                    raise ctypes.WinError(ctypes.get_last_error())
-                return identity
-
-            self.admit_descendants(pid, parents, open_child)
+            line = self.helper.stdout.readline()
+            record = json.loads(line) if line.strip() else {"failure": "no capture record"}
+            if "failure" in record:
+                kind = ("identity changed during capture" if record["failure"] == "replacement"
+                        else "capture failed")
+                raise RuntimeError("bootstrap descendant " + kind + ": " + json.dumps(record))
+            self.captured = [row["pid"] for row in record["captured"]]
+            self.excluded = record["excluded"]
         except BaseException:
             self.close()
             raise
-        finally:
-            if not kernel.CloseHandle(snapshot):
-                error = ctypes.WinError(ctypes.get_last_error())
-                self.close()
-                raise error
 
-    def creation_time(self, handle):
-        import ctypes
-        from ctypes import wintypes
-        created, exited, kernel_time, user_time = (wintypes.FILETIME() for _ in range(4))
-        if not self.kernel.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited),
-                                           ctypes.byref(kernel_time), ctypes.byref(user_time)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        return (created.dwHighDateTime << 32) | created.dwLowDateTime
-
-    def admit_descendants(self, pid, parents, open_child):
-        # Windows keeps a dead parent's PID in th32ParentProcessID, so a link
-        # proves descent only when the child is no older than that parent (#3690).
-        children = {}
-        for child, parent in parents.items():
-            children.setdefault(parent, []).append(child)
-        visited = {pid}
-        frontier = [(pid, self.parent_created)]
-        while frontier:
-            parent, parent_created = frontier.pop()
-            for child in sorted(children.get(parent, ())):
-                if child not in visited:
-                    visited.add(child)
-                    identity = open_child(child)
-                    if identity is not None:
-                        handle, created = identity
-                        if self.retain_handle(child, handle, created, parent_created):
-                            frontier.append((child, created))
-
-    def retain_handle(self, pid, handle, created, parent_created=None):
-        # Controlled fixtures publish readiness after spawning their descendants.
-        # A process older than its recorded parent, or created after the
-        # snapshot, is a reused-PID identity rather than a descendant: never
-        # wait on it, and do not admit anything through it.
-        if parent_created is None:
-            parent_created = self.parent_created
-        retained = parent_created <= created <= self.snapshot_started
-        if retained:
-            self.handles.append((pid, handle))
-        else:
-            self.rejected.append({"pid": pid, "created": created, "parent_created": parent_created})
-            if not self.kernel.CloseHandle(handle):
-                raise RuntimeError("bootstrap rejected descendant handle closure failed: " + str(pid))
-        return retained
-
-    def wait_until(self, deadline):
-        pending = []
-        failed = []
-        for pid, handle in self.handles:
-            milliseconds = max(0, int((deadline - time.monotonic()) * 1000))
-            result = self.kernel.WaitForSingleObject(handle, milliseconds)
-            if result == 258:  # WAIT_TIMEOUT.
-                pending.append(pid)
-            elif result != 0:  # WAIT_OBJECT_0 alone certifies termination.
-                failed.append((pid, result))
-        if pending or failed:
+    def wait(self):
+        # The termination request has been made; the helper waits on every
+        # retained handle within the shared deadline it received at launch.
+        try:
+            output, _ = self.helper.communicate("\n", timeout=max(0.0, self.deadline - time.monotonic()) +
+                                                TreeHelper.EXIT_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("bootstrap descendant wait exceeded its deadline") from None
+        record = json.loads(output) if output.strip() else {}
+        if (self.helper.returncode or record.get("pending") != [] or record.get("failed") != [] or
+                record.get("close_failed") != []):
             raise RuntimeError("bootstrap descendant termination incomplete: " +
-                               repr({"pending_pids": pending, "wait_failures": failed}))
+                               repr({"exit": self.helper.returncode, "record": output.strip()}))
 
     def close(self):
-        failures = []
-        for pid, handle in self.handles:
-            if not self.kernel.CloseHandle(handle):
-                failures.append(pid)
-        self.handles.clear()
-        if failures:
-            raise RuntimeError("bootstrap descendant handle closure failed: " + repr(failures))
+        # Ending the helper releases any handle it still holds.
+        if self.helper.poll() is None:
+            self.helper.kill()
+            self.helper.wait()
+        for stream in (self.helper.stdin, self.helper.stdout):
+            if stream is not None and not stream.closed:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
 
 
 class CaseProcess(bootstrap.WrapperProcess):
@@ -225,6 +166,7 @@ class CaseProcess(bootstrap.WrapperProcess):
         self.cleanup_seconds = 0.0
         self.descendant_cleanup_error = None
         self.descendant_waited_pids = []
+        self.descendant_excluded = []
         with self.ownership.lock:
             if self.ownership.cancelled.is_set():
                 raise RuntimeError("bootstrap case execution cancelled before launch")
@@ -252,17 +194,20 @@ class CaseProcess(bootstrap.WrapperProcess):
                 # the direct child can remove fixtures while a descendant still
                 # holds its inherited Windows current-directory handle (#2985).
                 # Capture native handles first; no new PID signal target is added.
+                # The unreaped direct child's open Popen handle keeps its PID
+                # from being reused while the helper opens it by number.
                 if not self.cleaned and os.name == "nt" and self.process.poll() is None:
                     try:
-                        tree = WindowsFixtureTree(self.process.pid, self.process._handle)
+                        tree = WindowsFixtureTree(self.process.pid, started + bootstrap.CLEANUP_TIMEOUT_SECONDS)
+                        self.descendant_excluded.extend(tree.excluded)
                     except Exception as error:
                         capture_error = error
                 try:
                     super().cleanup()
                 finally:
                     if tree is not None:
-                        tree.wait_until(started + bootstrap.CLEANUP_TIMEOUT_SECONDS)
-                        self.descendant_waited_pids.extend(pid for pid, _ in tree.handles)
+                        tree.wait()
+                        self.descendant_waited_pids.extend(tree.captured)
                 if capture_error is not None:
                     raise capture_error
             except Exception as error:
@@ -292,6 +237,7 @@ class CaseProcess(bootstrap.WrapperProcess):
                 "test": self.test_id, "pid": self.process.pid,
                 "elapsed_seconds": time.monotonic() - started,
                 "cleanup_seconds": self.cleanup_seconds,
+                "descendant_excluded": self.descendant_excluded,
             }), flush=True)
         return result
 
@@ -306,6 +252,8 @@ def run_cases(cases, jobs=1, stream=None, ownership=None):
         raise ValueError("bootstrap case jobs must be 1 or 2")
     if not cases or len({case.id() for case in cases}) != len(cases):
         raise ValueError("bootstrap cases must be nonempty and unique")
+    if os.name == "nt":
+        tree_helper()  # Build serially before any lane can need cleanup.
     stream = sys.stdout if stream is None else stream
     ownership = CaseOwnership() if ownership is None else ownership
     independent = [i for i, case in enumerate(cases) if case._testMethodName != EXCLUSIVE_TEST]
@@ -423,7 +371,9 @@ def run_cases(cases, jobs=1, stream=None, ownership=None):
                "worker_errors": worker_errors, "cleanup_errors": cleanup_errors,
                "owned_children": len(ownership.children),
                "peak_live_children": ownership.peak_live_children,
-               "unreaped_children": sum(child.process.poll() is None for child in ownership.children)}
+               "unreaped_children": sum(child.process.poll() is None for child in ownership.children),
+               "excluded_descendants": [dict(row, test=child.test_id) for child in ownership.children
+                                        for row in child.descendant_excluded]}
     # Release the registry cycle and native Popen handles between repeated
     # suite runs; all timing/cleanup facts above have already been collected.
     ownership.children.clear()
