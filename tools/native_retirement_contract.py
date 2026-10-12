@@ -54,6 +54,8 @@ MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256 = "f17dbde795c3afc99f4b3cfd59087d4a637212
 ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256 = "8190b3b14ab97487a3c779ce8a51f8b4150d074eb15fb104dadf8f96705841f2"
 # #2276 successor: the combined #2203/#2428 declaration with only the caller row updated.
 STACK_CALLER_SUPPORT_CONTRACT_SHA256 = "086b7020a566ac43c854fc84c2835a1eed872ea9f4f5763d8c521df04845194b"
+# #2889 successor: only the four frozen SIMD vocabulary fixture rows change.
+SIMD_VOCABULARY_SUPPORT_CONTRACT_SHA256 = "80065d1e9da7d6ce0ae36aee6a7d2c4b7f6f64134a0af3e7537d7b34fe81d66e"
 SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
 NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
 # Applicability is a validator-owned projection of the immutable row identity
@@ -72,8 +74,11 @@ FULL_APPLICABILITY_LEDGER_SHA256 = "934be981e866fe3dbbdb4a5b9e551c052b4546487bb0
 # #1007 successor: the same 374 identities with only the four
 # tests/basic_c_f80_machine.c fixture_sha256 cells updated to its 7,233-byte successor.
 PROPOSED_APPLICABILITY_LEDGER_SHA256 = "31c7aa79472b271db7ae39e8b9d96b99c49632f3d47908ac5ce12f1662a6a3c9"
+# #2889 successor: only six predicate-bank and two translate fixture hashes change.
+SIMD_VOCABULARY_APPLICABILITY_LEDGER_SHA256 = "77415a9c72cfa04c28c642d06cd1abc73b30035338a304f375c910b3b1122feb"
 ACCEPTED_APPLICABILITY_LEDGER_SHA256 = (FULL_APPLICABILITY_LEDGER_SHA256,
-                                        PROPOSED_APPLICABILITY_LEDGER_SHA256)
+                                        PROPOSED_APPLICABILITY_LEDGER_SHA256,
+                                        SIMD_VOCABULARY_APPLICABILITY_LEDGER_SHA256)
 LEGACY_DEPENDENCY_DESCRIPTOR_SHA256 = "33be3c1582858afb570298ae49db193293e7ec2008d3a6b85f03df3485dea803"
 LEGACY_DEPENDENCY_RECEIPT_SHA256 = "dc14e25a42f9000071d46c776f43282852bcebbf392a91089afe6b7e46aed55d"
 LEGACY_DEPENDENCY_PROJECT_SHA256 = "542c978ad5f8252917fb0fd93cdd318ac8fcca9db14ffa1093edb606a8d637a2"
@@ -620,7 +625,8 @@ def validate_profile(manifest, inputs, row_count):
             ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256,
             MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
             ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
-            STACK_CALLER_SUPPORT_CONTRACT_SHA256)
+            STACK_CALLER_SUPPORT_CONTRACT_SHA256,
+            SIMD_VOCABULARY_SUPPORT_CONTRACT_SHA256)
         assert manifest.get("inputs") == "559"
         assert manifest.get("shard_count") == str(FULL_SHARD_COUNT)
         assert manifest.get("fixture_filter", "") == "" and manifest.get("target_filter", "") == ""

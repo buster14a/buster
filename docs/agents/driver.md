@@ -591,11 +591,18 @@ inlining is disabled; an impossible requirement produces a source-mapped
 `ir.inline-required` error. Positive 32-bit per-invocation limits are set with
 `-fcanonical-inline-max-callee=N`,
 `-fcanonical-inline-function-growth=N`,
-`-fcanonical-inline-module-growth=N`, and
-`-fcanonical-inline-call-sites=N`. These flags set budgets but do not enable
+`-fcanonical-inline-module-growth=N`,
+`-fcanonical-inline-call-sites=N`, and
+`-fcanonical-inline-caller-growth-shift=N`. These flags set budgets but do not enable
 tiny inlining; zero is rejected and zero-valued API options normalize to the
 named defaults. Budgets cap callee instruction count, added instructions per
-caller, added instructions per module, and accepted call sites, respectively.
+caller, added instructions per module, and accepted call sites, respectively;
+the shift sets the caller relocation bound described below.
+Without an explicit module limit, the module budget is relative: the larger of
+4096 rows and 1/32 of the module's lowered canonical instruction rows
+(`ir_inline_module_growth_limit`). A caller keeps optional splices only when
+their growth is at least 1/32 of its rows (`IR_INLINE_CALLER_GROWTH_SHIFT`);
+see the FAST pipeline contract for the measured memory tradeoff.
 Verbose output emits one `IR_INLINE` record when tiny inlining is enabled or
 inlining candidates were encountered. Its fields are `tiny`, `candidates`,
 `inlined`, `always_inlined`, `copied_instructions`, `growth`,
@@ -942,7 +949,8 @@ source and encoder paths did for this snapshot; they do not supply an
 independent architectural oracle for every form. The broader #2931 issue
 remains open for unrelated encoding defects and further proof.
 
-X86 source forms also include baseline `pause`, `prefetcht0`/`prefetcht1`/
+X86 source forms also include baseline `pause`, operand-free `rep nop` (also
+`repe nop` and `repz nop`), `prefetcht0`/`prefetcht1`/
 `prefetcht2`/`prefetchnta`, `clflush`, and 32/64-bit `movnti` stores. PAUSE is
 an unconditional REP-NOP hint; prefetch and cache-flush rows map to the existing
 SSE/SSE2 baseline. ADX and PCLMUL metadata aliases use `adx` and `pclmul`.
@@ -966,6 +974,9 @@ AVX-512 profiles and malformed neighbours. The driver's
 Buster listings with byte-identical text and captured pristine GCC 16.2.1
 `-O2 -S` scalar conversions. These bounded witnesses do not claim every
 metadata form or arbitrary external listing is source-complete (#2931).
+`assembly_test_x86_rep_nop` checks the operand-free REP-NOP aliases and
+malformed operands in both dialects; `compiler_driver_test_gcc_pause_listing`
+assembles the pristine GCC PAUSE loop with its maximum-skip alignment directives.
 
 On Mach-O, `.section SEGMENT,SECTION[,TYPE[,ATTRIBUTES]]` and
 `.pushsection` accept the pairs Buster's listing writer represents:
@@ -1299,8 +1310,8 @@ The parser reserves one operation record per expanded argument; the native
 consumer walks it without another allocation. API-built invocations with a
 zero `link_operation_count` retain the explicit legacy order of all inputs
 followed by all libraries. Non-link output actions retain their prior order.
-Group/whole-archive and dynamic-library as-needed/interposition policy are
-unchanged.
+Group and whole-archive requests remain unsupported. Shared-symbol
+interposition retains its existing behavior.
 
 Provider state changes are monotonic: an edge is revisited at most three times.
 Selection work is expected O(S + A + D log(M + 1)), with S visited selected
@@ -1534,6 +1545,30 @@ The object writer already carries that requirement into the section metadata
 (GitHub #225).
 
 Every hosted ELF link reads the shared libraries' own dynamic symbol tables.
+Undefined ELF `STT_NOTYPE` references carry explicit `undefined_untyped`
+provenance in `ObjectSymbol`; TLS identity is independent. A typed reference
+wins over an untyped one in either object order. Both ELF object writers keep
+untyped assembly references `STT_NOTYPE`, even when a call relocation proves
+their callable use. Before any Linux or Android image writer, the selected
+library definition's `st_type` classifies an import: `STT_FUNC` and
+`STT_GNU_IFUNC` are functions, and `STT_OBJECT` remains data even without a
+storage-table entry. An untyped address reference with no usable definition,
+or a definition of unknown type, fails with its symbol and input named;
+it cannot become a guessed copy relocation. A call relocation proves use,
+not the providing definition's type: missing target exports refuse untyped
+calls and address references alike. Recognized `__tls_get_addr` companion
+calls retain the existing dynamic-loader ABI contract, including calls the
+writer relaxes away.
+An absent weak reference still follows the existing zero-resolution rule.
+
+Android reads `libc.so` and explicitly requested libraries through the same
+export reader. Its roots use `x86_64-linux-android` or
+`aarch64-linux-android` under the supplied sysroot, plus its generic
+`lib64`, `usr/lib64`, `lib` and `usr/lib` roots and explicit `-L` paths.
+Native Android also searches `/system/lib64`; cross Android links never
+search host GNU libc roots. Supply an API-specific NDK library directory
+with `-L` when needed. Missing target exports retain the refusal above.
+
 `compiler_driver_elf_library_exports` looks `libc.so.6` and each requested
 library up where the loader would — the `-L` paths, then the sysroot or host
 `lib`/`usr/lib` roots, multiarch first; without a sysroot also the Debian
@@ -2013,6 +2048,38 @@ The supported subset is:
 - Linux and Android ELF links: `--no-undefined`, `-no-undefined`, and the
   two arguments `-z defs` require strong references to resolve. Executables
   already enforce this rule; on a shared object it overrides loader resolution.
+- x86-64 Linux driver links: `--as-needed` and `--no-as-needed` select
+  subsequent `-l` requests and automatic-language direct `.so` / `.so.N`
+  operands in input order (the default is no-as-needed). Explicit `-x` source
+  inputs retain their selected language. A DSO
+  is retained when it satisfies a strong unresolved reference from preceding
+  objects, or from a previously retained DSO when the candidate is absent
+  from every retained DSO's DT_NEEDED list (matched by SONAME identity).
+  DSO-only dependencies already named there remain indirect; a regular-object
+  demand still keeps them. Later objects and weak references do not keep it. The driver consumes these switches before the native image API,
+  which receives the selected library list and still refuses raw policy flags
+  without an ordered driver request. GNU linker-script `AS_NEEDED` remains
+  unsupported.
+- x86-64 Linux ELF links: `-O1` permits the native writer's existing layout and
+  hash policy; it does not request generated-code optimization. `--sort-common`
+  is accepted because there are no admitted common symbols to sort: the object
+  reader continues to refuse `SHN_COMMON`, and assembly `.comm` definitions
+  are already ordinary zero-filled definitions.
+- x86-64 Linux executables, PIEs and shared objects: `-z relro`, `-z now` and
+  `-z noexecstack` request RELRO, eager binding and a non-executable stack.
+  The fixed-address dynamic writer already seals its GOT and binds eagerly.
+  `-z now` extends a PIE/shared object's sealed range to include its PLT GOT
+  and emits both NOW flags. These requests select a dynamic executable even
+  without source imports, so their metadata is present on trivial programs.
+- x86-64 Linux ELF links: `-z pack-relative-relocs` converts eligible PIE/shared
+  `R_X86_64_RELATIVE` relocations to `DT_RELR` with direct addresses and bitmaps,
+  storing their implicit addends in the target words. Unaligned and zero-fill
+  locations retain RELA, as do symbolic, TLS, COPY and IRELATIVE relocations.
+  glibc's `GLIBC_ABI_DT_RELR` version dependency is recorded and must be present
+  in the selected libc's version definitions; an incompatible libc is refused.
+  Fixed-address executables have no load-bias-relative relocations to pack.
+  The existing layout reservation stays as padding; this promises RELR
+  semantics, not a smaller artifact or a compiler-throughput improvement.
 - x86-64 Linux executables, PIEs and shared objects: `-rpath DIR`,
   `--rpath DIR`, `-rpath=DIR` and `--rpath=DIR` write a runtime search path.
   Repeated paths are joined with `:` in command-line order. The default and

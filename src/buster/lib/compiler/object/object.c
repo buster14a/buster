@@ -6067,6 +6067,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     // it imports as default visibility (#1291).
                     .hidden = (other & 3) == 1 || (other & 3) == 2,
                     .indirect = symbol_type == 10,
+                    .undefined_untyped = !section_index && symbol_type == 0,
                 };
                 symbol_map[source_index] = result.symbol_count++;
             }
@@ -10278,6 +10279,7 @@ BUSTER_GLOBAL_LOCAL ObjectArchive object_archive_read_core(Arena* arena, ByteSli
                             }
                             result.objects[result.object_count] = object;
                             result.member_names[result.object_count] = string_duplicate_arena(arena, member_name, false);
+                            result.objects[result.object_count].source_name = result.member_names[result.object_count];
                             if (object.requires_executable_stack)
                             {
                                 result.objects[result.object_count].executable_stack_source = result.member_names[result.object_count];
@@ -13940,9 +13942,9 @@ struct ObjectElfPlan
 // linker copy a library function into the executable (GitHub #1242).
 BUSTER_GLOBAL_LOCAL u8 object_elf64_symbol_type(ObjectSymbol const* source, bool is_defined, bool is_thread_local)
 {
-    bool untyped = !is_defined && source->kind == OBJECT_SYMBOL_DATA && source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN;
+    bool untyped = !is_defined && source->undefined_untyped;
     bool labeled = is_defined && source->untyped;
-    return is_thread_local ? 6 : labeled ? 0 : source->indirect ? 10 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : untyped ? 0 : 1;
+    return is_thread_local ? 6 : labeled || untyped ? 0 : source->indirect ? 10 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : 1;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_elf64_section_is_thread_local(ObjectSection const* section)

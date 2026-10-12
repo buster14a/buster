@@ -25,6 +25,9 @@
 //                                              phase-1/2 translation with
 //                                              SWAR/AVX-512/scalar variants
 //                                              kept in differential agreement
+//   c_source_trim_row_pair                     per-file token and checkpoint
+//                                              reservations trimmed to their
+//                                              counts after each file
 //   c_source_metrics_add,                      the SOURCE table counters and
 //   c_source_metrics_file_row                  the per-file attribution rows
 //   c_ucn_decode, c_ucn_identifier_allowed      dialect-owned identifier escapes
@@ -1454,6 +1457,39 @@ bool c_test_source_allocation_plan(u64 length, CSourceAllocationPlan* plan)
 }
 #endif
 
+// Each translated file reserves one checkpoint row per source byte and each
+// lexed file one token row per byte, but uses a few percent of them. Two
+// arrays filled together sit back to back; left as reserved, the first one's
+// unwritten tail separates live rows, and the pages and huge pages around it
+// fault in for nothing (#1307). When the pair is still the arena's newest
+// allocation, the second array's used rows move down behind the first one's
+// written prefix and the cursor returns to their end, so the next file packs
+// against them. The vacated rows are cleared again: everything above the
+// pair's written extent stays zero, and the arena's dirty mark stops there
+// instead of covering the gap no row ever reached. No reader goes past a
+// count. Returns the second array's possibly moved start.
+BUSTER_GLOBAL_LOCAL u8* c_source_trim_row_pair(Arena* arena, u8* first, u64 first_used, u64 first_written, u64 first_reserved, u8* second,
+                                               u64 second_used, u64 second_reserved, u64 second_alignment)
+{
+    u8* result = second;
+    u8* base = (u8*)arena;
+    if (second_used && second == first + first_reserved && base + arena->position == second + second_reserved)
+    {
+        u8* moved = (u8*)align_forward_unchecked((u64)(first + first_used), second_alignment);
+        if (moved < second)
+        {
+            memmove(moved, second, second_used);
+            u8* moved_end = moved + second_used;
+            u8* vacated = BUSTER_MAX(moved_end, second);
+            memset(vacated, 0, (u64)(second + second_used - vacated));
+            u8* written_end = BUSTER_MAX(moved_end, first + BUSTER_MIN(first_written, first_reserved));
+            arena_release_unwritten_tail(arena, (u64)(moved_end - base), (u64)(written_end - base));
+            result = moved;
+        }
+    }
+    return result;
+}
+
 // GNU modes preserve literal question-mark sequences. C23 removed trigraphs;
 // the supported earlier strict C modes require their phase-one replacement.
 BUSTER_C_INTERNAL bool c_translate_trigraphs_enabled(CPreprocessDialect dialect)
@@ -1732,6 +1768,10 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
             .pointer = translated,
             .length = output,
         };
+        checkpoint_offsets = (u32*)c_source_trim_row_pair(arena, (u8*)checkpoints, sizeof(*checkpoints) * checkpoint_count,
+                                                          sizeof(*checkpoints) * checkpoint_count, sizeof(*checkpoints) * plan->checkpoint_capacity, (u8*)checkpoint_offsets,
+                                                          sizeof(*checkpoint_offsets) * checkpoint_count,
+                                                          sizeof(*checkpoint_offsets) * plan->checkpoint_capacity, BUSTER_ALIGN_OF(u32));
         result.checkpoints = checkpoints;
         result.checkpoint_offsets = checkpoint_offsets;
         result.checkpoint_count = checkpoint_count;
@@ -3818,6 +3858,12 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
                     C_CENSUS_RECORD(LEX_TOKEN_ROWS, result.token_count);
                     C_CENSUS_RECORD(LEX_TOKEN_ROW_BYTES, result.token_count * (sizeof(CToken) + sizeof(CTokenShape)));
                     C_CENSUS_RECORD(LEX_RESERVED_ROW_BYTES, token_capacity * (sizeof(CToken) + sizeof(CTokenShape)));
+                    // The emitter's full-width stores may have written its
+                    // sixteen slack rows past the count.
+                    result.token_shapes = (CTokenShape*)c_source_trim_row_pair(arena, (u8*)result.tokens, sizeof(CToken) * result.token_count,
+                                                                               sizeof(CToken) * (result.token_count + 16), sizeof(CToken) * token_capacity, (u8*)result.token_shapes,
+                                                                               sizeof(CTokenShape) * result.token_count,
+                                                                               sizeof(CTokenShape) * token_capacity, BUSTER_ALIGN_OF(CTokenShape));
                     CDiagnostic* diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_count);
                     if (result.diagnostic_count)
                     {
@@ -4402,9 +4448,13 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_llroundl"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_inf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_inff"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_infl"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_nanf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_nan"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_nanl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_huge_valf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_huge_val"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_huge_vall"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isnanf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isnan"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isinf_sign"), C_SYMBOL_BUILTIN_MATH },
@@ -4842,7 +4892,26 @@ bool c_semantic_math_link_is_long_double(String8 link_name)
     CMathLibmShape libm = c_semantic_math_libm_shape(link_name);
     return string_equal(link_name, S8("fabsl")) || string_equal(link_name, S8("fmaxl")) || string_equal(link_name, S8("fminl")) ||
            string_equal(link_name, S8("powil")) || string_equal(link_name, S8("copysignl")) || string_equal(link_name, S8("signbitl")) ||
-           (libm.arity && libm.argument_kind == C_TYPE_LONG_DOUBLE);
+           c_semantic_math_special_value(link_name).kind == C_TYPE_LONG_DOUBLE || (libm.arity && libm.argument_kind == C_TYPE_LONG_DOUBLE);
+}
+
+// The constant-valued special-float builtins by link name: the census every
+// result-type query, arity check, constant folder and runtime lowering reads.
+// c_ir_math_builtin_link_name folds the spellings onto six link names:
+// `__builtin_inf` onto huge_val, `__builtin_huge_valf` onto inff, and
+// `__builtin_huge_vall` and `__builtin_infl` onto infl.
+CMathSpecialValue c_semantic_math_special_value(String8 link_name)
+{
+    CMathSpecialValue result = {.kind = C_TYPE_INVALID, .special = C_MATH_SPECIAL_NONE};
+    bool infinity = string_equal(link_name, S8("inff")) || string_equal(link_name, S8("huge_val")) || string_equal(link_name, S8("infl"));
+    bool quiet_nan = string_equal(link_name, S8("nanf")) || string_equal(link_name, S8("nan")) || string_equal(link_name, S8("nanl"));
+    if (infinity || quiet_nan)
+    {
+        char8 last = link_name.pointer[link_name.length - 1];
+        result.kind = last == 'f' ? C_TYPE_FLOAT : string_equal(link_name, S8("infl")) || string_equal(link_name, S8("nanl")) ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
+        result.special = infinity ? C_MATH_SPECIAL_INFINITY : C_MATH_SPECIAL_QUIET_NAN;
+    }
+    return result;
 }
 
 // One probe entry of the intern table. The identity of a name is its first
@@ -8212,7 +8281,8 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_pow",           "__builtin_powf",
         "__builtin_prefetch",
         "__builtin_round",         "__builtin_roundf",
-        "__builtin_inf",           "__builtin_inff", "__builtin_nan", "__builtin_nanf", "__builtin_huge_val", "__builtin_isnan", "__builtin_isnanf",
+        "__builtin_inf",           "__builtin_inff", "__builtin_infl", "__builtin_nan", "__builtin_nanf", "__builtin_nanl",
+        "__builtin_huge_val",      "__builtin_huge_valf", "__builtin_huge_vall", "__builtin_isnan", "__builtin_isnanf",
         "__builtin_isinf_sign",
         "__builtin_isinf",         "__builtin_isinff", "__builtin_isfinite",
         "__builtin_isnormal",      "__builtin_fpclassify", "__builtin_isgreater", "__builtin_isgreaterequal",

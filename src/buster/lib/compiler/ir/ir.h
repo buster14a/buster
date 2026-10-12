@@ -674,15 +674,6 @@ typedef struct IrPublishedCfg IrPublishedCfg;
 struct IrPublishedCfg
 {
     Arena* arena;
-    // Null means instruction IDs were already in block order. Otherwise this
-    // is the one map from prepublication IDs to the published dense rows.
-    IrInstructionId const* instruction_remap;
-    IrValueId const* operand_pool;
-    IrBlockId const* target_pool;
-    u64 const* immediate_pool;
-    u64 operand_count;
-    u64 target_count;
-    u64 immediate_count;
     IrCfgBlock const* blocks;
     IrCfgEdge const* edges;
     u32 const* predecessors;
@@ -881,12 +872,16 @@ struct IrFastPassStatistics
     u64 visits;
     u64 changes;
 };
+typedef struct IrFastDecline IrFastDecline;
 typedef struct IrFastStatistics IrFastStatistics;
 struct IrFastStatistics
 {
     IrFastPassStatistics passes[IR_FAST_PASS_COUNT];
     u64 functions;
+    // Counts lowered functions declined, including each function in a scope failure.
     u64 validation_skips;
+    IrFastDecline* declines;
+    u64 decline_count;
     u64 budget_skips;
     u64 provenance_skips;
     u64 parameter_budget_hits;
@@ -899,9 +894,22 @@ struct IrFastStatistics
 
 // Direct-call expansion is independent of register allocation and FAST cleanup.
 // Zero option limits select these defaults; limits count canonical rows/sites.
+// A zero module limit is relative to the module: the larger of
+// IR_INLINE_MODULE_GROWTH and the module's lowered canonical instruction rows
+// shifted right by IR_INLINE_MODULE_GROWTH_SHIFT (1/32 growth). A fixed
+// module cap starves optional sites in large translation units, because
+// callers are visited in module order rather than by profit (#48).
 #define IR_INLINE_TINY_INSTRUCTIONS 16u
 #define IR_INLINE_FUNCTION_GROWTH (2u * IR_INLINE_TINY_INSTRUCTIONS * IR_INLINE_CALL_SITES)
 #define IR_INLINE_MODULE_GROWTH 4096u
+#define IR_INLINE_MODULE_GROWTH_SHIFT 5u
+// Optional splices into a caller are kept only when their planned row growth,
+// shifted left by this amount, reaches the caller's instruction rows: the
+// first splice relocates the caller's tables and the arena retains the old
+// copy, so a few tiny sites in a large caller cost more memory than they save.
+// IrInlineOptions.caller_growth_shift overrides it; zero selects this default
+// and values of 32 or more keep every planned site.
+#define IR_INLINE_CALLER_GROWTH_SHIFT 5u
 #define IR_INLINE_CALL_SITES 64u
 
 typedef struct IrInlineOptions IrInlineOptions;
@@ -912,7 +920,11 @@ struct IrInlineOptions
     u32 max_function_growth;
     u32 max_module_growth;
     u32 max_call_sites;
+    u32 caller_growth_shift;
 };
+
+// Effective module row-growth limit for `module_rows` lowered canonical rows.
+BUSTER_F_DECL u32 ir_inline_module_growth_limit(u32 max_module_growth, u64 module_rows);
 
 typedef enum IrInlineBudgetReason
 {
@@ -988,6 +1000,11 @@ struct IrModule
     IrLocalPromotionStatistics local_promotion;
     bool inline_complete;
     IrInlineStatistics inlining;
+    // Callers whose splices were all optional and whose strict output check
+    // ir_inline_module deferred to preparation's next module-wide scan. Cleared
+    // once that scan proves them; see ir_prepare_canonical_module.
+    u32* inline_unchecked_callers;
+    u32 inline_unchecked_count;
     bool fast_complete;
     IrFastStatistics fast;
 };
@@ -1094,6 +1111,15 @@ struct IrValidationResult
     // Direct verifier calls and unchecked certified preparation leave this
     // UNSPECIFIED. This is diagnostic context, not a persistent certificate.
     IrValidationBoundary boundary;
+};
+
+// Retained only for declines, in function order. A scope failure keeps the
+// invalid function ID in validation while function_name names the declined body.
+struct IrFastDecline
+{
+    IrValidationResult validation;
+    String8 function_name;
+    String8 source; // Filled by the driver before ordered multi-input publication.
 };
 
 // The result of proving that every instruction of a function belongs to

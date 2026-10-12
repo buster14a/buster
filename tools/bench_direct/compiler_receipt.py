@@ -41,7 +41,8 @@ Map (searchable symbols):
     APPROVED_HOST, observed_cpu_model, host_problem        observed Zen 5 host
     MEASURED_OUTCOMES, MIN_PAIRS, classify                 core validity
     THROUGHPUT_PROFILE, classify_throughput, throughput_digest   corpus (#2761)
-    THROUGHPUT_HARNESS_FLOOR                               base-harness admission (#3714)
+    THROUGHPUT_HARNESS_FLOOR, HARNESS_ADMISSIONS           base-harness admission (#3714)
+    THROUGHPUT_HISTORICAL_PROFILE, THROUGHPUT_HISTORICAL_REQUEST_LINE   named historical corpus (#3714)
     SCALING_REQUEST, SCALING_PROFILE, classify_scaling, scaling_digest   multi-TU scaling (#424)
     INLINE_ACCEPTANCE_PROFILE, validate_inline_acceptance  issue #48 same-candidate inliner pair
     AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_BUDGET, ast_pilot_budget_verdict,
@@ -149,6 +150,26 @@ THROUGHPUT_PROFILE = {
 # harness; this is a necessary condition only, and classify_throughput stays
 # the full check of the exported corpus.
 THROUGHPUT_HARNESS_FLOOR = "293132e418cb2449b36e3b92ae38aaa487813e43"
+# The pull route's three corpus dispositions, decided by hosted authorization
+# before dispatch and re-derived by compiler_compare on the host (#3714).
+HARNESS_ADMISSIONS = ("admitted", "historical", "unsupported")
+# The named historical corpus recipe (#3714), frozen per name like PROFILE. A
+# pull request whose merge base predates THROUGHPUT_HARNESS_FLOOR selects it
+# with one fresh exact request line; it is refused for any other base. The
+# corpus then runs from tools/throughput at the pinned main revision, built by
+# that revision's own `./build.sh bench_throughput` in a detached worktree under --work,
+# on the same two binaries and with the v2 arguments and FAST/QUALITY
+# population, so classify_throughput applies unchanged. The pin is the base of
+# main's c6201a26 comparison, whose v2 corpus the current consumer accepted on
+# the 9700X (run 38227553632). Changing any value needs a new name.
+THROUGHPUT_HISTORICAL_REQUEST_LINE = "profile: throughput-corpus-historical-v1"
+THROUGHPUT_HISTORICAL_HARNESS_REVISION = "afe67cbebcb257e7fe130a8eccdd5ff08a79b555"
+THROUGHPUT_HISTORICAL_PROFILE = dict(
+    THROUGHPUT_PROFILE, name="throughput-corpus-historical-v1",
+    harness=f"tools/throughput at pinned main revision {THROUGHPUT_HISTORICAL_HARNESS_REVISION}, built and run by that "
+            "revision's ./build.sh bench_throughput in a detached worktree under the work directory",
+    harness_revision=THROUGHPUT_HISTORICAL_HARNESS_REVISION,
+    admission=f"pull request merge base predates {THROUGHPUT_HARNESS_FLOOR}")
 # The multi-TU scaling leg (#424), frozen per name like PROFILE. Each series
 # is one `bench_throughput scale` bundle on the candidate binary, with the
 # --compiler/--output that compiler_compare supplies. "cores" leaves CPU 0's
@@ -476,9 +497,16 @@ WILD_LINKER_COMPARATORS = {
 }
 WILD_LINKER_CELLS = ["ide-debug", "ide-unity-release", "ide-separate-release"]
 # What `wild --version` prints and what Wild writes into its output's .comment by default
-# (Args::linker_identity at wild e9a9b0cb, libwild/src/args.rs). Another linker installed as
-# `wild` is refused by both checks.
-WILD_IDENTITY = re.compile(r"Wild [0-9][0-9A-Za-z.+-]* \(compatible with GNU linkers\)\Z")
+# (Args::linker_identity at wild e9a9b0cb, libwild/src/args.rs). Its version is one of the forms
+# wild/build.rs writes: the Cargo version at a release tag, the origin/main merge-base hash, that
+# version and hash with "-modified", or that version with "non-git-build" (distribution builds,
+# e.g. the 9700X host's "Wild 0.10.0 non-git-build"). Another linker installed as `wild` is
+# refused by both checks.
+WILD_IDENTITY = re.compile(r"Wild (?:[0-9][0-9A-Za-z.+-]*(?: (?:[0-9a-f]{40}-modified|non-git-build))?"
+                           r"|[0-9a-f]{40}) \(compatible with GNU linkers\)\Z")
+# Wild writes that identity into .comment behind this prefix (Layout's `format!("Linker: {}\0", ...)`,
+# libwild/src/layout.rs at e9a9b0cb); run 38255545884 refused the host's genuine output for lacking it.
+WILD_COMMENT_PREFIX = "Linker: "
 WILD_LINKER_LINKERS = ("comparator", "wild")
 # Every token of a retained Wild argv: inert inside double quotes and outside them, so the
 # canonical quoted join is one simple command whatever the shell.
@@ -1527,9 +1555,9 @@ def validate_wild_linker(status: object, files: object, head: str, expected_iden
         problems.extend(argv_problems)
         wild = linkers.get("wild", {}).get("version")
         comments = {linker: files[f"comment {cell} {linker}"].splitlines() for linker in WILD_LINKER_LINKERS}
-        if not isinstance(wild, str) or wild not in comments["wild"]:
+        if not isinstance(wild, str) or WILD_COMMENT_PREFIX + wild not in comments["wild"]:
             problems.append(f"wild-linker {cell} Wild output does not carry the recorded Wild identity in .comment")
-        if any(WILD_IDENTITY.fullmatch(line) for line in comments["comparator"]):
+        if any(WILD_IDENTITY.fullmatch(line.removeprefix(WILD_COMMENT_PREFIX)) for line in comments["comparator"]):
             problems.append(f"wild-linker {cell} comparator output carries a Wild identity in .comment")
     # Every timed command, and each validated and repeated link, is exactly the command derived from the
     # cell's retained argv and the frozen options: no other input, linker or shell text can run.
@@ -1599,6 +1627,10 @@ def _wild_argv_grammar_problems(cell: str, arguments: list[str], config: str) ->
                     (token == "-o" and operand != f"{config}/ide"):
                 problems.append(f"wild-linker {cell} retained argv gives {token} the unadmitted operand {operand!r}")
             index += 1
+        elif token == f"--dependency-file=CMakeFiles/ide.dir/{config}/link.d":
+            # CMake's linker-written link dependencies (CMAKE_LINK_DEPENDS_USE_LINKER) name a file in the
+            # target's own directory; cmake 4.4.4 on the 9700X passes it (run 38255545884).
+            pass
         elif token.startswith("-L"):
             if not _system_path(token[2:]):
                 problems.append(f"wild-linker {cell} retained argv searches {token[2:]!r}, which is not a system directory")
@@ -4195,6 +4227,7 @@ INVENTORY_LEGS = {
         "compiler-probes": ("tool:fast_ra_scaling.c", "tool:machine_line_mark_scaling.c"),
         "frontend-selector": ("tool:benchmark_frontend_scaling.py", "tool:selection_benchmark.py", "ide:bench"),
         "wild-linker": ("tool:wild_linker_bench.c",),
+        "historical-corpus": ("build:bench_throughput@throughput-corpus-historical",),
     },
 }
 # Opt-in legs whose receipt record carries its own requested/status fields.
@@ -4219,8 +4252,11 @@ def inventory_leg_record(receipt: dict, leg: str) -> tuple[bool | None, str]:
         ran, recorded = analyzer, state if analyzer else "not requested"
     elif leg == "self-host":
         ran, recorded = not analyzer, "not requested" if analyzer else state
-    elif leg == "corpus":
-        if analyzer or ("throughput_profile" in receipt and receipt["throughput_profile"] is None):
+    elif leg in ("corpus", "historical-corpus"):
+        # The named historical recipe (#3714) discharges only its own row, never the v2 corpus row.
+        historical = receipt.get("throughput_profile") == THROUGHPUT_HISTORICAL_PROFILE
+        if analyzer or ("throughput_profile" in receipt and receipt["throughput_profile"] is None) or \
+                historical != (leg == "historical-corpus"):
             ran, recorded = False, "not requested"
         elif "throughput_profile" in receipt:
             corpus = receipt.get("throughput") if isinstance(receipt.get("throughput"), dict) else {}
@@ -4377,7 +4413,9 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
         cases = corpus.get("cases") if isinstance(corpus.get("cases"), list) else []
         flagged = [f"{row.get('name')}: {row.get('decision')}" for row in cases if isinstance(row, dict)
                    and row.get("decision") != "no substantial regression detected"]
-        lines += ["", f"Throughput corpus `{THROUGHPUT_PROFILE['name']}`: {len(cases)} cases, "
+        named = receipt.get("throughput_profile") if receipt.get("throughput_profile") == THROUGHPUT_HISTORICAL_PROFILE \
+            else THROUGHPUT_PROFILE
+        lines += ["", f"Throughput corpus `{named['name']}`: {len(cases)} cases, "
                   f"{corpus.get('confirmed_regressions', 'NA')} confirmed regressions, "
                   f"{corpus.get('inconclusive_cases', 'NA')} inconclusive (report-only)."
                   + (" " + "; ".join(flagged) + "." if flagged else "")]

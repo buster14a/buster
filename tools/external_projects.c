@@ -15,6 +15,9 @@ typedef enum ExternalProject
     EXTERNAL_PROJECT_COUNT,
 } ExternalProject;
 
+// The userspace verifier is defined later in build.c's unity include order.
+BUSTER_GLOBAL_LOCAL ProcessResult userspace_input_self_test(Arena* arena);
+
 BUSTER_GLOBAL_LOCAL String8 external_project_names[] = {
     S8_INITIALIZER("cjson"), S8_INITIALIZER("zlib"), S8_INITIALIZER("stb"),
     S8_INITIALIZER("lua"), S8_INITIALIZER("quickjs"), S8_INITIALIZER("sqlite"),
@@ -158,6 +161,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult external_projects_main(Arena* arena, SliceStri
         {
             passed = passed && external_projects_find(external_project_names[i]) == i;
         }
+#if BUSTER_LINUX
+        // Keep the private userspace immutability controls inside the one
+        // policy-owned generic external-project self-test route.
+        passed = userspace_input_self_test(arena) == PROCESS_RESULT_SUCCESS && passed;
+#endif
         string_print(S8("EXTERNAL_PROJECT_SELF_TEST {S8}\n"), passed ? S8("pass") : S8("failed"));
         result = passed ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
     }
