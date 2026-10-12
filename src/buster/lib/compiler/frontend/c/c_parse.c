@@ -9347,6 +9347,9 @@ BUSTER_C_INTERNAL void c_parse_type_identity_prepare(CTypeParseMachine* machine,
     if (machine && !machine->type_identity_queries_active)
     {
         machine->type_identity_queries_active = true;
+        // An unbuilt index lists no site; reading it would settle nothing
+        // for the first file-scope declaration that needs an answer (#3844).
+        c_parse_position_index_ensure(result, preprocess);
         CTokenPositionIndex* positions = result->position_index;
         u32 first = positions ? c_parse_position_lower_bound(positions->type_identity_positions, positions->type_identity_count, start) : start;
         u32 limit = positions ? c_parse_position_lower_bound(positions->type_identity_positions, positions->type_identity_count, end)
