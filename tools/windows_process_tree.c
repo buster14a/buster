@@ -8,8 +8,9 @@
 //   --status-path <path> <command-line>` (Windows): create the named
 //   job with kill-on-close, start the command suspended, assign it to the job,
 //   resume it, wait for it, then terminate and wait for any remaining member
-//   within the budget. Exit with the command's status, or
-//   TREE_EXIT_DRAIN_FAILED when the job cannot be established or emptied.
+//   within the budget. Publish the command's status atomically; exit zero on
+//   certified normal completion, 124 on certified runtime timeout, or 125
+//   when lifecycle establishment, draining or publication fails.
 // - `drain <job-name> <budget-ms>` (Windows): terminate every member of the
 //   named job and wait for each one within the budget; print one record. The
 //   launcher is not a member; it exits once its command has ended.
@@ -343,6 +344,7 @@ struct TreeLaunchStatus
 #if defined(WINDOWS_PROCESS_TREE_TEST)
 BUSTER_GLOBAL_LOCAL u32 tree_test_startup_delay_ms;
 BUSTER_GLOBAL_LOCAL u32 tree_test_cleanup_delay_ms;
+BUSTER_GLOBAL_LOCAL u32 tree_test_status_delay_ms;
 #endif
 
 // Match the adapter's actual Windows CPython monotonic clock: <=3.12 uses
@@ -554,9 +556,20 @@ BUSTER_GLOBAL_LOCAL int tree_launch(WCHAR const* name, u64 budget, WCHAR const* 
     status.complete = valid && status.clock_valid && status.cleanup_finished_ns <= cleanup_limit_ns;
     if (status.complete)
     {
-        result = status.runtime_timed_out ? TREE_EXIT_RUNTIME_TIMEOUT : (int)status.root_returncode;
+        result = status.runtime_timed_out ? TREE_EXIT_RUNTIME_TIMEOUT : 0;
     }
+#if defined(WINDOWS_PROCESS_TREE_TEST)
+    Sleep(tree_test_status_delay_ms);
+#endif
     if (!tree_launch_status(status_path, &status))
+    {
+        result = TREE_EXIT_DRAIN_FAILED;
+    }
+    // Publication is part of cleanup. Even an already-published success record
+    // cannot be accepted after its budget: failure exits never match its 0/124
+    // terminal code, regardless of the payload's own arbitrary return value.
+    now = tree_clock_ns(&status);
+    if (!status.clock_valid || now > cleanup_limit_ns)
     {
         result = TREE_EXIT_DRAIN_FAILED;
     }
