@@ -36,7 +36,7 @@ later conditional belongs to its right operand. Assignment completions keep
 their original order, conversions and stores. Counted chain regressions cover
 simple, distinct-local and compound assignments through both frontend SSA
 forms. The native runtime fixture also compiles the three 20,000-link object
-inputs through the real CLI and reports process wall time as a diagnostic
+inputs (including distinct compound-assignment array elements) through the real CLI and reports process wall time as a diagnostic
 receipt, with optimization/sanitizer flags; elapsed time is not a test gate.
 Executable controls cover narrowing, mixed compound operators, comma
 and conditional operands, aggregate/pointer values and single evaluation.

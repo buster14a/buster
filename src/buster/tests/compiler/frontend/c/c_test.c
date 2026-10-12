@@ -2316,12 +2316,16 @@ BUSTER_GLOBAL_LOCAL String8 c_test_assignment_chain_source(Arena* arena, u32 sha
     u64 length = 0;
     c_test_append_source(bytes, capacity, &length, S8("int f(int x){"));
     if (shape == 0 || shape == 3) c_test_append_source(bytes, capacity, &length, S8("int a;"));
-    if (shape == 2) c_test_append_source(bytes, capacity, &length, S8("int a[1]={0};"));
+    if (shape == 2)
+    {
+        c_test_append_source(bytes, capacity, &length, string_format(arena, S8("int a[{u32}]="), depth));
+        c_test_append_source(bytes, capacity, &length, S8("{0};"));
+    }
     for (u32 link = 0; shape == 1 && link < depth; link += 1)
         c_test_append_source(bytes, capacity, &length, string_format(arena, S8("int a{u32};"), link));
     for (u32 link = 0; link < depth; link += 1)
     {
-        String8 operand = shape == 0 || shape == 3 ? S8("a=") : shape == 2 ? S8("a[0]+=")
+        String8 operand = shape == 0 || shape == 3 ? S8("a=") : shape == 2 ? string_format(arena, S8("a[{u32}]+="), link)
             : string_format(arena, S8("a{u32}="), link);
         c_test_append_source(bytes, capacity, &length, operand);
     }
