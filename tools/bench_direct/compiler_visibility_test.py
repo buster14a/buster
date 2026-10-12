@@ -683,7 +683,7 @@ class RecoveryTest(unittest.TestCase):
 
 class PublishTest(unittest.TestCase):
     def publish(self, record: bytes | None, document: dict | None = None,
-                mode: str = "main") -> tuple[RecoveryApi, dict, dict]:
+                mode: str = "main", admission: str | None = "admitted") -> tuple[RecoveryApi, dict, dict]:
         """(api, started check, job outputs) after one publication of a retained receipt (default: valid main).
 
         Pull mode stubs only the request-file freshness gate, which has its own tests.
@@ -711,6 +711,8 @@ class PublishTest(unittest.TestCase):
                 values.update(BQ_MODE="pull", BQ_REF="refs/pull/7/head")
                 for key in ("BQ_FIRST_PARENT", "BQ_RANGE"):
                     values.pop(key)
+                if admission is not None:
+                    values["BQ_HARNESS_ADMISSION"] = admission
             original = api.request
             def routed(path, data=None, method=""):
                 bare = urllib.parse.urlsplit(path).path
@@ -753,6 +755,28 @@ class PublishTest(unittest.TestCase):
                 self.assertEqual(shown["inventory_coverage"]["route"], "pull-compare")
                 legs = {entry["leg"]: entry["status"] for entry in shown["inventory_coverage"]["legs"]}
                 self.assertEqual(legs["scaling"], "not discharged: leg failed")
+
+    def test_pull_harness_admission_gates_publication(self) -> None:
+        # #3714: an unsupported base was never dispatched and publishes its explicit refusal; a missing or
+        # unreviewed disposition never reads evidence; only an admitted one validates the receipt.
+        document = receipt()
+        document["mode"] = "pull"
+        document["identity"].update(mode="pull", ref="refs/pull/7/head")
+        pull_record = machine_bytes(job={"value": "compare-pull", "status": "available", "reason": ""})
+        for admission, title, reason in (
+                ("unsupported", "Not benchmarked: unsupported historical harness",
+                 "unsupported historical throughput harness"),
+                (None, "Not benchmarked", "hosted harness admission '' is not a reviewed disposition"),
+                ("maybe", "Not benchmarked", "hosted harness admission 'maybe' is not a reviewed disposition")):
+            with self.subTest(admission=admission):
+                api, started, unused_written = self.publish(pull_record, copy.deepcopy(document), "pull", admission)
+                self.assertEqual((started["status"], started["conclusion"]), ("completed", "failure"))
+                self.assertIn(title, started["output"]["title"])
+                self.assertIn(reason, started["output"]["text"])
+                shown = json.loads(started["output"]["text"].removeprefix("```json\n").removesuffix("\n```"))
+                self.assertEqual(shown["inventory_coverage"]["discharged"], [])
+                # No receipt was read: the shown identity is the authorized one, not the artifact's.
+                self.assertNotIn("binaries", shown)
 
     def test_malformed_production_profile_binaries_end_in_a_terminal_failure(self) -> None:
         """Rendering a malformed role record must not raise before the check completes (#2761)."""

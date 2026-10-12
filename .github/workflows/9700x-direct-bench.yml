@@ -77,6 +77,7 @@ jobs:
       merge_base: ${{ steps.verify.outputs.merge_base }}
       merge_base_tree: ${{ steps.verify.outputs.merge_base_tree }}
       head_tree: ${{ steps.verify.outputs.head_tree }}
+      harness_admission: ${{ steps.verify.outputs.harness_admission }}
       utility_request_data: ${{ steps.verify.outputs.utility_request_data }}
       utility_plan_data: ${{ steps.verify.outputs.utility_plan_data }}
       utility_allowlist_data: ${{ steps.verify.outputs.utility_allowlist_data }}
@@ -1195,7 +1196,7 @@ jobs:
   compare-pull:
     name: Compare the pull request compiler
     needs: authorize
-    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && needs.authorize.outputs.compare == 'true' }}
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && needs.authorize.outputs.compare == 'true' && (needs.authorize.outputs.harness_admission == 'admitted' || needs.authorize.outputs.harness_admission == 'historical') }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
@@ -1207,6 +1208,7 @@ jobs:
       BQ_BASE_TREE: ${{ needs.authorize.outputs.merge_base_tree }}
       BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
       BQ_HEAD_TREE: ${{ needs.authorize.outputs.head_tree }}
+      BQ_HARNESS_ADMISSION: ${{ needs.authorize.outputs.harness_admission }}
       BQ_TRUSTED_REVISION: ${{ github.sha }}
       BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
       BQ_RUN_ID: ${{ github.run_id }}
@@ -1262,6 +1264,7 @@ jobs:
             [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
           done
           [[ "$BQ_PULL" =~ ^[1-9][0-9]*$ ]]
+          [[ "$BQ_HARNESS_ADMISSION" =~ ^(admitted|historical)$ ]]
           [[ "$(git -C candidate rev-parse HEAD)" == "$BQ_HEAD_COMMIT" ]]
           python3 -B trusted/tools/bench_direct/compiler_compare.py --mode pull \
             --candidate candidate --lab trusted/tools/uarch_lab.py \
@@ -1269,7 +1272,8 @@ jobs:
             --summary "$GITHUB_STEP_SUMMARY" --repository "$BQ_REPOSITORY" --ref "refs/pull/$BQ_PULL/head" \
             --pull "$BQ_PULL" --pull-head "$BQ_HEAD_COMMIT" --base "$BQ_BASE_COMMIT" --base-tree "$BQ_BASE_TREE" \
             --head "$BQ_HEAD_COMMIT" --head-tree "$BQ_HEAD_TREE" --trusted-revision "$BQ_TRUSTED_REVISION" \
-            --request-run-id "$BQ_REQUEST_RUN_ID" --run-id "$BQ_RUN_ID" --run-attempt "$BQ_RUN_ATTEMPT"
+            --request-run-id "$BQ_REQUEST_RUN_ID" --run-id "$BQ_RUN_ID" --run-attempt "$BQ_RUN_ATTEMPT" \
+            --harness-admission "$BQ_HARNESS_ADMISSION"
       - name: Retain the machine-specification record
         if: ${{ always() }}
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
@@ -1383,6 +1387,7 @@ jobs:
           BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}
           BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}
           BQ_COMPARE_RESULT: ${{ needs.compare-pull.result }}
+          BQ_HARNESS_ADMISSION: ${{ needs.authorize.outputs.harness_admission }}
           BQ_PULL: ${{ needs.authorize.outputs.pull }}
           BQ_PULL_HEAD: ${{ github.event.workflow_run.head_sha }}
           BQ_BASE_COMMIT: ${{ needs.authorize.outputs.merge_base }}
