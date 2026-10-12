@@ -1320,11 +1320,15 @@ must also end with the same whole analysis model, field by field
 (`c_ast_corpus_models_differ`). It compares every row
 of the type, entity, scope, array-bound, alignment, declaration,
 identifier-use, member, enum-member and parameter tables, with names compared
-by content. That is about 125,700 rows from the fixtures and 497,400 with the
+by content; entities include their merged inline hints, and enumerators
+their declaration-point integer constant field by field. That is about
+125,700 rows from the fixtures and 497,400 with the
 frontend sources, and floors guard both counts. `c_ast_test_declaration_hints`
 holds the declaration hints' specifier facts to the walker in every layout:
 storage classes in each position the walker folds, and auto words in the
-specifiers and the first declarator.
+specifiers and the first declarator. It also mutates a copy of one analysis in
+an entity's inline hints and in each field of an enumerator's constant, and
+the comparator must name each mutated field.
 
 The compiler sources are preprocessed against the host's C library, so the
 differential also covers glibc's headers. It caught `__float128`, which glibc

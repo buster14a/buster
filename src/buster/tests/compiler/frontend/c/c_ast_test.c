@@ -1494,8 +1494,9 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_analyses_differ(Arena* arena, CAnalysis
 
 // The analysis model field by field: every row of the type, entity, scope,
 // array-bound, alignment, declaration, identifier-use, member, enum-member
-// and parameter tables. Names are compared by content and the syntax record
-// pointer not at all; each analysis parses its own. The counts are compared
+// and parameter tables, an enumerator's declaration-point integer constant
+// field by field. Names are compared by content; the syntax record pointer
+// and padding are not compared, since each analysis parses its own. The counts are compared
 // first (c_ast_corpus_analyses_differ), so the rows line up. `rows` receives
 // the number of rows compared.
 #define C_AST_MODEL_FIELD(table, field) \
@@ -1584,6 +1585,7 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_models_differ(Arena* arena, CAnalysisRe
         difference = C_AST_MODEL_FIELD(entities, is_extern);
         difference = C_AST_MODEL_FIELD(entities, definition_is_gnu_inline_only);
         difference = C_AST_MODEL_FIELD(entities, has_internal_linkage);
+        difference = C_AST_MODEL_FIELD(entities, inline_hints);
         difference = C_AST_MODEL_FIELD(entities, cleanup_function.value);
         difference = C_AST_MODEL_FIELD(entities, cleanup_attribute_token);
         difference = C_AST_MODEL_FIELD(entities, cleanup_attribute_end);
@@ -1679,6 +1681,14 @@ BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_models_differ(Arena* arena, CAnalysisRe
         difference = C_AST_MODEL_FIELD(enum_members, enum_type.value);
         difference = C_AST_MODEL_FIELD(enum_members, declaration_type.value);
         difference = C_AST_MODEL_FIELD(enum_members, type.value);
+        difference = C_AST_MODEL_FIELD(enum_members, integer_constant.magnitude);
+        difference = C_AST_MODEL_FIELD(enum_members, integer_constant.magnitude_high);
+        difference = C_AST_MODEL_FIELD(enum_members, integer_constant.type.value);
+        difference = C_AST_MODEL_FIELD(enum_members, integer_constant.rank);
+        difference = C_AST_MODEL_FIELD(enum_members, integer_constant.bit_width);
+        difference = C_AST_MODEL_FIELD(enum_members, integer_constant.is_signed);
+        difference = C_AST_MODEL_FIELD(enum_members, integer_constant.is_negative);
+        difference = C_AST_MODEL_FIELD(enum_members, integer_constant.valid);
         difference = C_AST_MODEL_FIELD(enum_members, value);
         difference = C_AST_MODEL_FIELD(enum_members, is_negative);
         difference = C_AST_MODEL_FIELD(enum_members, is_published);
@@ -5464,7 +5474,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_specifiers(UnitTestArguments* argu
 // `__auto_type` words where the auto-inference scan reads them, the
 // specifiers and the first declarator, as a parameter's specifier included.
 // Each analysis with the tree must equal the analysis without it, diagnostics
-// and model rows alike.
+// and model rows alike, inline hints and enumerator constants included; and
+// the model comparator must report a mutation of either.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_declaration_hints(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5485,6 +5496,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_declaration_hints(UnitTestArgument
         S8("void f(int c) { __auto_type a = c; auto int b = c; (void)a; (void)b; }\n"),
         S8("void f(void) { int (*h)(__auto_type x); (void)h; }\n"),
         S8("void f(int c) { int (*h)(int), k = c; __typeof__(c) m = k; (void)h; (void)m; }\n"),
+        S8("enum E { A = 1, B = -2 };\n"
+           "__attribute__((always_inline)) inline int f(void) { int x = A + B; return x; }\n"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
     {
@@ -5511,6 +5524,83 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_declaration_hints(UnitTestArgument
             c_ast_release(&built.ast);
             c_test_scratch_end(temporary);
         }
+    }
+    // The model comparator itself: a copy of one analysis that differs only in
+    // an entity's merged inline hints, or in one field of an enumerator's
+    // declaration-point integer constant, must be reported by that field.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
+                                                             S8("enum E { A = 1, B = -2 };\n"
+                                                                "__attribute__((always_inline)) inline int f(void) { return A + B; }\n"),
+                                                             C_PREPROCESS_DIALECT_GNU17);
+        CAnalysisResult left = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+        u32 hinted = left.entity_count;
+        for (u32 index = 0; index < left.entity_count; index += 1)
+        {
+            hinted = hinted == left.entity_count && left.entities[index].inline_hints ? index : hinted;
+        }
+        if (BUSTER_REQUIRE(arguments, left.diagnostic_count == 0 && hinted < left.entity_count && left.enum_member_count == 2 &&
+                                          left.enum_members[1].integer_constant.valid))
+        {
+            String8 const fields[] = {
+                S8("inline_hints"),
+                S8("integer_constant.magnitude"),
+                S8("integer_constant.magnitude_high"),
+                S8("integer_constant.type.value"),
+                S8("integer_constant.rank"),
+                S8("integer_constant.bit_width"),
+                S8("integer_constant.is_signed"),
+                S8("integer_constant.is_negative"),
+                S8("integer_constant.valid"),
+            };
+            for (u32 mutation = 0; mutation < BUSTER_ARRAY_LENGTH(fields); mutation += 1)
+            {
+                CAnalysisResult right = left;
+                right.entities = arena_allocate(temporary.arena, CEntity, left.entity_count);
+                right.enum_members = arena_allocate(temporary.arena, CEnumMember, left.enum_member_count);
+                memcpy(right.entities, left.entities, sizeof(CEntity) * left.entity_count);
+                memcpy(right.enum_members, left.enum_members, sizeof(CEnumMember) * left.enum_member_count);
+                CIntegerConstant* constant = &right.enum_members[1].integer_constant;
+                switch (mutation)
+                {
+                case 0:
+                    right.entities[hinted].inline_hints ^= C_ENTITY_INLINE_HINT_ALWAYS;
+                    break;
+                case 1:
+                    constant->magnitude += 1;
+                    break;
+                case 2:
+                    constant->magnitude_high += 1;
+                    break;
+                case 3:
+                    constant->type.value += 1;
+                    break;
+                case 4:
+                    constant->rank = constant->rank == C_INTEGER_RANK_INT ? C_INTEGER_RANK_LONG : C_INTEGER_RANK_INT;
+                    break;
+                case 5:
+                    constant->bit_width += 1;
+                    break;
+                case 6:
+                    constant->is_signed = !constant->is_signed;
+                    break;
+                case 7:
+                    constant->is_negative = !constant->is_negative;
+                    break;
+                default:
+                    constant->valid = !constant->valid;
+                    break;
+                }
+                u64 rows = 0;
+                String8 difference = c_ast_corpus_models_differ(temporary.arena, &left, &right, &rows);
+                String8 expected = mutation == 0 ? string_format(temporary.arena, S8("entities {u32} differs in {S8}"), hinted, fields[mutation])
+                                                 : string_format(temporary.arena, S8("enum_members 1 differs in {S8}"), fields[mutation]);
+                BUSTER_TEST_RAW(arguments, string_equal(difference, expected),
+                                string_format(temporary.arena, S8("model mutation '{S8}': '{S8}'"), fields[mutation], difference));
+            }
+        }
+        c_test_scratch_end(temporary);
     }
     return result;
 }
