@@ -6,3 +6,7 @@
 # and five other per-file object workloads, FAST and QUALITY, two rounds.
 # Local Lua/btrfs observations are separate; this is not a Lua workload replay.
 request: issue #2621 owner-authorized historical no-flush publication comparison against pre-fix 3bf9d004; production 967547700; fresh compiler-compare-v1 and throughput-corpus-v2 validation
+# #3714 successor: the same historical pair, measured with the named historical corpus recipe
+# (pinned harness afe67cbe, v2 arguments and FAST/QUALITY population), since 3bf9d004's own
+# harness cannot produce the throughput-corpus-v2 population.
+profile: throughput-corpus-historical-v1
