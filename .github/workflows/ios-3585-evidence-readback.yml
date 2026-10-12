@@ -1,0 +1,48 @@
+name: iOS 3585 evidence readback
+on:
+  push:
+    branches:
+      - codex/3585-ios-evidence-readback
+    paths:
+      - .github/workflows/ios-3585-evidence-readback.yml
+permissions:
+  actions: read
+  contents: read
+jobs:
+  read-evidence:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Verify and read completed iOS artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_root=$(mktemp -d)
+          curl --fail --location --silent --show-error \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/buster14a/buster/actions/artifacts/11776550350/zip \
+            --output "$evidence_root/ios.zip"
+          printf '%s  %s\n' 8fba5d31bfe2d78e4afd05ca1c7f2bd20be9cc65eea845ecf83203785235f65c "$evidence_root/ios.zip" | sha256sum --check
+          unzip -Z1 "$evidence_root/ios.zip" > "$evidence_root/members"
+          printf 'IOS_EVIDENCE_READER_V1 artifact=11776550350 source_head=87ddb71c75c878211537546e981183e6f627eb97\n'
+          printf 'ARCHIVE_MEMBERS_BEGIN\n'
+          sed -n '1,180p' "$evidence_root/members"
+          printf 'ARCHIVE_MEMBERS_END\n'
+          for config in Release Debug; do
+            member=$(awk -v c="$config" '$0 ~ ("(^|/)ios-console\\." c "\\.log$") { print; count++ } END { if (count != 1) exit 2 }' "$evidence_root/members")
+            unzip -p "$evidence_root/ios.zip" "$member" > "$evidence_root/$config.log"
+            printf 'CONFIG_BEGIN %s\n' "$config"
+            awk '/BUSTER_IOS_LAUNCH_V1 stage=fixtures-ready/ { real=1 } real && (/TEST_MODULE_TIMING/ || /BUSTER_IOS_LAUNCH_V1/ || /Unit tests/ || /BUSTER_IOS_RESULT/ || /TEST_SUMMARY/) { print }' "$evidence_root/$config.log" | head -n 220
+            printf 'FIXTURE_TOP_BEGIN %s\n' "$config"
+            awk '/BUSTER_IOS_LAUNCH_V1 stage=fixtures-ready/ { real=1 } real && /TEST_FIXTURE_TIMING_V1/ { duration=0; for(i=1;i<=NF;i++) if($i ~ /^duration_ns=/) { split($i,a,"="); duration=a[2] } print duration, $0 }' "$evidence_root/$config.log" | sort -rn > "$evidence_root/$config-fixtures"
+            sed -n '1,24p' "$evidence_root/$config-fixtures"
+            printf 'FIXTURE_TOP_END %s\n' "$config"
+            awk '/BUSTER_IOS_LAUNCH_V1 stage=fixtures-ready/ { real=1 } real { if(/TEST_MODULE_TIMING/) modules++; if(/TEST_FIXTURE_TIMING_V1/) fixtures++; if(/BUSTER_IOS_RESULT: SUCCESS/) success++ } END { printf "IOS_EVIDENCE_COUNTS_V1 modules=%d timed_fixtures=%d terminal_success=%d\\n", modules,fixtures,success; if(modules==0 || fixtures==0) exit 3 }' "$evidence_root/$config.log"
+            printf 'CONFIG_END %s\n' "$config"
+          done
+          printf 'METADATA_MEMBERS_BEGIN\n'
+          awk '/(machine|source|coverage|receipt|result|manifest)/ && $0 !~ /\/$/ {print}' "$evidence_root/members" | head -n 60
+          printf 'METADATA_MEMBERS_END\n'
