@@ -84,13 +84,13 @@
       "id": "build:production_profile",
       "kind": "build-command",
       "validation": "performance",
-      "measures": "PGO/LTO training and admission on the native throughput corpus",
+      "measures": "#2761 fixed production-profile-v1 on an owner request line: the head's own production_profile --no-benchmark builds its seven trees, trains both PGO profiles on the native corpus, and inspects and runs test_all on the PGO+LTO compiler in an isolated clone of the head; the base revision's bench_throughput run then times that run's Release compiler against its PGO+LTO compiler on throughput-corpus-v2, FAST and QUALITY; report-only",
       "zen5": {
-        "route": "none",
-        "status": "NOT VALIDATED",
-        "consumer": "",
-        "resolution": "Profile training is not a measurement; admitting a PGO compiler on performance grounds needs a 9700X comparison.",
-        "claim_route": "none"
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "production-profile-v1",
+        "request": "one exact fresh line, profile: production-profile-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
       }
     },
     {
@@ -410,8 +410,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "Profile production is not a measurement; see build:production_profile.",
-        "claim_route": "none"
+        "resolution": "Hosted profile production and its timings are diagnostic; admitting a PGO compiler on performance grounds needs the fixed production-profile-v1 profile on pull-compare (benchmarks/9700x/compiler-compare.request).",
+        "claim_route": "pull-compare"
       }
     },
     {

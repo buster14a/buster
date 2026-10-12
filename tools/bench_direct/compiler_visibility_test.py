@@ -682,14 +682,14 @@ class RecoveryTest(unittest.TestCase):
 
 
 class PublishTest(unittest.TestCase):
-    def publish(self, record: bytes | None) -> tuple[RecoveryApi, dict, dict]:
-        """(api, started check, job outputs) after one main-mode publication of a valid receipt."""
+    def publish(self, record: bytes | None, recorded: dict | None = None) -> tuple[RecoveryApi, dict, dict]:
+        """(api, started check, job outputs) after one main-mode publication of a valid receipt, or of recorded."""
         api = RecoveryApi()
         api.checks = []
         started = api.add_check(HEAD, marker(request="91", attempt="1"), status="in_progress")
         machine = {} if record is None else {compiler_publish.MACHINE_RECORD: record}
-        api.payload = archive({"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary()),
-                               **corpus_members(), **machine})
+        api.payload = archive({"receipt.json": json.dumps(receipt() if recorded is None else recorded),
+                               "lab/summary.json": json.dumps(summary()), **corpus_members(), **machine})
         listing = {"artifacts": [{"id": 8, "name": f"buster-9700x-compiler-{HEAD}-1", "expired": False,
                                   "size_in_bytes": 100, "archive_download_url": "https://api.invalid/zip",
                                   "expires_at": "2027-01-04T00:00:00Z"}]}
@@ -723,6 +723,30 @@ class PublishTest(unittest.TestCase):
                 self.assertEqual(compiler_publish.main(), 0)
             written = dict(line.split("=", 1) for line in output.read_text().splitlines())
         return api, started, written
+
+    def test_malformed_production_profile_binaries_end_in_a_terminal_failure(self) -> None:
+        """Rendering a malformed role record must not raise before the check completes (#2761)."""
+        for label, role in (("object", {"sha256": 1}), ("list", [1]), ("string", "x"), ("boolean", True)):
+            with self.subTest(role=label):
+                recorded = receipt()
+                recorded["production_profile"] = {"requested": True, "status": "failed",
+                                                  "binaries": {"baseline": role, "candidate": role}}
+                api, started, unused_written = self.publish(machine_bytes(), recorded)
+                self.assertEqual((len(api.checks), started["status"], started["conclusion"]),
+                                 (1, "completed", "failure"))
+
+    def test_out_of_range_production_profile_numbers_end_in_a_terminal_failure(self) -> None:
+        """An integer past the float range in rendered cells must not raise before the check completes (#3675)."""
+        for label, wall in (("huge integer", [10 ** 309, 1.0]), ("huge negative", [-(10 ** 309), 1.0]),
+                            ("boolean", [True, 1.0])):
+            with self.subTest(wall=label):
+                recorded = receipt()
+                recorded["production_profile"] = {"requested": True, "status": "failed", "binaries": {},
+                                                  "cells": [{"name": "tiny_startup/fast", "decision": "regression",
+                                                             "wall_seconds": wall}]}
+                api, started, unused_written = self.publish(machine_bytes(), recorded)
+                self.assertEqual((len(api.checks), started["status"], started["conclusion"]),
+                                 (1, "completed", "failure"))
 
     def test_publisher_completes_the_started_check_and_emits_the_entry(self) -> None:
         api, started, written = self.publish(machine_bytes())
