@@ -24264,6 +24264,190 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_special_float_spellings(UnitTe
 // decayed operand type as an int constant. _BitInt is not modeled by the
 // frontend type system; nullptr_t (C_TYPE_NULLPTR) is modeled but deliberately
 // refused, so neither has a row here.
+// Clang's source-location builtins (#3897). The program checks its own lines,
+// file names and function names, so it runs unchanged under GCC and Clang as
+// independent oracles; the expected lines are the physical lines below.
+BUSTER_GLOBAL_LOCAL String8 const c_test_source_location_builtins_source = S8_INITIALIZER(
+        "#if !__has_builtin(__builtin_LINE) || !__has_builtin(__builtin_FILE) || !__has_builtin(__builtin_FUNCTION)\n"
+        "#error source-location builtins are implemented\n"
+        "#endif\n"
+        "#define HERE() __builtin_LINE()\n"
+        "static int same(const char* a, const char* b) { while (*a && *a == *b) { a += 1; b += 1; } return *a == *b; }\n"
+        "_Static_assert(__builtin_LINE() == 6, \"line\");\n"
+        "static int bounded[__builtin_LINE()];\n"
+        "static int static_line = __builtin_LINE();\n"
+        "static const char* static_file = __builtin_FILE();\n"
+        "static const char* static_function = __builtin_FUNCTION();\n"
+        "typedef __typeof__(__builtin_LINE()) LineType;\n"
+        "typedef __typeof__(__builtin_FUNCTION()) NameType;\n"
+        "static int line_of(int x) { return x ? __builtin_LINE() : HERE(); }\n"
+        "static NameType name_of(void) { return __builtin_FUNCTION(); }\n"
+        "int main(void)\n"
+        "{\n"
+        "    int error = 0;\n"
+        "    LineType line = __builtin_LINE();\n"
+        "    error |= line != 18;\n"
+        "    error |= sizeof(__builtin_LINE()) != sizeof(int) || sizeof(LineType) != sizeof(int);\n"
+        "    error |= sizeof(__builtin_FILE()) != sizeof(char*) || sizeof(__builtin_FUNCTION()) != sizeof(char*);\n"
+        "    error |= (sizeof(bounded) != 7 * sizeof(int) || static_line != 8) << 1;\n"
+        "    error |= (line_of(1) != 13 || line_of(0) != 13) << 2;\n"
+        "    error |= (!same(static_function, \"\") || !same(name_of(), \"name_of\") || !same(__builtin_FUNCTION(), \"main\")) << 3;\n"
+        "    error |= (!same(static_file, __FILE__) || !same(__builtin_FILE(), __FILE__)) << 4;\n"
+        "    const char* chosen = line ? __builtin_FUNCTION() : __builtin_FILE();\n"
+        "    error |= (!same(chosen, \"main\") || __builtin_FUNCTION()[1] != 'a' || *(__builtin_FUNCTION() + 2) != 'i') << 5;\n"
+        "    switch (line)\n"
+        "    {\n"
+        "    case __builtin_LINE() - 12: break;\n"
+        "    default: error |= 1 << 6;\n"
+        "    }\n"
+        "#line 900 \"renamed.c\"\n"
+        "    error |= (__builtin_LINE() != 900 || !same(__builtin_FILE(), \"renamed.c\")) << 7;\n"
+        "    return error;\n"
+        "}\n"
+);
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_location_builtins(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // The result types follow GCC's prototypes; Clang 18 answers `unsigned`
+    // and `char *` instead, so the type checks stay out of the shared program.
+    String8 source = string_format(arguments->arena, S8("{S8}{S8}"), c_test_source_location_builtins_source,
+        S8("_Static_assert(_Generic(__builtin_LINE(), int: 1, default: 0), \"int\");\n"
+           "_Static_assert(_Generic(__builtin_FILE(), const char*: 1, default: 0), \"file\");\n"
+           "_Static_assert(_Generic(__builtin_FUNCTION(), const char*: 1, default: 0), \"function\");\n"));
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("source-location.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            bool accepted = preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0;
+            BUSTER_TEST_RAW(arguments, accepted, string_format(temporary.arena,
+                S8("source location target={u32} form={u32}: first diagnostic {S8}"), target_index, form,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            if (accepted && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                IrGlobal* line = c_test_find_ir_global(module, lowered.program, S8("static_line"));
+                BUSTER_TEST(arguments, line && line->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && line->initializer_bits == 8);
+                IrGlobal* file = c_test_find_ir_global(module, lowered.program, S8("static_file"));
+                BUSTER_TEST(arguments, file && file->initializer_kind == IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS);
+            }
+            scratch_end(temporary);
+        }
+    }
+    String8 invalid[] = {
+        S8("int bad(void) { return __builtin_LINE(1); }"),
+        S8("const char* bad(void) { return __builtin_FILE(1); }"),
+        S8("const char* bad(void) { return __builtin_FUNCTION(1); }"),
+        S8("static int bad = __builtin_LINE(1);"),
+        S8("_Static_assert(__builtin_LINE(1) == 1, \"arity\");"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = targets[0];
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[index],
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("source-location-invalid.c"), preprocess, syntax, target,
+            (CIRLowerOptions){0});
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0, invalid[index]);
+        BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0, invalid[index]);
+        BUSTER_TEST(arguments, !lowered.canonical_ir_certified && lowered.program == 0);
+        scratch_end(temporary);
+    }
+#if BUSTER_CPU_ARCH_X86_64 && BUSTER_LINUX && !BUSTER_ANDROID
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 input = buster_test_temporary_path(arguments->arena, S8("source-location"), S8(".c"));
+    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(c_test_source_location_builtins_source));
+    if (BUSTER_REQUIRE(arguments, written))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("source-location-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], forms[form], S8("-O0"),
+                    S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("source location mode={u32} form={u32}: {S8}"), mode, form, compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 command_line[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command_line),
+                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult run = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !run.timed_out && run.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("source location mode={u32} form={u32}: status={u32} timeout={u32}"),
+                                mode, form, run.platform_status, (u32)run.timed_out));
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+        String8 references[] = {S8("gcc"), S8("clang")};
+        for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("source-location-reference"), S8(".exe"));
+            if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+            {
+                String8 command[] = {compiler, S8("-std=gnu17"), S8("-O0"), S8("-nostdinc"), input, S8("-o"), output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
+                    (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                        .use_process_environment = true, .search_path = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult build = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !build.timed_out && build.result == PROCESS_RESULT_SUCCESS,
+                        BYTE_SLICE_TO_STRING(8, build.streams[STANDARD_STREAM_ERROR]));
+                    if (!build.timed_out && build.result == PROCESS_RESULT_SUCCESS)
+                    {
+                        String8 command_line[] = {output};
+                        ProcessSpawnResult executable = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command_line),
+                            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, executable.handle != 0))
+                        {
+                            ProcessWaitResult run = os_process_wait_deadline(temporary.arena, executable, 30000000);
+                            BUSTER_TEST_RAW(arguments, !run.timed_out && run.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("source location reference={S8}: status={u32} timeout={u32}"),
+                                    references[reference], run.platform_status, (u32)run.timed_out));
+                        }
+                        BUSTER_TEST(arguments, os_file_delete(output));
+                    }
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+        BUSTER_TEST(arguments, os_file_delete(input));
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_classify_type(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -64907,6 +65091,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_braced_string_initializers);
     C_TEST_FIXTURE(arguments, c_test_braced_string_runtime);
     C_TEST_FIXTURE(arguments, c_test_builtin_classify_type);
+    C_TEST_FIXTURE(arguments, c_test_source_location_builtins);
     C_TEST_FIXTURE(arguments, c_test_builtin_infinity);
     C_TEST_FIXTURE(arguments, c_test_builtin_special_float_spellings);
     C_TEST_FIXTURE(arguments, c_test_c23_attribute_noreturn);
