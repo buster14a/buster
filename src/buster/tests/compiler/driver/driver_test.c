@@ -1427,7 +1427,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
     BUSTER_STRING_TEST(arguments, no_sse2_invocation.diagnostic, S8("unsupported option: -mno-sse2 (SSE2 is part of the x86-64 baseline)"));
     // A spelling that names no feature stays an unsupported option, typed as
     // the user wrote it, and the options that are not features keep failing.
-    String8 refused_spellings[] = {S8("-mfoo"), S8("-mno-foo"), S8("-m32"), S8("-m64"), S8("-mred-zone"), S8("-mno-red-zone"), S8("-mno-"), S8("-m"),
+    String8 refused_spellings[] = {S8("-mfoo"), S8("-mno-foo"), S8("-m64"), S8("-mred-zone"), S8("-mno-red-zone"), S8("-mno-"), S8("-m"),
                                    S8("-mavx2=1"), S8("-mtune="), S8("-march="), S8("-mAVX2")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused_spellings); index += 1)
     {
@@ -1435,6 +1435,173 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
         CompilerDriverInvocation refused = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(line));
         BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_ARGUMENT);
         BUSTER_STRING_TEST(arguments, refused.diagnostic, string_format(arguments->arena, S8("unsupported option: {S8}"), refused_spellings[index]));
+    }
+    {
+        String8 mode_lines[][6] = {
+            {S8("-m16"), S8("-c"), S8("source.c")},
+            {S8("--target=x86_64-linux"), S8("-m32"), S8("-c"), S8("source.c")},
+            {S8("-m32"), S8("--target=x86_64-linux"), S8("-c"), S8("source.c")},
+            {S8("--target=i386-linux"), S8("-m16"), S8("-c"), S8("source.c")},
+            {S8("-m16"), S8("--target=i386-linux"), S8("-c"), S8("source.c")},
+        };
+        u32 mode_counts[] = {3, 4, 4, 4, 4};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(mode_lines); index += 1)
+        {
+            CompilerDriverInvocation mode = compiler_driver_parse_arguments(
+                arguments->arena, (SliceString8){mode_lines[index], mode_counts[index]});
+            BUSTER_TEST_RAW(arguments, mode.error == COMPILER_DRIVER_ERROR_ARGUMENT, mode.diagnostic);
+            BUSTER_TEST(arguments, mode.target.cpu_arch == CPU_ARCH_I386);
+            BUSTER_TEST(arguments, mode.target.x86_code16 == (index == 0 || index == 3 || index == 4));
+        }
+        String8 last_mode[] = {S8("-m16"), S8("-m32"), S8("-m16"), S8("-c"), S8("source.c")};
+        CompilerDriverInvocation last_wins = compiler_driver_parse_arguments(
+            arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(last_mode));
+        BUSTER_TEST(arguments, last_wins.error == COMPILER_DRIVER_ERROR_ARGUMENT && last_wins.target.x86_code16);
+        String8 reversed_last_mode[] = {S8("-m16"), S8("-m32"), S8("-c"), S8("source.c")};
+        CompilerDriverInvocation reversed_last_wins = compiler_driver_parse_arguments(
+            arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(reversed_last_mode));
+        BUSTER_TEST(arguments, reversed_last_wins.error == COMPILER_DRIVER_ERROR_ARGUMENT && !reversed_last_wins.target.x86_code16);
+        String8 non_x86_targets[] = {
+            S8("--target=aarch64-linux"), S8("--target=wasm32-wasi"), S8("--target=bpfel-linux"), S8("--target=spirv64"),
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(non_x86_targets); index += 1)
+        {
+            String8 line[] = {non_x86_targets[index], S8("-m16"), S8("-c"), S8("source.c")};
+            CompilerDriverInvocation refused = compiler_driver_parse_arguments(
+                arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(line));
+            BUSTER_STRING_TEST(arguments, refused.diagnostic, S8("unsupported option: -m16 for this target"));
+        }
+        String8 model_line[] = {S8("-m16"), S8("-march=i386"), S8("-c"), S8("source.c")};
+        CompilerDriverInvocation model = compiler_driver_parse_arguments(
+            arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(model_line));
+        BUSTER_TEST(arguments, model.target.cpu_arch == CPU_ARCH_I386 && model.target.cpu_model == CPU_MODEL_X86_I386);
+        String8 x64_model_line[] = {S8("--target=x86_64-linux"), S8("-march=i386"), S8("-c"), S8("source.c")};
+        CompilerDriverInvocation x64_model = compiler_driver_parse_arguments(
+            arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(x64_model_line));
+        BUSTER_TEST(arguments, x64_model.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        String8 regparm_values[][4] = {
+            {S8("-m16"), S8("-mregparm=0"), S8("-c"), S8("source.c")},
+            {S8("-m32"), S8("-mregparm=3"), S8("-c"), S8("source.c")},
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(regparm_values); index += 1)
+        {
+            CompilerDriverInvocation regparm = compiler_driver_parse_arguments(
+                arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(regparm_values[index]));
+            BUSTER_TEST(arguments, regparm.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+            BUSTER_TEST(arguments, regparm.target.x86_register_parameter_count == (index == 0 ? 0 : 3));
+        }
+        String8 regparm_four[] = {S8("-m32"), S8("-mregparm=4"), S8("-c"), S8("source.c")};
+        CompilerDriverInvocation regparm_range = compiler_driver_parse_arguments(
+            arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(regparm_four));
+        BUSTER_STRING_TEST(arguments, regparm_range.diagnostic, S8("-mregparm=4 is not between 0 and 3"));
+        String8 regparm_bad[] = {S8("-m32"), S8("-mregparm=abc"), S8("-c"), S8("source.c")};
+        CompilerDriverInvocation regparm_malformed = compiler_driver_parse_arguments(
+            arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(regparm_bad));
+        BUSTER_STRING_TEST(arguments, regparm_malformed.diagnostic, S8("invalid value for -mregparm: abc"));
+        String8 regparm_x64[] = {S8("--target=x86_64-linux"), S8("-mregparm=3"), S8("-c"), S8("source.c")};
+        CompilerDriverInvocation regparm_wrong_target = compiler_driver_parse_arguments(
+            arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(regparm_x64));
+        BUSTER_STRING_TEST(arguments, regparm_wrong_target.diagnostic, S8("unsupported option: -mregparm=3 for this target"));
+        String8 boundary_good[] = {S8("-m32"), S8("-mpreferred-stack-boundary=2"), S8("-c"), S8("source.c")};
+        CompilerDriverInvocation boundary = compiler_driver_parse_arguments(
+            arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(boundary_good));
+        BUSTER_TEST(arguments, boundary.error == COMPILER_DRIVER_ERROR_ARGUMENT &&
+                                 boundary.target.x86_preferred_stack_boundary == 2);
+        String8 boundary_bad[] = {S8("-m32"), S8("-mpreferred-stack-boundary=5"), S8("-c"), S8("source.c")};
+        CompilerDriverInvocation boundary_range = compiler_driver_parse_arguments(
+            arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(boundary_bad));
+        BUSTER_STRING_TEST(arguments, boundary_range.diagnostic, S8("-mpreferred-stack-boundary=5 is not between 2 and 4"));
+        String8 boundary_x64[] = {S8("--target=x86_64-linux"), S8("-mpreferred-stack-boundary=4"), S8("-c"), S8("source.c")};
+        CompilerDriverInvocation boundary_wrong_target = compiler_driver_parse_arguments(
+            arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(boundary_x64));
+        BUSTER_STRING_TEST(arguments, boundary_wrong_target.diagnostic,
+                           S8("unsupported option: -mpreferred-stack-boundary=4 for this target"));
+        String8 cf_protection[] = {S8("-m16"), S8("-fcf-protection=none"), S8("-c"), S8("source.c")};
+        CompilerDriverInvocation cf_protection_none = compiler_driver_parse_arguments(
+            arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(cf_protection));
+        BUSTER_TEST(arguments, cf_protection_none.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        String8 kbuild[] = {
+            S8("-m16"), S8("-g"), S8("-Os"), S8("-DDISABLE_BRANCH_PROFILING"), S8("-D__DISABLE_EXPORTS"), S8("-Wall"),
+            S8("-Wstrict-prototypes"), S8("-march=i386"), S8("-mregparm=3"), S8("-fno-strict-aliasing"),
+            S8("-fomit-frame-pointer"), S8("-fno-pic"), S8("-mno-mmx"), S8("-mno-sse"),
+            S8("-fcf-protection=none"), S8("-ffreestanding"), S8("-fno-stack-protector"),
+            S8("-Wno-address-of-packed-member"), S8("-mpreferred-stack-boundary=2"), S8("-D_SETUP"),
+            S8("-fno-asynchronous-unwind-tables"), S8("-Wimplicit-fallthrough=5"), S8("-c"), S8("boot.c"),
+        };
+        CompilerDriverInvocation kbuild_invocation = compiler_driver_parse_arguments(
+            arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(kbuild));
+        BUSTER_TEST_RAW(arguments, kbuild_invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT, kbuild_invocation.diagnostic);
+        BUSTER_STRING_TEST(arguments, kbuild_invocation.diagnostic,
+                           S8("i386 code generation is not implemented (-m16/-m32 support -E, -dM and -fsyntax-only only; see #3654)"));
+        String8 no_sse_i386[] = {S8("-m32"), S8("-mno-sse"), S8("-mno-mmx"), S8("-mno-sse2"), S8("-fsyntax-only"), S8("source.c")};
+        CompilerDriverInvocation disabled_i386_features = compiler_driver_parse_arguments(
+            arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(no_sse_i386));
+        BUSTER_TEST_RAW(arguments, disabled_i386_features.error == COMPILER_DRIVER_ERROR_NONE, disabled_i386_features.diagnostic);
+    }
+    {
+        Arena* arena = arguments->arena;
+        String8 source_path = buster_test_temporary_path(arena, S8("i386-driver-source"), S8(".c"));
+        String8 assembly_path = buster_test_temporary_path(arena, S8("i386-driver-assembly"), S8(".s"));
+        String8 output_path = buster_test_temporary_path(arena, S8("i386-driver-sentinel"), S8(".out"));
+        String8 preprocessed_path = buster_test_temporary_path(arena, S8("i386-driver-preprocessed"), S8(".i"));
+        String8 uppercase_assembly_path = buster_test_temporary_path(arena, S8("i386-driver-uppercase-assembly"), S8(".S"));
+        String8 sentinel = S8("keep this output intact\n");
+        BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("int i386_syntax(void) { return sizeof(void *); }\n"))));
+        BUSTER_TEST(arguments, file_write(assembly_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("nop\n"))));
+        BUSTER_TEST(arguments, file_write(uppercase_assembly_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("#define I386_ASSEMBLY 1\n.byte I386_ASSEMBLY\n"))));
+        for (u32 action = 0; action < 5; action += 1)
+        {
+            String8 line[8] = {S8("-m32")};
+            u32 line_count = 1;
+            if (action == 0)
+            {
+                line[line_count++] = S8("-c");
+                line[line_count++] = source_path;
+            }
+            else if (action == 1)
+            {
+                line[line_count++] = S8("-S");
+                line[line_count++] = source_path;
+            }
+            else if (action == 2)
+            {
+                line[line_count++] = source_path;
+            }
+            else if (action == 3)
+            {
+                line[line_count++] = S8("-emit-llvm");
+                line[line_count++] = S8("-c");
+                line[line_count++] = source_path;
+            }
+            else
+            {
+                line[line_count++] = S8("-c");
+                line[line_count++] = assembly_path;
+            }
+            line[line_count++] = S8("-o");
+            line[line_count++] = output_path;
+            BUSTER_TEST(arguments, file_write(output_path, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){line, line_count});
+            CompilerDriverResult refused = compiler_driver_execute_invocation(arena, invocation);
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+            BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, output_path, (FileReadOptions){0})), sentinel);
+        }
+        String8 syntax_line[] = {S8("-m16"), S8("-fsyntax-only"), source_path};
+        CompilerDriverResult syntax = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_line)));
+        BUSTER_TEST_RAW(arguments, syntax.error == COMPILER_DRIVER_ERROR_NONE, syntax.diagnostic);
+        String8 preprocess_line[] = {S8("-m32"), S8("-E"), source_path, S8("-o"), preprocessed_path};
+        CompilerDriverResult preprocessed = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(preprocess_line)));
+        BUSTER_TEST_RAW(arguments, preprocessed.error == COMPILER_DRIVER_ERROR_NONE, preprocessed.diagnostic);
+        String8 assembly_preprocess_line[] = {S8("-m16"), S8("-E"), uppercase_assembly_path, S8("-o"), preprocessed_path};
+        CompilerDriverResult assembly_preprocessed = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assembly_preprocess_line)));
+        BUSTER_TEST_RAW(arguments, assembly_preprocessed.error == COMPILER_DRIVER_ERROR_NONE, assembly_preprocessed.diagnostic);
+        String8 dumpmachine_line[] = {S8("--target=x86_64-linux"), S8("-m32"), S8("-dumpmachine")};
+        CompilerDriverInvocation dumpmachine = compiler_driver_parse_arguments(
+            arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(dumpmachine_line));
+        BUSTER_STRING_TEST(arguments, compiler_driver_query_text(arena, &dumpmachine), S8("i386-linux-gnu\n"));
     }
     // The existing -m options keep their meaning next to the aliases.
     String8 kept_line[] = {S8("--target=x86_64-linux"), S8("-march=x86-64-v2"), S8("-mtune=native"), S8("-masm=intel"), S8("-mavx"), S8("-mavx2"), S8("-c"), S8("source.c")};

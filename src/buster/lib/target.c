@@ -222,25 +222,29 @@ TargetDataLayout target_data_layout(Target target)
     bool windows = target.os == OPERATING_SYSTEM_WINDOWS;
     bool llp64 = target_uses_llp64_data_model(target);
     bool apple = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+    bool i386 = target.cpu_arch == CPU_ARCH_I386;
     bool wasm32 = target.cpu_arch == CPU_ARCH_WASM32;
     bool wasm64 = target.cpu_arch == CPU_ARCH_WASM64;
     bool bpfel = target.cpu_arch == CPU_ARCH_BPFEL;
     bool spirv_compute = target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE;
     bool wasm = wasm32 || wasm64;
     bool arm_plain_char_unsigned = target.cpu_arch == CPU_ARCH_AARCH64 && !apple && !windows;
-    u32 pointer_size = wasm32 || spirv_compute ? 4 : 8;
-    u32 long_size = llp64 || wasm32 || spirv_compute ? 4 : 8;
+    u32 pointer_size = i386 || wasm32 || spirv_compute ? 4 : 8;
+    u32 long_size = i386 || llp64 || wasm32 || spirv_compute ? 4 : 8;
     bool plain_char_is_signed = target.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_SIGNED ||
                                 (target.plain_char_policy != TARGET_PLAIN_CHAR_POLICY_UNSIGNED && !arm_plain_char_unsigned);
     // WebAssembly uses IEEE binary128 long double in both pointer-width ABIs.
     bool double_long_double = llp64 || bpfel || spirv_compute || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
-    u32 long_double_size = double_long_double ? 8 : 16;
+    u32 long_double_size = i386 ? 12 : double_long_double ? 8 : 16;
     bool x87_long_double = target.cpu_arch == CPU_ARCH_X86_64 && target.os != OPERATING_SYSTEM_ANDROID;
-    u32 long_double_bits = double_long_double ? 64 : x87_long_double ? 80 : 128;
+    u32 long_double_bits = i386 ? 80 : double_long_double ? 64 : x87_long_double ? 80 : 128;
     bool aarch64_pointer_list = target.cpu_arch == CPU_ARCH_AARCH64 && (apple || windows);
-    u32 va_list_size = wasm32 || spirv_compute ? 4 : llp64 || wasm64 || bpfel || aarch64_pointer_list ? 8 :
+    u32 va_list_size = i386 || wasm32 || spirv_compute ? 4 : llp64 || wasm64 || bpfel || aarch64_pointer_list ? 8 :
                        target.cpu_arch == CPU_ARCH_X86_64 ? TARGET_X86_64_SYSV_VA_LIST_SIZE : 32;
-    u32 va_list_alignment = wasm32 || spirv_compute ? 4 : 8;
+    u32 va_list_alignment = i386 || wasm32 || spirv_compute ? 4 : 8;
+    u32 i386_stack_alignment = target.x86_preferred_stack_boundary >= 2 && target.x86_preferred_stack_boundary <= 4
+                                   ? 1u << target.x86_preferred_stack_boundary
+                                   : 16;
 
     TargetDataLayout layout = {
         .boolean = {.size = 1, .alignment = 1, .bit_width = 1},
@@ -253,25 +257,25 @@ TargetDataLayout target_data_layout(Target target)
         .unsigned_integer = {.size = 4, .alignment = 4, .bit_width = 32},
         .long_integer = {.size = long_size, .alignment = long_size, .bit_width = long_size * 8},
         .unsigned_long_integer = {.size = long_size, .alignment = long_size, .bit_width = long_size * 8},
-        .long_long_integer = {.size = 8, .alignment = 8, .bit_width = 64},
-        .unsigned_long_long_integer = {.size = 8, .alignment = 8, .bit_width = 64},
+        .long_long_integer = {.size = 8, .alignment = i386 ? 4u : 8u, .bit_width = 64},
+        .unsigned_long_long_integer = {.size = 8, .alignment = i386 ? 4u : 8u, .bit_width = 64},
         .integer128 = {.size = 16, .alignment = 16, .bit_width = 128},
         .unsigned_integer128 = {.size = 16, .alignment = 16, .bit_width = 128},
         .float16_type = {.size = 2, .alignment = 2, .bit_width = 16},
         .bfloat16_type = {.size = 2, .alignment = 2, .bit_width = 16},
         .float_type = {.size = 4, .alignment = 4, .bit_width = 32},
-        .double_type = {.size = 8, .alignment = 8, .bit_width = 64},
-        .long_double_type = {.size = long_double_size, .alignment = long_double_size, .bit_width = long_double_bits},
+        .double_type = {.size = 8, .alignment = i386 ? 4u : 8u, .bit_width = 64},
+        .long_double_type = {.size = long_double_size, .alignment = i386 ? 4u : long_double_size, .bit_width = long_double_bits},
         .pointer = {.size = pointer_size, .alignment = pointer_size, .bit_width = pointer_size * 8},
         .va_list = {.size = va_list_size, .alignment = va_list_alignment, .bit_width = va_list_size * 8},
         .atomic_min_width = 8,
-        .atomic_max_width = wasm || bpfel ? 64 : 128,
-        .atomic_alignment = wasm || bpfel ? 8 : 16,
-        .abi_stack_alignment = bpfel ? 8 : 16,
+        .atomic_max_width = i386 || wasm || bpfel ? 64 : 128,
+        .atomic_alignment = i386 || wasm || bpfel ? 8 : 16,
+        .abi_stack_alignment = i386 ? i386_stack_alignment : bpfel ? 8 : 16,
         .abi_max_alignment = bpfel ? 8 : 16,
         .endianness = TARGET_ENDIAN_LITTLE,
         .plain_char_is_signed = plain_char_is_signed,
-        .has_128_bit_integer = !wasm && !bpfel && !spirv_compute,
+        .has_128_bit_integer = !i386 && !wasm && !bpfel && !spirv_compute,
     };
     return layout;
 }
@@ -442,6 +446,11 @@ TargetParseResult target_parse_triple(String8 triple)
             {
                 result.target.cpu_arch = CPU_ARCH_X86_64;
             }
+            else if (target_component_equal(component, S8("i386")) || target_component_equal(component, S8("i486")) ||
+                     target_component_equal(component, S8("i586")) || target_component_equal(component, S8("i686")))
+            {
+                result.target.cpu_arch = CPU_ARCH_I386;
+            }
             else if (target_component_equal(component, S8("aarch64")) || target_component_equal(component, S8("arm64")))
             {
                 result.target.cpu_arch = CPU_ARCH_AARCH64;
@@ -553,6 +562,19 @@ TargetParseResult target_parse_triple(String8 triple)
         {
             result.target.os = OPERATING_SYSTEM_FREESTANDING;
         }
+        else if (target_component_equal(component, S8("code16")))
+        {
+            if (result.target.cpu_arch == CPU_ARCH_I386)
+            {
+                result.target.x86_code16 = true;
+            }
+            else
+            {
+                result.invalid_component = component;
+                result.error = TARGET_PARSE_ERROR_ENVIRONMENT;
+                break;
+            }
+        }
 
         component_index += 1;
         component_start = component_end < triple.length ? component_end + 1 : triple.length;
@@ -566,6 +588,12 @@ TargetParseResult target_parse_triple(String8 triple)
     {
         result.invalid_component = gnu_environment;
         result.error = TARGET_PARSE_ERROR_ENVIRONMENT;
+    }
+    else if (result.error == TARGET_PARSE_ERROR_NONE && result.target.cpu_arch == CPU_ARCH_I386 &&
+             result.target.os != OPERATING_SYSTEM_LINUX && result.target.os != OPERATING_SYSTEM_FREESTANDING)
+    {
+        result.invalid_component = operating_system_to_string_os(result.target.os);
+        result.error = TARGET_PARSE_ERROR_OPERATING_SYSTEM;
     }
     return result;
 }
@@ -604,14 +632,26 @@ CpuModel cpu_detect_model(void)
 
 CpuModel cpu_model_from_string(String8 string)
 {
+    CpuModel result = CPU_MODEL_ERROR;
     for (CpuModel model = CPU_MODEL_BASELINE; model < CPU_MODEL_COUNT; model += 1)
     {
         if (string_equal(string, cpu_model_to_string_os(model)))
         {
-            return model;
+            result = model;
+            break;
         }
     }
-    return CPU_MODEL_ERROR;
+    if (result == CPU_MODEL_ERROR && string_equal(string, S8("pentiumpro")))
+    {
+        result = CPU_MODEL_X86_I686;
+    }
+    return result;
+}
+
+bool cpu_arch_is_x86(CpuArch arch)
+{
+    bool result = arch == CPU_ARCH_X86_64 || arch == CPU_ARCH_I386;
+    return result;
 }
 
 bool cpu_model_supports_arch(CpuModel model, CpuArch arch)
@@ -623,7 +663,12 @@ bool cpu_model_supports_arch(CpuModel model, CpuArch arch)
     }
     else if (model == CPU_MODEL_NATIVE)
     {
-        result = arch == target_native.cpu_arch;
+        result = arch != CPU_ARCH_I386 && arch == target_native.cpu_arch;
+    }
+    else if (arch == CPU_ARCH_I386)
+    {
+        result = model == CPU_MODEL_X86_I386 || model == CPU_MODEL_X86_I686 ||
+                 (model >= CPU_MODEL_AMD_I486 && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS);
     }
     else if (arch == CPU_ARCH_X86_64)
     {
@@ -705,9 +750,16 @@ bool cpu_model_supports_arch(CpuModel model, CpuArch arch)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL TargetCpuFeatures target_cpu_features_x86_default(CpuModel model)
+BUSTER_GLOBAL_LOCAL TargetCpuFeatures target_cpu_features_x86_default(CpuModel model, CpuArch arch)
 {
-    TargetCpuFeatures result = target_cpu_features_singleton(TARGET_CPU_FEATURE_X86_SSE2);
+    TargetCpuFeatures result = arch == CPU_ARCH_I386 ? target_cpu_features_empty()
+                                                      : target_cpu_features_singleton(TARGET_CPU_FEATURE_X86_SSE2);
+    bool amd_mmx = model >= CPU_MODEL_AMD_K6 && model <= CPU_MODEL_AMD_ATHLON_XP;
+    bool intel_mmx = model >= CPU_MODEL_INTEL_CORE_2 && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    if (arch == CPU_ARCH_I386 && (amd_mmx || intel_mmx))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_MMX);
+    }
     if (model >= CPU_MODEL_AMD_K8_SSE3 && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSE3);
@@ -1341,9 +1393,9 @@ TargetCpuFeatures target_cpu_features_default(CpuArch arch, CpuModel model)
             }, 2);
         }
     }
-    else if (arch == CPU_ARCH_X86_64)
+    else if (cpu_arch_is_x86(arch))
     {
-        result = target_cpu_features_x86_default(model);
+        result = target_cpu_features_x86_default(model, arch);
     }
     else
     {
@@ -1444,12 +1496,12 @@ bool target_cpu_features_are_valid(Target target)
             }
             return true;
         }
-        if (target.cpu_arch != CPU_ARCH_X86_64)
+        if (!cpu_arch_is_x86(target.cpu_arch))
         {
             return false;
         }
         TargetCpuFeature const known_feature_list[] = {
-            TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F,
+            TARGET_CPU_FEATURE_X86_MMX, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F,
             TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX10_1, TARGET_CPU_FEATURE_X86_AVX10_2,
             TARGET_CPU_FEATURE_X86_AVX10_512, TARGET_CPU_FEATURE_X86_APX, TARGET_CPU_FEATURE_X86_AVX512BW,
             TARGET_CPU_FEATURE_X86_SSE3, TARGET_CPU_FEATURE_X86_POPCNT, TARGET_CPU_FEATURE_X86_LZCNT,
@@ -1490,7 +1542,8 @@ bool target_cpu_features_are_valid(Target target)
             TARGET_CPU_FEATURE_X86_XSAVEC,
         };
         TargetCpuFeatures known = target_cpu_features_from_array(known_feature_list, (u32)BUSTER_ARRAY_LENGTH(known_feature_list));
-        if (!target_cpu_features_subset(features, known) || !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2))
+        if (!target_cpu_features_subset(features, known) ||
+            (target.cpu_arch == CPU_ARCH_X86_64 && !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2)))
         {
             return false;
         }
@@ -1829,6 +1882,12 @@ struct TargetCpuFeatureName
     CpuArch arch;
 };
 
+BUSTER_GLOBAL_LOCAL bool target_cpu_feature_name_matches_arch(CpuArch feature_arch, CpuArch arch)
+{
+    bool result = feature_arch == arch || (cpu_arch_is_x86(feature_arch) && cpu_arch_is_x86(arch));
+    return result;
+}
+
 // Kept in nondecreasing bytewise name order so verbose output is stable
 // without sorting or allocating one node per feature.  Names can repeat when
 // separate architectures expose the same spelling (for example, `aes`).
@@ -1913,6 +1972,7 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("lse"), .feature = TARGET_CPU_FEATURE_AARCH64_LSE, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("lwp"), .feature = TARGET_CPU_FEATURE_X86_LWP, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("lzcnt"), .feature = TARGET_CPU_FEATURE_X86_LZCNT, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("mmx"), .feature = TARGET_CPU_FEATURE_X86_MMX, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("monitor"), .feature = TARGET_CPU_FEATURE_X86_MONITOR, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("movbe"), .feature = TARGET_CPU_FEATURE_X86_MOVBE, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("movdir64b"), .feature = TARGET_CPU_FEATURE_X86_MOVDIR64B, .arch = CPU_ARCH_X86_64},
@@ -2024,7 +2084,7 @@ TargetCpuFeature target_cpu_feature_from_string(CpuArch arch, String8 name)
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(target_cpu_feature_names); index += 1)
     {
         TargetCpuFeatureName entry = target_cpu_feature_names[index];
-        if (entry.arch == arch && string_equal(entry.name, name))
+        if (target_cpu_feature_name_matches_arch(entry.arch, arch) && string_equal(entry.name, name))
         {
             return entry.feature;
         }
@@ -2052,7 +2112,7 @@ String8 target_cpu_features_to_string(Arena* arena, Target target)
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(target_cpu_feature_names); index += 1)
     {
         TargetCpuFeatureName entry = target_cpu_feature_names[index];
-        if (entry.arch == target.cpu_arch && target_cpu_features_contains(features, entry.feature))
+        if (target_cpu_feature_name_matches_arch(entry.arch, target.cpu_arch) && target_cpu_features_contains(features, entry.feature))
         {
             if (part_count)
             {
@@ -2080,7 +2140,7 @@ u32 target_vector_register_size(Target target)
     {
         return target_cpu_feature_has(target, TARGET_CPU_FEATURE_AARCH64_NEON) ? 16 : 0;
     }
-    if (target.cpu_arch != CPU_ARCH_X86_64)
+    if (!cpu_arch_is_x86(target.cpu_arch))
     {
         return 0;
     }
@@ -2110,15 +2170,34 @@ TargetStringSplit target_to_split_string_os(Target target)
     String8 arch_string = cpu_arch_to_string_os(target.cpu_arch);
     String8 string_os = operating_system_to_string_os(target.os);
     String8 model_string = cpu_model_to_string_os(target.cpu_model);
+    String8 environment_string = target.x86_code16 ? S8("code16") : S8("");
     TargetStringSplit result = {
         .s =
             {
                 [TARGET_STRING_COMPONENT_CPU_ARCH] = arch_string,
                 [TARGET_STRING_COMPONENT_OPERATING_SYSTEM] = string_os,
                 [TARGET_STRING_COMPONENT_CPU_MODEL] = model_string,
+                [TARGET_STRING_COMPONENT_ENVIRONMENT] = environment_string,
             },
     };
 
+    return result;
+}
+
+String8 target_to_string(Arena* arena, Target target)
+{
+    TargetStringSplit split = target_to_split_string_os(target);
+    String8 result = split.s[TARGET_STRING_COMPONENT_CPU_ARCH];
+    String8 operating_system = split.s[TARGET_STRING_COMPONENT_OPERATING_SYSTEM];
+    String8 environment = split.s[TARGET_STRING_COMPONENT_ENVIRONMENT];
+    if (operating_system.length)
+    {
+        result = string_format(arena, S8("{S8}-{S8}"), result, operating_system);
+    }
+    if (environment.length)
+    {
+        result = string_format(arena, S8("{S8}-{S8}"), result, environment);
+    }
     return result;
 }
 
@@ -2129,6 +2208,9 @@ String8 cpu_arch_to_string_os(CpuArch arch)
     {
     case CPU_ARCH_X86_64:
         result = S8("x86_64");
+        break;
+    case CPU_ARCH_I386:
+        result = S8("i386");
         break;
     case CPU_ARCH_AARCH64:
         result = S8("aarch64");
@@ -2658,6 +2740,12 @@ String8 cpu_model_to_string_os(CpuModel model)
         break;
     case CPU_MODEL_A64_APPLE_M4:
         result = S8("apple-m4");
+        break;
+    case CPU_MODEL_X86_I386:
+        result = S8("i386");
+        break;
+    case CPU_MODEL_X86_I686:
+        result = S8("i686");
         break;
     }
 

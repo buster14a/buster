@@ -333,6 +333,17 @@ publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
 the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
 not predefined at any level. `-mattr` overrides still refine the level.
 The psABI's LAHF-SAHF has no target feature and is implied by long mode.
+For 32-bit x86, the canonical target architecture is `i386`; `i386`, `i486`,
+`i586` and `i686` are accepted architecture spellings, while `-march=i386`
+and `-march=i686` select explicit CPU models. The I386 baseline models GCC's
+`-m32` default (i686 without MMX/SSE). `-m16` and `-m32` select I386 execution
+mode, with the last spelling winning independently of `--target` order;
+`-m16` also records the `code16` target environment. These modes support
+preprocessing (`-E`, including `-dM`) and frontend-only validation
+(`-fsyntax-only`). I386 artifact generation—including assembly, objects,
+LLVM output and links—is deliberately refused with an explicit #3654
+diagnostic. `-m64` remains unsupported and is tracked separately by #3458.
+
 Without `-march`/`-mcpu` the CPU model is `baseline`, matching Clang's and
 GCC's portable `x86-64` default. A command with no `-target` compiles for the
 host's architecture and operating system (`target_native`,
@@ -387,7 +398,8 @@ warning option. `--version`, `-dumpversion`, `-dumpmachine` and
 `__clang_patchlevel__` triple (`__clang_version__` is `18.0.0 (buster)`);
 `-dumpmachine` prints the effective target as `arch-os[-environment]` with the
 `gnu` environment on Linux and `msvc` on Windows (for example
-`x86_64-linux-gnu`); `--version` prints `Buster clang version 18.0.0 (buster)`,
+`x86_64-linux-gnu`, or `i386-linux-gnu` under `-m32`); `--version` prints
+`Buster clang version 18.0.0 (buster)`,
 `Target: <that triple>` and `Thread model: posix`. `-print-target-triple` and
 `-print-effective-triple` print Clang's normalized `arch-vendor-os[-environment]`
 form, with the vendor `apple` on macOS/iOS and `unknown` elsewhere (for example

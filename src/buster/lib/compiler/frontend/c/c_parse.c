@@ -6976,6 +6976,7 @@ BUSTER_C_SHARED CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPrep
         if (spelling.length && spelling.pointer[0] == 'L')
         {
             kind = target_uses_16_bit_wchar(preprocess.target) ? C_TYPE_UNSIGNED_SHORT :
+                   preprocess.target.cpu_arch == CPU_ARCH_I386 ? C_TYPE_LONG :
                    target_uses_unsigned_wchar(preprocess.target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
         }
         else if (spelling.length && spelling.pointer[0] == 'u')
@@ -7010,8 +7011,9 @@ BUSTER_C_SHARED CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPrep
         if ((string_equal(c_token_spelling(preprocess.spelling_base, first), S8("sizeof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("_Alignof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("alignof"))) &&
             start + 1 < end)
         {
-            return c_parse_expression_scalar_type(result,
-                                                  target_uses_llp64_data_model(preprocess.target) ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG);
+            CTypeKind size_type = preprocess.target.cpu_arch == CPU_ARCH_I386 ? C_TYPE_UNSIGNED_INT :
+                                  target_uses_llp64_data_model(preprocess.target) ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG;
+            return c_parse_expression_scalar_type(result, size_type);
         }
         if (c_preprocess_dialect_is_c23(preprocess.dialect) && (string_equal(c_token_spelling(preprocess.spelling_base, first), S8("true")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("false"))) &&
             end == start + 1)
@@ -8237,7 +8239,9 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             }
             else if (left_type->kind == C_TYPE_POINTER && right_type->kind == C_TYPE_POINTER && c_token_is_punctuator(&operation, C_PUNCTUATOR_MINUS))
             {
-                last = c_parse_expression_scalar_type(result, target_uses_llp64_data_model(preprocess.target) ? C_TYPE_LONG_LONG : C_TYPE_LONG);
+                CTypeKind ptrdiff_type = preprocess.target.cpu_arch == CPU_ARCH_I386 ? C_TYPE_INT :
+                                         target_uses_llp64_data_model(preprocess.target) ? C_TYPE_LONG_LONG : C_TYPE_LONG;
+                last = c_parse_expression_scalar_type(result, ptrdiff_type);
             }
             else
             {
@@ -31961,7 +31965,9 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CTypeParseMachine* mach
         value.valid &= c_parse_types_compatible(arena, result, preprocess, c_parse_unqualified_type(result, element),
                                                 c_parse_unqualified_type(result, result->types[right.type.value].element_type)) &&
                        c_parse_type_layout(machine, arena, preprocess, result, element, &size, &alignment) && size != 0;
-        value.type = c_parse_expression_scalar_type(result, target_uses_llp64_data_model(target) ? C_TYPE_LONG_LONG : C_TYPE_LONG);
+        CTypeKind ptrdiff_type = target.cpu_arch == CPU_ARCH_I386 ? C_TYPE_INT :
+                                 target_uses_llp64_data_model(target) ? C_TYPE_LONG_LONG : C_TYPE_LONG;
+        value.type = c_parse_expression_scalar_type(result, ptrdiff_type);
         bool negative = left.integer < right.integer;
         u64 magnitude = negative ? right.integer - left.integer : left.integer - right.integer;
         if (value.valid)
@@ -32251,8 +32257,9 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_offsetof(CTypeParseMachine* ma
     CTypeParseMachine* layout_machine = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE ? 0 : machine;
     if (member)
     {
-        value = (CParseConstant){.type = c_parse_expression_scalar_type(result, target_uses_llp64_data_model(preprocess.target)
-                                                                                  ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG)};
+        CTypeKind size_type = preprocess.target.cpu_arch == CPU_ARCH_I386 ? C_TYPE_UNSIGNED_INT :
+                              target_uses_llp64_data_model(preprocess.target) ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG;
+        value = (CParseConstant){.type = c_parse_expression_scalar_type(result, size_type)};
         task->colon = task->end - 1;
         value.valid = task->end - task->start > 4 &&
                       c_token_is_punctuator(&preprocess.tokens[task->start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
@@ -32578,7 +32585,9 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
             value.valid = c_parse_alignof_object_alignment(machine, result, preprocess, scope, operand_start, operand_end, &alignment);
         }
         value.integer = c_parse_alignof_word(spelling) ? alignment : size;
-        value.type = c_parse_expression_scalar_type(result, target_uses_llp64_data_model(preprocess.target) ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG);
+        CTypeKind size_type = preprocess.target.cpu_arch == CPU_ARCH_I386 ? C_TYPE_UNSIGNED_INT :
+                              target_uses_llp64_data_model(preprocess.target) ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG;
+        value.type = c_parse_expression_scalar_type(result, size_type);
     }
     return value;
 }
@@ -39145,7 +39154,7 @@ BUSTER_C_INTERNAL String8 c_parse_asm_bound_register(CTypeParseMachine* machine,
     CEntityId entity_id = start + 1 == end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER
                              ? c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[start]) : C_ENTITY_ID_INVALID;
     if (entity_id.value < result->entity_count &&
-        (preprocess.target.cpu_arch == CPU_ARCH_X86_64 || preprocess.target.cpu_arch == CPU_ARCH_AARCH64))
+        (cpu_arch_is_x86(preprocess.target.cpu_arch) || preprocess.target.cpu_arch == CPU_ARCH_AARCH64))
     {
         CEntity entity = result->entities[entity_id.value];
         u32 limit = entity.declaration_token_start + entity.declaration_token_count;
@@ -39364,8 +39373,8 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
                         else
                         {
                             if ((constraint == IR_INLINE_ASSEMBLY_CONSTRAINT_R || constraint == IR_INLINE_ASSEMBLY_CONSTRAINT_M)
-                                    ? preprocess.target.cpu_arch != CPU_ARCH_X86_64 && preprocess.target.cpu_arch != CPU_ARCH_AARCH64
-                                    : preprocess.target.cpu_arch != CPU_ARCH_X86_64)
+                            ? !cpu_arch_is_x86(preprocess.target.cpu_arch) && preprocess.target.cpu_arch != CPU_ARCH_AARCH64
+                                    : !cpu_arch_is_x86(preprocess.target.cpu_arch))
                                 message = S8("unsupported asm constraint for target");
                             else if (constraint == IR_INLINE_ASSEMBLY_CONSTRAINT_X && !c_semantic_asm_vector_operand(&scalar))
                                 message = S8("an asm operand in the SSE register class must be a float or a double");

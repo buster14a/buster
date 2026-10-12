@@ -397,6 +397,17 @@ Apple AArch64, 16 otherwise), independently of `abi_max_alignment`.
 PIC/PIE macros reflect the driver's `-fpic`/`-fPIC` and `-fpie`/`-fPIE`
 level and executable-mode fields.
 
+I386 uses the SysV ILP32 source model for both `-m16` and `-m32`: 32-bit
+pointers and `long`, `unsigned int` `size_t`, `int` `ptrdiff_t`, GCC's
+`long int` `wchar_t`, and 12-byte/80-bit `long double`. The model predefines
+`__i386__`/`__i386`, and GNU dialects additionally define `i386`; it does not
+inherit x86-64, code-model or unselected SIMD macros. Buster's layout records
+the psABI's 4-byte ABI alignment for `long long` and `double`. GCC's
+`__alignof__(long long)`/`__alignof__(double)` reports 8-byte preferred
+alignment while `_Alignof` and struct member alignment are 4; Buster has no
+separate preferred-type-alignment query yet, so `__alignof__` retains the
+4-byte ABI alignment on I386.
+
 These values intentionally differ from Clang 18.1.8 in several places:
 default fixed-address output leaves PIC/PIE undefined even where Ubuntu GCC
 and Clang default to PIE, and Darwin/Windows do not inherit Clang's always-PIC

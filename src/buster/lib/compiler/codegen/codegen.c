@@ -2496,6 +2496,7 @@ CodegenAbi codegen_abi_for_target(Target target)
     }
     break;
         break;
+    case CPU_ARCH_I386:
     case CPU_ARCH_WASM32:
     case CPU_ARCH_WASM64:
     case CPU_ARCH_BPFEL:
@@ -7527,6 +7528,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     u64 code_remaining = buffer.count <= buffer.capacity ? buffer.capacity - buffer.count : 0;
                     switch (target.cpu_arch)
                     {
+                        break; case CPU_ARCH_I386: encoded = (MachineEncodeResult){0};
                         break; case CPU_ARCH_AARCH64: encoded = machine_encode_aarch64_into(machine_arena, &selected.function, &placement,
                                                                                            code_destination, code_remaining);
                         break; case CPU_ARCH_X86_64: encoded = machine_encode_x86_64_into(machine_arena, &selected.function, &placement,
