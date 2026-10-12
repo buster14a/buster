@@ -36139,6 +36139,101 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unprototyped_then_prototyped(UnitTestA
 // Names in separate/nested prototype scopes may agree; a completed list
 // must reject its first repeated name before parameter binding can overwrite
 // it. Expected source sites refer to the first and later declarations.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_storage_class_contexts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct { String8 source; bool valid; bool c23_only; bool pre_c23_only; } cases[] = {
+        {S8("_Thread_local int f(void) { return 0; }\n"), false, false, false},
+        {S8("_Thread_local int f(void);\n"), false, false, false},
+        {S8("thread_local int f(void) { return 0; }\n"), false, true, false},
+        {S8("int f(_Thread_local int x) { return x; }\n"), false, false, false},
+        {S8("int f(static int x) { return x; }\n"), false, false, false},
+        {S8("int f(extern int x) { return x; }\n"), false, false, false},
+        {S8("int f(typedef int x) { return x; }\n"), false, false, false},
+        {S8("int f(auto int x) { return x; }\n"), false, false, false},
+        {S8("int f(constexpr int x);\n"), false, true, false},
+        {S8("int f(int static x);\n"), false, false, false},
+        {S8("int (*p)(extern int);\n"), false, false, false},
+        {S8("int f(int (*cb)(static int));\n"), false, false, false},
+        {S8("typedef int F(typedef int);\n"), false, false, false},
+        {S8("void f(void) { extern int g(_Thread_local int); }\n"), false, false, false},
+        {S8("void f(void) { int (*p)(static int); }\n"), false, false, false},
+        {S8("extern _Thread_local int (f)(void);\n"), false, false, false},
+        {S8("typedef int F(void); extern _Thread_local F f;\n"), false, false, false},
+        {S8("void f(void) { extern _Thread_local int g(void); }\n"), false, false, false},
+        {S8("int f(register int x) { return x; }\n"), true, false, false},
+        {S8("_Thread_local int x;\n"), true, false, false},
+        {S8("int f(void) { static _Thread_local int x; return x; }\n"), true, false, false},
+        {S8("int f(void) { extern _Thread_local int x; return x; }\n"), true, false, false},
+        {S8("int f(int a[static 4]) { return a[0]; }\n"), true, false, false},
+        {S8("int f(register int a[static 4]) { return a[0]; }\n"), true, false, false},
+        {S8("_Thread_local int (*fp)(int);\n"), true, false, false},
+        {S8("int f(int (*cb)(register int));\n"), true, false, false},
+        {S8("int thread_local; int f(int thread_local) { return thread_local; }\n"), true, false, true},
+        {S8("int f(thread_local int x);\n"), false, true, false},
+        {S8("static _Thread_local int f(void);\n"), false, false, false},
+        {S8("__thread int f(void);\n"), false, false, false},
+        {S8("int f(__thread int x);\n"), false, false, false},
+        {S8("void f(void) { typedef int T; extern int g(T static x); }\n"), false, false, false},
+        {S8("void f(void) { typedef int T; int (*p)(T extern x); }\n"), false, false, false},
+        {S8("void f(void) { typedef int T; extern int g(T register x); }\n"), true, false, false},
+        {S8("int f(void) { static _Thread_local int x; return x; }\n"), true, false, false},
+        {S8("_Thread_local int value, f(void);\n"), false, false, false},
+        {S8("void f(void) { extern _Thread_local int value, g(void); }\n"), false, false, false},
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17,
+                                     C_PREPROCESS_DIALECT_C23, C_PREPROCESS_DIALECT_GNU23};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            if ((cases[index].c23_only && dialect < 2) || (cases[index].pre_c23_only && dialect >= 2)) continue;
+            for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, cases[index].source,
+                        (CPreprocessOptions){.target = targets[target], .data_layout = target_data_layout(targets[target]),
+                                             .dialect = dialects[dialect]});
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, cases[index].source);
+                    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("storage-class-contexts.c"), tokens, syntax,
+                        targets[target], (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST_RAW(arguments, (semantic.diagnostic_count == 0) == cases[index].valid, cases[index].source);
+                    BUSTER_TEST_RAW(arguments, semantic.diagnostic_count == lowered.diagnostic_count, cases[index].source);
+                    if (!cases[index].valid && semantic.diagnostic_count)
+                    {
+                        BUSTER_TEST(arguments, semantic.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS);
+                    }
+                    for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count && diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                    {
+                        CDiagnostic left = semantic.diagnostics[diagnostic];
+                        CDiagnostic right = lowered.diagnostics[diagnostic];
+                        BUSTER_TEST(arguments, left.severity == C_DIAGNOSTIC_ERROR && left.severity == right.severity);
+                        BUSTER_TEST(arguments, left.kind == right.kind && left.location.line == right.location.line &&
+                                               left.location.column == right.location.column);
+                        BUSTER_STRING_TEST(arguments, left.message, right.message);
+                    }
+                    if (cases[index].valid && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count && lowered.canonical_ir_certified))
+                    {
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    }
+                    else if (!cases[index].valid) BUSTER_TEST(arguments, !lowered.program && !lowered.canonical_ir_certified);
+                    c_test_scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_duplicate_parameter_names(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -64030,6 +64125,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_loop_parameters);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_loop_entry_runtime);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
+    C_TEST_FIXTURE(arguments, c_test_storage_class_contexts);
     C_TEST_FIXTURE(arguments, c_test_duplicate_parameter_names);
     C_TEST_FIXTURE(arguments, c_test_dynamic_object_size);
     C_TEST_FIXTURE(arguments, c_test_redefinition_names_previous_site);

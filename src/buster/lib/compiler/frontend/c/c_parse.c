@@ -17517,10 +17517,12 @@ BUSTER_C_INTERNAL u32 c_type_parse_specifier_suffix_end(CPreprocessResult prepro
 // Normalized storage classes, including GNU TLS aliases. C23 permits auto
 // with every class except typedef, constexpr with register/static, and TLS
 // with static/extern. Typed auto with a second class still violates 6.7.1p4.
-BUSTER_C_INTERNAL bool c_parse_storage_classes_valid(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end)
+BUSTER_C_INTERNAL bool c_parse_storage_classes_valid(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
+                                                          bool parameter, bool function)
 {
     enum {TYPEDEF = 1, EXTERN = 2, STATIC = 4, AUTO = 8, REGISTER = 16, THREAD = 32, CONSTEXPR = 64};
     u32 seen = 0;
+    u32 forbidden_token = UINT32_MAX;
     bool duplicate = false;
     bool has_type = false;
     bool c23 = c_preprocess_dialect_is_c23(preprocess.dialect);
@@ -17550,6 +17552,10 @@ BUSTER_C_INTERNAL bool c_parse_storage_classes_valid(CParseResult* result, CPrep
         {
             duplicate |= (seen & storage) != 0;
             seen |= storage;
+            if (forbidden_token == UINT32_MAX && ((parameter && storage != REGISTER) || (function && storage == THREAD)))
+            {
+                forbidden_token = index;
+            }
             index += 1;
         }
         else if (c_parse_type_word_for_dialect_token(preprocess, token))
@@ -17579,7 +17585,10 @@ BUSTER_C_INTERNAL bool c_parse_storage_classes_valid(CParseResult* result, CPrep
         else
         {
             CEntityId named = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
-            if (!has_type && named.value < result->entity_count && result->entities[named.value].kind == C_ENTITY_TYPEDEF)
+            // Parameter callers pass the successfully parsed specifier prefix.
+            // Its typedef may be block-local even though the parameter type
+            // reader uses the global scope; keep checking later specifiers.
+            if (!has_type && (parameter || (named.value < result->entity_count && result->entities[named.value].kind == C_ENTITY_TYPEDEF)))
             {
                 has_type = true;
                 index += 1;
@@ -17610,6 +17619,13 @@ BUSTER_C_INTERNAL bool c_parse_storage_classes_valid(CParseResult* result, CPrep
                            typed_auto_conflict ? S8("auto combined with another storage class or at file scope requires type inference") :
                            S8("multiple storage-class specifiers in declaration"));
     }
+    if (valid && forbidden_token != UINT32_MAX)
+    {
+        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[forbidden_token]), C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
+                           parameter ? S8("only register is permitted as a parameter storage-class specifier") :
+                                       S8("thread-local storage is not permitted on a function"));
+        valid = false;
+    }
     return valid;
 }
 
@@ -17625,7 +17641,7 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
             return;
         }
         u32 start = c_parse_skip_attributes(preprocess, frame->start, frame->end);
-        if (!c_parse_storage_classes_valid(result, preprocess, frame->scope, start, frame->end))
+        if (!c_parse_storage_classes_valid(result, preprocess, frame->scope, start, frame->end, false, false))
         {
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
             return;
@@ -18177,6 +18193,7 @@ BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, C
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
             return;
         }
+        c_parse_storage_classes_valid(result, preprocess, (CScopeId){.value = 0}, frame->start, machine->result_index, true, false);
         frame->type = machine->result_type;
         frame->declarator_start = machine->result_index;
         frame->type = c_parse_pointer_chain(result, preprocess, frame->type, &frame->declarator_start, frame->end);
@@ -21468,6 +21485,7 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
         }
         return false;
     }
+    c_parse_storage_classes_valid(result, preprocess, (CScopeId){.value = 0}, start, declarator_start, true, false);
     type = c_parse_pointer_chain(result, preprocess, type, &declarator_start, end);
     type = c_parse_apply_vector_attribute(result, preprocess, declaration.scope, type, start, end);
     CToken name = {0};
@@ -25415,7 +25433,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypePar
 {
     CAutoDeclarationInfo auto_info = {0};
     bool is_auto_type = hints && hints->no_auto ? false : c_parse_auto_declaration_info(result, preprocess, scope, start, end, &auto_info);
-    if (is_auto_type && !c_parse_storage_classes_valid(result, preprocess, scope, start, end))
+    if (is_auto_type && !c_parse_storage_classes_valid(result, preprocess, scope, start, end, false, false))
     {
         return false;
     }
@@ -25929,6 +25947,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypePar
         u8 local_inline_hints = 0;
         if (declares_function)
         {
+            if (is_thread_local) c_parse_storage_classes_valid(result, preprocess, scope, start, end, false, true);
             CDeclaration inline_hint_declaration = {
                 .token_start = start,
                 .token_count = end - start,
@@ -42245,6 +42264,12 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                 // above it. c_ir_function_signature reads the range off the
                 // type when the declaration carries none.
             }
+        }
+        if (kind == C_DECLARATION_FUNCTION && declaration->type.value < result.type_count &&
+            c_parse_token_bitmap_any(declaration_range_words, declaration->token_start, declaration->token_start + declaration->token_count))
+        {
+            c_parse_storage_classes_valid(&result, preprocess, (CScopeId){.value = 0}, declaration->token_start,
+                                            declaration->token_start + declaration->token_count, false, true);
         }
         if (!static_assertion && !declaration->name.length && c_preprocess_dialect_is_c23(preprocess.dialect))
         {
