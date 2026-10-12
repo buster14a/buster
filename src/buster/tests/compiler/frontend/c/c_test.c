@@ -64129,6 +64129,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_identity_authority(UnitTestArgume
     return result;
 }
 
+// A file-scope typedef whose typeof operand is a _Generic selection names an
+// ordinary complete type, so sizeof of it is an integer constant in every
+// constant context (C11 6.6p6). The typedef is the file's first declaration,
+// before anything has built the token position index the identity prepare
+// walk reads; that walk once settled nothing there and left the typedef
+// without a type (#3844). A selected pointer to a variable-length array
+// stays variably modified, so sizeof of what it points to is not constant.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typedef_generic_sizeof_constant(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 positives[] = {
+        S8("typedef typeof(_Generic(1, int: 2L)) T;\n"),
+        S8("typedef typeof(_Generic(1.0, double: (long)0, default: (char)0)) T;\n"),
+        S8("typedef __typeof__(_Generic(1, default: 2L)) T;\n"),
+    };
+    String8 uses = S8("_Static_assert(sizeof(T) == sizeof(long), \"static assertion\");\n"
+                      "enum { E = sizeof(T) };\n"
+                      "_Static_assert(E == sizeof(long), \"enumerator\");\n"
+                      "int n = sizeof(T);\n"
+                      "char a[sizeof(T)];\n"
+                      "_Static_assert(sizeof a == sizeof(long), \"array bound\");\n"
+                      "T object;\n"
+                      "long *object_address = &object;\n"
+                      "int probe(void) { enum { F = sizeof(T) == sizeof(long) ? 5 : 0 }; return F; }\n");
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(positives); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = string_format(temporary.arena, S8("{S8}{S8}"), positives[index], uses);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parsed.diagnostic_count == 0))
+        {
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("typedef-generic-sizeof.c"), tokens, parsed, target_native);
+            if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                u64 long_size = target_uses_llp64_data_model(target_native) || target_native.cpu_arch == CPU_ARCH_I386 ? 4 : 8;
+                IrGlobal* global = c_test_find_ir_global(module, lowered.program, S8("n"));
+                if (BUSTER_REQUIRE(arguments, global != 0))
+                {
+                    BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER);
+                    BUSTER_TEST(arguments, global->initializer_bits == long_size);
+                }
+                IrFunction* function = c_test_find_ir_function(module, S8("probe"));
+                if (BUSTER_REQUIRE(arguments, function != 0))
+                {
+                    u32 returns = 0;
+                    for (u32 row = 0; row < function->instruction_count; row += 1)
+                    {
+                        IrInstruction* instruction = function->instructions + row;
+                        if (instruction->opcode == IR_OPCODE_RETURN && instruction->operand_count == 1)
+                        {
+                            IrInstructionId definition = function->values[instruction->operands[0].value].definition;
+                            IrInstruction* constant = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
+                            BUSTER_TEST(arguments, constant && constant->opcode == IR_OPCODE_CONSTANT_INTEGER && constant->immediate_count &&
+                                                       constant->immediates[0] == 5);
+                            returns += 1;
+                        }
+                    }
+                    BUSTER_TEST(arguments, returns == 1);
+                }
+            }
+        }
+        c_test_scratch_end(temporary);
+    }
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = S8("int g(int k)\n"
+                            "{\n"
+                            "    typedef typeof(_Generic(1, int: (char (*)[k])0)) P;\n"
+                            "    _Static_assert(sizeof(*(P)0) == 3, \"variable length\");\n"
+                            "    return 0;\n"
+                            "}\n");
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, parsed.diagnostic_count != 0))
+        {
+            BUSTER_TEST(arguments, string_first_sequence(parsed.diagnostics[0].message, S8("not an integer constant expression")) != BUSTER_STRING_NO_MATCH);
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_logical_constant_predicates(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -65007,6 +65095,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_type_constant_large_buffers);
     C_TEST_FIXTURE(arguments, c_test_type_constant_query_isolation);
     C_TEST_FIXTURE(arguments, c_test_type_identity_authority);
+    C_TEST_FIXTURE(arguments, c_test_typedef_generic_sizeof_constant);
     C_TEST_FIXTURE(arguments, c_test_type_name_attributes);
     C_TEST_FIXTURE(arguments, c_test_type_name_operand_trailer);
     C_TEST_FIXTURE(arguments, c_test_type_parse_rollback_growth);
