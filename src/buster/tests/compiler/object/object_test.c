@@ -1,9 +1,11 @@
 #include <buster/tests/compiler/object/object_test.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
+#include <buster/lib/compiler/assembly/assembly_unit.h>
 #include <buster/lib/compiler/object/object_internal.h>
 #include <buster/lib/compiler/pdb/pdb.h>
 #include <buster/lib/time.h>
 #include <buster/lib/file.h>
+#include <buster/lib/hash.h>
 #if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL bool object_bytes_contain(ByteSlice bytes, String8 value)
@@ -1567,6 +1569,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_label_case(UnitTestArgum
         String8 expected = {.pointer = expected_bytes, .length = (u64)(cursor - expected_bytes)};
         String8 assembly = object_print_assembly(arguments->arena, &object);
         BUSTER_STRING_TEST(arguments, assembly, expected);
+        if (BUSTER_REQUIRE(arguments, assembly.length != 0))
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, assembly, (AssemblyEncodeOptions){.target = object.target});
+            if (BUSTER_REQUIRE(arguments, !unit.diagnostic_count && unit.section_count != 0))
+            {
+                BUSTER_TEST(arguments, unit.relocation_count == 0);
+                BUSTER_TEST(arguments, unit.sections[0].data.length == length &&
+                                           memcmp(unit.sections[0].data.pointer, data, length) == 0);
+            }
+        }
     }
     scratch_end(temporary);
     return result;
@@ -4457,14 +4469,132 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_32_writer_limits(UnitTestArgument
     return result;
 }
 
+// Issue 3407: grouping relocations by section must not change a byte of COFF
+// output. Zero, one and 60 constructor priority groups (zero, three and three
+// destructor groups), with unrelated data and code relocations interleaved
+// among the initializer ones, are written on x86-64
+// and AArch64 and compared with SHA-256 digests the writer produced while it
+// still swept every relocation once per section (main 9d92ff80).
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_priority_split_bytes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    enum
+    {
+        INITIALIZER_ENTRIES = 64,
+        TERMINATOR_ENTRIES = 16,
+        UNPRIORITIZED_TAIL = 4,
+        DATA_ENTRIES = 384,
+        TEXT_ENTRIES = 32,
+        LANE_COUNT = 4,
+        RELOCATION_COUNT = INITIALIZER_ENTRIES + TERMINATOR_ENTRIES + DATA_ENTRIES + TEXT_ENTRIES,
+        SHAPE_COUNT = 3,
+    };
+    u8 initializer_entries[INITIALIZER_ENTRIES * OBJECT_INITIALIZER_ENTRY_SIZE] = {0};
+    u8 terminator_entries[TERMINATOR_ENTRIES * OBJECT_INITIALIZER_ENTRY_SIZE] = {0};
+    u8 data[DATA_ENTRIES * 8] = {0};
+    u8 text[TEXT_ENTRIES * 8] = {0};
+    ObjectSection sections[OBJECT_SECTION_COUNT];
+    for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+    {
+        sections[kind] = (ObjectSection){
+            .name = object_section_name_for_kind((ObjectSectionKind)kind),
+            .kind = (ObjectSectionKind)kind,
+            .alignment = object_section_default_alignment((ObjectSectionKind)kind),
+        };
+    }
+    sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(initializer_entries);
+    sections[OBJECT_SECTION_FINI_ARRAY].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(terminator_entries);
+    sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data);
+    sections[OBJECT_SECTION_TEXT].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(text);
+    ObjectSymbol symbol = {.name = S8("target"), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true};
+    ObjectRelocation relocations[RELOCATION_COUNT];
+    u32 counts[LANE_COUNT] = {0};
+    u32 limits[LANE_COUNT] = {INITIALIZER_ENTRIES, DATA_ENTRIES, TERMINATOR_ENTRIES, TEXT_ENTRIES};
+    ObjectSectionKind kinds[LANE_COUNT] = {OBJECT_SECTION_INIT_ARRAY, OBJECT_SECTION_DATA, OBJECT_SECTION_FINI_ARRAY, OBJECT_SECTION_TEXT};
+    for (u32 index = 0; index < RELOCATION_COUNT; index += 1)
+    {
+        u32 lane = (index * 7) % LANE_COUNT;
+        while (counts[lane] == limits[lane])
+        {
+            lane = (lane + 1) % LANE_COUNT;
+        }
+        relocations[index] = (ObjectRelocation){
+            .addend = (s64)index * 3 - 17,
+            .offset = (u64)counts[lane] * 8,
+            .section = (u32)kinds[lane],
+            .kind = OBJECT_RELOCATION_ABSOLUTE64,
+        };
+        counts[lane] += 1;
+    }
+    u32 initializer_priorities[INITIALIZER_ENTRIES];
+    u32 terminator_priorities[TERMINATOR_ENTRIES];
+    u32 group_counts[SHAPE_COUNT] = {0, 1, INITIALIZER_ENTRIES - UNPRIORITIZED_TAIL};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    String8 expected[BUSTER_ARRAY_LENGTH(architectures)][SHAPE_COUNT] = {
+        {
+            S8("5b96aec2036f17f4f5feedae5fd274381fd2ea26f9ce06c6de96e970248f01f1"),
+            S8("428c254398482dba446996e490a13fe4182e4330d90fb8a557de5872c54816b5"),
+            S8("2d438dc925a8ad68d956bf9d4200238fdeda64b06ce8cefdd912799debf53e95"),
+        },
+        {
+            S8("deaa01f759766c50c3e9eda0ce8147a4f6523b3c8ef5d06426453ee2815f1ed9"),
+            S8("c20d5a9851a9305566d93fe77e41c581f4e4c6ed4da39e013051491923deaeee"),
+            S8("7755a7944780bf7739b120d183f3db1374f1f73981687043bca436910faa06e2"),
+        },
+    };
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        for (u32 shape = 0; shape < SHAPE_COUNT; shape += 1)
+        {
+            TemporalArena scope = arena_begin_temporal(temporary.arena);
+            u32 groups = group_counts[shape];
+            u32 prioritized = INITIALIZER_ENTRIES - UNPRIORITIZED_TAIL;
+            for (u32 entry = 0; entry < INITIALIZER_ENTRIES; entry += 1)
+            {
+                initializer_priorities[entry] = groups && entry < prioritized ? 101 + entry * groups / prioritized : IR_INITIALIZER_PRIORITY_NONE;
+            }
+            for (u32 entry = 0; entry < TERMINATOR_ENTRIES; entry += 1)
+            {
+                terminator_priorities[entry] = groups && entry < TERMINATOR_ENTRIES / 2 ? 200 + entry % 3 : IR_INITIALIZER_PRIORITY_NONE;
+            }
+            ObjectFile object = {
+                .sections = sections,
+                .symbols = &symbol,
+                .relocations = relocations,
+                .target = {.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_WINDOWS},
+                .section_count = OBJECT_SECTION_COUNT,
+                .symbol_count = 1,
+                .relocation_count = RELOCATION_COUNT,
+                .initializer_priorities = {groups ? initializer_priorities : 0, groups ? terminator_priorities : 0},
+            };
+            ObjectArtifact written = object_write(temporary.arena, &object, OBJECT_FORMAT_COFF);
+            if (BUSTER_REQUIRE(arguments, written.error == OBJECT_ERROR_NONE))
+            {
+                char8 digest[SHA256_HEX_CAPACITY];
+                Sha256 hash;
+                sha256_init(&hash);
+                sha256_add(&hash, written.bytes.pointer, written.bytes.length);
+                sha256_finish_hex(&hash, digest);
+                String8 actual = {.pointer = digest, .length = SHA256_HEX_CAPACITY - 1};
+                BUSTER_TEST(arguments, string_equal(actual, expected[architecture][shape]));
+            }
+            arena_set_position(temporary.arena, scope.position);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // What ELF cannot state is refused by the plan, before an image exists: a
 // section index at SHN_LORESERVE, a 32-bit string offset that would wrap, a
 // file size that overflows, and a file the arena cannot hold.
 // Issue 990: the priority split remaps COFF initializer relocations in one
 // placement pass, whatever the group count. Its ledger share is exactly R
 // when a group moved an entry and zero otherwise; the rest is object_write's
-// validation, the TLS index scan, the writer's census and its two
-// per-section relocation sweeps (issue 3407). The same
+// validation, the TLS index scan, the writer's census, the two passes that
+// group relocations by section and the two sweeps over those groups (issues
+// 3407 and 1319), each R however many sections the split adds. The same
 // input is written twice, so the split must leave it untouched.
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_priority_split_ledger(UnitTestArguments* arguments)
 {
@@ -4550,22 +4680,29 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_priority_split_ledger(UnitTe
         u32 split_sections = OBJECT_SECTION_COUNT + groups + (groups ? 1 : 0);
         u64 placement = groups ? RELOCATION_COUNT : 0;
         // object_write's validation, the TLS index scan and the writer's
-        // census, the two sweeps and the placement.
-        u64 expected = 3 * (u64)RELOCATION_COUNT + 2 * (u64)split_sections * RELOCATION_COUNT + placement;
+        // census, the grouping passes, the two sweeps and the placement.
+        u64 expected = 3 * (u64)RELOCATION_COUNT + 2 * (u64)RELOCATION_COUNT + 2 * (u64)RELOCATION_COUNT + placement;
         ObjectArtifact first = object_write(temporary.arena, &object, OBJECT_FORMAT_COFF);
         ObjectArtifact second = object_write(temporary.arena, &object, OBJECT_FORMAT_COFF);
         if (BUSTER_REQUIRE(arguments, first.error == OBJECT_ERROR_NONE && second.error == OBJECT_ERROR_NONE))
         {
             BUSTER_TEST(arguments, first.statistics.relocation_visits == expected);
+            // The split still emits one COFF section per kind and group.
+            u16 emitted_sections = 0;
+            if (first.bytes.length >= 4)
+            {
+                memcpy(&emitted_sections, first.bytes.pointer + 2, sizeof(emitted_sections));
+            }
+            BUSTER_TEST(arguments, emitted_sections == split_sections);
             BUSTER_TEST(arguments, first.bytes.length == second.bytes.length &&
                                        memcmp(first.bytes.pointer, second.bytes.pointer, first.bytes.length) == 0);
             BUSTER_TEST(arguments, memcmp(relocations, original, sizeof(original)) == 0);
             BUSTER_TEST(arguments, object_bytes_contain(first.bytes, S8(".CRT$XCU")) && object_bytes_contain(first.bytes, S8(".CRT$XTX")));
             BUSTER_TEST(arguments, object_bytes_contain(first.bytes, S8(".CRT$XTA00200")) == (groups != 0));
-            // Past the per-section sweeps, a group adds nothing but the one
-            // placement pass.
-            u64 per_section = 2 * (u64)split_sections * RELOCATION_COUNT;
-            u64 remainder = first.statistics.relocation_visits - per_section;
+            // The sweeps visit each relocation once whatever the section
+            // count, so a group adds nothing but the one placement pass.
+            u64 sweeps = 2 * (u64)RELOCATION_COUNT;
+            u64 remainder = first.statistics.relocation_visits - sweeps;
             baseline_visits = shape == 0 ? remainder : baseline_visits;
             BUSTER_TEST(arguments, remainder == baseline_visits + placement);
             ObjectFile read = object_read(temporary.arena, first.bytes, object.target);
@@ -4595,6 +4732,122 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_priority_split_ledger(UnitTe
             }
         }
         arena_set_position(temporary.arena, scope.position);
+    }
+    // Relocations interleaved across two sections keep their input order
+    // within each section after grouping (from #3531): AArch64 adds the TLS
+    // binding copy, so validation, TLS, census, grouping and both sweeps
+    // make 7R.
+    {
+        TemporalArena scope = arena_begin_temporal(temporary.arena);
+        u8 text[32] = {0};
+        u8 data_bytes[32] = {0};
+        ObjectSection interleaved_sections[] = {
+            {.name = S8(".text"), .kind = OBJECT_SECTION_TEXT, .data = BUSTER_ARRAY_TO_SLICE(text), .alignment = 4},
+            {.name = S8(".data"), .kind = OBJECT_SECTION_DATA, .data = BUSTER_ARRAY_TO_SLICE(data_bytes), .alignment = 8},
+        };
+        ObjectSymbol interleaved_symbol = {.name = S8("target"), .section = 0, .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+        ObjectRelocation interleaved_relocations[] = {
+            {.addend = 0, .offset = 0, .section = 1, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.addend = 1, .offset = 8, .section = 0, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.addend = 2, .offset = 16, .section = 1, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.addend = 3, .offset = 24, .section = 0, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        };
+        u32 expected_order[OBJECT_SECTION_COUNT][2] = {
+            [OBJECT_SECTION_TEXT] = {1, 3},
+            [OBJECT_SECTION_DATA] = {0, 2},
+        };
+        ObjectFile interleaved = {
+            .sections = interleaved_sections,
+            .symbols = &interleaved_symbol,
+            .relocations = interleaved_relocations,
+            .target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+            .section_count = BUSTER_ARRAY_LENGTH(interleaved_sections),
+            .symbol_count = 1,
+            .relocation_count = BUSTER_ARRAY_LENGTH(interleaved_relocations),
+        };
+        ObjectArtifact artifact = object_write(temporary.arena, &interleaved, OBJECT_FORMAT_COFF);
+        if (BUSTER_REQUIRE(arguments, artifact.error == OBJECT_ERROR_NONE))
+        {
+            BUSTER_TEST(arguments, artifact.statistics.relocation_visits == 7 * BUSTER_ARRAY_LENGTH(interleaved_relocations));
+            ObjectFile read = object_read(temporary.arena, artifact.bytes, interleaved.target);
+            if (BUSTER_REQUIRE(arguments, read.error == OBJECT_ERROR_NONE &&
+                                           read.relocation_count == BUSTER_ARRAY_LENGTH(interleaved_relocations)))
+            {
+                u32 section_positions[OBJECT_SECTION_COUNT] = {0};
+                for (u32 index = 0; index < read.relocation_count; index += 1)
+                {
+                    ObjectRelocation* source = read.relocations + index;
+                    if (BUSTER_REQUIRE(arguments, source->section < OBJECT_SECTION_COUNT &&
+                                                       (source->section == OBJECT_SECTION_TEXT || source->section == OBJECT_SECTION_DATA)))
+                    {
+                        u32 section = source->section;
+                        u32 position = section_positions[section];
+                        BUSTER_TEST(arguments, position < BUSTER_ARRAY_LENGTH(expected_order[section]));
+                        if (position < BUSTER_ARRAY_LENGTH(expected_order[section]))
+                        {
+                            u32 input = expected_order[section][position];
+                            BUSTER_TEST(arguments, source->addend == input &&
+                                                       source->offset == interleaved_relocations[input].offset);
+                            section_positions[section] += 1;
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, section_positions[OBJECT_SECTION_TEXT] == BUSTER_ARRAY_LENGTH(expected_order[OBJECT_SECTION_TEXT]) &&
+                                           section_positions[OBJECT_SECTION_DATA] == BUSTER_ARRAY_LENGTH(expected_order[OBJECT_SECTION_DATA]));
+            }
+        }
+        arena_set_position(temporary.arena, scope.position);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// The 32-bit writers group relocations by section before emitting their
+// tables, one u32 per relocation. The arena preflight must count that table:
+// an arena with room for the image and the other scratch, but not the
+// grouping, is refused with OBJECT_ERROR_CAPACITY before anything is
+// allocated, instead of failing inside the writer.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_32_writer_grouping_preflight(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    enum
+    {
+        RELOCATION_COUNT = 1024,
+        // Past the image, room for the per-section and per-symbol scratch the
+        // preflight counted before grouping, but far from RELOCATION_COUNT u32s.
+        SHORT_SCRATCH = 1024,
+    };
+    u8* data = arena_allocate(temporary.arena, u8, RELOCATION_COUNT * 8);
+    memset(data, 0, RELOCATION_COUNT * 8);
+    ObjectRelocation* relocations = arena_allocate(temporary.arena, ObjectRelocation, RELOCATION_COUNT);
+    for (u32 index = 0; index < RELOCATION_COUNT; index += 1)
+    {
+        relocations[index] = (ObjectRelocation){.offset = (u64)index * 8, .section = 0, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+    }
+    ObjectSection section = {.name = S8(".data"), .kind = OBJECT_SECTION_DATA, .alignment = 8, .data = {.pointer = data, .length = RELOCATION_COUNT * 8}};
+    ObjectSymbol symbol = {.name = S8("value"), .section = 0, .kind = OBJECT_SYMBOL_DATA, .global = true};
+    ObjectFile object = {.sections = &section, .section_count = 1, .symbols = &symbol, .symbol_count = 1, .relocations = relocations,
+                         .relocation_count = RELOCATION_COUNT};
+    ObjectFormat formats[] = {OBJECT_FORMAT_COFF, OBJECT_FORMAT_MACH_O64};
+    for (u32 format_index = 0; format_index < BUSTER_ARRAY_LENGTH(formats); format_index += 1)
+    {
+        ObjectFormat format = formats[format_index];
+        object.target = (Target){.cpu_arch = CPU_ARCH_X86_64, .os = format == OBJECT_FORMAT_COFF ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS};
+        u64 capacity = 0;
+        if (BUSTER_REQUIRE(arguments, object_test_32_capacity(&object, format, &capacity) == OBJECT_ERROR_NONE && capacity))
+        {
+            u64 position = temporary.arena->position;
+            u64 reserved_size = temporary.arena->reserved_size;
+            temporary.arena->reserved_size = position + capacity + SHORT_SCRATCH;
+            ObjectArtifact refused = object_write(temporary.arena, &object, format);
+            temporary.arena->reserved_size = reserved_size;
+            BUSTER_TEST(arguments, refused.error == OBJECT_ERROR_CAPACITY && !refused.bytes.pointer && !refused.bytes.length &&
+                                       !refused.statistics.retained_bytes && temporary.arena->position == position);
+            ObjectArtifact written = object_write(temporary.arena, &object, format);
+            BUSTER_TEST(arguments, written.error == OBJECT_ERROR_NONE && written.bytes.length);
+            arena_set_position(temporary.arena, position);
+        }
     }
     scratch_end(temporary);
     return result;
@@ -5498,10 +5751,39 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_mach_relocation_identity(UnitTest
     return result;
 }
 
+// In-process object -> -S -> assembly_unit_encode byte identity for short
+// JMP and every Jcc condition, including forward and backward labels (#3602).
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_x86_short_branch_roundtrip(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 condition = 0; condition < 17; condition += 1)
+    {
+        TemporalArena scope = arena_begin_temporal(arguments->arena);
+        u8 opcode = condition == 16 ? 0xeb : (u8)(0x70 | condition);
+        u8 data[] = {opcode, 1, 0xc3, 0xc3, opcode, 0xfd};
+        ObjectSection section = {.kind = OBJECT_SECTION_TEXT, .data = BUSTER_ARRAY_TO_SLICE(data)};
+        ObjectFile object = {.target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX}, .sections = &section, .section_count = 1};
+        String8 assembly = object_print_assembly(arguments->arena, &object);
+        if (BUSTER_REQUIRE(arguments, assembly.length != 0))
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, assembly, (AssemblyEncodeOptions){.target = object.target});
+            if (BUSTER_REQUIRE(arguments, !unit.diagnostic_count && unit.section_count != 0))
+            {
+                BUSTER_TEST(arguments, unit.relocation_count == 0);
+                BUSTER_TEST(arguments, unit.sections[0].data.length == sizeof(data) &&
+                                           memcmp(unit.sections[0].data.pointer, data, sizeof(data)) == 0);
+            }
+        }
+        scratch_end(scope);
+    }
+    return result;
+}
+
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = object_test_assembly_index_order(arguments);
     BUSTER_TEST_FIXTURE(arguments, object_test_mach_relocation_identity);
+    BUSTER_TEST_FIXTURE(arguments, object_test_x86_short_branch_roundtrip);
     BUSTER_TEST_FIXTURE(arguments, object_test_elf_semantic_refusals);
     BUSTER_TEST_FIXTURE(arguments, object_test_x86_64_elf_listing_metadata);
     BUSTER_TEST_FIXTURE(arguments, object_test_elf_property_note_walk);
@@ -5563,6 +5845,12 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     UnitTestResult coff_priority_split = object_test_coff_priority_split_ledger(arguments);
     result.test_count += coff_priority_split.test_count;
     result.succeeded_test_count += coff_priority_split.succeeded_test_count;
+    UnitTestResult coff_priority_bytes = object_test_coff_priority_split_bytes(arguments);
+    result.test_count += coff_priority_bytes.test_count;
+    result.succeeded_test_count += coff_priority_bytes.succeeded_test_count;
+    UnitTestResult grouping_preflight = object_test_32_writer_grouping_preflight(arguments);
+    result.test_count += grouping_preflight.test_count;
+    result.succeeded_test_count += grouping_preflight.succeeded_test_count;
     UnitTestResult planned_writer_limits = object_test_elf_planned_writer_limits(arguments);
     result.test_count += planned_writer_limits.test_count;
     result.succeeded_test_count += planned_writer_limits.succeeded_test_count;

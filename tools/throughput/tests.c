@@ -979,6 +979,34 @@ static void test_workload_selection(void)
     invalid[3] = "macro";
     CHECK(!tp_options(4, invalid, &config));
     CHECK(!tp_options(3, invalid, &config));
+    /* A real-source descriptor replaces the synthetic default unless
+     * --workload also selects synthetic cases; its template is frozen. */
+    char* real[] = {"throughput", "run", "--no-guard", "--real-source", "a.workload", "a", "--real-source", "b.workload", "b", NULL};
+    CHECK(tp_options(9, real, &config) && config.workload_mask == 0 && config.real_count == 2 &&
+          !strcmp(config.real_descriptors[1], "b.workload") && !strcmp(config.real_roots[1], "b"));
+    CHECK(tp_job_count(&config, TP_MAX_JOBS, &count) && count == 4);
+    char* mixed[] = {"throughput", "run", "--no-guard", "--real-source", "a.workload", "a", "--workload", "macros",
+                     "--mode", "fast", NULL};
+    CHECK(tp_options(10, mixed, &config) && config.workload_mask == 1u << 6 && config.real_count == 1);
+    CHECK(tp_job_count(&config, TP_MAX_JOBS, &count) && count == 2);
+    real[2] = "--pmu";
+    CHECK(!tp_options(6, real, &config)); /* Guarded and PMU runs refuse real sources. */
+    char* flagged[] = {"throughput", "run", "--no-guard", "--flag", "-DX", "--real-source", "a.workload", "a", NULL};
+    CHECK(!tp_options(8, flagged, &config));
+    flagged[3] = "--artifact";
+    flagged[4] = "assembly";
+    CHECK(!tp_options(8, flagged, &config));
+    char* partial[] = {"throughput", "run", "--no-guard", "--real-source", "a.workload", NULL};
+    CHECK(!tp_options(5, partial, &config));
+    char* other[] = {"throughput", "generate", "--real-source", "a.workload", "a", NULL};
+    CHECK(!tp_options(5, other, &config));
+    char* too_many[] = {"throughput", "run", "--no-guard", "--real-source", "a", "a", "--real-source", "b", "b",
+                        "--real-source", "c", "c", "--real-source", "d", "d", "--real-source", "e", "e", NULL};
+    CHECK(TP_MAX_REAL_SOURCES == 4 && !tp_options(18, too_many, &config));
+    CHECK(tp_options(15, too_many, &config) && config.real_count == TP_MAX_REAL_SOURCES);
+    CHECK(tp_job_count(&config, TP_MAX_JOBS, &count) && count == TP_MAX_REAL_SOURCES * TP_MODES);
+    /* Jobs need the prepared descriptors; a configuration without them is refused. */
+    CHECK(!tp_prepare_jobs(&config, NULL, NULL, TP_MAX_JOBS, &count));
 }
 
 static void test_job_capacity(void)
@@ -1554,6 +1582,59 @@ static void test_workload_admission(char const* executable, char const* root)
           tp_path(failed_output, directory, "oracle-substring"));
     result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
     CHECK_CHILD_EXIT(result, 2, failure_log);
+}
+
+/* `run --real-source` times the descriptor's compile-link template on its
+ * verified tree, records the descriptor identity, and refuses a changed tree. */
+static void test_real_source_run(char const* executable, char const* root)
+{
+    char directory[TP_PATH_CAP], source_root[TP_PATH_CAP], descriptor[TP_PATH_CAP], output[TP_PATH_CAP], log[TP_PATH_CAP];
+    char refused[TP_PATH_CAP], path[TP_PATH_CAP];
+    int paths_ok = tp_path(directory, root, "real-source-run") && tp_mkdirs(directory) &&
+                   tp_path(source_root, directory, "inputs") && tp_mkdirs(source_root) &&
+                   tp_path(descriptor, directory, "admission.workload") && tp_path(output, directory, "result") &&
+                   tp_path(refused, directory, "refused") && tp_path(log, directory, "run.log");
+    CHECK(paths_ok);
+    char source[TP_PATH_CAP], generated[TP_PATH_CAP], source_hash[65], generated_hash[65], tree_hash[65];
+    uint64_t source_bytes = 0, generated_bytes = 0, lines = 0;
+    CHECK(paths_ok && test_text(source_root, "source.c", "int source(void) { return 1; }\n") &&
+          test_text(source_root, "generated.c", "int generated(void) { return 2; }\n") &&
+          tp_path(source, source_root, "source.c") && tp_path(generated, source_root, "generated.c") &&
+          tp_hash_file(source, source_hash, &source_bytes, &lines) &&
+          tp_hash_file(generated, generated_hash, &generated_bytes, &lines) && tp_hash_tree(source_root, tree_hash));
+    CHECK(test_admission_descriptor(directory, tree_hash, source_hash, source_bytes, generated_hash, generated_bytes, "",
+                                    "e7635c5d652fd35a6f2c259b32694b78d0aaefc90d611609e6401a76fcf31265"));
+    if (paths_ok)
+    {
+        char* command[] = {(char*)executable, "child", "throughput", "run", "--baseline", (char*)executable,
+            "--candidate", (char*)executable, "--output", output, "--no-guard", "--pairs", "1", "--warmups", "1",
+            "--timeout", "10", "--real-source", descriptor, source_root, NULL};
+        TpProcess result = tp_process(command, NULL, log, 60, -1, 0);
+        CHECK_CHILD_EXIT(result, 0, log);
+        char metadata[16384] = {0}, jobs[256] = {0}, commands[65536] = {0};
+        FILE* file = tp_path(path, output, "metadata.json") ? fopen(path, "rb") : NULL;
+        CHECK(file && fread(metadata, 1, sizeof(metadata) - 1, file) > 0);
+        if (file) fclose(file);
+        CHECK(strstr(metadata, "\"workloads\":[],\"real_sources\":[{\"name\":\"admission-fixture\"") != NULL);
+        CHECK(strstr(metadata, tree_hash) && strstr(metadata, "\"template\":\"compile_link_argv\"") &&
+              strstr(metadata, "\"artifact\":\"executable\"") && strstr(metadata, "\"mode\":\"quality\""));
+        file = tp_path(path, output, "jobs.tsv") ? fopen(path, "rb") : NULL;
+        CHECK(file && fread(jobs, 1, sizeof(jobs) - 1, file) > 0);
+        if (file) fclose(file);
+        CHECK(!strcmp(jobs, "0\tadmission-fixture/fast\n1\tadmission-fixture/quality\n"));
+        file = tp_path(path, output, "commands.jsonl") ? fopen(path, "rb") : NULL;
+        CHECK(file && fread(commands, 1, sizeof(commands) - 1, file) > 0);
+        if (file) fclose(file);
+        /* The measured mode replaces the admission default; the frozen flags remain. */
+        CHECK(strstr(commands, "\"-fregister-allocator=quality\"") && strstr(commands, "\"-ffrontend-ssa\"") &&
+              strstr(commands, "\"-fno-pic\"") && strstr(commands, "\"-lm\"") && !strstr(commands, "\"-c\""));
+        CHECK(test_text(source_root, "undeclared.c", "int undeclared;\n"));
+        command[9] = refused;
+        result = tp_process(command, NULL, log, 60, -1, 0);
+        CHECK_CHILD_EXIT(result, 2, log);
+        struct stat info;
+        CHECK(tp_path(path, refused, "metadata.json") && stat(path, &info) != 0 && errno == ENOENT);
+    }
 }
 
 static void test_checked_in_workload_descriptors(void)
@@ -2186,6 +2267,7 @@ int main(int argc, char** argv)
         test_compiler_failures(executable, root);
         test_workload_descriptors(executable, root);
         test_workload_admission(executable, root);
+        test_real_source_run(executable, root);
         test_checked_in_workload_descriptors();
         test_inputs(root);
         test_maximum_jobs(root);

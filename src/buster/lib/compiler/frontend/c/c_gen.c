@@ -33442,12 +33442,26 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
 
     CSymbolBuiltin builtin = c_ir_token_builtin_kind(builder, token);
     if (builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC ||
-        builtin == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT)
+        builtin == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT || builtin == C_SYMBOL_BUILTIN_SIMD)
     {
         if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
             return false;
         u32 close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        if (close >= end || !c_ir_vendor_result_type_attempt(builder, start, close, type_out)) return false;
+        bool valid = close < end;
+        if (valid && builtin == C_SYMBOL_BUILTIN_SIMD)
+        {
+            // A builtin has no function entity. Its result shape, rather than
+            // an argument's type, supplies the type of a conditional arm.
+            u32 index = c_ir_simd_builtin(name);
+            *type_out = index != C_IR_SIMD_BUILTIN_NONE
+                ? c_ir_simd_result_type(builder, (IrSimdOperation)c_ir_simd_builtins[index].operation) : IR_TYPE_ID_INVALID;
+            valid = type_out->value != IR_ID_UNDERLYING_INVALID;
+        }
+        else if (valid)
+        {
+            valid = c_ir_vendor_result_type_attempt(builder, start, close, type_out);
+        }
+        if (!valid) return false;
         return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
     }
 
@@ -33542,7 +33556,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     // and string forms answer their standard prototype's result.
     CSymbolBuiltin library_builtin = c_ir_token_builtin_kind(builder, token);
     CIrMemoryBuiltin memory_builtin = library_builtin == C_SYMBOL_BUILTIN_MEMORY ? c_ir_memory_builtin(name) : C_IR_MEMORY_BUILTIN_COUNT;
-    if (library_builtin == C_SYMBOL_BUILTIN_OVERFLOW || memory_builtin != C_IR_MEMORY_BUILTIN_COUNT)
+    if (library_builtin == C_SYMBOL_BUILTIN_OVERFLOW || library_builtin == C_SYMBOL_BUILTIN_ALLOCA ||
+        memory_builtin != C_IR_MEMORY_BUILTIN_COUNT)
     {
         if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
@@ -33553,9 +33568,13 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
         {
             return false;
         }
-        *type_out = memory_builtin != C_IR_MEMORY_BUILTIN_COUNT
-                        ? c_ir_library_value_type(builder, (CIrLibraryValue)c_ir_memory_builtin_signatures[memory_builtin].return_value)
-                        : builder->bool_type;
+        // alloca has no function entity and may be queried before its call
+        // is emitted. Match the void-pointer result of STACK_ALLOCATE.
+        *type_out = library_builtin == C_SYMBOL_BUILTIN_ALLOCA
+                        ? c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type)
+                        : memory_builtin != C_IR_MEMORY_BUILTIN_COUNT
+                            ? c_ir_library_value_type(builder, (CIrLibraryValue)c_ir_memory_builtin_signatures[memory_builtin].return_value)
+                            : builder->bool_type;
         return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
     }
 

@@ -54,6 +54,8 @@
 //                                              sidecar consumed by parser
 //                                              shape walks
 //   c_macro_name_hash .. c_symbol_intern       macro and symbol tables
+//   c_macro_builtin_token                     dynamic builtin spelling and
+//                                              macro-only filename prefix maps
 //   c_semantic_integer_transform_builtin,     fixed unsigned builtin signatures
 //   c_integer_transform_bits                  and bounded bit-transform folding
 //   c_macro_expansion_tasks_reserve ..         shared LIFO task batches,
@@ -4183,6 +4185,9 @@ struct CMacro
     // while __BASE_FILE__ retains the root path independently of #line.
     u32 builtin_counter;
     String8 builtin_base_path;
+    CMacroPrefixMap* builtin_prefix_maps;
+    u32 builtin_prefix_map_count;
+    bool builtin_in_directive;
 };
 
 typedef struct CMacroPushMacro CMacroPushMacro;
@@ -6603,6 +6608,29 @@ BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* 
                 }
             }
             path = string_slice(path, basename_start, path.length);
+        }
+        if (!first->builtin_in_directive)
+        {
+            for (u32 remaining = first->builtin_prefix_map_count; remaining; remaining -= 1)
+            {
+                CMacroPrefixMap mapping = first->builtin_prefix_maps[remaining - 1];
+                if (string_starts_with_sequence(path, mapping.old_prefix))
+                {
+                    String8 suffix = string_slice(path, mapping.old_prefix.length, path.length);
+                    u64 length = mapping.new_prefix.length + suffix.length;
+                    char8* mapped = c_space_allocate(space, length);
+                    if (mapping.new_prefix.length)
+                    {
+                        memcpy(mapped, mapping.new_prefix.pointer, mapping.new_prefix.length);
+                    }
+                    if (suffix.length)
+                    {
+                        memcpy(mapped + mapping.new_prefix.length, suffix.pointer, suffix.length);
+                    }
+                    path = (String8){.pointer = mapped, .length = length};
+                    break;
+                }
+            }
         }
         u64 capacity = path.length * 4 + 3;
         char8* quoted = c_space_allocate(space, capacity);
@@ -13453,6 +13481,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     u32 include_depth_limit = options.include_depth_limit ? options.include_depth_limit : 256;
     c_preprocess_builtins(arena, symbol_table, &first_macro, &last_macro, root_frame.logical_path,
                           (CSourceLocation){.line = 1, .column = 1});
+    first_macro->builtin_prefix_maps = options.macro_prefix_maps;
+    first_macro->builtin_prefix_map_count = options.macro_prefix_map_count;
     if (!options.already_preprocessed)
     {
         c_preprocess_command_operations(arena, space, symbol_table, options, &first_macro, &last_macro, &result);
@@ -13587,6 +13617,12 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         first_macro->builtin_frame = source_frame;
         first_macro->builtin_token_offset = token.offset;
         first_macro->builtin_path = source_frame->logical_path;
+        if (options.macro_prefix_map_count)
+        {
+            // GCC leaves filenames used by directives physical, notably
+            // #include __FILE__ and #line operands.
+            first_macro->builtin_in_directive = line_start && c_token_is_punctuator(&token, C_PUNCTUATOR_HASH);
+        }
         if (line_start && c_token_is_punctuator(&token, C_PUNCTUATOR_HASH))
         {
             bool directive_live = c_preprocess_is_active(conditional);
@@ -14108,9 +14144,11 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                      !conditional->else_seen && conditional->parent_active && !conditional->branch_taken);
                 c_preprocess_lex_diagnostics_release(arena, &result, base, source_frame, lex.tokens[directive_end].offset, directive_live);
                 first_macro->builtin_token_offset = directive.offset;
+                first_macro->builtin_in_directive = true;
                 c_preprocess_conditional_directive(arena, space, symbol_table, first_macro, &stamps, source_frame, directive_kind, directive,
                                                    directive_index, directive_end, expansion_limit, &result, options, &include_probes, &conditional);
                 first_macro->builtin_token_offset = token.offset;
+                first_macro->builtin_in_directive = false;
                 logical_end = directive_end;
                 continue;
             }

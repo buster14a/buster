@@ -6,13 +6,15 @@
 // first diagnostic are retained. Everything a whole file has that a single
 // statement does not lives here.
 //
-// Three passes over an AssemblyUnitBuilder sized from the statement count:
+// An AssemblyUnitBuilder sized from the statement count:
 //   assembly_unit_collect_numeric_labels  local `1:` definitions in source
 //                                         order, so `1f`/`1b` can name one
 //   assembly_unit_parse                   labels, directives, and one
 //                                         assembly_encode call per instruction
 //                                         statement, with only retained data
 //                                         copied out of its per-statement scratch
+//   assembly_unit_relax_x86_branches       cached instruction layouts replayed
+//                                         with rel8, growing out-of-range jumps
 //   assembly_unit_materialize             pieces concatenated per section and
 //                                         binding-invariant same-section
 //                                         PC-relative fixups resolved in place
@@ -44,7 +46,6 @@
 
 enum
 {
-    ASSEMBLY_UNIT_SECTION_CAPACITY = 32,
     ASSEMBLY_UNIT_SECTION_STACK_CAPACITY = 16,
     ASSEMBLY_UNIT_DIAGNOSTIC_CAPACITY = 16,
     ASSEMBLY_UNIT_OPERAND_CAPACITY = 64,
@@ -88,6 +89,22 @@ struct AssemblyUnitAlias
     u32 section;
 };
 
+typedef enum AssemblyUnitBranchState
+{
+    ASSEMBLY_UNIT_BRANCH_UNKNOWN,
+    ASSEMBLY_UNIT_BRANCH_SHORT,
+    ASSEMBLY_UNIT_BRANCH_LONG,
+} AssemblyUnitBranchState;
+
+typedef struct AssemblyUnitInstruction AssemblyUnitInstruction;
+struct AssemblyUnitInstruction
+{
+    AssemblyEncodeResult encoded;
+    String8 plt_symbol;
+    u64 offset;
+    u32 relocation_start;
+};
+
 typedef struct AssemblyUnitBuilder AssemblyUnitBuilder;
 typedef struct AssemblyUnitInteger AssemblyUnitInteger;
 struct AssemblyUnitInteger
@@ -110,6 +127,13 @@ struct AssemblyUnitBuilder
     u64* section_offsets;
     AssemblyUnitPiece* pieces;
     AssemblyUnitNumericLabel* numeric_labels;
+    // X86-only layout state indexed by source statement; zero is not a
+    // statement and marks relocations that are not relaxable JMP/Jcc fields.
+    AssemblyUnitInstruction* instructions;
+    AssemblyUnitBranchState* branch_states;
+    u32* relocation_statements;
+    bool* relocation_locations;
+    bool layout_cached;
     // The source line each relocation came from, kept beside the public array
     // so a displacement that does not fit can name the line that wrote it.
     u32* relocation_lines;
@@ -133,6 +157,15 @@ struct AssemblyUnitBuilder
     // does not maintain it; nothing interns after that.
     u32* symbol_slots;
     u64 symbol_slot_mask;
+    // The same index over result.sections, whose names are unique. Every
+    // section but the implicit first `.text` comes from one statement, so
+    // section_capacity is the statement count plus one.
+    u32* section_slots;
+    u64 section_slot_mask;
+    // Per section, the private section-base symbol assembly_unit_location_symbol
+    // chose, or UINT32_MAX before the first `.` relocation in that section.
+    u32* section_location_symbols;
+    u32 section_capacity;
     u32 integer_count;
     u32 integer_capacity;
     u32 alias_count;
@@ -236,7 +269,7 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_diagnostic_format(AssemblyUnitBuilder* bu
 
 // ---------------------------------------------------------------- symbols
 
-BUSTER_GLOBAL_LOCAL u32* assembly_unit_symbol_slot(AssemblyUnitBuilder* builder, String8 name)
+BUSTER_GLOBAL_LOCAL u64 assembly_unit_name_hash(String8 name)
 {
     u64 hash = 1469598103934665603ull;
     for (u64 index = 0; index < name.length; index += 1)
@@ -244,7 +277,24 @@ BUSTER_GLOBAL_LOCAL u32* assembly_unit_symbol_slot(AssemblyUnitBuilder* builder,
         hash ^= name.pointer[index];
         hash *= 1099511628211ull;
     }
-    u64 slot_index = hash & builder->symbol_slot_mask;
+    return hash;
+}
+
+// A power-of-two slot count at least twice `count`, so an index stays under
+// half full.
+BUSTER_GLOBAL_LOCAL u64 assembly_unit_slot_capacity(u64 count)
+{
+    u64 capacity = 16;
+    while (capacity < count * 2 + 1)
+    {
+        capacity <<= 1;
+    }
+    return capacity;
+}
+
+BUSTER_GLOBAL_LOCAL u32* assembly_unit_symbol_slot(AssemblyUnitBuilder* builder, String8 name)
+{
+    u64 slot_index = assembly_unit_name_hash(name) & builder->symbol_slot_mask;
     u32* slot = builder->symbol_slots + slot_index;
     while (*slot && !string_equal(builder->result.symbols[*slot - 1].name, name))
     {
@@ -351,32 +401,47 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_section_kind_for_name(String8 name, Assem
     return matched;
 }
 
+BUSTER_GLOBAL_LOCAL u32* assembly_unit_section_slot(AssemblyUnitBuilder* builder, String8 name)
+{
+    u64 slot_index = assembly_unit_name_hash(name) & builder->section_slot_mask;
+    u32* slot = builder->section_slots + slot_index;
+    while (*slot && !string_equal(builder->result.sections[*slot - 1].name, name))
+    {
+        slot_index = (slot_index + 1) & builder->section_slot_mask;
+        slot = builder->section_slots + slot_index;
+    }
+    return slot;
+}
+
 BUSTER_GLOBAL_LOCAL u32 assembly_unit_section_select(AssemblyUnitBuilder* builder, String8 name, AssemblyUnitSectionKind kind)
 {
     builder->current_stack_note = false;
-    for (u32 index = 0; index < builder->result.section_count; index += 1)
+    u32* slot = assembly_unit_section_slot(builder, name);
+    u32 result = UINT32_MAX;
+    if (*slot)
     {
-        if (string_equal(builder->result.sections[index].name, name))
-        {
-            return index;
-        }
+        result = *slot - 1;
     }
-    if (builder->result.section_count >= ASSEMBLY_UNIT_SECTION_CAPACITY)
+    else if (builder->result.section_count >= builder->section_capacity)
     {
         assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("too many sections in one assembly unit"));
-        return UINT32_MAX;
     }
-    u32 index = builder->result.section_count++;
-    builder->result.sections[index] = (AssemblyUnitSection){
-        .name = name,
-        // GNU as gives a hand-written section no alignment of its own: the
-        // `.init` fragments of crti.o and crtn.o are concatenated byte after
-        // byte, and any padding between them would run as code.
-        .alignment = 1,
-        .kind = kind,
-    };
-    builder->section_offsets[index] = 0;
-    return index;
+    else
+    {
+        result = builder->result.section_count++;
+        builder->result.sections[result] = (AssemblyUnitSection){
+            .name = name,
+            // GNU as gives a hand-written section no alignment of its own: the
+            // `.init` fragments of crti.o and crtn.o are concatenated byte after
+            // byte, and any padding between them would run as code.
+            .alignment = 1,
+            .kind = kind,
+        };
+        builder->section_offsets[result] = 0;
+        builder->section_location_symbols[result] = UINT32_MAX;
+        *slot = result + 1;
+    }
+    return result;
 }
 
 // The section every unit starts in, created on first use so a file that only
@@ -1082,6 +1147,11 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_relocation_append(AssemblyUnitBuilder* bu
     }
     builder->relocation_lines[builder->result.relocation_count] = builder->line;
     builder->relocation_columns[builder->result.relocation_count] = builder->column;
+    if (builder->relocation_statements)
+    {
+        builder->relocation_statements[builder->result.relocation_count] = 0;
+        builder->relocation_locations[builder->result.relocation_count] = false;
+    }
     builder->result.relocations[builder->result.relocation_count++] = (AssemblyUnitRelocation){
         .addend = addend,
         .offset = offset,
@@ -1158,39 +1228,38 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_integer(AssemblyUnitBuilder* bu
 }
 
 // A private local symbol at section offset zero represents a section base.
-// It is created only when a `.` address actually needs a relocation.
+// It is created only when a `.` address actually needs a relocation. Every
+// call happens in assembly_unit_materialize_integers, after the last symbol
+// attribute changes, so the first symbol that qualifies stays the answer for
+// its section. Interned names are unique, so before this section's first
+// base symbol exists the only candidate is the one interned under the
+// section's name.
 BUSTER_GLOBAL_LOCAL u32 assembly_unit_location_symbol(AssemblyUnitBuilder* builder)
 {
-    u32 symbol = builder->result.symbol_count;
-    for (u32 index = 0; index < builder->result.symbol_count; index += 1)
+    u32 symbol = builder->section_location_symbols[builder->current_section];
+    String8 name = builder->result.sections[builder->current_section].name;
+    if (symbol == UINT32_MAX)
     {
-        AssemblyUnitSymbol record = builder->result.symbols[index];
-        if (record.defined && record.section == builder->current_section && !record.value && !record.global && !record.weak &&
-            string_equal(record.name, builder->result.sections[builder->current_section].name))
+        u32* slot = assembly_unit_symbol_slot(builder, name);
+        AssemblyUnitSymbol record = *slot ? builder->result.symbols[*slot - 1] : (AssemblyUnitSymbol){0};
+        if (*slot && record.defined && record.section == builder->current_section && !record.value && !record.global && !record.weak)
         {
-            symbol = index;
-            break;
+            symbol = *slot - 1;
         }
-    }
-    if (symbol == builder->result.symbol_count)
-    {
-        if (symbol < builder->symbol_capacity)
+        else if (builder->result.symbol_count < builder->symbol_capacity)
         {
-            builder->result.symbols[builder->result.symbol_count++] = (AssemblyUnitSymbol){
-                .name = builder->result.sections[builder->current_section].name, .section = builder->current_section, .defined = true,
+            symbol = builder->result.symbol_count++;
+            builder->result.symbols[symbol] = (AssemblyUnitSymbol){
+                .name = name, .section = builder->current_section, .defined = true,
             };
             // A later intern of this name finds it unless an earlier symbol
             // already owns the name, the first-match rule interning keeps.
-            u32* slot = assembly_unit_symbol_slot(builder, builder->result.symbols[symbol].name);
             if (!*slot)
             {
                 *slot = symbol + 1;
             }
         }
-        else
-        {
-            symbol = UINT32_MAX;
-        }
+        builder->section_location_symbols[builder->current_section] = symbol;
     }
     return symbol;
 }
@@ -1470,15 +1539,13 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_define_section_starts(AssemblyUnitBuilder
         AssemblyUnitSymbol* symbol = builder->result.symbols + index;
         if (!symbol->defined && !symbol->global && !symbol->weak)
         {
-            for (u32 section = 0; section < builder->result.section_count && !symbol->defined; section += 1)
+            u32 section = *assembly_unit_section_slot(builder, symbol->name);
+            if (section)
             {
-                if (string_equal(builder->result.sections[section].name, symbol->name))
-                {
-                    symbol->defined = true;
-                    symbol->section = section;
-                    symbol->value = 0;
-                    builder->symbol_section_start[index] = true;
-                }
+                symbol->defined = true;
+                symbol->section = section - 1;
+                symbol->value = 0;
+                builder->symbol_section_start[index] = true;
             }
         }
     }
@@ -1878,7 +1945,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
     String8 rewritten = {0};
     String8 plt_symbol = {0};
     bool result = false;
-    if (assembly_unit_rewrite_line(builder, line, &rewritten, &plt_symbol) && assembly_unit_section_current(builder))
+    AssemblyUnitInstruction* cached = builder->instructions ? builder->instructions + builder->statement : 0;
+    bool ready = cached && builder->layout_cached && cached->encoded.bytes.pointer;
+    if ((ready || assembly_unit_rewrite_line(builder, line, &rewritten, &plt_symbol)) && assembly_unit_section_current(builder))
     {
         if (assembly_unit_section_kind_is_zero_fill(builder->result.sections[builder->current_section].kind))
         {
@@ -1894,7 +1963,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
             {
                 builder->result.sections[builder->current_section].alignment = 4;
             }
-            AssemblyEncodeResult encoded = assembly_encode(statement.arena, rewritten,
+            AssemblyEncodeResult encoded = ready ? cached->encoded : assembly_encode(statement.arena, rewritten,
                                                            (AssemblyEncodeOptions){
                                                                .target = builder->target,
                                                                .syntax = builder->syntax,
@@ -1907,12 +1976,28 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
             }
             else
             {
+                if (ready)
+                {
+                    plt_symbol = cached->plt_symbol;
+                }
+                bool jump = builder->branch_states && !plt_symbol.length && encoded.relocation_count == 1 &&
+                            encoded.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                            ((encoded.bytes.length == 5 && encoded.bytes.pointer[0] == 0xe9 && encoded.relocations[0].offset == 1) ||
+                             (encoded.bytes.length == 6 && encoded.bytes.pointer[0] == 0x0f &&
+                              (encoded.bytes.pointer[1] & 0xf0) == 0x80 && encoded.relocations[0].offset == 2));
+                bool short_jump = jump && builder->branch_states[builder->statement] == ASSEMBLY_UNIT_BRANCH_SHORT;
                 u64 base = builder->section_offsets[builder->current_section];
                 bool plt_matched = !plt_symbol.length;
                 bool valid = true;
                 for (u32 index = 0; index < encoded.relocation_count && valid; index += 1)
                 {
                     AssemblyRelocation relocation = encoded.relocations[index];
+                    if (short_jump)
+                    {
+                        relocation.kind = ASSEMBLY_RELOCATION_X86_PC8;
+                        relocation.offset = 1;
+                        relocation.addend += 3; // PC8 is relative to its one-byte field's end.
+                    }
                     if (relocation.symbol >= encoded.symbol_count)
                     {
                         valid = false;
@@ -1931,6 +2016,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
                         }
                         else
                         {
+                            if (cached && !ready)
+                            {
+                                builder->relocation_locations[builder->result.relocation_count - 1] = string_equal(relocation_name, S8("."));
+                            }
+                            if (jump)
+                            {
+                                builder->relocation_statements[builder->result.relocation_count - 1] = (u32)builder->statement;
+                            }
                             bool direct_branch =
                                 relocation.kind == ASSEMBLY_RELOCATION_X86_PC32 && relocation.offset &&
                                 (encoded.bytes.pointer[relocation.offset - 1] == 0xe8 ||
@@ -1946,13 +2039,35 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
                 }
                 if (valid && plt_matched)
                 {
+                    u64 length = short_jump ? 2 : encoded.bytes.length;
                     u8* bytes = 0;
                     if (encoded.bytes.length)
                     {
-                        bytes = arena_allocate(builder->arena, u8, encoded.bytes.length);
-                        memcpy(bytes, encoded.bytes.pointer, encoded.bytes.length);
+                        if (ready && !short_jump)
+                        {
+                            bytes = encoded.bytes.pointer;
+                        }
+                        else if (short_jump)
+                        {
+                            bytes = arena_allocate(builder->arena, u8, length);
+                            bytes[0] = encoded.bytes.length == 5 ? 0xeb : (u8)(0x70 | (encoded.bytes.pointer[1] & 0x0f));
+                            bytes[1] = 0;
+                        }
+                        else
+                        {
+                            bytes = arena_allocate(builder->arena, u8, length);
+                            memcpy(bytes, encoded.bytes.pointer, length);
+                        }
                     }
-                    result = assembly_unit_append(builder, bytes, encoded.bytes.length);
+                    result = assembly_unit_append(builder, bytes, length);
+                    if (cached && !ready && result)
+                    {
+                        cached->encoded.bytes = (ByteSlice){.pointer = bytes, .length = length};
+                        cached->encoded.relocation_count = encoded.relocation_count;
+                        cached->plt_symbol = plt_symbol;
+                        cached->offset = base;
+                        cached->relocation_start = builder->result.relocation_count - encoded.relocation_count;
+                    }
                 }
                 else if (valid)
                 {
@@ -2219,6 +2334,101 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_parse(AssemblyUnitBuilder* builder, Strin
         assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT,
                                  S8("a repeat or lock prefix on its own line must be followed by an instruction"));
     }
+}
+
+// Capture the first layout only when a jump actually needs relaxation.
+// Ordinary branchless units retain exactly their previous per-instruction
+// bytes/names. Relocations and names survive the mutable unit-table reset;
+// the cached bytes are the first layout's already-retained pieces.
+BUSTER_GLOBAL_LOCAL void assembly_unit_cache_layout(AssemblyUnitBuilder* builder)
+{
+    for (u64 statement = 1; statement <= builder->statement; statement += 1)
+    {
+        AssemblyUnitInstruction* cached = builder->instructions + statement;
+        u32 count = cached->encoded.relocation_count;
+        if (count)
+        {
+            cached->encoded.relocations = arena_allocate(builder->arena, AssemblyRelocation, count);
+            cached->encoded.symbols = arena_allocate(builder->arena, AssemblySymbol, count);
+            cached->encoded.symbol_count = count;
+            for (u32 index = 0; index < count; index += 1)
+            {
+                AssemblyUnitRelocation relocation = builder->result.relocations[cached->relocation_start + index];
+                cached->encoded.relocations[index] = (AssemblyRelocation){
+                    .addend = relocation.addend, .offset = relocation.offset - cached->offset,
+                    .symbol = index, .kind = relocation.kind,
+                };
+                cached->encoded.symbols[index] = (AssemblySymbol){
+                    .name = builder->relocation_locations[cached->relocation_start + index] ? S8(".") :
+                            builder->result.symbols[relocation.symbol].name,
+                };
+            }
+        }
+    }
+    builder->layout_cached = true;
+}
+
+// Layout starts with every eligible jump short, then only grows. At least one
+// remaining short jump becomes long per retry, so convergence is bounded by
+// the number of jumps. Replaying directives also recomputes alignment, sizes,
+// '.' expressions and aliases instead of shifting stale numerical offsets.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_relax_x86_branches(AssemblyUnitBuilder* builder)
+{
+    bool changed = false;
+    if (builder->branch_states)
+    {
+        bool elf = builder->target.os == OPERATING_SYSTEM_LINUX || builder->target.os == OPERATING_SYSTEM_ANDROID ||
+                   builder->target.os == OPERATING_SYSTEM_FREESTANDING;
+        for (u32 index = 0; index < builder->result.relocation_count; index += 1)
+        {
+            u32 statement = builder->relocation_statements[index];
+            if (statement)
+            {
+                AssemblyUnitRelocation relocation = builder->result.relocations[index];
+                AssemblyUnitSymbol symbol = builder->result.symbols[relocation.symbol];
+                bool eligible = symbol.defined && symbol.section == relocation.section && !symbol.weak &&
+                                !(elf && symbol.global && !symbol.hidden);
+                AssemblyUnitBranchState* state = builder->branch_states + statement;
+                if (*state == ASSEMBLY_UNIT_BRANCH_UNKNOWN)
+                {
+                    *state = eligible ? ASSEMBLY_UNIT_BRANCH_SHORT : ASSEMBLY_UNIT_BRANCH_LONG;
+                    changed = changed || eligible;
+                }
+                else if (*state == ASSEMBLY_UNIT_BRANCH_SHORT)
+                {
+                    s64 displacement = (s64)symbol.value + relocation.addend - (s64)relocation.offset;
+                    if (!eligible || displacement < INT8_MIN || displacement > INT8_MAX)
+                    {
+                        *state = ASSEMBLY_UNIT_BRANCH_LONG;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    return changed;
+}
+
+BUSTER_GLOBAL_LOCAL void assembly_unit_reset_layout(AssemblyUnitBuilder* builder, AssemblySyntax syntax)
+{
+    builder->syntax = syntax;
+    builder->current_section = UINT32_MAX;
+    builder->previous_section = UINT32_MAX;
+    builder->current_stack_note = false;
+    builder->section_stack_count = 0;
+    builder->statement = 0;
+    builder->piece_count = 0;
+    builder->integer_count = 0;
+    builder->alias_count = 0;
+    builder->result.section_count = 0;
+    builder->result.symbol_count = 0;
+    builder->result.relocation_count = 0;
+    builder->result.requires_executable_stack = false;
+    memset(builder->symbol_slots, 0, (builder->symbol_slot_mask + 1) * sizeof(*builder->symbol_slots));
+    memset(builder->section_slots, 0, (builder->section_slot_mask + 1) * sizeof(*builder->section_slots));
+    memset(builder->symbol_local, 0, builder->symbol_capacity * sizeof(*builder->symbol_local));
+    memset(builder->symbol_section_start, 0, builder->symbol_capacity * sizeof(*builder->symbol_section_start));
+    memset(builder->symbol_weak_definition_line, 0, builder->symbol_capacity * sizeof(*builder->symbol_weak_definition_line));
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_unit_aarch64_control_relocation(AssemblyRelocationKind kind)
@@ -2553,13 +2763,16 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     }
     String8 blanked = {.pointer = text, .length = source.length};
 
-    builder.symbol_capacity = statement_count * 2 + comma_count + ASSEMBLY_UNIT_SECTION_CAPACITY;
+    builder.section_capacity = statement_count + 1;
+    // Each section adds at most one private section-base symbol.
+    builder.symbol_capacity = statement_count * 2 + comma_count + builder.section_capacity;
     builder.relocation_capacity = statement_count + comma_count + 16;
     builder.integer_capacity = statement_count + comma_count + 16;
     builder.piece_capacity = statement_count + 16;
     builder.numeric_label_capacity = statement_count * 2 + 16;
-    builder.result.sections = arena_allocate(arena, AssemblyUnitSection, ASSEMBLY_UNIT_SECTION_CAPACITY);
-    builder.section_offsets = arena_allocate(arena, u64, ASSEMBLY_UNIT_SECTION_CAPACITY);
+    builder.result.sections = arena_allocate(arena, AssemblyUnitSection, builder.section_capacity);
+    builder.section_offsets = arena_allocate(arena, u64, builder.section_capacity);
+    builder.section_location_symbols = arena_allocate(arena, u32, builder.section_capacity);
     builder.result.symbols = arena_allocate(arena, AssemblyUnitSymbol, builder.symbol_capacity);
     builder.result.relocations = arena_allocate(arena, AssemblyUnitRelocation, builder.relocation_capacity);
     builder.integers = arena_allocate(arena, AssemblyUnitInteger, builder.integer_capacity);
@@ -2572,21 +2785,51 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     builder.symbol_local = arena_allocate_zeroed(arena, bool, builder.symbol_capacity);
     builder.symbol_section_start = arena_allocate_zeroed(arena, bool, builder.symbol_capacity);
     builder.symbol_weak_definition_line = arena_allocate_zeroed(arena, u32, builder.symbol_capacity);
-    u64 symbol_slot_capacity = 16;
-    while (symbol_slot_capacity < (u64)builder.symbol_capacity * 2 + 1)
-    {
-        symbol_slot_capacity <<= 1;
-    }
+    u64 symbol_slot_capacity = assembly_unit_slot_capacity(builder.symbol_capacity);
     builder.symbol_slots = arena_allocate_zeroed(arena, u32, symbol_slot_capacity);
     builder.symbol_slot_mask = symbol_slot_capacity - 1;
+    u64 section_slot_capacity = assembly_unit_slot_capacity(builder.section_capacity);
+    builder.section_slots = arena_allocate_zeroed(arena, u32, section_slot_capacity);
+    builder.section_slot_mask = section_slot_capacity - 1;
+
+    if (options.target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        builder.instructions = arena_allocate_zeroed(arena, AssemblyUnitInstruction, (u64)statement_count + 1);
+        builder.branch_states = arena_allocate_zeroed(arena, AssemblyUnitBranchState, (u64)statement_count + 1);
+        builder.relocation_statements = arena_allocate(arena, u32, builder.relocation_capacity);
+        builder.relocation_locations = arena_allocate(arena, bool, builder.relocation_capacity);
+    }
 
     assembly_unit_collect_numeric_labels(&builder, blanked);
+    AssemblySyntax initial_syntax = builder.syntax;
     assembly_unit_parse(&builder, blanked);
     if (!builder.result.diagnostic_count)
     {
         assembly_unit_define_section_starts(&builder);
     }
-    if (!builder.result.diagnostic_count && assembly_unit_resolve_aliases(&builder) && assembly_unit_resolve_weak_definitions(&builder))
+    bool valid = !builder.result.diagnostic_count && assembly_unit_resolve_aliases(&builder) &&
+                 assembly_unit_resolve_weak_definitions(&builder);
+    // The first layout owns all instruction caches and numeric-label names.
+    // Later layout allocations are reclaimed between retries.
+    u64 layout_position = arena->position;
+    while (valid && assembly_unit_relax_x86_branches(&builder))
+    {
+        if (!builder.layout_cached)
+        {
+            assembly_unit_cache_layout(&builder);
+            layout_position = arena->position;
+        }
+        arena_release_to_position(arena, layout_position);
+        assembly_unit_reset_layout(&builder, initial_syntax);
+        assembly_unit_parse(&builder, blanked);
+        if (!builder.result.diagnostic_count)
+        {
+            assembly_unit_define_section_starts(&builder);
+        }
+        valid = !builder.result.diagnostic_count && assembly_unit_resolve_aliases(&builder) &&
+                assembly_unit_resolve_weak_definitions(&builder);
+    }
+    if (valid)
     {
         assembly_unit_materialize(&builder);
     }

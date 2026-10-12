@@ -236,8 +236,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_checksum_records(UnitTestArguments* 
             BUSTER_TEST(arguments, memcmp(module.pointer + 112, original + lines_header, 100) == 0);
         }
     }
-    // Reuse the same record shapes in a second module: its remap must use its
-    // own names offsets without moving any checksum or line-record boundary.
+    // Reuse the same record shapes in a second module: its remap must not move
+    // any checksum or line-record boundary, and since it names the same paths
+    // it points at the first module's /names copies rather than new ones.
     PdbModule modules[2] = {
         {.name = S8("first.obj"), .codeview_symbols = input.codeview_symbols, .code_section = 1, .code_size = 16},
         {.name = S8("second.obj"), .codeview_symbols = input.codeview_symbols, .code_section = 1, .code_offset = 16, .code_size = 16},
@@ -255,7 +256,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_checksum_records(UnitTestArguments* 
             {
                 u32 offset = record_offsets[index];
                 u32 stride = (6 + (u32)digest_sizes[index] + 3) & ~(u32)3;
-                BUSTER_TEST(arguments, pdb_read_u32(second, 12 + offset) == mapped_offsets[index] + 29);
+                BUSTER_TEST(arguments, pdb_read_u32(second, 12 + offset) == mapped_offsets[index]);
                 BUSTER_TEST(arguments, memcmp(second.pointer + 12 + offset + 4,
                                              original + checksum_start + offset + 4, stride - 4) == 0);
             }
@@ -298,6 +299,162 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_checksum_records(UnitTestArguments* 
 
 // Scope links are offsets in the final module symbol stream, including its
 // four-byte signature, not offsets into the input .debug$S subsection layout.
+// Independent restatement of the classic PDB string hash (hashStringV1).
+BUSTER_GLOBAL_LOCAL u32 pdb_test_hash_v1(String8 text)
+{
+    u32 result = 0;
+    u64 index = 0;
+    for (; index + 4 <= text.length; index += 4)
+    {
+        result ^= pdb_read_u32((ByteSlice){.pointer = (u8*)text.pointer, .length = text.length}, index);
+    }
+    if (text.length - index >= 2)
+    {
+        result ^= (u32)((u8)text.pointer[index] | (u8)text.pointer[index + 1] << 8);
+        index += 2;
+    }
+    if (text.length - index == 1)
+    {
+        result ^= (u8)text.pointer[index];
+    }
+    result |= 0x20202020u;
+    result ^= result >> 11;
+    result ^= result >> 16;
+    return result;
+}
+
+// Reads the name of the symbol-records-stream record at `offset`.
+BUSTER_GLOBAL_LOCAL String8 pdb_test_record_name(ByteSlice records, u32 offset)
+{
+    String8 name = {0};
+    u16 length = 0;
+    u16 kind = 0;
+    if ((u64)offset + 4 <= records.length)
+    {
+        memcpy(&length, records.pointer + offset, sizeof(length));
+        memcpy(&kind, records.pointer + offset + 2, sizeof(kind));
+    }
+    // S_PROCREF, S_PUB32 and S_[GL]DATA32 all place their name after 14 bytes.
+    bool named = kind == PDB_TEST_S_PROCREF || kind == PDB_TEST_S_PUB32 || kind == PDB_TEST_S_GDATA32 || kind == PDB_TEST_S_LDATA32;
+    u64 name_offset = named ? 14 : 0;
+    u64 end = (u64)offset + 2 + length;
+    if (name_offset && end <= records.length)
+    {
+        u64 cursor = offset + name_offset;
+        while (cursor < end && records.pointer[cursor])
+        {
+            cursor += 1;
+        }
+        if (cursor < end)
+        {
+            name = (String8){.pointer = (char8*)records.pointer + offset + name_offset, .length = cursor - offset - name_offset};
+        }
+    }
+    return name;
+}
+
+// Re-derives one GSI hash table: every hash record names a record whose
+// hashStringV1 bucket is the bucket the bitmap and bucket offsets place it in.
+BUSTER_GLOBAL_LOCAL bool pdb_test_check_gsi(ByteSlice hash, ByteSlice records, u32* record_count)
+{
+    enum { BUCKETS = 4096, BITMAP_WORDS = (4096 + 32) / 32 };
+    bool valid = hash.length >= 16 && pdb_read_u32(hash, 0) == 0xffffffffu && pdb_read_u32(hash, 4) == 0xf12f091au;
+    u32 hr_size = valid ? pdb_read_u32(hash, 8) : 0;
+    u32 bucket_bytes = valid ? pdb_read_u32(hash, 12) : 0;
+    u32 count = hr_size / 8;
+    valid = valid && !(hr_size % 8) && (u64)16 + hr_size + bucket_bytes == hash.length && bucket_bytes >= BITMAP_WORDS * 4;
+    u64 bitmap = 16 + (u64)hr_size;
+    u64 starts = bitmap + BITMAP_WORDS * 4;
+    u32 present = 0;
+    for (u32 bucket = 0; valid && bucket < BUCKETS; bucket += 1)
+    {
+        if (pdb_read_u32(hash, bitmap + bucket / 32 * 4) & (1u << (bucket % 32)))
+        {
+            valid = starts + (u64)present * 4 + 4 <= hash.length;
+            u32 first = valid ? pdb_read_u32(hash, starts + (u64)present * 4) / 12 : 0;
+            u32 next = count;
+            // The next present bucket's start ends this one.
+            for (u32 later = bucket + 1; valid && later < BUCKETS && next == count; later += 1)
+            {
+                if (pdb_read_u32(hash, bitmap + later / 32 * 4) & (1u << (later % 32)))
+                {
+                    next = pdb_read_u32(hash, starts + (u64)present * 4 + 4) / 12;
+                }
+            }
+            valid = valid && first < next && next <= count;
+            for (u32 index = first; valid && index < next; index += 1)
+            {
+                u32 offset = pdb_read_u32(hash, 16 + (u64)index * 8);
+                String8 name = offset ? pdb_test_record_name(records, offset - 1) : (String8){0};
+                valid = name.length && pdb_read_u32(hash, 20 + (u64)index * 8) == 1 && pdb_test_hash_v1(name) % BUCKETS == bucket;
+            }
+            present += 1;
+        }
+    }
+    valid = valid && starts + (u64)present * 4 == hash.length;
+    *record_count = count;
+    return valid;
+}
+
+// Global and public indexes (#3411): DbgHelp treats a PDB with empty ones as
+// public-only. Check the hash tables, the module references and the address map.
+BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_global_indexes(UnitTestArguments* arguments, PdbResult built)
+{
+    UnitTestResult result = {0};
+    ByteSlice records = pdb_test_stream_bytes(arguments->arena, built.bytes, PDB_TEST_STREAM_SYMBOL_RECORDS);
+    ByteSlice globals = pdb_test_stream_bytes(arguments->arena, built.bytes, PDB_TEST_STREAM_GLOBALS);
+    ByteSlice publics = pdb_test_stream_bytes(arguments->arena, built.bytes, PDB_TEST_STREAM_PUBLICS);
+    ByteSlice module = pdb_test_stream_bytes(arguments->arena, built.bytes, PDB_TEST_STREAM_MODULE);
+    u32 global_count = 0;
+    BUSTER_TEST(arguments, records.length && pdb_test_check_gsi(globals, records, &global_count) && global_count);
+    // Every S_PROCREF names the module-stream offset of a same-named S_GPROC32.
+    u32 references = 0;
+    for (u32 index = 0; index < global_count; index += 1)
+    {
+        u32 offset = pdb_read_u32(globals, 16 + (u64)index * 8) - 1;
+        u16 kind = 0;
+        memcpy(&kind, records.pointer + offset + 2, sizeof(kind));
+        if (kind == PDB_TEST_S_PROCREF)
+        {
+            u32 module_offset = pdb_read_u32(records, (u64)offset + 8);
+            u16 module_index = 0;
+            memcpy(&module_index, records.pointer + offset + 12, sizeof(module_index));
+            u16 target_kind = 0;
+            String8 name = pdb_test_record_name(records, offset);
+            bool target = name.pointer && module_index == 1 && (u64)module_offset + 40 + name.length <= module.length;
+            if (target)
+            {
+                memcpy(&target_kind, module.pointer + module_offset + 2, sizeof(target_kind));
+            }
+            BUSTER_TEST(arguments, target && target_kind == PDB_TEST_S_GPROC32 &&
+                                   !memcmp(module.pointer + module_offset + 39, name.pointer, name.length));
+            references += 1;
+        }
+    }
+    BUSTER_TEST(arguments, references >= 2);
+    // Publics: header, the same hash form, then an address map sorted by
+    // (section, offset) over S_PUB32 records.
+    u32 hash_size = publics.length >= 28 ? pdb_read_u32(publics, 0) : 0;
+    u32 map_size = publics.length >= 28 ? pdb_read_u32(publics, 4) : 0;
+    bool header = publics.length >= 28 && (u64)28 + hash_size + map_size == publics.length && !(map_size % 4);
+    u32 public_count = 0;
+    BUSTER_TEST(arguments, header && pdb_test_check_gsi((ByteSlice){.pointer = publics.pointer + 28, .length = hash_size}, records, &public_count) &&
+                           public_count == map_size / 4 && public_count >= 2);
+    u64 previous = 0;
+    for (u32 index = 0; header && index < map_size / 4; index += 1)
+    {
+        u32 offset = pdb_read_u32(publics, 28 + (u64)hash_size + (u64)index * 4);
+        u16 kind = 0;
+        u16 section = 0;
+        memcpy(&kind, records.pointer + offset + 2, sizeof(kind));
+        memcpy(&section, records.pointer + offset + 12, sizeof(section));
+        u64 key = (u64)section << 32 | pdb_read_u32(records, (u64)offset + 8);
+        BUSTER_TEST(arguments, kind == PDB_TEST_S_PUB32 && key >= previous);
+        previous = key;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_scope_links(UnitTestArguments* arguments, PdbResult built, CodeviewResult codeview)
 {
     UnitTestResult result = {0};
@@ -836,12 +993,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_large_source_count(UnitTestArguments
             ByteSlice module = pdb_test_stream_bytes(arena, built.bytes, stream_index);
             bool valid = module.length == 16 + module_files * checksum_stride;
             BUSTER_TEST(arguments, valid);
+            // Both modules name the same paths, so both point at the one
+            // /names copy of each.
             for (u32 file = 0; file < module_files && valid; file += 1)
             {
-                u32 expected = 1 + (module_index * module_files + file) * 7;
+                u32 expected = 1 + file * 7;
                 valid = pdb_read_u32(module, 12 + (u64)file * checksum_stride) == expected;
             }
             BUSTER_TEST(arguments, valid);
+        }
+        ByteSlice names = pdb_test_stream_bytes(arena, built.bytes, PDB_TEST_STREAM_NAMES);
+        u64 names_buffer = 1 + (u64)module_files * 7;
+        if (BUSTER_REQUIRE(arguments, names.length >= 12 + names_buffer + 8 && pdb_read_u32(names, 8) == names_buffer))
+        {
+            u32 bucket_count = pdb_read_u32(names, 12 + names_buffer);
+            BUSTER_TEST(arguments, names.length == 12 + names_buffer + 4 + (u64)bucket_count * 4 + 4 &&
+                                       pdb_read_u32(names, names.length - 4) == module_files);
         }
     }
     // The total may exceed 16 bits, but one module's ModFileCount may not.
@@ -1198,6 +1365,9 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
         PdbResult built = pdb_build(arguments->arena, input);
         if (BUSTER_REQUIRE(arguments, built.valid))
         {
+            UnitTestResult global_indexes = pdb_test_global_indexes(arguments, built);
+            result.test_count += global_indexes.test_count;
+            result.succeeded_test_count += global_indexes.succeeded_test_count;
             UnitTestResult scope_links = pdb_test_scope_links(arguments, built, codeview);
             result.test_count += scope_links.test_count;
             result.succeeded_test_count += scope_links.succeeded_test_count;
@@ -1492,11 +1662,35 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
                                 BUSTER_TEST(arguments, local_count == 1 && public_count == 1);
                             }
                             BUSTER_TEST(arguments, pointer_to_const_float != PDB_TEST_TYPE_INDEX_BASE + 1);
-                            // PDB's global/public indexes remain empty; neither local
-                            // record is promoted into a cross-module symbol stream.
-                            ByteSlice globals = pdb_test_stream_bytes(arguments->arena, data_merged.bytes, PDB_TEST_STREAM_GLOBALS);
-                            ByteSlice publics = pdb_test_stream_bytes(arguments->arena, data_merged.bytes, PDB_TEST_STREAM_PUBLICS);
-                            BUSTER_TEST(arguments, globals.length == 16 && publics.length == 44);
+                            // The global index copies each module's top-level data record
+                            // with its own merged type; only the global one is public.
+                            ByteSlice records = pdb_test_stream_bytes(arguments->arena, data_merged.bytes, PDB_TEST_STREAM_SYMBOL_RECORDS);
+                            u32 hidden_types[2] = {0};
+                            u32 public_types[2] = {0};
+                            u32 hidden_count = 0;
+                            u32 data_count = 0;
+                            u32 public_records = 0;
+                            for (u64 cursor = 0; cursor + 4 <= records.length;)
+                            {
+                                u16 length = 0;
+                                u16 kind = 0;
+                                memcpy(&length, records.pointer + cursor, sizeof(length));
+                                memcpy(&kind, records.pointer + cursor + 2, sizeof(kind));
+                                String8 name = pdb_test_record_name(records, (u32)cursor);
+                                if (kind == PDB_TEST_S_LDATA32 && string_equal(name, S8("hidden")) && hidden_count < 2)
+                                {
+                                    hidden_types[hidden_count++] = pdb_read_u32(records, cursor + 4);
+                                }
+                                if (kind == PDB_TEST_S_GDATA32 && string_equal(name, S8("public_data")) && data_count < 2)
+                                {
+                                    public_types[data_count++] = pdb_read_u32(records, cursor + 4);
+                                }
+                                public_records += kind == PDB_TEST_S_PUB32 && string_equal(name, S8("public_data"));
+                                cursor += 2 + (u64)length;
+                            }
+                            BUSTER_TEST(arguments, hidden_count == 2 && data_count == 2 && public_records == 2);
+                            BUSTER_TEST(arguments, hidden_types[0] == pointer_to_const_int && hidden_types[1] == pointer_to_const_float &&
+                                                   public_types[0] == pointer_to_const_int && public_types[1] == pointer_to_const_float);
                         }
                     }
 

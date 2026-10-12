@@ -1931,8 +1931,11 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_member_write(MachineX64Selector* sel
     bool selected = member_offset <= INT32_MAX && member_size <= INT32_MAX;
     if (selected && !member_size)
     {
+        // Omitted flexible-array members have a resolved zero-byte image.
+        // Capture it without a store, just like an empty record member.
         selected = value_type && value_type->layout.resolved && value_type->layout.size == 0 &&
-                   (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION) && value_slot != UINT32_MAX;
+                   (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_ARRAY) &&
+                   value_slot != UINT32_MAX;
     }
     else if (selected && !vector && (value_register != UINT32_MAX || value_slot == UINT32_MAX))
     {

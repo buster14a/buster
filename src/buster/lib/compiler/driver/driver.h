@@ -207,6 +207,8 @@ struct CompilerDriverInvocation
     // arrays remain an execution compatibility path for API-built invocations
     // and are used only when macro_operation_count is zero.
     CPreprocessorOperation* macro_operations;
+    // -fmacro-prefix-map=OLD=NEW, in argv order; only builtin spellings change.
+    CMacroPrefixMap* macro_prefix_maps;
     String8* definitions;
     String8* undefinitions;
     String8* library_paths;
@@ -292,6 +294,7 @@ struct CompilerDriverInvocation
     u32 system_include_path_count;
     u32 forced_include_count;
     u32 macro_operation_count;
+    u32 macro_prefix_map_count;
     u32 definition_count;
     u32 undefinition_count;
     u32 library_path_count;
@@ -310,6 +313,8 @@ struct CompilerDriverInvocation
     // -MD/-MMD enable depfile emission; the last one selects system filtering.
     bool dependency_file;
     bool dependency_exclude_system;
+    // Exact -Wp,-MD,PATH / -Wp,-MMD,PATH: one C input, also named native -S.
+    bool dependency_passthrough;
     // -MP emits phony rules for header prerequisites.
     bool dependency_phony_targets;
     bool verbose;
@@ -336,6 +341,8 @@ struct CompilerDriverInvocation
     // the visibility of definitions that carry no attribute or pragma.
     u8 default_visibility;
     bool pinned_debug_locals_explicit;
+    // Effective optional pass mask: no-flag/positive -O use IR_FAST_ALL,
+    // explicit -O/-O0 use zero, and explicit pass controls override either.
     u32 fast_passes;
     bool measure_fast_passes;
     // Tiny direct-call inlining defaults off. An explicit optimization level
