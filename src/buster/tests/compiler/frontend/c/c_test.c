@@ -44444,6 +44444,98 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestAr
     return result;
 }
 
+// Three prediction callers read the type only to choose a form: the overload
+// ranking between `__overloadable__` candidates, whether `(*p)(...)` drops a
+// redundant dereference, and whether a Windows `__builtin_va_end` names the
+// char* cursor. A missing type now fails the call with a diagnostic instead
+// of ranking every candidate non-viable or stripping the `*` (GitHub #2531).
+// Typed operands of each shape must keep their choices on every target, and
+// operands without an IR type must fail with a diagnostic.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_prediction_caller_checks(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 header = S8(
+        "int pick(int value) __asm__(\"pick_signed\");\n"
+        "int pick(unsigned value) __attribute__((__overloadable__)) __asm__(\"pick_unsigned\");\n"
+        "typedef int (*Fn)(void);\n");
+    String8 typed = S8(
+        "int picks(int i, int c) {\n"
+        "    return pick(1) + pick(1u) + pick(c ? 1 : 2u) + pick(__builtin_ffs(i)) + pick(_Generic(i, int: 1u, default: 1));\n"
+        "}\n"
+        "int calls(int c, Fn a, Fn b, Fn* q) {\n"
+        "    return (*a)() + (*q)() + (**q)() + (*(c ? a : b))() + (*({ a; }))() + (*(Fn)q[0])();\n"
+        "}\n");
+    String8 windows_typed = S8(
+        "void cursor(int n, ...) { char* ap; __builtin_va_start(ap, n); __builtin_va_end(ap); }\n"
+        "int list(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); int v = __builtin_va_arg(ap, int); __builtin_va_end(ap); return v; }\n");
+    String8 untyped[] = {
+        S8("int f(void) { return pick((__fp16)1); }\n"),
+        S8("int f(unsigned short bits) { return pick(__builtin_bit_cast(__fp16, bits)); }\n"),
+        S8("int f(void) { return (*(__fp16)1)(); }\n"),
+        S8("void f(int n, ...) { __builtin_va_end((__fp16)1); }\n"),
+    };
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        Target target = targets[target_index];
+        CPreprocessOptions options = {.target = target, .data_layout = target_data_layout(target)};
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 text = string_format(temporary.arena, S8("{S8}{S8}{S8}"), header, typed,
+                target.os == OPERATING_SYSTEM_WINDOWS ? windows_typed : S8(""));
+            CPreprocessResult tokens = c_preprocess(temporary.arena, text, options);
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("prediction-callers.c"), tokens, parsed, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program,
+                string_format(temporary.arena, S8("prediction callers target={u32} form={u32}: {S8}"), target_index, form,
+                    lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("")));
+            if (lowered.program && !lowered.diagnostic_count)
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                IrFunction* picks = c_test_find_ir_function(module, S8("picks"));
+                u32 signed_calls = 0;
+                u32 unsigned_calls = 0;
+                for (u32 index = 0; picks && index < picks->instruction_count; index += 1)
+                {
+                    IrInstruction instruction = picks->instructions[index];
+                    IrSymbol* symbol = instruction.opcode == IR_OPCODE_CALL ? ir_symbol_from_id(&lowered.program->symbols, instruction.symbol) : 0;
+                    signed_calls += symbol && string_equal(symbol->link_name, S8("pick_signed"));
+                    unsigned_calls += symbol && string_equal(symbol->link_name, S8("pick_unsigned"));
+                }
+                BUSTER_TEST(arguments, picks && signed_calls == 2 && unsigned_calls == 3);
+            }
+            c_preprocess_release(&tokens);
+            scratch_end(temporary);
+        }
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(untyped); index += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 text = string_format(temporary.arena, S8("{S8}{S8}"), header, untyped[index]);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, text, options);
+                CParseResult parsed = c_parse(temporary.arena, tokens);
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("untyped-prediction-caller.c"), tokens, parsed, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments,
+                    (tokens.diagnostic_count || parsed.diagnostic_count || lowered.diagnostic_count) && !lowered.canonical_ir_certified,
+                    string_format(temporary.arena, S8("untyped prediction caller {u32} target={u32} form={u32} lowered without a diagnostic"),
+                        index, target_index, form));
+                c_preprocess_release(&tokens);
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 // Lua's userdata accessor combines nested pointer-cast macros, a
 // builtin-offsetof ternary, and a switch whose other arm returns void *.  The
 // strict expression-type walk must preserve the pointer result instead of
@@ -64727,6 +64819,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_tall_expression_types);
     C_TEST_FIXTURE(arguments, c_test_builtin_operand_types);
     C_TEST_FIXTURE(arguments, c_test_untyped_operand_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_prediction_caller_checks);
     C_TEST_FIXTURE(arguments, c_test_nested_offsetof_pointer_prediction);
     C_TEST_FIXTURE(arguments, c_test_nonvoid_falloff);
     C_TEST_FIXTURE(arguments, c_test_noreturn_call_expression_statements);
