@@ -5948,5 +5948,135 @@ class WildLinkerTest(unittest.TestCase):
             self.assertTrue(any("wild-linker evidence lacks" in error for error in record["errors"]), record["errors"])
 
 
+class OutOfRangeEvidenceNumberTest(unittest.TestCase):
+    """#3675: a JSON integer past the float range fails the check instead of raising OverflowError."""
+
+    HUGE = 10 ** 309
+
+    def inline_summary(self, **wall: object) -> dict:
+        stage = {"metrics": {
+            "wall": {"a_median": 1.0, "b_median": 1.0, "ratio": 1.0, **wall},
+            "instructions": {"a_median": 10.0, "b_median": 10.0, "ratio": 1.0},
+            "counter_availability": {"perf_stat": True, "reason": "usable"},
+            "peak_rss": {"ratio": 1.0},
+            "code_bytes": {"a_value": 100, "b_value": 100, "ratio": 1.0}}}
+        return {"schema": compiler_receipt.INLINE_ACCEPTANCE_SCHEMA, "status": "complete", "source_revision": "a" * 40,
+                "profile": {**compiler_receipt.INLINE_ACCEPTANCE_PROFILE, "source_sha256": "b" * 64, "cpu": 2},
+                "candidate_compiler": {"sha256": "c" * 64, "size_bytes": 1},
+                "fixed_point": {"off": True, "on": True}, "stage1": stage, "selfhost_runtime": copy.deepcopy(stage)}
+
+    def test_predicates_refuse_out_of_range_integers_and_accept_normal_values(self) -> None:
+        huge = self.HUGE
+        for predicate in (compiler_receipt._finite_positive, inline_acceptance._positive_number,
+                          ast_pilot_acceptance._positive_number):
+            with self.subTest(predicate=predicate.__module__):
+                self.assertFalse(predicate(huge))
+                self.assertFalse(predicate(-huge))
+                self.assertTrue(predicate(1))
+                self.assertTrue(predicate(0.5))
+        self.assertEqual(compiler_receipt.number(huge, "%.4f"), "NA")
+        self.assertEqual(compiler_receipt.number(1.25, "%.4f"), "1.2500")
+        self.assertEqual(compiler_receipt.number(3, "%.1f"), "3.0")
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            compiler_publish.campaign_ppm(1, huge)
+        self.assertEqual(compiler_publish.campaign_ppm(1.0, 1.0)[:2], (0, 0))
+
+        self.assertEqual(compiler_receipt.validate_inline_acceptance(self.inline_summary(), "a" * 40, "c" * 64), [])
+        for key in ("a_median", "b_median", "ratio"):
+            with self.subTest(inline=key):
+                problems = compiler_receipt.validate_inline_acceptance(self.inline_summary(**{key: huge}), "a" * 40, "c" * 64)
+                self.assertTrue(any("wall-time measurements are missing" in problem for problem in problems), problems)
+        changed = self.inline_summary()
+        changed["stage1"]["metrics"]["code_bytes"]["ratio"] = huge
+        self.assertTrue(compiler_receipt.validate_inline_acceptance(changed, "a" * 40, "c" * 64))
+        changed = self.inline_summary()
+        changed["stage1"]["metrics"]["instructions"]["ratio"] = huge
+        self.assertTrue(compiler_receipt.validate_inline_acceptance(changed, "a" * 40, "c" * 64))
+
+        unused_record, unused_bundle, acceptance = ast_pilot_evidence()
+        self.assertEqual(compiler_receipt.validate_ast_pilot_acceptance(acceptance, "a" * 40, "c" * 64), [])
+        for metric, key in (("wall", "ratio"), ("peak_rss", "b_median"), ("instructions", "a_median")):
+            changed = copy.deepcopy(acceptance)
+            changed["cells"]["object"]["metrics"][metric][key] = huge
+            with self.subTest(ast_pilot=metric):
+                self.assertTrue(compiler_receipt.validate_ast_pilot_acceptance(changed, "a" * 40, "c" * 64))
+
+        self.assertEqual(compiler_receipt.classify(summary(), BINARIES), [])
+        for key in ("ratio", "ci_low", "ci_high"):
+            lab = summary()
+            lab["verdict"][key] = huge
+            lab["metrics"]["wall"][key] = huge
+            with self.subTest(verdict=key):
+                reasons = compiler_receipt.classify(lab, BINARIES)
+                self.assertTrue(any("not a finite positive ratio" in reason for reason in reasons), reasons)
+
+        good = corpus()
+        self.assertNotIn("throughput report-only family_alpha does not match the original gate",
+                         compiler_receipt.classify_throughput_exit(0, good["summary"], good["metadata"], BINARIES))
+        good["summary"]["family_alpha"] = huge
+        self.assertIn("throughput report-only family_alpha does not match the original gate",
+                      compiler_receipt.classify_throughput_exit(0, good["summary"], good["metadata"], BINARIES))
+
+    def publish(self, pull: dict, lab: dict, bundle: dict | None = None) -> tuple:
+        """ZIP -> read_evidence -> decide (then render), as the ordinary publisher runs it."""
+        members = {"receipt.json": json.dumps(pull), "lab/summary.json": json.dumps(lab),
+                   "throughput/summary.json": json.dumps(corpus()["summary"]),
+                   "throughput/metadata.json": json.dumps(corpus()["metadata"])}
+        for key, value in (bundle or {}).items():
+            members[compiler_publish.AST_PILOT_BUNDLE_FILES[key]] = json.dumps(value)
+        read, summary_read, problem, unused_artifact, throughput = compiler_publish.read_evidence(
+            FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+        self.assertEqual(problem, "")
+        decision = compiler_publish.decide(dict(EXPECTED, mode=pull["mode"]), True, "success", read, summary_read, "",
+                                           throughput)
+        compiler_receipt.render(read, summary_read, decision[0], decision[2])
+        return decision
+
+    def test_out_of_range_lab_summary_fails_through_publication(self) -> None:
+        main = receipt()
+        self.assertEqual(self.publish(main, summary())[0], "success")
+        verdict = summary()
+        verdict["verdict"]["ratio"] = self.HUGE
+        verdict["metrics"]["wall"]["ratio"] = self.HUGE
+        metric = summary()
+        metric["verdict"]["ci_high"] = self.HUGE
+        for name, lab in (("verdict ratio", verdict), ("wall ci_high", metric)):
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = self.publish(main, lab)
+                self.assertEqual(conclusion, "failure", reasons)
+                self.assertTrue(any("not a finite positive ratio" in reason for reason in reasons), reasons)
+
+    def test_out_of_range_ast_pilot_receipt_fails_through_publication(self) -> None:
+        record, bundle, unused_acceptance = ast_pilot_evidence("a" * 40, B256)
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["ast_pilot_acceptance"] = record
+        self.assertEqual(self.publish(pull, summary(), bundle)[:3:2], ("success", []))
+
+        def changed(path: tuple, raw: bool) -> tuple[dict, dict]:
+            current, documents = copy.deepcopy(pull), copy.deepcopy(bundle)
+            targets = [current["ast_pilot_acceptance"]["summary"]["cells"], documents["acceptance"]["cells"]]
+            if raw:
+                targets = [documents]
+            for target in targets:
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = self.HUGE
+            return current, documents
+        cases = {
+            "acceptance wall ratio": (("syntax-only", "metrics", "wall", "ratio"), False),
+            "acceptance instruction median": (("object", "metrics", "instructions", "b_median"), False),
+            "acceptance peak RSS": (("object", "metrics", "peak_rss", "a_median"), False),
+            "raw cell wall median": (("object_summary", "metrics", "wall", "a_median"), True),
+        }
+        for name, (path, raw) in cases.items():
+            with self.subTest(case=name):
+                current, documents = changed(path, raw)
+                conclusion, unused_title, reasons = self.publish(current, summary(), documents)
+                self.assertEqual(conclusion, "failure", reasons)
+                self.assertTrue(reasons)
+
+
 if __name__ == "__main__":
     unittest.main()
