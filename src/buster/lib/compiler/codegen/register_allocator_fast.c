@@ -35,7 +35,8 @@
 // lets an edge conform leave one its destination does not read dirty for the
 // source's other successors. A fixed or tied operand that
 // needs an occupied register, and a non-call row's clobber, moves the live
-// occupant to a free one (`machine_fast_vacate`) rather than storing it. A reload prefers the
+// occupant to a free one (`machine_fast_vacate`) rather than storing it; an
+// occupant whose last use is the clobbering row is dropped. A reload prefers the
 // register the value was first bound to (`MachineFastState.preferred_registers`),
 // so the copies that repair cross-path disagreement mostly vanish.
 // `machine_fast_placement_build_pinned` then lays the frame out
@@ -4581,6 +4582,11 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 // candidates, so the copy lands where nothing this row reads or
                 // writes. A call clobbers the caller-saved file, where a free
                 // register would be flushed with the rest, so it keeps the store.
+                // The row has read its inputs by the time a clobber lands, so an
+                // occupant whose last use is this row is dead: a constrained
+                // row's input forced into its own clobbered scratch (AArch64
+                // X9-X13) is dropped rather than stored or copied, the rule the
+                // physical-definition eviction above already applies.
                 state.uses_consumed = true;
                 for (u64 clobber_mask = opcode_row.clobber_mask; clobber_mask; clobber_mask &= clobber_mask - 1u)
                 {

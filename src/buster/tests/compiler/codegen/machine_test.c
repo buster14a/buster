@@ -8,6 +8,8 @@
 // machine_test_x64_narrow_call_results checks ABI-width RAX captures.
 // machine_test_x64_division_clobber_vacate keeps a value live across a division
 // clobber in a register (#3783).
+// machine_test_a64_dying_clobber_input drops a constrained row's dying
+// scratch input at its clobber instead of storing or copying it (#3783).
 // machine_test_boolean_i128_cast checks Boolean widening and its strict IR contract.
 // machine_test_frame_capacity guards checked placement and capacity diagnostics.
 // machine_test_sparse_local_state compares sparse and row-based local discovery.
@@ -5037,6 +5039,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_division_clobber_vacate(Unit
                 codegen_release_executable(executable);
             }
 #endif
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// A constrained row reads its inputs from the scratch registers it also
+// clobbers. An input whose last use is that row is dead once the row runs,
+// so its clobber eviction neither stores nor copies it (#3783): the VLA size
+// reaches STACK_ALLOCATE in X9 and is never read again.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_a64_dying_clobber_input(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    IrProgram* program = machine_test_compile_c(temporary.arena, S8("dying-clobber-input.c"),
+        S8("void take(char* p, unsigned long k); void vla(unsigned long n, unsigned long k) { char buffer[n]; take(buffer, k); }"), target);
+    IrFunction* function = program && program->module_count == 1 ? machine_test_ir_function_find(program->modules, S8("vla")) : 0;
+    MachineSelectResult selected = function ? machine_select_canonical_function(temporary.arena, program, function, target) : (MachineSelectResult){0};
+    if (BUSTER_REQUIRE(arguments, function && selected.supported))
+    {
+        for (u32 mode = 0; mode < 2; mode += 1)
+        {
+            MachineStackPlacement placement = mode == 0 ? machine_fast_placement_build(temporary.arena, &selected.function)
+                                                        : machine_quality_placement_build(temporary.arena, &selected.function);
+            BUSTER_TEST(arguments, placement.valid);
+            u32 allocations = 0;
+            u32 evictions = 0;
+            for (u32 instruction_index = 0; instruction_index < selected.function.instruction_count; instruction_index += 1)
+            {
+                if (selected.function.instructions[instruction_index].opcode == MACHINE_A64_STACK_ALLOCATE)
+                {
+                    allocations += 1;
+                    MachinePoint before = machine_point_make(instruction_index, MACHINE_POINT_BEFORE);
+                    for (u32 edit_index = 0; edit_index < placement.edit_count; edit_index += 1)
+                    {
+                        MachineEdit edit = placement.edits[edit_index];
+                        evictions += edit.point == before && (edit.kind == MACHINE_EDIT_SPILL ||
+                                                              (edit.kind == MACHINE_EDIT_COPY && edit.subject == MACHINE_A64_X9));
+                    }
+                }
+            }
+            BUSTER_TEST_RAW(arguments, allocations == 1 && evictions == 0,
+                            string_format(temporary.arena, S8("mode {u32} allocations {u32} evictions {u32}"), mode, allocations, evictions));
+            MachineEncodeResult encoded = machine_encode_aarch64(temporary.arena, &selected.function, &placement);
+            BUSTER_TEST(arguments, encoded.valid);
         }
     }
     scratch_end(temporary);
@@ -10562,6 +10610,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_clear_instruction_cache);
     BUSTER_TEST_FIXTURE(arguments, machine_test_unsigned_switch);
     BUSTER_TEST_FIXTURE(arguments, machine_test_x64_division_clobber_vacate);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_a64_dying_clobber_input);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_switch_cfg);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_backward_switch_cfg);
     BUSTER_TEST_FIXTURE(arguments, machine_test_disconnected_dominance);
