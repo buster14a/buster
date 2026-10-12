@@ -7736,11 +7736,28 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 }
                 // The final statement belongs to the body's parsed scope:
                 // a local value there can shadow an enclosing typedef name.
-                CScopeId tail_scope = c_parse_scope_for_token(result, scope, tail_start);
+                // The active body map records lexical scope independently of
+                // the query's root. Nested type queries use inner roots and
+                // would otherwise descend the same nest at every tail (#3724).
+                CTokenPositionIndex const* positions = result->position_index;
+                bool mapped = positions && positions->body_scopes &&
+                    tail_start - positions->body_scope_start < positions->body_scope_count;
+                CScopeId tail_scope = mapped ? (CScopeId){.value = positions->body_scopes[tail_start - positions->body_scope_start]}
+                                             : c_parse_scope_for_token(result, scope, tail_start);
+                C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_STATEMENT_EXPRESSION_TAILS, 1);
                 bool expression = tail_start < tail_end && statement == task->end - 1 &&
                     !c_parse_type_start_token(result, preprocess, tail_scope, preprocess.tokens[tail_start]);
                 if (expression)
                 {
+                    u32 tail_slot = slot != UINT32_MAX ? tail_start - machine->expression_query_start : UINT32_MAX;
+                    u32 tail_stored = c_parse_expression_query_lookup(machine, result, tail_slot, tail_end, tail_scope, flags);
+                    if (tail_stored)
+                    {
+                        last = machine->expression_queries[tail_slot].type;
+                        nonplace_projection = (tail_stored & C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION) != 0;
+                        task_count -= 1;
+                        continue;
+                    }
                     task->start = tail_start;
                     task->end = tail_end;
                     task->operators_checked = false;
@@ -41032,9 +41049,15 @@ BUSTER_C_INTERNAL void c_parse_validate_statement_expressions(CTypeParseMachine*
     u32 start = declaration->body_start;
     u32 end = BUSTER_MIN((u32)preprocess.token_count, start + declaration->body_token_count);
     c_parse_validate_statement_expression_range(machine, result, preprocess, declaration, start, end, diagnostic);
+    // Settle innermost bodies first. Each enclosing tail can then consume
+    // the child's ordinary expression memo instead of retyping every level.
     CParseCandidates groups = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_STATEMENT_EXPRESSIONS, C_PARSE_POPULATION_NONE, start + 1);
-    for (u32 index = c_parse_candidates_next(&groups, start + 1, end); index < end; index = c_parse_candidates_next(&groups, index + 1, end))
+    bool indexed = groups.source == C_PARSE_CANDIDATES_POSITIONS;
+    u32 first = indexed ? groups.cursors[0] : start + 1;
+    u32 limit = indexed ? c_parse_position_lower_bound(groups.positions[0], groups.counts[0], end) : end;
+    for (u32 cursor = limit; cursor > first;)
     {
+        u32 index = indexed ? groups.positions[0][--cursor] : --cursor;
         if (!skipped[index - start] && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE) &&
             c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
