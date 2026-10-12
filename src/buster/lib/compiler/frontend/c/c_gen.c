@@ -6680,6 +6680,8 @@ struct CIrDirectSsa
     CIrSsaParameter* last_parameter;
     u32 slot_count;
     u32 slot_capacity;
+    // Path-cache entries among slot_count (C_IR_SSA_SLOT_CACHE).
+    u32 cached_slot_count;
     u32 read_count;
     u32 read_capacity;
     CIrSsaLoop* loops;
@@ -6881,7 +6883,8 @@ BUSTER_C_INTERNAL void c_ir_ssa_loop_close(CIntegerIrBuilder* builder, u32 loop_
     }
 }
 
-BUSTER_C_INTERNAL bool c_ir_ssa_grow_slots(CIntegerIrBuilder* builder)
+// A refused growth fails the function only when the caller needs the slot.
+BUSTER_C_INTERNAL bool c_ir_ssa_grow_slots(CIntegerIrBuilder* builder, bool required)
 {
     CIrDirectSsa* ssa = builder->direct_ssa;
     u64 capacity = ssa->slot_capacity ? (u64)ssa->slot_capacity * 2 : 64;
@@ -6919,20 +6922,33 @@ BUSTER_C_INTERNAL bool c_ir_ssa_grow_slots(CIntegerIrBuilder* builder)
         ssa->slot_indices = slot_indices;
         ssa->slot_capacity = (u32)capacity;
     }
-    else
+    else if (required)
     {
         c_ir_ssa_refuse(builder, S8("C frontend SSA slot capacity exceeds the lowering scratch reservation"));
     }
     return fits;
 }
 
-// The sparse slot for (block, local), inserted unresolved when new. A refused
-// table growth returns ssa->failed_slot, unresolved, after recording the refusal.
-BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot(CIntegerIrBuilder* builder, u32 block, u32 local)
+typedef enum CIrSsaSlotMode
+{
+    // Return the slot if present; never insert.
+    C_IR_SSA_SLOT_FIND,
+    // Insert when new; a refused growth fails the function.
+    C_IR_SSA_SLOT_INSERT,
+    // Insert a path-cache entry when new, within the cache budget and the
+    // reservation; otherwise insert nothing and fail nothing.
+    C_IR_SSA_SLOT_CACHE,
+} CIrSsaSlotMode;
+
+// The sparse slot for (block, local) per `mode`, or zero when none is present
+// or inserted. Cache entries only spare later walks, and a walk past N nested
+// loops for each of N loop variables would cache N^2 of them (#3771), so they
+// stay within twice the other entries plus a constant.
+BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot_lookup(CIntegerIrBuilder* builder, u32 block, u32 local, CIrSsaSlotMode mode)
 {
     CIrDirectSsa* ssa = builder->direct_ssa;
-    CIrSsaSlot* result = &ssa->failed_slot;
-    if (ssa->slot_capacity || c_ir_ssa_grow_slots(builder))
+    CIrSsaSlot* result = 0;
+    if (ssa->slot_capacity || (mode == C_IR_SSA_SLOT_INSERT && c_ir_ssa_grow_slots(builder, true)))
     {
         u32 slot = c_ir_ssa_hash(block + 1, local, ssa->slot_capacity - 1);
         IR_CONSTRUCTION_RECORD(SSA_FINISH_SLOT_PROBES, ssa->predecessor_offsets != 0);
@@ -6946,12 +6962,15 @@ BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot(CIntegerIrBuilder* builder, u32 bloc
             slot = (slot + 1) & (ssa->slot_capacity - 1);
         }
         bool present = ssa->slots[slot].block_plus_one != 0;
-        if (!present)
+        bool cache = mode == C_IR_SSA_SLOT_CACHE;
+        bool budget = mode == C_IR_SSA_SLOT_INSERT ||
+                      (cache && (u64)ssa->cached_slot_count < (u64)(ssa->slot_count - ssa->cached_slot_count) * 2 + 1024);
+        if (!present && budget)
         {
             // Only a new key needs capacity. Reads of existing values must not
             // rehash a half-full table before finding their unchanged entry.
             bool room = (u64)(ssa->slot_count + 1) * 2 < ssa->slot_capacity;
-            if (!room && c_ir_ssa_grow_slots(builder))
+            if (!room && c_ir_ssa_grow_slots(builder, !cache))
             {
                 room = true;
                 slot = c_ir_ssa_hash(block + 1, local, ssa->slot_capacity - 1);
@@ -6968,6 +6987,7 @@ BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot(CIntegerIrBuilder* builder, u32 bloc
             {
                 ssa->slots[slot] = (CIrSsaSlot){.block_plus_one = block + 1, .local = local, .value = IR_VALUE_ID_INVALID};
                 ssa->slot_indices[ssa->slot_count++] = slot;
+                ssa->cached_slot_count += cache;
                 IR_CONSTRUCTION_RECORD(SSA_SLOT_INSERTS, 1);
             }
         }
@@ -6976,9 +6996,19 @@ BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot(CIntegerIrBuilder* builder, u32 bloc
             result = ssa->slots + slot;
         }
     }
-    if (result == &ssa->failed_slot)
+    return result;
+}
+
+// The sparse slot for (block, local), inserted unresolved when new. A refused
+// table growth returns ssa->failed_slot, unresolved, after recording the refusal.
+BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot(CIntegerIrBuilder* builder, u32 block, u32 local)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    CIrSsaSlot* result = c_ir_ssa_slot_lookup(builder, block, local, C_IR_SSA_SLOT_INSERT);
+    if (!result)
     {
         ssa->failed_slot = (CIrSsaSlot){.value = IR_VALUE_ID_INVALID};
+        result = &ssa->failed_slot;
     }
     return result;
 }
@@ -7079,18 +7109,20 @@ BUSTER_C_INTERNAL u32 c_ir_ssa_forward_block(CIrDirectSsa* ssa, u32 block, u32 l
 }
 
 // Once predecessor discovery is complete, forward through single-predecessor
-// blocks instead of allocating a parameter at every intervening block. Cache
-// the answer on the traversed path. A stamped cycle still creates one pending
-// parameter, so loop backedges terminate without C recursion. A refused slot or
-// parameter carve returns the unresolved value with the refusal recorded.
+// blocks instead of allocating a parameter at every intervening block. The walk
+// only looks slots up; it inserts one where it ends unresolved, for the
+// parameter, and caches the answer on the traversed path within the cache
+// budget. A stamped cycle still creates one pending parameter, so loop
+// backedges terminate without C recursion. A refused slot or parameter carve
+// returns the unresolved value with the refusal recorded.
 BUSTER_C_INTERNAL IrValueId c_ir_ssa_current(CIntegerIrBuilder* builder, u32 block, u32 local)
 {
     CIrDirectSsa* ssa = builder->direct_ssa;
     u32 path_count = 0;
-    CIrSsaSlot* slot = c_ir_ssa_slot(builder, block, local);
-    IrValueId value = slot->value;
-    bool refused = slot == &ssa->failed_slot;
-    if (!refused && value.value == IR_ID_UNDERLYING_INVALID && ssa->predecessor_offsets)
+    bool walk = ssa->predecessor_offsets != 0;
+    CIrSsaSlot* slot = c_ir_ssa_slot_lookup(builder, block, local, walk ? C_IR_SSA_SLOT_FIND : C_IR_SSA_SLOT_INSERT);
+    IrValueId value = slot ? slot->value : IR_VALUE_ID_INVALID;
+    if (walk && value.value == IR_ID_UNDERLYING_INVALID)
     {
         ssa->read_stamp += 1;
         if (!ssa->read_stamp)
@@ -7105,20 +7137,26 @@ BUSTER_C_INTERNAL IrValueId c_ir_ssa_current(CIntegerIrBuilder* builder, u32 blo
             ssa->read_blocks[path_count++] = block;
             IR_CONSTRUCTION_RECORD(SSA_FORWARD_STEPS, 1);
             block = forward;
-            slot = c_ir_ssa_slot(builder, block, local);
-            value = slot->value;
-            refused = slot == &ssa->failed_slot;
-            forward = !refused && value.value == IR_ID_UNDERLYING_INVALID ? c_ir_ssa_forward_block(ssa, block, local) : UINT32_MAX;
+            slot = c_ir_ssa_slot_lookup(builder, block, local, C_IR_SSA_SLOT_FIND);
+            value = slot ? slot->value : IR_VALUE_ID_INVALID;
+            forward = value.value == IR_ID_UNDERLYING_INVALID ? c_ir_ssa_forward_block(ssa, block, local) : UINT32_MAX;
         }
     }
-    if (!refused && value.value == IR_ID_UNDERLYING_INVALID)
+    bool refused = false;
+    if (value.value == IR_ID_UNDERLYING_INVALID)
     {
-        value = c_ir_ssa_parameter(builder, block, local, slot);
+        slot = c_ir_ssa_slot(builder, block, local);
+        refused = slot == &ssa->failed_slot;
+        value = refused ? IR_VALUE_ID_INVALID : c_ir_ssa_parameter(builder, block, local, slot);
         refused = value.value == IR_ID_UNDERLYING_INVALID;
     }
     for (u32 index = 0; index < path_count && !refused; index += 1)
     {
-        c_ir_ssa_slot(builder, ssa->read_blocks[index], local)->value = value;
+        CIrSsaSlot* cached = c_ir_ssa_slot_lookup(builder, ssa->read_blocks[index], local, C_IR_SSA_SLOT_CACHE);
+        if (cached)
+        {
+            cached->value = value;
+        }
     }
     return value;
 }
