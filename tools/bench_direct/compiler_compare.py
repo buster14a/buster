@@ -48,6 +48,10 @@ A fresh exact WILD_LINKER_REQUEST_LINE adds the linker leg
 (#2761): the head's ide objects are built in an isolated clone of the head,
 then the trusted revision's wild_linker_acceptance.c --link-only times the
 host's installed Wild against mold (or the host's default ld) on them.
+A fresh exact LINK_TLS_REQUEST_LINE adds the TLS companion link leg (#1915):
+the trusted revision's tools/link_tls_bench.py builds frozen TLS-heavy inputs
+and times fresh `ide cc` links of both binaries, after requiring byte-identical
+images that print the frozen output.
 
 The receipt records identities, the profile, toolchain versions, binary hashes
 and timings, and is written even when a step fails. The candidate's build runs
@@ -64,7 +68,8 @@ real_source_request_selection and measure_real_source (#2761 real-source leg),
 production_profile_request_selection and measure_production_profile (#2761 PGO/LTO leg),
 compiler_probes_request_selection and measure_compiler_probes (#2761 probe leg),
 frontend_selector_request_selection and measure_frontend_selector (#2761 probes),
-wild_linker_request_selection, host_linker and measure_wild_linker (#2761 linker leg), main. Validity rules live in compiler_receipt.classify.
+wild_linker_request_selection, host_linker and measure_wild_linker (#2761 linker leg),
+link_tls_request_selection and measure_link_tls (#1915 TLS link leg), main. Validity rules live in compiler_receipt.classify.
 """
 
 from __future__ import annotations
@@ -102,6 +107,8 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               WILD_LINKER_PROFILE, WILD_LINKER_REQUEST_LINE, WILD_LINKER_SCHEMA, WILD_LINKER_COMPARATORS,
                               wild_linker_bundle_files, wild_linker_digest, validate_wild_linker, WILD_IDENTITY,
                               WILD_LINKER_LINKERS,
+                              LINK_TLS_PROFILE, LINK_TLS_REQUEST_LINE, LINK_TLS_HARNESS, link_tls_digest,
+                              validate_link_tls,
                               INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUEST_LINE,
                               ANALYZER_REQUEST_LINES,
                               ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, MAIN40_PROFILE, MAIN_PROFILES, named_main_profile, RECEIPT_SCHEMA, SCALING_PROFILE,
@@ -146,6 +153,10 @@ IDE_BENCH_TIMEOUT_SECONDS = 30
 WILD_LINKER_BUILD_TIMEOUT_SECONDS = 20 * 60
 WILD_LINKER_HARNESS_TIMEOUT_SECONDS = 15 * 60
 WILD_LINKER_PROBE_TIMEOUT_SECONDS = 30
+# Measured on a hosted 4-vCPU 2.8 GHz Xeon against a pre-#2247 baseline, whose scan
+# is slowest: building the inputs and the seven cells of 2 warmups + 20 pairs took
+# 248 s. The bound stays inside the unchanged compare-pull job with its ordinary comparison.
+LINK_TLS_TIMEOUT_SECONDS = 20 * 60
 ANALYZER_DRIVER_BUILD_TIMEOUT_SECONDS = 600
 ANALYZER_GENERATE_TIMEOUT_SECONDS = 900
 ANALYZER_HELPER_TIMEOUT_SECONDS = 76 * 60
@@ -174,6 +185,7 @@ SCALING_REQUIRED = ("scaling.json", "scaling-metadata.json")
 FRONTEND_SCALING_REQUIRED = ("provenance.json", "results.json")
 SELECTION_REQUIRED = ("report.json",)
 WILD_LINKER_REQUIRED = tuple(wild_linker_bundle_files().values())
+LINK_TLS_REQUIRED = ("summary.json",)
 # Raw evidence without compiled outputs, per-run binary copies or perf data.
 EVIDENCE_IGNORE = ("*.exe", "instances", "*.data", "*.data.old", "*.o", "*.obj")
 # A scaling bundle keeps its reports, raw samples and per-sample logs; its
@@ -1122,6 +1134,18 @@ def wild_linker_request_selection(candidate: Path, head: str) -> tuple[bool, str
     return True, ""
 
 
+def link_tls_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #1915's TLS companion link leg only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, LINK_TLS_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the link-tls selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the link-tls selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
 def analyzer_profile_request_status(candidate: Path, head: str) -> tuple[bool, str]:
     """Compatibility boolean wrapper for callers interested only in selection state."""
     selected, problem = analyzer_profile_request_selection(candidate, head)
@@ -1990,6 +2014,34 @@ def measure_wild_linker(candidate: Path, work: Path, evidence: Path, head: str, 
     record["status"] = "complete" if not errors and status == 0 else "failed"
 
 
+def measure_link_tls(bins: Path, work: Path, evidence: Path, receipt: dict) -> None:
+    """Run the trusted revision's TLS companion link harness on both binaries and record it (#1915)."""
+    record = receipt["link_tls"]
+    output = work / "link-tls"
+    exported = evidence / "link_tls"
+    errors: list[str] = []
+    harness = Path(__file__).resolve().parents[1] / LINK_TLS_HARNESS
+    record["harness_sha256"] = sha256(harness) if harness.is_file() else None
+    measured = time.monotonic()
+    # The harness comes from this trusted checkout's tools/, never from the candidate.
+    status = run([sys.executable, "-I", str(harness), str(bins / "ide-base"), str(bins / "ide-cand"),
+                  str(work / "link-tls-work"), str(output)], work, evidence / "link-tls.log", LINK_TLS_TIMEOUT_SECONDS)
+    receipt["timings"]["link_tls_seconds"] = round(time.monotonic() - measured, 3)
+    summary = None
+    if output.is_dir():
+        problems, record["evidence_omissions"] = export_tree(output, exported, evidence, EVIDENCE_IGNORE,
+                                                             LINK_TLS_REQUIRED)
+        errors.extend(problems)
+        summary, problem = read_exported_json(exported / "summary.json")
+        if problem:
+            errors.append(f"exported evidence link_tls/summary.json unreadable: {problem}")
+    errors.extend(validate_link_tls(status, summary, receipt["binaries"]))
+    record["cells"] = link_tls_digest(summary)
+    record["exit"] = status
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
 def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path, bins: Path, log: Path,
             receipt: dict, summaries: list) -> None:
     """Build both revisions and run the lab, corpus and scaling legs; the lab summary goes to summaries."""
@@ -2076,13 +2128,25 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         if real_requested or ast_requested or production_requested or probes_requested or selector_requested:
             reasons.append("wild-linker-v1 cannot be combined with real-source throughput, ast-pilot acceptance, "
                            "the PGO/LTO production profile, compiler-probes-v1 or the frontend-selector probes")
+    link_tls_requested = arguments.mode == "pull" and getattr(arguments, "link_tls_requested", False)
+    problem = getattr(arguments, "link_tls_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if link_tls_requested:
+        receipt["link_tls"] = {"requested": True, "request_line": LINK_TLS_REQUEST_LINE, "profile": LINK_TLS_PROFILE,
+                               "status": "pending"}
+        # One opt-in leg per attempt keeps a report from being shared between two profiles.
+        if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
+                linker_requested:
+            reasons.append("link-tls-v1 cannot be combined with real-source throughput, ast-pilot acceptance, the "
+                           "PGO/LTO production profile, compiler-probes-v1, the frontend-selector probes or wild-linker-v1")
     # #3714: the named historical recipe swaps only the corpus harness; every other opt-in leg would
     # still run the base's own pre-floor harness, so none may join it. Its pinned worktree is prepared
     # before any build.
     historical_root = None
     if receipt.get("throughput_profile") == THROUGHPUT_HISTORICAL_PROFILE:
         others = (real_requested or ast_requested or production_requested or probes_requested or selector_requested
-                  or inline_requested or linker_requested
+                  or inline_requested or linker_requested or link_tls_requested
                   or (arguments.mode == "pull" and scaling_requested(candidate, arguments.base,
                                                                                            arguments.head)))
         if snapshot_closure:
@@ -2219,6 +2283,9 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         if linker_requested:
             mark(receipt, evidence, "wild-linker")
             measure_wild_linker(candidate, work, evidence, arguments.head, receipt)
+        if link_tls_requested:
+            mark(receipt, evidence, "link-tls")
+            measure_link_tls(bins, work, evidence, receipt)
         mark(receipt, evidence, "validate")
         raw_closure = {}
         if snapshot_closure:
@@ -2324,6 +2391,14 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             reasons.append("the wild-linker leg was requested but did not reach its measurement phase")
         if record["status"] != "complete":
             receipt["state"] = "failed"
+    if link_tls_requested:
+        record = receipt["link_tls"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("the link-tls leg was requested but did not reach its measurement phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
 
 
 
@@ -2361,6 +2436,8 @@ def main(argv: list[str] | None = None) -> int:
         frontend_selector_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.wild_linker_requested, arguments.wild_linker_request_problem = (
         wild_linker_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.link_tls_requested, arguments.link_tls_request_problem = (
+        link_tls_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}
     utility = getattr(arguments, "utility_owned_phases", False)
     main_owned = getattr(arguments, "main_owned_phases", False)
