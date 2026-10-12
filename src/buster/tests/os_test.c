@@ -3331,8 +3331,9 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     // A held unread proc descriptor must classify a reaped task as vanished;
     // empty, oversized and invalid-descriptor reads remain ordinary failures.
     BUSTER_TEST(arguments, os_linux_proc_read_self_test());
-    // An unrelated PID disappearing between readdir and stat is ordinary
-    // host churn and cannot invalidate a stable target-group proof.
+    // Unrelated PIDs disappearing between readdir and stat, once or in every
+    // snapshot, are ordinary host churn and cannot invalidate a stable
+    // target-group proof or consume a retry.
     BUSTER_TEST(arguments, os_linux_process_group_churn_self_test(arguments->arena));
 #endif
 
