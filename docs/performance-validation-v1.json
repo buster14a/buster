@@ -2,7 +2,7 @@
   "schema": "buster-performance-validation-v1",
   "rule": "Every performance-validation test requires actual execution of its relevant workload on the approved Zen 5 benchmark host (AMD Ryzen 7 9700X). Without complete evidence matching the candidate, workload and configuration, performance validation is incomplete; hosted, simulated and static evidence is diagnostic.",
   "routes": {
-    "main-compare": "9700x-direct-bench.yml job compare (every commit that lands on main, against its first parent or the nearest measured first-parent ancestor, #2752)",
+    "main-compare": "9700x-direct-bench.yml job compare (every commit that lands on main, against its first parent or the nearest measured first-parent ancestor, #2752; compiler-compare-v1 plus the full throughput-corpus-v2 FAST/QUALITY corpus; the disabled docs/compiler-main-profile-routing-v1.tsv switch may select compiler-main-40pairs-v1 for this authenticated automatic route only after a reviewed #3212 certificate, with rollback to compiler-compare-v1)",
     "pull-compare": "9700x-direct-bench.yml job compare-pull (benchmarks/9700x/compiler-compare.request; compiler-compare-v1, throughput-corpus-v2 (or throughput-corpus-historical-v1 for a pre-floor merge base, #3714), scaling-v1 or exact clang-analyze-full-v1/v2 opt-in, #2769)",
     "direct-workload": "9700x-direct-bench.yml job bench (benchmarks/9700x/*.c and *.data, #2704)",
     "sampling-qualification": "9700x-direct-bench.yml job sampling (disabled staged owner-fresh predeclared acquisition/pilot/confirm route; separate unqualified research check, #3212)"
@@ -142,6 +142,17 @@
       "kind": "lab-mode",
       "validation": "performance",
       "measures": "issue #3397 fixed ast-pilot-acceptance-v1: one candidate-HEAD ide without and with -fc-ast-pilot on the -g0 unity self-host input, -fsyntax-only and -c cells of 20 ABBA pairs each, wall time with 95% CI, available retired instructions, peak RSS, the tree's retained bytes, byte-identical objects and identical diagnostics, and the report-only ast.md stage-1 adoption verdict",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
+      "id": "uarch_lab:compare@constant-reuse-acceptance",
+      "kind": "lab-mode",
+      "validation": "performance",
+      "measures": "issue #3011 fixed constant-reuse-acceptance-v1: one candidate-HEAD ide on the -g0 unity self-host -c compile, A default and B with -fcanonical-intern-constants (intern cell) or -fcanonical-fast-cse (cse cell), 20 ABBA pairs per cell, wall time with 95% CI, available retired instructions, peak RSS, executable-section code bytes and identical diagnostics; report-only",
       "zen5": {
         "route": "pull-compare",
         "status": "covered",

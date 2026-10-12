@@ -6,6 +6,7 @@
 #include <buster/lib/compiler/object/object.h>
 #include <buster/lib/string.h>
 #include <buster/tests/compiler/ir/ir_oracle_internal.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 // ir_oracle_fixture builds canonical rows without the C frontend. The C
 // companion exercises lowering separately. ir_oracle_native_tests is a private
@@ -637,7 +638,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_comparison(UnitTestArguments* argum
             arguments->show(arguments, S8("IR_ORACLE_REPORT_V1 fixture={u32} status=native-unavailable\n"), fixture);
 #endif
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
