@@ -43275,6 +43275,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_lookup_work_growth(UnitTestArgum
     return result;
 }
 
+// The statement walker asks whether an unbound first token names a typedef,
+// which costs a scope lookup. A statement keyword never does, so it is gated
+// out before the lookup (#3102): a body whose statements all begin with a
+// statement keyword or a bound name must make none. A label still makes one,
+// and a typedef-led block declaration at most one, and both bodies lower.
+BUSTER_GLOBAL_LOCAL u64 c_test_statement_keyword_typedef_probe_count(String8 source)
+{
+    u64 probes = UINT64_MAX;
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64), .flags = {.no_pool = true}});
+    if (arena)
+    {
+        CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17,
+        });
+        CParseResult parse = c_parse(arena, preprocess);
+        if (!preprocess.diagnostic_count && !parse.diagnostic_count)
+        {
+            u64 before = c_test_ir_first_token_typedef_probes();
+            CIRLowerResult lowered = c_lower_to_ir(arena, S8("statement-keyword-probes.c"), preprocess, parse, target_native);
+            if (!lowered.diagnostic_count && lowered.canonical_ir_certified)
+            {
+                probes = c_test_ir_first_token_typedef_probes() - before;
+            }
+        }
+        arena_destroy(arena, 1);
+    }
+    return probes;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_keyword_typedef_probes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u64 keywords = c_test_statement_keyword_typedef_probe_count(S8(
+        "int f(int x)\n"
+        "{\n"
+        "    if (x) x += 1; else x -= 1;\n"
+        "    while (x > 9) { x -= 1; if (x == 5) break; continue; }\n"
+        "    for (; x < 3; x += 1) {}\n"
+        "    do x += 1; while (x < 4);\n"
+        "    switch (x) { case 1: x = 2; break; default: break; }\n"
+        "    return x;\n"
+        "}\n"));
+    BUSTER_TEST_RAW(arguments, keywords == 0, string_format(arguments->arena, S8("keyword-led statements made {u64} typedef probes"), keywords));
+    // A label is an unbound name that is not a keyword: it is probed, once.
+    u64 labelled = c_test_statement_keyword_typedef_probe_count(S8(
+        "int h(int x)\n"
+        "{\n"
+        "    if (x) goto done;\n"
+        "    x += 1;\n"
+        "done:\n"
+        "    return x;\n"
+        "}\n"));
+    BUSTER_TEST_RAW(arguments, labelled == 1, string_format(arguments->arena, S8("a labelled body made {u64} typedef probes"), labelled));
+    u64 typedefs = c_test_statement_keyword_typedef_probe_count(S8(
+        "typedef int T;\n"
+        "int g(int x)\n"
+        "{\n"
+        "    if (x) return 1;\n"
+        "    T y = x;\n"
+        "    return y;\n"
+        "}\n"));
+    BUSTER_TEST_RAW(arguments, typedefs != UINT64_MAX && typedefs <= 1,
+                    string_format(arguments->arena, S8("a typedef-led declaration made {u64} typedef probes"), typedefs));
+    return result;
+}
+
 // Braceless nests (#2676): `while (c) while (c) ... x;` has no block for a
 // delimiter table to skip, so each statement's end used to be found by walking
 // the prefix of every statement inside it. The walk's steps must grow with the
@@ -63712,6 +63778,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_negative_array_bounds);
     C_TEST_FIXTURE(arguments, c_test_nested_conditional_conversions);
     C_TEST_FIXTURE(arguments, c_test_label_lookup_work_growth);
+    C_TEST_FIXTURE(arguments, c_test_statement_keyword_typedef_probes);
     C_TEST_FIXTURE(arguments, c_test_nested_control_work_growth);
     C_TEST_FIXTURE(arguments, c_test_nested_tag_scan_growth);
     C_TEST_FIXTURE(arguments, c_test_nested_vector_lane_stores);

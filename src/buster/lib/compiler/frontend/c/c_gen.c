@@ -47638,6 +47638,28 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_finish_vla_declaration(CIntegerIrBuilder*
      C_SYMBOL_WELL_KNOWN_BIT(DEFAULT) | C_SYMBOL_WELL_KNOWN_BIT(DO) | C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(GOTO) |       \
      C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) |    \
      C_SYMBOL_WELL_KNOWN_BIT(STATIC_ASSERT) | C_IR_ASM_KEYWORD_SET)
+#if BUSTER_INCLUDE_TESTS
+// Typedef probes the statement walker has made of first tokens on this
+// thread, for the regression c_test_statement_keyword_typedef_probes.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_ir_first_token_typedef_probe_total;
+
+u64 c_test_ir_first_token_typedef_probes(void)
+{
+    return c_ir_first_token_typedef_probe_total;
+}
+#define C_IR_FIRST_TOKEN_TYPEDEF_PROBE() (c_ir_first_token_typedef_probe_total += 1)
+#else
+#define C_IR_FIRST_TOKEN_TYPEDEF_PROBE() ((void)0)
+#endif
+
+// The statement keywords that are keywords in every dialect: never a type
+// word and never an entity's name, so the typedef probe below always answers
+// false for them. `asm` and `static_assert` are left out, because some
+// dialects spell ordinary identifiers that way.
+#define C_IR_STATEMENT_ONLY_KEYWORD_SET                                                                                                    \
+    (C_SYMBOL_WELL_KNOWN_BIT(BREAK) | C_SYMBOL_WELL_KNOWN_BIT(CASE) | C_SYMBOL_WELL_KNOWN_BIT(CONTINUE) |                                  \
+     C_SYMBOL_WELL_KNOWN_BIT(DEFAULT) | C_SYMBOL_WELL_KNOWN_BIT(DO) | C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(GOTO) |       \
+     C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH) | C_SYMBOL_WELL_KNOWN_BIT(WHILE))
 
 BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
 {
@@ -48175,16 +48197,32 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 first_entity.value < builder->parse.entity_count && builder->parse.entities[first_entity.value].kind == C_ENTITY_TYPEDEF;
             // An unbound prefix reads the token's own lexical scope, but a
             // declarator is not visible before itself: `for (T T = 0; ...)`
-            // still starts with the outer typedef name.
+            // still starts with the outer typedef name. A statement keyword
+            // is never a typedef name, so it skips the lookup; on the
+            // self-host they are four in five of the unbound first tokens
+            // (GitHub #3102).
             bool first_is_unbound_typedef_name = false;
-            if (first.kind == C_TOKEN_IDENTIFIER && first_entity.value == C_ID_UNDERLYING_INVALID)
+            bool first_is_statement_keyword = first.kind == C_TOKEN_IDENTIFIER &&
+                                              c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_STATEMENT_ONLY_KEYWORD_SET);
+            if (first.kind == C_TOKEN_IDENTIFIER && first_entity.value == C_ID_UNDERLYING_INVALID && !first_is_statement_keyword)
             {
+                C_IR_FIRST_TOKEN_TYPEDEF_PROBE();
                 CScopeId token_scope = c_ir_scope_for_token(builder, index);
                 CEntityId visible = c_parse_lookup_entity_at_token(&builder->parse, builder->preprocess, token_scope, index);
                 first_is_unbound_typedef_name = visible.value < builder->parse.entity_count
                                                     ? builder->parse.entities[visible.value].kind == C_ENTITY_TYPEDEF
                                                     : c_parse_type_start_token(&builder->parse, builder->preprocess, C_SCOPE_ID_INVALID, first);
             }
+#if BUSTER_REFERENCE_CHECKS
+            // The lookup the gate skips, kept as the reference: a Debug or
+            // sanitized build checks that it answers false for every gated keyword.
+            if (first_is_statement_keyword && first_entity.value == C_ID_UNDERLYING_INVALID)
+            {
+                CEntityId visible = c_parse_lookup_entity_at_token(&builder->parse, builder->preprocess, c_ir_scope_for_token(builder, index), index);
+                BUSTER_CHECK(visible.value >= builder->parse.entity_count &&
+                             !c_parse_type_start_token(&builder->parse, builder->preprocess, C_SCOPE_ID_INVALID, first));
+            }
+#endif
             if (c_ir_named_label_at(&builder->preprocess, task.start, index, task.end) &&
                 c_parse_label_candidate_at(&builder->parse, &builder->preprocess, task.start, index))
             {

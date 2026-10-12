@@ -92,6 +92,9 @@ typedef enum CTestIrExtentMutation
 BUSTER_F_DECL void c_test_ir_extent_mutation_set(CTestIrExtentMutation mutation);
 // Rows and slots c_ir_label_find has visited since process start.
 BUSTER_F_DECL u64 c_test_ir_label_find_probes(void);
+// Typedef lookups c_ir_lower_body_advance has made for statements' first
+// tokens on this thread.
+BUSTER_F_DECL u64 c_test_ir_first_token_typedef_probes(void);
 BUSTER_F_DECL bool c_test_ir_scratch_reservation_size(u64 required_size, u64 current_size, u64* size_out);
 BUSTER_F_DECL bool c_test_ir_function_scratch_size(u32 body_capacity, u32 lowering_capacity, bool direct_ssa, u64* size_out);
 BUSTER_F_DECL bool c_test_ir_arena_reservation_advance(u64 reserved_size, u64* position, u64 element_size, u64 count, u64 alignment);
