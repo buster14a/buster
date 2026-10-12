@@ -112,8 +112,10 @@ Whole-project execution follows the [main-only shared OS owner](../../external-p
 The obsolete branch-push/manual project workflow is removed. OpenSSL has no
 qualified shared input recipe yet; this PR does not schedule upstream builds or
 tests in PR/merge-group CI. The existing hosted TCC proof job runs only the
-isolated native `--self-test` source/routing/archive fixtures, with no upstream
-checkout or project compilation. Keep this intake draft until the driver owner
+isolated native `test_openssl_controls` source/routing/archive fixtures, with no upstream
+checkout or project compilation. This separate zero-argument command cannot
+route to an upstream cell; extra arguments fail before any controls run.
+Keep this intake draft until the driver owner
 lands, the portable reference timeout is diagnosed and the applicable acceptance
 evidence is complete. Correctness development stays hosted; diagnostic elapsed
 times cannot satisfy the approved exact-candidate 9700X performance requirement.
