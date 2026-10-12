@@ -184,10 +184,145 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_unit_number_boundary_tests(UnitTestA
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_unit_x86_relaxation_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    AssemblyEncodeOptions options = {.target = target};
+    struct
+    {
+        String8 source;
+        u8 bytes[16];
+        u32 length;
+    } const cases[] = {
+        {S8_INITIALIZER("jmp .L1\nret\n.L1:\nret\njmp .L1\n"), {0xeb, 1, 0xc3, 0xc3, 0xeb, 0xfd}, 6},
+        {S8_INITIALIZER("jmp .L1\n.set .L1, . - 1\n"), {0xeb, 0xff}, 2},
+        {S8_INITIALIZER(".set .Lalias, .Lend\njmp .Lalias\n.Lend: ret\n"), {0xeb, 0, 0xc3}, 3},
+        {S8_INITIALIZER("1: jmp 2f\nret\n2: jne 1b\n"), {0xeb, 1, 0xc3, 0x75, 0xfb}, 5},
+        {S8_INITIALIZER("jmp .+2\njmp .\n"), {0xeb, 0, 0xeb, 0xfe}, 4},
+        {S8_INITIALIZER("jmp .Lend\n.long .Lend - .\n.Lend: ret\n"), {0xeb, 4, 4, 0, 0, 0, 0xc3}, 7},
+        {S8_INITIALIZER("jmp .Lend\ncall .Lend\n.Lend: ret\n"), {0xeb, 5, 0xe8, 0, 0, 0, 0, 0xc3}, 8},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        TemporalArena scope = arena_begin_temporal(arguments->arena);
+        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, cases[index].source, options);
+        if (BUSTER_REQUIRE(arguments, !unit.diagnostic_count && unit.section_count == 1))
+        {
+            BUSTER_TEST(arguments, unit.relocation_count == 0);
+            BUSTER_TEST(arguments, unit.sections[0].data.length == cases[index].length &&
+                                       memcmp(unit.sections[0].data.pointer, cases[index].bytes, cases[index].length) == 0);
+        }
+        scratch_end(scope);
+    }
+    // Both signed rel8 endpoints and the first byte beyond each endpoint.
+    // Forward bounds use JMP and Jcc; backward bounds also account for the
+    // larger near encoding when a short candidate must grow.
+    for (u32 conditional = 0; conditional < 2; conditional += 1)
+    {
+        for (u32 backward = 0; backward < 2; backward += 1)
+        {
+            for (u32 outside = 0; outside < 2; outside += 1)
+            {
+                TemporalArena scope = arena_begin_temporal(arguments->arena);
+                String8 mnemonic = conditional ? S8("jne") : S8("jmp");
+                u32 gap = (backward ? 126 : 127) + outside;
+                String8 source = backward
+                    ? string_format(arguments->arena, S8(".Lstart:\n.zero {u32}\n{S8} .Lstart\n"), gap, mnemonic)
+                    : string_format(arguments->arena, S8("{S8} .Lend\n.zero {u32}\n.Lend: ret\n"), mnemonic, gap);
+                AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, options);
+                u32 width = outside ? (conditional ? 6 : 5) : 2;
+                u32 offset = backward ? gap : 0;
+                if (BUSTER_REQUIRE(arguments, !unit.diagnostic_count && unit.section_count == 1))
+                {
+                    ByteSlice data = unit.sections[0].data;
+                    if (BUSTER_REQUIRE(arguments, data.length == gap + width + !backward))
+                    {
+                        BUSTER_TEST(arguments, data.pointer[offset] == (outside ? (conditional ? 0x0f : 0xe9) : (conditional ? 0x75 : 0xeb)));
+                        s32 displacement;
+                        if (outside)
+                        {
+                            memcpy(&displacement, data.pointer + offset + (conditional ? 2 : 1), sizeof(displacement));
+                        }
+                        else
+                        {
+                            displacement = (s8)data.pointer[offset + 1];
+                        }
+                        BUSTER_TEST(arguments, displacement == (backward ? -(s32)(gap + width) : (s32)gap));
+                    }
+                    BUSTER_TEST(arguments, unit.relocation_count == 0);
+                }
+                scratch_end(scope);
+            }
+        }
+    }
+    // A far JMP grows first, moving a backward Jcc past -128 on the next
+    // layout. The alignment case separately recomputes a fill gap.
+    String8 const layouts[] = {
+        S8_INITIALIZER(".Lstart: jmp .Lfar\n.zero 124\njne .Lstart\n.zero 128\n.Lfar: ret\n"),
+        S8_INITIALIZER("jmp .Lend\n.balign 16, 0x90\n.Lend: ret\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(layouts); index += 1)
+    {
+        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, layouts[index], options);
+        if (BUSTER_REQUIRE(arguments, !unit.diagnostic_count && unit.section_count == 1))
+        {
+            ByteSlice data = unit.sections[0].data;
+            if (BUSTER_REQUIRE(arguments, data.length == (index ? 17 : 264)))
+            {
+                if (index)
+                {
+                    BUSTER_TEST(arguments, data.pointer[0] == 0xeb && data.pointer[1] == 14 && data.pointer[16] == 0xc3);
+                    for (u32 byte = 2; byte < 16; byte += 1)
+                    {
+                        BUSTER_TEST(arguments, data.pointer[byte] == 0x90);
+                    }
+                }
+                else
+                {
+                    s32 forward;
+                    s32 backward;
+                    memcpy(&forward, data.pointer + 1, sizeof(forward));
+                    memcpy(&backward, data.pointer + 131, sizeof(backward));
+                    BUSTER_TEST(arguments, data.pointer[0] == 0xe9 && forward == 258);
+                    BUSTER_TEST(arguments, data.pointer[129] == 0x0f && data.pointer[130] == 0x85 && backward == -135);
+                }
+            }
+        }
+    }
+    // Target binding is decided after parsing, including late attributes.
+    String8 const bindings[] = {
+        S8_INITIALIZER("jmp f\nf: ret\n.globl f\n"),
+        S8_INITIALIZER("jmp f\nf: ret\n.weak f\n.hidden f\n"),
+        S8_INITIALIZER("jmp f\nf: ret\n.globl f\n.hidden f\n"),
+        S8_INITIALIZER("jmp external\n"),
+        S8_INITIALIZER("jmp f@PLT\nf: ret\n"),
+        S8_INITIALIZER("jmp f\n.data\nf: .byte 0\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(bindings); index += 1)
+    {
+        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, bindings[index], options);
+        if (BUSTER_REQUIRE(arguments, !unit.diagnostic_count && unit.section_count))
+        {
+            bool short_jump = index == 2;
+            BUSTER_TEST(arguments, unit.sections[0].data.pointer[0] == (short_jump ? 0xeb : 0xe9));
+            bool retained = index == 0 || index == 1 || index == 3 || index == 5;
+            BUSTER_TEST(arguments, unit.relocation_count == (u32)retained);
+            if (BUSTER_REQUIRE(arguments, !retained || unit.relocation_count == 1))
+            {
+                BUSTER_TEST(arguments, !retained || unit.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32);
+            }
+        }
+    }
+    return result;
+}
+
 UnitTestResult executable_padding_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, assembly_unit_number_boundary_tests);
+    BUSTER_TEST_FIXTURE(arguments, assembly_unit_x86_relaxation_tests);
     // Independently assembled by GNU as (x86) and LLVM (both targets).
     static u8 const aarch64_nop[] = {0x1f, 0x20, 0x03, 0xd5};
     u8 actual[384];
