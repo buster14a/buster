@@ -300,13 +300,14 @@ jobs:
         run: |
           set -euo pipefail
           # The native assembler path supports production SIMD and avoids intentionally unsupported LLVM SIMD records.
-          # Arms: tiny off, tiny on at the default budgets (whose module row budget
-          # is relative to module size, #48), and tiny on with an explicit lifted
-          # module row cap, which may only match or improve on the default.
+          # Arms: tiny off, tiny on at the default budgets (a module row budget
+          # relative to module size and a per-caller relocation bound, #48), and
+          # tiny on with the module cap and caller bound lifted, which shows every
+          # sampled site is selectable and may only match or improve on the default.
           for mode in off on lifted; do
             selection=(-fno-canonical-inline)
             if [[ "$mode" == on ]]; then selection=(-fcanonical-inline); fi
-            if [[ "$mode" == lifted ]]; then selection=(-fcanonical-inline -fcanonical-inline-module-growth=1048576); fi
+            if [[ "$mode" == lifted ]]; then selection=(-fcanonical-inline -fcanonical-inline-module-growth=1048576 -fcanonical-inline-caller-growth-shift=32); fi
             ./build/Release/ide cc -v -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -O3 "${selection[@]}" -S src/buster/apps/ide/ide.c -o "direct-ssa-census-evidence/tiny-$mode.s" > "direct-ssa-census-evidence/tiny-$mode.stdout.log" 2> "direct-ssa-census-evidence/tiny-$mode.stderr.log"
           done
           records='['
@@ -320,9 +321,9 @@ jobs:
               definitions[$mode]=$(grep -Ec "$definition_pattern" "direct-ssa-census-evidence/tiny-$mode.s" || true)
               if (( definitions[$mode] != 1 )); then proof_ok=0; fi
             done
-            # Every sampled helper is called without tiny inlining and fully inlined
-            # at the default budgets and with the module row cap lifted.
-            if (( calls[off] == 0 || calls[on] != 0 || calls[lifted] != 0 )); then proof_ok=0; fi
+            # Every sampled helper is called without tiny inlining, never gains calls
+            # at the default budgets, and is fully inlined with the budgets lifted.
+            if (( calls[off] == 0 || calls[on] > calls[off] || calls[lifted] != 0 )); then proof_ok=0; fi
             record=$(printf '{"helper":"%s","calls":{"off":%s,"on":%s,"lifted":%s},"definitions":{"off":%s,"on":%s,"lifted":%s}}' "$helper" "${calls[off]}" "${calls[on]}" "${calls[lifted]}" "${definitions[off]}" "${definitions[on]}" "${definitions[lifted]}")
             if [[ "$records" != "[" ]]; then records+=','; fi
             records+="$record"
@@ -350,7 +351,7 @@ jobs:
           REFERENCE_RESULT: ${{ steps.reference.outcome }}
         run: |
           printf '## Direct-SSA diagnostic census\n\nRegistered tests: **%s**. Direct SSA: **%s**. Shared local promotion: **%s**.\n\nArtifacts retain source metrics, raw allocation reports, compiler/input identities and failures. This instrumented job is not a timing comparison, a sanitizer or self-host gate, or dedicated Ryzen 9700X performance acceptance for #447.\n' "$TEST_RESULT" "$DIRECT_RESULT" "$REFERENCE_RESULT" >> "$GITHUB_STEP_SUMMARY"
-          printf '\nProduction tiny-helper proof: **%s**. At -O3 on the same production source, total calls fall at default budgets, every sampled helper call is removed at default budgets and with the module row cap lifted, and lifting the cap adds no calls; sampled helper definitions are retained in every arm.\n' "$TINY_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          printf '\nProduction tiny-helper proof: **%s**. At -O3 on the same production source, total calls fall at default budgets, no sampled helper gains calls, every sampled helper call is removed with the module cap and caller bound lifted, and lifting them adds no calls; sampled helper definitions are retained in every arm.\n' "$TINY_RESULT" >> "$GITHUB_STEP_SUMMARY"
           grep '^IR_INLINE ' direct-ssa-census-evidence/tiny-*.stdout.log || true
           if [[ "$DIRECT_RESULT" != success || "$REFERENCE_RESULT" != success || "$TINY_RESULT" == failure ]]; then
             grep -nE -m 20 'error|ir.inline-required|validation' direct-ssa-census-evidence/*.stderr.log || true

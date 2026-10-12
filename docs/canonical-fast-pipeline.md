@@ -251,8 +251,9 @@ unity self-host source with `-fcanonical-inline`, shifts 2 through 6 kept 801,
 self-host instructions under cachegrind fell 0.47%, 1.00% and 1.32% at shifts 3,
 4 and 5 (unbounded: 1.31%), so 5 keeps the measured benefit at about half the
 memory. Diagnostic only; 9700X qualification is separate. Mandatory sites are never
-dropped. Embedders override the shift with `IrInlineOptions.caller_growth_shift`
-(zero selects the default, 32 or more keeps every planned site).
+dropped. `-fcanonical-inline-caller-growth-shift=N` and
+`IrInlineOptions.caller_growth_shift` override the shift (a zero API field
+selects the default, 32 or more keeps every planned site).
 The caller default is twice the 64-site times 16-row tiny-body budget. This leaves
 headroom for larger mandatory checked-arithmetic expansions; the module, work
 and storage guards still independently bound expansion.

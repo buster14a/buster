@@ -575,11 +575,13 @@ inlining is disabled; an impossible requirement produces a source-mapped
 `ir.inline-required` error. Positive 32-bit per-invocation limits are set with
 `-fcanonical-inline-max-callee=N`,
 `-fcanonical-inline-function-growth=N`,
-`-fcanonical-inline-module-growth=N`, and
-`-fcanonical-inline-call-sites=N`. These flags set budgets but do not enable
+`-fcanonical-inline-module-growth=N`,
+`-fcanonical-inline-call-sites=N`, and
+`-fcanonical-inline-caller-growth-shift=N`. These flags set budgets but do not enable
 tiny inlining; zero is rejected and zero-valued API options normalize to the
 named defaults. Budgets cap callee instruction count, added instructions per
-caller, added instructions per module, and accepted call sites, respectively.
+caller, added instructions per module, and accepted call sites, respectively;
+the shift sets the caller relocation bound described below.
 Without an explicit module limit, the module budget is relative: the larger of
 4096 rows and 1/32 of the module's lowered canonical instruction rows
 (`ir_inline_module_growth_limit`). A caller keeps optional splices only when
