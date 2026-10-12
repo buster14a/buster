@@ -91,8 +91,11 @@ class SchedulerTests(unittest.TestCase):
             def test_launch(self):
                 scheduler.bootstrap.WrapperProcess(self, [sys.executable, "-c", "import time; time.sleep(60)"],
                                                    Path.cwd(), os.environ.copy())
-                scheduler.bootstrap.WrapperProcess(self, ["buster-missing-executable-2034"],
-                                                   Path.cwd(), os.environ.copy())
+                missing = scheduler.bootstrap.WrapperProcess(self, ["buster-missing-executable-2034"],
+                                                             Path.cwd(), os.environ.copy())
+                # Observe launch failure before cleanup can cancel the native
+                # broker during startup without attempting the missing payload.
+                missing.finish()
 
         summary, output = self.run_control([Control("test_launch")])
         self.assertFalse(summary["success"])
