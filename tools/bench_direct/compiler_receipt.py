@@ -3713,6 +3713,14 @@ def preparation_selection_problems(receipt: dict) -> list[str]:
             not isinstance(fallback["reason"], str) or not fallback["reason"] or \
             not is_number(fallback["closure_rebuild_seconds"]) or fallback["closure_rebuild_seconds"] < 0:
         problems.append("preparation fallback must be a default snapshot-v1 to legacy-rebuild record with reason and cost")
+    else:
+        # The cost is the recorded third build, or the producer's zero when that build never ran.
+        timings = receipt.get("timings") if isinstance(receipt.get("timings"), dict) else {}
+        builds = timings.get("build_seconds") if isinstance(timings.get("build_seconds"), dict) else {}
+        recorded = builds.get("closure", 0.0)
+        if not is_number(recorded) or not math.isfinite(recorded) or recorded < 0 or \
+                not math.isfinite(fallback["closure_rebuild_seconds"]) or fallback["closure_rebuild_seconds"] != recorded:
+            problems.append("preparation fallback cost differs from the recorded closure rebuild")
     return problems
 
 

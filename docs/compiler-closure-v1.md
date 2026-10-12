@@ -168,7 +168,8 @@ Each new receipt carries `preparation`:
 ```
 
 `closure_rebuild_seconds` is the actual third-build time the fallback spent
-(0 when it never ran). `preparation_selection_problems` refuses malformed
+(0 when it never ran); the reader requires it to equal the receipt's recorded
+`timings.build_seconds.closure`. `preparation_selection_problems` refuses malformed
 records, and it refuses any record whose policy differs from the declared
 `preparation_policy` or the replayed closure. It also refuses a default that
 is not the route's, and a fallback that is not default `snapshot-v1` to

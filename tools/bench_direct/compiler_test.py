@@ -2915,11 +2915,20 @@ class HarnessTest(unittest.TestCase):
         self.assertIn("legacy-rebuild fallback from the default snapshot-v1",
                       compiler_receipt.render(result, summary, result["state"], []))
         # A fallback that hides its cost or reason, or claims a different policy, is not publishable.
-        for forged in ({"closure_rebuild_seconds": None}, {"reason": ""}, {"to": "snapshot-v1"}):
+        recorded = result["timings"]["build_seconds"]["closure"]
+        for forged in ({"closure_rebuild_seconds": None}, {"reason": ""}, {"to": "snapshot-v1"},
+                       {"closure_rebuild_seconds": 0.0}, {"closure_rebuild_seconds": recorded + 1.0},
+                       {"closure_rebuild_seconds": float("inf")}):
             changed = copy.deepcopy(result)
             changed["preparation"]["fallback"].update(forged)
             self.assertEqual(compiler_publish.decide(dict(result["identity"]), True, "success", changed, summary, "",
                                                      retained(evidence))[0], "failure", forged)
+        # Only the fallback cost differs: the recorded third build stays bound to the reported cost.
+        self.assertGreater(recorded, 0)
+        unbound = copy.deepcopy(result)
+        unbound["timings"]["build_seconds"]["closure"] = recorded + 2.0
+        self.assertEqual(compiler_publish.decide(dict(result["identity"]), True, "success", unbound, summary, "",
+                                                 retained(evidence))[0], "failure")
         silent = copy.deepcopy(result)
         silent["preparation"]["fallback"] = None
         self.assertEqual(compiler_publish.decide(dict(result["identity"]), True, "success", silent, summary, "",
