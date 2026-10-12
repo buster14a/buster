@@ -3064,6 +3064,154 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_section_stack(UnitTestArgu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_alignment_max_skip(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+    };
+    u8 aarch64_nop[] = {0x1f, 0x20, 0x03, 0xd5};
+    u32 limits[] = {0, 1, 7, 10, 14, 15, 16, UINT32_MAX};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        String8 directives[] = {S8(".p2align 4"), S8(".balign 16"), target ? S8(".align 16") : S8(".align 4")};
+        for (u32 directive = 0; directive < BUSTER_ARRAY_LENGTH(directives); directive += 1)
+        {
+            for (u32 prefix = 1; prefix <= 16; prefix += 1)
+            {
+                for (u32 limit = 0; limit < BUSTER_ARRAY_LENGTH(limits); limit += 1)
+                {
+                    for (u32 policy = 0; policy < 3; policy += 1)
+                    {
+                        bool text = policy != 2;
+                        bool explicit_fill = policy == 1;
+                        String8 source = string_format(arguments->arena,
+                            S8("{S8}\n.zero {u32}\n{S8},{S8},{u32}\n.byte 85\n"),
+                            text ? S8(".text") : S8(".data"), prefix, directives[directive],
+                            explicit_fill ? S8("165") : S8(""), limits[limit]);
+                        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = targets[target]});
+                        BUSTER_TEST(arguments, !unit.diagnostic_count && unit.section_count == 1);
+                        if (!unit.diagnostic_count && unit.section_count == 1)
+                        {
+                            u32 padding = (16 - prefix) & 15;
+                            if (limits[limit] && padding > limits[limit]) padding = 0;
+                            ByteSlice bytes = unit.sections[0].data;
+                            BUSTER_TEST(arguments, bytes.length == prefix + padding + 1 && unit.sections[0].alignment == 16);
+                            if (bytes.length == prefix + padding + 1)
+                            {
+                                bool correct = bytes.pointer[prefix + padding] == 85;
+                                for (u32 offset = 0; offset < prefix + padding; offset += 1)
+                                {
+                                    u8 expected = 0;
+                                    if (offset >= prefix)
+                                    {
+                                        expected = explicit_fill ? 165 : (!text ? 0 : (target ? 0x90 :
+                                            (offset < ((prefix + 3) & ~3u) ? 0 : aarch64_nop[offset & 3])));
+                                    }
+                                    correct = correct && bytes.pointer[offset] == expected;
+                                }
+                                BUSTER_TEST(arguments, correct);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        String8 rejected[] = {
+            S8(".p2align 4,,-1"), S8(".p2align 4,,4294967296"), S8(".p2align 4,,missing"),
+            S8(".p2align 4,,1+"), S8(".p2align 4,,"), S8(".p2align 4,256,10"),
+            S8(".p2align 4,-1,10"), S8(".p2align 4,missing,10"), S8(".p2align 4,,10,1"),
+            S8(".p2align ,0,10"), S8(".p2align 21,,10"),
+        };
+        for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rejected); row += 1)
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, rejected[row], (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST(arguments, unit.diagnostic_count != 0);
+        }
+        for (u32 limit = 14; limit <= 15; limit += 1)
+        {
+            String8 source = string_format(arguments->arena, S8(".bss\n.zero 1\n.p2align 4,,{u32}\n.zero 1\n"), limit);
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST(arguments, !unit.diagnostic_count && unit.section_count == 1 &&
+                unit.sections[0].zero_size == (limit == 14 ? 2 : 17) && !unit.sections[0].data.length && unit.sections[0].alignment == 16);
+        }
+        AssemblyUnitResult expression = assembly_unit_encode(arguments->arena,
+            S8(".data\n.byte 85\n.balign 16+0, 0xa0+5, 14+1\n.byte 102\n"), (AssemblyEncodeOptions){.target = targets[target]});
+        u8 expected[] = {85, 165, 165, 165, 165, 165, 165, 165, 165, 165, 165, 165, 165, 165, 165, 165, 102};
+        BUSTER_TEST(arguments, !expression.diagnostic_count && expression.section_count == 1 &&
+            assembly_test_bytes_equal(expression.sections[0].data, expected, BUSTER_ARRAY_LENGTH(expected)));
+    }
+    // Growing the jump from two to five bytes changes padding from suppressed
+    // (14 > 12) to admitted (11 <= 12); replay must recompute the limit.
+    AssemblyUnitResult relaxed = assembly_unit_encode(arguments->arena,
+        S8(".text\njmp .Lend\n.p2align 4,165,12\n.zero 128\n.Lend: ret\n"), (AssemblyEncodeOptions){.target = targets[1]});
+    BUSTER_TEST(arguments, !relaxed.diagnostic_count && relaxed.section_count == 1);
+    if (!relaxed.diagnostic_count && relaxed.section_count == 1)
+    {
+        ByteSlice bytes = relaxed.sections[0].data;
+        u8 jump[] = {0xe9, 0x8b, 0, 0, 0};
+        BUSTER_TEST(arguments, bytes.length == 145 && bytes.pointer[144] == 0xc3);
+        if (bytes.length == 145)
+        {
+            BUSTER_TEST(arguments, memcmp(bytes.pointer, jump, sizeof(jump)) == 0);
+            for (u32 offset = 5; offset < 144; offset += 1)
+            {
+                BUSTER_TEST(arguments, bytes.pointer[offset] == (offset < 16 ? 165 : 0));
+            }
+        }
+    }
+    return result;
+}
+
+// Pristine GCC 16.2.1 -O2 -S output, including its omitted-fill max skip.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_gcc_alignment_listing(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Keep the exact fixture text in the portable test: mobile runners have
+    // no repository filesystem. Provenance lives beside gcc_alignment_spin.s.
+    String8 source = S8(
+        "\t.file\t\"spin.c\"\n"
+        "\t.text\n"
+        "\t.p2align 4\n"
+        "\t.globl\tspin\n"
+        "\t.type\tspin, @function\n"
+        "spin:\n"
+        ".LFB0:\n"
+        "\t.cfi_startproc\n"
+        "\tjmp\t.L8\n"
+        "\t.p2align 4\n"
+        "\t.p2align 4,,10\n"
+        "\t.p2align 3\n"
+        ".L3:\n"
+        "\tmovl\t(%rdi), %eax\n"
+        "\tmovl\t%eax, (%rdi)\n"
+        ".L8:\n"
+        "\tmovl\t(%rdi), %eax\n"
+        "\ttestl\t%eax, %eax\n"
+        "\tjne\t.L3\n"
+        "\tret\n"
+        "\t.cfi_endproc\n"
+        ".LFE0:\n"
+        "\t.size\tspin, .-spin\n"
+        "\t.ident\t\"GCC: (GNU) 16.2.1 20260810\"\n"
+        "\t.section\t.note.GNU-stack,\"\",@progbits\n");
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = target});
+    BUSTER_TEST(arguments, !unit.diagnostic_count && unit.section_count >= 1);
+    if (!unit.diagnostic_count && unit.section_count >= 1)
+    {
+        // GNU as 2.47 puts the store-loop body at 16 and the test at 20. Buster preserves
+        // its single-byte NOP fill rather than GNU's multibyte NOP spelling.
+        u8 expected[] = {0xeb, 0x12, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+                         0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+                         0x8b, 0x07, 0x89, 0x07, 0x8b, 0x07, 0x85, 0xc0, 0x75, 0xf6, 0xc3};
+        BUSTER_TEST(arguments, assembly_test_bytes_equal(unit.sections[0].data, expected, BUSTER_ARRAY_LENGTH(expected)) &&
+                               unit.sections[0].alignment == 16 && unit.relocation_count == 0);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_alignment(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5791,6 +5939,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_x86_common_source_forms(UnitTes
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_alignment_max_skip);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_gcc_alignment_listing);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_stack_note);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_data_widths);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_quoted_instruction_symbols);

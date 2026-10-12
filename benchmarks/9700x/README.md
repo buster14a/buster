@@ -208,8 +208,11 @@ and these jobs follow `authorize`:
   the same two binaries (#2761, #3053). Historical four-mode v1 receipts keep
   their original identity. A merge base without the FAST/QUALITY retirement
   (`compiler_receipt.THROUGHPUT_HARNESS_FLOOR`) has a four-mode `--mode all`
-  harness that cannot produce the v2 population, so it is rejected as an
-  unsupported historical harness before any build or lab (#3714). A head
+  harness that cannot produce the v2 population. Hosted `authorize` finds such
+  a base from GitHub's records (`harness_admission=unsupported`), so no 9700X
+  job is dispatched and `publish-pull` posts an explicit "Not benchmarked:
+  unsupported historical harness" check; the host re-derives the same
+  disposition before any build (#3714). A head
   that moved before measurement is recorded as superseded.
 - `start-pull` (hosted) creates or adopts the exact attempt's queued
   `9700X compiler benchmark (pull request)` check after authorization, then
@@ -258,6 +261,19 @@ checked against pinned hashes before timing. The leg is report-only. Its
 evidence is under `throughput_real_source/` in the artifact, and a missing,
 partial, failed or cancelled leg fails the check. Its method is in
 [benchmarking.md](../../docs/agents/benchmarking.md).
+
+A fresh exact `profile: throughput-corpus-historical-v1` line, added once
+against every parent, selects the named historical corpus recipe (#3714). It
+is admitted only for a merge base that predates the FAST/QUALITY harness floor
+and refused for any other base. The corpus then runs from `tools/throughput`
+at the pinned main revision `afe67cbe`, built and run by that revision's own
+`./build.sh bench_throughput` in a detached worktree, with the
+`throughput-corpus-v2` arguments and FAST/QUALITY population on the same two
+binaries. The receipt names `throughput-corpus-historical-v1` and the pinned
+revision it observed; the publisher accepts that profile only when hosted
+authorization admitted it, and it never discharges the v2 corpus row. It
+cannot be combined with another opt-in leg, since those would still run the
+base's own harness.
 
 A fresh exact `profile: production-profile-v1` line, added once against every
 parent, adds the PGO/LTO production-profile leg (#2761) after the corpus leg.
