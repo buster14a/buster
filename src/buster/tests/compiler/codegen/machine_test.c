@@ -4966,24 +4966,40 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_switch_cfg(UnitTestArgum
 
 // A value live in RDX across an x86-64 division, which clobbers RDX, moves
 // to a free register instead of being stored before the division and
-// reloaded after it (#3783). The third System V argument arrives in RDX and
-// is read only after the quotient, while RSI, RDI and R8-R11 stay free.
-// Both allocators consume the same clobber eviction; native hosts also run
-// the generated code.
+// reloaded after it (#3783). In divide_live the third System V argument
+// arrives in RDX and is read only after the quotient, while RSI, RDI and
+// R8-R11 stay free. In divide_pressure five loaded values stay live across
+// both divisions and every caller-saved register is held, but the address
+// temporaries behind the loads are dead, so their registers take the moved
+// values instead. Both allocators consume the same clobber eviction; native
+// hosts also run the generated code.
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_division_clobber_vacate(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    String8 names[] = {S8("divide_live"), S8("divide_pressure")};
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     IrProgram* program = machine_test_compile_c(temporary.arena, S8("division-clobber.c"),
-        S8("typedef unsigned long u64; u64 divide_live(u64 a, u64 d, u64 c) { u64 q = a / d; return q + c * 3; }"), target);
+        S8("typedef unsigned long u64;\n"
+           "u64 divide_live(u64 a, u64 d, u64 c) { u64 q = a / d; return q + c * 3; }\n"
+           "u64 divide_pressure(u64 const* p, u64 d)\n"
+           "{\n"
+           "    u64 a = p[0]; u64 b = p[1]; u64 c = p[2]; u64 e = p[3]; u64 g = p[4];\n"
+           "    u64 q = a / d; u64 r = b % d;\n"
+           "    return q * 3 + r * 5 + a + b * 7 + c * 11 + e * 13 + g * 17;\n"
+           "}\n"),
+        target);
     if (BUSTER_REQUIRE(arguments, program && program->module_count == 1))
     {
         IrModule* module = program->modules;
-        IrFunction* function = machine_test_ir_function_find(module, S8("divide_live"));
-        MachineSelectResult selected = function ? machine_select_canonical_function(temporary.arena, program, function, target) : (MachineSelectResult){0};
-        if (BUSTER_REQUIRE(arguments, function && selected.supported))
+        for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
         {
+            IrFunction* function = machine_test_ir_function_find(module, names[name_index]);
+            MachineSelectResult selected = function ? machine_select_canonical_function(temporary.arena, program, function, target) : (MachineSelectResult){0};
+            if (!BUSTER_REQUIRE(arguments, function && selected.supported))
+            {
+                continue;
+            }
             for (u32 mode = 0; mode < 2; mode += 1)
             {
                 MachineStackPlacement placement = mode == 0 ? machine_fast_placement_build(temporary.arena, &selected.function)
@@ -4994,7 +5010,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_division_clobber_vacate(Unit
                 u32 division_moves = 0;
                 for (u32 instruction_index = 0; instruction_index < selected.function.instruction_count; instruction_index += 1)
                 {
-                    if (selected.function.instructions[instruction_index].opcode == MACHINE_X64_UDIV64)
+                    u16 opcode = selected.function.instructions[instruction_index].opcode;
+                    if (opcode == MACHINE_X64_UDIV64 || opcode == MACHINE_X64_UREM64)
                     {
                         divisions += 1;
                         MachinePoint before = machine_point_make(instruction_index, MACHINE_POINT_BEFORE);
@@ -5006,10 +5023,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_division_clobber_vacate(Unit
                         }
                     }
                 }
-                BUSTER_TEST_RAW(arguments, divisions == 1 && division_spills == 0 && division_moves == 1,
-                                string_format(temporary.arena, S8("mode {u32} divisions {u32} spills {u32} moves {u32}"), mode, divisions,
-                                              division_spills, division_moves));
-                BUSTER_TEST(arguments, placement.spill_count == 0 && placement.reload_count == 0);
+                bool expected = name_index == 0 ? divisions == 1 && division_spills == 0 && division_moves == 1 &&
+                                                      placement.spill_count == 0 && placement.reload_count == 0
+                                                : divisions == 2 && division_spills == 0;
+                BUSTER_TEST_RAW(arguments, expected,
+                                string_format(temporary.arena, S8("{S8} mode {u32} divisions {u32} spills {u32} moves {u32}"), names[name_index],
+                                              mode, divisions, division_spills, division_moves));
                 MachineEncodeResult encoded = machine_encode_x86_64(temporary.arena, &selected.function, &placement);
                 BUSTER_TEST(arguments, encoded.valid);
             }
@@ -5025,16 +5044,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_division_clobber_vacate(Unit
             {
                 CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
                 BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
-                u32 offset = machine_test_module_offset(&generated, module, S8("divide_live"));
-                BUSTER_TEST(arguments, offset != UINT32_MAX);
-                if (executable.address && offset != UINT32_MAX)
+                u32 live_offset = machine_test_module_offset(&generated, module, names[0]);
+                u32 pressure_offset = machine_test_module_offset(&generated, module, names[1]);
+                BUSTER_TEST(arguments, live_offset != UINT32_MAX && pressure_offset != UINT32_MAX);
+                if (executable.address && live_offset != UINT32_MAX && pressure_offset != UINT32_MAX)
                 {
                     typedef u64 DivideCall(u64, u64, u64);
+                    typedef u64 PressureCall(u64 const*, u64);
                     DivideCall* call = 0;
-                    void* address = (u8*)executable.address + offset;
+                    PressureCall* pressure = 0;
+                    void* address = (u8*)executable.address + live_offset;
                     memcpy(&call, &address, sizeof(call));
+                    address = (u8*)executable.address + pressure_offset;
+                    memcpy(&pressure, &address, sizeof(pressure));
                     BUSTER_TEST(arguments, call(100, 7, 5) == 14 + 15);
                     BUSTER_TEST(arguments, call(UINT64_MAX, 3, UINT64_C(0x123456789)) == UINT64_MAX / 3 + UINT64_C(0x123456789) * 3);
+                    u64 values[] = {1000, 2001, 3, 4, 5};
+                    u64 divisor = 7;
+                    u64 expected = values[0] / divisor * 3 + values[1] % divisor * 5 + values[0] + values[1] * 7 + values[2] * 11 +
+                                   values[3] * 13 + values[4] * 17;
+                    BUSTER_TEST(arguments, pressure(values, divisor) == expected);
                 }
                 codegen_release_executable(executable);
             }
