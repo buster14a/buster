@@ -2078,6 +2078,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
             "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
             "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
             "    return bound_leaf(value);\n"
             "}\n");
         CPreprocessResult bound_preprocess = c_preprocess(bound_temporary.arena, bound_source,

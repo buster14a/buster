@@ -1368,13 +1368,13 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     bool required_splice = false;
                     if (function_sites != function_sites_used[caller_index])
                     {
-                        // One growth per table; each site may add a branch and a
-                        // continuation row beyond its copied body.
-                        u64 site_slack = 2u * (u64)(function_sites - function_sites_used[caller_index]);
+                        // One growth per table, to exactly the counts admission
+                        // charged (as geometric growth from the current capacity),
+                        // so no table is reallocated when its final count still
+                        // fits. A splice adds exactly its planned rows.
                         ir_inline_cfg_reserve_tables(program->arena, caller,
                             ir_inline_storage_add(caller->block_count, function_projected_blocks),
-                            ir_inline_storage_add(caller->instruction_count,
-                                                  ir_inline_storage_add(function_projected_instructions, site_slack)),
+                            ir_inline_storage_add(caller->instruction_count, function_projected_instructions),
                             ir_inline_storage_add(caller->value_count, function_projected_values),
                             ir_inline_storage_add(caller->extra_count, function_projected_extras));
                     }

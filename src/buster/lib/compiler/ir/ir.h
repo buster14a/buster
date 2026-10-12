@@ -914,7 +914,7 @@ struct IrFastStatistics
 // copy, so a few tiny sites in a large caller cost more memory than they save.
 // IrInlineOptions.caller_growth_shift overrides it; zero selects this default
 // and values of 32 or more keep every planned site.
-#define IR_INLINE_CALLER_GROWTH_SHIFT 4u
+#define IR_INLINE_CALLER_GROWTH_SHIFT 5u
 #define IR_INLINE_CALL_SITES 64u
 
 typedef struct IrInlineOptions IrInlineOptions;
