@@ -30,6 +30,7 @@ import compiler_publish  # noqa: E402
 import compiler_receipt  # noqa: E402
 import inline_acceptance  # noqa: E402
 import ast_pilot_acceptance  # noqa: E402
+import constant_reuse_acceptance  # noqa: E402
 import throughput_real_source  # noqa: E402
 
 A256, B256 = "1" * 64, "2" * 64
@@ -2887,6 +2888,18 @@ class HarnessTest(unittest.TestCase):
         self.assertIn("unsupported historical throughput harness",
                       compiler_compare.throughput_harness_problem(root, historical))
 
+    def test_native_evidence_inventory_matches_the_receipt_contract(self) -> None:
+        # tools/compiler_evidence.c derives required raw members from the same admitted profiles (#2918).
+        import re
+        source = (Path(__file__).resolve().parents[2] / "tools" / "compiler_evidence.c").read_text()
+        table = re.search(r"compiler_evidence_workloads\[\] = \{(.*?)\};", source, re.S)
+        self.assertIsNotNone(table)
+        self.assertEqual(re.findall(r'S8_INITIALIZER\("([^"]+)"\)', table.group(1)), compiler_receipt.THROUGHPUT_PROFILE["workloads"])
+        self.assertIn(f'#define COMPILER_EVIDENCE_HARNESS_REVISION "{compiler_receipt.THROUGHPUT_HISTORICAL_HARNESS_REVISION}"', source)
+        for name in (compiler_receipt.PROFILE["name"], compiler_receipt.THROUGHPUT_PROFILE["name"],
+                     compiler_receipt.THROUGHPUT_HISTORICAL_PROFILE["name"]):
+            self.assertIn(f'S8("{name}")', source)
+
     def historical_fixture(self, extra_lines: tuple[str, ...] = ()) -> tuple[str, str, str]:
         """(pinned harness commit, head commit, head tree) for the #3714 historical recipe.
 
@@ -3785,6 +3798,279 @@ class AstPilotAcceptanceTest(unittest.TestCase):
         self.assertIn("Issue #3397 -fc-ast-pilot adoption budget: complete, verdict pass", report)
         self.assertIn("| syntax-only | 0.9000", report)
 
+
+
+def constant_reuse_raw_cell(cell: str, binary: str = "c" * 64, wall: float = 0.99, instructions: object = 0.98) -> dict:
+    """One synthetic, complete raw uarch_lab cell of the #3011 constant-reuse profile."""
+    pairs = compiler_receipt.CONSTANT_REUSE_ACCEPTANCE_PROFILE["pairs"]
+    argv = constant_reuse_acceptance.cell_command(cell)
+    extra_by_variant = constant_reuse_acceptance.extra_by_variant(cell)
+    labs = {}
+    for key, extra in extra_by_variant.items():
+        command = ["/bin/ide"] + argv[:-2] + extra + argv[-2:]
+        labs[key] = {"config": {"extra": list(extra), "cpu": 2, "constant_reuse_cell": cell, "ide": "/bin/ide",
+                                "command": " ".join(command)}}
+    insn = {"ratio": instructions, "a_median": 1e10 if instructions is not None else None,
+            "b_median": 1e10 * instructions if instructions is not None else None}
+    summary = {"schema": constant_reuse_acceptance.UARCH_SCHEMA,
+               "plan": {"pairs": pairs, "complete_pairs": pairs, "order": "ABBA", "fresh_copy": True},
+               "baseline": {"sha256": binary, "failed": 0, "deterministic": True, "runs": pairs},
+               "candidate": {"sha256": binary, "failed": 0, "deterministic": True, "runs": pairs},
+               "metrics": {"wall": {"a_median": 2.0, "b_median": 2.0 * wall, "ratio": wall,
+                                    "ci_low": wall - 0.01, "ci_high": wall + 0.005},
+                           "instructions": insn, "peak_rss": {"a_median": 1e9, "b_median": 0.98e9, "ratio": 0.98}},
+               "code_bytes": {"a_value": 28520268, "b_value": 28298232},
+               "counters": {"perf_stat": instructions is not None,
+                            "reason": "usable" if instructions is not None else "perf_event_paranoid"},
+               "outputs_identical": False, "diagnostics_identical": True}
+    meta = {"config": {"constant_reuse_pair": cell, "extra_by_variant": extra_by_variant, "ast_pilot_pair": None,
+                       "canonical_inline_pair": False, "command": " ".join(["IDE"] + argv), "pairs": pairs,
+                       "warmups": 1, "cpu": 2, "extra": [], "profile_steps": [], "fresh_copy": True}}
+    return {"summary": summary, "meta": meta, "a": labs["a"], "b": labs["b"]}
+
+
+def constant_reuse_evidence(head: str = "a" * 40, binary: str = "c" * 64) -> tuple[dict, dict, dict]:
+    """(receipt record, raw bundle, acceptance) built through the helper's own record code."""
+    raw = {cell: constant_reuse_raw_cell(cell, binary) for cell in compiler_receipt.CONSTANT_REUSE_CELLS}
+    cells = {cell: constant_reuse_acceptance.cell_record(raw[cell]["summary"]) for cell in raw}
+    acceptance = {"schema": compiler_receipt.CONSTANT_REUSE_ACCEPTANCE_SCHEMA, "status": "complete",
+                  "source_revision": head,
+                  "profile": {**compiler_receipt.CONSTANT_REUSE_ACCEPTANCE_PROFILE, "source_sha256": "e" * 64},
+                  "candidate_compiler": {"sha256": binary, "size_bytes": 10}, "cells": cells}
+    bundle = {"acceptance": acceptance}
+    for cell, documents in raw.items():
+        for key, value in documents.items():
+            bundle[f"{cell}_{key}"] = value
+    record = {"requested": True, "request_line": compiler_receipt.CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE,
+              "profile": compiler_receipt.CONSTANT_REUSE_ACCEPTANCE_PROFILE, "summary": acceptance,
+              "status": "complete", "exit": 0}
+    return json.loads(json.dumps(record)), json.loads(json.dumps(bundle)), acceptance
+
+
+class ConstantReuseAcceptanceTest(unittest.TestCase):
+    def test_publisher_revalidates_raw_cells(self) -> None:
+        head, binary = "a" * 40, "c" * 64
+        record, bundle, unused_acceptance = constant_reuse_evidence(head, binary)
+        self.assertEqual(compiler_publish.validate_constant_reuse_bundle(record, bundle, head, binary), [])
+
+        def broken(change) -> list[str]:
+            changed = copy.deepcopy(bundle)
+            change(changed)
+            return compiler_publish.validate_constant_reuse_bundle(record, changed, head, binary)
+        cases = {
+            "wrong flag": lambda value: value["intern_meta"]["config"].update(
+                extra_by_variant={"a": [], "b": ["-fcanonical-fast-cse"]}),
+            "flag on A": lambda value: value["cse_a"]["config"].update(extra=["-fcanonical-fast-cse"]),
+            "lab command": lambda value: value["intern_b"]["config"].update(
+                command=value["intern_a"]["config"]["command"]),
+            "syntax-only command": lambda value: value["cse_meta"]["config"].update(
+                command=" ".join(["IDE"] + compiler_receipt.AST_PILOT_COMPILE + ["-fsyntax-only"])),
+            "cell swap": lambda value: value["cse_meta"]["config"].update(constant_reuse_pair="intern"),
+            "ast pilot pair": lambda value: value["cse_meta"]["config"].update(ast_pilot_pair="object"),
+            "wrong binary": lambda value: value["intern_summary"]["candidate"].update(sha256="d" * 64),
+            "cpu": lambda value: value["cse_meta"]["config"].update(cpu=3),
+            "pair count": lambda value: value["cse_summary"]["plan"].update(pairs=12, complete_pairs=12),
+            "missing cell": lambda value: [value.pop(f"cse_{key}") for key in ("summary", "meta", "a", "b")],
+            "metrics": lambda value: value["cse_summary"]["metrics"]["wall"].update(ratio=1.2),
+            "code bytes": lambda value: value["intern_summary"].update(code_bytes={}),
+            "diagnostics": lambda value: value["intern_summary"].update(diagnostics_identical=False),
+        }
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(broken(change))
+        self.assertTrue(compiler_publish.validate_constant_reuse_bundle(dict(record, status="failed"), bundle, head, binary))
+        self.assertTrue(compiler_publish.validate_constant_reuse_bundle(
+            dict(record, request_line="constant-reuse"), bundle, head, binary))
+        self.assertTrue(compiler_publish.validate_constant_reuse_bundle(record, None, head, binary))
+        self.assertTrue(compiler_publish.validate_constant_reuse_bundle(record, bundle, head, "d" * 64))
+        self.assertEqual(compiler_publish.validate_constant_reuse_bundle(None, None, head, binary), [])
+
+    def test_receipt_validator_needs_both_cells_and_frozen_profile(self) -> None:
+        head, binary = "a" * 40, "c" * 64
+        unused_record, unused_bundle, acceptance = constant_reuse_evidence(head, binary)
+        self.assertEqual(compiler_receipt.validate_constant_reuse_acceptance(acceptance, head, binary), [])
+        for name, change in {
+            "profile": lambda value: value["profile"].update(pairs=2),
+            "extra profile key": lambda value: value["profile"].update(flags=["-O3"]),
+            "missing cell": lambda value: value["cells"].pop("cse"),
+            "revision": lambda value: value.update(source_revision="b" * 40),
+            "binary": lambda value: value["candidate_compiler"].update(sha256="d" * 64),
+            "code bytes": lambda value: value["cells"]["intern"]["metrics"].update(code_bytes={"a_value": 1}),
+            "diagnostics": lambda value: value["cells"]["cse"].update(diagnostics_identical=False),
+        }.items():
+            changed = copy.deepcopy(acceptance)
+            change(changed)
+            with self.subTest(case=name):
+                self.assertTrue(compiler_receipt.validate_constant_reuse_acceptance(changed, head, binary))
+
+    def test_out_of_range_numbers_fail_closed(self) -> None:
+        huge, head, binary = 10 ** 309, "a" * 40, "c" * 64
+        self.assertFalse(constant_reuse_acceptance._positive_number(huge))
+        self.assertTrue(constant_reuse_acceptance._positive_number(1))
+        record, bundle, acceptance = constant_reuse_evidence(head, binary)
+        for metric, key in (("wall", "ci_high"), ("peak_rss", "b_median"), ("instructions", "a_median"),
+                            ("code_bytes", "b_value")):
+            changed = copy.deepcopy(acceptance)
+            changed["cells"]["cse"]["metrics"][metric][key] = huge
+            with self.subTest(metric=metric):
+                self.assertTrue(compiler_receipt.validate_constant_reuse_acceptance(changed, head, binary))
+                raw = copy.deepcopy(bundle)
+                target = raw["cse_summary"] if metric == "code_bytes" else raw["cse_summary"]["metrics"]
+                target[metric][key] = huge
+                self.assertTrue(compiler_publish.validate_constant_reuse_bundle(record, raw, head, binary))
+                pull = receipt()
+                pull["constant_reuse_acceptance"] = dict(record, summary=changed)
+                self.assertIn("Issue #3011 constant-reuse arms", compiler_receipt.render(pull, summary(), "failure", []))
+
+    def test_raw_cell_loader_refuses_wrong_flags_binaries_and_unexplained_na(self) -> None:
+        binary = "c" * 64
+        for cell in compiler_receipt.CONSTANT_REUSE_CELLS:
+            raw = constant_reuse_raw_cell(cell, binary)
+            documents = (raw["summary"], raw["meta"], {"a": raw["a"], "b": raw["b"]})
+            constant_reuse_acceptance.validate_documents(cell, *documents, binary)
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "frozen candidate-HEAD"):
+                constant_reuse_acceptance.validate_documents(cell, *documents, "d" * 64)
+            other = "cse" if cell == "intern" else "intern"
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "fixed constant-reuse"):
+                constant_reuse_acceptance.validate_documents(other, *documents, binary)
+            na = constant_reuse_raw_cell(cell, binary, instructions=None)
+            na_documents = (na["summary"], na["meta"], {"a": na["a"], "b": na["b"]})
+            constant_reuse_acceptance.validate_documents(cell, *na_documents, binary)
+            na["summary"]["counters"] = {"perf_stat": True, "reason": "usable"}
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "NA without"):
+                constant_reuse_acceptance.validate_documents(cell, *na_documents, binary)
+        with self.assertRaisesRegex(RuntimeError, "unknown"):
+            constant_reuse_acceptance.validate_documents("table", *documents, binary)
+
+    def test_compare_command_is_fixed_and_uses_one_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for cell in compiler_receipt.CONSTANT_REUSE_CELLS:
+                with mock.patch.object(constant_reuse_acceptance.subprocess, "run") as run:
+                    constant_reuse_acceptance.run_compare(root / "uarch_lab.py", root / "ide", root, 2, root / cell,
+                                                          "perf", cell)
+                argv = run.call_args.args[0]
+                self.assertEqual(argv[argv.index("--constant-reuse-pair") + 1], cell)
+                self.assertEqual(argv[argv.index("--baseline") + 1], argv[argv.index("--candidate") + 1])
+                self.assertEqual(argv[argv.index("--pairs") + 1], "20")
+                self.assertNotIn("--", argv)
+                self.assertNotIn("--ast-pilot-pair", argv)
+
+    def test_profile_runs_both_cells_on_candidate_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "ide"
+            candidate.write_bytes(b"candidate compiler")
+            repo = root / "repo"
+            source = repo / "src/buster/apps/ide/ide.c"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"int frozen_unity_source;\n")
+            (repo / "build/generated").mkdir(parents=True)
+            lab = root / "trusted-uarch.py"
+            lab.write_bytes(b"trusted test stub")
+            binary = hashlib.sha256(b"candidate compiler").hexdigest()
+            args = argparse.Namespace(lab=lab, repo_root=repo, candidate_ide=candidate, output=root / "profile",
+                                      head_revision="a" * 40, cpu=2, perf="perf")
+            cells = []
+            with mock.patch.object(constant_reuse_acceptance, "git", return_value="a" * 40), \
+                 mock.patch.object(constant_reuse_acceptance, "run_compare",
+                                   side_effect=lambda *values: cells.append(values[-1])), \
+                 mock.patch.object(constant_reuse_acceptance, "load_complete",
+                                   side_effect=lambda path, cell, sha: constant_reuse_raw_cell(cell, sha)["summary"]):
+                result = constant_reuse_acceptance.execute(args)
+            self.assertEqual(cells, ["intern", "cse"])
+            self.assertEqual(result["cells"]["intern"]["metrics"]["code_bytes"]["b_value"], 28298232)
+            self.assertEqual(compiler_receipt.validate_constant_reuse_acceptance(result, "a" * 40, binary), [])
+            args.cpu = 3
+            args.output = root / "other"
+            with mock.patch.object(constant_reuse_acceptance, "git", return_value="a" * 40), \
+                 self.assertRaisesRegex(RuntimeError, "pins CPU 2"):
+                constant_reuse_acceptance.execute(args)
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            def git(*args: str) -> str:
+                return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                                      text=True).stdout.strip()
+            git("init", "-q")
+            git("config", "user.name", "Constant Reuse Test")
+            git("config", "user.email", "constant-reuse@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            git("add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            git("commit", "-qm", "seed")
+            line = compiler_receipt.CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                git("commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.constant_reuse_request_selection(repo, git("rev-parse", "HEAD")),
+                                     expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            git("commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.constant_reuse_request_selection(repo, git("rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", constant_reuse_acceptance=constant_reuse_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        self.assertEqual(compiler_publish.verify_analyzer_request_freshness(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", compiler_publish.verify_analyzer_request_freshness(Api(1, 1), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("constant_reuse_acceptance")
+        self.assertIn("no constant-reuse acceptance record",
+                      compiler_publish.verify_analyzer_request_freshness(Api(1, 0), expected, plain, {}))
+        self.assertEqual(compiler_publish.verify_analyzer_request_freshness(Api(1, 1), expected, plain, {}), "")
+
+    def test_decision_needs_pull_mode_the_9700x_and_the_complete_bundle(self) -> None:
+        record, bundle, unused_acceptance = constant_reuse_evidence("a" * 40, B256)
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["constant_reuse_acceptance"] = record
+        expected = dict(EXPECTED, mode="pull")
+        values = {"expected": expected, "authorized": True, "compare_result": "success", "receipt": pull,
+                  "summary": summary(), "policy_value": "", "throughput": dict(corpus(), constant_reuse_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        both = copy.deepcopy(pull)
+        both["ast_pilot_acceptance"] = ast_pilot_evidence("a" * 40, B256)[0]
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "missing cell": {"throughput": dict(corpus(), constant_reuse_bundle={
+                key: value for key, value in bundle.items() if not key.startswith("cse_")})},
+            "with ast pilot": {"receipt": both},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("Issue #3011 constant-reuse arms: complete", report)
+        self.assertIn("| intern (-fcanonical-intern-constants) | 0.9900", report)
 
 def real_source_evidence() -> tuple[dict, dict]:
     """A complete synthetic throughput-real-source-v1 record and its exported bundle on BINARIES."""
@@ -5946,6 +6232,141 @@ class WildLinkerTest(unittest.TestCase):
             # The mocked harness wrote nothing, so publication evidence is refused.
             self.assertEqual(record["status"], "failed")
             self.assertTrue(any("wild-linker evidence lacks" in error for error in record["errors"]), record["errors"])
+
+
+class OutOfRangeEvidenceNumberTest(unittest.TestCase):
+    """#3675: a JSON integer past the float range fails the check instead of raising OverflowError."""
+
+    HUGE = 10 ** 309
+
+    def inline_summary(self, **wall: object) -> dict:
+        stage = {"metrics": {
+            "wall": {"a_median": 1.0, "b_median": 1.0, "ratio": 1.0, **wall},
+            "instructions": {"a_median": 10.0, "b_median": 10.0, "ratio": 1.0},
+            "counter_availability": {"perf_stat": True, "reason": "usable"},
+            "peak_rss": {"ratio": 1.0},
+            "code_bytes": {"a_value": 100, "b_value": 100, "ratio": 1.0}}}
+        return {"schema": compiler_receipt.INLINE_ACCEPTANCE_SCHEMA, "status": "complete", "source_revision": "a" * 40,
+                "profile": {**compiler_receipt.INLINE_ACCEPTANCE_PROFILE, "source_sha256": "b" * 64, "cpu": 2},
+                "candidate_compiler": {"sha256": "c" * 64, "size_bytes": 1},
+                "fixed_point": {"off": True, "on": True}, "stage1": stage, "selfhost_runtime": copy.deepcopy(stage)}
+
+    def test_predicates_refuse_out_of_range_integers_and_accept_normal_values(self) -> None:
+        huge = self.HUGE
+        for predicate in (compiler_receipt._finite_positive, inline_acceptance._positive_number,
+                          ast_pilot_acceptance._positive_number):
+            with self.subTest(predicate=predicate.__module__):
+                self.assertFalse(predicate(huge))
+                self.assertFalse(predicate(-huge))
+                self.assertTrue(predicate(1))
+                self.assertTrue(predicate(0.5))
+        self.assertEqual(compiler_receipt.number(huge, "%.4f"), "NA")
+        self.assertEqual(compiler_receipt.number(1.25, "%.4f"), "1.2500")
+        self.assertEqual(compiler_receipt.number(3, "%.1f"), "3.0")
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            compiler_publish.campaign_ppm(1, huge)
+        self.assertEqual(compiler_publish.campaign_ppm(1.0, 1.0)[:2], (0, 0))
+
+        self.assertEqual(compiler_receipt.validate_inline_acceptance(self.inline_summary(), "a" * 40, "c" * 64), [])
+        for key in ("a_median", "b_median", "ratio"):
+            with self.subTest(inline=key):
+                problems = compiler_receipt.validate_inline_acceptance(self.inline_summary(**{key: huge}), "a" * 40, "c" * 64)
+                self.assertTrue(any("wall-time measurements are missing" in problem for problem in problems), problems)
+        changed = self.inline_summary()
+        changed["stage1"]["metrics"]["code_bytes"]["ratio"] = huge
+        self.assertTrue(compiler_receipt.validate_inline_acceptance(changed, "a" * 40, "c" * 64))
+        changed = self.inline_summary()
+        changed["stage1"]["metrics"]["instructions"]["ratio"] = huge
+        self.assertTrue(compiler_receipt.validate_inline_acceptance(changed, "a" * 40, "c" * 64))
+
+        unused_record, unused_bundle, acceptance = ast_pilot_evidence()
+        self.assertEqual(compiler_receipt.validate_ast_pilot_acceptance(acceptance, "a" * 40, "c" * 64), [])
+        for metric, key in (("wall", "ratio"), ("peak_rss", "b_median"), ("instructions", "a_median")):
+            changed = copy.deepcopy(acceptance)
+            changed["cells"]["object"]["metrics"][metric][key] = huge
+            with self.subTest(ast_pilot=metric):
+                self.assertTrue(compiler_receipt.validate_ast_pilot_acceptance(changed, "a" * 40, "c" * 64))
+        changed = copy.deepcopy(acceptance)
+        changed["tree"]["retained_bytes"] = huge
+        problems = compiler_receipt.validate_ast_pilot_acceptance(changed, "a" * 40, "c" * 64)
+        self.assertTrue(any("tree retained bytes are missing" in problem for problem in problems), problems)
+
+        self.assertEqual(compiler_receipt.classify(summary(), BINARIES), [])
+        for key in ("ratio", "ci_low", "ci_high"):
+            lab = summary()
+            lab["verdict"][key] = huge
+            lab["metrics"]["wall"][key] = huge
+            with self.subTest(verdict=key):
+                reasons = compiler_receipt.classify(lab, BINARIES)
+                self.assertTrue(any("not a finite positive ratio" in reason for reason in reasons), reasons)
+
+        good = corpus()
+        self.assertNotIn("throughput report-only family_alpha does not match the original gate",
+                         compiler_receipt.classify_throughput_exit(0, good["summary"], good["metadata"], BINARIES))
+        good["summary"]["family_alpha"] = huge
+        self.assertIn("throughput report-only family_alpha does not match the original gate",
+                      compiler_receipt.classify_throughput_exit(0, good["summary"], good["metadata"], BINARIES))
+
+    def publish(self, pull: dict, lab: dict, bundle: dict | None = None) -> tuple:
+        """ZIP -> read_evidence -> decide (then render), as the ordinary publisher runs it."""
+        members = {"receipt.json": json.dumps(pull), "lab/summary.json": json.dumps(lab),
+                   "throughput/summary.json": json.dumps(corpus()["summary"]),
+                   "throughput/metadata.json": json.dumps(corpus()["metadata"])}
+        for key, value in (bundle or {}).items():
+            members[compiler_publish.AST_PILOT_BUNDLE_FILES[key]] = json.dumps(value)
+        read, summary_read, problem, unused_artifact, throughput = compiler_publish.read_evidence(
+            FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+        self.assertEqual(problem, "")
+        decision = compiler_publish.decide(dict(EXPECTED, mode=pull["mode"]), True, "success", read, summary_read, "",
+                                           throughput)
+        compiler_receipt.render(read, summary_read, decision[0], decision[2])
+        return decision
+
+    def test_out_of_range_lab_summary_fails_through_publication(self) -> None:
+        main = receipt()
+        self.assertEqual(self.publish(main, summary())[0], "success")
+        verdict = summary()
+        verdict["verdict"]["ratio"] = self.HUGE
+        verdict["metrics"]["wall"]["ratio"] = self.HUGE
+        metric = summary()
+        metric["verdict"]["ci_high"] = self.HUGE
+        for name, lab in (("verdict ratio", verdict), ("wall ci_high", metric)):
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = self.publish(main, lab)
+                self.assertEqual(conclusion, "failure", reasons)
+                self.assertTrue(any("not a finite positive ratio" in reason for reason in reasons), reasons)
+
+    def test_out_of_range_ast_pilot_receipt_fails_through_publication(self) -> None:
+        record, bundle, unused_acceptance = ast_pilot_evidence("a" * 40, B256)
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["ast_pilot_acceptance"] = record
+        self.assertEqual(self.publish(pull, summary(), bundle)[:3:2], ("success", []))
+
+        def changed(path: tuple, raw: bool) -> tuple[dict, dict]:
+            current, documents = copy.deepcopy(pull), copy.deepcopy(bundle)
+            targets = [current["ast_pilot_acceptance"]["summary"], documents["acceptance"]]
+            if raw:
+                targets = [documents]
+            for target in targets:
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = self.HUGE
+            return current, documents
+        cases = {
+            "acceptance wall ratio": (("cells", "syntax-only", "metrics", "wall", "ratio"), False),
+            "acceptance instruction median": (("cells", "object", "metrics", "instructions", "b_median"), False),
+            "acceptance peak RSS": (("cells", "object", "metrics", "peak_rss", "a_median"), False),
+            "acceptance tree retained bytes": (("tree", "retained_bytes"), False),
+            "raw cell wall median": (("object_summary", "metrics", "wall", "a_median"), True),
+        }
+        for name, (path, raw) in cases.items():
+            with self.subTest(case=name):
+                current, documents = changed(path, raw)
+                conclusion, unused_title, reasons = self.publish(current, summary(), documents)
+                self.assertEqual(conclusion, "failure", reasons)
+                self.assertTrue(reasons)
 
 
 LINK_TLS_TOOL = Path(__file__).resolve().parents[1] / "link_tls_bench.py"

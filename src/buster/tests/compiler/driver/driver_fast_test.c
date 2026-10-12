@@ -364,6 +364,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_work_ledger(UnitTestArgu
     BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_INITIALIZER_ELEMENTS] >= delta[WORK_LEDGER_REDERIVE_INITIALIZER_LITERAL_ELEMENTS] &&
                                delta[WORK_LEDGER_REDERIVE_INITIALIZER_LITERAL_ELEMENTS] >= 5);
     BUSTER_TEST(arguments, delta[WORK_LEDGER_POPULATION_MEMBER_PROMOTED_SEARCHES] != 0);
+    // `sizeof (struct Outer)` is a call-shaped candidate the arity check skips.
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_CALL_ARITY_KEYWORDS_SKIPPED] != 0 &&
+                               delta[WORK_LEDGER_REDERIVE_CALL_ARITY_CANDIDATES] >= delta[WORK_LEDGER_REDERIVE_CALL_ARITY_KEYWORDS_SKIPPED]);
+    // Each body token is stored once; the visited shares cover at least that.
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_BODY_SCOPE_STORES] != 0 &&
+                               delta[WORK_LEDGER_REDERIVE_BODY_SCOPE_SHARE_TOKENS] >= delta[WORK_LEDGER_REDERIVE_BODY_SCOPE_STORES]);
     BUSTER_TEST(arguments, delta[WORK_LEDGER_LITERAL_NUMBER_CONVERSIONS] != 0);
     BUSTER_TEST(arguments, delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERNS] != 0 &&
                                delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERN_PROBES] >= delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERNS]);
@@ -872,6 +878,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_optimization_poli
         {S8("-O0"), S8("-fcanonical-fast-cse"), cse},
         {S8("-fcanonical-fast-cse"), S8("-fno-canonical-fast-cse"), IR_FAST_ALL},
     };
+    struct { String8 first; String8 second; bool intern; } interning[] = {
+        {S8("source.c"), S8("-O2"), false},
+        {S8("-fcanonical-intern-constants"), S8("-O0"), true},
+        {S8("-fcanonical-intern-constants"), S8("-fno-canonical-intern-constants"), false},
+        {S8("-fno-canonical-intern-constants"), S8("-fcanonical-intern-constants"), true},
+        {S8("-fcanonical-intern-constants"), S8("-fno-canonical-fast"), true},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(interning); index += 1)
+    {
+        String8 command[] = {interning[index].first, interning[index].second, S8("source.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.intern_block_constants == interning[index].intern);
+    }
     struct { String8 first; String8 second; bool window; } strategies[] = {
         {S8("-fcanonical-fast-cse-strategy=window"), S8("source.c"), true},
         {S8("-fcanonical-fast-cse-strategy=window"), S8("-fcanonical-fast-cse-strategy=table"), false},
@@ -1118,32 +1137,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast_decline_publication
         BUSTER_TEST(arguments, record.validation.error == IR_VALIDATION_OPERATION && record.validation.function.value == index % 2 &&
                                record.validation.instruction.value == index / 2);
     }
-    // A real accepted legacy shape found by the #1602 musl/CPython census:
-    // the strict value check requires a layout for an incomplete extern PLACE,
-    // although native address-taking does not consume that object's layout.
+    // The former #1602 census decline is valid address-only C (#3777).
+    // Keep the synthetic lifetime controls above; this real driver input must
+    // now pass strict verification without allocating any decline records.
     String8 source = S8("struct Opaque;extern struct Opaque stream;extern int sink(struct Opaque*);"
-                        "int declined(void){return sink(&stream);}"
+                        "int address_only(void){return sink(&stream);}"
                         "int kept(int a,int b){int x=a+0;return x*1+b;}");
     String8 input = buster_test_temporary_path(arguments->arena, S8("buster-fast-decline"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
-        String8 command[] = {S8("-nostdinc"), S8("-g0"), S8("-target"), S8("x86_64-linux"), S8("-c"), input};
+        String8 command[] = {S8("-nostdinc"), S8("-g0"), S8("-fverify-codegen"), S8("-target"), S8("x86_64-linux"), S8("-c"), input};
         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
         invocation.retain_object = true;
         CompilerDriverResult compiled = compiler_driver_execute_invocation(arguments->arena, invocation);
-        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.fast.functions == 1 &&
-                               compiled.fast.validation_skips == 1 && compiled.fast.decline_count == 1);
-        if (compiled.fast.decline_count == 1)
-        {
-            IrFastDecline record = compiled.fast.declines[0];
-            BUSTER_TEST(arguments, string_equal(record.source, input) && string_equal(record.function_name, S8("declined")) &&
-                                   record.validation.error == IR_VALIDATION_OPERATION);
-            // Reading a released spelling arena can appear to work until the
-            // next TU reuses it. Prove ownership rather than relying on reuse.
-            uintptr_t arena_start = (uintptr_t)arguments->arena;
-            uintptr_t name_address = (uintptr_t)record.function_name.pointer;
-            BUSTER_TEST(arguments, name_address >= arena_start && name_address - arena_start < arguments->arena->reserved_size);
-        }
+        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.fast.functions == 2 &&
+                               compiled.fast.validation_skips == 0 && compiled.fast.decline_count == 0 && !compiled.fast.declines);
         os_file_delete(input);
     }
     return result;
@@ -1192,11 +1200,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
     {
         // Every subset of the adopted recipe, then the recipe plus opt-in CSE
         // on the shared fixture and, natively, on the separate CSE control
-        // with the table and then the linear window strategy.
-        for (u32 selection = 0; selection <= IR_FAST_ALL + 3; selection += 1)
+        // with the table and then the linear window strategy, and finally
+        // the shared fixture with CSE and construction-time interning.
+        for (u32 selection = 0; selection <= IR_FAST_ALL + 4; selection += 1)
         {
-            bool control = selection >= IR_FAST_ALL + 2;
+            bool control = selection == IR_FAST_ALL + 2 || selection == IR_FAST_ALL + 3;
             bool window = selection == IR_FAST_ALL + 3;
+            // Construction-time constant interning (#3011) on the shared fixture.
+            bool intern = selection == IR_FAST_ALL + 4;
             if (control && backend >= native_count) continue;
             u32 mask = selection <= IR_FAST_ALL ? selection : IR_FAST_ALL | IR_FAST_PASS_BIT(IR_FAST_CSE);
             TemporalArena temporary = arena_begin_temporal(arguments->arena);
@@ -1232,6 +1243,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
             }
             command[count++] = S8("-fcanonical-fast");
             if (window) command[count++] = S8("-fcanonical-fast-cse-strategy=window");
+            if (intern) command[count++] = S8("-fcanonical-intern-constants");
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
             {
                 bool selected = (mask & IR_FAST_PASS_BIT(pass)) != 0;
@@ -1243,7 +1255,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
             }
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){command, count});
             BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.fast_passes == mask);
-            BUSTER_TEST(arguments, invocation.fast_cse_window == window);
+            BUSTER_TEST(arguments, invocation.fast_cse_window == window && invocation.intern_block_constants == intern);
             CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
             if (compiled.error != COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("FAST backend={u32} mask={u32}: {S8}\n"), backend, mask, compiled.diagnostic);
             BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);

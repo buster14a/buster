@@ -40,6 +40,8 @@ struct CIrExt80Big
 };
 
 #if BUSTER_INCLUDE_TESTS
+// Calling-thread root-conditional, comma and assignment operator visits.
+BUSTER_F_DECL u64 c_test_assignment_lower_work(void);
 // Calling-thread reference lookups plus scanned rows, and scanned rows alone.
 BUSTER_F_DECL u64 c_test_logical_call_reference_work(void);
 BUSTER_F_DECL u64 c_test_logical_call_reference_rows(void);
@@ -92,6 +94,9 @@ typedef enum CTestIrExtentMutation
 BUSTER_F_DECL void c_test_ir_extent_mutation_set(CTestIrExtentMutation mutation);
 // Rows and slots c_ir_label_find has visited since process start.
 BUSTER_F_DECL u64 c_test_ir_label_find_probes(void);
+// Typedef lookups c_ir_lower_body_advance has made for statements' first
+// tokens on this thread.
+BUSTER_F_DECL u64 c_test_ir_first_token_typedef_probes(void);
 BUSTER_F_DECL bool c_test_ir_scratch_reservation_size(u64 required_size, u64 current_size, u64* size_out);
 BUSTER_F_DECL bool c_test_ir_function_scratch_size(u32 body_capacity, u32 lowering_capacity, bool direct_ssa, u64* size_out);
 BUSTER_F_DECL bool c_test_ir_arena_reservation_advance(u64 reserved_size, u64* position, u64 element_size, u64 count, u64 alignment);
@@ -116,8 +121,6 @@ BUSTER_F_DECL IrValueId c_test_ir_member_place(Arena* arena, Arena* temporary_ar
                                                String8* failure_message);
 // Fields a member lookup visited, and name indexes built, on this thread.
 BUSTER_F_DECL void c_test_ir_member_lookup_counts(u64* visits, u64* builds);
-// `for`, `while` and `switch` headers c_ir_statement_span peeled on this thread.
-BUSTER_F_DECL u64 c_test_ir_statement_header_peels(void);
 BUSTER_F_DECL bool c_test_ext80_big_shift_left(CIrExt80Big* value, u32 shift);
 BUSTER_F_DECL s32 c_test_ext80_big_compare_shifted(CIrExt80Big const* left, CIrExt80Big const* right, s32 shift);
 BUSTER_F_DECL bool c_test_ext80_big_subtract_shifted(CIrExt80Big* left, CIrExt80Big const* right, u32 shift);

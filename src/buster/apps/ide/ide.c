@@ -2146,6 +2146,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                         "parameters_created={u64} parameters_removed={u64} temporaries={u64} fallback_locals={u64}\n"),
                      direct.functions, direct.locals, direct.reads, direct.writes, direct.parameters_created, direct.parameters_removed,
                      direct.temporaries, direct.fallback_locals);
+        if (invocation.intern_block_constants)
+        {
+            CIRConstantInternStatistics interned = compile.constant_interning;
+            string_print(S8("C_CONSTANT_INTERN lookups={u64} hits={u64} stale={u64}\n"), interned.lookups, interned.hits, interned.stale);
+        }
         CTypeLayoutStatistics layout = compile.type_layout;
         string_print(S8("C_TYPE_LAYOUT solves={u64} pass_solves={u64} pass_state_types={u64} pass_attempts={u64} agenda_solves={u64} agenda_types={u64} "
                         "agenda_attempts={u64} agenda_edges={u64} agenda_notifications={u64} agenda_pushes={u64} agenda_fallbacks={u64}\n"),
@@ -2253,10 +2258,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         if (invocation.inline_options.tiny || inlining.candidates || inlining.always_inlined)
         {
             string_print(S8("IR_INLINE tiny={u32} candidates={u64} inlined={u64} always_inlined={u64} copied_instructions={u64} growth={u64} "
-                            "budget_skips={u64} shape_skips={u64} linkage_skips={u64} recursion_skips={u64} visits={u64}\n"),
+                            "budget_skips={u64} shape_skips={u64} linkage_skips={u64} recursion_skips={u64} visits={u64} "
+                            "released_bytes={u64}\n"),
                          (u32)invocation.inline_options.tiny, inlining.candidates, inlining.inlined, inlining.always_inlined,
                          inlining.copied_instructions, inlining.growth, inlining.budget_skips, inlining.shape_skips,
-                         inlining.linkage_skips, inlining.recursion_skips, inlining.visits);
+                         inlining.linkage_skips, inlining.recursion_skips, inlining.visits, inlining.released_bytes);
         }
         IrLocalPromotionStatistics p = compile.local_promotion;
         string_print(S8("IR_LOCAL_PROMOTION candidates={u64} promoted={u64} loads_removed={u64} stores_removed={u64} "

@@ -527,6 +527,43 @@ class ReportTest(unittest.TestCase):
         self.assertIn("No valid measurement", text)
         self.assertIn("| Wall time B/A | NA, 95% CI [NA, NA], NA |", text)
         self.assertIn("- no readable receipt.json", text)
+        self.assertIn("| Achieved uncertainty | NA (not measured) |", text)
+        self.assertIn("| Host cost per leg | builds NA + NA s, self-host measurement NA s, corpus NA s, "
+                      "total NA s; queue delay NA s |", text)
+        self.assertNotIn("unresolved at the achieved resolution", text)
+
+    def test_report_names_route_profile_uncertainty_and_leg_costs(self) -> None:
+        # #3212 items 6-7: the selected profile, its trusted route, the achieved
+        # interval and every leg's recorded seconds are visible on the commit page.
+        shown = self.shown()
+        shown["timings"].update(build_seconds={"baseline": 61.0, "candidate": 62.0}, measurement_seconds=600.0,
+                                throughput_seconds=23.0, total_seconds=822.0, queue_delay_seconds=5.0)
+        route = {"main_owned": False, "main_profile": "compiler-compare-v1", "main_policy_revision": "b" * 40,
+                 "main_certificate_revision": "-"}
+        text = compiler_publish.commit_report(dict(shown, main_route=route), summary(), "success", "Measured", [], "LINKS")
+        for marker in ("| Achieved uncertainty | ±1.00% (half-width of the 95% CI of wall B/A) |",
+                       "| Selected profile | `compiler-compare-v1` (Main routing disabled at policy `bbbbbbbbbbbb`) |",
+                       "| Host cost per leg | builds 61 + 62 s, self-host measurement 600 s, corpus 23 s, total 822 s; "
+                       "queue delay 5 s |"):
+            self.assertIn(marker, text)
+        route = dict(route, main_owned=True, main_profile="compiler-main-40pairs-v1", main_certificate_revision="c" * 40)
+        text = compiler_publish.commit_report(dict(shown, main_route=route), summary(), "success", "Measured", [], "LINKS")
+        self.assertIn("| Selected profile | `compiler-main-40pairs-v1` (authenticated automatic Main route, policy "
+                      "`bbbbbbbbbbbb`, certificate `cccccccccccc`) |", text)
+        text = compiler_publish.commit_report(dict(shown, mode="pull"), summary(), "success", "Measured", [], "LINKS")
+        self.assertIn("| Selected profile | `compiler-compare-v1` (explicit pull-request request) |", text)
+        text = compiler_publish.commit_report(shown, summary(), "success", "Measured", [], "LINKS")
+        self.assertIn("| Selected profile | `compiler-compare-v1` (Main route not resolved) |", text)
+
+    def test_unresolved_outcomes_never_read_as_equivalence(self) -> None:
+        for outcome in ("no detectable difference", "below-floor", "inconclusive"):
+            data = summary()
+            data["verdict"] = dict(data["verdict"], outcome=outcome, ci_low=0.99, ci_high=1.01)
+            text = compiler_publish.commit_report(self.shown(), data, "success", "Measured", [], "LINKS")
+            with self.subTest(outcome=outcome):
+                self.assertIn("neither equivalence nor a performance pass", text)
+        text = compiler_publish.commit_report(self.shown(), summary(), "success", "Measured", [], "LINKS")
+        self.assertNotIn("neither equivalence nor a performance pass", text)
 
     def test_links_name_check_attempt_and_expiring_evidence(self) -> None:
         line = compiler_publish.links("https://c", "https://w", "2", "https://e", "2027-01-04T00:00:00Z")

@@ -146,7 +146,24 @@
     X(VALIDATION_LABEL_OWNER_PROBES, validation_label_owner_probes) \
     X(VALIDATION_LABEL_SCRATCH_BYTES, validation_label_scratch_bytes) \
     X(C_STATEMENT_EXTENT_SPANS, c_statement_extent_spans) \
-    X(C_DELIMITER_FALLBACK_TOKENS, c_delimiter_fallback_tokens)
+    X(C_STATEMENT_EXTENT_PEELS, c_statement_extent_peels) \
+    X(C_DELIMITER_FALLBACK_TOKENS, c_delimiter_fallback_tokens) \
+    X(FOLD_BIRTH_SCALAR_ROWS, fold_birth_scalar_rows) \
+    X(FOLD_BIRTH_CAST_IDENTITY, fold_birth_cast_identity) \
+    X(FOLD_BIRTH_CAST_CONSTANT, fold_birth_cast_constant) \
+    X(FOLD_BIRTH_UNARY_CONSTANT, fold_birth_unary_constant) \
+    X(FOLD_BIRTH_BINARY_CONSTANT, fold_birth_binary_constant) \
+    X(FOLD_BIRTH_BINARY_RIGHT_IDENTITY, fold_birth_binary_right_identity) \
+    X(FOLD_BIRTH_BINARY_LEFT_IDENTITY, fold_birth_binary_left_identity) \
+    X(FOLD_BIRTH_METADATA_MISMATCHES, fold_birth_metadata_mismatches) \
+    X(FOLD_BIRTH_AVOIDABLE_BYTES, fold_birth_avoidable_bytes) \
+    X(FOLD_LATE_CAST_IDENTITY, fold_late_cast_identity) \
+    X(FOLD_LATE_CAST_CONSTANT, fold_late_cast_constant) \
+    X(FOLD_LATE_UNARY_CONSTANT, fold_late_unary_constant) \
+    X(FOLD_LATE_BINARY_CONSTANT, fold_late_binary_constant) \
+    X(FOLD_LATE_BINARY_RIGHT_IDENTITY, fold_late_binary_right_identity) \
+    X(FOLD_LATE_BINARY_LEFT_IDENTITY, fold_late_binary_left_identity) \
+    X(FOLD_LATE_REPLACED_ROOTS, fold_late_replaced_roots)
 
 typedef enum IrConstructionCounter
 {

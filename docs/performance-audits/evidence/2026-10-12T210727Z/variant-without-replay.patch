@@ -1,0 +1,13 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_parse.c b/src/buster/lib/compiler/frontend/c/c_parse.c
+index 2daf7514..d7b3d55b 100644
+--- a/src/buster/lib/compiler/frontend/c/c_parse.c
++++ b/src/buster/lib/compiler/frontend/c/c_parse.c
+@@ -12570,7 +12570,7 @@ BUSTER_C_SHARED void c_parse_infer_file_array_bounds(CTypeParseMachine* machine,
+         u64 log_mark = machine->scratch_arena->position;
+         u32 log_capacity = (end - initializer) / 2 + 1;
+         CParseInitializerLog log = {0};
+-        if (machine->phase_arena && c_parse_initializer_log_fits(machine->scratch_arena, (u64)log_capacity * sizeof(CParseInitializerElement)))
++        if (0 && machine->phase_arena && c_parse_initializer_log_fits(machine->scratch_arena, (u64)log_capacity * sizeof(CParseInitializerElement)))
+         {
+             log.elements = arena_allocate(machine->scratch_arena, CParseInitializerElement, log_capacity);
+             log.capacity = log_capacity;
