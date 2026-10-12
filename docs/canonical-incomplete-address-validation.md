@@ -23,6 +23,9 @@ IR in both provenance paths and valid C in both frontend forms across Linux
 x86-64, Win64, Linux AArch64, macOS AArch64, Wasm64 and eBPF layouts.
 The valid source covers opaque struct/union extern addresses, a sink call,
 pointer dereference/address cancellation and an ordinary arithmetic neighbor.
+The real driver fixture formerly used to demonstrate this decline now requires
+strict success and zero decline records. Its independent synthetic decline
+publication and arena-lifetime controls remain in place.
 Separate Linux native execution compiles the opaque-only unit with strict
 codegen verification under FAST and QUALITY, links it with a Clang-built unit
 that owns the complete definitions, and checks exact addresses, sink output
