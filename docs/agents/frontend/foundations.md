@@ -26,7 +26,8 @@ token-stream pointer; a private query with different tokens takes the scalar
 walk even when its copied model retains the position index. The table uses guarded body scratch,
 is detached before the arena rewinds, and malformed delimiter streams retain
 the scalar walk. The private boundary regression compares every subrange with
-that walk, including bounds inside delimiter groups.
+that walk, including bounds inside delimiter groups and a query with no
+position index. Such a query uses scalar delimiter matching as well.
 
 Lowering's assignment continuation retains the comma-free suffix range that
 its parent scanned. Moving into a group changes the endpoint and requires a

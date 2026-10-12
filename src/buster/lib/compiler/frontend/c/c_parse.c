@@ -34983,7 +34983,19 @@ BUSTER_C_SHARED u32 c_parse_constraint_expression_end(CParseResult* result, CPre
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
             c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
         {
-            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
+            u32 close;
+            if (result->position_index)
+            {
+                close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
+            }
+            else
+            {
+                CPunctuator opening = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ? C_PUNCTUATOR_LEFT_PARENTHESIS
+                    : c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ? C_PUNCTUATOR_LEFT_BRACKET : C_PUNCTUATOR_LEFT_BRACE;
+                CPunctuator closing = opening == C_PUNCTUATOR_LEFT_PARENTHESIS ? C_PUNCTUATOR_RIGHT_PARENTHESIS
+                    : opening == C_PUNCTUATOR_LEFT_BRACKET ? C_PUNCTUATOR_RIGHT_BRACKET : C_PUNCTUATOR_RIGHT_BRACE;
+                close = c_parse_matching_delimiter(preprocess, cursor, end, opening, closing);
+            }
             cursor = close < end ? close + 1 : end;
         }
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) ||
@@ -35020,7 +35032,10 @@ bool c_test_constraint_expression_ends_agree(Arena* arena, CPreprocessResult pre
             u32 indexed = c_parse_constraint_expression_end(&model, preprocess, first, end);
             positions.body_expression_ends = 0;
             u32 walked = c_parse_constraint_expression_end(&model, preprocess, first, end);
-            agree &= indexed == walked;
+            model.position_index = 0;
+            u32 unindexed = c_parse_constraint_expression_end(&model, preprocess, first, end);
+            model.position_index = &positions;
+            agree &= indexed == walked && indexed == unindexed;
         }
     }
     // A private query may retain the model's position index while supplying
