@@ -207,6 +207,8 @@ struct CompilerDriverInvocation
     // arrays remain an execution compatibility path for API-built invocations
     // and are used only when macro_operation_count is zero.
     CPreprocessorOperation* macro_operations;
+    // -fmacro-prefix-map=OLD=NEW, in argv order; only builtin spellings change.
+    CMacroPrefixMap* macro_prefix_maps;
     String8* definitions;
     String8* undefinitions;
     String8* library_paths;
@@ -292,6 +294,7 @@ struct CompilerDriverInvocation
     u32 system_include_path_count;
     u32 forced_include_count;
     u32 macro_operation_count;
+    u32 macro_prefix_map_count;
     u32 definition_count;
     u32 undefinition_count;
     u32 library_path_count;
@@ -315,6 +318,7 @@ struct CompilerDriverInvocation
     // -MP emits phony rules for header prerequisites.
     bool dependency_phony_targets;
     bool verbose;
+    bool linker_verbose;
     // -w: the driver publishes no warning text or warning records.
     bool suppress_warnings;
     // -Werror, -Wno-error and the per-group spellings (see CompilerDriverWarningPolicy).
@@ -342,6 +346,8 @@ struct CompilerDriverInvocation
     // the visibility of definitions that carry no attribute or pragma.
     u8 default_visibility;
     bool pinned_debug_locals_explicit;
+    // Effective optional pass mask: no-flag/positive -O use IR_FAST_ALL,
+    // explicit -O/-O0 use zero, and explicit pass controls override either.
     u32 fast_passes;
     bool measure_fast_passes;
     // Tiny direct-call inlining defaults off. An explicit optimization level
@@ -551,6 +557,14 @@ struct CompilerDriverCAstPilotResult
     // segments and hints read from the tree, and bodies left to the token
     // walk and why. Zero when the analysis had no tree to use.
     CAstStatementStatistics statements;
+    // The declaration specifier runs read from the tree (c_parse.c): runs
+    // answered, and runs left to the type machine and why. Zero when the
+    // analysis had no tree to use.
+    CAstSpecifierStatistics specifiers;
+    // The extent table lowering read controlled body ranges from
+    // (c_gen.c): bodies, entries and answers, and the queries the token
+    // walker answered and why. Zero when lowering had no tree to use.
+    CAstExtentStatistics extents;
     // What lowering read from the tree (CAstLowerStatistics). Zero for
     // -fsyntax-only and when lowering had no tree.
     CAstLowerStatistics lower;
@@ -572,6 +586,7 @@ struct CompilerDriverResult
     CompilerDiagnostic* diagnostics;
     u32 diagnostic_count;
     String8 output;
+    String8 linker_report;
     NativeExecutableLinkResult native_link;
     WasmArtifact wasm;
     // Compatibility mirror; both artifacts reference the same arena-owned

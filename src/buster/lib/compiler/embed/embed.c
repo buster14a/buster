@@ -214,6 +214,9 @@ BUSTER_GLOBAL_LOCAL BusterEmbedSeverity compiler_embed_severity(CompilerDiagnost
         case COMPILER_DIAGNOSTIC_NOTE:
             result = BUSTER_EMBED_SEVERITY_NOTE;
             break;
+        default:
+            result = BUSTER_EMBED_SEVERITY_ERROR;
+            break;
     }
     return result;
 }

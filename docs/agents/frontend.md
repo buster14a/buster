@@ -36,6 +36,21 @@ The registered argument-demand controls in `macro_conditional_test.c` cover
 this boundary in C17/GNU17, including duplicate substitution and raw/paste
 controls. The external Clang `macro_disable.c` assertion remains unchanged.
 
+## Macro filename prefix maps
+
+`CPreprocessOptions.macro_prefix_maps` supplies ordered
+`CMacroPrefixMap` entries; the last byte-prefix match is substituted once by
+`c_macro_builtin_token`. Only synthesized filename literals change.
+`CMacro` retains the immutable mapping view for the preprocess call and its
+directive-context bit; no final result retains this view. `__FILE__` reads
+the current logical filename, `__BASE_FILE__` the root, and
+`__FILE_NAME__` the original basename before substitution. GCC-style
+directive expansions bypass mapping. Escaping happens after substitution
+through the existing literal renderer. Include identity/probes, dependencies,
+diagnostics and source maps use original physical/logical names.
+See [the driver contract](driver.md#macro-filename-prefix-maps) for argv
+ordering, GCC/Clang differences and hosted oracle controls.
+
 ## Line-control filenames
 
 `#line` and GNU linemarkers decode ordinary string-literal filenames with the
