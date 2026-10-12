@@ -457,7 +457,21 @@ values -- one scope-chain entity lookup per identifier -- only when
 branches through a computed goto. The proof is the walk's own test:
 `c_parse_label_address_prefix_proven`, or `c_parse_label_address_cast_at` for
 the `(type)&&label` form, whose type name may be a typedef resolved in the
-token's scope. Every provenance fact the walk records descends from such a
+token's scope. The scoped prefix proof treats a balanced `typeof (...)`
+specifier as one type-name component; its operand remains owned by expression
+or type-name semantics. Operand matching uses the position index when present
+and the scalar delimiter reference when absent; the registered fixture checks
+both proof paths, including an ordinary conjunction inside the typeof operand. The machineless cast reader falls back to that proof
+for decorated types it cannot resolve. A preceding sizeof/alignof group is
+still an operand, and ordinary conjunctions still bind ordinary identifiers.
+`c_test_typeof_label_address` covers GNU17/GNU23, all six native target
+layouts, both canonical forms, and default/pilot verified execution under
+FAST/QUALITY, with undeclared conjunction/sizeof/alignof/typeof neighbors.
+A complete root equality/inequality is a provenance sink: its result is the
+ordinary integer produced by canonical pointer equality. Conditional, comma,
+logical and cast results retain the conservative policy; decorated pointer
+return/call/static-storage and conditional/comma controls remain rejected.
+Every provenance fact the walk records descends from such a
 root, so a body it skips could have recorded or diagnosed nothing. The
 conjunction operator shares the spelling; a body with a goto label and
 `a && b` is not walked, and a parenthesized sizeof/alignof operand before
@@ -741,3 +755,27 @@ released after validation; completed definitions reuse their source identity.
 The multidimensional constant/runtime pair pins a later array derivation that
 first materializes a member during retry, including its exact source diagnostic.
 A GNU17-only empty-record dimension pins completion without member-row growth.
+
+### Promoted-member workspace
+
+Initializer member paths keep the existing breadth-first search and generation-stamped
+visited table. The semantic machine starts with token-derived workspace capacity,
+but expression queries can append type rows beyond that estimate. A search grows
+its checked private workspace to cover the live type table before indexing it;
+scratch and phase rewinds cannot release those buffers. The next growth releases
+the previous private reservation, and semantic teardown releases the last one.
+Reservation failure produces a structured diagnostic rather than treating an intact
+record as if it lacked the requested member. The depth-16/32 later-assertion regression
+in `c_test_nested_designator_static_assert` covers this interaction in syntax-only
+validation, both frontend forms and the AST pilot; runtime controls check inferred
+array length and member values.
+
+If an omitted outer array bound remains uninferred after a failed initializer
+walk, shape validation still traverses the list through the existing unbounded-root
+mode. It publishes no synthetic bound and diagnoses unknown outer/inner member
+names instead of silently skipping the list (#3672). The same registered fixture
+checks unsized/sized invalid neighbors through direct semantics and the driver,
+with independent Linux GCC/Clang rejection controls. Workspace ownership has its
+own registered fault/recovery control: a failed replacement preserves the old
+reservation and generation, a later search recovers, and production teardown
+returns the private reservation count to its starting value.

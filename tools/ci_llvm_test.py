@@ -302,7 +302,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn(r"$env:ProgramFiles\LLVM\bin", self.workflow)
         self.assertEqual(self.workflow.count("-LlvmBin $env:BUSTER_CI_LLVM_BIN"), 2)
         helper = (ROOT / "tools/ci_vs_dev_shell.ps1").read_text(encoding="utf-8")
-        launch = helper.index("Launch-VsDevShell.ps1') -Arch")
+        launch = re.search(r"^& \([^\n]*Launch-VsDevShell\.ps1[^\n]*\) -Arch \$Arch -HostArch amd64 -SkipAutomaticLocation$", helper, re.MULTILINE)
+        self.assertIsNotNone(launch)
+        launch = launch.start()
         self.assertGreater(helper.index('$env:PATH = "$LlvmBin;$env:PATH"'), launch)
 
 
