@@ -6542,6 +6542,17 @@ class SelfHostInlineCompareTest(unittest.TestCase):
                                                                                        "reason": "perf missing"})),
             "no cycles": changed(lab, lambda value: value["metrics"]["cycles"].update(a_median=None)),
             "no topdown": changed(lab, lambda value: value["profile"].update(topdown={"status": "failed", "metrics": []})),
+            "cache-only topdown": changed(lab, lambda value: value["profile"]["topdown"]["metrics"].pop(0)),
+            "malformed topdown row": changed(lab, lambda value: value["profile"]["topdown"]["metrics"].append({})),
+            "front end without values": changed(lab, lambda value: value["profile"]["topdown"]["metrics"][0].update(
+                a=None, b=None)),
+            "one-sided front end": changed(lab, lambda value: value["profile"]["topdown"]["metrics"][0].update(b=None)),
+            "non-finite front end": changed(lab, lambda value: value["profile"]["topdown"]["metrics"][0].update(
+                a=float("nan"))),
+            "only a level-2 front-end metric": changed(lab, lambda value: value["profile"]["topdown"]["metrics"][0].update(
+                group="PipelineL2", metric="frontend_bound_by_latency")),
+            "an unavailable extra front-end group": changed(lab, lambda value: value["profile"]["topdown"]["metrics"].append(
+                {"group": "decoder", "metric": "op_cache_hit_rate", "unit": "%", "a": 80.0, "b": None})),
             "other flags": changed(meta, lambda value: value["config"].update(extra=[])),
             "fixed inline pair": changed(meta, lambda value: value["config"].update(canonical_inline_pair=True)),
             "other pair count": changed(meta, lambda value: value["config"].update(pairs=12)),
@@ -6597,6 +6608,8 @@ class SelfHostInlineCompareTest(unittest.TestCase):
                                       "throughput": dict(corpus(), selfhost_inline_bundle=bundle,
                                                          link_tls_bundle=link_tls_evidence()[1])},
             "with the #48 inline profile": {"receipt": dict(pull, inline_acceptance={"requested": True})},
+            "with the scaling leg": {"receipt": dict(pull, scaling_profile=copy.deepcopy(compiler_receipt.SCALING_PROFILE)),
+                                     "throughput": dict(corpus(), selfhost_inline_bundle=bundle, scaling=scaling())},
         }.items():
             with self.subTest(case=name):
                 conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
@@ -6686,6 +6699,27 @@ class SelfHostInlineCompareTest(unittest.TestCase):
         plain.pop("selfhost_inline")
         self.assertIn("no self-host inline record", verify(Api(1, 0), expected, plain, {}))
         self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+
+    def test_request_with_another_opt_in_leg_or_scaling_fails_before_any_build(self) -> None:
+        for name, patches in {"scaling": {"scaling_requested": True},
+                              "link-tls": {"scaling_requested": False}}.items():
+            with self.subTest(combined=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                candidate, work, evidence, bins = root / "candidate", root / "work", root / "evidence", root / "bins"
+                for directory in (candidate, work, evidence, bins):
+                    directory.mkdir()
+                current = {"state": "pending", "reasons": [], "timings": {}, "binaries": {}, "lab": {}}
+                args = argparse.Namespace(mode="pull", base="b" * 40, head="a" * 40, selfhost_inline_requested=True,
+                                          link_tls_requested=name == "link-tls", lab=root / "uarch_lab.py")
+                with mock.patch.object(compiler_compare, "scaling_requested", return_value=patches["scaling_requested"]), \
+                        mock.patch.object(compiler_compare, "build") as build, \
+                        mock.patch.object(compiler_compare, "run") as run:
+                    compiler_compare.measure(args, candidate, work, evidence, bins, evidence / "build.log", current, [])
+                self.assertTrue(any("self-host-inline-compare-v1 cannot be combined" in reason
+                                    for reason in current["reasons"]), current["reasons"])
+                self.assertEqual(current["selfhost_inline"]["status"], "failed")
+                build.assert_not_called()
+                run.assert_not_called()
 
     def test_leg_runs_the_trusted_helper_and_refuses_missing_stage1(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

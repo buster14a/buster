@@ -2243,10 +2243,13 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     if selfhost_requested:
         receipt["selfhost_inline"] = {"requested": True, "request_line": SELFHOST_INLINE_REQUEST_LINE,
                                       "profile": SELFHOST_INLINE_PROFILE, "status": "pending"}
-        # One opt-in leg per attempt keeps a report from being shared between two profiles.
+        # One opt-in leg per attempt keeps a report from being shared between two profiles; the
+        # scaling leg also runs before this one and would share its budget.
         if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
-                linker_requested or link_tls_requested or inline_requested:
-            reasons.append("self-host-inline-compare-v1 cannot be combined with another opt-in leg")
+                linker_requested or link_tls_requested or inline_requested or \
+                scaling_requested(candidate, arguments.base, arguments.head):
+            reasons.append("self-host-inline-compare-v1 cannot be combined with another opt-in leg, the scaling "
+                           "leg included")
     # #3714: the named historical recipe swaps only the corpus harness; every other opt-in leg would
     # still run the base's own pre-floor harness, so none may join it. Its pinned worktree is prepared
     # before any build.

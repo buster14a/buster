@@ -672,8 +672,10 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     if any(receipt.get(key) is not None for key in
                            ("throughput_real_source", "ast_pilot_acceptance", "production_profile", "compiler_probes",
                             "frontend_selector", "wild_linker", "link_tls")) or \
-                            (isinstance(inline_record, dict) and inline_record.get("requested") is True):
-                        reasons.append("the self-host inline leg cannot be combined with another opt-in leg")
+                            (isinstance(inline_record, dict) and inline_record.get("requested") is True) or \
+                            "scaling_profile" in receipt:
+                        reasons.append("the self-host inline leg cannot be combined with another opt-in leg, the "
+                                       "scaling leg included")
                     reasons.extend(validate_selfhost_inline_bundle(receipt["selfhost_inline"],
                                                                    corpus.get("selfhost_inline_bundle"),
                                                                    receipt.get("binaries")))

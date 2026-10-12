@@ -26,7 +26,8 @@ import subprocess
 import sys
 import time
 
-from compiler_receipt import SELFHOST_INLINE_PROFILE, SELFHOST_INLINE_SCHEMA, SELFHOST_INLINE_STAGE1_SCHEMA
+from compiler_receipt import (SELFHOST_INLINE_PROFILE, SELFHOST_INLINE_SCHEMA, SELFHOST_INLINE_STAGE1_SCHEMA,
+                              selfhost_inline_frontend_problems)
 from inline_acceptance import git, hash_inputs, sha256
 
 PROFILE = SELFHOST_INLINE_PROFILE
@@ -114,10 +115,7 @@ def validate_compare_documents(summary: object, meta: object, labs: object, expe
         row = metrics.get(metric) if isinstance(metrics.get(metric), dict) else {}
         if not all(_positive(row.get(key)) for key in ("a_median", "b_median", "ratio")):
             problems.append(f"self-host inline {metric} counts are missing")
-    profile = summary.get("profile") if isinstance(summary.get("profile"), dict) else {}
-    topdown = profile.get("topdown") if isinstance(profile.get("topdown"), dict) else {}
-    if topdown.get("status") != "ok" or not isinstance(topdown.get("metrics"), list) or not topdown["metrics"]:
-        problems.append("self-host inline topdown metrics are missing")
+    problems.extend(selfhost_inline_frontend_problems(summary))
     return problems
 
 

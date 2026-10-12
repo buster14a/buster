@@ -1414,7 +1414,8 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    would self-build with `-fcanonical-inline`. The #48 profile above times
    one head against itself, inliner off against on; this one times base
    against head, both with the inliner on. It cannot be combined with any
-   other opt-in profile, `canonical-inline-self-host-v1` included. The
+   other opt-in profile, `canonical-inline-self-host-v1` and the scaling leg
+   included; both the harness and the publisher refuse the combination. The
    trusted revision's `tools/bench_direct/selfhost_inline_compare.py` runs in
    two parts:
    - **Stage 1, untimed.** Right after each role's Clang Release build, with
@@ -1446,8 +1447,13 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
      the fixed flags, CPU, floor and profile steps;
    - outputs that differ, or a prepare, timed, topdown or sampling step that
      did not complete;
-   - missing wall-time intervals, unavailable hardware counters, missing
-     instruction, cycle or branch-miss counts, or missing topdown metrics;
+   - missing wall-time intervals, unavailable hardware counters, or missing
+     instruction, cycle or branch-miss counts;
+   - front-end evidence that is not usable (`selfhost_inline_frontend_problems`):
+     a malformed topdown row, no level-1 `frontend_bound` metric with finite
+     values for both compilers, or a front-end row measured for only one.
+     The topdown step is marked ok even when a group fails or is
+     unavailable, so cache or backend rows never stand in for it;
    - a receipt digest that the exported summary does not give.
 
    Every value is report-only. On a pull request the merge base is the

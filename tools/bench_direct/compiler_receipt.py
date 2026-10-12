@@ -1862,6 +1862,38 @@ def validate_selfhost_inline(stage1: object, result: object, binaries: object) -
     return problems
 
 
+def _finite_number(value: object) -> bool:
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def selfhost_inline_frontend_problems(summary: object) -> list[str]:
+    """Reasons a self-host inline summary lacks usable paired front-end topdown evidence.
+
+    Every topdown row must be well formed; the level-1 front-end-bound metric (a name ending in
+    frontend_bound, as uarch_lab's dominant_category reads it) must be present with finite values for
+    both compilers; and no front-end row may carry a value for only one of them. Other groups (cache,
+    backend) are reported but never stand in for it, because step_topdown marks the step ok even when a
+    group fails or is unavailable."""
+    label = "self-host inline"
+    profile = summary.get("profile") if isinstance(summary, dict) and isinstance(summary.get("profile"), dict) else {}
+    topdown = profile.get("topdown") if isinstance(profile.get("topdown"), dict) else {}
+    rows = topdown.get("metrics")
+    if topdown.get("status") != "ok" or not isinstance(rows, list) or not rows:
+        return [f"{label} topdown metrics are missing"]
+    problems: list[str] = []
+    if any(not isinstance(row, dict) or not isinstance(row.get("group"), str) or not isinstance(row.get("metric"), str)
+           for row in rows):
+        problems.append(f"{label} topdown has a malformed metric row")
+        rows = [row for row in rows if isinstance(row, dict)]
+    frontend = [row for row in rows if SELFHOST_INLINE_FRONTEND.search(f"{row.get('group', '')} {row.get('metric', '')}")]
+    if not any(str(row.get("metric", "")).lower().endswith("frontend_bound") and _finite_number(row.get("a")) and
+               _finite_number(row.get("b")) for row in frontend):
+        problems.append(f"{label} topdown lacks a paired level-1 frontend_bound metric")
+    if any(_finite_number(row.get("a")) != _finite_number(row.get("b")) for row in frontend):
+        problems.append(f"{label} topdown has a front-end metric measured for only one compiler")
+    return problems
+
+
 def selfhost_inline_digest(summary: object) -> dict | None:
     """The reported rows of a self-host inline uarch summary: paired metrics, code bytes, front-end topdown."""
     if not isinstance(summary, dict) or not isinstance(summary.get("metrics"), dict):
