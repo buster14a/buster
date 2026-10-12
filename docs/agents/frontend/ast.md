@@ -3627,4 +3627,16 @@ default flags, B the base with `-fc-ast-pilot`, C the candidate with
 - **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
   requested, so Zen 5 validation stays incomplete (#2761).
 
+The gate's hosted census is
+[`2026-10-12T175829Z`](../../performance-audits/2026-10-12T175829Z.md),
+diagnostic only. The candidate passes every hosted budget and ships:
+- `-fsyntax-only` falls by 62.6 M Ir on the default path (−0.559%) and by
+  69.4 M under the pilot (−0.741%). `-c` falls by the same amounts (−0.245%
+  and −0.292%).
+- No call reaches the walk on the self-host. 53.1 M of the saving is the
+  function itself, and the rest is the callers' argument copy and call setup.
+- Objects are byte-identical across the four arms at `-g0` and `-g`.
+- The walk is still needed where a range holds a site. A gate that always
+  skips fails 45 fixtures in `c_frontend_tests`.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
