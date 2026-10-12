@@ -1203,15 +1203,25 @@ hosts execute its independent expected-value fixture.
   `.eh_frame` function references are `R_AARCH64_PREL32` against `.text`, and
   initialized pointers are `R_AARCH64_ABS64` in `.data`: constants with
   relocations already live in writable data, so no `.data.rel.ro` split exists
-  and none is needed for `ld.lld -shared -z text`. Without `-fPIC` nothing
-  changes (objects are byte-identical). Thread-local access under this model
-  is refused by name -- selection fails with `thread-local access under
-  AArch64 ELF position-independent code (TLSDESC) is not implemented`, which
-  the driver reports as a code-generation refusal and publishes no output --
-  instead of emitting local-exec `TPREL` relocations a shared object cannot
-  hold. TLSDESC itself, Buster's own AArch64 `-shared` writer and hidden-visibility
-  attribute propagation (a hidden definition still uses the GOT form, as on
-  x86-64) remain open. The test hook is
+  and none is needed for `ld.lld -shared -z text`. Without `-fPIC` the reference model is unchanged.
+  Thread-local access under ELF PIC selects `MACHINE_A64_TLS_DESCRIPTOR`,
+  an ordinary conservative MIR call boundary followed by an explicit X0
+  result capture. Its adjacent ADRP X0 / LDR X1 / ADD X0 / BLR X1 sequence
+  publishes the four existing TLSDESC relocations (562/563/564/569); the
+  returned TLS offset is added to TPIDR_EL0 after the call. This follows the
+  [AArch64 System V TLS ABI](https://github.com/ARM-software/abi-aa/blob/main/sysvabi64/sysvabi64.rst).
+  The call boundary preserves live values across resolver register/flag effects
+  and keeps loader memory effects ordered. Independent linkers can retain
+  descriptors in shared objects or relax them in executables; Buster's
+  fixed-address linker uses its existing local-exec relaxation. Non-PIC TLS,
+  Darwin and Windows retain their prior forms. The registered
+  `compiler_driver_test_aarch64_pic_tlsdesc` checks both allocators/frontend
+  forms, four flags and Linux/Android object serialization; native AArch64
+  Linux also links a shared library with an independent host linker and runs
+  a pthread observer for imported, defined, zero-initialized and static TLS.
+  Buster's own AArch64 `-shared` writer and hidden-visibility attribute
+  propagation (a hidden definition still uses the GOT form, as on x86-64)
+  remain open. The test hook is
   `compiler_driver_test_aarch64_pic_outputs`, which reads the relocation kind
   per symbol class from a Buster object; on a native Linux AArch64 host it
   also links the object with `ld.lld -shared -z text`.

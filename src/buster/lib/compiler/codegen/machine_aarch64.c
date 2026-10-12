@@ -23,8 +23,8 @@
 // machine_a64_select_inline_hint selects the fixed NOP/YIELD literal rows.
 // Symbol addresses: machine_a64_symbol_reference picks the inline literal, the
 // Darwin page pair or GOT load, or under ELF -fPIC the GOT or page pair that the
-// MACHINE_A64_LEA_SYMBOL encoder case emits (thread-locals are refused there in
-// machine_a64_select_global_address).
+// MACHINE_A64_LEA_SYMBOL encoder case emits. machine_a64_select_global_address
+// selects local-exec TLS or a PIC descriptor call (MACHINE_A64_TLS_DESCRIPTOR).
 // machine_a64_cast_copies_constant lets a register-copy cast of an integer
 // constant (a C null pointer) define itself with MOV_RI, which the allocators
 // rematerialize; the classification pass counts those reads and constants
@@ -3042,20 +3042,14 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_global_address(MachineA64Selector* s
     bool windows = selector->target.os == OPERATING_SYSTEM_WINDOWS;
     bool thread_local_supported = darwin || windows ||
         selector->target.os == OPERATING_SYSTEM_LINUX || selector->target.os == OPERATING_SYSTEM_ANDROID;
-    if (result_register != UINT32_MAX && symbol && thread_local_global && thread_local_supported && selector->position_independent)
-    {
-        // The only ELF model the selector emits is local-exec, which a shared
-        // object cannot hold; the position-independent models are TLSDESC.
-        selector->failure_detail = S8("thread-local access under AArch64 ELF position-independent code (TLSDESC) is not implemented");
-        machine_a64_reject(selector, instruction->opcode);
-    }
-    else if (result_register != UINT32_MAX && symbol && thread_local_global && thread_local_supported)
+    if (result_register != UINT32_MAX && symbol && thread_local_global && thread_local_supported)
     {
         u32 target_index = machine_a64_call_target_append(selector, instruction->symbol, false);
         u32 row;
-        if (darwin)
+        if (darwin || selector->position_independent)
         {
-            machine_a64_select_row(selector, (MachineInstruction){.payload = target_index, .opcode = MACHINE_A64_TLS_DARWIN});
+            machine_a64_select_row(selector, (MachineInstruction){
+                .payload = target_index, .opcode = (u16)(darwin ? MACHINE_A64_TLS_DARWIN : MACHINE_A64_TLS_DESCRIPTOR)});
             row = machine_a64_select_row(selector, (MachineInstruction){
                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                              machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_A64_X0)},
@@ -9298,6 +9292,9 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
         case MACHINE_A64_TLS_DARWIN:
             capacity64 += 16;
             break;
+        case MACHINE_A64_TLS_DESCRIPTOR:
+            capacity64 += 24;
+            break;
         case MACHINE_A64_RET:
             capacity64 += 20 + (large_save_offset ? 8u : 0u) + (u64)frame_chunk_words * 4 + (u64)push_count * 4;
             break;
@@ -10810,6 +10807,47 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
                         .operands = {{.value = MACHINE_A64_X8, .kind = A64_MC_OPERAND_REGISTER}},
                         .opcode = A64_OPCODE_BLR, .operand_count = 1});
                 }
+            }
+            break;
+            case MACHINE_A64_TLS_DESCRIPTOR:
+            {
+                // SysV AArch64 small-model TLSDESC requires this adjacent
+                // ADRP/LDR/ADD/BLR sequence for independent linker relaxation.
+                // The resolver returns an offset in X0; add TP afterwards.
+                MachineThreadLocalSite sites[] = {MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_PAGE,
+                    MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_LOAD, MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_ADD,
+                    MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_CALL};
+                for (u32 step = 0; step < BUSTER_ARRAY_LENGTH(sites); step += 1)
+                {
+                    MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                    *site = (MachineCallSite){.code_offset = encoder.count, .target = instruction->payload,
+                        .is_thread_local = 1, .thread_local_site = (u32)sites[step]};
+                    switch (step)
+                    {
+                    case 0:
+                        machine_a64_emit_mc(&encoder, (A64MCInst){
+                            .operands = {{.value = MACHINE_A64_X0, .kind = A64_MC_OPERAND_REGISTER},
+                                         {.value = 0, .kind = A64_MC_OPERAND_PC_RELATIVE}},
+                            .opcode = A64_OPCODE_ADRP, .operand_count = 2});
+                        break;
+                    case 1:
+                        machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_X1, MACHINE_A64_X0, 0, 8, false);
+                        break;
+                    case 2:
+                    {
+                        u32 fields[] = {MACHINE_A64_X0, MACHINE_A64_X0, 0};
+                        machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
+                    } break;
+                    case 3:
+                        machine_a64_emit_mc(&encoder, (A64MCInst){
+                            .operands = {{.value = MACHINE_A64_X1, .kind = A64_MC_OPERAND_REGISTER}},
+                            .opcode = A64_OPCODE_BLR, .operand_count = 1});
+                        break;
+                    }
+                }
+                machine_a64_emit(&encoder, UINT32_C(0xd53bd040) | MACHINE_A64_X1);
+                u32 address_fields[] = {MACHINE_A64_X0, MACHINE_A64_X1, 0, MACHINE_A64_X0};
+                machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRS, address_fields, BUSTER_ARRAY_LENGTH(address_fields));
             }
             break;
             case MACHINE_A64_LEA_TLS:

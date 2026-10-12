@@ -1616,9 +1616,11 @@ reference model (see the position-independent code bullets in
 acceptable to `ld.lld -shared -z text`; Buster's Linux `-shared` and `-pie`
 writers still exist only for x86-64. Android AArch64 executable links use the
 AArch64 PIC model automatically. Thread-local access under AArch64
-ELF PIC is refused by a named code-generation diagnostic (emitting TLSDESC is
-not implemented; foreign TLSDESC objects are relaxed at link time, see the
-AArch64 TLS paragraph below) and publishes no output. Cancellation, preprocessing,
+ELF PIC emits the general-dynamic descriptor sequence and its four TLSDESC
+relocations. Independent platform linkers can build shared objects from these
+objects; Buster's fixed-address AArch64 linker relaxes the descriptor to
+local-exec, using the same path as foreign TLSDESC objects (see the
+AArch64 TLS paragraph below). Cancellation, preprocessing,
 syntax-only and assembly/prebuilt-only input routes retain their behavior.
 Mach-O and COFF keep their existing target models; Wasm/eBPF compatibility
 behavior is unchanged. LLVM-bitcode and direct backend model requests remain
