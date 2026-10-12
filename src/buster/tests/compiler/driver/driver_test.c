@@ -20,6 +20,8 @@
 // macro_prefix_map_test.c owns builtin filename spelling, oracle and depfile checks.
 // compiler_driver_test_aarch64_elf_ldst checks foreign non-PIC memory references
 // against native host-linked controls, including each scaled low12 form.
+// compiler_driver_test_aarch64_pic_tlsdesc checks emitted PIC descriptors and
+// independent host shared-library/thread observers on AArch64 Linux.
 // compiler_driver_test_aarch64_elf_tlsdesc runs foreign TLSDESC objects relaxed
 // to local-exec, against a host-linked control (#2582).
 // compiler_driver_test_aarch64_elf_tls_initial_exec runs a foreign -O2
@@ -15381,7 +15383,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_tls(UnitTestArgum
                 for (u32 pic = 0; pic < 2; pic += 1)
                 {
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, target == 1 && pic ? S8("buster-native-tls-pic-refusal") : S8("buster-native-tls"), S8(".o"));
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-native-tls"), S8(".o"));
                     String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
                         pic ? S8("-fPIC") : S8("-fno-pic"), S8("-fverify-codegen"), S8("-o"), output,
                         S8("tests/basic_c_thread_local_models.c")};
@@ -15390,26 +15392,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_tls(UnitTestArgum
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     String8 description = string_format(temporary.arena, S8("native_tls {S8} {S8} {S8} pic={u32}: {S8}"),
                         targets[target], modes[mode], frontends[frontend], pic, compiled.diagnostic);
-                    if (target == 1 && pic)
-                    {
-                        // AArch64 ELF position-independent code addresses
-                        // thread-locals through TLSDESC, which is not
-                        // implemented: the request is refused by name and no
-                        // object is published, never emitted as local-exec.
-                        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_CODEGEN, description);
-                        BUSTER_TEST_RAW(arguments, string_first_sequence(compiled.diagnostic,
-                            S8("thread-local access under AArch64 ELF position-independent code (TLSDESC) is not implemented")) !=
-                            BUSTER_STRING_NO_MATCH, description);
-                        BUSTER_TEST(arguments, !compiled.has_object && !compiled.output.length && !compiled.native_link.executable.length);
-                        BUSTER_TEST(arguments, compiler_driver_test_pic_output_unchanged(temporary.arena, output, false, (String8){0}));
-                        scratch_end(temporary);
-                        continue;
-                    }
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
                     BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 2 &&
                         compiled.codegen_statistics.fallback_function_count == 0, description);
-                    ObjectRelocationKind first_kind = target == 0 && pic ? OBJECT_RELOCATION_X86_64_TLSGD : first_kinds[target];
-                    ObjectRelocationKind second_kind = target == 0 && pic ? OBJECT_RELOCATION_X86_64_PLT32 : second_kinds[target];
+                    ObjectRelocationKind first_kind = target == 0 && pic ? OBJECT_RELOCATION_X86_64_TLSGD
+                        : target == 1 && pic ? OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21 : first_kinds[target];
+                    ObjectRelocationKind second_kind = target == 0 && pic ? OBJECT_RELOCATION_X86_64_PLT32
+                        : target == 1 && pic ? OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL : second_kinds[target];
                     bool first = false;
                     bool second = false;
                     bool index_low = target != 3;
@@ -27649,6 +27638,180 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_test_text_absolute_relocations(ObjectFil
 // an ADRP/ADD pair (ADR_PREL_PG_HI21 + ADD_ABS_LO12_NC). Direct calls keep
 // CALL26, no executable section carries an absolute relocation, and the
 // request leaves the default model's bytes alone when it is cancelled.
+// #3033: emitted PIC TLS must survive a host shared link and independent
+// threads. Both frontend forms/allocators retain values across the resolver.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_pic_tlsdesc(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-pic-tlsdesc-input"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-pic-tlsdesc-output"), S8(".o"));
+    String8 source = S8("__thread long pic_tls_init = 7;\n"
+                        "__thread long pic_tls_zero;\n"
+                        "static __thread long pic_tls_local;\n"
+                        "extern __thread long pic_tls_import;\n"
+                        "long pic_tls_step(long a, long b, long c, long d, long e, long f, long g, long h)\n"
+                        "{ long saved = a+b+c+d+e+f+g+h; pic_tls_local += a; pic_tls_zero += b; pic_tls_init += c;\n"
+                        "  return saved+pic_tls_local+pic_tls_zero+pic_tls_init+pic_tls_import; }\n");
+    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, written);
+    String8 flags[] = {S8("-fPIC"), S8("-fpic"), S8("-fPIE"), S8("-fpie")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 targets[] = {S8("aarch64-linux"), S8("aarch64-linux-android")};
+    ObjectRelocationKind kinds[] = {OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21,
+        OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12, OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12,
+        OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL};
+    String8 symbols[] = {S8("pic_tls_init"), S8("pic_tls_zero"), S8("pic_tls_local"), S8("pic_tls_import")};
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && BUSTER_CPU_ARCH_AARCH64 && !BUSTER_ANDROID
+    String8 client = buster_test_temporary_path(arena, S8("buster-pic-tlsdesc-client"), S8(".c"));
+    String8 library = buster_test_temporary_path(arena, S8("buster-pic-tlsdesc-library"), S8(".so"));
+    String8 executable = buster_test_temporary_path(arena, S8("buster-pic-tlsdesc-run"), S8(""));
+    String8 client_source = S8("#include <pthread.h>\n"
+        "__thread long pic_tls_import = 11;\n"
+        "long pic_tls_step(long,long,long,long,long,long,long,long);\n"
+        "static int check(void) { long a=pic_tls_step(1,2,3,4,5,6,7,8);\n"
+        "  long b=pic_tls_step(1,2,3,4,5,6,7,8); return a!=60 || b!=66; }\n"
+        "static void *worker(void *p) { *(int *)p=check(); return 0; }\n"
+        "int main(void) { int failure=check(), child=1; pthread_t thread;\n"
+        "  int created=pthread_create(&thread,0,worker,&child);\n"
+        "  if (created==0) failure|=pthread_join(thread,0);\n"
+        "  return failure || created || child || pic_tls_step(1,2,3,4,5,6,7,8)!=72; }\n");
+    bool client_written = file_write(client, BUSTER_SLICE_TO_BYTE_SLICE(client_source));
+    BUSTER_TEST(arguments, client_written);
+    ProcessSpawnOptions spawn_options = {.use_process_environment = true, .search_path = true,
+        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)};
+    // First run the same source and observer through the configured host compiler.
+    // The second pass uses Buster output; linker relaxation remains independent.
+    for (u32 provider = 0; written && client_written && provider < 2; provider += 1)
+    {
+        if (provider == 0)
+        {
+            String8 command[12];
+            u32 count = 0;
+            command[count++] = S8(BUSTER_HOST_C_COMPILER);
+            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+            command[count++] = S8("-fPIC"); command[count++] = S8("-c"); command[count++] = input;
+            command[count++] = S8("-o"); command[count++] = output;
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = command, .length = count},
+                (SliceString8){0}, (SliceString8){0}, spawn_options);
+            ProcessWaitResult waited = spawned.handle ? os_process_wait_deadline(arena, spawned, 30000000) : (ProcessWaitResult){0};
+            BUSTER_TEST_RAW(arguments, spawned.handle && !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS,
+                BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
+        }
+#endif
+    for (u32 target = 0; written && target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                for (u32 flag = 0; flag < BUSTER_ARRAY_LENGTH(flags); flag += 1)
+                {
+                    TemporalArena scope = arena_begin_temporal(arena);
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && BUSTER_CPU_ARCH_AARCH64 && !BUSTER_ANDROID
+                    bool host_control = provider == 0;
+                    if (host_control && (target || mode || frontend || flag))
+                    {
+                        scratch_end(scope);
+                        continue;
+                    }
+#else
+                    bool host_control = false;
+#endif
+                    String8 command[] = {S8("-target"), targets[target], S8("-nostdinc"), S8("-g0"), modes[mode], frontends[frontend],
+                        S8("-c"), flags[flag], S8("-fverify-codegen"), S8("-fno-machine-fallback"), input, S8("-o"), output};
+                    bool compile_ok;
+                    if (!host_control)
+                    {
+                        CompilerDriverResult compiled = compiler_driver_execute_invocation(arena,
+                            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                        compile_ok = compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object;
+                        BUSTER_TEST_RAW(arguments, compile_ok, compiled.diagnostic);
+                        if (compile_ok)
+                        {
+                            BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_function_count == 0);
+                            BUSTER_TEST(arguments, compiler_driver_test_text_absolute_relocations(&compiled.object) == 0);
+                            for (u32 symbol = 0; symbol < BUSTER_ARRAY_LENGTH(symbols); symbol += 1)
+                            {
+                                u32 descriptors = compiler_driver_test_symbol_relocations(&compiled.object, symbols[symbol], kinds[0]);
+                                BUSTER_TEST(arguments, descriptors != 0);
+                                for (u32 kind = 1; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+                                {
+                                    BUSTER_TEST(arguments, compiler_driver_test_symbol_relocations(&compiled.object, symbols[symbol], kinds[kind]) == descriptors);
+                                }
+                                BUSTER_TEST(arguments, compiler_driver_test_symbol_relocations(&compiled.object, symbols[symbol],
+                                    OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12) == 0);
+                            }
+                            // The serialized object must independently read back all descriptor sites.
+                            ObjectFile imported = object_read(arena, file_read(arena, output, (FileReadOptions){0}),
+                                (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = target ? OPERATING_SYSTEM_ANDROID : OPERATING_SYSTEM_LINUX});
+                            BUSTER_TEST(arguments, imported.error == OBJECT_ERROR_NONE);
+                            for (u32 symbol = 0; symbol < BUSTER_ARRAY_LENGTH(symbols); symbol += 1)
+                            {
+                                for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+                                {
+                                    BUSTER_TEST(arguments, compiler_driver_test_symbol_relocations(&imported, symbols[symbol], kinds[kind]) ==
+                                        compiler_driver_test_symbol_relocations(&compiled.object, symbols[symbol], kinds[kind]));
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        compile_ok = true;
+                    }
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && BUSTER_CPU_ARCH_AARCH64 && !BUSTER_ANDROID
+                    if (compile_ok && target == 0 && flag == 0)
+                    {
+                        String8 host_command[16];
+                        u32 count = 0;
+                        host_command[count++] = S8(BUSTER_HOST_C_COMPILER);
+                        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { host_command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+                        host_command[count++] = S8("-shared"); host_command[count++] = S8("-Wl,-z,text");
+                        host_command[count++] = output; host_command[count++] = S8("-o"); host_command[count++] = library;
+                        ProcessSpawnResult linker = os_process_spawn((SliceString8){.pointer = host_command, .length = count},
+                            (SliceString8){0}, (SliceString8){0}, spawn_options);
+                        ProcessWaitResult linked = linker.handle ? os_process_wait_deadline(arena, linker, 30000000) : (ProcessWaitResult){0};
+                        bool shared_ok = linker.handle && !linked.timed_out && linked.result == PROCESS_RESULT_SUCCESS;
+                        BUSTER_TEST_RAW(arguments, shared_ok, BYTE_SLICE_TO_STRING(8, linked.streams[STANDARD_STREAM_ERROR]));
+                        if (shared_ok)
+                        {
+                            count = 0;
+                            host_command[count++] = S8(BUSTER_HOST_C_COMPILER);
+                            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { host_command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+                            host_command[count++] = S8("-pthread"); host_command[count++] = S8("-Wl,--export-dynamic");
+                            host_command[count++] = client; host_command[count++] = library;
+                            host_command[count++] = S8("-o"); host_command[count++] = executable;
+                            ProcessSpawnResult observer = os_process_spawn((SliceString8){.pointer = host_command, .length = count},
+                                (SliceString8){0}, (SliceString8){0}, spawn_options);
+                            ProcessWaitResult observed = observer.handle ? os_process_wait_deadline(arena, observer, 30000000) : (ProcessWaitResult){0};
+                            bool observer_ok = observer.handle && !observed.timed_out && observed.result == PROCESS_RESULT_SUCCESS;
+                            BUSTER_TEST_RAW(arguments, observer_ok, BYTE_SLICE_TO_STRING(8, observed.streams[STANDARD_STREAM_ERROR]));
+                            if (observer_ok) { BUSTER_TEST(arguments, compiler_driver_test_process_success(arena, executable)); }
+                        }
+                        (void)os_file_delete(executable);
+                        (void)os_file_delete(library);
+                    }
+#else
+                    BUSTER_UNUSED(compile_ok);
+#endif
+                    (void)os_file_delete(output);
+                    scratch_end(scope);
+                }
+            }
+        }
+    }
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && BUSTER_CPU_ARCH_AARCH64 && !BUSTER_ANDROID
+    }
+    (void)os_file_delete(client);
+#endif
+    (void)os_file_delete(input);
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_pic_outputs(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -27810,9 +27973,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_pic_outputs(Unit
         (void)os_file_delete(output);
         scratch_end(attempt);
     }
-    // Thread-local access has no position-independent model on this target
-    // yet. The refusal names it, publishes nothing, and leaves a file already
-    // at the destination alone; the same request without PIC compiles.
+    // Thread-local PIC emits descriptors and replaces prior output only on
+    // success. A cancelled request retains the existing local-exec model.
     String8 thread_source = S8("__thread int pic_thread_value = 7;\nint pic_thread_read(void) { return pic_thread_value; }\n");
     String8 thread_input = buster_test_temporary_path(arena, S8("buster-aarch64-pic-thread"), S8(".c"));
     bool thread_written = file_write(thread_input, BUSTER_SLICE_TO_BYTE_SLICE(thread_source));
@@ -27830,13 +27992,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_pic_outputs(Unit
                                      S8("-o"), output};
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(
                     arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_CODEGEN, compiled.diagnostic);
-                BUSTER_TEST_RAW(arguments, string_first_sequence(compiled.diagnostic,
-                    S8("thread-local access under AArch64 ELF position-independent code (TLSDESC) is not implemented")) != BUSTER_STRING_NO_MATCH,
-                    compiled.diagnostic);
-                BUSTER_TEST(arguments, string_first_sequence(compiled.diagnostic, S8("function='pic_thread_read'")) != BUSTER_STRING_NO_MATCH);
-                BUSTER_TEST(arguments, !compiled.has_object && !compiled.native_link.executable.length);
-                BUSTER_TEST(arguments, compiler_driver_test_pic_output_unchanged(arena, output, true, sentinel));
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+                ObjectRelocationKind descriptor_kinds[] = {OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21,
+                    OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12, OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12,
+                    OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL};
+                for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(descriptor_kinds); kind += 1)
+                {
+                    BUSTER_TEST(arguments, compiler_driver_test_symbol_relocations(&compiled.object, S8("pic_thread_value"),
+                        descriptor_kinds[kind]) != 0);
+                }
+                BUSTER_TEST(arguments, compiler_driver_test_symbol_relocations(&compiled.object, S8("pic_thread_value"),
+                    OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12) == 0);
+                ByteSlice replaced = file_read(arena, output, (FileReadOptions){0});
+                BUSTER_TEST(arguments, replaced.pointer && replaced.length != sentinel.length);
                 (void)os_file_delete(output);
                 scratch_end(scope);
             }
@@ -34785,6 +34953,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_probe_spellings);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_pic_arguments);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_pic_tlsdesc);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_pic_outputs);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_weak_unwind);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_common_storage_option);
