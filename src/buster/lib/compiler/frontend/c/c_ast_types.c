@@ -245,7 +245,6 @@
 //   c_ast_types_lookups_agree
 //   c_ast_types_locals_build,                    the settled name checks
 //   c_ast_types_mark_resolves_at_file,
-//   c_ast_types_group_settles,
 //   c_ast_types_lookups_hold,
 //   c_ast_types_lookups_settle,
 //   c_ast_types_lookups_settled
@@ -2436,28 +2435,6 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_mark_resolves_at_file(CAstTypeBodyIndex* in
     return file;
 }
 
-// The marks of one flag word's group, from its mask of mark bytes, the low
-// byte first (every supported host is little-endian): whether the region can
-// still settle, recording each mark that does not resolve as from the file
-// scope among its others.
-BUSTER_GLOBAL_LOCAL bool c_ast_types_group_settles(CAstTypeBodyIndex* index, CAstTypeBody* body, CPreprocessResult const* preprocess, CParseResult* result,
-                                                   u32 group, u64 marks)
-{
-    bool file = true;
-    for (; file && marks; marks &= marks - 1)
-    {
-        u32 relative = group + mask64_first_set(marks) / 8;
-        bool other = !c_ast_types_mark_resolves_at_file(index, body, preprocess, result, relative);
-        file = !other || body->other_count < C_AST_TYPE_LOOKUP_OTHER_LIMIT;
-        if (other && file)
-        {
-            body->others[body->other_count] = relative;
-            body->other_count += 1;
-        }
-    }
-    return file;
-}
-
 // Whether the region's settlement answers a query over `node`: it holds under
 // the current lookup generation and identifier use count, no other mark lies
 // in the node's subtree, and the query's scope chain reaches the file scope.
@@ -2494,24 +2471,35 @@ BUSTER_GLOBAL_LOCAL C_AST_TYPES_NOINLINE bool c_ast_types_lookups_settle(CAstTyp
     }
     index->settled_nodes += count;
     bool file = index->local_generation == generation;
-    // Whole flag words first: almost none carry the mark. The tail's bytes are
-    // assembled into one more word.
+    // Eight flag bytes at a time: almost none carry the mark, and each mark
+    // in a group is found from the group's mask, the low byte first (every
+    // supported host is little-endian). The tail's bytes are assembled into
+    // one word before the scan, which selects it for the last group.
     u64 const lookup_bytes = 0x0101010101010101ull * C_AST_TYPE_FLAG_LOOKUP;
     u32 whole = count & ~7u;
-    for (u32 group = 0; file && group < whole; group += 8)
+    u64 tail = 0;
+    for (u32 byte = whole; byte < count; byte += 1)
     {
-        u64 word;
-        memcpy(&word, body->flags + group, 8);
-        file = c_ast_types_group_settles(index, body, preprocess, result, group, word & lookup_bytes);
+        tail |= (u64)body->flags[byte] << (8 * (byte - whole));
     }
-    if (file && whole < count)
+    for (u32 group = 0; file && group < count; group += 8)
     {
-        u64 word = 0;
-        for (u32 byte = 0; byte < count - whole; byte += 1)
+        u64 word = tail;
+        if (group < whole)
         {
-            word |= (u64)body->flags[whole + byte] << (8 * byte);
+            memcpy(&word, body->flags + group, 8);
         }
-        file = c_ast_types_group_settles(index, body, preprocess, result, whole, word & lookup_bytes);
+        for (u64 marks = word & lookup_bytes; file && marks; marks &= marks - 1)
+        {
+            u32 relative = group + mask64_first_set(marks) / 8;
+            bool other = !c_ast_types_mark_resolves_at_file(index, body, preprocess, result, relative);
+            file = !other || body->other_count < C_AST_TYPE_LOOKUP_OTHER_LIMIT;
+            if (other && file)
+            {
+                body->others[body->other_count] = relative;
+                body->other_count += 1;
+            }
+        }
     }
     body->lookups = (u8)(file ? C_AST_TYPE_LOOKUPS_FILE : C_AST_TYPE_LOOKUPS_EACH);
     body->lookups_generation = generation;
