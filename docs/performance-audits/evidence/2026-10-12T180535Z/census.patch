@@ -1,0 +1,65 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_source.c b/src/buster/lib/compiler/frontend/c/c_source.c
+index ffeafdd..b130a40 100644
+--- a/src/buster/lib/compiler/frontend/c/c_source.c
++++ b/src/buster/lib/compiler/frontend/c/c_source.c
+@@ -113,6 +113,7 @@
+ //   c_prewarm                                  serial table prewarm
+ 
+ #include "c_internal.h"
++#include <stdio.h>
+ #include <buster/lib/compiler/frontend/c/c_source_internal.h>
+ #include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
+ #include "c_vendor_builtin.c"
+@@ -6754,6 +6755,11 @@ BUSTER_C_INTERNAL bool c_macro_paste_tokens(Arena* arena, CSpellingSpace* space,
+     char8 const* base = space->base;
+     bool ok = true;
+     u32 pasted_count = 0;
++    u64 census_joins = 0;
++    u64 census_bytes = 0;
++    u64 census_final = 0;
++    u64 census_max = 0;
++    fprintf(stderr, "PASTE_CALL items=%u\n", count);
+     // Removing an empty left operand early would let `##` consume an
+     // unrelated preceding token or appear to be at an edge.
+     for (u32 index = 0; index < count && ok; index += 1)
+@@ -6761,6 +6767,16 @@ BUSTER_C_INTERNAL bool c_macro_paste_tokens(Arena* arena, CSpellingSpace* space,
+         CMacroReplacementToken item = items[index];
+         if (!c_macro_is_paste(item.token.token))
+         {
++            if (census_joins)
++            {
++                fprintf(stderr, "PASTE_CHAIN joins=%llu bytes=%llu final=%llu max=%llu ok=1\n",
++                        (unsigned long long)census_joins, (unsigned long long)census_bytes,
++                        (unsigned long long)census_final, (unsigned long long)census_max);
++                census_joins = 0;
++                census_bytes = 0;
++                census_final = 0;
++                census_max = 0;
++            }
+             items[pasted_count++] = item;
+             continue;
+         }
+@@ -6800,6 +6816,10 @@ BUSTER_C_INTERNAL bool c_macro_paste_tokens(Arena* arena, CSpellingSpace* space,
+         String8 left_spelling = c_token_spelling(base, left->token.token);
+         String8 right_spelling = c_token_spelling(base, right.token.token);
+         u64 joined_length = left_spelling.length + right_spelling.length;
++        census_joins += 1;
++        census_bytes += joined_length + 1;
++        census_final = joined_length;
++        census_max = BUSTER_MAX(census_max, joined_length);
+         // The joined text lives in the spelling space so the pasted token's
+         // offset resolves like any other; pasting never crosses a newline or
+         // splice, so relexing it cannot change its bytes and the relex is
+@@ -6861,6 +6881,12 @@ BUSTER_C_INTERNAL bool c_macro_paste_tokens(Arena* arena, CSpellingSpace* space,
+             .preceded_by_space = left->token.preceded_by_space,
+         };
+     }
++    if (census_joins)
++    {
++        fprintf(stderr, "PASTE_CHAIN joins=%llu bytes=%llu final=%llu max=%llu ok=%u\n",
++                (unsigned long long)census_joins, (unsigned long long)census_bytes,
++                (unsigned long long)census_final, (unsigned long long)census_max, (u32)ok);
++    }
+     *pasted_count_out = pasted_count;
+     return ok;
+ }
