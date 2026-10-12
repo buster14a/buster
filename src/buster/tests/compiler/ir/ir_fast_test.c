@@ -803,6 +803,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
         }
         scratch_end(census_temporary);
     }
+    // #3010 end-of-body census. `input+1` converts the int literal to unsigned
+    // for an operator; `return 0` from a _Bool function compares two literals.
+    // Each literal is read only by its folded row, so both become dead.
+    {
+        TemporalArena census_temporary = arena_begin_temporal(arguments->arena);
+        IrConstructionCounters before = ir_construction_counters();
+        CIRLowerResult lowered = ir_promotion_lower(arguments->arena,
+                                                    S8("unsigned test(unsigned input){return input+1;} _Bool truth(void){return 0;}"), target_native);
+        IrConstructionCounters lowering = ir_construction_counters();
+#define IR_FOLD_CENSUS_DELTA(later, earlier, counter) ((later).values[IR_CONSTRUCTION_##counter] - (earlier).values[IR_CONSTRUCTION_##counter])
+        if (BUSTER_REQUIRE(arguments, lowered.program && !lowered.diagnostic_count))
+        {
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_NET_FUNCTIONS) == 2);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_SIZE_ROWS_LT_64_FUNCTIONS) == 2);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_SIZE_ROWS_LT_64_FOLDS) == 2);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_NET_CONSTANT_ROWS) == 2);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_NET_IDENTITY_ROWS) == 0);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_NET_OPERAND_SLOTS) == 3);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_NET_LITERAL_USES) == 3);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_NET_DEAD_LITERALS) == 3);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_FORM_REINTERPRET_OPERATOR) == 1);
+            BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(lowering, before, FOLD_FORM_BOOL_COMPARE_RETURN) == 1);
+            // Re-take the census on the published rows. A literal or folded
+            // result held outside the rows (a pending SSA store) is live, and
+            // the held result is attributed to a store.
+            IrProgram* census_program = lowered.program;
+            IrFunction* census_function = census_program->modules->functions;
+            u32 literal = UINT32_MAX;
+            u32 folded = UINT32_MAX;
+            for (u32 index = 0; index < census_function->instruction_count; index += 1)
+            {
+                IrInstruction const* row = census_function->instructions + index;
+                u32 definition = row->opcode == IR_OPCODE_CAST ? census_function->values[row->operands[0].value].definition.value : UINT32_MAX;
+                if (definition < census_function->instruction_count && census_function->instructions[definition].opcode == IR_OPCODE_CONSTANT_INTEGER)
+                {
+                    literal = row->operands[0].value;
+                    folded = row->result.value;
+                }
+            }
+            if (BUSTER_REQUIRE(arguments, literal != UINT32_MAX))
+            {
+                IrSemanticCounters semantic_before = ir_semantic_counters();
+                IrConstructionCounters held_before = ir_construction_counters();
+                ArenaBenchmarkCounters arena_before = arena_benchmark_counters();
+                IrFoldCensus census = ir_construction_fold_census_begin(census_function);
+                ir_construction_fold_census_hold(&census, (IrValueId){.value = literal});
+                ir_construction_fold_census_hold(&census, (IrValueId){.value = folded});
+                ir_construction_fold_census_end(census_program, census_function, &census);
+                ArenaBenchmarkCounters arena_after = arena_benchmark_counters();
+                IrConstructionCounters held_after = ir_construction_counters();
+                IrSemanticCounters semantic_after = ir_semantic_counters();
+                BUSTER_TEST(arguments, memcmp(&semantic_before, &semantic_after, sizeof(semantic_before)) == 0);
+                BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(held_after, held_before, FOLD_NET_SSA_USES) == 2);
+                BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(held_after, held_before, FOLD_NET_CONSTANT_ROWS) == 1);
+                BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(held_after, held_before, FOLD_NET_DEAD_LITERALS) == 0);
+                BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(held_after, held_before, FOLD_FORM_REINTERPRET_STORE) == 1);
+                BUSTER_TEST(arguments, IR_FOLD_CENSUS_DELTA(held_after, held_before, FOLD_FORM_REINTERPRET_OPERATOR) == 0);
+                // Census scratch is carved outside the observed arena requests.
+                BUSTER_TEST(arguments, arena_after.calls == arena_before.calls && arena_after.requested_bytes == arena_before.requested_bytes);
+            }
+        }
+#undef IR_FOLD_CENSUS_DELTA
+        scratch_end(census_temporary);
+    }
 #endif
     return result;
 }

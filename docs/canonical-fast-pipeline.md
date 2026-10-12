@@ -242,6 +242,67 @@ per-row birth classification reaches FAST, so neither a birth/late ratio nor
 late minus birth attributes or bounds the late folds that were available at
 commit; that needs a matched per-row association.
 
+#### End-of-body breakdown and net account
+
+`c_ir_fold_census_body` takes a second census of each C function after its body
+lowers and before `c_ir_ssa_finish`. At that point the rows are still the
+committed ones, minus retractions, and values are not yet renumbered. It asks
+the same rule of every row (an operand defined after its reader does not count,
+as at commit) and walks the rows twice more. Direct SSA still keeps stored
+values in its `STORE` events and resolved reads, so those are counted as
+readers (`fold_net_ssa_uses`). This population is close to the commit-time one
+but not identical: retracted rows, functions whose body failed to lower, and
+rows committed outside a function body are absent.
+
+- **Form.** `fold_form_<shape>_<consumer>` crosses the folded row's IR shape
+  with the construct that first reads its result. Shapes: `reinterpret`,
+  `sign_extend`, `zero_extend`, `truncate` (literal casts), `bool_compare` (a
+  two-literal binary producing `bool`), `other` (unary, non-boolean binary,
+  identities). Consumers: `store` (a store row or an SSA store), `aggregate`
+  (array/aggregate construction, which includes initializers), `return`,
+  `call`, `branch` (conditional branch or switch), `operator` (cast, unary or
+  binary), `other`, `unused`.
+- **Function size.** `fold_size_<bucket>_{functions,rows,folds,dead_literals}`
+  buckets functions by committed rows: `rows_lt_64`, `rows_lt_256`,
+  `rows_lt_1024`, `rows_lt_4096`, `rows_ge_4096`.
+- **Net account.** These are object counts, not bytes multiplied by a presumed
+  size.
+  - `fold_net_constant_rows` and `fold_net_identity_rows` partition the folded
+    rows.
+  - `fold_net_operand_slots` counts the operand slots those rows filled. Each
+    row's slice is its own arena request in the C builder.
+  - `fold_net_literal_uses` counts the literal reads that folding removes; an
+    identity's forwarded operand is not counted.
+  - `fold_net_dead_literals` counts literals left with no reader. Each would
+    need no row, value or immediate request.
+  - `fold_net_adjacent_dead_literals` counts the dead literals committed directly
+    before their folded reader in the same block. Those could be rewritten in
+    place.
+
+  Rows, values and source ranges come from per-unit streams trimmed to the
+  final count (`c_ir_row_streams_trim`). So the rows and values a birth fold
+  saves free stream slots, not arena requests. In that model:
+  - Rows and values not built: `identity_rows + dead_literals`.
+  - Operand-slice requests saved: `constant_rows + identity_rows`.
+  - Immediate requests at construction: `constant_rows - dead_literals` more,
+    since each folded constant needs one.
+- **Late side.** Each `fold_late_*_constant` is one FAST immediate request, and
+  `fold_late_dce_constants` counts `CONSTANT_INTEGER` rows FAST DCE deleted
+  (literals and folded rows alike). Promotion compacts rows before FAST runs,
+  so this census cannot tell which late requests or deletions belong to
+  birth-foldable rows. They only bound what a birth fold would also save:
+  - FAST immediates spared: at most `min(fold_net_constant_rows, Σ fold_late_*_constant)`.
+  - DCE deletions spared: at most `min(fold_net_dead_literals, fold_late_dce_constants)`.
+
+  Whether FAST would skip a whole function's compaction is not measured.
+
+Scratch is a per-thread arena created on first use and carved with the raw
+arena primitive. The census therefore adds no `allocation.*` request and does
+not move any other arena's dirty prefix. The arena's reservation does appear
+among OS events in the exit census, and its pages in minor-fault counts. A
+function with more than 2^25 values is skipped and counted in
+`fold_net_skipped_functions`.
+
 ## Opt-in block-local CSE (#3011)
 
 `ir_fast_cse` is an experiment, outside every optimization level and outside

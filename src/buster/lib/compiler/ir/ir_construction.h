@@ -8,6 +8,38 @@
 #include <buster/lib/base.h>
 
 #if BUSTER_BENCH_ALLOCATIONS
+// #3010 fold census, end of body lowering: one counter per IR shape of a
+// birth-foldable row and the construct that first consumes its result. The
+// order follows IrFoldCensusShape and IrFoldCensusConsumer in ir_fast.c.
+#define IR_FOLD_FORM_ROW(X, SHAPE, shape) \
+    X(FOLD_FORM_##SHAPE##_STORE, fold_form_##shape##_store) \
+    X(FOLD_FORM_##SHAPE##_AGGREGATE, fold_form_##shape##_aggregate) \
+    X(FOLD_FORM_##SHAPE##_RETURN, fold_form_##shape##_return) \
+    X(FOLD_FORM_##SHAPE##_CALL, fold_form_##shape##_call) \
+    X(FOLD_FORM_##SHAPE##_BRANCH, fold_form_##shape##_branch) \
+    X(FOLD_FORM_##SHAPE##_OPERATOR, fold_form_##shape##_operator) \
+    X(FOLD_FORM_##SHAPE##_OTHER, fold_form_##shape##_other) \
+    X(FOLD_FORM_##SHAPE##_UNUSED, fold_form_##shape##_unused)
+#define IR_FOLD_FORM_COUNTERS(X) \
+    IR_FOLD_FORM_ROW(X, REINTERPRET, reinterpret) \
+    IR_FOLD_FORM_ROW(X, SIGN_EXTEND, sign_extend) \
+    IR_FOLD_FORM_ROW(X, ZERO_EXTEND, zero_extend) \
+    IR_FOLD_FORM_ROW(X, TRUNCATE, truncate) \
+    IR_FOLD_FORM_ROW(X, BOOL_COMPARE, bool_compare) \
+    IR_FOLD_FORM_ROW(X, OTHER, other)
+// Function-size buckets by committed rows at the end of body lowering, in the
+// order of IR_FOLD_CENSUS_SIZE_LIMITS in ir_fast.c.
+#define IR_FOLD_SIZE_ROW(X, BUCKET, bucket) \
+    X(FOLD_SIZE_##BUCKET##_FUNCTIONS, fold_size_##bucket##_functions) \
+    X(FOLD_SIZE_##BUCKET##_ROWS, fold_size_##bucket##_rows) \
+    X(FOLD_SIZE_##BUCKET##_FOLDS, fold_size_##bucket##_folds) \
+    X(FOLD_SIZE_##BUCKET##_DEAD_LITERALS, fold_size_##bucket##_dead_literals)
+#define IR_FOLD_SIZE_COUNTERS(X) \
+    IR_FOLD_SIZE_ROW(X, ROWS_LT_64, rows_lt_64) \
+    IR_FOLD_SIZE_ROW(X, ROWS_LT_256, rows_lt_256) \
+    IR_FOLD_SIZE_ROW(X, ROWS_LT_1024, rows_lt_1024) \
+    IR_FOLD_SIZE_ROW(X, ROWS_LT_4096, rows_lt_4096) \
+    IR_FOLD_SIZE_ROW(X, ROWS_GE_4096, rows_ge_4096)
 #define IR_CONSTRUCTION_COUNTERS(X) \
     X(PROGRAM_STARTS, program_starts) \
     X(TYPE_APPENDS, type_appends) \
@@ -163,7 +195,21 @@
     X(FOLD_LATE_BINARY_CONSTANT, fold_late_binary_constant) \
     X(FOLD_LATE_BINARY_RIGHT_IDENTITY, fold_late_binary_right_identity) \
     X(FOLD_LATE_BINARY_LEFT_IDENTITY, fold_late_binary_left_identity) \
-    X(FOLD_LATE_REPLACED_ROOTS, fold_late_replaced_roots)
+    X(FOLD_LATE_REPLACED_ROOTS, fold_late_replaced_roots) \
+    X(FOLD_LATE_DCE_CONSTANTS, fold_late_dce_constants) \
+    X(FOLD_NET_FUNCTIONS, fold_net_functions) \
+    X(FOLD_NET_SKIPPED_FUNCTIONS, fold_net_skipped_functions) \
+    X(FOLD_NET_ROWS, fold_net_rows) \
+    X(FOLD_NET_SCALAR_ROWS, fold_net_scalar_rows) \
+    X(FOLD_NET_CONSTANT_ROWS, fold_net_constant_rows) \
+    X(FOLD_NET_IDENTITY_ROWS, fold_net_identity_rows) \
+    X(FOLD_NET_OPERAND_SLOTS, fold_net_operand_slots) \
+    X(FOLD_NET_LITERAL_USES, fold_net_literal_uses) \
+    X(FOLD_NET_DEAD_LITERALS, fold_net_dead_literals) \
+    X(FOLD_NET_ADJACENT_DEAD_LITERALS, fold_net_adjacent_dead_literals) \
+    X(FOLD_NET_SSA_USES, fold_net_ssa_uses) \
+    IR_FOLD_FORM_COUNTERS(X) \
+    IR_FOLD_SIZE_COUNTERS(X)
 
 typedef enum IrConstructionCounter
 {
