@@ -2172,10 +2172,13 @@ def measure_selfhost_inline(arguments: argparse.Namespace, candidate: Path, work
     documents = {}
     if root.is_dir():
         record["evidence_omissions"] = []
-        # Each part has its own destination: an export replaces its destination directory.
+        # Each part has its own destination: an export replaces its destination directory. Each part
+        # names its mandatory documents, so they are exported now even when optional files are deferred.
         for part in ("stage1-baseline", "stage1-candidate", "compare"):
             if (root / part).is_dir():
-                problems, omissions = export_tree(root / part, exported / part, evidence, EVIDENCE_IGNORE, ())
+                required = tuple(name[len(part) + 1:] for name in SELFHOST_INLINE_REQUIRED
+                                 if name.startswith(part + "/"))
+                problems, omissions = export_tree(root / part, exported / part, evidence, EVIDENCE_IGNORE, required)
                 errors.extend(problems)
                 record["evidence_omissions"].extend(omissions)
         for name in SELFHOST_INLINE_REQUIRED:

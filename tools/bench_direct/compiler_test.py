@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -7012,6 +7013,44 @@ class SelfHostInlineCompareTest(unittest.TestCase):
                 self.assertEqual(current["selfhost_inline"]["status"], "failed")
                 build.assert_not_called()
                 run.assert_not_called()
+
+    def test_leg_exports_and_reads_each_part_s_mandatory_documents_when_optional_files_are_deferred(self) -> None:
+        """A deferred export copies only a part's required members before measure returns; the leg must name them."""
+        record_value, bundle = selfhost_inline_evidence()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("work", "evidence", "candidate"):
+                (root / name).mkdir()
+            for name, value in bundle.items():
+                path = root / "work/selfhost-inline" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(value), encoding="utf-8")
+            (root / "work/selfhost-inline/compare/lab/a/report.md").write_text("optional\n", encoding="utf-8")
+            pull = {"timings": {}, "binaries": copy.deepcopy(SELFHOST_BINARIES),
+                    "selfhost_inline": {"requested": True, "status": "pending",
+                                        "stage1_exit": {"baseline": 0, "candidate": 0}}}
+            arguments = argparse.Namespace(lab=root / "uarch_lab.py", base=EXPECTED["base"])
+            exported_required = []
+
+            def deferred_export(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple):
+                exported_required.append(required)
+                for name in required:
+                    target = destination / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source / name, target)
+                return [], []
+
+            with mock.patch.object(compiler_compare, "run", return_value=0), \
+                    mock.patch.object(compiler_compare, "export_tree", side_effect=deferred_export):
+                compiler_compare.measure_selfhost_inline(arguments, root / "candidate", root / "work",
+                                                         root / "evidence", pull)
+            record = pull["selfhost_inline"]
+            self.assertEqual((record["status"], record["errors"]), ("complete", []))
+            self.assertEqual(sorted(name for names in exported_required for name in names),
+                             sorted(["stage1.json", "stage1.json", "result.json", "lab/summary.json",
+                                     "lab/compare.json", "lab/a/lab.json", "lab/b/lab.json"]))
+            self.assertFalse((root / "evidence/selfhost_inline/compare/lab/a/report.md").exists())
+            self.assertEqual(record["digest"], record_value["digest"])
 
     def test_leg_runs_the_trusted_helper_and_refuses_missing_stage1(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
