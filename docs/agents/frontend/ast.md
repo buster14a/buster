@@ -379,8 +379,10 @@ unchanged.
   tree's top-level function definitions and declarations once
   (`c_ast_types_bodies_prepare`). Before each body's validator families run,
   `c_ast_types_body_begin` makes one forward pass over the body's node
-  interval. Children come before parents, so each expression node's operands
-  are already typed when the node is reached. The pass records each node's
+  interval, in two loops: one types the single-token leaves and lists the other
+  expression nodes, and the other runs the operator rules over that list in
+  index order. Children come before parents, so each expression node's
+  operands are already typed when the node is reached. The pass records each node's
   token span and, for the accepted kinds, its type, whether it is safe under
   constraint checks, and the bit-field width of a member. A node is accepted
   only when every operand the machine types for it is accepted. Its arrays
@@ -398,6 +400,16 @@ unchanged.
     found directly in its aggregate's row. Nothing the lookup reads changes
     during a pass. A promoted search into anonymous members is never
     remembered, because it takes guarded body scratch (#1256).
+
+  A second cut keeps every rule:
+  - the leaves and the operators are typed in separate loops, which keeps
+    each loop's working values in registers;
+  - an integer literal whose kind the syntax pass cached is typed from that
+    fact without calling the machine's leaf;
+  - `c_ast_types_arithmetic` remembers the usual arithmetic conversions for
+    one pass;
+  - two integer operands pass the checked-mode operator rule without its
+    other tests.
 - **File-scope initializers.** `c_parse_validate_static_initializers` made
   nearly all of the queries outside a typed body: 77,545 of 79,035 on the unity
   self-host, at about 190 M machine Ir, against at most 3 M for any other
@@ -3208,5 +3220,39 @@ pilot, D candidate default):
 - **Default path (D against A).** Within ±0.05% Ir.
 - **Performance acceptance.** Hosted counts are diagnostic; Zen 5 validation
   stays incomplete (#2761) and the hook stays opt-in.
+
+For a further cut in the eager pass (#3102), these budgets were declared
+before its measured runs. The change keeps every rule. It splits the pass into
+a leaf loop and an operator loop over a list, reads cached integer-literal
+facts without the leaf call, memoizes the usual arithmetic conversions per
+pass, and settles the checked-mode rule for two integer operands at once. The
+budgets use the stage-2 input, flags and four Callgrind arms
+(`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3` builds,
+with base main `a6705764`:
+- **Correctness.** No answer changes:
+  - no verify mismatch over the corpus;
+  - the typer's `-v` counters on the self-host are identical in B and C;
+  - identical diagnostics with and without the flag;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **The pass's own cost (C against B).** The inclusive cost of
+  `c_ast_types_type_body`, which is the cost charged at its call sites, falls
+  by at least 12%. The whole compile falls by at least the pass's saving less
+  3 M, which covers the region's two extra scratch arrays, so the saving is
+  not moved elsewhere.
+- **Default path (D against A).** The change is confined to the typer, so the
+  default path stays within ±0.05% Ir on `-fsyntax-only` and on `-c` (`-g0`).
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete (#2761) and
+  the hook stays opt-in.
+
+The further cut's hosted census is
+[`2026-10-11T110050Z`](../../performance-audits/2026-10-11T110050Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. The typer's counters are identical in B and C,
+  and the objects of all four arms are identical.
+- `c_ast_types_type_body` falls from 329.2 M to 274.2 M Ir (−16.7%), and the
+  pilot's compile by 54.2 M (−0.58%).
+- The default path is within −0.001% on `-fsyntax-only` and +0.001% on `-c`.
+- Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.

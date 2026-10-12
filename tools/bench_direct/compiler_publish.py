@@ -25,6 +25,11 @@ Conclusions (the performance verdict never decides; report-only):
     failure  authorization refused, evidence missing, mismatched or invalid,
              or an unimplemented regression policy was requested
 A failure says the candidate was not benchmarked; it is never relabelled.
+Whatever the conclusion, the check's summary, its JSON (`inventory_coverage`)
+and the main commit report name the inventory rows that this attempt's
+validated legs discharged, from the trusted mode and the decided conclusion
+(compiler_receipt.covered_inventory_rows, #2761). Only a success discharges a
+row.
 
 The check is the attempt's own check (#2803): the request bridge or the start
 job usually created it queued and moved it to in_progress; this completes the
@@ -49,9 +54,9 @@ present is still checked.
 
 Map: validate_inline_bundle and validate_ast_pilot_bundle (opt-in flag pairs),
 validate_real_source_bundle and validate_production_profile_bundle (#2761 opt-in legs),
-decide (pure decision), machine_record and machine_record_required (#2758
-host facts), read_evidence, verify_analyzer_request_freshness
-(fresh request selectors), queue_delay, links,
+decide (pure decision), inventory_rows (discharged inventory rows),
+machine_record and machine_record_required (#2758 host facts), read_evidence,
+verify_analyzer_request_freshness (fresh request selectors), queue_delay, links,
 commit_report, recovered_identity, bind_request, report_check_url, main.
 Api lives in compiler_github.
 """
@@ -90,7 +95,7 @@ from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE,
                               MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
                               check_name, classify, classify_scaling, classify_throughput, host_problem, number,
                               range_label, regression_policy, render, SCALING_PROFILE, scaling_digest, validate_inline_acceptance,
-                              THROUGHPUT_PROFILE, throughput_digest, validate_analyzer_bundle)
+                              THROUGHPUT_PROFILE, throughput_digest, validate_analyzer_bundle, covered_inventory_rows)
 
 ARTIFACT_PREFIX = "buster-9700x-compiler-"
 MEMBER_LIMIT = 8 * 1024 * 1024
@@ -1236,6 +1241,13 @@ def links(check_url: str, workflow_url: str, attempt: str, evidence_url: str, ex
     return " · ".join(parts)
 
 
+def inventory_rows(shown: dict) -> str:
+    """The discharged inventory row ids of a published attempt, or none."""
+    coverage = shown.get("inventory_coverage") if isinstance(shown.get("inventory_coverage"), dict) else {}
+    rows = coverage.get("discharged") if isinstance(coverage.get("discharged"), list) else []
+    return ", ".join(f"`{row}`" for row in rows) or "none"
+
+
 def commit_report(shown: dict, summary: object, conclusion: str, title: str, notes: list[str],
                   link_line: str) -> str:
     """The commit-page report (#2804): verdict, scope, metrics with units, links; tables collapsed."""
@@ -1258,6 +1270,7 @@ def commit_report(shown: dict, summary: object, conclusion: str, title: str, not
             f"| Candidate executions / aliases | {inventory.get('candidate_unique_executions', 'NA')} / "
             f"{inventory.get('candidate_alias_rows', 'NA')} |",
             f"| Evidence status | `{summary.get('status', 'missing')}` |",
+            f"| Inventory rows discharged | {inventory_rows(shown)} |",
             f"| Captured | {timings.get('started_at', 'NA')} to {timings.get('finished_at', 'NA')} |",
             "", link_line, "",
         ]
@@ -1296,6 +1309,7 @@ def commit_report(shown: dict, summary: object, conclusion: str, title: str, not
         f"{number(wall.get('b_median'), '%.6g')} {unit} |",
         f"| Complete pairs | {number(plan.get('complete_pairs'), '%d')} |",
         f"| Host (observed) | `{host.get('cpu_model', 'NA')}` |",
+        f"| Inventory rows discharged | {inventory_rows(shown)} |",
         f"| Scope | `{profile.get('name', 'NA')}`: {profile.get('workload', 'NA')}; corpus "
         f"{profile.get('corpus', 'NA')} |",
         f"| Captured | {timings.get('started_at', 'NA')} to {timings.get('finished_at', 'NA')} by run "
@@ -5319,6 +5333,9 @@ def main() -> int:
         if mode == "main" and expected.get("range"):
             shown["coverage"] = {"first_parent": expected.get("first_parent"), "range": expected.get("range")}
         shown["reasons"] = reasons
+        # Which inventory rows this attempt discharged (#2761): from the trusted
+        # mode and the decided conclusion, never from the host's own claim.
+        shown["inventory_coverage"] = covered_inventory_rows(receipt, conclusion, mode)
         if machine_facts:
             shown["machine"] = machine_facts
         if route is not None:
