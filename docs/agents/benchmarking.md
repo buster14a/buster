@@ -984,6 +984,30 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    `compiler_publish.py` re-validates every raw cell document, the tree probe
    and the recomputed verdict on the 9700X evidence.
 
+   **Issue #3011 opt-in constant-reuse profile.** The same route accepts one
+   fresh exact line `profile: constant-reuse-acceptance-v1`, selected by the
+   same every-parent freshness rule. It cannot be combined with an analyzer
+   profile, inline acceptance, the ast-pilot profile, or the other opt-in legs
+   it excludes in `compiler_compare.py`. `constant_reuse_acceptance.py` runs
+   it after the tests-off candidate build, on the same frozen candidate-HEAD
+   tree. It times the one candidate binary as both A (default) and B with
+   `uarch_lab.py compare --constant-reuse-pair CELL` on the `-g0` unity
+   `-c` compile. The `intern` cell passes `-fcanonical-intern-constants` to B
+   and the `cse` cell passes `-fcanonical-fast-cse`. Each cell is 20 ABBA
+   pairs after one warmup on CPU 2 with fresh copies. It records:
+   - wall time with its 95% CI;
+   - retired instructions when perf can count them (NA needs a recorded
+     reason);
+   - peak RSS;
+   - executable-section code bytes of each object.
+
+   A's and B's diagnostics must be identical. Their objects differ by design.
+   The profile is report-only and has no verdict, and it accepts no request
+   flags, pair counts or compiler arguments. `compiler_publish.py`
+   re-validates every raw cell document on the 9700X evidence. The flags and
+   their hosted census are described in
+   [the canonical FAST pipeline guide](../canonical-fast-pipeline.md).
+
    **Issue #2761 opt-in real-source throughput profile.** The same route
    accepts one fresh exact line `profile: throughput-real-source-v1`, selected
    by the same every-parent freshness rule; it cannot be combined with an

@@ -371,7 +371,9 @@ What the data show:
 Interning is therefore the cheaper way to obtain most of the constant reuse,
 with less memory and without the spill growth. Both stay opt-in. Adopting
 either needs the Zen 5 A/A and A/B comparison (#2761) of compile time and
-peak RSS. The C frontend's row-capacity, codegen-shape and CSE-count tests
+peak RSS. The fixed report-only profile `profile: constant-reuse-acceptance-v1`
+measures both flags on the 9700X; its method is in
+[benchmarking.md](agents/benchmarking.md). The C frontend's row-capacity, codegen-shape and CSE-count tests
 expect today's default, so enabling interning by default would also update
 those expectations.
 

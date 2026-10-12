@@ -149,6 +149,17 @@
       }
     },
     {
+      "id": "uarch_lab:compare@constant-reuse-acceptance",
+      "kind": "lab-mode",
+      "validation": "performance",
+      "measures": "issue #3011 fixed constant-reuse-acceptance-v1: one candidate-HEAD ide on the -g0 unity self-host -c compile, A default and B with -fcanonical-intern-constants (intern cell) or -fcanonical-fast-cse (cse cell), 20 ABBA pairs per cell, wall time with 95% CI, available retired instructions, peak RSS, executable-section code bytes and identical diagnostics; report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
       "id": "uarch_lab:retirement",
       "kind": "lab-mode",
       "validation": "performance",
