@@ -1,0 +1,8 @@
+bwhile4000 exit=0
+bwhile16000 exit=0
+bfor4000 exit=0
+bfor16000 exit=0
+bdo4000 exit=0
+bdo16000 exit=0
+bwif4000 exit=0
+bwif16000 exit=0

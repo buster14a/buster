@@ -364,6 +364,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_work_ledger(UnitTestArgu
     BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_INITIALIZER_ELEMENTS] >= delta[WORK_LEDGER_REDERIVE_INITIALIZER_LITERAL_ELEMENTS] &&
                                delta[WORK_LEDGER_REDERIVE_INITIALIZER_LITERAL_ELEMENTS] >= 5);
     BUSTER_TEST(arguments, delta[WORK_LEDGER_POPULATION_MEMBER_PROMOTED_SEARCHES] != 0);
+    // `sizeof (struct Outer)` is a call-shaped candidate the arity check skips.
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_CALL_ARITY_KEYWORDS_SKIPPED] != 0 &&
+                               delta[WORK_LEDGER_REDERIVE_CALL_ARITY_CANDIDATES] >= delta[WORK_LEDGER_REDERIVE_CALL_ARITY_KEYWORDS_SKIPPED]);
+    // Each body token is stored once; the visited shares cover at least that.
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_BODY_SCOPE_STORES] != 0 &&
+                               delta[WORK_LEDGER_REDERIVE_BODY_SCOPE_SHARE_TOKENS] >= delta[WORK_LEDGER_REDERIVE_BODY_SCOPE_STORES]);
     BUSTER_TEST(arguments, delta[WORK_LEDGER_LITERAL_NUMBER_CONVERSIONS] != 0);
     BUSTER_TEST(arguments, delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERNS] != 0 &&
                                delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERN_PROBES] >= delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERNS]);
@@ -1118,32 +1124,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast_decline_publication
         BUSTER_TEST(arguments, record.validation.error == IR_VALIDATION_OPERATION && record.validation.function.value == index % 2 &&
                                record.validation.instruction.value == index / 2);
     }
-    // A real accepted legacy shape found by the #1602 musl/CPython census:
-    // the strict value check requires a layout for an incomplete extern PLACE,
-    // although native address-taking does not consume that object's layout.
+    // The former #1602 census decline is valid address-only C (#3777).
+    // Keep the synthetic lifetime controls above; this real driver input must
+    // now pass strict verification without allocating any decline records.
     String8 source = S8("struct Opaque;extern struct Opaque stream;extern int sink(struct Opaque*);"
-                        "int declined(void){return sink(&stream);}"
+                        "int address_only(void){return sink(&stream);}"
                         "int kept(int a,int b){int x=a+0;return x*1+b;}");
     String8 input = buster_test_temporary_path(arguments->arena, S8("buster-fast-decline"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
-        String8 command[] = {S8("-nostdinc"), S8("-g0"), S8("-target"), S8("x86_64-linux"), S8("-c"), input};
+        String8 command[] = {S8("-nostdinc"), S8("-g0"), S8("-fverify-codegen"), S8("-target"), S8("x86_64-linux"), S8("-c"), input};
         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
         invocation.retain_object = true;
         CompilerDriverResult compiled = compiler_driver_execute_invocation(arguments->arena, invocation);
-        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.fast.functions == 1 &&
-                               compiled.fast.validation_skips == 1 && compiled.fast.decline_count == 1);
-        if (compiled.fast.decline_count == 1)
-        {
-            IrFastDecline record = compiled.fast.declines[0];
-            BUSTER_TEST(arguments, string_equal(record.source, input) && string_equal(record.function_name, S8("declined")) &&
-                                   record.validation.error == IR_VALIDATION_OPERATION);
-            // Reading a released spelling arena can appear to work until the
-            // next TU reuses it. Prove ownership rather than relying on reuse.
-            uintptr_t arena_start = (uintptr_t)arguments->arena;
-            uintptr_t name_address = (uintptr_t)record.function_name.pointer;
-            BUSTER_TEST(arguments, name_address >= arena_start && name_address - arena_start < arguments->arena->reserved_size);
-        }
+        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.fast.functions == 2 &&
+                               compiled.fast.validation_skips == 0 && compiled.fast.decline_count == 0 && !compiled.fast.declines);
         os_file_delete(input);
     }
     return result;

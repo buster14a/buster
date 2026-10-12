@@ -18,7 +18,7 @@
 // global label-owner index (ir_module_function_for_symbol), the per-target
 // ABI classification the frontend and codegen both consume
 // (ir_abi_unqualified_type, ir_system_v_abi_classes,
-// ir_homogeneous_float_abi, ir_classify_abi_value, ir_abi_context_value,
+// ir_homogeneous_float_abi, ir_i386_abi_value, ir_classify_abi_value, ir_abi_context_value,
 // ir_abi_context_value_validated/cold),
 // vector semantic classes and exact target/predicate contracts
 // (ir_vector_operation_semantics, ir_simd_operation_shape/supported),
@@ -1699,6 +1699,21 @@ BUSTER_GLOBAL_LOCAL bool ir_label_block_sets_equal(IrValueLabelMetadata* left, I
     return valid;
 }
 
+// Opaque aggregate places name storage without requiring its object layout.
+// Their only permitted consumer is ADDRESS_OF (checked with operand IDs).
+BUSTER_GLOBAL_LOCAL bool ir_value_layout_valid(IrFunction* function, IrValue* value, IrType* type)
+{
+    bool valid = type && type->layout.resolved;
+    if (type && !valid && function && function->instructions && value && value->category == IR_VALUE_PLACE &&
+        (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION) &&
+        value->definition.value < function->instruction_count)
+    {
+        IrOpcode opcode = function->instructions[value->definition.value].opcode;
+        valid = opcode == IR_OPCODE_GLOBAL || opcode == IR_OPCODE_DEREFERENCE;
+    }
+    return valid;
+}
+
 bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction* function, IrValueId value_id)
 {
     IrValue* value_slot = function && value_id.value < function->value_count ? function->values + value_id.value : 0;
@@ -1709,14 +1724,14 @@ bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction* function, IrV
         // With no metadata anywhere in the function every label-specific
         // clause below is vacuous; only the value/type-layout requirements
         // remain.
-        valid = value_slot && (!program || (value_type && value_type->layout.resolved));
+        valid = value_slot && (!program || ir_value_layout_valid(function, value_slot, value_type));
     }
     else
     {
         IrValueLabelMetadata metadata = ir_value_label_metadata(function, value_id);
         IrValueLabelMetadata* value = value_slot ? &metadata : 0;
         u64 pointer_size = program ? program->data_layout.pointer.size : 0;
-        valid = function && value && (!program || (value_type && value_type->layout.resolved)) &&
+        valid = function && value && (!program || ir_value_layout_valid(function, value_slot, value_type)) &&
                 (value->label_block_count != 0) == (value->label_blocks != 0) &&
                 (value->label_path_count != 0) == (value->label_paths != 0) &&
                 (!value->is_label_value || value->label_block_count != 0) &&
@@ -3567,24 +3582,32 @@ bool ir_inline_assembly_jump_target(IrFunction* function, IrInstruction* instruc
 
 IrAbiConvention ir_abi_convention_for_target(Target target)
 {
+    IrAbiConvention result;
     if (target.cpu_arch == CPU_ARCH_X86_64)
     {
-        return target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? IR_ABI_CONVENTION_WIN64_X86_64
+        result = target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? IR_ABI_CONVENTION_WIN64_X86_64
                                                                                            : IR_ABI_CONVENTION_SYSTEMV_X86_64;
     }
-    if (target.cpu_arch == CPU_ARCH_AARCH64)
+    else if (target.cpu_arch == CPU_ARCH_AARCH64)
     {
         if (target.os == OPERATING_SYSTEM_WINDOWS)
         {
-            return IR_ABI_CONVENTION_WINDOWS_AARCH64;
+            result = IR_ABI_CONVENTION_WINDOWS_AARCH64;
         }
-        if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
+        else if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
         {
-            return IR_ABI_CONVENTION_DARWIN_AARCH64;
+            result = IR_ABI_CONVENTION_DARWIN_AARCH64;
         }
-        return IR_ABI_CONVENTION_AAPCS64;
+        else
+        {
+            result = IR_ABI_CONVENTION_AAPCS64;
+        }
     }
-    return IR_ABI_CONVENTION_SYSTEMV_X86_64;
+    else
+    {
+        result = target.cpu_arch == CPU_ARCH_I386 ? IR_ABI_CONVENTION_SYSTEMV_I386 : IR_ABI_CONVENTION_SYSTEMV_X86_64;
+    }
+    return result;
 }
 
 IrProgram ir_program_initialize(Arena* arena, u32 module_count, u32 type_capacity, u32 symbol_capacity, u32 source_capacity)
@@ -4170,6 +4193,63 @@ BUSTER_GLOBAL_LOCAL bool ir_homogeneous_float_abi(IrProgram* program, IrTypeId r
     return result;
 }
 
+// Baseline SysV i386 cdecl transport, independent of the language layout.
+// Scalar and aggregate arguments are by-value stack images. Integer results
+// use EAX or EDX:EAX; float/double/80-bit long double use ST(0). Structs and
+// unions, including GNU empty records, return through a four-byte hidden
+// pointer. _Complex float alone returns its two component bit images in
+// EAX/EDX. Vector transport needs target ISA features and is not classified
+// here; an unsupported shape stays empty instead of acquiring x86-64 rules.
+BUSTER_GLOBAL_LOCAL IrAbiValue ir_i386_abi_value(IrProgram* program, IrType* type, bool is_result)
+{
+    IrAbiValue value = {0};
+    u64 size = type->layout.size;
+    bool aggregate = type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION || type->kind == IR_TYPE_ARRAY;
+    bool integer = (type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM) &&
+                   size && size <= 8 && !(size & (size - 1));
+    bool pointer = (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_VA_LIST) && size == 4;
+    bool floating = type->kind == IR_TYPE_FLOAT &&
+                    ((type->bit_width == 32 && size == 4) || (type->bit_width == 64 && size == 8) || (type->bit_width == 80 && size == 12));
+    if (size <= UINT32_MAX && (aggregate || integer || pointer || floating))
+    {
+        if (!is_result)
+        {
+            value.memory = true;
+            value.part_count = 1;
+            value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_MEMORY, .size = (u32)size};
+        }
+        else
+        {
+            IrType* element = type->is_complex ? ir_type_from_id(&program->types, type->element_type) : 0;
+            bool complex_float = aggregate && size == 8 && element && element->layout.resolved &&
+                                 element->kind == IR_TYPE_FLOAT && element->bit_width == 32 && element->layout.size == 4;
+            if (aggregate && !complex_float)
+            {
+                value.indirect = true;
+                value.part_count = 1;
+                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_POINTER, .size = 4};
+            }
+            else if (floating)
+            {
+                value.part_count = 1;
+                value.parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_X87, .size = (u32)size};
+            }
+            else
+            {
+                value.part_count = (u32)((size + 3) / 4);
+                for (u32 part = 0; part < value.part_count; part += 1)
+                {
+                    value.parts[part] = (IrAbiPart){
+                        .abi_class = pointer ? IR_ABI_CLASS_POINTER : IR_ABI_CLASS_INTEGER,
+                        .value_offset = part * 4,
+                        .size = (u32)BUSTER_MIN((u64)4, size - (u64)part * 4)};
+                }
+            }
+        }
+    }
+    return value;
+}
+
 BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeId type_id, IrAbiConvention convention, bool is_result,
                                                       bool variadic_argument, bool unnamed_integer)
 {
@@ -4179,7 +4259,11 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
     {
         u64 size = type->layout.size;
         bool aggregate = type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION || type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VA_LIST;
-        if (type->kind != IR_TYPE_VOID)
+        if (convention == IR_ABI_CONVENTION_SYSTEMV_I386)
+        {
+            value = ir_i386_abi_value(program, type, is_result);
+        }
+        else if (type->kind != IR_TYPE_VOID)
         {
             if (!aggregate && type->kind != IR_TYPE_VECTOR)
             {
@@ -5807,6 +5891,13 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_value_error(IrProgram* program
         // also share it with a block parameter.
         error = IR_VALIDATION_BLOCK_PARAMETER;
     }
+    else if (!ir_value_layout_valid(function, value, value_type))
+    {
+        // An opaque external object or *pointer names storage without using
+        // its layout. Only ADDRESS_OF may consume this incomplete PLACE;
+        // the operand check below refuses every storage-dependent use.
+        error = IR_VALIDATION_OPERATION;
+    }
     else if (!function->label_metadata_count)
     {
         IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_PROVENANCE_CHECKS, 1);
@@ -5819,7 +5910,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_value_error(IrProgram* program
                                       : 0;
             transfer_valid = ir_label_transfer_valid_without_metadata(program, function, definition, first_slot);
         }
-        if (!transfer_valid || !value_type->layout.resolved)
+        if (!transfer_valid)
         {
             error = IR_VALIDATION_OPERATION;
         }
@@ -6828,10 +6919,17 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_row(IrProgram* pro
     else
     {
         bool operands_valid = true;
+        bool operand_layouts_valid = true;
         for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
         {
             IR_CONSTRUCTION_RECORD(VALIDATION_OPERAND_IDS, 1);
-            operands_valid &= operands[operand_index].value < value_count;
+            u32 operand = operands[operand_index].value;
+            operands_valid &= operand < value_count;
+            if (operand < value_count && values[operand].category == IR_VALUE_PLACE && instruction->opcode != IR_OPCODE_ADDRESS_OF)
+            {
+                IrType* type = ir_type_from_id(&program->types, values[operand].canonical_type);
+                operand_layouts_valid &= type && type->layout.resolved;
+            }
         }
         bool targets_valid = true;
         for (u32 target_index = 0; operands_valid && target_index < target_count; target_index += 1)
@@ -6852,6 +6950,10 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_row(IrProgram* pro
                   values[result_value].canonical_type.value != instruction->canonical_type.value))
         {
             error = IR_VALIDATION_RESULT_TYPE;
+        }
+        else if (!operand_layouts_valid)
+        {
+            error = IR_VALIDATION_OPERATION;
         }
         else
         {
