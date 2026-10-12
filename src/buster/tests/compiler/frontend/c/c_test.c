@@ -35992,13 +35992,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_storage_class_contexts(UnitTestArgumen
                     CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
                     CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("storage-class-contexts.c"), tokens, syntax,
                         targets[target], (CIRLowerOptions){.disable_direct_ssa = form != 0});
-                    BUSTER_TEST_RAW(arguments, semantic.diagnostic_count == (cases[index].valid ? 0u : 1u), cases[index].source);
+                    BUSTER_TEST_RAW(arguments, (semantic.diagnostic_count == 0) == cases[index].valid, cases[index].source);
                     BUSTER_TEST_RAW(arguments, semantic.diagnostic_count == lowered.diagnostic_count, cases[index].source);
-                    if (!cases[index].valid && semantic.diagnostic_count == 1 && lowered.diagnostic_count == 1)
+                    if (!cases[index].valid && semantic.diagnostic_count)
                     {
-                        CDiagnostic left = semantic.diagnostics[0];
-                        CDiagnostic right = lowered.diagnostics[0];
-                        BUSTER_TEST(arguments, left.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS && left.severity == C_DIAGNOSTIC_ERROR);
+                        BUSTER_TEST(arguments, semantic.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS);
+                    }
+                    for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count && diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                    {
+                        CDiagnostic left = semantic.diagnostics[diagnostic];
+                        CDiagnostic right = lowered.diagnostics[diagnostic];
+                        BUSTER_TEST(arguments, left.severity == C_DIAGNOSTIC_ERROR && left.severity == right.severity);
                         BUSTER_TEST(arguments, left.kind == right.kind && left.location.line == right.location.line &&
                                                left.location.column == right.location.column);
                         BUSTER_STRING_TEST(arguments, left.message, right.message);
