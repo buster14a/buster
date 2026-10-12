@@ -2257,6 +2257,9 @@ struct MachineX64MetadataShapeCacheAudit
     u32 resolved_rows;
     u32 pending_rows;
     u32 invalid_rows;
+    // Registrations whose selector form is pinned; each is re-checked
+    // against the selector by the complete resolution.
+    u32 pinned_queries;
     bool valid;
     u8 reserved[3];
 };

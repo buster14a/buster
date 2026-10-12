@@ -11677,6 +11677,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, metadata_shape_cache.registered_queries == 344);
     BUSTER_TEST(arguments, metadata_shape_cache.resolved_rows == metadata_shape_cache.prepared_rows);
     BUSTER_TEST(arguments, metadata_shape_cache.pending_rows == 0);
+    // PUSH, POP, MOV r64, XOR r32, LEAVE and RET pin their selector form
+    // (#1125); the complete resolution above found each pin to agree with
+    // the selector, or the cache would not be valid.
+    BUSTER_TEST(arguments, metadata_shape_cache.pinned_queries == 6);
 
     // Canonical metadata authorities and neutral patch helpers are separate
     // records.  The source audit below validates their shape and ownership;

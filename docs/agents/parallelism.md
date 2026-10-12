@@ -59,7 +59,10 @@
   `buster_x86_metadata_prewarm_all_forms()` first, which fills every one of
   them. The machine encoder's closed expansion-shape set follows the same
   rule: `machine_x86_64_exact_prewarm` registers its queries and resolves
-  each shape on its first serial lookup; it registers each dense GPR table,
+  each shape on its first serial lookup (the prologue, epilogue and
+  zero-idiom shapes pin their selected form key, so their lookup skips the
+  selector, and the complete resolution re-checks each pin against the
+  selector); it registers each dense GPR table,
   variable-memory table and fixed-template row but encodes each table, cell
   or row on its first serial read; and the metadata form and operand records
   decode on their first serial read. `machine_x86_64_exact_prewarm_all()` and
