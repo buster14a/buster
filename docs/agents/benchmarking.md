@@ -1167,6 +1167,15 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    usable, diagnostic wall-time A/B; Zen 5 evidence still needs the 9700X
    routes below.
 
+   **Probe orphans (#3709).** The `perf stat -- true` probes
+   (`probe_counters`, the `wrapper_rss_bytes` run in `probe_workload`, and the
+   top-down dry runs) make the lab a child subreaper for that one command.
+   After perf is reaped, the lab kills the rest of the probe's process group
+   and reaps any orphan it left. Each one is named as `orphan reaped:
+   pid=N stat=[...]` in `commands.log` and in the probe's log. Workload runs
+   never do this, so an outer supervisor still adopts, and charges, anything
+   the compiler or its wrapper leaves behind.
+
    Both binaries are probed for `-fsource-metrics`/`-fmetrics-out` before
    either is warmed up. Compare enables `-fmetrics-out` in both variants'
    warm-ups, pilot and timed pairs only when both support it; otherwise it

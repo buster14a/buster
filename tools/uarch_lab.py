@@ -124,6 +124,7 @@ Map (searchable symbols):
     summarize, percentile, runs_since_minimum, tenth_medians   statistics
     phase_spans, interval_table, attribute_intervals      timeline alignment
     Lab, Lab.workload, Lab.run_command                    process execution
+    run_measured, child_subreaper, reap_orphans           wait4 RSS, probe orphan reaping
     Lab.instance, fresh_binary_copy, Lab.record_options   fresh binary copy per run/capture
     step_env ... step_micro, sampling_capture, derive_ibs_reports   the steps (raw files)
     render_env ... render_micro, guarded                  report sections from raw files
@@ -1035,10 +1036,12 @@ class Lab:
             with contextlib.suppress(OSError):
                 os.rmdir(parent)
 
-    def run_command(self, argv, log=None, timeout=COMMAND_TIMEOUT, stdout_path=None):
+    def run_command(self, argv, log=None, timeout=COMMAND_TIMEOUT, stdout_path=None, probe=False):
         """Run argv in the repository root; returns (exit status, stdout, stderr).
         last_elapsed is its monotonic span; last_maxrss and last_harness_rss
-        are run_measured's peak RSS and resident harness floor in bytes (or None)."""
+        are run_measured's peak RSS and resident harness floor in bytes (or None).
+        A probe (`perf stat -- true`) reaps the orphans it leaves (#3709) and
+        names each in commands.log and its log."""
         output = None
         if "-o" in argv:
             output = argv[argv.index("-o") + 1]
@@ -1051,7 +1054,9 @@ class Lab:
                 os.remove(output)
         started = time.monotonic()
         usage = {}
-        status, out, err, self.last_maxrss, self.last_harness_rss = run_measured(argv, self.repo_root, self.environment, timeout, usage)
+        status, out, err, self.last_maxrss, self.last_harness_rss = run_measured(argv, self.repo_root, self.environment, timeout, usage,
+                                                                                    reap_orphans_after=probe)
+        orphans = "".join("  orphan reaped: %s\n" % orphan for orphan in usage.get("orphans", ()))
         self.last_cpu_s = usage.get("cpu_s")
         if status == 0 and output and not os.path.isfile(output):
             status, err = 1, err + b"\ncompiler did not create the requested output\n"
@@ -1062,11 +1067,11 @@ class Lab:
             with open(stdout_path, "w") as handle:
                 handle.write(out_text)
         with open(self.path("commands.log"), "a") as handle:
-            handle.write("%s exit=%d %.3fs\n" % (shell_join(argv), status, self.last_elapsed))
+            handle.write("%s exit=%d %.3fs\n%s" % (shell_join(argv), status, self.last_elapsed, orphans))
         if log:
             with open(log, "w") as handle:
-                handle.write("$ %s\nexit=%d\n--- stdout\n%s\n--- stderr\n%s" % (
-                    shell_join(argv), status, out_text[-200000:], err_text[-200000:]))
+                handle.write("$ %s\nexit=%d\n%s--- stdout\n%s\n--- stderr\n%s" % (
+                    shell_join(argv), status, orphans, out_text[-200000:], err_text[-200000:]))
         return status, out_text, err_text
 
     def save_meta(self):
@@ -1093,7 +1098,62 @@ def harness_resident_bytes():
     return value
 
 
-def run_measured(argv, cwd, environment, timeout, usage_out=None):
+# prctl(2) options for the probe-scoped child subreaper (#3709).
+PR_SET_CHILD_SUBREAPER = 36
+PR_GET_CHILD_SUBREAPER = 37
+# How long run_measured(reap_orphans=True) waits for an orphaned probe
+# descendant, already sent SIGKILL, before leaving it unreaped.
+ORPHAN_REAP_SECONDS = 5.0
+
+
+def child_subreaper(value):
+    """Set this process's PR_SET_CHILD_SUBREAPER flag (Linux only); returns
+    the previous value, or None where prctl is unavailable or refuses."""
+    previous = None
+    if sys.platform.startswith("linux"):
+        try:
+            import ctypes
+            libc = ctypes.CDLL(None, use_errno=True)
+            state = ctypes.c_int(0)
+            if libc.prctl(PR_GET_CHILD_SUBREAPER, ctypes.byref(state), 0, 0, 0) == 0 and \
+                    libc.prctl(PR_SET_CHILD_SUBREAPER, ctypes.c_ulong(value), 0, 0, 0) == 0:
+                previous = state.value
+        except (OSError, AttributeError):
+            previous = None
+    return previous
+
+
+def reap_orphans(group):
+    """Reap every remaining child of this subreaper after the direct child of
+    a probe was waited for (#3709): `perf stat -- true` was seen to leave its
+    exited `true` behind, which the 9700X supervisor's own subreaper then
+    adopted and charged to the trial.  Live members of the probe's process
+    group are killed first.  Returns one `pid=N stat=[...]` line per reaped
+    orphan, plus `unreaped` when one outlived ORPHAN_REAP_SECONDS; that one
+    stays a child of this process, so the supervisor still adopts it."""
+    found = []
+    with contextlib.suppress(OSError):
+        os.killpg(group, signal.SIGKILL)
+    deadline = time.monotonic() + ORPHAN_REAP_SECONDS
+    waiting = True
+    while waiting:
+        try:
+            info = os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            info, waiting = None, False
+        if info is not None:
+            stat = (read_text("/proc/%d/stat" % info.si_pid) or "").strip()
+            os.waitpid(info.si_pid, 0)
+            found.append("pid=%d stat=[%s]" % (info.si_pid, stat))
+        elif waiting and time.monotonic() < deadline:
+            time.sleep(0.01)
+        elif waiting:
+            found.append("unreaped after %.0fs" % ORPHAN_REAP_SECONDS)
+            waiting = False
+    return found
+
+
+def run_measured(argv, cwd, environment, timeout, usage_out=None, reap_orphans_after=False):
     """(exit status, stdout bytes, stderr bytes, peak RSS bytes, harness
     resident RSS bytes) of argv; both RSS values None where unsupported.
     A usage_out dict receives `cpu_s`, the child's user+system seconds from
@@ -1110,8 +1170,24 @@ def run_measured(argv, cwd, environment, timeout, usage_out=None):
     stat -- ide ...` the value is max(harness, perf's own RSS, the compiler's
     RSS over all its threads); rss_value keeps only values clearly above the
     first two.  Output goes to temporary files, so a chatty child cannot
-    block on a full pipe."""
+    block on a full pipe.
+
+    reap_orphans_after (the `-- true` probes only, #3709) makes this process
+    a child subreaper for the call, so an orphan the child leaves is reaped
+    here (reap_orphans) and listed in usage_out["orphans"]; workload runs
+    keep every orphan visible to an outer supervisor."""
     harness = harness_resident_bytes()
+    prior = child_subreaper(1) if reap_orphans_after else None
+    try:
+        result = run_measured_child(argv, cwd, environment, timeout, usage_out, harness, prior is not None)
+    finally:
+        if prior is not None:
+            child_subreaper(prior)
+    return result
+
+
+def run_measured_child(argv, cwd, environment, timeout, usage_out, harness, subreaper):
+    """run_measured's body; subreaper means reap the child's orphans after it."""
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         try:
             process = subprocess.Popen(argv, cwd=cwd, env=environment, stdout=out, stderr=err, start_new_session=os.name == "posix")
@@ -1146,6 +1222,10 @@ def run_measured(argv, cwd, environment, timeout, usage_out=None):
             raise
         finally:
             timer.cancel()
+            if subreaper:
+                orphans = reap_orphans(process.pid)
+                if usage_out is not None:
+                    usage_out["orphans"] = orphans
         out.seek(0)
         err.seek(0)
         stdout, stderr = out.read(), err.read()
@@ -1389,7 +1469,7 @@ def probe_counters(lab):
     if lab.counters is None:
         csv_path = lab.path("perf-probe.csv")
         status, _, err = lab.run_command([lab.perf, "stat", "-x,", "-o", csv_path, "-e", ",".join(TIMED_EVENTS), "--", "true"],
-                                         timeout=60)
+                                         timeout=60, probe=True)
         task = task_seconds(parse_stat(read_text(csv_path) or "")) if status == 0 else None
         lab.counters = task is not None
         reason = "perf stat counts task-clock" if lab.counters else "perf stat unusable (%s)" % (
@@ -1416,7 +1496,7 @@ def probe_workload(lab, directory, out):
     the floor rss_value compares every run against."""
     capabilities = lab.meta["capabilities"]
     status, _, _ = lab.run_command(timed_command(lab, os.path.join(directory, "wrapper.csv")) + ["true"],
-                                   log=os.path.join(directory, "wrapper-rss.log"))
+                                   log=os.path.join(directory, "wrapper-rss.log"), probe=True)
     capabilities["wrapper_rss_bytes"] = lab.last_maxrss if status == 0 else None
     # Work denominators (and the -fsource-metrics probe) from a separate run.
     source = os.path.join(directory, "source.metrics")
@@ -1533,7 +1613,8 @@ def step_topdown(lab, groups):
     for group in groups:
         base = lab.path("topdown", safe_name(group))
         entry = {"group": group}
-        status, out, err = lab.run_command([lab.perf, "stat", "-M", group, "--", "true"], log=base + ".dryrun.log", timeout=120)
+        status, out, err = lab.run_command([lab.perf, "stat", "-M", group, "--", "true"], log=base + ".dryrun.log", timeout=120,
+                                           probe=True)
         entry["dryrun_exit"] = status
         if status != 0:
             entry.update({"exit": status, "reason": last_reason(out + "\n" + err)})
