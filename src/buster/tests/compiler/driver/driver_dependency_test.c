@@ -216,6 +216,79 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_dependency_test_compile
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_target_scaling(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    // Measure the real parser's retained allocations, including response-file
+    // expansion. A 16x population must not retain 256x target prefixes.
+    for (u32 response = 0; response < 2; response += 1)
+    {
+        for (u32 mode = 0; mode < 3; mode += 1)
+        {
+            u64 small_bytes = 0;
+            for (u32 scale = 0; scale < 2; scale += 1)
+            {
+                TemporalArena temporary = arena_begin_temporal(arena);
+                u32 target_count = scale ? 2048 : 128;
+                String8* command = arena_allocate(arena, String8, 3 + 2 * target_count);
+                String8* expected_parts = arena_allocate(arena, String8, 2 * target_count - 1);
+                String8* response_parts = arena_allocate(arena, String8, target_count + 1);
+                command[0] = S8("-c");
+                command[1] = S8("-MMD");
+                command[2] = S8("tests/basic_c_multi_main.c");
+                response_parts[0] = S8("-c -MMD tests/basic_c_multi_main.c\n");
+                u32 expected_count = 0;
+                for (u32 index = 0; index < target_count; index += 1)
+                {
+                    bool quoted = mode == 1 || (mode == 2 && (index & 1));
+                    command[3 + index * 2] = quoted ? S8("-MQ") : S8("-MT");
+                    command[4 + index * 2] = S8("target $name#.o");
+                    response_parts[index + 1] = quoted ? S8("-MQ 'target $name#.o'\n") : S8("-MT 'target $name#.o'\n");
+                    if (index)
+                    {
+                        expected_parts[expected_count++] = S8(" ");
+                    }
+                    expected_parts[expected_count++] = quoted ? S8("target\\ $$name\\#.o") : S8("target $name#.o");
+                }
+                String8 expected = string_join_arena(arena, (SliceString8){.pointer = expected_parts, .length = expected_count}, false);
+                SliceString8 input = {.pointer = command, .length = 3 + 2 * target_count};
+                String8 response_argument = {0};
+                if (response)
+                {
+                    String8 path = buster_test_temporary_path(arena, S8("buster-dependency-targets"), S8(".rsp"));
+                    String8 text = string_join_arena(arena, (SliceString8){.pointer = response_parts, .length = target_count + 1}, false);
+                    BUSTER_TEST(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+                    response_argument = string_format(arena, S8("@{S8}"), path);
+                    input = (SliceString8){.pointer = &response_argument, .length = 1};
+                }
+                u64 start = arena->position;
+                CompilerDriverInvocation parsed = compiler_driver_parse_arguments(arena, input);
+                u64 retained = arena->position - start;
+                BUSTER_TEST_RAW(arguments, parsed.error == COMPILER_DRIVER_ERROR_NONE, parsed.diagnostic);
+                BUSTER_STRING_TEST(arguments, parsed.dependency_targets, expected);
+                // Includes all argument-indexed arrays, quoting and expansion;
+                // the old prefix join exceeds this bound at 2,048 targets.
+                BUSTER_TEST_RAW(arguments, retained <= 4096 * (u64)target_count + 65536,
+                                string_format(arena, S8("response={u32} mode={u32} targets={u32} retained={u64}"),
+                                              response, mode, target_count, retained));
+                if (!scale)
+                {
+                    small_bytes = retained;
+                }
+                else
+                {
+                    BUSTER_TEST_RAW(arguments, retained <= 16 * small_bytes + 65536,
+                                    string_format(arena, S8("response={u32} mode={u32} small={u64} large={u64}"),
+                                                  response, mode, small_bytes, retained));
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_files(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -237,6 +310,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dependency_files(UnitTes
         CompilerDriverInvocation parsed = compiler_driver_parse_arguments(
             arena, (SliceString8){.pointer = accepted[index], .length = accepted_lengths[index]});
         BUSTER_TEST(arguments, parsed.error == COMPILER_DRIVER_ERROR_NONE && parsed.dependency_file);
+    }
+    String8 target_cases[][11] = {
+        {S8("-c"), S8("-MD"), input, S8("-MT"), S8("")},
+        {S8("-c"), S8("-MD"), input, S8("-MQ"), S8("")},
+        {S8("-c"), S8("-MD"), input, S8("-MT"), S8(""), S8("-MQ"), S8(""), S8("-MTraw")},
+        {S8("-c"), S8("-MD"), input, S8("-MTraw$#"), S8("-MQ"), S8("q\\ \t$#"), S8("-MTraw$#"), S8("-MQ"), S8("")},
+        {S8("-c"), S8("-MD"), input, S8("-MQ"), S8("line\nbreak")},
+    };
+    u32 target_case_lengths[] = {5, 5, 8, 9, 5};
+    String8 target_case_expected[] = {S8(""), S8(""), S8("  raw"), S8("raw$# q\\\\\\ \\\t$$\\# raw$# "), S8("line\nbreak")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(target_cases); index += 1)
+    {
+        CompilerDriverInvocation parsed = compiler_driver_parse_arguments(
+            arena, (SliceString8){.pointer = target_cases[index], .length = target_case_lengths[index]});
+        BUSTER_TEST_RAW(arguments, parsed.error == COMPILER_DRIVER_ERROR_NONE, parsed.diagnostic);
+        BUSTER_TEST(arguments, parsed.dependency_targets.pointer != 0);
+        BUSTER_STRING_TEST(arguments, parsed.dependency_targets, target_case_expected[index]);
     }
     String8 unsupported[] = {S8("-M"), S8("-MM"), S8("-MG")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unsupported); index += 1)
