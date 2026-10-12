@@ -1164,9 +1164,11 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run             --root "$BUSTER_CI_OBSERVATION_ROOT" --phase producer_build --sequence 30 --             "$driver" build --config Release -t ide
           "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run             --root "$BUSTER_CI_OBSERVATION_ROOT" --phase mode_payload --sequence 40 --             "$driver" test_mode_matrix --config Release
 
-      # #2067: bound the Windows native steps so that a hang fails here and the
-      # pack and retain steps below still run. Passing runs, 2026-09-28 to
-      # 2026-10-12: mode matrix max 299 s (AArch64), MSVC reference max 137 s.
+      # #2067: step bounds below the 300-minute job limit. On a responsive
+      # runner, expiry ends the step and makes the pack/retain steps eligible;
+      # evidence still needs the runner to survive and packing and upload to
+      # succeed, and phase records may be partial. Passing runs, 2026-09-28
+      # to 2026-10-12: mode matrix max 299 s (AArch64), MSVC reference 137 s.
       - name: Execution-mode matrix (Windows)
         id: modes_windows
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'windows' && (matrix.os == 'macos' || steps.llvm.outcome == 'success') }}
