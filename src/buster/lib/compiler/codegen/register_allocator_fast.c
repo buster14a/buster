@@ -3066,13 +3066,16 @@ BUSTER_GLOBAL_LOCAL void machine_fast_solve_liveness_reference(u32 block_count, 
 // depth times blocks times words, and the reverse-CFG order converges in one
 // pass, so the work stays within two visits per block. The second is a
 // seeded pseudo-random graph with irreducible regions, several exits, an
-// exitless cycle and live-out seeds, which only has to agree with the oracle.
+// exitless cycle and live-out seeds, which only has to agree with the oracle;
+// it spans several `pending_words` summary words, so re-pending a rank below
+// the current summary word is exercised too.
 bool machine_fast_solve_liveness_test(Arena* arena)
 {
     enum
     {
         MACHINE_FAST_SOLVE_TEST_DEPTH = 320,
-        MACHINE_FAST_SOLVE_TEST_RANDOM_BLOCKS = 97,
+        MACHINE_FAST_SOLVE_TEST_RANDOM_BLOCKS = 2u * MACHINE_FAST_LIVENESS_SUMMARY_SPAN + 808u,
+        MACHINE_FAST_SOLVE_TEST_EXITLESS_FIRST = MACHINE_FAST_SOLVE_TEST_RANDOM_BLOCKS - 7u,
         MACHINE_FAST_SOLVE_TEST_RANDOM_VALUES = 150,
     };
     u64 arena_position = arena->position;
@@ -3132,19 +3135,21 @@ bool machine_fast_solve_liveness_test(Arena* arena)
         else
         {
             // Up to two successors per block, mostly forward with some
-            // backward and cross edges; blocks 90 and up form an exitless
-            // cycle, and 13, 41 and 89 are extra exits.
+            // backward and cross edges; the last seven blocks form an
+            // exitless cycle, and 13, 41 and the block before them are exits.
             u64 random = 0x9e3779b97f4a7c15ull;
             for (u32 block_index = 0; block_index < block_count; block_index += 1)
             {
-                bool exit = block_index == 13u || block_index == 41u || block_index == 89u;
+                bool exit = block_index == 13u || block_index == 41u || block_index + 1u == MACHINE_FAST_SOLVE_TEST_EXITLESS_FIRST;
                 u32 successors = exit ? 0 : 1u + (u32)((random >> 33) & 1u);
                 for (u32 successor_index = 0; successor_index < successors; successor_index += 1)
                 {
                     random = random * 6364136223846793005ull + 1442695040888963407ull;
                     u32 target = (u32)((random >> 40) % block_count);
-                    target = block_index >= 90u ? 90u + (u32)((random >> 40) % (block_count - 90u)) : target;
-                    target = successor_index == 0 && block_index + 1u < 90u ? block_index + 1u : target;
+                    target = block_index >= MACHINE_FAST_SOLVE_TEST_EXITLESS_FIRST
+                                 ? MACHINE_FAST_SOLVE_TEST_EXITLESS_FIRST + (u32)((random >> 40) % (block_count - MACHINE_FAST_SOLVE_TEST_EXITLESS_FIRST))
+                                 : target;
+                    target = successor_index == 0 && block_index + 1u < MACHINE_FAST_SOLVE_TEST_EXITLESS_FIRST ? block_index + 1u : target;
                     edge_sources[edge_count] = block_index;
                     edge_targets[edge_count++] = target;
                 }
