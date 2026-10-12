@@ -9980,9 +9980,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteS
     u64 string_offset = 0;
     u64 string_size = 0;
     u32 stride = 0;
-    bool valid = byte_slice_read_u32(bytes, 0, &magic);
+    // The bounded reader lives in byte_writer.c; testing the pointer here keeps
+    // the direct header-byte loads below visibly guarded by a successful read.
+    bool valid = bytes.pointer && byte_slice_read_u32(bytes, 0, &magic);
     ObjectFormat format = OBJECT_FORMAT_COUNT;
-    bool elf32 = bytes.pointer && bytes.length >= 16 && bytes.pointer[4] == 1;
+    bool elf32 = valid && bytes.length >= 16 && bytes.pointer[4] == 1;
     if (valid && magic == UINT32_C(0x464c457f))
     {
         format = elf32 ? OBJECT_FORMAT_ELF32 : OBJECT_FORMAT_ELF64;
