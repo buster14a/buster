@@ -2815,12 +2815,11 @@ BUSTER_C_SHARED String8 c_ir_math_builtin_link_name(String8 name)
         {S8("__builtin_fmaxf"), S8("fmaxf")},   {S8("__builtin_fmax"), S8("fmax")},   {S8("__builtin_fmaxl"), S8("fmaxl")},
         {S8("__builtin_fminf"), S8("fminf")},   {S8("__builtin_fmin"), S8("fmin")},   {S8("__builtin_fminl"), S8("fminl")},
         {S8("__builtin_powif"), S8("powif")},   {S8("__builtin_powi"), S8("powi")},   {S8("__builtin_powil"), S8("powil")},
-        {S8("__builtin_nanf"), S8("nanf")},     {S8("__builtin_nan"), S8("nan")},
+        {S8("__builtin_nanf"), S8("nanf")},     {S8("__builtin_nan"), S8("nan")},     {S8("__builtin_nanl"), S8("nanl")},
         {S8("__builtin_signbit"), S8("signbit")}, {S8("__builtin_signbitf"), S8("signbitf")},
         {S8("__builtin_signbitl"), S8("signbitl")},
-        {S8("__builtin_inff"), S8("inff")},
-        {S8("__builtin_inf"), S8("huge_val")},
-        {S8("__builtin_huge_val"), S8("huge_val")},
+        {S8("__builtin_inff"), S8("inff")},     {S8("__builtin_inf"), S8("huge_val")}, {S8("__builtin_infl"), S8("infl")},
+        {S8("__builtin_huge_valf"), S8("inff")}, {S8("__builtin_huge_val"), S8("huge_val")}, {S8("__builtin_huge_vall"), S8("infl")},
         {S8("__builtin_isnanf"), S8("isnanf")}, {S8("__builtin_isnan"), S8("isnan")},
         {S8("__builtin_isinf_sign"), S8("isinf_sign")},
         {S8("__builtin_isinf"), S8("isinf")},   {S8("__builtin_isinff"), S8("isinff")},
@@ -14822,9 +14821,9 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_builtin(CIrExt80Fold* fold, CIrExt80Value
     if (token->kind == C_TOKEN_IDENTIFIER && fold->cursor + 1 < fold->limit &&
         c_token_is_punctuator(&fold->preprocess.tokens[fold->cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
-        String8 link_name = c_ir_math_builtin_link_name(c_token_spelling(fold->preprocess.spelling_base, *token));
-        bool quiet_nan = string_equal(link_name, S8("nan")) || string_equal(link_name, S8("nanf"));
-        bool infinity = string_equal(link_name, S8("inff")) || string_equal(link_name, S8("huge_val"));
+        CMathSpecialValue special = c_semantic_math_special_value(c_ir_math_builtin_link_name(c_token_spelling(fold->preprocess.spelling_base, *token)));
+        bool quiet_nan = special.special == C_MATH_SPECIAL_QUIET_NAN;
+        bool infinity = special.special == C_MATH_SPECIAL_INFINITY;
         if (quiet_nan || infinity)
         {
             u32 open = fold->cursor + 1;
@@ -14840,7 +14839,8 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_builtin(CIrExt80Fold* fold, CIrExt80Value
                 bool empty_payload = payload.length == 2 && payload.pointer[0] == '"' && payload.pointer[1] == '"';
                 if (quiet_nan ? empty_payload : close == open + 1)
                 {
-                    u8 rank = string_equal(link_name, S8("nanf")) || string_equal(link_name, S8("inff")) ? C_IR_EXT80_RANK_FLOAT : C_IR_EXT80_RANK_DOUBLE;
+                    u8 rank = special.kind == C_TYPE_FLOAT ? C_IR_EXT80_RANK_FLOAT
+                              : special.kind == C_TYPE_LONG_DOUBLE ? C_IR_EXT80_RANK_LONG_DOUBLE : C_IR_EXT80_RANK_DOUBLE;
                     *value_out = infinity ? c_ir_ext80_value_infinity(false, rank) : c_ir_ext80_value_default_nan(rank);
                     fold->cursor = close + 1;
                     folded = true;
@@ -21629,51 +21629,44 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_power_integer(CIntegerIrBuilder* bui
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CToken token, String8 link_name, IrValueId* arguments, u32 argument_count)
 {
-    // `__builtin_huge_val()` is a constant-valued compiler intrinsic.  Keep
-    // it in the math-builtin path so hosted headers can use the spelling
-    // without declaring a runtime symbol, but emit the IEEE positive
-    // infinity directly in canonical IR.
-    if (string_equal(link_name, S8("huge_val")))
+    // The infinity (`__builtin_inf*`, `__builtin_huge_val*`) and NaN
+    // (`__builtin_nan*`) constructors are constant-valued compiler
+    // intrinsics.  Hosted headers spell HUGE_VAL*, INFINITY and NAN with them
+    // before any runtime library declaration exists, so emit the positive
+    // infinity or default quiet NaN directly in the result type's own format
+    // and never import an `inf*`/`nan*` symbol.
+    CMathSpecialValue special = c_semantic_math_special_value(link_name);
+    if (special.special != C_MATH_SPECIAL_NONE)
     {
-        if (argument_count != 0)
-        {
-            return IR_VALUE_ID_INVALID;
-        }
+        bool nan = special.special == C_MATH_SPECIAL_QUIET_NAN;
+        IrTypeId value_type = c_ir_builder_scalar_type(builder, special.kind);
+        IrType const* type = ir_type_from_id(&builder->program->types, value_type);
         IrSourceRange source = c_ir_token_source_range(builder, token);
-        return c_ir_emit_builtin_float_bits(builder, builder->f64_type, UINT64_C(0x7ff0000000000000), source, S8("HUGE_VAL"));
-    }
-    // `__builtin_inff()` is the single-precision counterpart used by the
-    // hosted <math.h> INFINITY macro.  It is a constant-valued intrinsic, so
-    // do not require a runtime `inff` declaration or linker symbol.
-    if (string_equal(link_name, S8("inff")))
-    {
-        if (argument_count != 0)
+        IrValueId result = IR_VALUE_ID_INVALID;
+        if (argument_count == (nan ? 1u : 0u) && type && type->kind == IR_TYPE_FLOAT)
         {
-            return IR_VALUE_ID_INVALID;
+            CIrConstantValue constant = c_ir_constant_math_special(type, special.special);
+            String8 literal = nan ? S8("NAN") : special.kind == C_TYPE_FLOAT ? S8("INFF") : special.kind == C_TYPE_LONG_DOUBLE ? S8("HUGE_VALL") : S8("HUGE_VAL");
+            if (type->bit_width == 80)
+            {
+                result = c_ir_emit_f80_constant_bits(builder, source, literal, constant.integer, (u16)constant.integer_high);
+            }
+            else if (type->bit_width == 128)
+            {
+                result = c_ir_emit_f128_constant_bits(builder, source, literal, constant.integer, constant.integer_high);
+            }
+            else if (type->bit_width == 32)
+            {
+                result = c_ir_emit_builtin_float_bits(builder, value_type, nan ? UINT64_C(0x7fc00000) : UINT64_C(0x7f800000), source, literal);
+            }
+            else
+            {
+                u64 bits = 0;
+                memcpy(&bits, &constant.floating, sizeof(bits));
+                result = c_ir_emit_builtin_float_bits(builder, value_type, bits, source, literal);
+            }
         }
-        IrSourceRange source = c_ir_token_source_range(builder, token);
-        return c_ir_emit_builtin_float_bits(builder, builder->f32_type, UINT64_C(0x7f800000), source, S8("INFF"));
-    }
-    // The builtin NaN constructors are compile-time values.  Do not create
-    // an imported `nan*` symbol: hosted headers use these names before a
-    // runtime library declaration exists, and the quiet IEEE payload is
-    // target-independent for the f32/f64 types represented by canonical IR.
-    if (string_equal(link_name, S8("nanf")) || string_equal(link_name, S8("nan")))
-    {
-        if (argument_count != 1)
-        {
-            return IR_VALUE_ID_INVALID;
-        }
-        IrTypeId value_type = string_equal(link_name, S8("nanf")) ? builder->f32_type : builder->f64_type;
-        IrType* type = ir_type_from_id(&builder->program->types, value_type);
-        if (!type || type->kind != IR_TYPE_FLOAT)
-        {
-            return IR_VALUE_ID_INVALID;
-        }
-        IrSourceRange source = c_ir_token_source_range(builder, token);
-        return c_ir_emit_builtin_float_bits(builder, value_type, type->bit_width == 32 ? UINT64_C(0x7fc00000)
-                                                                                       : UINT64_C(0x7ff8000000000000),
-                                            source, S8("NAN"));
+        return result;
     }
     if (string_equal(link_name, S8("fabsf")) || string_equal(link_name, S8("fabs")))
     {
@@ -57747,6 +57740,13 @@ BUSTER_C_INTERNAL CIrConstantValue c_ir_constant_float_special(IrType const* typ
     return result;
 }
 
+// The positive infinity or default quiet NaN a special-float math builtin
+// names, encoded in `type`'s own format.
+BUSTER_C_SHARED CIrConstantValue c_ir_constant_math_special(IrType const* type, CMathSpecial special)
+{
+    return c_ir_constant_float_special(type, false, special == C_MATH_SPECIAL_QUIET_NAN ? C_IR_FLOAT_NAN : C_IR_FLOAT_INFINITY);
+}
+
 // Round a rational once to binary128's 113 significant bits.  Division needs
 // two quotient limbs, not a host __float128 or an intervening x87/f64 value.
 BUSTER_C_INTERNAL u8 c_ir_ieee128_from_rational(CIrExt80Big const* numerator, CIrExt80Big const* denominator, s32 binary_exponent,
@@ -60277,9 +60277,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
             // the emitter that already knows the bits.
             if (token.kind == C_TOKEN_IDENTIFIER && index + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
-                String8 math_link_name = c_ir_math_builtin_link_name(c_token_spelling(builder->preprocess.spelling_base, token));
-                bool quiet_nan = string_equal(math_link_name, S8("nan")) || string_equal(math_link_name, S8("nanf"));
-                bool infinity = string_equal(math_link_name, S8("inff")) || string_equal(math_link_name, S8("huge_val"));
+                CMathSpecialValue special = c_semantic_math_special_value(c_ir_math_builtin_link_name(c_token_spelling(builder->preprocess.spelling_base, token)));
+                bool quiet_nan = special.special == C_MATH_SPECIAL_QUIET_NAN;
+                bool infinity = special.special == C_MATH_SPECIAL_INFINITY;
                 if (quiet_nan || infinity)
                 {
                     u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
@@ -60298,29 +60298,12 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                     {
                         return false;
                     }
-                    bool single = string_equal(math_link_name, S8("nanf")) || string_equal(math_link_name, S8("inff"));
-                    f64 floating = 0.0;
-                    if (single)
-                    {
-                        f32 narrowed = 0.0f;
-                        u32 bits = infinity ? UINT32_C(0x7f800000) : UINT32_C(0x7fc00000);
-                        memcpy(&narrowed, &bits, sizeof(narrowed));
-                        floating = (f64)narrowed;
-                    }
-                    else
-                    {
-                        u64 bits = infinity ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7ff8000000000000);
-                        memcpy(&floating, &bits, sizeof(floating));
-                    }
-                    if (value_count >= capacity)
+                    IrType const* special_type = ir_type_from_id(&builder->program->types, c_ir_builder_scalar_type(builder, special.kind));
+                    if (value_count >= capacity || !special_type || special_type->kind != IR_TYPE_FLOAT)
                     {
                         return false;
                     }
-                    values[value_count++] = (CIrConstantValue){
-                        .type = single ? builder->f32_type : builder->f64_type,
-                        .floating = floating,
-                        .kind = C_IR_CONSTANT_FLOAT,
-                    };
+                    values[value_count++] = c_ir_constant_math_special(special_type, special.special);
                     expect_operand = false;
                     index = close;
                     continue;

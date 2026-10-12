@@ -23799,6 +23799,220 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_infinity(UnitTestArguments* ar
     return result;
 }
 
+// The remaining special-value spellings: glibc's HUGE_VALF/HUGE_VALL macros
+// (`__builtin_huge_valf`/`__builtin_huge_vall`), `__builtin_infl` and
+// `__builtin_nanl`. Each is a constant in its own type's format at run time
+// and in static initializers, with no runtime import (#1269).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_special_float_spellings(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "#define HUGE_VALF (__builtin_huge_valf())\n"
+        "#define HUGE_VALL (__builtin_huge_vall())\n"
+        "#define NAN (__builtin_nanf(\"\"))\n"
+        "#if !__has_builtin(__builtin_huge_valf) || !__has_builtin(__builtin_huge_vall) || !__has_builtin(__builtin_infl) || !__has_builtin(__builtin_nanl)\n"
+        "#error the special float builtins are implemented\n"
+        "#endif\n"
+        "#if __has_builtin(__builtin_inflf)\n"
+        "#error near spellings stay unavailable\n"
+        "#endif\n"
+        "#define SAME(e, t) __builtin_types_compatible_p(__typeof__(e), t)\n"
+        "_Static_assert(SAME(HUGE_VALF, float) && SAME(HUGE_VALL, long double), \"huge_val types\");\n"
+        "_Static_assert(SAME(__builtin_infl(), long double) && SAME(__builtin_nanl(\"\"), long double), \"long double types\");\n"
+        "_Static_assert(sizeof(HUGE_VALF) == sizeof(float) && sizeof(__builtin_nanl(\"\")) == sizeof(long double), \"sizes\");\n"
+        "_Static_assert(_Generic(HUGE_VALF, float: 1, default: 0) && _Generic(__builtin_infl(), long double: 1, default: 0), \"generic\");\n"
+        "_Static_assert(SAME(1 ? HUGE_VALF : __builtin_nanl(\"\"), long double), \"conditional\");\n"
+        "#if __LDBL_MANT_DIG__ == 64\n"
+        "#define LD_BYTES 10\n"
+        "static unsigned char const ld_inf[] = {0, 0, 0, 0, 0, 0, 0, 0x80, 0xff, 0x7f};\n"
+        "static unsigned char const ld_nan[] = {0, 0, 0, 0, 0, 0, 0, 0xc0, 0xff, 0x7f};\n"
+        "#elif __LDBL_MANT_DIG__ == 113\n"
+        "#define LD_BYTES 16\n"
+        "static unsigned char const ld_inf[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0x7f};\n"
+        "static unsigned char const ld_nan[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 0xff, 0x7f};\n"
+        "#else\n"
+        "#define LD_BYTES 8\n"
+        "static unsigned char const ld_inf[] = {0, 0, 0, 0, 0, 0, 0xf0, 0x7f};\n"
+        "static unsigned char const ld_nan[] = {0, 0, 0, 0, 0, 0, 0xf8, 0x7f};\n"
+        "#endif\n"
+        "typedef union FloatBits { float value; unsigned int bits; } FloatBits;\n"
+        "typedef union LongDoubleBits { long double value; unsigned char bytes[sizeof(long double)]; } LongDoubleBits;\n"
+        "float global_huge_valf = HUGE_VALF;\n"
+        "float global_negative_huge_valf = -HUGE_VALF;\n"
+        "long double global_table[] = {HUGE_VALL, -__builtin_infl(), __builtin_nanl(\"\"), __builtin_huge_val(), __builtin_inff(), NAN};\n"
+        "float special_huge_valf(void) { return HUGE_VALF; }\n"
+        "long double special_huge_vall(void) { return HUGE_VALL; }\n"
+        "long double special_infl(void) { return __builtin_infl(); }\n"
+        "long double special_nanl(void) { return __builtin_nanl(\"\"); }\n"
+        "static int ld_differs(long double value, unsigned char const* expected, int negative)\n"
+        "{\n"
+        "    LongDoubleBits bits;\n"
+        "    int differs = 0;\n"
+        "    bits.value = value;\n"
+        "    for (int index = 0; index < LD_BYTES; index += 1)\n"
+        "        differs |= bits.bytes[index] != (unsigned char)(expected[index] | (negative && index == LD_BYTES - 1 ? 0x80 : 0));\n"
+        "    return differs;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int error = 0;\n"
+        "    FloatBits single;\n"
+        "    single.value = global_huge_valf;\n"
+        "    error |= single.bits != 0x7f800000u;\n"
+        "    single.value = global_negative_huge_valf;\n"
+        "    error |= single.bits != 0xff800000u;\n"
+        "    single.value = special_huge_valf();\n"
+        "    error |= single.bits != 0x7f800000u;\n"
+        "    for (int index = 0; index < 6; index += 1)\n"
+        "        error |= ld_differs(global_table[index], index % 3 == 2 ? ld_nan : ld_inf, index == 1) << 1;\n"
+        "    error |= (ld_differs(special_huge_vall(), ld_inf, 0) | ld_differs(special_infl(), ld_inf, 0)) << 2;\n"
+        "    error |= (ld_differs(special_nanl(), ld_nan, 0) | ld_differs(__builtin_nanl(\"\"), ld_nan, 0)) << 2;\n"
+        "#if __LDBL_MANT_DIG__ != 113\n"
+        "    volatile long double infinity = HUGE_VALL;\n"
+        "    volatile long double nan = __builtin_nanl(\"\");\n"
+        "    error |= (!(infinity > 1e300L) || !(-infinity < -1e300L) || nan == nan || !(nan != nan)) << 3;\n"
+        "#endif\n"
+        "    return error;\n"
+        "}\n");
+    typedef struct CTestSpecialFloatTarget CTestSpecialFloatTarget;
+    struct CTestSpecialFloatTarget
+    {
+        Target target;
+        u32 long_double_bits;
+    };
+    CTestSpecialFloatTarget targets[] = {
+        {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX}, 80},
+        {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS}, 64},
+        {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}, 128},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index].target;
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("builtin-special-float.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            bool accepted = preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0;
+            BUSTER_TEST_RAW(arguments, accepted, string_format(temporary.arena,
+                S8("special float target={u32} form={u32}: first diagnostic {S8}"), target_index, form,
+                preprocess.diagnostic_count ? preprocess.diagnostics[0].message : lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            if (accepted && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrProgram* program = lowered.program;
+                IrModule* module = program->modules;
+                BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                String8 names[] = {S8("special_huge_valf"), S8("special_huge_vall"), S8("special_infl"), S8("special_nanl")};
+                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+                {
+                    IrFunction* function = c_test_find_ir_function(module, names[index]);
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
+                        IrType* returned = signature ? ir_type_from_id(&program->types, signature->return_type) : 0;
+                        u32 width = index ? targets[target_index].long_double_bits : 32;
+                        BUSTER_TEST(arguments, returned && returned->kind == IR_TYPE_FLOAT && returned->bit_width == width);
+                        BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
+                    }
+                }
+                bool imported = false;
+                for (u32 index = 0; index < program->symbols.count; index += 1)
+                {
+                    IrSymbol* symbol = program->symbols.symbols + index;
+                    String8 link_name = symbol->link_name;
+                    imported |= symbol->kind == IR_SYMBOL_FUNCTION && symbol->linkage == IR_LINKAGE_IMPORT &&
+                        (string_starts_with_sequence(link_name, S8("__builtin_")) || string_starts_with_sequence(link_name, S8("huge_val")) ||
+                         string_equal(link_name, S8("inff")) || string_equal(link_name, S8("infl")) || string_equal(link_name, S8("nanl")));
+                }
+                BUSTER_TEST(arguments, !imported);
+            }
+            scratch_end(temporary);
+        }
+    }
+    typedef struct CTestSpecialFloatInvalid CTestSpecialFloatInvalid;
+    struct CTestSpecialFloatInvalid
+    {
+        String8 source;
+        String8 name;
+    };
+    CTestSpecialFloatInvalid invalid[] = {
+        {S8("float bad(void) { return __builtin_huge_valf(1); }"), S8("__builtin_huge_valf")},
+        {S8("static inline long double bad(void) { return __builtin_huge_vall(1); }"), S8("__builtin_huge_vall")},
+        {S8("static long double bad = __builtin_infl(1);"), S8("__builtin_infl")},
+        {S8("typedef __typeof__(__builtin_infl(1, 2)) Bad;"), S8("__builtin_infl")},
+        {S8("_Static_assert(sizeof(__builtin_nanl()) == sizeof(long double), \"unevaluated arity\");"), S8("__builtin_nanl")},
+        {S8("typedef __typeof__(__builtin_nanl(\"\", \"\")) Bad;"), S8("__builtin_nanl")},
+        {S8("static inline long double bad(void) { return __builtin_nanl(); }"), S8("__builtin_nanl")},
+        {S8("static inline float bad(void) { return __builtin_nanf(\"\", 0); }"), S8("__builtin_nanf")},
+        {S8("int bad = sizeof(__builtin_nan());"), S8("__builtin_nan")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[0].target;
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[index].source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("builtin-special-float-invalid.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0, invalid[index].source);
+            bool found = false;
+            for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
+            {
+                String8 message = lowered.diagnostics[diagnostic].message;
+                found |= lowered.diagnostics[diagnostic].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
+                    string_first_sequence(message, invalid[index].name) != BUSTER_STRING_NO_MATCH &&
+                    (string_first_sequence(message, S8("too many arguments")) != BUSTER_STRING_NO_MATCH ||
+                     string_first_sequence(message, S8("too few arguments")) != BUSTER_STRING_NO_MATCH);
+            }
+            BUSTER_TEST_RAW(arguments, found, string_format(temporary.arena,
+                S8("special float invalid case={u32} form={u32}: first diagnostic {S8}"), index, form,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            BUSTER_TEST(arguments, !lowered.canonical_ir_certified && lowered.program == 0);
+            scratch_end(temporary);
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 path = buster_test_temporary_path(arguments->arena, S8("builtin-special-float-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("builtin-special-float-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fregister-allocator=fast"),
+#if BUSTER_CPU_ARCH_X86_64
+                S8("-mattr=+sse2,+cx16"),
+#endif
+                form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#endif
+    return result;
+}
+
 // __builtin_classify_type answers Clang's type class from the unevaluated,
 // decayed operand type as an int constant. _BitInt is not modeled by the
 // frontend type system; nullptr_t (C_TYPE_NULLPTR) is modeled but deliberately
@@ -63627,6 +63841,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_braced_string_runtime);
     C_TEST_FIXTURE(arguments, c_test_builtin_classify_type);
     C_TEST_FIXTURE(arguments, c_test_builtin_infinity);
+    C_TEST_FIXTURE(arguments, c_test_builtin_special_float_spellings);
     C_TEST_FIXTURE(arguments, c_test_c23_attribute_noreturn);
     C_TEST_FIXTURE(arguments, c_test_c23_attribute_positions);
     C_TEST_FIXTURE(arguments, c_test_c23_auto_local_declarations);
