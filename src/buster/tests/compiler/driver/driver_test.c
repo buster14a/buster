@@ -12193,6 +12193,168 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_call_crossing_callee_sav
     return result;
 }
 
+// Vector values under register pressure across calls, executed under both
+// allocators (#56 criterion 4). `narrow_loop` carries twenty four-lane and
+// eighteen two-lane 16-byte vectors around a loop whose body makes two calls:
+// thirty-eight live vector values, more than either target's vector register
+// file holds, so the allocators must spill and reload them around the calls
+// and the back edge. `wide_calls` keeps eight 32-byte and six 64-byte vectors
+// live across two calls in straight-line code, wider than the baseline
+// 128-bit vector registers. Wider vectors stay out of the loop: a 32- or
+// 64-byte vector reaching any join or loop header is refused by selection
+// today (#3886).
+// `tests/basic_c_vector_register_pressure.c` covers the same shape only on an
+// AVX-512 VBMI/VBMI2 target, so the default-CPU mode matrix compiles it to an
+// empty `main`. Every target must select without fallback under both
+// allocators and frontend forms, and the host runs the program under each;
+// the expected values were cross-checked with host GCC and Clang at -O0, -O2
+// and -O2 -march=native.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vector_call_pressure(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Three literals keep each under the portable string-literal length.
+    String8 folds = S8(
+        "typedef unsigned int Quad __attribute__((vector_size(16)));\n"
+        "typedef unsigned long long Pair __attribute__((vector_size(16)));\n"
+        "typedef unsigned int Words __attribute__((vector_size(32)));\n"
+        "typedef unsigned long long Longs __attribute__((vector_size(64)));\n"
+        "static volatile unsigned opaque = 3;\n"
+        "static unsigned long long sink;\n"
+        "static __attribute__((noinline)) unsigned touch(unsigned x)\n"
+        "{\n"
+        "    sink += x;\n"
+        "    return x * 5 + opaque;\n"
+        "}\n"
+        "static __attribute__((noinline)) unsigned long long fold_quad(Quad v)\n"
+        "{\n"
+        "    return ((unsigned long long)v[0] * 31 + v[1]) * 961 + (unsigned long long)v[2] * 29791 + v[3];\n"
+        "}\n"
+        "static __attribute__((noinline)) unsigned long long fold_pair(Pair v)\n"
+        "{\n"
+        "    return v[0] * 37 + v[1];\n"
+        "}\n"
+        "static __attribute__((noinline)) unsigned long long fold_words(Words v)\n"
+        "{\n"
+        "    unsigned long long total = 0;\n"
+        "    for (int i = 0; i < 8; i += 1)\n"
+        "    {\n"
+        "        total = total * 31 + v[i];\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n"
+        "static __attribute__((noinline)) unsigned long long fold_longs(Longs v)\n"
+        "{\n"
+        "    unsigned long long total = 0;\n"
+        "    for (int i = 0; i < 8; i += 1)\n"
+        "    {\n"
+        "        total = total * 37 + v[i];\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n");
+    String8 narrow = S8(
+        "static __attribute__((noinline)) unsigned long long narrow_loop(unsigned rounds)\n"
+        "{\n"
+        "    Quad a0 = (Quad){0, 1, 2, 3} + opaque;\n"
+        "    Quad a1 = a0 + 11, a2 = a0 * 3, a3 = a0 ^ 0x55, a4 = a0 + a1, a5 = a2 - a0, a6 = a3 << 2, a7 = a4 >> 1;\n"
+        "    Quad a8 = a0 + 101, a9 = a1 * 7, a10 = a2 ^ a3, a11 = a4 + a5, a12 = a6 - a7, a13 = a8 >> 3, a14 = a9 << 1, a15 = a10 + 9;\n"
+        "    Quad a16 = a11 ^ a12, a17 = a13 + a14, a18 = a15 * 5, a19 = a16 - a17;\n"
+        "    Pair b0 = (Pair){0, 10} + opaque;\n"
+        "    Pair b1 = b0 + 13, b2 = b0 * 9, b3 = b0 ^ 0x3c3c, b4 = b1 + b2, b5 = b3 - b0, b6 = b4 << 3, b7 = b5 >> 2;\n"
+        "    Pair b8 = b6 + b7, b9 = b8 * 3, b10 = b9 ^ b1, b11 = b10 + b2, b12 = b11 - b3, b13 = b12 >> 1, b14 = b13 << 2, b15 = b14 + 77;\n"
+        "    Pair b16 = b15 ^ b0, b17 = b16 + b4;\n"
+        "    for (unsigned i = 0; i < rounds; i += 1)\n"
+        "    {\n"
+        "        unsigned k = touch(i);\n"
+        "        a0 += k; a1 ^= a0; a2 += a1; a3 ^= a2; a4 += a3; a5 ^= a4; a6 += a5; a7 ^= a6; a8 += a7; a9 ^= a8;\n"
+        "        a10 += a9; a11 ^= a10; a12 += a11; a13 ^= a12; a14 += a13; a15 ^= a14; a16 += a15; a17 ^= a16; a18 += a17; a19 ^= a18;\n"
+        "        unsigned j = touch(k);\n"
+        "        b0 += j; b1 ^= b0; b2 += b1; b3 ^= b2; b4 += b3; b5 ^= b4; b6 += b5; b7 ^= b6; b8 += b7;\n"
+        "        b9 ^= b8; b10 += b9; b11 ^= b10; b12 += b11; b13 ^= b12; b14 += b13; b15 ^= b14; b16 += b15; b17 ^= b16;\n"
+        "        a0 = (a0 << 1) | (a0 >> 31);\n"
+        "        b0 = (b0 << 3) | (b0 >> 61);\n"
+        "    }\n"
+        "    Quad qa = a0 ^ a1 ^ a2 ^ a3 ^ a4 ^ a5 ^ a6 ^ a7 ^ a8 ^ a9;\n"
+        "    Quad qb = a10 + a11 + a12 + a13 + a14 + a15 + a16 + a17 + a18 + a19;\n"
+        "    Pair pa = b0 ^ b1 ^ b2 ^ b3 ^ b4 ^ b5 ^ b6 ^ b7 ^ b8;\n"
+        "    Pair pb = b9 + b10 + b11 + b12 + b13 + b14 + b15 + b16 + b17;\n"
+        "    return fold_quad(qa) ^ (fold_quad(qb) * 3) ^ fold_pair(pa) ^ (fold_pair(pb) * 5);\n"
+        "}\n");
+    String8 wide = S8(
+        "static __attribute__((noinline)) unsigned long long wide_calls(unsigned seed)\n"
+        "{\n"
+        "    Words w0 = (Words){0, 1, 2, 3, 4, 5, 6, 7} + seed;\n"
+        "    Words w1 = w0 * 3, w2 = w1 ^ w0, w3 = w2 + 17, w4 = w3 << 2, w5 = w4 - w1, w6 = w5 >> 1, w7 = w6 ^ w2;\n"
+        "    Longs l0 = (Longs){0, 10, 20, 30, 40, 50, 60, 70} + seed;\n"
+        "    Longs l1 = l0 * 9, l2 = l1 ^ l0, l3 = l2 + 33, l4 = l3 << 3, l5 = l4 - l1;\n"
+        "    unsigned k = touch(seed);\n"
+        "    w0 += k; l0 ^= k;\n"
+        "    unsigned j = touch(k);\n"
+        "    w1 ^= j; l1 += j;\n"
+        "    Words w = (w0 + w1) ^ (w2 + w3) ^ (w4 - w5) ^ (w6 + w7);\n"
+        "    Longs l = (l0 ^ l1) + (l2 ^ l3) + (l4 ^ l5);\n"
+        "    return fold_words(w) * 7 ^ fold_longs(l);\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    unsigned long long narrow = narrow_loop(opaque + 5);\n"
+        "    unsigned long long wide = wide_calls(opaque + 40);\n"
+        "    return (narrow != 18446742968909630808ULL) | (wide != 439599296363116ULL) | (sink != 453);\n"
+        "}\n");
+    String8 source = string_format(arguments->arena, S8("{S8}{S8}{S8}"), folds, narrow, wide);
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-vector-call-pressure"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
+        String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-vector-call-pressure-object"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[target], frontends[frontend],
+                                         allocators[allocator], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), object, input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 description = string_format(temporary.arena, S8("vector call pressure object {S8} {S8} {S8}: {S8}"),
+                        targets[target], allocators[allocator], frontends[frontend], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == 0, description);
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-vector-call-pressure-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), allocators[allocator], frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), executable, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("vector call pressure native {S8} {S8}: {S8}"),
+                    allocators[allocator], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description);
+                }
+                scratch_end(temporary);
+            }
+        }
+#endif
+    }
+    return result;
+}
+
 // A general-only edge with several parameter assignments publishes as a
 // register parallel move (`machine_fast_publish_edge_parallel`) instead of
 // staging every resident source through the edge-copy tile. The program
@@ -35555,6 +35717,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_parameter_contract_carry_lanes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preferred_reload_registers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_call_crossing_callee_saved);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vector_call_pressure);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_parallel_edge_moves);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_recreated_edge_sources);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_return_address);
