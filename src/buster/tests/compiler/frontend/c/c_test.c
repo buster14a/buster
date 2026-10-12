@@ -36905,6 +36905,61 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_argument_conversion_diagnostics(U
     return result;
 }
 
+// A simple or compound assignment's conversion check reuses the type of its
+// value's checked typing when that typing appended no type row, and types the
+// value again otherwise (a cast parses its type name as a new row). A
+// compound assignment keeps its scalar conversion rule on both routes. Every
+// diagnostic must survive, and the valid controls must stay accepted (#3102).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_assignment_conversion_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    struct
+    {
+        String8 source;
+        String8 message;
+    } expected[] = {
+        {S8("struct S { int x; };\nint f(struct S s) { int v; v = s; return v; }\n"),
+         S8("in function 'f': assignment value is incompatible with the destination type")},
+        {S8("int f(int x) { char *p; p = x; return 0; }\n"),
+         S8("in function 'f': cannot convert from 'int' to 'char *'")},
+        {S8("struct S { int x; };\nint f(void) { int v; v = (struct S *)0; return v; }\n"),
+         S8("in function 'f': cannot convert from 'struct S *' to 'int'")},
+        {S8("struct S { int x; };\nint f(int x) { struct S t; t = x + 1; return 0; }\n"),
+         S8("in function 'f': assignment value is incompatible with the destination type")},
+        {S8("struct S { int x; };\nint f(struct S s) { int v = 0; v += s; return v; }\n"),
+         S8("in function 'f': assignment value is incompatible with the destination type")},
+        {S8("int f(double d) { int *p = 0; p += d; return 0; }\n"),
+         S8("in function 'f': cannot convert between a pointer and a floating-point type")},
+        {S8("struct S { int x; };\n"
+            "int f(struct S s, char *p) { int v; char *q; struct S t; v = (int)1.5; q = (char *)p; t = s; v = s.x; q = \"ab\";\n"
+            "    t = (struct S){2}; v += 1; q += v; return v + *q + t.x; }\n"),
+         S8("")},
+    };
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected); expected_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, expected[expected_index].source,
+                                                (CPreprocessOptions){
+                                                    .target = target_native,
+                                                    .data_layout = target_data_layout(target_native),
+                                                    .dialect = C_PREPROCESS_DIALECT_GNU17,
+                                                });
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+        BUSTER_TEST(arguments, analysis.diagnostic_count == (expected[expected_index].message.length != 0));
+        if (analysis.diagnostic_count == 1 && expected[expected_index].message.length)
+        {
+            BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, expected[expected_index].message);
+        }
+        c_test_scratch_end(temporary);
+    }
+
+    return result;
+}
+
 // The type-only sizeof query used to take a callee's return type without
 // checking the call. Both C lowering forms must diagnose the same source;
 // valid controls include nested commas that are not argument separators.
@@ -64149,6 +64204,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_ir);
     C_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_parse);
     C_TEST_FIXTURE(arguments, c_test_array_bound_object_layout);
+    C_TEST_FIXTURE(arguments, c_test_assignment_conversion_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_atomic_compound_assignment_runtime);
     C_TEST_FIXTURE(arguments, c_test_atomic_compound_result);
     C_TEST_FIXTURE(arguments, c_test_atomic_float_compare_exchange);
