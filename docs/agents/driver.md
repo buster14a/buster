@@ -481,7 +481,17 @@ disables it. A later `-std=` restores that dialect's default (on in strict C99
 to C17, off in GNU modes and C23), so the last of these options wins, as in
 Clang. `-nostdlibinc` drops the system include directories but keeps the
 compiler resource directory (`stddef.h` and the other freestanding headers);
-`-nostdinc` drops both. `-working-directory=DIR` and `-working-directory DIR`
+`-nostdinc` drops both. Explicit `-I`, `-isystem` and `-idirafter`
+directories remain available with either switch. `-idirafter DIR` and
+`-idirafterDIR` add system-header directories after `-I`, `-isystem`, the
+compiler resource headers and the default system roots, preserving the order
+of repeated `-idirafter` options. Both quoted and angle includes consult them;
+quoted includes still search the including file\'s directory first. Headers
+resolved there are excluded by `-MMD`. External GPU pipelines refuse
+`-idirafter` explicitly because their system-path forwarding would lose its
+late search position. The registered
+`compiler_driver_test_idirafter` covers shadowed headers, sysroot defaults,
+`-nostdinc`/`-nostdlibinc`, `#include_next`, both spellings and MD/MMD classification. `-working-directory=DIR` and `-working-directory DIR`
 resolve relative input paths against `DIR` with host path rules (on POSIX only
 a leading `/` is absolute and `\` and `:` are ordinary filename bytes; on
 Windows `\x.c` takes the root name of `DIR` (`C:` or UNC `\\server`) and
