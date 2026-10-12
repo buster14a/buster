@@ -1,0 +1,12 @@
+Applied uncommitted to 451b412a0c84538a98b9d9d565fda56036d8a69b, built into
+build-census (BUSTER_BENCH_ALLOCATIONS=ON), then reverted with git checkout.
+
+--- src/buster/lib/compiler/frontend/c/c_gen.c (c_ir_statement_peels_file)
+-    for (u32 index = peels->count; index > 0 && statement_end != UINT32_MAX; index -= 1)
++    for (u32 index = 0 * peels->count; index > 0 && statement_end != UINT32_MAX; index -= 1)
+
+--- src/buster/tests/compiler/frontend/c/c_test.c (c_frontend_tests, run only this fixture)
+     UnitTestResult result = {0};
++    C_TEST_FIXTURE(arguments, c_test_controlled_body_extents_linear);
++    if (result.test_count + 1) return result;
+     BUSTER_TEST_FIXTURE(arguments, c_test_generic_work_and_scratch);

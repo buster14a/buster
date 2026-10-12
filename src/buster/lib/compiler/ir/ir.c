@@ -1698,6 +1698,21 @@ BUSTER_GLOBAL_LOCAL bool ir_label_block_sets_equal(IrValueLabelMetadata* left, I
     return valid;
 }
 
+// Opaque aggregate places name storage without requiring its object layout.
+// Their only permitted consumer is ADDRESS_OF (checked with operand IDs).
+BUSTER_GLOBAL_LOCAL bool ir_value_layout_valid(IrFunction* function, IrValue* value, IrType* type)
+{
+    bool valid = type && type->layout.resolved;
+    if (type && !valid && function && function->instructions && value && value->category == IR_VALUE_PLACE &&
+        (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION) &&
+        value->definition.value < function->instruction_count)
+    {
+        IrOpcode opcode = function->instructions[value->definition.value].opcode;
+        valid = opcode == IR_OPCODE_GLOBAL || opcode == IR_OPCODE_DEREFERENCE;
+    }
+    return valid;
+}
+
 bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction* function, IrValueId value_id)
 {
     IrValue* value_slot = function && value_id.value < function->value_count ? function->values + value_id.value : 0;
@@ -1708,14 +1723,14 @@ bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction* function, IrV
         // With no metadata anywhere in the function every label-specific
         // clause below is vacuous; only the value/type-layout requirements
         // remain.
-        valid = value_slot && (!program || (value_type && value_type->layout.resolved));
+        valid = value_slot && (!program || ir_value_layout_valid(function, value_slot, value_type));
     }
     else
     {
         IrValueLabelMetadata metadata = ir_value_label_metadata(function, value_id);
         IrValueLabelMetadata* value = value_slot ? &metadata : 0;
         u64 pointer_size = program ? program->data_layout.pointer.size : 0;
-        valid = function && value && (!program || (value_type && value_type->layout.resolved)) &&
+        valid = function && value && (!program || ir_value_layout_valid(function, value_slot, value_type)) &&
                 (value->label_block_count != 0) == (value->label_blocks != 0) &&
                 (value->label_path_count != 0) == (value->label_paths != 0) &&
                 (!value->is_label_value || value->label_block_count != 0) &&
@@ -5875,6 +5890,13 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_value_error(IrProgram* program
         // also share it with a block parameter.
         error = IR_VALIDATION_BLOCK_PARAMETER;
     }
+    else if (!ir_value_layout_valid(function, value, value_type))
+    {
+        // An opaque external object or *pointer names storage without using
+        // its layout. Only ADDRESS_OF may consume this incomplete PLACE;
+        // the operand check below refuses every storage-dependent use.
+        error = IR_VALIDATION_OPERATION;
+    }
     else if (!function->label_metadata_count)
     {
         IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_PROVENANCE_CHECKS, 1);
@@ -5887,7 +5909,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_value_error(IrProgram* program
                                       : 0;
             transfer_valid = ir_label_transfer_valid_without_metadata(program, function, definition, first_slot);
         }
-        if (!transfer_valid || !value_type->layout.resolved)
+        if (!transfer_valid)
         {
             error = IR_VALIDATION_OPERATION;
         }
@@ -6896,10 +6918,17 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_row(IrProgram* pro
     else
     {
         bool operands_valid = true;
+        bool operand_layouts_valid = true;
         for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
         {
             IR_CONSTRUCTION_RECORD(VALIDATION_OPERAND_IDS, 1);
-            operands_valid &= operands[operand_index].value < value_count;
+            u32 operand = operands[operand_index].value;
+            operands_valid &= operand < value_count;
+            if (operand < value_count && values[operand].category == IR_VALUE_PLACE && instruction->opcode != IR_OPCODE_ADDRESS_OF)
+            {
+                IrType* type = ir_type_from_id(&program->types, values[operand].canonical_type);
+                operand_layouts_valid &= type && type->layout.resolved;
+            }
         }
         bool targets_valid = true;
         for (u32 target_index = 0; operands_valid && target_index < target_count; target_index += 1)
@@ -6920,6 +6949,10 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_row(IrProgram* pro
                   values[result_value].canonical_type.value != instruction->canonical_type.value))
         {
             error = IR_VALIDATION_RESULT_TYPE;
+        }
+        else if (!operand_layouts_valid)
+        {
+            error = IR_VALIDATION_OPERATION;
         }
         else
         {

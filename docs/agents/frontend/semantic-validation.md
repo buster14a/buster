@@ -369,8 +369,9 @@ publish cache entries. Immutable scalar query types are created before query
 checkpoints; declarator and qualified types remain independent. All borrowed
 cache pointers are cleared before the semantic model is returned.
 
-`CParseResult.type_identity_queries` retains successful `_Generic` selections
-and `__builtin_types_compatible_p` answers through lowering. These compact rows
+`CParseResult.type_identity_queries` retains successful `_Generic` selections,
+`__builtin_choose_expr` selections and `__builtin_types_compatible_p` answers
+through lowering. These compact rows
 contain original token ranges or an integer answer; no frontend identity enters
 canonical IR. The shared semantic resolver uses `CType` compatibility, applies
 lvalue/array/function conversion only to generic controllers, and preserves
@@ -382,7 +383,20 @@ expression's type, including when inspected by `typeof` or `sizeof`.
 The existing token position index records identity-query candidates once.
 Nested queries settle in reverse token order on an explicit work walk; the
 expression task stack follows the selected range without evaluating the
-controller or discarded values. Append-only answers participate in semantic
+controller or discarded values. A `__builtin_choose_expr` row
+(`c_parse_choose_expr_builtin`) selects the arm its integer constant condition
+picks, so the semantic typer and constant evaluator see that arm's unconverted
+type and value; a choice in the condition starts later and is already settled
+when the walk evaluates it. A condition that is not an integer constant
+records nothing. `__builtin_constant_p(x)` is typed as `int` by the
+expression task stack without a row; its value belongs to lowering. Each query
+re-walks its range, so a site whose row is retained is recognized from its
+slot's hint without a search.
+
+Lowering's own constant evaluator does not yet fold a `__builtin_choose_expr`
+value in a deferred `_Static_assert`, and lowering cannot take a choice whose
+condition is another choice (#3860); `c_test_builtin_operand_types` therefore
+checks those forms through the parser only. Append-only answers participate in semantic
 result checkpoints. Lowering consumes retained answers; model-building-only
 callers resolve missing answers through the same semantic helper.
 
