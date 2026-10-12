@@ -339,6 +339,8 @@ struct CompilerDriverInvocation
     // Accepted only for I386, where native artifact generation is refused.
     bool no_asynchronous_unwind_tables;
     bool disable_direct_ssa;
+    // -fcanonical-intern-constants: CIRLowerOptions.intern_block_constants.
+    bool intern_block_constants;
     bool disable_local_promotion;
     bool disable_target_local_promotion;
     // -fpinned-debug-locals / -fno-pinned-debug-locals override the default.
@@ -352,6 +354,9 @@ struct CompilerDriverInvocation
     // explicit -O/-O0 use zero, and explicit pass controls override either.
     u32 fast_passes;
     bool measure_fast_passes;
+    // -fcanonical-fast-cse-strategy=window selects the CSE census's linear
+    // arm; =table, the default, selects the hash table (#3011).
+    bool fast_cse_window;
     // Tiny direct-call inlining defaults off. An explicit optimization level
     // above -O0 enables it; -O0 disables it. The last -O* or explicit
     // -fcanonical-inline/-fno-canonical-inline option wins. always_inline
@@ -584,6 +589,7 @@ struct CompilerDriverResult
     IrFastStatistics fast;
     IrInlineStatistics inlining;
     CIRDirectSsaStatistics direct_ssa;
+    CIRConstantInternStatistics constant_interning;
     CTypeLayoutStatistics type_layout;
     CompilerDriverCAstPilotResult c_ast;
     String8 diagnostic;

@@ -748,6 +748,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
             wait = os_process_wait_deadline(arena, spawn, remaining);
         }
     }
+    if (!launch_attempted || !spawn.handle)
+    {
+        // The worker owns the ledger claim, so this refusal is always pre-claim.
+        String8 reason = !clock_valid ? S8("the physical job clock is missing or invalid") :
+            !remaining ? S8("the reservation no longer fits the remaining physical job time") :
+            !contained ? S8("the native descendant supervisor could not start") :
+            !deferred ? S8("signal deferral could not start") : S8("the owned worker could not be spawned");
+        string_print(S8("error: sampling owner refused before its ledger claim: {S8}\n"), reason);
+    }
     bool cleanup = contained && compiler_experiment_supervisor_end_known(arena, &supervisor,
         (!launch_attempted || !spawn.handle || wait.result != PROCESS_RESULT_UNKNOWN) && !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost);
     bool cancelled = false;
@@ -1061,12 +1070,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* are
     else if (options.valid && options.execute)
     {
         CompilerSamplingControllerOptions resolved = {0};
-        if (compiler_sampling_controller_resolve(arena, options, &resolved))
+        String8 reason = {0};
+        if (compiler_sampling_controller_resolve(arena, options, &resolved, &reason))
         {
             result = options.owned_worker ? compiler_sampling_controller_execute(arena, resolved) :
                 compiler_sampling_run_owned(arena, resolved.packet, arguments);
         }
-        else string_print(S8("error: trusted sampling controller rejected immutable admission data or platform identity before execution\n"));
+        else string_print(S8("error: trusted sampling controller rejected immutable admission data or platform identity before execution: {S8}\n"), reason);
     }
     else if (options.valid && options.claim)
     {

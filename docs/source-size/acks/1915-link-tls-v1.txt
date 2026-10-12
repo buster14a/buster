@@ -1,0 +1,4 @@
+# Source-size acknowledgement; see docs/source-size.md.
+schema buster-source-size-ack-v1
+build 33846
+reason The link-tls-v1 compare-pull leg: its trusted whole-link TLS harness, frozen profile, publisher validation and selector freshness checks (#1915, #2761).

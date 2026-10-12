@@ -135,10 +135,17 @@ jobs:
           ./build.sh compiler_profile_qualification --self-test-preparation-controller
           python3 -B tools/tests/compiler_sampling_packet_export_test.py "$PWD/build.sh" "$RUNNER_TEMP/compiler-sampling-packet-proof"
 
+      - name: Exercise native external-project refusal controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh external_projects --self-test
+
       - name: Exercise native frozen baseline producer and consumer
         shell: bash
         run: |
           set -euo pipefail
+          ./build.sh compiler_evidence self-test
           ./build.sh compiler_closure corpus-contract-self-test
           ./build.sh compiler_closure containment-self-test timeout
           ./build.sh compiler_closure containment-self-test SIGTERM

@@ -29,6 +29,15 @@ unevaluated operands. This addresses the constant-designator validation residual
 of [#1570](https://github.com/buster14a/buster/issues/1570); shared parser/lowering
 member authority and nonconstant-index validation remain separate work.
 
+`c_parse_validate_bit_field_addresses` checks unary address operands against
+semantic member widths before constant folding, including parenthesized,
+indirect and promoted anonymous members. GNU `__extension__` prefixes before
+`&` and around its operand retain the same constraint. Unevaluated and unselected operands
+retain this constraint; binary `&` remains a value operation. The registered
+`compiler_driver_test_bit_field_addresses` matrix requires matching structured
+syntax-only/object diagnostics and no object for rejected source in four C
+dialects, three frontend routes and three target layouts (#3743).
+
 ## Declaration constraints
 
 Before C23, a `for` initializer declaration may introduce only automatic or
@@ -68,6 +77,15 @@ before publishing an entity. `c_parse_storage_classes_valid` normalizes GNU
 thread-local aliases and retains C23's permitted `auto`, `constexpr`, and
 thread-local combinations. A typed `auto` declaration at file scope or with
 another storage class still requires type inference under C23 6.7.1p4.
+
+Storage-class context validation uses the same specifier reader: parameters
+permit only `register`, and resolved function declarations cannot carry thread
+storage (`_Thread_local`, C23 `thread_local`, or GNU `__thread`). Direct and
+nested parameter readers validate the specifier prefix before array adjustment,
+so `int a[static 4]` remains valid. File and block function declarations are
+checked after type resolution, including function typedefs and prototypes.
+`c_test_storage_class_contexts` covers four dialects and three target layouts;
+the driver diagnostic-equivalence matrix compares syntax-only and object paths.
 
 Windows target predefines in `c_source.c` preserve the `__inline` spelling and
 map `__forceinline` to it, without injecting a storage class. The existing needed
@@ -360,8 +378,9 @@ publish cache entries. Immutable scalar query types are created before query
 checkpoints; declarator and qualified types remain independent. All borrowed
 cache pointers are cleared before the semantic model is returned.
 
-`CParseResult.type_identity_queries` retains successful `_Generic` selections
-and `__builtin_types_compatible_p` answers through lowering. These compact rows
+`CParseResult.type_identity_queries` retains successful `_Generic` selections,
+`__builtin_choose_expr` selections and `__builtin_types_compatible_p` answers
+through lowering. These compact rows
 contain original token ranges or an integer answer; no frontend identity enters
 canonical IR. The shared semantic resolver uses `CType` compatibility, applies
 lvalue/array/function conversion only to generic controllers, and preserves
@@ -373,7 +392,20 @@ expression's type, including when inspected by `typeof` or `sizeof`.
 The existing token position index records identity-query candidates once.
 Nested queries settle in reverse token order on an explicit work walk; the
 expression task stack follows the selected range without evaluating the
-controller or discarded values. Append-only answers participate in semantic
+controller or discarded values. A `__builtin_choose_expr` row
+(`c_parse_choose_expr_builtin`) selects the arm its integer constant condition
+picks, so the semantic typer and constant evaluator see that arm's unconverted
+type and value; a choice in the condition starts later and is already settled
+when the walk evaluates it. A condition that is not an integer constant
+records nothing. `__builtin_constant_p(x)` is typed as `int` by the
+expression task stack without a row; its value belongs to lowering. Each query
+re-walks its range, so a site whose row is retained is recognized from its
+slot's hint without a search.
+
+Lowering's own constant evaluator does not yet fold a `__builtin_choose_expr`
+value in a deferred `_Static_assert`, and lowering cannot take a choice whose
+condition is another choice (#3860); `c_test_builtin_operand_types` therefore
+checks those forms through the parser only. Append-only answers participate in semantic
 result checkpoints. Lowering consumes retained answers; model-building-only
 callers resolve missing answers through the same semantic helper.
 

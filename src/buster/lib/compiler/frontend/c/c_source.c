@@ -25,6 +25,9 @@
 //                                              phase-1/2 translation with
 //                                              SWAR/AVX-512/scalar variants
 //                                              kept in differential agreement
+//   c_source_trim_row_pair                     per-file token and checkpoint
+//                                              reservations trimmed to their
+//                                              counts after each file
 //   c_source_metrics_add,                      the SOURCE table counters and
 //   c_source_metrics_file_row                  the per-file attribution rows
 //   c_ucn_decode, c_ucn_identifier_allowed      dialect-owned identifier escapes
@@ -70,6 +73,9 @@
 //                                              driver's per-line scans read
 //                                              instead of walking token rows
 //   c_preprocess_directive_line_end             comment-aware directive ends
+//   c_token_kind_name                          token-kind spelling (one
+//                                              definition for unity and
+//                                              split builds)
 //   c_frame_wrap_conditional_tokens             conditional whitespace and sites
 //   c_integer_operation,                       C integer operators over the
 //   c_integer_constant_binary/unary            shared ir_integer_* semantics:
@@ -1451,6 +1457,39 @@ bool c_test_source_allocation_plan(u64 length, CSourceAllocationPlan* plan)
 }
 #endif
 
+// Each translated file reserves one checkpoint row per source byte and each
+// lexed file one token row per byte, but uses a few percent of them. Two
+// arrays filled together sit back to back; left as reserved, the first one's
+// unwritten tail separates live rows, and the pages and huge pages around it
+// fault in for nothing (#1307). When the pair is still the arena's newest
+// allocation, the second array's used rows move down behind the first one's
+// written prefix and the cursor returns to their end, so the next file packs
+// against them. The vacated rows are cleared again: everything above the
+// pair's written extent stays zero, and the arena's dirty mark stops there
+// instead of covering the gap no row ever reached. No reader goes past a
+// count. Returns the second array's possibly moved start.
+BUSTER_GLOBAL_LOCAL u8* c_source_trim_row_pair(Arena* arena, u8* first, u64 first_used, u64 first_written, u64 first_reserved, u8* second,
+                                               u64 second_used, u64 second_reserved, u64 second_alignment)
+{
+    u8* result = second;
+    u8* base = (u8*)arena;
+    if (second_used && second == first + first_reserved && base + arena->position == second + second_reserved)
+    {
+        u8* moved = (u8*)align_forward_unchecked((u64)(first + first_used), second_alignment);
+        if (moved < second)
+        {
+            memmove(moved, second, second_used);
+            u8* moved_end = moved + second_used;
+            u8* vacated = BUSTER_MAX(moved_end, second);
+            memset(vacated, 0, (u64)(second + second_used - vacated));
+            u8* written_end = BUSTER_MAX(moved_end, first + BUSTER_MIN(first_written, first_reserved));
+            arena_release_unwritten_tail(arena, (u64)(moved_end - base), (u64)(written_end - base));
+            result = moved;
+        }
+    }
+    return result;
+}
+
 // GNU modes preserve literal question-mark sequences. C23 removed trigraphs;
 // the supported earlier strict C modes require their phase-one replacement.
 BUSTER_C_INTERNAL bool c_translate_trigraphs_enabled(CPreprocessDialect dialect)
@@ -1729,6 +1768,10 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
             .pointer = translated,
             .length = output,
         };
+        checkpoint_offsets = (u32*)c_source_trim_row_pair(arena, (u8*)checkpoints, sizeof(*checkpoints) * checkpoint_count,
+                                                          sizeof(*checkpoints) * checkpoint_count, sizeof(*checkpoints) * plan->checkpoint_capacity, (u8*)checkpoint_offsets,
+                                                          sizeof(*checkpoint_offsets) * checkpoint_count,
+                                                          sizeof(*checkpoint_offsets) * plan->checkpoint_capacity, BUSTER_ALIGN_OF(u32));
         result.checkpoints = checkpoints;
         result.checkpoint_offsets = checkpoint_offsets;
         result.checkpoint_count = checkpoint_count;
@@ -3815,6 +3858,12 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
                     C_CENSUS_RECORD(LEX_TOKEN_ROWS, result.token_count);
                     C_CENSUS_RECORD(LEX_TOKEN_ROW_BYTES, result.token_count * (sizeof(CToken) + sizeof(CTokenShape)));
                     C_CENSUS_RECORD(LEX_RESERVED_ROW_BYTES, token_capacity * (sizeof(CToken) + sizeof(CTokenShape)));
+                    // The emitter's full-width stores may have written its
+                    // sixteen slack rows past the count.
+                    result.token_shapes = (CTokenShape*)c_source_trim_row_pair(arena, (u8*)result.tokens, sizeof(CToken) * result.token_count,
+                                                                               sizeof(CToken) * (result.token_count + 16), sizeof(CToken) * token_capacity, (u8*)result.token_shapes,
+                                                                               sizeof(CTokenShape) * result.token_count,
+                                                                               sizeof(CTokenShape) * token_capacity, BUSTER_ALIGN_OF(CTokenShape));
                     CDiagnostic* diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_count);
                     if (result.diagnostic_count)
                     {
@@ -14679,18 +14728,21 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
 #if BUSTER_INCLUDE_TESTS
 #define C_TEST_UNIT_REGISTRY_RESERVED_SIZE BUSTER_MB(64)
 // One unit this thread preprocessed and has not yet released: its three
-// private arenas, the arena its result lives in, and that arena's position
-// when preprocessing began (rewinding below it kills the result).
+// private arenas, the arena its result lives in, that arena's position
+// when preprocessing began (rewinding below it kills the result), and the
+// thread's registration serial, which orders units against test scopes.
 typedef struct CTestUnitEntry CTestUnitEntry;
 struct CTestUnitEntry
 {
     Arena* arenas[3];
     Arena* owner;
     u64 owner_position;
+    u64 serial;
 };
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL Arena* c_test_unit_registry_arena;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestUnitEntry* c_test_unit_registry;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_registry_count;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_serial;
 
 BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Arena* shapes, Arena* owner, u64 owner_position)
 {
@@ -14705,8 +14757,9 @@ BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Ar
         {
             c_test_unit_registry = entry;
         }
-        *entry = (CTestUnitEntry){.arenas = {spelling, tokens, shapes}, .owner = owner, .owner_position = owner_position};
+        *entry = (CTestUnitEntry){.arenas = {spelling, tokens, shapes}, .owner = owner, .owner_position = owner_position, .serial = c_test_unit_serial};
         c_test_unit_registry_count += 1;
+        c_test_unit_serial += 1;
     }
 }
 
@@ -14775,14 +14828,17 @@ BUSTER_GLOBAL_LOCAL void c_test_unit_unregister(Arena* spelling)
     }
 }
 
-void c_test_release_preprocess_arenas_from(Arena* owner, u64 position)
+// Releases every unit the predicate selects: those owned by `owner` at or
+// above `position` (every unit when `owner` is null) that registered at or
+// after `serial`.
+BUSTER_GLOBAL_LOCAL void c_test_release_preprocess_units(Arena* owner, u64 position, u64 serial)
 {
     u64 index = c_test_unit_registry_count;
     while (index > 0)
     {
         index -= 1;
         CTestUnitEntry entry = c_test_unit_registry[index];
-        if (!owner || (entry.owner == owner && entry.owner_position >= position))
+        if (entry.serial >= serial && (!owner || (entry.owner == owner && entry.owner_position >= position)))
         {
             c_test_unit_remove(index);
             for (u32 arena_index = 0; arena_index < BUSTER_ARRAY_LENGTH(entry.arenas); arena_index += 1)
@@ -14791,6 +14847,21 @@ void c_test_release_preprocess_arenas_from(Arena* owner, u64 position)
             }
         }
     }
+}
+
+void c_test_release_preprocess_arenas_from(Arena* owner, u64 position)
+{
+    c_test_release_preprocess_units(owner, position, 0);
+}
+
+u64 c_test_preprocess_unit_mark(void)
+{
+    return c_test_unit_serial;
+}
+
+void c_test_release_preprocess_arenas_since(u64 mark)
+{
+    c_test_release_preprocess_units(0, 0, mark);
 }
 
 void c_test_release_preprocess_arenas(void)
@@ -14932,32 +15003,43 @@ void c_prewarm(void)
     }
 }
 
-#if !BUSTER_UNITY_BUILD
 String8 c_token_kind_name(CTokenKind kind)
 {
+    String8 result;
     switch (kind)
     {
     case C_TOKEN_INVALID:
-        return S8("invalid");
+        result = S8("invalid");
+        break;
     case C_TOKEN_END_OF_FILE:
-        return S8("end of file");
+        result = S8("end of file");
+        break;
     case C_TOKEN_IDENTIFIER:
-        return S8("identifier");
+        result = S8("identifier");
+        break;
     case C_TOKEN_PREPROCESSING_NUMBER:
-        return S8("preprocessing number");
+        result = S8("preprocessing number");
+        break;
     case C_TOKEN_CHARACTER_LITERAL:
-        return S8("character literal");
+        result = S8("character literal");
+        break;
     case C_TOKEN_STRING_LITERAL:
-        return S8("string literal");
+        result = S8("string literal");
+        break;
     case C_TOKEN_PUNCTUATOR:
-        return S8("punctuator");
+        result = S8("punctuator");
+        break;
     case C_TOKEN_NEWLINE:
-        return S8("newline");
+        result = S8("newline");
+        break;
     case C_TOKEN_PRAGMA:
-        return S8("pragma");
+        result = S8("pragma");
+        break;
     case C_TOKEN_KIND_COUNT:
-        return S8("invalid token kind");
+    default:
+        result = S8("invalid token kind");
+        break;
     }
-    return S8("invalid token kind");
+
+    return result;
 }
-#endif

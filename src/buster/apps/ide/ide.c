@@ -2146,6 +2146,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                         "parameters_created={u64} parameters_removed={u64} temporaries={u64} fallback_locals={u64}\n"),
                      direct.functions, direct.locals, direct.reads, direct.writes, direct.parameters_created, direct.parameters_removed,
                      direct.temporaries, direct.fallback_locals);
+        if (invocation.intern_block_constants)
+        {
+            CIRConstantInternStatistics interned = compile.constant_interning;
+            string_print(S8("C_CONSTANT_INTERN lookups={u64} hits={u64} stale={u64}\n"), interned.lookups, interned.hits, interned.stale);
+        }
         CTypeLayoutStatistics layout = compile.type_layout;
         string_print(S8("C_TYPE_LAYOUT solves={u64} pass_solves={u64} pass_state_types={u64} pass_attempts={u64} agenda_solves={u64} agenda_types={u64} "
                         "agenda_attempts={u64} agenda_edges={u64} agenda_notifications={u64} agenda_pushes={u64} agenda_fallbacks={u64}\n"),
@@ -2205,6 +2210,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          specifiers.type_name_fallbacks, specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_INPUT],
                          specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_SPECIFIERS], specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_STORAGE],
                          specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_PRIMITIVE], specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_TYPEDEF]);
+            // Counts: the member specifier runs read from the tree inside tag definitions, and the runs left to the type machine, by reason.
+            string_print(S8("C_AST_MEMBERS primitive_answers={u64} typedef_answers={u64} fallbacks={u64} input={u64} specifiers={u64} storage={u64} "
+                            "primitive={u64} typedef={u64}\n"),
+                         specifiers.member_primitive_answers, specifiers.member_typedef_answers, specifiers.member_fallbacks,
+                         specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_INPUT], specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_SPECIFIERS],
+                         specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_STORAGE], specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_PRIMITIVE],
+                         specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_TYPEDEF]);
             // Counts: lowering's root-conditional queries inside indexed bodies, by how each ended.
             string_print(S8("C_AST_LOWER bodies={u64} conditionals={u64} steps={u64} answers={u64} negatives={u64} fallbacks={u64}\n"),
                          tree.lower.bodies, tree.lower.conditionals, tree.lower.steps, tree.lower.answers, tree.lower.negatives, tree.lower.fallbacks);
@@ -2233,15 +2245,24 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          measurement.functions, measurement.validation_skips, measurement.budget_skips, measurement.provenance_skips, measurement.parameter_budget_hits,
                          measurement.scratch_peak_bytes, measurement.retained_bytes, measurement.compact_nanoseconds,
                          measurement.instructions_before, measurement.instructions_after);
+            if (invocation.fast_passes & IR_FAST_PASS_BIT(IR_FAST_CSE))
+            {
+                IrFastCseStatistics cse = measurement.cse;
+                string_print(S8("IR_FAST_CSE blocks={u64} candidates={u64} hits={u64} window_hits={u64} commuted_hits={u64} constant_hits={u64} "
+                                "probes={u64} collisions={u64} metadata_declines={u64} saturation_declines={u64} table_bytes={u64} max_block_candidates={u64}\n"),
+                             cse.blocks, cse.candidates, cse.hits, cse.window_hits, cse.commuted_hits, cse.constant_hits, cse.probes, cse.collisions,
+                             cse.metadata_declines, cse.saturation_declines, cse.table_bytes, cse.max_block_candidates);
+            }
         }
         IrInlineStatistics inlining = compile.inlining;
         if (invocation.inline_options.tiny || inlining.candidates || inlining.always_inlined)
         {
             string_print(S8("IR_INLINE tiny={u32} candidates={u64} inlined={u64} always_inlined={u64} copied_instructions={u64} growth={u64} "
-                            "budget_skips={u64} shape_skips={u64} linkage_skips={u64} recursion_skips={u64} visits={u64}\n"),
+                            "budget_skips={u64} shape_skips={u64} linkage_skips={u64} recursion_skips={u64} visits={u64} "
+                            "released_bytes={u64}\n"),
                          (u32)invocation.inline_options.tiny, inlining.candidates, inlining.inlined, inlining.always_inlined,
                          inlining.copied_instructions, inlining.growth, inlining.budget_skips, inlining.shape_skips,
-                         inlining.linkage_skips, inlining.recursion_skips, inlining.visits);
+                         inlining.linkage_skips, inlining.recursion_skips, inlining.visits, inlining.released_bytes);
         }
         IrLocalPromotionStatistics p = compile.local_promotion;
         string_print(S8("IR_LOCAL_PROMOTION candidates={u64} promoted={u64} loads_removed={u64} stores_removed={u64} "

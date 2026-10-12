@@ -4,6 +4,43 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+## Assignment-chain traversal
+
+The token expression typer keeps the right-associative assignment split in
+`CParseExpressionTypeTask.assignment_rhs`. An assignment's initial operator
+scan proves that its suffix has no top-level comma; the suffix can stop at
+its first assignment. A preceding conditional retains the complete scan,
+and opening a parenthesized range drops the hint.
+
+`c_type_parse_sizeof_step` publishes completed assignment suffix types to the
+existing per-body expression memo only from a non-speculative root that added
+no type rows, mutations or diagnostics and has no expression constraint.
+The normal checked/runtime/constant flags, endpoint and scope still gate reuse.
+Consequently failed queries can roll back safely, and typing that creates rows
+still runs through the original path.
+
+During body validation, `c_parse_body_expression_ends_build` computes natural
+expression endpoints backwards, using the existing delimiter index. Queries
+clamp that endpoint to their own bound. Reuse also requires the exact supplying
+token-stream pointer; a private query with different tokens takes the scalar
+walk even when its copied model retains the position index. The table uses guarded body scratch,
+is detached before the arena rewinds, and malformed delimiter streams retain
+the scalar walk. The private boundary regression compares every subrange with
+that walk, including bounds inside delimiter groups and a query with no
+position index. Such a query uses scalar delimiter matching as well.
+
+Lowering's assignment continuation retains the comma-free suffix range that
+its parent scanned. Moving into a group changes the endpoint and requires a
+new scan. `c_ir_root_conditional_scan` stops once an assignment proves that a
+later conditional belongs to its right operand. Assignment completions keep
+their original order, conversions and stores. Counted chain regressions cover
+simple, distinct-local and compound assignments through both frontend SSA
+forms. The native runtime fixture also compiles the three 20,000-link object
+inputs (including distinct compound-assignment array elements) through the real CLI and reports process wall time as a diagnostic
+receipt, with optimization/sanitizer flags; elapsed time is not a test gate.
+Executable controls cover narrowing, mixed compound operators, comma
+and conditional operands, aggregate/pointer values and single evaluation.
+
 ## Logical constant eligibility
 
 `c_ir_constant_apply_binary` preserves unknownness for the necessarily evaluated
@@ -83,7 +120,11 @@ from outside (labels, case labels and gotos into a loop fail it), and a read of
 a local no block of that loop writes passes from the header straight to the
 entry. Without it, N nested loops that each declare their own variable placed
 a trivial parameter for every enclosing variable at every inner header: N^2
-parameters, refused past ~2000 levels (#3723). Trivial
+parameters, refused past ~2000 levels (#3723). The walk only looks slots up;
+it inserts one where it ends unresolved and caches its answer on the path
+within a budget of twice the other slots (plus a constant), since caching every
+walk past N nested `do` loops for each of their N variables needed N^2 slots
+(#3771). A skipped cache entry costs a later walk, never a different value. Trivial
 parameters and unused parameter cycles are removed; a replaced parameter hands
 its user rows on without those that can no longer requeue, so a chain of
 trivial parameters stays linear. A parameter is trivial
@@ -114,6 +155,17 @@ The semantic type query classifies the final statement in its own parsed block
 scope, so a local value shadows an outer typedef. A final declaration still
 produces void; an expired nested shadow does not change the enclosing typedef,
 and a const-qualified shadow remains unmodifiable.
+
+GNU statement-expression type queries resolve their final statement's lexical
+scope through the active function-body map, even when the query begins under
+an inner scope. Statement-expression constraint bodies run in reverse source
+order, so an enclosing tail reads its already-checked child's expression memo
+with the same range, scope and mode flags. This avoids repeatedly typing every
+inner tail and descending from a different root at every level (#3724).
+`c_test_statement_expression_work_growth` bounds tail visits and scope levels
+through depth 10,000, validates canonical IR, and covers GNU17/GNU23 and both
+frontend SSA forms. These work bounds are deterministic correctness checks;
+local elapsed times remain diagnostic pending the approved-host route.
 
 Nested GNU statement-expression body walks reuse the function's label block at
 the same source token. Allocating a second block leaves the predeclared label
@@ -1756,7 +1808,13 @@ A direct, unqualified enum definition immediately following `(` in a
 function-body expression is published by that same lexical walk, including
 expression statements, return operands, casts and block static assertions.
 Its constants belong to the current block and become visible at their own
-declaration points; the enum braces do not create a child block. Ordinary
+declaration points; the enum braces do not create a child block. The walk
+recognizes the definition with `c_parse_type_definition_at`, so an enum with a
+fixed underlying type (`enum : char { ... }`) is published there too, and a
+later operand of the same full expression reads it (C11 6.2.1p7, #3895):
+`if (sizeof(enum : char { Q = 2 }) != 1 || Q != 2)`. A controlling expression
+holding such a definition opens the statement scope through
+`c_parse_controlling_expression_defines_tag` like any other. Ordinary
 enum declarations still take the local-declaration path so their declarators
 are retained. Publication skips an already published member and diagnoses a
 same-scope ordinary-name collision instead of appending a second entity.
