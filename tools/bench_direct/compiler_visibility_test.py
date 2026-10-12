@@ -730,6 +730,19 @@ class PublishTest(unittest.TestCase):
                 self.assertEqual((len(api.checks), started["status"], started["conclusion"]),
                                  (1, "completed", "failure"))
 
+    def test_out_of_range_production_profile_numbers_end_in_a_terminal_failure(self) -> None:
+        """An integer past the float range in rendered cells must not raise before the check completes (#3675)."""
+        for label, wall in (("huge integer", [10 ** 309, 1.0]), ("huge negative", [-(10 ** 309), 1.0]),
+                            ("boolean", [True, 1.0])):
+            with self.subTest(wall=label):
+                recorded = receipt()
+                recorded["production_profile"] = {"requested": True, "status": "failed", "binaries": {},
+                                                  "cells": [{"name": "tiny_startup/fast", "decision": "regression",
+                                                             "wall_seconds": wall}]}
+                api, started, unused_written = self.publish(machine_bytes(), recorded)
+                self.assertEqual((len(api.checks), started["status"], started["conclusion"]),
+                                 (1, "completed", "failure"))
+
     def test_publisher_completes_the_started_check_and_emits_the_entry(self) -> None:
         api, started, written = self.publish(machine_bytes())
         self.assertEqual(len(api.checks), 1)
