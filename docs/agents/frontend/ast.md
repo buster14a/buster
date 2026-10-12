@@ -460,8 +460,11 @@ unchanged.
     (`c_ast_types_lookups_settled`). Each mark is checked at the file scope
     against its binding, which must be a file-scope entity or none. The file
     scope's answer for a symbol is looked up once per lookup generation and
-    kept beside the symbol table (`CAstTypeSymbol`), and the scan visits only
-    the mark bytes of each flag word.
+    kept beside the symbol table (`CAstTypeSymbol`). The scan skips flag
+    words without a mark in a loop of its own and visits only the mark bytes
+    of the rest. The settlement runs out of line
+    (`c_ast_types_lookups_settle`), so the per-query check
+    (`c_ast_types_lookups_hold`) saves one register, not five.
   - Up to 16 marks per region that a non-file-scope entity also spells are
     recorded. A query over one of them walks its subtree as before. A region
     with more walks for every query.
@@ -3696,5 +3699,69 @@ No code was written. #3812's inlined branch already uses +0.046% of the
 default path's ±0.05% band in the same frame step. The segment frames,
 alignment frames, declarators and layout attributes stay with the machine.
 Zen 5 validation stays incomplete (#2761).
+
+Results are recorded in a performance audit (`tools/new_audit.py`), not here.
+
+### Settling the name checks, second cut
+
+This section has its own anchor because other open AST branches append to
+the plan's final paragraph. After [the first cut](#settling-the-name-checks),
+a census of main `4ed35b59` under `-fc-ast-pilot`, on the same stage-2 input,
+attributed `c_ast_types_lookups_settled`'s 24.35 M inclusive Ir line by line
+from one Callgrind run (no census wrappers):
+- 132,669 calls, 6,047 settlements, 126,249 marks, one table build;
+- 6.5 M of query-time checks, about 49 Ir a call. 2.1 M of it is the
+  prologue and epilogue: every call saves and restores five callee-saved
+  registers and a frame that only the settlement loop needs;
+- 5.5 M in the flag scan, about 21 Ir per eight-byte group. Each group
+  recomputes its width and tests for a tail;
+- 8.1 M in the per-mark checks, including the binding loads and the 11,474
+  file-scope lookups;
+- 2.3 M in the table build, and 1.7 M of spills spread over the loops.
+
+The floor for a code change is 1 M Ir removable. Two items clear it:
+- the query path pays the settlement's frame on every call, though only
+  6,047 of 132,669 calls settle;
+- the scan pays per-group bookkeeping that a whole-word loop with one tail
+  does not.
+
+The candidate keeps every rule. It moves the settlement into its own
+out-of-line function, so the query path saves one register, and scans
+whole flag words with the tail assembled once. These budgets are declared
+before its measured runs. They use the same stage-2 input, flags and four
+Callgrind arms (A to D) on tests-off `-march=x86-64-v3` builds, with main
+`4ed35b59` as the base:
+- **Correctness.** No answer changes:
+  - no verify mismatch over the corpus, with the existing
+    `c_ast_test_type_lookups` probes;
+  - the typer's `-v` counters on the self-host, `lookups_settled` and
+    `lookups_walked` included, are identical in B and C;
+  - identical diagnostics with and without the flag;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **The settlement's own cost (C against B).** The inclusive instructions of
+  `c_ast_types_lookups_settled` and the new settlement function, plus any
+  increase in `c_ast_types_answer`'s and `c_ast_types_type_body`'s own
+  instructions, fall by at least 12%, and the whole compile falls by at least
+  2 M Ir. Otherwise the result is recorded as negative and the code does not
+  ship.
+- **Default path (D against A).** Within ±0.05% Ir on `-fsyntax-only` and on
+  `-c` (`-g0`).
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete (#2761) and
+  the hook stays opt-in.
+
+The second cut's hosted census is
+[`2026-10-12T174307Z`](../../performance-audits/2026-10-12T174307Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. The typer's counters are identical in B and C,
+  and the objects of all four arms are identical at `-g0` and `-g`.
+- The settlement falls from 24.35 M to 20.43 M Ir (−16.1%), and the pilot's
+  compile by 3.92 M (−0.042%). The query path's own cost falls from about
+  6.5 M to 4.1 M, and the scan's from 5.5 M to about 3.8 M.
+- The default path moves +54 Ir on `-fsyntax-only` and +20,431 on `-c`.
+- What remains is mostly the per-mark checks (about 8 M) and the query-time
+  checks themselves. Neither has a lead above the 1 M floor that avoids
+  recording marks in the eager pass.
+- Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
