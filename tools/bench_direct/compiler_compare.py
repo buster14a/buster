@@ -35,6 +35,10 @@ FRONTEND_SELECTOR_REQUEST_LINE adds the frontend and selector probes (#2761):
 the base revision's benchmark_frontend_scaling.py and selection_benchmark.py
 run on the same two binaries, then `ide bench` runs in alternating fresh
 processes of both.
+A fresh exact COMPILER_PROBES_REQUEST_LINE adds the compiler-probes leg (#2761): the
+trusted native compiler_probes.c harness builds the FAST register-allocation and
+scheduler line-mark probes against both revisions in isolated clones and times
+them as pairs.
 
 The receipt records identities, the profile, toolchain versions, binary hashes
 and timings, and is written even when a step fails. The candidate's build runs
@@ -47,6 +51,7 @@ measure_throughput (corpus leg), scaling_requested and measure_scaling (scaling 
 ast_pilot_request_selection and measure_ast_pilot (#3397 opt-in flag pair),
 real_source_request_selection and measure_real_source (#2761 real-source leg),
 production_profile_request_selection and measure_production_profile (#2761 PGO/LTO leg),
+compiler_probes_request_selection and measure_compiler_probes (#2761 probe leg),
 frontend_selector_request_selection and measure_frontend_selector (#2761 probes), main. Validity rules live in compiler_receipt.classify.
 """
 
@@ -76,6 +81,9 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               THROUGHPUT_REAL_SOURCE_PROFILE, THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
                               throughput_real_source_digest, validate_throughput_real_source,
                               PRODUCTION_PROFILE_PROFILE, PRODUCTION_PROFILE_REQUEST_LINE, validate_production_profile,
+                              COMPILER_PROBES_PROFILE, COMPILER_PROBES_REQUEST_LINE, COMPILER_PROBES_ROLES,
+                              COMPILER_PROBES_HARNESS, COMPILER_PROBES_HARNESS_FLAGS,
+                              compiler_probes_digest, validate_compiler_probes,
                               FRONTEND_SELECTOR_PROFILE, FRONTEND_SELECTOR_REQUEST_LINE, FRONTEND_SELECTOR_SCHEMA,
                               frontend_selector_digest, validate_frontend_selector,
                               INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUEST_LINE,
@@ -102,6 +110,10 @@ REAL_SOURCE_TIMEOUT_SECONDS = 1800
 # 2.8 GHz Xeon. Twice that keeps the leg, its corpus run and the ordinary
 # comparison inside the unchanged 90-minute compare-pull job.
 PRODUCTION_PROFILE_BUILD_TIMEOUT_SECONDS = 40 * 60
+# Measured: the whole compiler-probes leg (the native harness build, two
+# clones, four probe builds, 12 cases of 2 + 30 pairs) took 241 s on a hosted
+# 4-vCPU 2.8 GHz Xeon; this bound keeps it inside the unchanged compare-pull budget.
+COMPILER_PROBES_TIMEOUT_SECONDS = 20 * 60
 # Measured: the whole frontend-selector leg took 57 s on a hosted 2.1 GHz Xeon
 # (frontend scaling 45 s, selection 6 s, 40 ide bench runs 7 s). Each bound is
 # far above its tool's time and the sum stays inside the unchanged compare-pull job.
@@ -129,6 +141,9 @@ LAB_REQUIRED = ("summary.json",)
 THROUGHPUT_REQUIRED = ("summary.json", "metadata.json")
 REAL_SOURCE_REQUIRED = ("summary.json", "metadata.json", "staging.json", "cpuinfo.txt")
 PRODUCTION_PROFILE_REQUIRED = ("summary.txt", "evidence/phases.tsv")
+COMPILER_PROBES_REQUIRED = ("summary.json",)
+# The same LLVM tools production-profile.yml ensures; the LTO lanes link with -fuse-ld=lld.
+PRODUCTION_PROFILE_HOST_TOOLS = ("clang", "ld.lld", "llvm-profdata", "llvm-readobj")
 SCALING_REQUIRED = ("scaling.json", "scaling-metadata.json")
 FRONTEND_SCALING_REQUIRED = ("provenance.json", "results.json")
 SELECTION_REQUIRED = ("report.json",)
@@ -144,6 +159,8 @@ REAL_SOURCE_IGNORE = SCALING_IGNORE
 # manifests; its seven build trees and raw profiles are rebuilt from the head.
 PRODUCTION_PROFILE_IGNORE = (*EVIDENCE_IGNORE, "release", "g0", "lto", "pgo", "pgo-lto", "instrumented",
                              "instrumented-lto", "*.profraw", "*.profdata")
+# The probe leg keeps its summary and logs; its clones and binaries are not evidence.
+COMPILER_PROBES_IGNORE = (*EVIDENCE_IGNORE, "bin")
 # Frontend scaling keeps its JSON records; its generated sources (up to a few
 # MB, identified by hash in results.json) and objects are not evidence.
 FRONTEND_SCALING_IGNORE = (*EVIDENCE_IGNORE, "*.c")
@@ -960,6 +977,18 @@ def production_profile_request_selection(candidate: Path, head: str) -> tuple[bo
     return True, ""
 
 
+def compiler_probes_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #2761's probe profile only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, COMPILER_PROBES_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the compiler-probes selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the compiler-probes selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
 def frontend_selector_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
     """Select #2761's frontend and selector probes only when the exact line is added once against every head parent."""
     deltas = request_selector_parent_deltas(candidate, head, FRONTEND_SELECTOR_REQUEST_LINE)
@@ -1500,7 +1529,11 @@ def measure_production_profile(candidate: Path, bins: Path, work: Path, evidence
                "-C", str(source), "checkout", "--quiet", "--detach", head], candidate, GIT_TIMEOUT_SECONDS),
              (["./build.sh", "production_profile", *PRODUCTION_PROFILE_PROFILE["build_arguments"]], source,
               PRODUCTION_PROFILE_BUILD_TIMEOUT_SECONDS))
-    build_status = 0
+    missing = [tool for tool in PRODUCTION_PROFILE_HOST_TOOLS if shutil.which(tool) is None]
+    if missing:
+        errors.append(f"production profile host lacks {', '.join(missing)}; install them before requesting this profile")
+    record["missing_tools"] = missing
+    build_status = 1 if missing else 0
     for argv, cwd, timeout in steps:
         if build_status == 0:
             build_status = run(argv, cwd, evidence / "production-profile-build.log", timeout)
@@ -1545,6 +1578,53 @@ def measure_production_profile(candidate: Path, bins: Path, work: Path, evidence
                                               status, documents[0], documents[1], compilers))
     record["cells"] = throughput_real_source_digest(documents[0])
     record["build_exit"] = build_status
+    record["exit"] = status
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
+def measure_compiler_probes(candidate: Path, work: Path, evidence: Path, base: str, head: str, receipt: dict) -> None:
+    """Build the trusted native probe harness, run #2761's probe leg and record it with independently hashed inputs."""
+    record = receipt["compiler_probes"]
+    output = work / "compiler-probes"
+    scratch = work / "compiler-probes-work"
+    harness = work / "compiler-probes-harness"
+    exported = evidence / "compiler_probes"
+    log = evidence / "compiler-probes.log"
+    errors: list[str] = []
+    measured = time.monotonic()
+    # The harness comes from this trusted checkout's tools/, never from the candidate.
+    status = run(["clang", *COMPILER_PROBES_HARNESS_FLAGS,
+                  str(Path(__file__).resolve().with_name(COMPILER_PROBES_HARNESS)), "-o", str(harness)],
+                 candidate, log, GIT_TIMEOUT_SECONDS)
+    record["harness_exit"] = status
+    if status == 0:
+        status = run([str(harness), str(candidate), base, head, str(scratch), str(output)], candidate, log,
+                     COMPILER_PROBES_TIMEOUT_SECONDS)
+    receipt["timings"]["compiler_probes_seconds"] = round(time.monotonic() - measured, 3)
+    binaries: dict = {}
+    sources: dict = {}
+    for probe, definition in COMPILER_PROBES_PROFILE["probes"].items():
+        copied = scratch / "probe-sources" / Path(definition["source"]).name
+        if copied.is_file():
+            sources[probe] = sha256(copied)
+        for role, revision in zip(COMPILER_PROBES_ROLES, (base, head)):
+            built = output / "bin" / f"{probe}-{role}"
+            if built.is_file():
+                binaries.setdefault(probe, {})[role] = {"sha256": sha256(built), "size_bytes": built.stat().st_size,
+                                                        "revision": revision}
+    record["binaries"] = binaries
+    record["probe_source_sha256"] = sources
+    summary = None
+    if output.is_dir():
+        problems, record["evidence_omissions"] = export_tree(output, exported, evidence, COMPILER_PROBES_IGNORE,
+                                                             COMPILER_PROBES_REQUIRED)
+        errors.extend(problems)
+        summary, problem = read_exported_json(exported / "summary.json")
+        if problem:
+            errors.append(f"exported evidence compiler_probes/summary.json unreadable: {problem}")
+    errors.extend(validate_compiler_probes(status, summary, base, head, binaries, sources))
+    record["cells"] = compiler_probes_digest(summary)
     record["exit"] = status
     record["errors"] = errors
     record["status"] = "complete" if not errors else "failed"
@@ -1665,17 +1745,28 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         # Its build leg and the other long opt-in legs together would not fit the compare-pull job.
         if real_requested or ast_requested:
             reasons.append("production-profile-v1 cannot be combined with real-source throughput or ast-pilot acceptance")
-    probes_requested = arguments.mode == "pull" and getattr(arguments, "frontend_selector_requested", False)
-    problem = getattr(arguments, "frontend_selector_request_problem", "") if arguments.mode == "pull" else ""
+    probes_requested = arguments.mode == "pull" and getattr(arguments, "compiler_probes_requested", False)
+    problem = getattr(arguments, "compiler_probes_request_problem", "") if arguments.mode == "pull" else ""
     if problem and problem not in reasons:
         reasons.append(problem)
     if probes_requested:
+        receipt["compiler_probes"] = {"requested": True, "request_line": COMPILER_PROBES_REQUEST_LINE,
+                                      "profile": COMPILER_PROBES_PROFILE, "status": "pending"}
+        # One long opt-in leg per compare-pull job keeps the unchanged 90-minute budget provable.
+        if real_requested or ast_requested or production_requested:
+            reasons.append("compiler-probes-v1 cannot be combined with real-source throughput, ast-pilot acceptance "
+                           "or the PGO/LTO production profile")
+    selector_requested = arguments.mode == "pull" and getattr(arguments, "frontend_selector_requested", False)
+    problem = getattr(arguments, "frontend_selector_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if selector_requested:
         receipt["frontend_selector"] = {"requested": True, "request_line": FRONTEND_SELECTOR_REQUEST_LINE,
                                         "profile": FRONTEND_SELECTOR_PROFILE, "status": "pending"}
         # One long opt-in leg per compare-pull job keeps the leg's measured cost inside its unchanged budget.
-        if real_requested or ast_requested or production_requested:
+        if real_requested or ast_requested or production_requested or probes_requested:
             reasons.append("frontend-selector-v1 cannot be combined with real-source throughput, ast-pilot "
-                           "acceptance or the PGO/LTO production profile")
+                           "acceptance, the PGO/LTO production profile or compiler-probes-v1")
     if not reasons:
         for role, commit in (("baseline", arguments.base), ("candidate", arguments.head), ("closure", arguments.base)):
             mark(receipt, evidence, f"build-{role}")
@@ -1792,6 +1883,9 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             mark(receipt, evidence, "production-profile")
             measure_production_profile(candidate, bins, work, evidence, arguments.head, receipt, harness)
         if probes_requested:
+            mark(receipt, evidence, "compiler-probes")
+            measure_compiler_probes(candidate, work, evidence, arguments.base, arguments.head, receipt)
+        if selector_requested:
             mark(receipt, evidence, "frontend-selector")
             measure_frontend_selector(candidate, bins, work, evidence, receipt)
         mark(receipt, evidence, "validate")
@@ -1876,6 +1970,14 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         if record["status"] != "complete":
             receipt["state"] = "failed"
     if probes_requested:
+        record = receipt["compiler_probes"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("the compiler probes were requested but did not reach their measurement phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
+    if selector_requested:
         record = receipt["frontend_selector"]
         reasons.extend(record.get("errors", []))
         if record["status"] == "pending":
@@ -1912,6 +2014,8 @@ def main(argv: list[str] | None = None) -> int:
         real_source_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.production_profile_requested, arguments.production_profile_request_problem = (
         production_profile_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.compiler_probes_requested, arguments.compiler_probes_request_problem = (
+        compiler_probes_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.frontend_selector_requested, arguments.frontend_selector_request_problem = (
         frontend_selector_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}

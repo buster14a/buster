@@ -347,7 +347,7 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_driver(Arena* arena, String8 checkout, Stri
          CLANG_SUITE_DRIVER_ARGUMENTS(S8("--target=x86_64-linux-gnu"), S8("-dumpmachine")), false, CLANG_SUITE_DRIVER_EXPECT_MISMATCH, {0}, 3421},
         {S8("%clang --target=x86_64-redhat-linux -m32 -dumpmachine | FileCheck %s --check-prefix=X86_64_M32"), S8("X86_64_M32"),
          CLANG_SUITE_DRIVER_ARGUMENTS(S8("--target=x86_64-redhat-linux"), S8("-m32"), S8("-dumpmachine")),
-         false, CLANG_SUITE_DRIVER_EXPECT_REFUSAL, S8("unsupported option: -m32"), 1418},
+         false, CLANG_SUITE_DRIVER_EXPECT_MISMATCH, {0}, 3421},
         {S8("%clang --target=xxx-pc-freebsd -dumpmachine | FileCheck %s --check-prefix=FREEBSD"), S8("FREEBSD"),
          CLANG_SUITE_DRIVER_ARGUMENTS(S8("--target=xxx-pc-freebsd"), S8("-dumpmachine")),
          false, CLANG_SUITE_DRIVER_EXPECT_REFUSAL, S8("unsupported target: xxx-pc-freebsd"), 3421},
