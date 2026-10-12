@@ -109,7 +109,8 @@ These rows form addresses without reading object bytes. Every other consumer
 of an incomplete place rejects, as do incomplete values, local allocations,
 field/index results and explicit alignment claims. This rule applies equally
 with and without label metadata; opaque extern address-taking does not decline
-FAST (#3777).
+FAST (#3777). The [validation report](canonical-incomplete-address-validation.md)
+records the focused controls and pinned compatibility census.
 
 `IrFastStatistics.declines` retains every declining function and its first
 strict error, block and instruction, in function order. `ide cc -v` prints
