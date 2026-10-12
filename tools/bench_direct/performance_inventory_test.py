@@ -43,7 +43,7 @@ needs its own covered `<entry>@<profile>` row (`uarch_lab:compare@...`, or
 `build:bench_throughput@...` for a harness profile, or the entry's own row
 when the profile is its only Zen 5 route, as for `build:production_profile`,
 the two compiler-internal probes of compiler-probes-v1, the three
-frontend-selector probes and `tool:wild_linker_bench.c`) whose consumer
+frontend-selector probes, `tool:wild_linker_bench.c` and `tool:link_tls_bench.py`) whose consumer
 validates that exact frozen profile, so a flag-pair profile cannot be added,
 or its validation dropped, without the inventory noticing.
 
@@ -94,6 +94,7 @@ PROFILE_ROWS = {
     "tool:selection_benchmark.py": "FRONTEND_SELECTOR_PROFILE",
     "ide:bench": "FRONTEND_SELECTOR_PROFILE",
     "tool:wild_linker_bench.c": "WILD_LINKER_PROFILE",
+    "tool:link_tls_bench.py": "LINK_TLS_PROFILE",
 }
 
 
