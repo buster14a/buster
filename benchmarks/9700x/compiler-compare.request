@@ -163,3 +163,5 @@ request: issue #47 PR #3171 combined head merged with main 86634390 (driver_fast
 
 request: issue #2761 first 9700X compiler-probes run after #3657 landed; request-only head over main e13523e94128; fresh compiler-compare-v1 plus compiler-probes-v1 leg (report-only, A/A) and live proof of #3656 inventory_coverage discharge
 profile: compiler-probes-v1
+request: issue #2761 first 9700X frontend-selector run after #3661 landed; request-only head over main afe67cbeb; fresh compiler-compare-v1 plus frontend-selector-v1 leg (report-only, A/A)
+profile: frontend-selector-v1
