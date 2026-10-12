@@ -602,11 +602,14 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   build is not run. `bash android/runtime_order_test.sh` (run by
   `android/run_tests_test.sh`) covers the script with fake tools; the frozen
   shared mobile suite keeps the check disabled.
-  `android/run_tests.sh` bounds each complete suite with a 180-second monitor
-  watchdog, independently of adb command/install/boot deadlines. Debug compiler
-  fixtures exceeded the former 60-second budget while still reporting progress
-  in PR #687's run `35157195321`; this is a correctness-suite execution budget,
-  not a throughput threshold. `BUSTER_ANDROID_TEST_TIMEOUT_SECONDS` explicitly
+  Android CI selects a 240-second Debug / 60-second Release whole-suite monitor
+  watchdog; the standalone `android/run_tests.sh` default remains 180 seconds.
+  These are independent of adb command/install/boot deadlines. #3258 measured
+  a same-checkout 75-second Debug pass and a 180-second cutoff, with about
+  190 seconds estimated slow-host completion after #3265's scan fix. See
+  [payload deadline sizing](../android-payload-deadlines.md) for the matched
+  module/fixture receipts, intended coverage growth and sizing multiple.
+  This is a correctness-suite execution budget, not a throughput threshold. `BUSTER_ANDROID_TEST_TIMEOUT_SECONDS` explicitly
   overrides it. Terminal markers end monitoring immediately, and timeout,
   malformed or missing markers still fail; the fake monitor suite checks the
   default and override without lengthening its short timeout failure controls.
