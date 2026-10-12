@@ -1,5 +1,4 @@
 #include <buster/tests/compiler/assembly/assembly_test.h>
-#include <buster/lib/file.h>
 #if BUSTER_INCLUDE_TESTS
 
 #include <buster/tests/compiler/assembly/generated/aarch64_scalar_integer_corpus.generated.h>
@@ -3169,10 +3168,36 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_alignment_max_skip(UnitTes
 BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_gcc_alignment_listing(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    ByteSlice source = file_read(arguments->arena, S8("src/buster/tests/compiler/assembly/fixtures/gcc_alignment_spin.s"), (FileReadOptions){0});
-    BUSTER_TEST(arguments, source.length != 0);
+    // Keep the exact fixture text in the portable test: mobile runners have
+    // no repository filesystem. Provenance lives beside gcc_alignment_spin.s.
+    String8 source = S8(
+        "\t.file\t\"spin.c\"\n"
+        "\t.text\n"
+        "\t.p2align 4\n"
+        "\t.globl\tspin\n"
+        "\t.type\tspin, @function\n"
+        "spin:\n"
+        ".LFB0:\n"
+        "\t.cfi_startproc\n"
+        "\tjmp\t.L8\n"
+        "\t.p2align 4\n"
+        "\t.p2align 4,,10\n"
+        "\t.p2align 3\n"
+        ".L3:\n"
+        "\tmovl\t(%rdi), %eax\n"
+        "\tmovl\t%eax, (%rdi)\n"
+        ".L8:\n"
+        "\tmovl\t(%rdi), %eax\n"
+        "\ttestl\t%eax, %eax\n"
+        "\tjne\t.L3\n"
+        "\tret\n"
+        "\t.cfi_endproc\n"
+        ".LFE0:\n"
+        "\t.size\tspin, .-spin\n"
+        "\t.ident\t\"GCC: (GNU) 16.2.1 20260810\"\n"
+        "\t.section\t.note.GNU-stack,\"\",@progbits\n");
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
-    AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, BYTE_SLICE_TO_STRING(8, source), (AssemblyEncodeOptions){.target = target});
+    AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = target});
     BUSTER_TEST(arguments, !unit.diagnostic_count && unit.section_count >= 1);
     if (!unit.diagnostic_count && unit.section_count >= 1)
     {

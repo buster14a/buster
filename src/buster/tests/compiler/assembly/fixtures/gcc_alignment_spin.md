@@ -15,7 +15,8 @@ objdump -d work/gcc-alignment/spin.o
 
 GNU as 2.47 places the volatile load/store body at byte 16, the loop test
 at byte 20, and RET at byte 26. The regression retains Buster's existing single-byte x86 NOP padding;
-it checks the same instruction offsets and branch displacements rather than
+its exact text is embedded in the portable test so mobile runners need no
+repository filesystem. The test checks the same instruction offsets and branch displacements rather than
 requiring GNU's multibyte NOP encodings.
 
 `gcc_pause_alignment_spin.c` and `.s` retain the original issue's pristine
