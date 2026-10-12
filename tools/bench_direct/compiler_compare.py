@@ -129,6 +129,8 @@ THROUGHPUT_REQUIRED = ("summary.json", "metadata.json")
 REAL_SOURCE_REQUIRED = ("summary.json", "metadata.json", "staging.json", "cpuinfo.txt")
 PRODUCTION_PROFILE_REQUIRED = ("summary.txt", "evidence/phases.tsv")
 COMPILER_PROBES_REQUIRED = ("summary.json",)
+# The same LLVM tools production-profile.yml ensures; the LTO lanes link with -fuse-ld=lld.
+PRODUCTION_PROFILE_HOST_TOOLS = ("clang", "ld.lld", "llvm-profdata", "llvm-readobj")
 SCALING_REQUIRED = ("scaling.json", "scaling-metadata.json")
 # Raw evidence without compiled outputs, per-run binary copies or perf data.
 EVIDENCE_IGNORE = ("*.exe", "instances", "*.data", "*.data.old", "*.o", "*.obj")
@@ -1497,7 +1499,11 @@ def measure_production_profile(candidate: Path, bins: Path, work: Path, evidence
                "-C", str(source), "checkout", "--quiet", "--detach", head], candidate, GIT_TIMEOUT_SECONDS),
              (["./build.sh", "production_profile", *PRODUCTION_PROFILE_PROFILE["build_arguments"]], source,
               PRODUCTION_PROFILE_BUILD_TIMEOUT_SECONDS))
-    build_status = 0
+    missing = [tool for tool in PRODUCTION_PROFILE_HOST_TOOLS if shutil.which(tool) is None]
+    if missing:
+        errors.append(f"production profile host lacks {', '.join(missing)}; install them before requesting this profile")
+    record["missing_tools"] = missing
+    build_status = 1 if missing else 0
     for argv, cwd, timeout in steps:
         if build_status == 0:
             build_status = run(argv, cwd, evidence / "production-profile-build.log", timeout)

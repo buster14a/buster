@@ -4121,9 +4121,11 @@ class ProductionProfileTest(unittest.TestCase):
             root = Path(temporary)
             for name in ("work", "evidence", "bin", "candidate"):
                 (root / name).mkdir()
+            missing: tuple[str, ...] = ()
             def leg(run_status) -> dict:
                 receipt_value = {"timings": {}, "production_profile": {"requested": True, "status": "pending"}}
-                with mock.patch.object(compiler_compare, "run", side_effect=run_status) as run:
+                with mock.patch.object(compiler_compare, "run", side_effect=run_status) as run, \
+                     mock.patch.object(compiler_compare.shutil, "which", side_effect=lambda tool: None if tool in missing else "/usr/bin/" + tool):
                     compiler_compare.measure_production_profile(root / "candidate", root / "bin", root / "work",
                                                                 root / "evidence", head, receipt_value)
                 return receipt_value["production_profile"], run
@@ -4155,6 +4157,11 @@ class ProductionProfileTest(unittest.TestCase):
             self.assertTrue((root / "evidence" / "production_profile" / "evidence" / "phases.tsv").is_file())
             self.assertEqual((record["status"], record["build_exit"], record["exit"]), ("failed", 0, 3))
             self.assertTrue(any("corpus" in error for error in record["errors"]), record["errors"])
+            missing = ("ld.lld",)
+            record, run = leg(built)
+            run.assert_not_called()
+            self.assertEqual((record["status"], record["missing_tools"]), ("failed", ["ld.lld"]))
+            self.assertIn("production profile host lacks ld.lld", record["errors"][0])
 
 
 PROBE_HASHES = {"fast_ra": {"baseline": "3" * 64, "candidate": "4" * 64},

@@ -263,8 +263,9 @@ isolated clone of the head: it builds and trains the PGO compilers and runs
 `test_all` on the PGO+LTO one. The merge base's `bench_throughput run` then
 times that run's Release compiler against its PGO+LTO compiler on the same
 corpus as the ordinary leg. It is report-only and cannot be combined with the
-real-source or ast-pilot profiles. The host needs `llvm-profdata`,
-`llvm-readobj` and Clang's profile runtime. Its evidence is under
+real-source or ast-pilot profiles. The host needs `ld.lld`, `llvm-profdata`,
+`llvm-readobj` and Clang's profile runtime; a missing tool fails the leg
+before the build starts. Its evidence is under
 `production_profile/` in the artifact, and a missing, partial, failed or
 cancelled leg fails the check. Its method is in
 [benchmarking.md](../../docs/agents/benchmarking.md).
