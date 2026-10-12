@@ -562,7 +562,10 @@ captures (#2741).
   model, architecture) is not `available`, when it names another CPU or
   architecture than the 9700X's x86-64, when its model differs from the
   receipt's observed CPU, or when its run, attempt or job is not the attempt
-  being published. Optional facts keep the collector's own `unknown` or
+  being published. Sealed raw evidence for this route (#2918) follows
+  [compiler-evidence-v1.md](../compiler-evidence-v1.md); until its producer
+  lands, artifacts are `legacy-unsealed` and their raw bytes unverified.
+  Optional facts keep the collector's own `unknown` or
   `unavailable` status in the published check and are never filled in. Only
   publication-only recovery may lack it, and only when the bench workflow at
   the original run's authenticated revision has no record retention step
