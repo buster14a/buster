@@ -23944,6 +23944,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_special_float_spellings(UnitTe
         {S8("static inline long double bad(void) { return __builtin_huge_vall(1); }"), S8("__builtin_huge_vall")},
         {S8("static long double bad = __builtin_infl(1);"), S8("__builtin_infl")},
         {S8("typedef __typeof__(__builtin_infl(1, 2)) Bad;"), S8("__builtin_infl")},
+        {S8("_Static_assert(sizeof(__builtin_nanl()) == sizeof(long double), \"unevaluated arity\");"), S8("__builtin_nanl")},
+        {S8("typedef __typeof__(__builtin_nanl(\"\", \"\")) Bad;"), S8("__builtin_nanl")},
+        {S8("static inline long double bad(void) { return __builtin_nanl(); }"), S8("__builtin_nanl")},
+        {S8("static inline float bad(void) { return __builtin_nanf(\"\", 0); }"), S8("__builtin_nanf")},
+        {S8("int bad = sizeof(__builtin_nan());"), S8("__builtin_nan")},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
     {
@@ -23963,7 +23968,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_special_float_spellings(UnitTe
                 String8 message = lowered.diagnostics[diagnostic].message;
                 found |= lowered.diagnostics[diagnostic].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
                     string_first_sequence(message, invalid[index].name) != BUSTER_STRING_NO_MATCH &&
-                    string_first_sequence(message, S8("too many arguments")) != BUSTER_STRING_NO_MATCH;
+                    (string_first_sequence(message, S8("too many arguments")) != BUSTER_STRING_NO_MATCH ||
+                     string_first_sequence(message, S8("too few arguments")) != BUSTER_STRING_NO_MATCH);
             }
             BUSTER_TEST_RAW(arguments, found, string_format(temporary.arena,
                 S8("special float invalid case={u32} form={u32}: first diagnostic {S8}"), index, form,

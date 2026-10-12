@@ -38978,10 +38978,10 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
         CSymbolBuiltin kind = token.kind == C_TOKEN_IDENTIFIER ? c_symbol_builtin_from_spelling(name) : C_SYMBOL_BUILTIN_NONE;
         bool member = index && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
                                 c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
-        bool infinity = kind == C_SYMBOL_BUILTIN_MATH &&
-            c_semantic_math_special_value(c_ir_math_builtin_link_name(name)).special == C_MATH_SPECIAL_INFINITY;
+        CMathSpecial special = kind == C_SYMBOL_BUILTIN_MATH ? c_semantic_math_special_value(c_ir_math_builtin_link_name(name)).special
+                                                             : C_MATH_SPECIAL_NONE;
         if (member || (kind != C_SYMBOL_BUILTIN_VENDOR_TARGET && kind != C_SYMBOL_BUILTIN_VENDOR_GENERIC &&
-                       kind != C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT && !infinity) ||
+                       kind != C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT && special == C_MATH_SPECIAL_NONE) ||
             !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
         CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, index);
         CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
@@ -39010,15 +39010,17 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
             count += 1;
             argument = limit + 1;
         }
-        // Infinity constructors share the existing math constant emitter.
-        // Check their fixed no-argument signature even in unused bodies and
-        // unevaluated/global expressions before the fixed result-type shortcut.
-        if (infinity)
+        // Infinity and NaN constructors share the existing math constant
+        // emitter. Check their fixed signature (none, or the one payload
+        // string) even in unused bodies and unevaluated/global expressions
+        // before the fixed result-type shortcut.
+        if (special != C_MATH_SPECIAL_NONE)
         {
-            if (count)
+            u32 parameters = special == C_MATH_SPECIAL_QUIET_NAN ? 1 : 0;
+            if (count != parameters)
                 c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[close]),
                                    C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                                   c_semantic_call_arity_message(result->arena, name, 0, false, count));
+                                   c_semantic_call_arity_message(result->arena, name, parameters, false, count));
             continue;
         }
         String8 message = {0};
