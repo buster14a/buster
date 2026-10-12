@@ -18025,60 +18025,6 @@ BUSTER_GLOBAL_LOCAL bool c_test_lex_paths_agree(Arena* arena, String8 source)
     return result;
 }
 
-// Each file reserves token and checkpoint rows per source byte; lexing trims
-// both pairs to their counts (#1307). The shapes follow the used tokens and
-// the offsets the used checkpoints, the arena cursor and dirty mark stop at
-// the written rows, and the never-written remainder still reads as zero.
-BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lex_row_trim(UnitTestArguments* arguments)
-{
-    UnitTestResult result = {0};
-    String8 source = S8("/* a comment long enough that the per-byte reservations dwarf the rows the lexer keeps */\n"
-                        "#define TWICE(x) ((x) + \\\n (x))\n"
-                        "int value = TWICE(3);\r\n"
-                        "static char const text[] = \"spliced \\\n string\";\n");
-    for (u32 path = 0; path < 2; path += 1)
-    {
-        Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(4), .flags = {.no_pool = 1}});
-        if (BUSTER_REQUIRE(arguments, arena != 0))
-        {
-            u8 const* base = (u8 const*)arena;
-            CLexResult lex = path ? c_lex_reference(arena, source) : c_lex(arena, source);
-            u64 count = lex.token_count;
-            BUSTER_TEST(arguments, lex.diagnostic_count == 0 && count > 1 && count < source.length / 2);
-            BUSTER_TEST(arguments, count && lex.tokens[count - 1].kind == C_TOKEN_END_OF_FILE);
-            BUSTER_TEST(arguments, (u8 const*)lex.token_shapes == (u8 const*)(lex.tokens + count));
-            BUSTER_TEST(arguments, lex.checkpoint_count > 1 && lex.checkpoint_count < source.length / 4);
-            BUSTER_TEST(arguments, (u8 const*)lex.checkpoint_offsets == (u8 const*)(lex.checkpoints + lex.checkpoint_count));
-            u64 shapes_end = (u64)((u8 const*)(lex.token_shapes + count) - base);
-            u64 slack_end = (u64)((u8 const*)(lex.tokens + count + 16) - base);
-            BUSTER_TEST(arguments, arena->position >= shapes_end && arena->position - shapes_end < 16);
-            BUSTER_TEST(arguments, arena_dirty_position(arena) <= BUSTER_MAX(arena->position, slack_end));
-            bool shapes_match = true;
-            for (u64 index = 0; index < count; index += 1)
-            {
-                shapes_match &= lex.token_shapes[index] == c_token_shape_from_token(lex.tokens[index]);
-            }
-            BUSTER_TEST(arguments, shapes_match);
-            bool offsets_ordered = true;
-            for (u32 index = 1; index < lex.checkpoint_count; index += 1)
-            {
-                offsets_ordered &= lex.checkpoint_offsets[index - 1] <= lex.checkpoint_offsets[index];
-            }
-            BUSTER_TEST(arguments, offsets_ordered);
-            u64 remainder = source.length * (sizeof(CToken) + sizeof(CTokenShape));
-            u8 const* zero = arena_allocate_zeroed(arena, u8, remainder);
-            bool zeroed = true;
-            for (u64 index = 0; index < remainder; index += 1)
-            {
-                zeroed &= zero[index] == 0;
-            }
-            BUSTER_TEST(arguments, zeroed);
-            BUSTER_TEST(arguments, arena_destroy(arena, 1));
-        }
-    }
-    return result;
-}
-
 // Independent oracle: reconstruct the scalar and compare its minimum encoding
 // width/range, rather than reproducing the production leader/second-byte table.
 BUSTER_GLOBAL_LOCAL bool c_test_utf8_scalar_valid(String8 bytes)
@@ -64298,7 +64244,6 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_ir_local_table_zero_scratch);
     C_TEST_FIXTURE(arguments, c_test_parse_large_static_initializers);
     C_TEST_FIXTURE(arguments, c_test_ir_row_streams);
-    C_TEST_FIXTURE(arguments, c_test_lex_row_trim);
     C_TEST_FIXTURE(arguments, c_test_label_address_prefix_indexed_paths);
     C_TEST_FIXTURE(arguments, c_test_label_values_gate);
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_growth);

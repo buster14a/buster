@@ -145,14 +145,6 @@ BUSTER_F_DECL bool arena_set_position_and_decommit(Arena* arena, u64 position);
 // for that next phase and the dirty high-water mark covers them, exactly as
 // arena_set_position leaves them. Returns the number of bytes released.
 BUSTER_F_DECL u64 arena_release_to_position(Arena* arena, u64 position);
-// Rewinds an over-reserved tail the caller has just finished filling, like
-// arena_release_to_position, but extends the dirty mark only to written_end:
-// the caller guarantees every byte from written_end up to the cursor is zero,
-// never written since that tail was allocated or cleared again. A later
-// arena_allocate_zeroed over that remainder then skips a fill the operating
-// system already did, so trimming an estimate faults no page nothing used
-// (#1307).
-BUSTER_F_DECL u64 arena_release_unwritten_tail(Arena* arena, u64 position, u64 written_end);
 // Ends an arena's use by the thread that created it: rewinds it, returns
 // every committed page beyond `retained_size` bytes of buffer to the OS and
 // destroys it, which parks a pool-eligible mapping for the next creation of

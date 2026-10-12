@@ -378,25 +378,6 @@ u64 arena_release_to_position(Arena* arena, u64 position)
     return result;
 }
 
-u64 arena_release_unwritten_tail(Arena* arena, u64 position, u64 written_end)
-{
-    BUSTER_VALIDATE(arena && position >= arena_minimum_position && position <= written_end && written_end <= arena->position);
-    u64 result = arena->position - position;
-#if BUSTER_INCLUDE_TESTS
-    if (arena_test_release_fill)
-    {
-        BUSTER_ARENA_UNPOISON((u8*)arena + position, result);
-        memset((u8*)arena + position, ARENA_TEST_RELEASE_FILL, result);
-        written_end = arena->position;
-    }
-#endif
-    BUSTER_ARENA_POISON((u8*)arena + position, result);
-    arena->high_water = BUSTER_MAX(arena->high_water, arena->position);
-    arena->dirty_position = BUSTER_MAX(arena->dirty_position, written_end);
-    arena->position = position;
-    return result;
-}
-
 void arena_retire(Arena* arena, u64 retained_size)
 {
     BUSTER_VALIDATE(retained_size <= arena->reserved_size - arena_minimum_position);
