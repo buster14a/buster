@@ -55279,9 +55279,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_sparse_finish(UnitTestArgum
 // extends over its whole else-chain. A long `else if` chain and a brace-less
 // nest of `if`s used to re-walk the rest of the chain for every link, and a
 // nest of braced `if`s re-scanned each block for its closing brace: all three
-// were quadratic in the length (#2805). The counters bound the extent work
-// linearly and run in the allocation diagnostic build; every build still
-// lowers, validates and checks the shape.
+// were quadratic in the length (#2805). A brace-less nest of loops, `switch`es
+// or `do`s peeled every inner header again for each enclosing one (#2676). The
+// counters bound the extent work linearly and run in the allocation diagnostic
+// build; every build still lowers, validates and checks the shape.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_controlled_body_extents_linear(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -55290,11 +55291,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_controlled_body_extents_linear(UnitTes
         C_TEST_EXTENT_ELSE_IF_CHAIN,
         C_TEST_EXTENT_IF_NEST,
         C_TEST_EXTENT_BRACED_IF_NEST,
+        C_TEST_EXTENT_WHILE_NEST,
+        C_TEST_EXTENT_FOR_NEST,
+        C_TEST_EXTENT_SWITCH_NEST,
+        C_TEST_EXTENT_DO_NEST,
+        C_TEST_EXTENT_WHILE_IF_NEST,
         C_TEST_EXTENT_SHAPE_COUNT,
     };
     // The braced nest opens one block scope per link, and semantic analysis
     // (not lowering) still pays per enclosing scope there, so it stays short.
-    u32 lengths[C_TEST_EXTENT_SHAPE_COUNT] = {8192, 8192, 2048};
+    // Loop nests keep every loop's blocks live to the innermost, so they stay
+    // short too: the counters still separate n from n^2 by three orders.
+    u32 lengths[C_TEST_EXTENT_SHAPE_COUNT] = {8192, 8192, 2048, 2048, 2048, 2048, 2048, 2048};
     for (u32 shape = 0; shape < C_TEST_EXTENT_SHAPE_COUNT; shape += 1)
     {
         TemporalArena temporary = scratch_begin(0, 0);
@@ -55306,15 +55314,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_controlled_body_extents_linear(UnitTes
         for (u32 link = 0; link < length_count; link += 1)
         {
             String8 piece = shape == C_TEST_EXTENT_ELSE_IF_CHAIN ? (link ? S8(" else if (c) x = i;") : S8("if (c) x = i;"))
-                            : shape == C_TEST_EXTENT_IF_NEST     ? S8("if (c) ")
-                                                                 : S8("if (c) { x += i; ");
+                            : shape == C_TEST_EXTENT_IF_NEST       ? S8("if (c) ")
+                            : shape == C_TEST_EXTENT_BRACED_IF_NEST ? S8("if (c) { x += i; ")
+                            : shape == C_TEST_EXTENT_WHILE_NEST    ? S8("while (c) ")
+                            : shape == C_TEST_EXTENT_FOR_NEST      ? S8("for (; c;) ")
+                            : shape == C_TEST_EXTENT_SWITCH_NEST   ? S8("switch (c) ")
+                            : shape == C_TEST_EXTENT_DO_NEST       ? S8("do ")
+                                                                   : S8("while (c) if (c) ");
             c_test_append_source(bytes, capacity, &length, piece);
         }
         c_test_append_source(bytes, capacity, &length,
-                             shape == C_TEST_EXTENT_ELSE_IF_CHAIN ? S8(" else x = u;") : shape == C_TEST_EXTENT_IF_NEST ? S8("x = i;") : S8(""));
-        for (u32 link = 0; shape == C_TEST_EXTENT_BRACED_IF_NEST && link < length_count; link += 1)
+                             shape == C_TEST_EXTENT_ELSE_IF_CHAIN ? S8(" else x = u;") : shape == C_TEST_EXTENT_BRACED_IF_NEST ? S8("") : S8("x = i;"));
+        for (u32 link = 0; (shape == C_TEST_EXTENT_BRACED_IF_NEST || shape == C_TEST_EXTENT_DO_NEST) && link < length_count; link += 1)
         {
-            c_test_append_source(bytes, capacity, &length, S8("}"));
+            c_test_append_source(bytes, capacity, &length, shape == C_TEST_EXTENT_DO_NEST ? S8(" while (c);") : S8("}"));
         }
         c_test_append_source(bytes, capacity, &length, S8(" return x + i + u + c;}"));
         BUSTER_TEST(arguments, length < capacity);
@@ -55328,12 +55341,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_controlled_body_extents_linear(UnitTes
 #if BUSTER_BENCH_ALLOCATIONS
         IrConstructionCounters after = ir_construction_counters();
         u64 spans = after.values[IR_CONSTRUCTION_C_STATEMENT_EXTENT_SPANS] - before.values[IR_CONSTRUCTION_C_STATEMENT_EXTENT_SPANS];
+        u64 peels = after.values[IR_CONSTRUCTION_C_STATEMENT_EXTENT_PEELS] - before.values[IR_CONSTRUCTION_C_STATEMENT_EXTENT_PEELS];
         u64 fallback_tokens =
             after.values[IR_CONSTRUCTION_C_DELIMITER_FALLBACK_TOKENS] - before.values[IR_CONSTRUCTION_C_DELIMITER_FALLBACK_TOKENS];
         BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
         // A walked link measures its arms once and every later question about
         // it is a memo hit: a few spans per link, never one per later link.
         BUSTER_TEST(arguments, spans <= (u64)length_count * 4 + 16);
+        // A peeled header is filed with the statement it opens, so each one is
+        // peeled a bounded number of times, not once per enclosing header.
+        BUSTER_TEST_RAW(arguments, peels <= (u64)length_count * 4 + 16,
+                        string_format(arguments->arena, S8("statement-extent peels shape={u32} length={u32} peels={u64}"), shape, length_count, peels));
         // Every brace, parenthesis and bracket of a well-formed body answers
         // from the delimiter index, so nothing rescans a block per link.
         BUSTER_TEST(arguments, fallback_tokens <= tokens.token_count);
