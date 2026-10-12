@@ -908,6 +908,13 @@ struct IrFastStatistics
 #define IR_INLINE_FUNCTION_GROWTH (2u * IR_INLINE_TINY_INSTRUCTIONS * IR_INLINE_CALL_SITES)
 #define IR_INLINE_MODULE_GROWTH 4096u
 #define IR_INLINE_MODULE_GROWTH_SHIFT 5u
+// Optional splices into a caller are kept only when their planned row growth,
+// shifted left by this amount, reaches the caller's instruction rows: the
+// first splice relocates the caller's tables and the arena retains the old
+// copy, so a few tiny sites in a large caller cost more memory than they save.
+// IrInlineOptions.caller_growth_shift overrides it; zero selects this default
+// and values of 32 or more keep every planned site.
+#define IR_INLINE_CALLER_GROWTH_SHIFT 4u
 #define IR_INLINE_CALL_SITES 64u
 
 typedef struct IrInlineOptions IrInlineOptions;
@@ -918,6 +925,7 @@ struct IrInlineOptions
     u32 max_function_growth;
     u32 max_module_growth;
     u32 max_call_sites;
+    u32 caller_growth_shift;
 };
 
 // Effective module row-growth limit for `module_rows` lowered canonical rows.

@@ -1977,6 +1977,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, UINT64_MAX) == UINT32_MAX);
             BUSTER_TEST(arguments, ir_inline_module_growth_limit(100u, 2000000u) == 100u);
             BUSTER_TEST(arguments, defaults_program->inline_options.max_call_sites == IR_INLINE_CALL_SITES);
+            BUSTER_TEST(arguments, defaults_program->inline_options.caller_growth_shift == IR_INLINE_CALLER_GROWTH_SHIFT);
             BUSTER_TEST(arguments, defaults_module->inline_complete);
             BUSTER_TEST(arguments, defaults_module->inlining.inlined >= 1);
             IrFunction* defaults_caller = ir_test_inline_find_function(defaults_module, S8("small_caller"));
@@ -2059,6 +2060,57 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             }
         }
         scratch_end(deferred_temporary);
+    }
+
+    // A tiny site in a caller much larger than its growth stays a call by
+    // default (relocating the caller's tables would cost more than the site
+    // saves); an explicit caller_growth_shift of 32 keeps it (#48).
+    for (u32 variant = 0; variant < 2; variant += 1)
+    {
+        TemporalArena bound_temporary = scratch_begin(&arguments->arena, 1);
+        String8 bound_source = S8(
+            "static int bound_leaf(int value) { return value + 1; }\n"
+            "int bound_caller(int value)\n"
+            "{\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1; value = value * 3 + 1;\n"
+            "    return bound_leaf(value);\n"
+            "}\n");
+        CPreprocessResult bound_preprocess = c_preprocess(bound_temporary.arena, bound_source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult bound_analysis = c_parse(bound_temporary.arena, bound_preprocess);
+        CIRLowerResult bound_lowered = {0};
+        if (!bound_preprocess.error_count && !bound_analysis.diagnostic_count)
+        {
+            bound_lowered = c_lower_to_ir(bound_temporary.arena, S8("canonical-inline-bound.c"),
+                bound_preprocess, bound_analysis, target_native);
+        }
+        BUSTER_TEST(arguments, bound_lowered.diagnostic_count == 0 && bound_lowered.program != 0);
+        if (BUSTER_REQUIRE(arguments, bound_lowered.program && bound_lowered.program->module_count == 1))
+        {
+            IrProgram* bound_program = bound_lowered.program;
+            IrModule* bound_module = bound_program->modules;
+            IrFunction* bound_caller = ir_test_inline_find_function(bound_module, S8("bound_caller"));
+            IrFunction* bound_leaf = ir_test_inline_find_function(bound_module, S8("bound_leaf"));
+            BUSTER_TEST(arguments, bound_caller != 0 && bound_leaf != 0);
+            // The fixture only proves the bound if the caller outgrows the
+            // leaf by more than the default factor.
+            BUSTER_TEST(arguments, bound_caller && bound_leaf &&
+                                       ((u64)bound_leaf->instruction_count << IR_INLINE_CALLER_GROWTH_SHIFT) <
+                                           bound_caller->instruction_count);
+            bound_program->inline_options = (IrInlineOptions){.tiny = true, .caller_growth_shift = variant ? 32u : 0u};
+            IrValidationResult prepared = ir_prepare_canonical_module(bound_program, bound_module, false);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+            u32 remaining = bound_caller ? ir_test_direct_call_count(bound_program, bound_caller, S8("bound_leaf")) : 1u;
+            BUSTER_TEST(arguments, remaining == (variant ? 0u : 1u));
+            BUSTER_TEST(arguments, bound_module->inlining.inlined == variant);
+            BUSTER_TEST(arguments, variant || bound_module->inlining.budget_skips >= 1);
+        }
+        scratch_end(bound_temporary);
     }
 
     // Mandatory sites must be budgeted before optional sites, even when
@@ -2606,7 +2658,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
                 }
             }
             BUSTER_TEST(arguments, found && doubled_total > old_module_limit);
-            spread_program->inline_options = (IrInlineOptions){.tiny = true};
+            // These callers are deliberately large; keep their one tiny site
+            // despite the default relocation bound to exercise storage limits.
+            spread_program->inline_options = (IrInlineOptions){.tiny = true, .caller_growth_shift = 32u};
             IrValidationResult spread_prepared = ir_prepare_canonical_module(spread_program, spread_module, false);
             BUSTER_TEST(arguments, spread_prepared.error == IR_VALIDATION_NONE);
             BUSTER_TEST(arguments, spread_module->inline_complete);

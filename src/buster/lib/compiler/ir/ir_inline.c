@@ -537,6 +537,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
         if (!options.max_callee_instructions) options.max_callee_instructions = IR_INLINE_TINY_INSTRUCTIONS;
         if (!options.max_function_growth) options.max_function_growth = IR_INLINE_FUNCTION_GROWTH;
         if (!options.max_call_sites) options.max_call_sites = IR_INLINE_CALL_SITES;
+        if (!options.caller_growth_shift) options.caller_growth_shift = IR_INLINE_CALLER_GROWTH_SHIFT;
+        if (options.caller_growth_shift > 32u) options.caller_growth_shift = 32u;
         program->inline_options = options;
         bool has_required = false;
         for (u32 symbol = 0; symbol < program->symbols.count; symbol += 1)
@@ -846,6 +848,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     }
                     u32 function_growth = function_growth_used[caller_index];
                     u64 function_storage = function_storage_used[caller_index];
+                    u64 module_growth_before = module_growth;
+                    u64 module_storage_before = module_storage;
+                    u64 total_copies_before = total_copies;
                     u64 function_projected_units = 0;
                     u64 function_projected_blocks = 0;
                     u64 function_projected_locals = 0;
@@ -1339,6 +1344,25 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             module_storage += storage;
                             total_copies += copied;
                         }
+                    }
+                    // The first splice relocates the caller's exactly sized
+                    // tables, and the arena keeps the old copy. Optional sites
+                    // stay calls unless their planned growth is worth that
+                    // relocation (IrInlineOptions.caller_growth_shift); mandatory
+                    // sites are never dropped here.
+                    u32 planned_sites = function_sites - function_sites_used[caller_index];
+                    if (phase == 1 && planned_sites &&
+                        ((u64)(function_growth - function_growth_used[caller_index]) << options.caller_growth_shift) <
+                            original_instructions)
+                    {
+                        module->inlining.budget_skips += planned_sites;
+                        for (u32 block = 0; block < original_blocks; block += 1) planned_heads[block] = IR_INLINE_NONE;
+                        function_sites = function_sites_used[caller_index];
+                        function_growth = function_growth_used[caller_index];
+                        function_storage = function_storage_used[caller_index];
+                        module_growth = module_growth_before;
+                        module_storage = module_storage_before;
+                        total_copies = total_copies_before;
                     }
                     bool changed = false;
                     bool required_splice = false;

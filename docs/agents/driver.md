@@ -582,7 +582,9 @@ named defaults. Budgets cap callee instruction count, added instructions per
 caller, added instructions per module, and accepted call sites, respectively.
 Without an explicit module limit, the module budget is relative: the larger of
 4096 rows and 1/32 of the module's lowered canonical instruction rows
-(`ir_inline_module_growth_limit`).
+(`ir_inline_module_growth_limit`). A caller keeps optional splices only when
+their growth is at least 1/16 of its rows (`IR_INLINE_CALLER_GROWTH_SHIFT`);
+see the FAST pipeline contract for the measured memory tradeoff.
 Verbose output emits one `IR_INLINE` record when tiny inlining is enabled or
 inlining candidates were encountered. Its fields are `tiny`, `candidates`,
 `inlined`, `always_inlined`, `copied_instructions`, `growth`,

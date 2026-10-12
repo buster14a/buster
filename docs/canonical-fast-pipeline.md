@@ -240,6 +240,16 @@ The fixed 4096-row module default stopped optional expansion of the unity
 self-host source after 243 sites, because callers are visited in module
 order; per-caller limits refused only 54 further sites once the module limit
 was raised (#48). An explicit module limit is absolute.
+A caller keeps its optional splices only when their planned row growth,
+shifted left by `IR_INLINE_CALLER_GROWTH_SHIFT` (4), reaches its instruction
+rows; otherwise every optional site in it stays a call. The first splice
+relocates the caller's exactly sized tables and the arena keeps the old copy,
+so one tiny site in a large caller costs more memory than it saves. On the
+unity self-host source with `-fcanonical-inline`, shifts 2 through 6 kept 801,
+1643, 2639, 3462 and 3739 of 3984 optional sites for +5, +11, +25, +42 and
++52 MB of peak RSS over tiny-off (unbounded: +80 MB). Mandatory sites are never
+dropped. Embedders override the shift with `IrInlineOptions.caller_growth_shift`
+(zero selects the default, 32 or more keeps every planned site).
 The caller default is twice the 64-site times 16-row tiny-body budget. This leaves
 headroom for larger mandatory checked-arithmetic expansions; the module, work
 and storage guards still independently bound expansion.
