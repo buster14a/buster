@@ -2887,7 +2887,7 @@ class HarnessTest(unittest.TestCase):
         self.assertIn("unsupported historical throughput harness",
                       compiler_compare.throughput_harness_problem(root, historical))
 
-    def historical_fixture(self) -> tuple[str, str, str]:
+    def historical_fixture(self, extra_lines: tuple[str, ...] = ()) -> tuple[str, str, str]:
         """(pinned harness commit, head commit, head tree) for the #3714 historical recipe.
 
         The pinned commit's fake corpus also writes pinned.txt, so the export shows which harness ran.
@@ -2902,7 +2902,8 @@ class HarnessTest(unittest.TestCase):
         git("checkout", "-q", "--detach", self.pull_head)
         request = self.repo / compiler_receipt.ANALYZER_REQUEST_PATH
         request.parent.mkdir(parents=True, exist_ok=True)
-        request.write_text(compiler_receipt.THROUGHPUT_HISTORICAL_REQUEST_LINE + "\n")
+        request.write_text("".join(line + "\n" for line in (compiler_receipt.THROUGHPUT_HISTORICAL_REQUEST_LINE,
+                                                            *extra_lines)))
         git("add", compiler_receipt.ANALYZER_REQUEST_PATH)
         git("commit", "-qm", "request the historical corpus")
         return pinned, git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
@@ -2960,6 +2961,23 @@ class HarnessTest(unittest.TestCase):
         code, result, evidence = self.run_historical("f" * 40, head, tree)
         self.assert_unadmitted(code, result, evidence, "historical corpus harness worktree exited")
         self.assertEqual(result["throughput_historical"]["status"], "failed")
+
+    def test_historical_recipe_refuses_every_other_opt_in_leg_before_preparation(self) -> None:
+        # Each fresh opt-in selector beside the historical one would still run the base's own harness.
+        for line in (compiler_receipt.WILD_LINKER_REQUEST_LINE, compiler_receipt.THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
+                     compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE, compiler_receipt.COMPILER_PROBES_REQUEST_LINE,
+                     compiler_receipt.FRONTEND_SELECTOR_REQUEST_LINE,
+                     compiler_receipt.AST_PILOT_ACCEPTANCE_REQUEST_LINE):
+            with self.subTest(line=line):
+                fixture_git(self.repo, "checkout", "-q", "main")
+                pinned, head, tree = self.historical_fixture((line,))
+                with mock.patch.object(compiler_compare, "prepare_historical_harness",
+                                       side_effect=AssertionError("prepared beside another opt-in leg")):
+                    code, result, evidence = self.run_historical(pinned, head, tree)
+                self.assertEqual((code, result["state"]), (1, "failed"))
+                self.assertTrue(any("cannot be combined" in reason for reason in result["reasons"]), result["reasons"])
+                self.assertEqual((result["timings"]["build_seconds"], result["binaries"], result["lab"]), ({}, {}, {}))
+                self.assertNotIn("throughput_historical", result)
 
     def test_hosted_historical_admission_without_the_request_is_refused(self) -> None:
         pull_tree = fixture_git(self.repo, "rev-parse", self.pull_head + "^{tree}")

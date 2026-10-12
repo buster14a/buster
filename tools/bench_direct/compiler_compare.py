@@ -2082,7 +2082,8 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     historical_root = None
     if receipt.get("throughput_profile") == THROUGHPUT_HISTORICAL_PROFILE:
         others = (real_requested or ast_requested or production_requested or probes_requested or selector_requested
-                  or inline_requested or (arguments.mode == "pull" and scaling_requested(candidate, arguments.base,
+                  or inline_requested or linker_requested
+                  or (arguments.mode == "pull" and scaling_requested(candidate, arguments.base,
                                                                                            arguments.head)))
         if snapshot_closure:
             reasons.append(f"{THROUGHPUT_HISTORICAL_PROFILE['name']} runs only with the legacy-rebuild closure")
