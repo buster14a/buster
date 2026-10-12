@@ -1260,7 +1260,9 @@ fallback reasons. Two things differ:
 Everything else in the body stays with the machine: the segment frames and
 their checkpoints, alignment frames, declarators, bit-field widths and layout
 attributes, and every member run that is not a plain list (a nested tag,
-`typeof`, `_Atomic`, an attribute). Those runs get the scalar frame, counted
+`typeof`, `_Atomic`, an attribute). The
+[census of that remainder](#tag-definition-machine-work) found no shape a
+tree read could take above the gate. Those runs get the scalar frame, counted
 under their `CAstSpecifierFallback`. Plain casts, typed by a scalar frame
 inside a parenthesized expression leaf, stay with the machine: the
 [census](#member-specifier-runs) put them below the gate.
@@ -1717,7 +1719,7 @@ differential tests pass.
 |---|---|---|---|
 | `c_parse_ast_run`, `c_parser_parse_function_body`, `c_parser_parse_declaration_expression` | declaration split, declarator name, body range, static-assert ranges | `DECLARATION`, `FUNCTION_DEFINITION`, `INIT_DECLARATOR`, `STATIC_ASSERT` | Retired under `-fc-ast-pilot` by the [declaration split](#declaration-split-from-the-tree). The walker stays the default path and the per-unit fallback. |
 | `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, plain segments bound in one pass, and each block declarator's `,`, `=` and plain initializer. The token loop stays the engine, the default path and the per-body fallback; the type machine still reads specifiers and declarators from tokens (next row), and the switch and control-statement validators keep `c_parse_statement_end`, whose calls cost about 1 M instructions on the self-host. |
-| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)), and so do the validators' plain type names; their runs where no type name begins are skipped ([type names](#type-names)). So do members' plain runs inside tag definitions ([members](#members)). The rest of a tag definition (segment frames, alignment, declarators, layout attributes), tags, `typeof`, attributes, type names typed in machine frames (casts, below the gate) and every declarator derivation stay with the machine. |
+| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)), and so do the validators' plain type names; their runs where no type name begins are skipped ([type names](#type-names)). So do members' plain runs inside tag definitions ([members](#members)). The rest of a tag definition (segment frames, alignment, declarators, layout attributes; [below the gate](#tag-definition-machine-work)), tags, `typeof`, attributes, type names typed in machine frames (casts, below the gate) and every declarator derivation stay with the machine. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Controlled-body extents (`c_ir_controlled_body_range`, and through it `c_ir_statement_end*` and `c_ir_statement_labels_end`) are read under `-fc-ast-pilot` from the [extent table](#statement-extents-in-lowering). The walkers stay the default path and the per-body and per-query fallback. `c_ir_lower_body_advance`'s first-token classification is not migrated. |
 | `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | `c_ir_root_conditional` is read under `-fc-ast-pilot` ([lowering from the tree](#lowering-from-the-tree)); the rest is not migrated. The evaluator's walk is designed in [Expression lowering from the tree](#expression-lowering-from-the-tree). Without the tree, `c_ir_root_conditional` refuses a body range that holds no `?` by a per-body prefix count (#3467). |
@@ -3561,5 +3563,53 @@ the same way and diagnostic only:
 - About 14 M remains, spread over the scan, the per-mark binding loads and the
   query-time checks.
 - Zen 5 validation stays incomplete (#2761).
+
+### Tag definition machine work
+
+This covers the rest of a tag definition after [members](#members): the
+aggregate segment frames and their checkpoints, the alignment frames, member
+declarators and layout attributes. These rules were declared before any
+candidate. They keep the [member specifier runs](#member-specifier-runs)
+gate: a shape is built only if it removes at least **5 M Ir** on the
+self-host unity input. Two things are charged against it:
+- **What any read could remove.** This is an oracle's drop: a throwaway build
+  that skips the machine's work on the members the shape covers, with
+  byte-identical objects.
+- **What the read must spend to be exact.** This is the measured cost of the
+  tree test that admits those members.
+
+A shape that clears the gate would take the member read's budgets:
+- 0 model differences;
+- a verify mode with a mutation check;
+- byte-identical `-g0` and `-g` objects across the four arms;
+- C − B of at least the gate;
+- D − A within ±0.05%.
+
+The census is
+[`2026-10-12T175251Z`](../../performance-audits/2026-10-12T175251Z.md), a
+throwaway build of base main `4ed35b59` under `-fc-ast-pilot`, hosted and
+diagnostic only:
+- **Frame costs.** Inside tag definitions, the 9,868 segment frames cost
+  18.35 M Ir, 4.21 M of it the member read, which stays. The alignment frames
+  cost 1.90 M and the 1,300 range frames 1.74 M.
+- **Plain members.** 98.2% of segments are plain: only words, `*`, `[...]` and
+  `,`, with no decoration word. On them, every decoration scan finds nothing:
+  - the attribute skips;
+  - the alignment frame;
+  - the layout and vector scans;
+  - the `_Static_assert` test.
+- **The oracle.** Skipping those scans removes **7.71 M** with identical
+  objects. Split by the rows above, no row reaches 2.5 M.
+- **The tree test.** An exact test walks the member's nodes and checks its
+  names and words. It answers 97.7% of members and costs 3.32 M; #3812's
+  member read gets 0.18 M cheaper.
+- **Net:** 4.57 M, **below the gate**. A lean test without the specifier
+  list's checks costs 2.44 M, but it is not exact. A `__extension__` word, or
+  a typedef named `aligned`, changes what the machine does.
+
+No code was written. #3812's inlined branch already uses +0.046% of the
+default path's ±0.05% band in the same frame step. The segment frames,
+alignment frames, declarators and layout attributes stay with the machine.
+Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
