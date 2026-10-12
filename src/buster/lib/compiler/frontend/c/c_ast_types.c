@@ -245,6 +245,7 @@
 //   c_ast_types_lookups_agree
 //   c_ast_types_locals_build,                    the settled name checks
 //   c_ast_types_mark_resolves_at_file,
+//   c_ast_types_flag_word,
 //   c_ast_types_lookups_hold,
 //   c_ast_types_lookups_settle,
 //   c_ast_types_lookups_settled
@@ -2435,6 +2436,15 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_mark_resolves_at_file(CAstTypeBodyIndex* in
     return file;
 }
 
+// Eight flag bytes as one word, the first byte lowest on every supported
+// (little-endian) host.
+BUSTER_GLOBAL_LOCAL u64 c_ast_types_flag_word(u8 const* flags)
+{
+    u64 word;
+    memcpy(&word, flags, sizeof(word));
+    return word;
+}
+
 // Whether the region's settlement answers a query over `node`: it holds under
 // the current lookup generation and identifier use count, no other mark lies
 // in the node's subtree, and the query's scope chain reaches the file scope.
@@ -2471,24 +2481,27 @@ BUSTER_GLOBAL_LOCAL C_AST_TYPES_NOINLINE bool c_ast_types_lookups_settle(CAstTyp
     }
     index->settled_nodes += count;
     bool file = index->local_generation == generation;
-    // Eight flag bytes at a time: almost none carry the mark, and each mark
-    // in a group is found from the group's mask, the low byte first (every
+    // Eight flag bytes at a time: almost none carry the mark, so whole groups
+    // without one are skipped in a loop of their own, and each mark in a
+    // group is found from the group's mask, the low byte first (every
     // supported host is little-endian). The tail's bytes are assembled into
-    // one word before the scan, which selects it for the last group.
+    // one word before the scan, which takes it for the last group.
+    u8 const* flags = body->flags;
     u64 const lookup_bytes = 0x0101010101010101ull * C_AST_TYPE_FLAG_LOOKUP;
     u32 whole = count & ~7u;
     u64 tail = 0;
     for (u32 byte = whole; byte < count; byte += 1)
     {
-        tail |= (u64)body->flags[byte] << (8 * (byte - whole));
+        tail |= (u64)flags[byte] << (8 * (byte - whole));
     }
-    for (u32 group = 0; file && group < count; group += 8)
+    u32 group = 0;
+    while (file && group < count)
     {
-        u64 word = tail;
-        if (group < whole)
+        while (group < whole && !(c_ast_types_flag_word(flags + group) & lookup_bytes))
         {
-            memcpy(&word, body->flags + group, 8);
+            group += 8;
         }
+        u64 word = group < whole ? c_ast_types_flag_word(flags + group) : tail;
         for (u64 marks = word & lookup_bytes; file && marks; marks &= marks - 1)
         {
             u32 relative = group + mask64_first_set(marks) / 8;
@@ -2500,6 +2513,7 @@ BUSTER_GLOBAL_LOCAL C_AST_TYPES_NOINLINE bool c_ast_types_lookups_settle(CAstTyp
                 body->other_count += 1;
             }
         }
+        group += 8;
     }
     body->lookups = (u8)(file ? C_AST_TYPE_LOOKUPS_FILE : C_AST_TYPE_LOOKUPS_EACH);
     body->lookups_generation = generation;
