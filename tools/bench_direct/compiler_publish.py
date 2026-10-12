@@ -64,7 +64,7 @@ Anything else fails closed.
 Map: validate_inline_bundle and validate_ast_pilot_bundle (opt-in flag pairs),
 validate_real_source_bundle, validate_production_profile_bundle,
 validate_compiler_probes_bundle, validate_frontend_selector_bundle and
-validate_wild_linker_bundle (#2761 opt-in legs),
+validate_wild_linker_bundle (#2761 opt-in legs), validate_link_tls_bundle (#1915),
 decide (pure decision), verify_evidence_bundle and evidence_bundle_problems
 (sealed raw evidence), inventory_rows (discharged inventory rows),
 machine_record and machine_record_required (#2758 host facts), read_evidence,
@@ -110,6 +110,7 @@ from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE,
                               FRONTEND_SELECTOR_PROFILE, FRONTEND_SELECTOR_REQUEST_LINE, frontend_selector_digest,
                               validate_frontend_selector,
                               WILD_LINKER_PROFILE, WILD_LINKER_REQUEST_LINE, validate_wild_linker, wild_linker_bundle_files,
+                              LINK_TLS_PROFILE, LINK_TLS_REQUEST_LINE, link_tls_digest, validate_link_tls,
                               wild_linker_digest,
                               MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
                               check_name, classify, classify_scaling, classify_throughput, host_problem, number,
@@ -406,6 +407,30 @@ def validate_wild_linker_bundle(record: object, bundle: object, head: str) -> li
     return problems
 
 
+LINK_TLS_BUNDLE_FILES = {"summary": "link_tls/summary.json"}
+
+
+def validate_link_tls_bundle(record: object, bundle: object, binaries: object) -> list[str]:
+    """Re-derive the requested #1915 TLS companion link result from its exported raw samples."""
+    if record is None:
+        return []
+    if not isinstance(record, dict) or record.get("requested") is not True:
+        return ["receipt link-tls record is present but not a request"]
+    problems: list[str] = []
+    if record.get("status") != "complete" or record.get("exit") != 0:
+        problems.append("receipt link-tls run did not complete successfully")
+    if record.get("request_line") != LINK_TLS_REQUEST_LINE:
+        problems.append("receipt link-tls request selector is not the exact supported line")
+    if record.get("profile") != LINK_TLS_PROFILE:
+        problems.append("receipt link-tls profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(LINK_TLS_BUNDLE_FILES):
+        return [*problems, "requested link-tls evidence bundle is incomplete"]
+    problems.extend(validate_link_tls(record.get("exit"), bundle["summary"], binaries))
+    if record.get("cells") != link_tls_digest(bundle["summary"]):
+        problems.append("receipt link-tls cells do not match the exported raw samples")
+    return problems
+
+
 def decide(expected: dict, authorized: bool, compare_result: str, receipt: object, summary: object,
            policy_value: str, throughput: object = None, require_throughput: bool = True,
            extra_reasons: list[str] | None = None, *,
@@ -506,6 +531,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.append(f"{selected_profile['name']} cannot be combined with the frontend-selector probes")
                 if receipt.get("wild_linker") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with the wild-linker leg")
+                if receipt.get("link_tls") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with the link-tls leg")
                 reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
                 reasons.extend(validate_analyzer_bundle(receipt,
                                                         analyzer_bundle.get("summary") if isinstance(analyzer_bundle, dict) else None,
@@ -607,6 +634,18 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                                        "frontend-selector probes")
                     reasons.extend(validate_wild_linker_bundle(receipt["wild_linker"], corpus.get("wild_linker_bundle"),
                                                                expected.get("head", "")))
+                if receipt.get("link_tls") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("the link-tls leg is valid only in pull mode")
+                    if any(receipt.get(key) is not None for key in
+                           ("throughput_real_source", "ast_pilot_acceptance", "production_profile", "compiler_probes",
+                            "frontend_selector", "wild_linker")):
+                        reasons.append("the link-tls leg cannot be combined with real-source throughput, ast-pilot "
+                                       "acceptance, the PGO/LTO production profile, the compiler probes, the "
+                                       "frontend-selector probes or the wild-linker leg")
+                    reasons.extend(validate_link_tls_bundle(receipt["link_tls"], corpus.get("link_tls_bundle"),
+                                                            receipt.get("binaries")))
             if compare_result != "success":
                 reasons.append(f"compare job result is {compare_result!r}, not success")
             if problem:
@@ -1031,7 +1070,8 @@ def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
     if receipt.get("throughput_profile") != THROUGHPUT_PROFILE or "scaling_profile" in receipt or \
             not isinstance(receipt.get("inline_acceptance"), dict) or receipt["inline_acceptance"].get("requested") is not False or \
             "ast_pilot_acceptance" in receipt or "throughput_real_source" in receipt or "production_profile" in receipt or \
-            "compiler_probes" in receipt or "frontend_selector" in receipt or "wild_linker" in receipt:
+            "compiler_probes" in receipt or "frontend_selector" in receipt or "wild_linker" in receipt or \
+            "link_tls" in receipt:
         raise ValueError("owned ordinary Main evidence changed the complete original corpus recipe")
     identity = receipt.get("identity")
     if not isinstance(identity, dict) or identity.get("trusted_revision") != route["main_measurement_revision"]:
@@ -1394,6 +1434,23 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         break
                 throughput["wild_linker_bundle"] = (bundle if not problem and
                                                     len(bundle) == len(WILD_LINKER_BUNDLE_FILES) else None)
+            if isinstance(receipt, dict) and receipt.get("link_tls") is not None and not problem:
+                bundle = {}
+                for key, member in LINK_TLS_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required link-tls evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed"
+                        break
+                throughput["link_tls_bundle"] = (bundle if not problem and
+                                                 len(bundle) == len(LINK_TLS_BUNDLE_FILES) else None)
     return receipt, summary, problem, artifact, throughput
 
 
@@ -1464,6 +1521,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     head_probes_count = head_lines.count(COMPILER_PROBES_REQUEST_LINE)
     head_selector_count = head_lines.count(FRONTEND_SELECTOR_REQUEST_LINE)
     head_linker_count = head_lines.count(WILD_LINKER_REQUEST_LINE)
+    head_link_tls_count = head_lines.count(LINK_TLS_REQUEST_LINE)
     parent_analyzer_deltas = {line: [] for line in ANALYZER_REQUEST_LINES}
     parent_inline_counts = []
     ast_deltas = []
@@ -1472,6 +1530,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     probes_deltas = []
     linker_deltas = []
     selector_deltas = []
+    link_tls_deltas = []
     for parent in parent_shas:
         parent_bytes, problem = _github_file(api, parent)
         if problem:
@@ -1489,6 +1548,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
         probes_deltas.append(head_probes_count - parent_lines.count(COMPILER_PROBES_REQUEST_LINE))
         selector_deltas.append(head_selector_count - parent_lines.count(FRONTEND_SELECTOR_REQUEST_LINE))
         linker_deltas.append(head_linker_count - parent_lines.count(WILD_LINKER_REQUEST_LINE))
+        link_tls_deltas.append(head_link_tls_count - parent_lines.count(LINK_TLS_REQUEST_LINE))
     ast_record = receipt.get("ast_pilot_acceptance")
     if ast_record is not None and not all(delta == 1 for delta in ast_deltas):
         return ("the exact ast-pilot selector was not freshly added once at this head relative to every parent; "
@@ -1525,6 +1585,12 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
                 "parent; append one selector line for each explicit wild-linker request")
     if linker_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in linker_deltas):
         return "a fresh wild-linker selector has no wild-linker record in the receipt"
+    link_tls_record = receipt.get("link_tls")
+    if link_tls_record is not None and not all(delta == 1 for delta in link_tls_deltas):
+        return ("the exact link-tls selector was not freshly added once at this head relative to every "
+                "parent; append one selector line for each explicit link-tls request")
+    if link_tls_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in link_tls_deltas):
+        return "a fresh link-tls selector has no link-tls record in the receipt"
     if analyzer_profile:
         selected_deltas = parent_analyzer_deltas[request_line]
         other_deltas = [delta for line, values in parent_analyzer_deltas.items() if line != request_line

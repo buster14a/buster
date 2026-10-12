@@ -1,0 +1,17 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 22K of event 'cycles:u'
+# Event count (approx.): 24953106581
+#
+# Overhead  Command      Shared Object         Symbol                                         
+# ........  ...........  ....................  ...............................................
+#
+    98.72%  main_thread  3724-ide-baseline     [.] c_parse_scope_for_token
+
+
+#
+# (Tip: To trace calls using Processor Trace use perf record -e intel_pt// ... ; perf script --call-trace. Then use perf script --time A-B --insn-trace to look at region of interest.)
+#

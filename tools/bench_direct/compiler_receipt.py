@@ -61,6 +61,7 @@ Map (searchable symbols):
         frontend_selector_digest                           frontend and selector probes (#2761)
     WILD_LINKER_PROFILE, validate_wild_linker, wild_linker_population,
         wild_linker_digest                                 host Wild against its comparator (#2761)
+    LINK_TLS_PROFILE, validate_link_tls, link_tls_digest   whole-link TLS companion cells (#1915)
     REGRESSION_POLICIES, regression_policy                 report-only switch
     range_label                                            main baseline relation
     render                                                 readable report
@@ -603,6 +604,75 @@ WILD_LINKER_PROFILE = {
     "correctness": "every link exits 0; each linker's output links again byte-identically and compiles a probe; "
                    "the object and archive manifest is unchanged at the end",
     "decision": "report-only: paired medians are reported and never gate",
+    "report_only": True,
+}
+# Issue #1915: the Zen 5 route for whole-link `ide cc` timing of the x86-64 ELF
+# TLS companion lookup (#2247). One fresh exact line in ANALYZER_REQUEST_PATH
+# selects it on the pull-compare route. After the corpus leg the trusted
+# revision's tools/link_tls_bench.py builds the frozen inputs below with the
+# host's clang and ar, links every cell once with each of the matched
+# baseline/candidate ide binaries, requires byte-identical images that print
+# the frozen output, then times fresh `ide cc` link processes of both binaries
+# as fixed alternating pairs on the pinned CPU. Inputs, cells and populations
+# are frozen here; changing any value needs a new name. It is report-only.
+LINK_TLS_REQUEST_LINE = "profile: link-tls-v1"
+LINK_TLS_SCHEMA = "buster-link-tls-v1"
+LINK_TLS_ROLES = ("baseline", "candidate")
+LINK_TLS_HARNESS = "link_tls_bench.py"
+# A timed sample cannot exceed the per-invocation timeout; bounding it here keeps
+# every median and ratio finite before any float arithmetic.
+LINK_TLS_INVOCATION_TIMEOUT_SECONDS = 60
+LINK_TLS_SAMPLE_LIMIT_NS = LINK_TLS_INVOCATION_TIMEOUT_SECONDS * 1_000_000_000
+_LINK_TLS_OBJECT = ["-O0", "-fPIC", "-g0", "-c"]
+
+
+def _link_tls_sums(variables: int) -> str:
+    """What a linked tls:N image prints: each variable i starts at i and both calls add every one, then increment it."""
+    first = variables * (variables - 1) // 2
+    return f"{first} {first + variables}\n"
+
+
+LINK_TLS_PROFILE = {
+    "name": "link-tls-v1",
+    "issue": "#1915",
+    "harness": "tools/link_tls_bench.py at the trusted revision, run by compiler_compare after the corpus leg on the "
+               "matched baseline/candidate ide binaries",
+    "compiler": "clang",
+    # Source kinds the harness writes: main calls sum_all twice and prints both sums; tls:N defines N global
+    # `__thread long` variables (v_i = i) read and incremented once each by sum_all, so two general-dynamic
+    # TLS sites per variable; plain is the no-TLS control, 4096 globals and 4096 functions summed in a chain.
+    "inputs": {
+        "main.o": {"source": "main", "arguments": ["-O0", "-g0", "-c"]},
+        "m1024.o": {"source": "tls:1024", "arguments": _LINK_TLS_OBJECT},
+        "m4096.o": {"source": "tls:4096", "arguments": _LINK_TLS_OBJECT},
+        "m16384.o": {"source": "tls:16384", "arguments": _LINK_TLS_OBJECT},
+        "n16384.o": {"source": "tls:16384", "arguments": ["-fno-plt", *_LINK_TLS_OBJECT]},
+        "m16384.a": {"archive": ["m16384.o"]},
+        "plain.o": {"source": "plain", "arguments": _LINK_TLS_OBJECT},
+    },
+    "cells": [
+        {"name": "tls-gd-2048", "arguments": ["cc", "-no-pie", "main.o", "m1024.o"], "stdout": _link_tls_sums(1024)},
+        {"name": "tls-gd-8192", "arguments": ["cc", "-no-pie", "main.o", "m4096.o"], "stdout": _link_tls_sums(4096)},
+        {"name": "tls-gd-32768", "arguments": ["cc", "-no-pie", "main.o", "m16384.o"], "stdout": _link_tls_sums(16384)},
+        {"name": "tls-gd-32768-pie", "arguments": ["cc", "-pie", "main.o", "m16384.o"], "stdout": _link_tls_sums(16384)},
+        {"name": "tls-gd-32768-no-plt", "arguments": ["cc", "-no-pie", "main.o", "n16384.o"],
+         "stdout": _link_tls_sums(16384)},
+        {"name": "tls-gd-32768-archive", "arguments": ["cc", "-no-pie", "main.o", "m16384.a"],
+         "stdout": _link_tls_sums(16384)},
+        {"name": "no-tls-control", "arguments": ["cc", "-no-pie", "main.o", "plain.o"], "stdout": "8386560 8386560\n"},
+    ],
+    "warmups": 2,
+    "pairs": 20,
+    "cpu": 2,
+    "order": "warmups alternate baseline, candidate; even pairs run baseline first, odd pairs candidate first",
+    "stopping": "fixed: exactly warmups + pairs invocations per binary and cell, no early stop or extension",
+    "timing": "wall nanoseconds of one fresh `taskset -c CPU ide ARGUMENTS -o OUTPUT` process from spawn to wait, "
+              "with its user plus system CPU; startup, argument parsing, input reads, linking and publication included",
+    "correctness": "each binary links every cell once before timing; both images are byte-identical, exit 0 and "
+                   "print the frozen output, and every timed link exits 0",
+    "statistic": "per pair candidate/baseline wall time; per cell the median pair ratio with a distribution-free "
+                 "95% order-statistic interval",
+    "decision": "report-only: ratios and intervals are reported and never gate",
     "report_only": True,
 }
 SCALING_SCHEMA = "buster-throughput-scaling-v1"
@@ -1645,6 +1715,126 @@ def validate_wild_linker(status: object, files: object, head: str, expected_iden
             problems.append(f"wild-linker {name} {row.get('variant')} round {row.get('round')} is not the command "
                             "derived from the retained argv and the frozen options")
             break
+    return problems
+
+
+def _link_tls_invocation(value: object) -> int | None:
+    """Wall nanoseconds of one well-formed timed link that exited 0, else None."""
+    result = None
+    if isinstance(value, dict) and set(value) == {"exit", "wall_ns", "cpu_ns"} and type(value["exit"]) is int and \
+            value["exit"] == 0 and type(value["wall_ns"]) is int and 0 < value["wall_ns"] <= LINK_TLS_SAMPLE_LIMIT_NS and \
+            type(value["cpu_ns"]) is int and 0 <= value["cpu_ns"] <= LINK_TLS_SAMPLE_LIMIT_NS:
+        result = value["wall_ns"]
+    return result
+
+
+def link_tls_cell_statistics(cell: object) -> tuple[dict | None, list[str]]:
+    """Re-derive one cell's statistics from its identity record and raw invocations; (statistics, problems)."""
+    profile = LINK_TLS_PROFILE
+    name = cell.get("name") if isinstance(cell, dict) else None
+    label = f"link-tls {name if isinstance(name, str) else '?'}"
+    expected = next((item for item in profile["cells"] if item["name"] == name), None)
+    if expected is None or cell.get("arguments") != expected["arguments"]:
+        return None, [f"{label} is not a cell of the frozen profile"]
+    problems: list[str] = []
+    identity = cell.get("identity")
+    keys = {"exit", "sha256", "size_bytes", "run_exit", "stdout"}
+    if not isinstance(identity, dict) or set(identity) != set(LINK_TLS_ROLES) or \
+            any(not isinstance(identity[role], dict) or set(identity[role]) != keys for role in LINK_TLS_ROLES):
+        problems.append(f"{label} identity record is malformed")
+    else:
+        for role in LINK_TLS_ROLES:
+            record = identity[role]
+            if record["exit"] != 0 or record["run_exit"] != 0 or record["stdout"] != expected["stdout"] or \
+                    not isinstance(record["sha256"], str) or not re.fullmatch("[0-9a-f]{64}", record["sha256"]) or \
+                    type(record["size_bytes"]) is not int or record["size_bytes"] <= 0:
+                problems.append(f"{label} {role} image did not link, run and print the frozen output")
+        if identity["baseline"]["sha256"] != identity["candidate"]["sha256"] or \
+                identity["baseline"]["size_bytes"] != identity["candidate"]["size_bytes"]:
+            problems.append(f"{label} baseline and candidate images are not byte-identical")
+    warmups = cell.get("warmups")
+    if not isinstance(warmups, dict) or set(warmups) != set(LINK_TLS_ROLES) or \
+            any(not isinstance(warmups[role], list) or len(warmups[role]) != profile["warmups"] for role in LINK_TLS_ROLES):
+        problems.append(f"{label} does not have {profile['warmups']} warmups per binary")
+    elif any(_link_tls_invocation(item) is None for role in LINK_TLS_ROLES for item in warmups[role]):
+        problems.append(f"{label} has a failed or malformed warmup")
+    pairs = cell.get("pairs")
+    ratios: list[float] = []
+    walls = {role: [] for role in LINK_TLS_ROLES}
+    if not isinstance(pairs, list) or len(pairs) != profile["pairs"]:
+        problems.append(f"{label} does not have exactly {profile['pairs']} pairs")
+        pairs = []
+    for index, pair in enumerate(pairs):
+        order = ["baseline", "candidate"] if index % 2 == 0 else ["candidate", "baseline"]
+        if not isinstance(pair, dict) or pair.get("order") != order or set(pair) != {"order", *LINK_TLS_ROLES}:
+            problems.append(f"{label} pair {index} is malformed or out of the fixed order")
+            continue
+        values = {role: _link_tls_invocation(pair[role]) for role in LINK_TLS_ROLES}
+        if values["baseline"] is None or values["candidate"] is None:
+            problems.append(f"{label} pair {index} has a failed or malformed link")
+            continue
+        for role in LINK_TLS_ROLES:
+            walls[role].append(values[role])
+        ratios.append(values["candidate"] / values["baseline"])
+    if problems or len(ratios) != profile["pairs"]:
+        return None, problems
+    low, high = compiler_probes_interval(ratios)
+    return {"name": expected["name"], "baseline_ns": statistics.median(walls["baseline"]),
+            "candidate_ns": statistics.median(walls["candidate"]), "ratio": statistics.median(ratios),
+            "ratio_low": low, "ratio_high": high, "candidate_faster": sum(1 for ratio in ratios if ratio < 1.0),
+            "image_sha256": identity["baseline"]["sha256"]}, []
+
+
+def link_tls_digest(summary: object) -> list[dict]:
+    """The re-derived per-cell statistics of a link-tls summary; malformed cells are left out."""
+    digest = []
+    cells = summary.get("cells") if isinstance(summary, dict) else None
+    for cell in cells if isinstance(cells, list) else []:
+        statistics_value, unused_problems = link_tls_cell_statistics(cell)
+        if statistics_value is not None:
+            digest.append(statistics_value)
+    return digest
+
+
+def validate_link_tls(status: object, summary: object, binaries: object) -> list[str]:
+    """Reasons the evidence is not one complete LINK_TLS_PROFILE run of these binaries.
+
+    status is link_tls_bench.py's exit and summary its summary.json; binaries is the receipt's
+    role -> {"sha256", ...} record of the measured ide binaries, hashed by compiler_compare itself.
+    Every statistic is re-derived from the raw samples; the harness states none.
+    """
+    label = "link-tls"
+    profile = LINK_TLS_PROFILE
+    problems: list[str] = []
+    if type(status) is not int or status != 0:
+        problems.append(f"{label} exited {status!r}, not 0")
+    if not isinstance(summary, dict):
+        return [*problems, f"{label} summary is missing or malformed"]
+    for key, wanted in (("schema", LINK_TLS_SCHEMA), ("profile", profile["name"]), ("cpu", profile["cpu"]),
+                        ("status", "complete"), ("errors", [])):
+        if summary.get(key) != wanted:
+            problems.append(f"{label} summary {key} is {summary.get(key)!r}, not {wanted!r}")
+    hashes = {role: binaries[role].get("sha256") if isinstance(binaries, dict) and isinstance(binaries.get(role), dict)
+              else None for role in LINK_TLS_ROLES}
+    if any(not isinstance(value, str) for value in hashes.values()) or summary.get("binaries") != hashes:
+        problems.append(f"{label} did not measure the recorded baseline and candidate binaries")
+    elif hashes["baseline"] == hashes["candidate"]:
+        problems.append(f"{label} baseline and candidate are the same binary")
+    inputs = summary.get("inputs")
+    if not isinstance(inputs, dict) or set(inputs) != set(profile["inputs"]) or \
+            any(not isinstance(value, str) or not re.fullmatch("[0-9a-f]{64}", value) for value in inputs.values()):
+        problems.append(f"{label} inputs are not the frozen input set, each with its sha256")
+    toolchain = summary.get("toolchain")
+    if not isinstance(toolchain, dict) or set(toolchain) != {"clang", "ar"} or \
+            any(not isinstance(value, str) or not value for value in toolchain.values()):
+        problems.append(f"{label} does not record the clang and ar that built its inputs")
+    cells = summary.get("cells")
+    if not isinstance(cells, list) or [cell.get("name") if isinstance(cell, dict) else None for cell in cells] != \
+            [cell["name"] for cell in profile["cells"]]:
+        problems.append(f"{label} cells are not the frozen cells in order")
+        cells = []
+    for cell in cells:
+        problems.extend(link_tls_cell_statistics(cell)[1])
     return problems
 
 
@@ -4284,6 +4474,7 @@ INVENTORY_LEGS = {
         "compiler-probes": ("tool:fast_ra_scaling.c", "tool:machine_line_mark_scaling.c"),
         "frontend-selector": ("tool:benchmark_frontend_scaling.py", "tool:selection_benchmark.py", "ide:bench"),
         "wild-linker": ("tool:wild_linker_bench.c",),
+        "link-tls": ("tool:link_tls_bench.py",),
         "historical-corpus": ("build:bench_throughput@throughput-corpus-historical",),
     },
 }
@@ -4291,7 +4482,7 @@ INVENTORY_LEGS = {
 INVENTORY_OPT_IN_RECORDS = {"inline": "inline_acceptance", "ast-pilot": "ast_pilot_acceptance",
                             "real-source": "throughput_real_source", "production-profile": "production_profile",
                             "compiler-probes": "compiler_probes", "frontend-selector": "frontend_selector",
-                            "wild-linker": "wild_linker"}
+                            "wild-linker": "wild_linker", "link-tls": "link_tls"}
 
 
 def inventory_leg_record(receipt: dict, leg: str) -> tuple[bool | None, str]:
@@ -4660,6 +4851,25 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
         for key, title in (("build_exit", "input build"), ("exit", "harness")):
             if linker.get(key) not in (None, 0):
                 lines.append(f"Wild linker {title} exit: {linker.get(key)}.")
+    link_tls = receipt.get("link_tls") if isinstance(receipt, dict) else None
+    if isinstance(link_tls, dict) and link_tls.get("requested"):
+        profile = LINK_TLS_PROFILE
+        lines += ["", f"TLS companion links ({profile['name']}): {link_tls.get('status', 'NA')} (fresh `ide cc` link "
+                  "processes of both binaries on frozen TLS-heavy inputs, byte-identical images required, "
+                  f"{profile['pairs']} alternating pairs per cell on CPU {profile['cpu']}; report-only).", "",
+                  "| Cell | Base (ms) | Head (ms) | Head / base [95% interval] | Head faster |",
+                  "| --- | ---: | ---: | ---: | ---: |"]
+        for row in link_tls.get("cells") if isinstance(link_tls.get("cells"), list) else []:
+            row = row if isinstance(row, dict) else {}
+            values = [row.get(key) for key in ("baseline_ns", "candidate_ns", "ratio", "ratio_low", "ratio_high")]
+            ok = all(_finite_positive(value) for value in values)
+            lines.append("| %s | %s | %s | %s | %s/%d |" % (
+                row.get("name", "NA"), "%.3f" % (values[0] / 1e6) if ok else "NA",
+                "%.3f" % (values[1] / 1e6) if ok else "NA",
+                "%.4f [%.4f, %.4f]" % tuple(values[2:]) if ok else "NA", row.get("candidate_faster", "NA"),
+                profile["pairs"]))
+        if link_tls.get("exit") not in (None, 0):
+            lines.append(f"TLS companion link harness exit: {link_tls.get('exit')}.")
     reasons = receipt.get("reasons") if isinstance(receipt, dict) else None
     warnings = summary.get("warnings")
     for item in (*notes, *(reasons if isinstance(reasons, list) else ()),
