@@ -10,7 +10,7 @@
 // must be a terminator (ir_instruction_is_terminator) and no terminator may
 // have a successor in its chain.
 
-void ir_function_invalidate_cfg(IrFunction* function)
+void ir_function_reopen_cfg(IrFunction* function)
 {
     if (function && function->published_cfg)
     {
@@ -317,37 +317,42 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* ar
     }
     if (result.error == IR_VALIDATION_NONE)
     {
-        if (moved)
+        // One pass both permutes and drops the mutable chain, which stops
+        // existing at publication: consumers use the dense span and explicit
+        // invalidation reconstructs builder links. A row is final once its
+        // index is visited, because every cycle starts at its lowest index.
+        // The old-to-new map stays in scratch: once definitions and extras
+        // follow it below, no consumer reads prepublication IDs.
+        for (u32 index = 0; index < count; index += 1)
         {
-            // The old-to-new map stays in scratch: once definitions and extras
-            // follow it below, no consumer reads prepublication IDs.
-            for (u32 index = 0; index < count; index += 1)
+            if (inverse[index] != index)
             {
-                if (inverse[index] != index)
+                IrInstruction saved = function->instructions[index];
+                IrSourceRange source = function->instruction_canonical_sources ? function->instruction_canonical_sources[index] : (IrSourceRange){0};
+                u32 destination = index;
+                u32 from = inverse[destination];
+                while (from != index)
                 {
-                    IrInstruction saved = function->instructions[index];
-                    IrSourceRange source = function->instruction_canonical_sources ? function->instruction_canonical_sources[index] : (IrSourceRange){0};
-                    u32 destination = index;
-                    u32 from = inverse[destination];
-                    while (from != index)
-                    {
-                        function->instructions[destination] = function->instructions[from];
-                        if (function->instruction_canonical_sources)
-                        {
-                            function->instruction_canonical_sources[destination] = function->instruction_canonical_sources[from];
-                        }
-                        inverse[destination] = destination;
-                        destination = from;
-                        from = inverse[destination];
-                    }
-                    function->instructions[destination] = saved;
+                    function->instructions[destination] = function->instructions[from];
                     if (function->instruction_canonical_sources)
                     {
-                        function->instruction_canonical_sources[destination] = source;
+                        function->instruction_canonical_sources[destination] = function->instruction_canonical_sources[from];
                     }
                     inverse[destination] = destination;
+                    destination = from;
+                    from = inverse[destination];
                 }
+                function->instructions[destination] = saved;
+                if (function->instruction_canonical_sources)
+                {
+                    function->instruction_canonical_sources[destination] = source;
+                }
+                inverse[destination] = destination;
             }
+            function->instructions[index].next = IR_INSTRUCTION_ID_INVALID;
+        }
+        if (moved)
+        {
             for (u32 value = 0; value < function->value_count; value += 1)
             {
                 IrInstructionId* definition = &function->values[value].definition;
@@ -364,13 +369,6 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* ar
             IrCfgBlock* published = blocks + index;
             block->first_instruction.value = published->instruction_count ? published->first_instruction : IR_ID_UNDERLYING_INVALID;
             block->last_instruction.value = published->instruction_count ? published->first_instruction + published->instruction_count - 1 : IR_ID_UNDERLYING_INVALID;
-            // The mutable chain stops existing at publication. Consumers use
-            // the dense span; explicit invalidation reconstructs builder links.
-            for (u32 offset = 0; offset < published->instruction_count; offset += 1)
-            {
-                u32 row = published->first_instruction + offset;
-                function->instructions[row].next = IR_INSTRUCTION_ID_INVALID;
-            }
         }
         cfg->instruction_count = count;
     }

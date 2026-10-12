@@ -1284,7 +1284,17 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE IrInstructionId ir_block_ne
                                    : function->instructions[instruction.value].next;
 }
 
-BUSTER_F_DECL void ir_function_invalidate_cfg(IrFunction* function);
+BUSTER_F_DECL void ir_function_reopen_cfg(IrFunction* function);
+
+// Every value, block and row append calls this, and almost none of them find a
+// published CFG, so the test stays inline and only a reopen pays for a call.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE void ir_function_invalidate_cfg(IrFunction* function)
+{
+    if (function && function->published_cfg)
+    {
+        ir_function_reopen_cfg(function);
+    }
+}
 BUSTER_F_DECL IrCfgEdge const* ir_function_cfg_edge(IrFunction const* function, IrBlockId source, IrBlockId destination);
 
 
