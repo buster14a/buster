@@ -25723,6 +25723,9 @@ struct MatrixTestTree
     // unless matrix_superbuild_allocate_jobs serializes the test phases.
     u32 parallel_jobs;
     u32 test_jobs;
+    // Inner Ninja --parallel for clang_analyze plus optnone_audit
+    // (matrix_superbuild_analyze_jobs); zero means serial.
+    u32 analyze_jobs;
     u32 unity_only : 1;
     u32 test_serialized : 1;
     u32 unity_analysis_scheduled : 1;
@@ -25734,6 +25737,10 @@ struct MatrixTestTree
 // budget the superbuild admits one tree per CPU (matrix_superbuild_outer_jobs)
 // and shares the budget between test trees (matrix_superbuild_allocate_jobs).
 #define MATRIX_SUPERBUILD_LOW_CORE_THREADS 4
+// The post-test analyzers overlap only on hosts with at least this much
+// memory: hosted Linux and Windows runners report 15.6-16 GiB, while the
+// 7 GiB macOS runners keep them serial (#3912).
+#define MATRIX_SUPERBUILD_ANALYZE_OVERLAP_MEMORY BUSTER_GB(12)
 
 typedef struct MatrixSuperbuildSelfHostPlan MatrixSuperbuildSelfHostPlan;
 struct MatrixSuperbuildSelfHostPlan
@@ -26988,6 +26995,15 @@ BUSTER_GLOBAL_LOCAL u32 matrix_superbuild_outer_jobs(u32 thread_count, u32 tree_
     return BUSTER_MIN(split_tree_limit, tree_count);
 }
 
+// clang_analyze keeps two workers and optnone_audit replays one frontend.
+// Its longest shard leaves one worker idle for most of the run (hosted Linux
+// x86-64: 57 s analysis, 26 s audit, back to back), so a host with the CPUs
+// and memory for all three processes runs the two commands together.
+BUSTER_GLOBAL_LOCAL u32 matrix_superbuild_analyze_jobs(u32 thread_count, u64 memory_bytes)
+{
+    return thread_count >= 3 && memory_bytes >= MATRIX_SUPERBUILD_ANALYZE_OVERLAP_MEMORY ? 2 : 1;
+}
+
 // Ninja admits ready edges from a shared pool in declaration order, and a fresh
 // CI checkout has no `.ninja_log` for its critical-path scheduler to learn from.
 // Declaring the longest trees first therefore decides whether the slowest test
@@ -27414,7 +27430,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
             .combination_indices = {0},
             .combination_count = 1,
             .parallel_jobs = 1,
+            .analyze_jobs = 2,
             .unity_only = 1,
+            .unity_analysis_scheduled = 1,
         },
         {
             .build_directory = S8("build/gcc-debug"),
@@ -27449,7 +27467,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
                                  string_first_sequence(manifest, S8("BUSTER_SUPERBUILD_SELF_HOST_BUILD_DRIVER")) == BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_BUILD_TARGETS ide:Debug)")) != BUSTER_STRING_NO_MATCH &&
                                  string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_CONFIG )")) != BUSTER_STRING_NO_MATCH &&
-                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_TARGET )")) != BUSTER_STRING_NO_MATCH;
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_TEST_0_TARGET )")) != BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_0_ANALYZE_CONFIG Release)")) != BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_0_ANALYZE_JOBS 2)")) != BUSTER_STRING_NO_MATCH &&
+                                 string_first_sequence(manifest, S8("set(BUSTER_SUPERBUILD_TREE_1_ANALYZE_JOBS 1)")) != BUSTER_STRING_NO_MATCH;
     remove_path_recursive(arena, manifest_path);
 
     // A four-CPU checks shard: the two sanitized test trees keep their build
@@ -27484,6 +27505,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_superbuild_parallelism_tests(Arena* are
     if (low_core_result != PROCESS_RESULT_SUCCESS ||
         matrix_superbuild_outer_jobs(4, BUSTER_ARRAY_LENGTH(windows_trees)) != 4 || matrix_superbuild_outer_jobs(16, 5) != 5 ||
         matrix_superbuild_outer_jobs(0, 0) != 0 || matrix_superbuild_self_host_enabled(true, true) ||
+        matrix_superbuild_analyze_jobs(4, 16759504896ull) != 2 || matrix_superbuild_analyze_jobs(3, BUSTER_GB(7)) != 1 ||
+        matrix_superbuild_analyze_jobs(2, BUSTER_GB(64)) != 1 ||
         !matrix_superbuild_self_host_enabled(false, true) || matrix_superbuild_self_host_enabled(false, false) ||
         !matrix_superbuild_self_host_plan_valid(windows_self_host, windows_trees, BUSTER_ARRAY_LENGTH(windows_trees), 4) ||
         !matrix_superbuild_self_host_plan_valid(linux_self_host, linux_trees, BUSTER_ARRAY_LENGTH(linux_trees), 16) ||
@@ -27629,6 +27652,7 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_1_CONFIG {S8})\n"), prefix, second_test_config));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_TEST_1_TARGET {S8})\n"), prefix, second_target));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_ANALYZE_CONFIG {S8})\n"), prefix, analyze_config));
+        string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_ANALYZE_JOBS {u32})\n"), prefix, BUSTER_MAX(tree.analyze_jobs, 1)));
         // Whole-table audits ride on the same canonical tree that already
         // owns clang_analyze: unsanitized optimized Clang, exactly one tree
         // per platform. They read only generated metadata tables and source
@@ -28057,6 +28081,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         matrix_phase.outer_jobs = matrix_superbuild_outer_jobs(thread_count, tree_count);
         string_print(S8("BUSTER_SUPERBUILD_PARALLELISM: threads={u32} trees={u32} outer_jobs={u32}\n"), thread_count, tree_count,
                      matrix_superbuild_outer_jobs(thread_count, tree_count));
+        u64 memory_bytes = os_get_physical_memory_size();
+        u32 analyze_jobs = matrix_superbuild_analyze_jobs(thread_count, memory_bytes);
+        string_print(S8("BUSTER_SUPERBUILD_POST_TEST: analyze_jobs={u32} memory_mib={u64}\n"), analyze_jobs, memory_bytes >> 20);
+        for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
+        {
+            trees[tree_i].analyze_jobs = trees[tree_i].unity_analysis_scheduled ? analyze_jobs : 0;
+        }
         for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
         {
             string_print(S8("BUSTER_SUPERBUILD_TREE: index={u32} configs={u32} unity_only={u32} tests={u32} jobs={u32} directory={S8}\n"), tree_i,

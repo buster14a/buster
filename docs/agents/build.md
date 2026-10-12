@@ -243,11 +243,16 @@ its separate compiler-rt lookup and fallback policy.
 function must never inherit that: #1376 found 156 of them running at -O0 when
 the region was a `#pragma clang attribute` that also marked declarations. The
 audit replays the database row for `ide.c` through the Clang frontend only
-(LLVM IR, no optimization or code generation; about ten seconds) and fails
+(LLVM IR, no optimization or code generation; 20-26 s on hosted runners) and fails
 when a function defined outside `src/buster/tests/` carries `optnone`. The
 `optnone_audit` CMake target runs it on the same canonical unsanitized
 optimized Clang tree as `clang_analyze`, in the same superbuild step (the
-direct matrix schedules the command beside `clang_analyze` too). A production
+direct matrix schedules the command beside `clang_analyze` too). Neither
+target takes the console pool: `matrix_superbuild_analyze_jobs` passes
+`--parallel 2` to that step on hosts with at least three logical CPUs and
+`MATRIX_SUPERBUILD_ANALYZE_OVERLAP_MEMORY` (12 GiB), so the audit runs while
+the analyzer's longest shard leaves a worker idle; smaller hosts, including
+the 7 GiB macOS runners, keep `--parallel 1` (#3912). A production
 header that defines functions must be included before the test region, as
 `simd.h` is.
 

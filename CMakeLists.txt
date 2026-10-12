@@ -2491,6 +2491,8 @@ endif()
 
 if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMANDS)
     if (EXISTS "${BUSTER_CLANG_ANALYZE_DRIVER}")
+        # Neither target takes the console pool: the superbuild's --parallel,
+        # chosen by build.c from host memory, decides whether the two overlap.
         add_custom_target(clang_analyze
             COMMAND "${BUSTER_CLANG_ANALYZE_DRIVER}"
                 clang_analyze
@@ -2498,7 +2500,6 @@ if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMAN
                 --config "$<CONFIG>"
                 --quiet
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-            USES_TERMINAL
             COMMENT "Running clang --analyze"
             VERBATIM
         )
@@ -2511,7 +2512,6 @@ if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMAN
                 --config "$<CONFIG>"
                 --quiet
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-            USES_TERMINAL
             COMMENT "Auditing optnone in the unity ide"
             VERBATIM
         )
