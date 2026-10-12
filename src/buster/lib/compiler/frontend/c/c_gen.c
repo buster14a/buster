@@ -32,8 +32,11 @@
 // _contains_range, kept current by _begin, _end and _rollback (a typeof
 // replay).
 // Without a tree, c_ir_root_conditional refuses a body range that holds no
-// `?` through the per-body prefix count c_ir_question_prefix_build, before
-// its scan.
+// `?` through the per-body token prefix table c_ir_token_prefix_build, before
+// its scan. The same table lets c_ir_lower_expression_core_step skip a control
+// prepass (c_ir_range_may_prepare_control), a call prepass
+// (c_ir_range_may_prepare_calls) or a postfix probe
+// (c_ir_range_may_hold_update) that cannot find anything.
 // c_ir_parameter_value_type and c_ir_emit_parameter keep callable values
 // separate from the declared qualification of parameter objects.
 // c_ir_windows_va_start_cursor_place bridges an addressed Windows CRT cursor
@@ -3335,6 +3338,29 @@ struct CIrGroupFactsEntry
     u8 reserved[3];
 };
 
+// One gap of the body's token prefix table (c_ir_token_prefix_build): at body
+// offset o, how many body tokens before o are of each class the expression
+// core's probes look for, and the innermost delimiter group open at o. A range
+// [start, end) holds a class exactly when the two gaps' counts differ, and on a
+// body whose delimiters nest properly it is balanced exactly when the two gaps
+// sit in the same group.
+typedef struct CIrTokenPrefix CIrTokenPrefix;
+struct CIrTokenPrefix
+{
+    // `?`.
+    u32 questions;
+    // `?`, `&&`, `||` and the assignment operators: every group the control
+    // prepass prepares holds one of them.
+    u32 controls;
+    // `(`: every call the call prepass discovers is a token followed by one.
+    u32 parentheses;
+    // `++` and `--`.
+    u32 updates;
+    // Body offset plus one of the innermost open `(`, `[` or `{`; 0 at body
+    // level.
+    u32 group;
+};
+
 typedef struct CIrLowerFrame CIrLowerFrame;
 
 typedef struct CIrLowerMachine CIrLowerMachine;
@@ -3658,12 +3684,14 @@ struct CIntegerIrBuilder
     CIrGroupFactsEntry* group_facts_stack;
     bool group_facts_exact;
     bool group_facts_built;
-    // question_prefix[o]: how many body tokens before offset o spell `?`
-    // (body_token_count + 1 entries), filled by c_ir_question_prefix_build
-    // the first time c_ir_range_may_hold_question asks. A null pointer (any
-    // builder without a body) answers every range by the scan.
-    u32* question_prefix;
-    bool question_prefix_built;
+    // token_prefix[o]: the body's token class counts and enclosing group at
+    // offset o (body_token_count + 1 entries), filled by
+    // c_ir_token_prefix_build the first time a range probe asks
+    // (c_ir_range_may_hold_question, c_ir_range_may_prepare_control,
+    // c_ir_range_may_prepare_calls, c_ir_range_may_hold_update). A null
+    // pointer (any builder without a body) answers every range by the scan.
+    CIrTokenPrefix* token_prefix;
+    bool token_prefix_built;
     // One past each body `if` statement's whole else-chain, plus one, indexed
     // by the offset of its `if` token; 0 is unmeasured. c_ir_statement_end
     // owns it, files every `if` its chain walk completes, and clears the array
@@ -4700,6 +4728,165 @@ BUSTER_C_INTERNAL const u8 c_ir_lazy_scan_classes[C_PUNCTUATOR_COUNT] = {
     [C_PUNCTUATOR_PIPE_PIPE] = C_IR_LAZY_SCAN_SHORT_CIRCUIT_OR,
     [C_PUNCTUATOR_AMPERSAND_AMPERSAND] = C_IR_LAZY_SCAN_SHORT_CIRCUIT_AND,
 };
+
+// The classes CIrTokenPrefix counts, by punctuator id. Each is the test the
+// scan it answers for applies to one token: c_token_is_punctuator for `?`,
+// `(`, `++` and `--`, c_ir_assignment_operator and the control operators of
+// c_ir_has_control_operator_anywhere for the control class, and the
+// punctuator ids c_ir_build_delimiter_index pairs for the groups.
+typedef enum CIrTokenPrefixClass
+{
+    C_IR_TOKEN_PREFIX_QUESTION = 1,
+    C_IR_TOKEN_PREFIX_CONTROL = 2,
+    C_IR_TOKEN_PREFIX_PARENTHESIS = 4,
+    C_IR_TOKEN_PREFIX_UPDATE = 8,
+    C_IR_TOKEN_PREFIX_OPEN = 16,
+    C_IR_TOKEN_PREFIX_CLOSE = 32,
+} CIrTokenPrefixClass;
+
+BUSTER_C_INTERNAL const u8 c_ir_token_prefix_classes[C_PUNCTUATOR_COUNT] = {
+    [C_PUNCTUATOR_QUESTION] = C_IR_TOKEN_PREFIX_QUESTION | C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_AMPERSAND_AMPERSAND] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_PIPE_PIPE] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_STAR_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_SLASH_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_PERCENT_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_PLUS_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_MINUS_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_SHIFT_LEFT_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_SHIFT_RIGHT_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_AMPERSAND_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_CARET_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_PIPE_ASSIGN] = C_IR_TOKEN_PREFIX_CONTROL,
+    [C_PUNCTUATOR_LEFT_PARENTHESIS] = C_IR_TOKEN_PREFIX_PARENTHESIS | C_IR_TOKEN_PREFIX_OPEN,
+    [C_PUNCTUATOR_LEFT_BRACKET] = C_IR_TOKEN_PREFIX_OPEN,
+    [C_PUNCTUATOR_LEFT_BRACE] = C_IR_TOKEN_PREFIX_OPEN,
+    [C_PUNCTUATOR_RIGHT_PARENTHESIS] = C_IR_TOKEN_PREFIX_CLOSE,
+    [C_PUNCTUATOR_RIGHT_BRACKET] = C_IR_TOKEN_PREFIX_CLOSE,
+    [C_PUNCTUATOR_RIGHT_BRACE] = C_IR_TOKEN_PREFIX_CLOSE,
+    [C_PUNCTUATOR_PLUS_PLUS] = C_IR_TOKEN_PREFIX_UPDATE,
+    [C_PUNCTUATOR_MINUS_MINUS] = C_IR_TOKEN_PREFIX_UPDATE,
+};
+
+BUSTER_C_INTERNAL bool c_ir_assignment_operator(CToken token);
+
+// Fill the body's token prefix table in one pass. A close returns to the group
+// its open sat in, which is the group recorded at the open's own gap, so the
+// table is its own group stack. On a body whose delimiters do not nest
+// properly the groups are meaningless, and c_ir_range_balanced never reads
+// them there.
+BUSTER_C_INTERNAL void c_ir_token_prefix_build(CIntegerIrBuilder* builder)
+{
+    CIrTokenPrefix* prefix = builder->token_prefix;
+    CToken const* tokens = builder->preprocess.tokens + builder->body_token_start;
+    CIrTokenPrefix running = {0};
+    for (u32 offset = 0; offset < builder->body_token_count; offset += 1)
+    {
+        prefix[offset] = running;
+        u32 classes = c_ir_token_prefix_classes[tokens[offset].punctuator];
+#if BUSTER_REFERENCE_CHECKS
+        CToken token = tokens[offset];
+        BUSTER_CHECK(((classes & C_IR_TOKEN_PREFIX_CONTROL) != 0) ==
+                     (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION) || c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) ||
+                      c_token_is_punctuator(&token, C_PUNCTUATOR_PIPE_PIPE) || c_ir_assignment_operator(token)));
+#endif
+        running.questions += (classes & C_IR_TOKEN_PREFIX_QUESTION) != 0;
+        running.controls += (classes & C_IR_TOKEN_PREFIX_CONTROL) != 0;
+        running.parentheses += (classes & C_IR_TOKEN_PREFIX_PARENTHESIS) != 0;
+        running.updates += (classes & C_IR_TOKEN_PREFIX_UPDATE) != 0;
+        if (classes & C_IR_TOKEN_PREFIX_OPEN)
+        {
+            running.group = offset + 1;
+        }
+        else if ((classes & C_IR_TOKEN_PREFIX_CLOSE) && running.group)
+        {
+            running.group = prefix[running.group - 1].group;
+        }
+    }
+    prefix[builder->body_token_count] = running;
+    builder->token_prefix_built = true;
+}
+
+// The table entry at the gap before `start`, or null when the table cannot
+// answer for [start, end): a builder without a body, or a range outside it.
+// The entry at the gap before `end` sits end - start entries later.
+BUSTER_C_INTERNAL BUSTER_INLINE CIrTokenPrefix* c_ir_token_prefix_at(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    CIrTokenPrefix* result = 0;
+    u32 body_start = builder->body_token_start;
+    if (builder->token_prefix && start >= body_start && end >= start && end - body_start <= builder->body_token_count)
+    {
+        if (!builder->token_prefix_built)
+        {
+            c_ir_token_prefix_build(builder);
+        }
+        result = builder->token_prefix + (start - body_start);
+    }
+    return result;
+}
+
+// Whether every `(`, `[` and `{` in [start, end) is known to close inside it.
+// On a body whose delimiters nest properly, two gaps in the same innermost
+// group bound a range that never leaves that group, so each group opened in
+// between closes before the range ends. Any other range may not.
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_range_balanced(CIntegerIrBuilder* builder, CIrTokenPrefix* first, u32 length)
+{
+    return builder->group_facts_exact && first[0].group == first[length].group;
+}
+
+// Whether c_ir_prepare_control_expressions_step over [start, end) can do more
+// than succeed having prepared nothing. Every group it prepares holds `?`,
+// `&&`, `||` or an assignment operator inside the range; it fails only on a
+// `(`, `[`, `_Generic` or `__builtin_choose_expr` group that does not close in
+// the range, or when the lowering machine has no frame left for it. A balanced
+// range with none of those tokens, with a frame to spare, answers no.
+BUSTER_C_INTERNAL bool c_ir_range_may_prepare_control(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool result = true;
+    CIrLowerMachine* machine = &builder->lower_machine;
+    CIrTokenPrefix* first = !machine->failed && machine->frame_count < machine->frame_capacity ? c_ir_token_prefix_at(builder, start, end) : 0;
+    if (first)
+    {
+        result = first[end - start].controls != first[0].controls || !c_ir_range_balanced(builder, first, end - start);
+    }
+    return result;
+}
+
+// Whether c_ir_prepare_calls_step over [start, end) can do more than succeed
+// having prepared nothing. A nested run, under preparing_calls, finishes at
+// once. Otherwise c_ir_prepare_calls_discover finds a call only at a token
+// followed by `(`, so at a `(` in [start + 1, end), and it fails only there or
+// when its scratch reservation does not fit; the frame push fails only when
+// the machine has no frame left.
+BUSTER_C_INTERNAL bool c_ir_range_may_prepare_calls(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool result = true;
+    CIrLowerMachine* machine = &builder->lower_machine;
+    if (!machine->failed && machine->frame_count < machine->frame_capacity)
+    {
+        if (builder->preparing_calls)
+        {
+            result = false;
+        }
+        else
+        {
+            CIrTokenPrefix* first = c_ir_token_prefix_at(builder, start, end);
+            u64 position = builder->temporary_arena->position;
+            result = !first || (end - start > 1 && first[end - start].parentheses != first[1].parentheses) ||
+                     !c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &position, sizeof(u32), (u64)end - start + 1,
+                                                     BUSTER_ALIGN_OF(u32));
+        }
+    }
+    return result;
+}
+
+// Whether [start, end) may hold a `++` or `--`.
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_range_may_hold_update(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    CIrTokenPrefix* first = c_ir_token_prefix_at(builder, start, end);
+    return !first || first[end - start].updates != first[0].updates;
+}
 
 // An operand that only runs when a branch is taken -- either arm of a
 // conditional, the right operand of && or ||, the body of a GNU statement
@@ -35784,22 +35971,32 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
             return;
         }
         frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_CONTROL;
-        // The child's kind is known here, so run its first step now instead
-        // of returning to the dispatch loop: the prepare pass completes
-        // without suspending in the common case, and the loop's indirect
-        // dispatch of the child and of this frame's resume both disappear.
-        // A suspension leaves the child's continuation on the machine stack
-        // and resumes through the loop unchanged.
-        u32 mark = machine->frame_count;
-        if (!c_ir_prepare_control_expressions_frame_push(builder, preparation_start, end))
+        // A range the prepass can only walk to an empty success skips it, and
+        // the stage below reads the success it would have finished with. On
+        // the self-host about 94% of the ranges hold no control token (#3445).
+        if (!c_ir_range_may_prepare_control(builder, preparation_start, end))
         {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            machine->child_result = (CIrLowerFrameResult){.value = IR_VALUE_ID_INVALID, .index = UINT32_MAX, .success = true};
         }
-        c_ir_prepare_control_expressions_step(builder, machine->frames + machine->frame_count - 1);
-        if (machine->frame_count != mark || machine->failed)
+        else
         {
-            return;
+            // The child's kind is known here, so run its first step now
+            // instead of returning to the dispatch loop: the prepare pass
+            // completes without suspending in the common case, and the loop's
+            // indirect dispatch of the child and of this frame's resume both
+            // disappear. A suspension leaves the child's continuation on the
+            // machine stack and resumes through the loop unchanged.
+            u32 mark = machine->frame_count;
+            if (!c_ir_prepare_control_expressions_frame_push(builder, preparation_start, end))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            c_ir_prepare_control_expressions_step(builder, machine->frames + machine->frame_count - 1);
+            if (machine->frame_count != mark || machine->failed)
+            {
+                return;
+            }
         }
     }
     if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_CONTROL)
@@ -35814,16 +36011,26 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
             return;
         }
         frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_CALLS;
-        u32 mark = machine->frame_count;
-        if (!c_ir_prepare_calls_frame_push(builder, preparation_start, end))
+        // The same for the call prepass: about 72% of the self-host's ranges
+        // hold no call, and a nested range under preparing_calls has nothing
+        // to discover at all.
+        if (!c_ir_range_may_prepare_calls(builder, preparation_start, end))
         {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            machine->child_result = (CIrLowerFrameResult){.value = IR_VALUE_ID_INVALID, .index = UINT32_MAX, .success = true};
         }
-        c_ir_prepare_calls_step(builder, machine->frames + machine->frame_count - 1);
-        if (machine->frame_count != mark || machine->failed)
+        else
         {
-            return;
+            u32 mark = machine->frame_count;
+            if (!c_ir_prepare_calls_frame_push(builder, preparation_start, end))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                return;
+            }
+            c_ir_prepare_calls_step(builder, machine->frames + machine->frame_count - 1);
+            if (machine->frame_count != mark || machine->failed)
+            {
+                return;
+            }
         }
     }
     BUSTER_CHECK(frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_CALLS);
@@ -36109,7 +36316,11 @@ c_ir_expression_core_loop:
             index += 1;
             continue;
         }
-        if (expect_operand)
+        // A postfix update ends the unary expression at a `++` or `--` past
+        // its first token. Without one in the rest of the range the probe's
+        // answer is never used, so it is not measured: about 99.9% of the
+        // self-host's operands hold none (#3445).
+        if (expect_operand && c_ir_range_may_hold_update(builder, index + 1, end))
         {
             u32 operand_end = c_ir_unary_expression_end(builder, index, end);
             bool postfix = operand_end > index + 1 && (c_token_is_punctuator(&builder->preprocess.tokens[operand_end - 1], C_PUNCTUATOR_PLUS_PLUS) ||
@@ -37459,38 +37670,14 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u3
 BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
                                                     u32* expression_end);
 
-// Count the body's `?` tokens once, as a prefix over body offsets. The test
-// is the scan's own (the punctuator field alone), so a range the count calls
-// empty is one the scan would find no `?` in.
-BUSTER_C_INTERNAL void c_ir_question_prefix_build(CIntegerIrBuilder* builder)
-{
-    u32* prefix = builder->question_prefix;
-    CToken const* tokens = builder->preprocess.tokens + builder->body_token_start;
-    u32 count = 0;
-    for (u32 offset = 0; offset < builder->body_token_count; offset += 1)
-    {
-        prefix[offset] = count;
-        count += tokens[offset].punctuator == C_PUNCTUATOR_QUESTION;
-    }
-    prefix[builder->body_token_count] = count;
-    builder->question_prefix_built = true;
-}
-
 // Whether [start, end) may hold a `?`. Only a range inside the body is
-// answered by the prefix count; any other range may.
+// answered by the token prefix table; any other range may. The table's test is
+// the scan's own (the punctuator field alone), so a range it calls empty is
+// one the scan would find no `?` in.
 BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_range_may_hold_question(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
-    bool result = true;
-    u32 body_start = builder->body_token_start;
-    if (builder->question_prefix && start >= body_start && end >= start && end - body_start <= builder->body_token_count)
-    {
-        if (!builder->question_prefix_built)
-        {
-            c_ir_question_prefix_build(builder);
-        }
-        result = builder->question_prefix[end - body_start] != builder->question_prefix[start - body_start];
-    }
-    return result;
+    CIrTokenPrefix* first = c_ir_token_prefix_at(builder, start, end);
+    return !first || first[end - start].questions != first[0].questions;
 }
 
 // Whether [start, end) is a `?:` at the root, and its tokens: from the syntax
@@ -64797,7 +64984,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u8), body_array_capacity, BUSTER_ALIGN_OF(u8)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrGroupFactsEntry), prepared_control_expression_capacity + 1,
                                           BUSTER_ALIGN_OF(CIrGroupFactsEntry)) &&
-            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity + 1, BUSTER_ALIGN_OF(u32)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrTokenPrefix), body_array_capacity + 1,
+                                          BUSTER_ALIGN_OF(CIrTokenPrefix)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32));
 #if BUSTER_REFERENCE_CHECKS
         u64 carve_end = position;
@@ -64979,7 +65167,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                  prepared_control_expression_capacity ? prepared_control_expression_capacity : 1);
         builder.group_facts = arena_allocate(lowering_temporary.arena, u8, body_array_capacity);
         builder.group_facts_stack = arena_allocate(lowering_temporary.arena, CIrGroupFactsEntry, prepared_control_expression_capacity + 1);
-        builder.question_prefix = arena_allocate(lowering_temporary.arena, u32, body_array_capacity + 1);
+        builder.token_prefix = arena_allocate(lowering_temporary.arena, CIrTokenPrefix, body_array_capacity + 1);
         builder.statement_ends_plus_one = arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
 #if BUSTER_REFERENCE_CHECKS
         // The carve above must end exactly where the preflight's carve list

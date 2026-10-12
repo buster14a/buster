@@ -42478,6 +42478,37 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_conditional_operand_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // The expression core skips a prepass or a postfix probe that the body's
+    // token prefix table proves empty; a wrong skip drops or repeats a side
+    // effect, so run it.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_expression_core_prepass_skip_path"), false);
+    String8 c_prepass_skip_path = buster_test_temporary_path(arguments->arena, S8("buster-c-expression-core-prepass-skip"), S8(""));
+    String8 c_prepass_skip_command_line[] = {
+        S8("-o"),
+        c_prepass_skip_path,
+        S8("src/buster/tests/compiler/driver/fixtures/expression_core_prepass_skip.c"),
+    };
+    CompilerDriverResult c_prepass_skip = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_prepass_skip_command_line)));
+    BUSTER_TEST(arguments, c_prepass_skip.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_prepass_skip.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_prepass_skip_arguments[] = {
+            c_prepass_skip_path,
+        };
+        ProcessSpawnResult c_prepass_skip_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_prepass_skip_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true, .search_path = true,
+                             });
+        BUSTER_TEST(arguments, c_prepass_skip_spawn.handle != 0);
+        if (c_prepass_skip_spawn.handle)
+        {
+            ProcessWaitResult c_prepass_skip_wait = os_process_wait_sync(arguments->arena, c_prepass_skip_spawn);
+            BUSTER_TEST(arguments, c_prepass_skip_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // The prepared-control-expression lookups answer from token-indexed
     // tables; a wrong answer repeats or drops a side effect, so run it.
     buster_test_arena_end(arguments, driver_fixture, true);
