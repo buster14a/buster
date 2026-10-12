@@ -167,3 +167,5 @@ request: issue #2761 first 9700X frontend-selector run after #3661 landed; reque
 profile: frontend-selector-v1
 request: issue #2761 first 9700X production-profile run after lld was installed on benchpress (supersedes #3703, whose attempt 1 failed on missing ld.lld); request-only head over main afe67cbeb; fresh compiler-compare-v1 plus production-profile-v1 leg (report-only, Release vs PGO+LTO)
 profile: production-profile-v1
+request: issue #2761 first 9700X wild-linker run after #3689 landed; request-only head over main a0857f47c; fresh compiler-compare-v1 plus wild-linker-v1 leg (report-only, host Wild vs mold on the head's own ide objects)
+profile: wild-linker-v1
