@@ -2205,6 +2205,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          specifiers.type_name_fallbacks, specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_INPUT],
                          specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_SPECIFIERS], specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_STORAGE],
                          specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_PRIMITIVE], specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_TYPEDEF]);
+            // Counts: the member specifier runs read from the tree inside tag definitions, and the runs left to the type machine, by reason.
+            string_print(S8("C_AST_MEMBERS primitive_answers={u64} typedef_answers={u64} fallbacks={u64} input={u64} specifiers={u64} storage={u64} "
+                            "primitive={u64} typedef={u64}\n"),
+                         specifiers.member_primitive_answers, specifiers.member_typedef_answers, specifiers.member_fallbacks,
+                         specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_INPUT], specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_SPECIFIERS],
+                         specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_STORAGE], specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_PRIMITIVE],
+                         specifiers.member_fallback_counts[C_AST_SPECIFIER_FALLBACK_TYPEDEF]);
             // Counts: lowering's root-conditional queries inside indexed bodies, by how each ended.
             string_print(S8("C_AST_LOWER bodies={u64} conditionals={u64} steps={u64} answers={u64} negatives={u64} fallbacks={u64}\n"),
                          tree.lower.bodies, tree.lower.conditionals, tree.lower.steps, tree.lower.answers, tree.lower.negatives, tree.lower.fallbacks);

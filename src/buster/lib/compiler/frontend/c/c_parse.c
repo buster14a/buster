@@ -118,6 +118,9 @@
 //   c_parse_declaration_specifiers_type,          a declaration's plain
 //   c_parse_tree_specifiers_type                  specifier run read from the
 //                                                 syntax tree's DECL_SPECIFIERS
+//   c_parse_member_specifiers_type                a member's plain run, read
+//                                                 in its aggregate segment
+//                                                 frame as a declaration's
 //   c_parse_tree_type_name_type                   a type name's run: skipped
 //                                                 where no list begins, else
 //                                                 read as a declaration's
@@ -16553,6 +16556,9 @@ BUSTER_C_INTERNAL bool c_parse_forward_type_query_bit_field_width_diagnostics(Ar
     return invalid_width;
 }
 
+BUSTER_C_INTERNAL bool c_parse_member_specifiers_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                      u32 start, u32 end);
+
 BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
@@ -16650,6 +16656,12 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         }
         frame->first = preprocess.tokens[type_start];
         frame->stage = C_TYPE_PARSE_STAGE_FALLBACK;
+        // Under -fc-ast-pilot a plain run is read from the tree instead, and
+        // this frame resumes at the stage below with the answer.
+        if (machine->ast_specifier_starts && !c_parse_member_specifiers_type(machine, result, preprocess, frame->scope, type_start, frame->end))
+        {
+            return;
+        }
         if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                   .result = result,
                                                   .preprocess = frame->preprocess,
@@ -19290,15 +19302,19 @@ BUSTER_GLOBAL_LOCAL u32 c_parse_specifier_node(CTypeParseMachine* machine, u32 t
 // The specifier run [start, end) read from its DECL_SPECIFIERS node, as the
 // section comment above describes: C_AST_SPECIFIER_FALLBACK_NONE with the
 // machine's answer in *type and *declarator_start, or the reason the machine
-// must read it, with nothing appended.
+// must read it, with nothing appended. A root run (`member` false) is read
+// only with no machine frame open, in place of
+// c_parse_scalar_type_in_scope_attempt; a member's run is read inside its
+// aggregate segment frame, in place of the scalar frame the segment pushes
+// (c_parse_member_specifiers_type), which settles no identity answers.
 BUSTER_GLOBAL_LOCAL CAstSpecifierFallback c_parse_tree_specifiers_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
-                                                                      CScopeId scope, u32 start, u32 end, CTypeId* type, u32* declarator_start,
-                                                                      bool* named)
+                                                                      CScopeId scope, u32 start, u32 end, bool member, CTypeId* type,
+                                                                      u32* declarator_start, bool* named)
 {
     enum {TYPEDEF = 1, EXTERN = 2, STATIC = 4, REGISTER = 8, THREAD = 16};
     CAst const* ast = machine->syntax_tree;
-    u32 node = machine->frame_count == 0 && machine->constant_evaluation_mode != C_CONSTANT_EVALUATION_TYPE ? c_parse_specifier_node(machine, start)
-                                                                                                             : C_AST_NODE_INVALID;
+    bool readable = (member || machine->frame_count == 0) && machine->constant_evaluation_mode != C_CONSTANT_EVALUATION_TYPE;
+    u32 node = readable ? c_parse_specifier_node(machine, start) : C_AST_NODE_INVALID;
     u32 first = node != C_AST_NODE_INVALID ? c_ast_subtree_begin(ast, node) : 0;
     u32 after = start + (node - first);
     CAstSpecifierFallback reason = node == C_AST_NODE_INVALID || first == node || after > end ? C_AST_SPECIFIER_FALLBACK_INPUT
@@ -19433,9 +19449,13 @@ BUSTER_GLOBAL_LOCAL CAstSpecifierFallback c_parse_tree_specifiers_type(CTypePars
     if (!reason)
     {
         // c_parse_scalar_type_in_scope_attempt's order: settle the identity
-        // answers its range holds, then build the run's one row.
-        c_parse_type_identity_prepare(machine, machine->scratch_arena, preprocess, result, scope, start, end);
-        machine->mutation_type_limit = result->type_count;
+        // answers its range holds, then build the run's one row. The scalar
+        // frame a member's run replaces builds the row alone.
+        if (!member)
+        {
+            c_parse_type_identity_prepare(machine, machine->scratch_arena, preprocess, result, scope, start, end);
+            machine->mutation_type_limit = result->type_count;
+        }
         if (primitive)
         {
             *type = c_parse_intern_type(result, spelling.type);
@@ -19464,7 +19484,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_declaration_specifiers_type(CTypeParseMachine*
     if (machine->ast_specifier_starts)
     {
         bool named = false;
-        reason = c_parse_tree_specifiers_type(machine, result, preprocess, scope, start, end, &type, declarator_start, &named);
+        reason = c_parse_tree_specifiers_type(machine, result, preprocess, scope, start, end, false, &type, declarator_start, &named);
         CAstSpecifierStatistics* statistics = machine->ast_specifier_statistics;
         if (statistics)
         {
@@ -19484,6 +19504,107 @@ BUSTER_C_INTERNAL CTypeId c_parse_declaration_specifiers_type(CTypeParseMachine*
         type = c_parse_scalar_type_in_scope_context(machine, result, preprocess, scope, start, end, tag_only_declaration, declarator_start);
     }
     return type;
+}
+
+// ---- member specifier runs read from the syntax tree ---------------------------
+//
+// Under -fc-ast-pilot each aggregate segment frame (one member declaration in
+// a tag definition's body) has its specifier run read from the member's
+// DECL_SPECIFIERS node instead of pushing the scalar frame, and its core
+// frame, that would read it (GitHub #3102). The read is the declaration
+// read's (c_parse_tree_specifiers_type), with the same plain lists, rows and
+// fallback reasons; the frame's scope is the tag's, and nothing else
+// changes. The scalar frame settles no identity answers, so the read settles
+// none either, and the answer is left where the scalar frame's completion
+// leaves it (CTypeParseMachine.result_*) for the segment frame's next stage.
+// Every other run gets the scalar frame, counted under its
+// CAstSpecifierFallback. Verify mode (c_test_ast_members_verify_set) has the
+// scalar frame read every run the tree reads first, rolls it back and
+// compares the two answers.
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_parse_member_verify;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestAstMemberVerify c_parse_member_verified;
+
+void c_test_ast_members_verify_set(bool enabled)
+{
+    c_parse_member_verify = enabled;
+}
+
+CTestAstMemberVerify c_test_ast_members_verify_take(void)
+{
+    CTestAstMemberVerify taken = c_parse_member_verified;
+    c_parse_member_verified = (CTestAstMemberVerify){0};
+    return taken;
+}
+#endif
+
+// The member specifier run [start, end) settled from the tree, as the section
+// comment above describes: false with the answer in the machine's result,
+// or true when the segment frame must push the scalar frame.
+BUSTER_C_INTERNAL bool c_parse_member_specifiers_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                      u32 start, u32 end)
+{
+#if BUSTER_INCLUDE_TESTS
+    bool machine_valid = false;
+    CTypeId machine_type = C_TYPE_ID_INVALID;
+    CType machine_row = {0};
+    u32 machine_index = 0;
+    if (c_parse_member_verify)
+    {
+        CParseResult checkpoint = *result;
+        u32 mutation_mark = machine->mutation_count;
+        u32 frame_start = machine->frame_count;
+        machine->result_valid = false;
+        if (c_type_parse_frame_push(machine, (CTypeParseFrame){
+                                                 .result = result,
+                                                 .preprocess = &preprocess,
+                                                 .scope = scope,
+                                                 .start = start,
+                                                 .end = end,
+                                                 .mutation_mark = mutation_mark,
+                                                 .kind = C_TYPE_PARSE_FRAME_SCALAR,
+                                             }))
+        {
+            c_type_parse_machine_run(machine, frame_start);
+        }
+        machine_valid = machine->result_valid && !machine->failed && machine->result_type.value < result->type_count;
+        machine_type = machine->result_type;
+        machine_row = machine_valid ? result->types[machine_type.value] : (CType){0};
+        machine_index = machine->result_index;
+        c_type_parse_rollback(machine, result, &checkpoint, mutation_mark);
+    }
+#endif
+    bool named = false;
+    CTypeId type = C_TYPE_ID_INVALID;
+    u32 declarator_start = start;
+    CAstSpecifierFallback reason = c_parse_tree_specifiers_type(machine, result, preprocess, scope, start, end, true, &type, &declarator_start, &named);
+    if (!reason)
+    {
+        machine->result_nonplace_projection = false;
+    }
+#if BUSTER_INCLUDE_TESTS
+    if (c_parse_member_verify && !reason)
+    {
+        CType const* row = &result->types[type.value];
+        bool same = machine_valid && machine_type.value == type.value && machine_index == declarator_start && machine_row.kind == row->kind &&
+                    machine_row.element_type.value == row->element_type.value && machine_row.is_const == row->is_const &&
+                    machine_row.is_volatile == row->is_volatile && machine_row.is_restrict == row->is_restrict &&
+                    machine_row.is_atomic == row->is_atomic && machine_row.has_unqualified_type == row->has_unqualified_type &&
+                    machine_row.unqualified_type.value == row->unqualified_type.value;
+        c_parse_member_verified.compared += 1;
+        c_parse_member_verified.mismatches += !same;
+    }
+#endif
+    CAstSpecifierStatistics* statistics = machine->ast_specifier_statistics;
+    if (statistics)
+    {
+        statistics->member_primitive_answers += !reason && !named;
+        statistics->member_typedef_answers += !reason && named;
+        statistics->member_fallbacks += reason != C_AST_SPECIFIER_FALLBACK_NONE;
+        statistics->member_fallback_counts[reason] += reason != C_AST_SPECIFIER_FALLBACK_NONE;
+    }
+    return reason != C_AST_SPECIFIER_FALLBACK_NONE;
 }
 
 // ---- type names read from the syntax tree ------------------------------------
@@ -19571,7 +19692,7 @@ BUSTER_GLOBAL_LOCAL bool c_parse_tree_type_name_type(CTypeParseMachine* machine,
     else
     {
         bool named = false;
-        CAstSpecifierFallback reason = c_parse_tree_specifiers_type(machine, result, preprocess, scope, start, end, type, declarator_start, &named);
+        CAstSpecifierFallback reason = c_parse_tree_specifiers_type(machine, result, preprocess, scope, start, end, false, type, declarator_start, &named);
         run_machine = reason != C_AST_SPECIFIER_FALLBACK_NONE;
         if (statistics)
         {

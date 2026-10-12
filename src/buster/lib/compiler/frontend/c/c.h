@@ -1603,6 +1603,14 @@ struct CAstSpecifierStatistics
     u64 type_name_typedef_answers;
     u64 type_name_fallbacks;
     u64 type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_COUNT];
+    // Member specifier runs (c_parse_member_specifiers_type: the run each
+    // aggregate segment frame types, inside a tag definition's body): the
+    // runs read from the tree by base, and the runs left to the machine's
+    // scalar frame by reason.
+    u64 member_primitive_answers;
+    u64 member_typedef_answers;
+    u64 member_fallbacks;
+    u64 member_fallback_counts[C_AST_SPECIFIER_FALLBACK_COUNT];
     // The last fallback: its reason, and the run's first token.
     CAstSpecifierFallback reason;
     u32 fallback_token;
