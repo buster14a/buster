@@ -36905,6 +36905,53 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_argument_conversion_diagnostics(U
     return result;
 }
 
+// A file-scope list whose bound inference walked it is checked by replaying
+// the element checks that walk logged, when its path depended on nothing that
+// can change before validation. The first failing element must still be the
+// diagnostic, in a flat list and in braced members; a designated list walks
+// again and keeps its diagnostic; the valid controls stay accepted (#3102).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inferred_initializer_element_checks(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    struct
+    {
+        String8 source;
+        String8 message;
+    } expected[] = {
+        {S8("int a[] = {1, 2, \"x\"};\n"), S8("cannot convert from 'char *' to 'int'")},
+        {S8("int a[] = {1, \"x\", 2.0 + \"y\"};\n"), S8("cannot convert from 'char *' to 'int'")},
+        {S8("struct P { int x; char *y; };\nstruct P p[] = {{1, \"a\"}, {2, 3.5}};\n"),
+         S8("cannot convert between a pointer and a floating-point type")},
+        {S8("int b[] = {1, 2, [5] = \"x\"};\n"), S8("cannot convert from 'char *' to 'int'")},
+        {S8("struct P { int x; char *y; };\nstruct P q[] = {{1, \"a\"}, {2, 0}};\nint c[] = {1, 2, 3,};\nchar s[][4] = {\"ab\", \"cd\"};\n"
+            "int d[][2] = {{1, 2}, {3, 4}};\nint e[sizeof(c) + sizeof(d) == 28 ? 1 : -1];\n"),
+         S8("")},
+    };
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected); expected_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, expected[expected_index].source,
+                                                (CPreprocessOptions){
+                                                    .target = target_native,
+                                                    .data_layout = target_data_layout(target_native),
+                                                    .dialect = C_PREPROCESS_DIALECT_GNU17,
+                                                });
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+        BUSTER_TEST(arguments, analysis.diagnostic_count == (expected[expected_index].message.length != 0));
+        if (analysis.diagnostic_count == 1 && expected[expected_index].message.length)
+        {
+            BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, expected[expected_index].message);
+        }
+        c_test_scratch_end(temporary);
+    }
+
+    return result;
+}
+
 // A simple or compound assignment's conversion check reuses the type of its
 // value's checked typing when that typing appended no type row, and types the
 // value again otherwise (a cast parses its type name as a new row). A
@@ -64205,6 +64252,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_parse);
     C_TEST_FIXTURE(arguments, c_test_array_bound_object_layout);
     C_TEST_FIXTURE(arguments, c_test_assignment_conversion_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_inferred_initializer_element_checks);
     C_TEST_FIXTURE(arguments, c_test_atomic_compound_assignment_runtime);
     C_TEST_FIXTURE(arguments, c_test_atomic_compound_result);
     C_TEST_FIXTURE(arguments, c_test_atomic_float_compare_exchange);
