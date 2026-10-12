@@ -8659,6 +8659,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     for (u64 index = 0; index < result.fast.decline_count; index += 1)
     {
         result.fast.declines[index].source = invocation.input_paths[0];
+        // Declaration names can borrow preprocessing's private spelling arena,
+        // released at end; even the single-input result must own these bytes.
+        result.fast.declines[index].function_name = string_duplicate_arena(arena, result.fast.declines[index].function_name, false);
     }
     result.inlining = module->inlining;
     if (validation.error == IR_VALIDATION_INLINE_REQUIRED)

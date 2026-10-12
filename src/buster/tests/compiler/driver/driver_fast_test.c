@@ -1108,6 +1108,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast_decline_publication
             IrFastDecline record = compiled.fast.declines[0];
             BUSTER_TEST(arguments, string_equal(record.source, input) && string_equal(record.function_name, S8("declined")) &&
                                    record.validation.error == IR_VALIDATION_OPERATION);
+            // Reading a released spelling arena can appear to work until the
+            // next TU reuses it. Prove ownership rather than relying on reuse.
+            uintptr_t arena_start = (uintptr_t)arguments->arena;
+            uintptr_t name_address = (uintptr_t)record.function_name.pointer;
+            BUSTER_TEST(arguments, name_address >= arena_start && name_address - arena_start < arguments->arena->reserved_size);
         }
         os_file_delete(input);
     }
