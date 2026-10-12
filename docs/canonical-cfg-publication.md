@@ -19,8 +19,11 @@ building one instruction permutation, then publishes these immutable slices:
 - Predecessor slices contain edge indices sorted by source block ID.
 - Parameters are grouped by block; argument `i` on an edge supplies parameter
   `i` of its destination.
-- Variable operands, targets and immediates occupy shared pools. Already
-  contiguous pools are reused, including shared promotion's operand pool.
+- No two rows' operand, target or immediate slices alias. Slices that ascend
+  without overlap in row order stay where construction put them, gaps
+  included. Only a kind whose ascent fails, such as one overlapping or
+  descending slice, is copied into fresh dense storage. No consumer reads the
+  slices as one pool, so publication publishes no pool pointer.
 
 Repeated conditional/switch/computed-goto destinations collapse to one edge.
 Parameter-free destinations are included even if their builder omitted its
@@ -29,10 +32,11 @@ sorted predecessor slice without searching parameter incoming lists.
 Construction transposes ordered builder incoming columns once, with linear
 work in blocks, terminator targets, parameters and incoming values.
 
-When instruction order changes, `instruction_remap` is the one explicit map
-from prepublication IDs to published IDs. The row permutation is in place;
+When instruction order changes, publication builds one scratch map from
+prepublication IDs to published IDs. The row permutation is in place;
 canonical source rows move with it, value definitions are remapped, and sparse
-instruction extras are remapped and sorted again. Block, value, local, symbol
+instruction extras are remapped and sorted again. The map is not retained: no
+consumer reads prepublication IDs afterwards. Block, value, local, symbol
 and label IDs remain stable. Computed-goto address identity and relocation
 ownership therefore do not change. The declared entry remains independent of
 numeric block order, and backend layout still emits it first where required.
@@ -69,8 +73,7 @@ slices after finalization and preserves its construction path beforehand.
 
 `allocated_bytes` reports new persistent allocation performed by this
 publication, excluding reused pools, original builder storage, arena padding
-and temporary scratch. Pool counts and instruction-remap presence describe the
-additional retained data. The existing optional `CFG_*` counters describe
+and temporary scratch; it includes any slices copied to break aliasing. The existing optional `CFG_*` counters describe
 publication work; `CFG_COPY_SOURCES` counts actual machine copy translation.
 These counts are not compiler throughput results.
 

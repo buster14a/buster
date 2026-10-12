@@ -1234,7 +1234,10 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
      fall back to the host's default `ld`, which must report a GNU ld
      version. The check then states the substitution. Wild must report its
      own identity, `Wild <version> (compatible with GNU linkers)`, which is
-     what `Args::linker_identity` prints at wild `e9a9b0cb`. Each linker's
+     what `Args::linker_identity` prints at wild `e9a9b0cb`. `<version>` is
+     any form `wild/build.rs` writes: a release version, a merge-base hash,
+     `<release> <hash>-modified`, or `<release> non-git-build`, which is what
+     a distribution package such as the 9700X host's reports. Each linker's
      `command -v` path, resolved path, first `--version` line and SHA-256
      (before and after the leg) go into the receipt. A missing Wild, a
      missing comparator, a silent `--version`, or a `mold` that is not
@@ -1280,9 +1283,11 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    - an observed CPU other than the Ryzen 7 9700X, or a harness affinity
      other than CPUs 2-5;
    - a Wild whose `--version` is not Wild's own identity, a Wild output
-     whose `.comment` does not carry that same identity, or a comparator
-     output that does. Wild writes the identity into every executable it
-     links by default, so another linker installed as `wild` is refused
+     whose `.comment` does not carry that same identity as
+     `Linker: <identity>`, or a comparator output that carries it with or
+     without that prefix. Wild writes `Linker: <identity>` into every
+     executable it links by default, so another linker installed as `wild`
+     is refused
      even when it imitates the version line. `compiler_compare` reads each
      saved output's `.comment` itself, and only after checking that its
      hash is the one the harness recorded;
@@ -1303,8 +1308,9 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
      objects must come from `/usr` or `/lib`, and nothing else may come from
      the build root. The grammar (`WILD_ARGV_FLAGS`, `WILD_ARGV_OPERANDS`)
      admits only Clang's own flags, `-z`/`-m`/`-dynamic-linker`/`-o` with
-     admitted operands, `-L` system directories, plain `-l` names, and
-     object or archive operands. It refuses response files (`@file`, which
+     admitted operands, `-L` system directories, plain `-l` names, CMake's
+     `--dependency-file=CMakeFiles/ide.dir/<config>/link.d` for the cell's
+     own configuration, and object or archive operands. It refuses response files (`@file`, which
      Wild expands recursively), linker scripts, plugins and any other option
      that would read an input the manifest does not hash. Each relative
      operand, each manifest path and the build root must already be canonical,

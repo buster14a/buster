@@ -5377,8 +5377,9 @@ class FrontendSelectorTest(unittest.TestCase):
             self.assertTrue((root / "evidence" / "frontend_selector" / "ide_bench" / "ide-bench.json").is_file())
 
 WILD_PATH = "/usr/local/bin/wild"
-# Wild's own identity format (Args::linker_identity at wild e9a9b0cb): the positive control.
-WILD_VERSION = "Wild 0.10.0 (compatible with GNU linkers)"
+# Wild's own identity format (Args::linker_identity at wild e9a9b0cb): the positive control, in the
+# form the 9700X host's distribution Wild reports (run 38242826849).
+WILD_VERSION = "Wild 0.10.0 non-git-build (compatible with GNU linkers)"
 WILD_ROOT = "/work/wild-linker-source"
 
 
@@ -5414,7 +5415,8 @@ def wild_linker_evidence(head: str = "a" * 40, kind: str = "mold") -> tuple[dict
         tree, config = profile["cell_trees"][cell]
         directory = f"{WILD_ROOT}/{tree}"
         objects = [f"CMakeFiles/ide.dir/{config}/src/{name}.c.o" for name in ("ide", "os", "arena")]
-        argvs[cell] = (f'"{WILD_PATH}" "-z" "relro" "-pie" "-o" "{config}/ide" "/lib/x86_64-linux-gnu/Scrt1.o" ' +
+        argvs[cell] = (f'"{WILD_PATH}" "-z" "relro" "-pie" "-o" "{config}/ide" '
+                       f'"--dependency-file=CMakeFiles/ide.dir/{config}/link.d" "/lib/x86_64-linux-gnu/Scrt1.o" ' +
                        " ".join(f'"{name}"' for name in objects) + ' "-lm" "/lib/x86_64-linux-gnu/crtn.o"')
         manifests[cell] = "".join(f"{'3' * 64}  {directory}/{name}\n" for name in objects)
         wild = f"cd '{directory}' && {argvs[cell]} {common} {profile['wild']['policy']}"
@@ -5460,7 +5462,8 @@ def wild_linker_evidence(head: str = "a" * 40, kind: str = "mold") -> tuple[dict
         for linker in compiler_receipt.WILD_LINKER_LINKERS:
             bundle[f"output {cell} {linker}"] = ("9" if linker == "wild" else "6") * 64 + "\n"
             bundle[f"comment {cell} {linker}"] = "clang version 21.1.8\n" + (
-                WILD_VERSION + "\n" if linker == "wild" else "mold 2.42.1 (compatible with GNU ld)\n" if kind == "mold" else "")
+                "Linker: " + WILD_VERSION + "\n" if linker == "wild" else
+                "mold 2.42.1 (compatible with GNU ld)\n" if kind == "mold" else "")
     record = {"requested": True, "request_line": compiler_receipt.WILD_LINKER_REQUEST_LINE,
               "profile": copy.deepcopy(profile), "status": "complete", "errors": [], "build_exit": 0, "exit": 0,
               "linkers": copy.deepcopy(linkers), "identity": copy.deepcopy(identity),
@@ -5494,6 +5497,21 @@ class WildLinkerTest(unittest.TestCase):
         # Both bounds together stay inside the unchanged 90-minute compare-pull job with its ordinary comparison.
         self.assertLessEqual(compiler_compare.WILD_LINKER_BUILD_TIMEOUT_SECONDS +
                              compiler_compare.WILD_LINKER_HARNESS_TIMEOUT_SECONDS, 40 * 60)
+
+    def test_identity_accepts_every_version_form_wild_builds(self) -> None:
+        # wild/build.rs at e9a9b0cb: release tag, merge-base hash, modified checkout, no git. The
+        # 9700X host's distribution Wild reports the last form (run 38242826849).
+        merge_base = "e9a9b0cb6fd63a23cc7b93aafc931aadd5746be6"
+        for version in ("0.10.0", merge_base, f"0.10.0 {merge_base}-modified", "0.10.0 non-git-build"):
+            with self.subTest(version=version):
+                self.assertTrue(compiler_receipt.WILD_IDENTITY.fullmatch(
+                    f"Wild {version} (compatible with GNU linkers)"))
+        for line in ("Ubuntu LLD 18.1.3 (compatible with GNU linkers)", "Wild (compatible with GNU linkers)",
+                     "Wild 0.10.0 dirty (compatible with GNU linkers)", "Wild 0.10.0 non-git-build",
+                     f"Wild {merge_base[:12]} (compatible with GNU linkers)",
+                     "Wild 0.10.0 non-git-build (compatible with GNU linkers)\nmold 2.42.1"):
+            with self.subTest(line=line):
+                self.assertIsNone(compiler_receipt.WILD_IDENTITY.fullmatch(line))
 
     def test_schedule_replays_the_harness_generator(self) -> None:
         """The seeded xorshift order and bootstrap match the C harness's random_u32 (seed 2645)."""
@@ -5611,8 +5629,15 @@ class WildLinkerTest(unittest.TestCase):
             "Wild prefix only": (linker("wild", version="Wild version 0.10.0"), {}),
             "Wild output without identity": (dict(bundle, **{"comment ide-unity-release wild": "Linker: LLD 18\n"}), {}),
             "Wild output with another version": (dict(bundle, **{"comment ide-debug wild": (
-                "Wild 0.9.0 (compatible with GNU linkers)\n")}), {}),
-            "comparator output is Wild": (dict(bundle, **{"comment ide-debug comparator": WILD_VERSION + "\n"}), {}),
+                "Linker: Wild 0.9.0 (compatible with GNU linkers)\n")}), {}),
+            "Wild identity without Wild's prefix": (dict(bundle, **{"comment ide-debug wild": WILD_VERSION + "\n"}), {}),
+            "comparator output is Wild": (dict(bundle, **{"comment ide-debug comparator": "Linker: " + WILD_VERSION + "\n"}),
+                                          {}),
+            "comparator output is bare Wild": (dict(bundle, **{"comment ide-debug comparator": WILD_VERSION + "\n"}), {}),
+            "dependency file elsewhere": (text("argv ide-debug", lambda value: value.replace(
+                "CMakeFiles/ide.dir/Debug/link.d", "/tmp/link.d")), {}),
+            "dependency file of another config": (text("argv ide-debug", lambda value: value.replace(
+                "CMakeFiles/ide.dir/Debug/link.d", "CMakeFiles/ide.dir/Release/link.d")), {}),
             "missing comment": (without("comment ide-separate-release wild"), {}),
             "no build root": (identity(lambda value: value.pop("build_root")), {}),
             # #3689 review: the timed argv is bound to the hashed inputs and nothing else can run.

@@ -5936,6 +5936,54 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_x86_common_source_forms(UnitTes
     return result;
 }
 
+// GNU as 2.47 byte oracles for GCC's PAUSE spelling, its F3 aliases, and
+// neighbouring prefixes. Operands must not disappear during normalization.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_x86_rep_nop(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct RepNopCase
+    {
+        String8 att;
+        String8 intel;
+        u8 bytes[5];
+        u32 length;
+    } const cases[] = {
+        {S8("rep nop\n"), S8("rep nop\n"), {0xf3, 0x90}, 2},
+        {S8("repe nop\n"), S8("repe nop\n"), {0xf3, 0x90}, 2},
+        {S8("repz nop\n"), S8("repz nop\n"), {0xf3, 0x90}, 2},
+        {S8("REP NOP\n"), S8("REP NOP\n"), {0xf3, 0x90}, 2},
+        {S8("\trep\t nop  \n"), S8("\trep\t nop  \n"), {0xf3, 0x90}, 2},
+        {S8("nop\n"), S8("nop\n"), {0x90}, 1},
+        {S8("rep movsb\n"), S8("rep movsb\n"), {0xf3, 0xa4}, 2},
+        {S8("rep bsfq %rdi, %rbx\n"), S8("rep bsf rbx, rdi\n"), {0xf3, 0x48, 0x0f, 0xbc, 0xdf}, 5},
+        {S8("repne scasb\n"), S8("repne scasb\n"), {0xf2, 0xae}, 2},
+        {S8("rep nop %xmm0\n"), S8("rep nop xmm0\n"), {0}, 0},
+        {S8("rep nop $1\n"), S8("rep nop 1\n"), {0}, 0},
+        {S8("rep nop %eax, %ebx\n"), S8("rep nop eax, ebx\n"), {0}, 0},
+    };
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX, .cpu_model = CPU_MODEL_BASELINE};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        struct RepNopCase test = cases[index];
+        for (u32 dialect = 0; dialect < 2; dialect += 1)
+        {
+            String8 source = dialect ? test.intel : test.att;
+            AssemblyEncodeResult encoded = assembly_encode(arguments->arena, source,
+                (AssemblyEncodeOptions){.target = target, .syntax = dialect ? ASSEMBLY_SYNTAX_INTEL : ASSEMBLY_SYNTAX_ATT});
+            bool valid = test.length ? encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                assembly_test_bytes_equal(encoded.bytes, test.bytes, test.length) : encoded.diagnostic_count != 0 && encoded.bytes.length == 0;
+            BUSTER_TEST_RAW(arguments, valid, source);
+            String8 unit_source = string_format(arguments->arena,
+                dialect ? S8(".intel_syntax noprefix\n.text\n{S8}") : S8(".text\n{S8}"), source);
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, unit_source, (AssemblyEncodeOptions){.target = target});
+            bool unit_valid = test.length ? unit.diagnostic_count == 0 && unit.section_count != 0 &&
+                assembly_test_bytes_equal(unit.sections[0].data, test.bytes, test.length) : unit.diagnostic_count != 0;
+            BUSTER_TEST_RAW(arguments, unit_valid, source);
+        }
+    }
+    return result;
+}
+
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
@@ -5963,6 +6011,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_simd_source_forms);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_gpr_feature_generic_targets);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_x86_common_source_forms);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_x86_rep_nop);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_gnu_compatible_spellings);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_accumulator_alu_forms);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_compiler_directives);

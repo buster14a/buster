@@ -76,8 +76,21 @@ independent fallback for every retained memory owner.
 The current-value table is sparse `(block, owner)` state, not a blocks × locals
 matrix. Unresolved reads create provisional block parameters. Sealing waits
 until all backedges and goto predecessors are known; an iterative queue fills
-incoming values, forwarding through single-predecessor chains. Trivial
-parameters and unused parameter cycles are removed. A parameter is trivial
+incoming values, forwarding through single-predecessor chains and through
+loop headers: `c_ir_ssa_finish_loops` checks each recorded `for`/`while`/`do`
+for a header with one predecessor from outside and no other loop block entered
+from outside (labels, case labels and gotos into a loop fail it), and a read of
+a local no block of that loop writes passes from the header straight to the
+entry. Without it, N nested loops that each declare their own variable placed
+a trivial parameter for every enclosing variable at every inner header: N^2
+parameters, refused past ~2000 levels (#3723). The walk only looks slots up;
+it inserts one where it ends unresolved and caches its answer on the path
+within a budget of twice the other slots (plus a constant), since caching every
+walk past N nested `do` loops for each of their N variables needed N^2 slots
+(#3771). A skipped cache entry costs a later walk, never a different value. Trivial
+parameters and unused parameter cycles are removed; a replaced parameter hands
+its user rows on without those that can no longer requeue, so a chain of
+trivial parameters stays linear. A parameter is trivial
 when every edge out of a reachable block carries the same value; an edge out
 of an unreachable block never runs, so its value decides only when no
 reachable edge carries one; then every dead edge must agree, as before. A braced statement ending in `break`, `goto`,
