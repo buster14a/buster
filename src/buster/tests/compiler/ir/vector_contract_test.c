@@ -146,6 +146,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult vector_contract_test_emit(UnitTestArguments* 
             {
                 BUSTER_TEST(arguments, artifact.error.code == LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION && artifact.error.opcode == IR_OPCODE_SIMD);
                 BUSTER_TEST(arguments, artifact.bytes.length == 0 && artifact.error.message.length != 0);
+                BUSTER_STRING_TEST(arguments, artifact.error.message,
+                                   S8("LLVM bitcode exact SIMD lowering is unavailable; select an explicit source fallback"));
             }
         }
     }

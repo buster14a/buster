@@ -236,8 +236,53 @@ either selector do not replay the profile; the selected line must increase
 exactly once against every GitHub parent while the other recognized selector
 count stays unchanged. The publisher checks the exact head request bytes and
 hash. Analyzer profiles run in place of compiler timing/corpus profiles;
-`scaling.request` and a newly requested inline-acceptance selector cannot be
-combined with them.
+`scaling.request`, a newly requested inline-acceptance selector and a fresh
+ast-pilot selector cannot be combined with them.
+
+A fresh exact `profile: ast-pilot-acceptance-v1` line, added once against
+every parent, adds issue #3397's fixed `-fc-ast-pilot` adoption profile to
+the ordinary comparison: the candidate binary without and with the flag on
+`-fsyntax-only` and `-c` cells. Its method, budget and evidence are in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
+A fresh exact `profile: throughput-real-source-v1` line, added once against
+every parent, adds the real-source throughput leg (#2761) after the corpus
+leg. The merge base's `./build.sh bench_throughput run --real-source` times
+the pinned cJSON 1.7.19, Lua 5.4.8 and SQLite 3.53.4 descriptors' own
+compile-link command on the same two binaries, so the merge base must already
+contain that harness option. The inputs are fetched from pinned URLs and
+checked against pinned hashes before timing. The leg is report-only. Its
+evidence is under `throughput_real_source/` in the artifact, and a missing,
+partial, failed or cancelled leg fails the check. Its method is in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
+A fresh exact `profile: production-profile-v1` line, added once against every
+parent, adds the PGO/LTO production-profile leg (#2761) after the corpus leg.
+The head's own `./build.sh production_profile --no-benchmark` runs in an
+isolated clone of the head: it builds and trains the PGO compilers and runs
+`test_all` on the PGO+LTO one. The merge base's `bench_throughput run` then
+times that run's Release compiler against its PGO+LTO compiler on the same
+corpus as the ordinary leg. It is report-only and cannot be combined with the
+real-source or ast-pilot profiles. The host needs `ld.lld`, `llvm-profdata`,
+`llvm-readobj` and Clang's profile runtime; a missing tool fails the leg
+before the build starts. Its evidence is under
+`production_profile/` in the artifact, and a missing, partial, failed or
+cancelled leg fails the check. Its method is in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
+A fresh exact `profile: compiler-probes-v1` line, added once against every
+parent, adds the compiler-probes leg (#2761) after the corpus leg. It is the
+route for a targeted register-allocator or scheduler claim.
+`tools/fast_ra_scaling.c` and `tools/machine_line_mark_scaling.c` include
+compiler internals, so they cannot be workloads in this directory. Instead,
+the native harness `tools/bench_direct/compiler_probes.c` builds each probe from the head's
+probe source twice: against the merge base's `src/` and against the head's,
+each in an isolated clone. It then times the two builds as fixed alternating
+pairs on CPU 2. It is report-only and cannot be combined with the
+real-source, ast-pilot or production-profile profiles. Its evidence is under
+`compiler_probes/` in the artifact, and a missing, partial, failed or
+cancelled leg fails the check. Its method is in
+[benchmarking.md](../../docs/agents/benchmarking.md).
 
 V1 preserves its historical fixed 182-row qualification and 135-execution,
 47-alias candidate profile. V2 independently derives the ordered Release

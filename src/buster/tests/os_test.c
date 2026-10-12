@@ -3473,11 +3473,27 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/top.txt"), root), BUSTER_SLICE_TO_BYTE_SLICE(S8("top"))));
         BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/deep.txt"), nested), BUSTER_SLICE_TO_BYTE_SLICE(S8("deep"))));
 
+        // os_directory_entry_names lists direct children only, without "."
+        // and "..", and nothing for a missing directory.
+        u32 entry_count = 0;
+        String8* entries = os_directory_entry_names(arena, root, &entry_count);
+        BUSTER_TEST(arguments, entry_count == 2);
+        bool saw_nested = false;
+        bool saw_top = false;
+        for (u32 index = 0; index < entry_count; index += 1)
+        {
+            saw_nested = saw_nested || string_equal(entries[index], S8("nested"));
+            saw_top = saw_top || string_equal(entries[index], S8("top.txt"));
+        }
+        BUSTER_TEST(arguments, saw_nested && saw_top);
+
         OpenFlags read_flags = {0};
         OsFileAccess read_access = {.read = 1};
         OsFileCreateMode read_create_mode = {0};
         OsFileShareFlags read_share_flags = {.read = 1};
         BUSTER_TEST(arguments, os_directory_delete(root));
+        entries = os_directory_entry_names(arena, root, &entry_count);
+        BUSTER_TEST(arguments, entry_count == 0 && entries == 0);
         OsFileDescriptor* deleted = os_file_open(root, read_flags, read_access, read_create_mode, read_share_flags);
         BUSTER_TEST(arguments, deleted == 0);
         // Idempotent: a second delete of the same path still reports success.

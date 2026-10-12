@@ -22,7 +22,9 @@
 // ir_abi_context_value_validated/cold),
 // vector semantic classes and exact target/predicate contracts
 // (ir_vector_operation_semantics, ir_simd_operation_shape/supported),
-// shared local promotion (ir_promote_function in ir_promote.c), bounded FAST
+// bounded direct-call expansion (ir_inline_module in ir_inline.c), CFG cloning
+// (ir_inline_cfg_call in ir_inline_cfg.c), shared local promotion
+// (ir_promote_function in ir_promote.c), bounded FAST
 // preparation (ir_prepare_canonical_module in ir_fast.c), the fixed-width
 // integer semantics every compile-time evaluator shares (ir_integer_* in
 // ir_integer.c), immutable CFG publication (ir_function_publish_cfg in
@@ -3588,6 +3590,8 @@ IrProgram ir_program_initialize(Arena* arena, u32 module_count, u32 type_capacit
 {
     IR_CONSTRUCTION_RECORD(PROGRAM_STARTS, 1);
     IrProgram program = {0};
+    // Be conservative for embedders until a target-aware frontend narrows the policy.
+    program.external_function_definitions_interposable = true;
     if (arena)
     {
         program.arena = arena;
@@ -6950,11 +6954,12 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_alias(IrProgram* program, IrMo
             defined_here = module->functions[function_index].symbol.value == alias.target.value &&
                            module->functions[function_index].state == IR_FUNCTION_LOWERED;
         }
-        for (u32 global_index = 0; global_index < module->global_count && !defined_here; global_index += 1)
+        // An indirect alias's target is its resolver, which has to be code.
+        for (u32 global_index = 0; global_index < module->global_count && !defined_here && !alias.is_indirect; global_index += 1)
         {
             defined_here = module->globals[global_index].symbol.value == alias.target.value;
         }
-        result = defined_here ? IR_VALIDATION_NONE : IR_VALIDATION_ALIAS_TARGET;
+        result = defined_here && (!alias.is_indirect || symbol->kind == IR_SYMBOL_FUNCTION) ? IR_VALIDATION_NONE : IR_VALIDATION_ALIAS_TARGET;
     }
 
     return result;
@@ -7311,5 +7316,7 @@ IrValidationResult ir_test_validate_canonical_module_reference(IrProgram* progra
 
 #include <buster/lib/compiler/ir/ir_cfg.c>
 #include <buster/lib/compiler/ir/ir_promote.c>
+#include <buster/lib/compiler/ir/ir_inline_cfg.c>
+#include <buster/lib/compiler/ir/ir_inline.c>
 #include <buster/lib/compiler/ir/ir_fast.c>
 #include <buster/lib/compiler/ir/ir_integer.c>

@@ -31,6 +31,7 @@ fi
 unset BUSTER_IOS_MOCK_BASH_REEXEC 2>/dev/null || true
 set -euo pipefail
 launcher=${BUSTER_IOS_TEST_LAUNCHER:-$repo_root/ios/launch_simulator.sh}
+/bin/bash "$repo_root/ios/lifecycle_receipt_test.sh"
 python3 "$repo_root/ios/lifecycle_capture_test.py" -v
 python3 "$repo_root/ios/lifecycle_capture_bridge_test.py" -v
 timeout_bin=$(python3 "$repo_root/ios/gnu_timeout.py")

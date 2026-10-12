@@ -147,3 +147,16 @@ request: PR #3157 issue #2717 final default -g scalar location candidate after d
 request: PR #3157 issue #2717 guard optional published CFG; compare the final exact PR head
 request: PR #3157 issue #2717 ready-head Apple/macOS/iOS CI and fresh compiler-compare-v1 after marker-only push from ee52b190; source-identical code
 request: PR #3321 issue #3102 owner-requested exact-head comparison after the readiness hold; tree typer stage 3 with type-row interning narrowed to opt-in -fc-ast-pilot (default compile path interns nothing); merge of current main f6e8d25ffd1768a37107dccf1bfe4f8bc56a0667; fresh compiler-compare-v1 and throughput-corpus-v2 qualification
+canonical-inline-self-host-v1
+request: PR #3111 issue #48 per-function inline validation fix (f33940ae) after compiler-compare-v1 measured +4.51% at 15227131, and #3539 stage-2 harness repair (3a1b5a53); fresh exact-head compiler-compare-v1 and canonical-inline-self-host-v1 qualification
+request: PR #3111 issue #48 per-function inline validation fix (f33940ae) merged with main 65c89701 including the #3539 stage-2 harness repair; fresh exact-head compiler-compare-v1 and canonical-inline-self-host-v1 qualification
+request: PR #3111 issue #48 tiny inlining made opt-in at every -O level (8f3ac850) and mandatory-graph caller gate (2122d990) after compiler-compare-v1 measured +1.05% at 94b56786; merged main a08f96ff; fresh exact-head compiler-compare-v1 and canonical-inline-self-host-v1 qualification
+request: PR #3111 issue #48 tiny inlining opt-in at every -O level (8f3ac850) plus mandatory-graph caller prefilter (2122d990) after compiler-compare-v1 measured +1.05% at 94b56786; merged main 5029503f; fresh exact-head compiler-compare-v1 and canonical-inline-self-host-v1 qualification (supersedes the 626e4c91 line, whose head conflicted with main)
+profile: compiler-main-sampling-pilot-v1 packet: 1 freeze: bd60682b52f9f83356b7d80295e3c7183e82f09e
+
+request: issue #47 PR #3171 native O0 optional-pass policy; explicit-O0 throughput corpus plus unchanged default recipe; base 521b791421a962a085a0a9685357b6ea5ca790ef
+
+request: issue #47 PR #3171 resolved shared request history on main ec2e3033de749a28ed938d248b7ad0816338ae46; fresh exact-head O0/default compiler qualification
+request: issue #47 PR #3171 combined head after #3111 (23f617cd) landed: -O levels select only canonical FAST passes, tiny inlining stays explicit -fcanonical-inline; merged main 2ca6d797; fresh exact-head compiler-compare-v1 O0/default qualification
+request: issue #47 PR #3171 docs-only follow-up (review 5484683484: remove stale positive-level tiny inlining text) on combined head over main 2ca6d797; fresh exact-head compiler-compare-v1 O0/default qualification
+request: issue #47 PR #3171 combined head merged with main 86634390 (driver_fast_test fixture conflict resolved by keeping both); -O selects only canonical FAST passes, tiny inlining explicit; fresh exact-head compiler-compare-v1 O0/default qualification

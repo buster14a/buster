@@ -16,9 +16,10 @@ The tool refuses Git environment redirection, replacement refs, sparse checkout,
 hidden index flags, different HEAD, tracked modifications, ignored and untracked files.
 It additionally compares every regular file's unfiltered raw Git object hash and
 executable mode against the immutable, replacement-disabled pinned tree, independently
-of the index, then repeats the checks after execution. The hosted workflow exercises
-untracked, ignored, assume-unchanged, skip-worktree, sparse, environment, replacement
-and wrong-pin refusals plus a final clean control. Build directories are outside the
+of the index, then repeats the checks after execution. Historical hosted intake
+executed untracked, ignored, assume-unchanged, skip-worktree, sparse, environment,
+replacement and wrong-pin refusals plus a final clean control; the exact run and
+retained artifact are recorded below. Build directories are outside the
 upstream checkout. Wrong-pin/dirty failures must not be repaired by patching
 sources or accepting a different revision.
 
@@ -94,30 +95,57 @@ working directory. It does not set compiler IDs, fabricate probe successes,
 filter flags, replace failing C objects, or preseed configuration. A configure
 failure prevents candidate build/tests and is reported separately.
 
-## Hosted execution
+## Cloud execution and scheduling
 
 Development and correctness use cloud/GitHub-hosted Linux, never the laptop
-or general-purpose agent execution on the 9700X. The
-[workflow](../../../.github/workflows/sdl3-qualification.yml) is explicitly
-opt-in; its temporary development trigger is limited to the owned
-`codex/3188-sdl3-qualification` branch. It adds no PR/merge-group/main gate.
+or general-purpose agent execution on the 9700X. Ordinary whole-project
+execution belongs to the single [main-only external-project owner](../../external-project-ci.md).
+SDL has no qualified input recipe or native assignment there yet. This intake
+adds no SDL workflow, branch-push/manual dispatch, PR gate or merge-group workload.
+After the pinned recipe qualifies, its owner must add it to that existing Linux
+OS job and assignment table; preserve the pending macOS/Windows cells.
 
-Build the existing compiler with its native driver. Then compile the intake
-tool with the hosted compiler; GCC also validates it with warnings as errors:
+The following is the environment contract for an authorized cloud intake,
+not an additional Actions scheduling entry. Run from the Buster checkout root
+with a frozen candidate compiler built by its native driver. Use private source,
+server and evidence paths owned by one run. Retain the Buster revision, compiler
+and harness hashes, installed package versions, machine/image, complete
+commands and server logs with every result.
+
+External prerequisites are Clang, GCC, CMake, Ninja, Git, pkg-config, GNU
+timeout, objdump, sha256sum, GDB, Xvfb and PulseAudio. The selected Ubuntu
+backend packages are `libx11-dev`, `libxext-dev`, `libxcursor-dev`,
+`libxfixes-dev`, `libxi-dev`, `libxrandr-dev`, `libxss-dev`,
+`libxtst-dev`, `libpulse-dev`, `pulseaudio`, `pulseaudio-utils`
+and `xvfb`. Record their actual versions; they are external prerequisites,
+not Buster runtime dependencies. The upstream input must be a complete clean
+Git checkout at the pin above, without sparse checkout, hidden index flags,
+replacement refs or Git environment redirection.
+
+Build the existing compiler with its native driver. Compile the intake tool
+with the hosted compiler; GCC also validates it with warnings as errors:
 
 ```sh
 clang -D_DEFAULT_SOURCE -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char tools/sdl3_qualification.c -o /absolute/private/path/sdl3-qualification
+gcc -D_DEFAULT_SOURCE -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char tools/sdl3_qualification.c -o /absolute/private/path/sdl3-qualification-gcc
+/absolute/private/path/sdl3-qualification --check /absolute/pristine/SDL /absolute/fresh/source-check
 /absolute/private/path/sdl3-qualification /absolute/pristine/SDL /absolute/buster/build/Release/ide /absolute/fresh/evidence
 ```
 
-The output path must not exist: it is created privately and owned by one run.
-Use the workflow's fixed Xvfb display and PulseAudio `buster_sdl3` virtual
-sink, or reproduce those isolated resources on authorized cloud infrastructure.
-The tools remain external prerequisites, not Buster runtime dependencies.
-GNU `timeout` bounds child process groups; timeout/signal/launch failures
-remain nonzero, and a stage that did not execute has status 125. A zero fixture exit without
-the exact all-success verdict is refused with status 126. Oracle corruption
-negative controls remain pending.
+Before the last command, set `DISPLAY=:93`, `SDL_VIDEO_DRIVER=x11`,
+`SDL_AUDIO_DRIVER=pulseaudio` and `CMAKE_BUILD_PARALLEL_LEVEL=2`.
+Start an isolated `Xvfb :93 -screen 0 800x600x24 -nolisten tcp` server and
+PulseAudio with `--exit-idle-time=-1`. Load `module-null-sink` with
+`sink_name=buster_sdl3 rate=48000 channels=1`, make `buster_sdl3` the
+default sink and retain `pactl list sinks` plus both server logs. Ensure
+these selected resources are ready before execution and shut down only
+resources owned by that run.
+
+Each source-check/evidence output path must not exist: the tool creates it
+privately. GNU `timeout` bounds child process groups; timeout/signal/launch
+failures remain nonzero, and a stage that did not execute has status 125.
+A zero fixture exit without the exact all-success verdict is refused with
+status 126. Oracle corruption negative controls remain pending.
 
 ## Independent checks
 
@@ -157,7 +185,7 @@ process-tree high-water RSS observation. Compiler/tool SHA-256, upstream tree,
 installed package identities, CMake cache/logs, generated inputs, compilation
 database, objects, libraries and fixture executables stay in the private
 evidence directory. Input pin/pristine checks repeat after execution.
-The outer workflow retains failed stages and machine-specification records.
+The execution owner must retain failed stages and machine-specification records.
 
 Build command count, successful C actions and distinct source count are separate
 denominators; do not infer them from the number of executables that link.
@@ -173,3 +201,41 @@ performance-validation conclusion is made by this initial campaign.
 Exact revisions, hosted runs, actual counts, observed blockers and remaining
 gates are recorded on #3188 and its PR; historical reports are not current
 compatibility claims.
+
+## Historical evidence and current qualification frontier
+
+The original [intake38134480483](https://github.com/buster14a/buster/actions/runs/38134480483)
+used harness head `b52b04f6df4e662e8b67f67c83368eb6680e569a` and
+compiler anchor `abb1c5afbcf55e120d83283ffbad402fc75bd80a`.
+Eight input-refusal controls and the final clean/raw-object controls passed.
+Reference CTest was 5/5, with automation 355 total / 344 pass / 0 fail / 11 skip.
+Its original dependency-flag and foreign-Boolean blockers are historical:
+#3465 and #3613 subsequently merged. Artifact11700936379 has archive SHA-256
+`c6e511e6dbb69204e4df470645a9cca87fef907c7b148c094e0c27be89cccb1f`
+and expires 2026-10-25; full raw archival beyond retention remains pending.
+
+The [later unchanged intake38222238640](https://github.com/buster14a/buster/actions/runs/38222238640)
+is a separate composition: diagnostic head `da64acdb117e88ce6595b71de0b84567637752b5` over main
+`e13523e94128f980799e9a7e64663e4568b93cb0`, retaining the same
+upstream pin and intake/fixture bytes. The #3653 owner reports the exact
+[discovery records and following blockers](https://github.com/buster14a/buster/issues/3653#issuecomment-6120520220).
+Do not promote those results to a different candidate head or treat the
+historical per-project diagnostic workflow as the current scheduling contract.
+
+The recorded candidate configure exits 0 and finds the multiarch X11/Xext
+libraries after #3673 and #3648. It still fails the XOpenDisplay and
+HAVE_XFIXES_H link checks on full-path `.so` operands
+([#3712](https://github.com/buster14a/buster/issues/3712)), leaving
+`SDL_X11_XFIXES=OFF` against the reference's ON. Configure success therefore
+does not establish a matching profile. Candidate build exits 1 on
+`-idirafter` ([#3676](https://github.com/buster14a/buster/issues/3676)).
+Candidate-library tests and both candidate-library ABI cells remain unexecuted.
+Artifact11734742728 has archive SHA-256
+`64da018e1d41bd5dd5645cb91775b68c9a44345e338b1dac7d9e3d1714f4b50b`;
+the owner records fourteen-day retention. These are reported observations,
+not a new exact-head execution by this guide update.
+
+Keep #3188 open until the matched candidate build/tests, four ABI cells,
+negative-oracle controls, complete C-action/target/license closure,
+durable raw archival and required cost/performance evidence are complete.
+Hardware, GPU and physical audible-output cells remain pending.

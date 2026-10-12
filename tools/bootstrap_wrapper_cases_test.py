@@ -176,8 +176,10 @@ class SchedulerTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(cancellation_errors, [], diagnostics)
         self.assertEqual(summary["unreaped_children"], 0, diagnostics)
-        self.assertTrue(all(child.cleaned and child.stdout.closed and child.stderr.closed for child in children))
-        self.assertTrue(all(not Path(path).exists() for path in directories))
+        self.assertTrue(all(child.cleaned and child.stdout.closed and child.stderr.closed for child in children), diagnostics)
+        survivors = {path: [str(entry) for entry in Path(path).rglob("*")]
+                     for path in directories if Path(path).exists()}
+        self.assertEqual(survivors, {}, diagnostics + "\nfixture survivors: " + repr(survivors))
         self.assertTrue(summary["cases"][0].get("success"), diagnostics)
         self.assertTrue(requested.is_set(), diagnostics)
         self.assertTrue(summary["cancelled"], diagnostics)
@@ -185,6 +187,7 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(len(descendants), 1)
         pid = descendants[0]
         if os.name == "nt":
+            self.assertIn(pid, children[0].descendant_waited_pids, diagnostics)
             import ctypes
             from ctypes import wintypes
             kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -253,6 +256,117 @@ class SchedulerTests(unittest.TestCase):
         self.assertTrue(summary["cancelled"])
         self.assertFalse(summary["success"])
         self.assertEqual(summary["owned_children"], 0)
+
+
+    def test_windows_cleanup_waits_for_descendant_handles_before_fixture_removal(self):
+        self.check_windows_cleanup_order()
+
+    def test_windows_descendant_wait_failure_is_not_success(self):
+        self.check_windows_cleanup_order(wait_error=RuntimeError("descendant-wait-marker"))
+
+    def test_windows_tree_capture_failure_still_reaps_direct_child(self):
+        self.check_windows_cleanup_order(capture_error=RuntimeError("tree-capture-marker"))
+
+    def test_windows_handle_close_failure_keeps_the_owner_failed(self):
+        self.check_windows_cleanup_order(close_error=RuntimeError("handle-close-marker"))
+
+    def check_windows_cleanup_order(self, wait_error=None, capture_error=None, close_error=None):
+        events = []
+        tree = mock.Mock()
+        tree.handles = [(24, "owned-descendant")]
+        tree.wait_until.side_effect = lambda deadline: events.append(("wait", deadline))
+        if wait_error is not None:
+            def failed_wait(deadline):
+                events.append(("wait", deadline))
+                raise wait_error
+            tree.wait_until.side_effect = failed_wait
+        def close_tree():
+            events.append(("close",))
+            if close_error is not None:
+                raise close_error
+        tree.close.side_effect = close_tree
+        child = scheduler.CaseProcess.__new__(scheduler.CaseProcess)
+        child.cleanup_lock = threading.RLock()
+        child.cleanup_seconds = 0.0
+        child.descendant_cleanup_error = None
+        child.descendant_waited_pids = []
+        child.cleaned = False
+        child.process = mock.Mock(pid=123)
+        child.process.poll.return_value = None
+
+        def direct_cleanup(_child):
+            events.append(("direct",))
+            _child.cleaned = True
+
+        factory = mock.Mock(side_effect=capture_error, return_value=tree)
+        with mock.patch.object(scheduler.os, "name", "nt"), \
+             mock.patch.object(scheduler, "WindowsFixtureTree", factory), \
+             mock.patch.object(scheduler.bootstrap.WrapperProcess, "cleanup", direct_cleanup), \
+             mock.patch.object(scheduler.time, "monotonic", return_value=100):
+            error = wait_error or capture_error or close_error
+            if error is not None:
+                with self.assertRaisesRegex(RuntimeError, str(error)):
+                    child.cleanup()
+            else:
+                child.cleanup()
+            events.append(("fixture",))
+            if error is not None:
+                self.assertFalse(child.cleaned)
+                with self.assertRaisesRegex(RuntimeError, str(error)):
+                    child.cleanup()
+            else:
+                child.cleanup()  # Already cleaned; do not recapture stale numeric PIDs.
+        factory.assert_called_once_with(123, child.process._handle)
+        self.assertEqual(child.descendant_waited_pids, [] if wait_error or capture_error else [24])
+        expected = [("direct",)]
+        if capture_error is None:
+            expected += [("wait", 100 + scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS), ("close",)]
+        expected += [("fixture",)]
+        if error is None:
+            expected += [("direct",)]
+        self.assertEqual(events, expected)
+
+
+    def test_windows_descendant_wait_shares_deadline_and_keeps_all_identities(self):
+        tree = scheduler.WindowsFixtureTree.__new__(scheduler.WindowsFixtureTree)
+        tree.kernel = mock.Mock()
+        tree.handles = [(23, "first-handle"), (24, "second-handle")]
+        tree.kernel.WaitForSingleObject.side_effect = [258, 0]
+        with mock.patch.object(scheduler.time, "monotonic", side_effect=[105, 111]):
+            with self.assertRaisesRegex(RuntimeError, "pending_pids.*23"):
+                tree.wait_until(110)
+        self.assertEqual(tree.kernel.WaitForSingleObject.call_args_list,
+                         [mock.call("first-handle", 5000), mock.call("second-handle", 0)])
+        tree.close()
+        self.assertEqual(tree.kernel.CloseHandle.call_args_list,
+                         [mock.call("first-handle"), mock.call("second-handle")])
+        self.assertEqual(tree.handles, [])
+
+
+    def test_windows_capture_refuses_reused_and_stale_parent_identities(self):
+        tree = scheduler.WindowsFixtureTree.__new__(scheduler.WindowsFixtureTree)
+        tree.kernel = mock.Mock()
+        tree.handles = []
+        tree.parent_created = 100
+        tree.snapshot_started = 200
+        for created in (99, 201):
+            with self.subTest(created=created):
+                with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                    tree.retain_handle(23, "replacement-handle", created)
+                self.assertEqual(tree.handles, [])
+        self.assertEqual(tree.kernel.CloseHandle.call_count, 2)
+        tree.retain_handle(24, "original-handle", 150)
+        self.assertEqual(tree.handles, [(24, "original-handle")])
+
+    def test_windows_handle_close_failure_is_not_ignored(self):
+        tree = scheduler.WindowsFixtureTree.__new__(scheduler.WindowsFixtureTree)
+        tree.kernel = mock.Mock()
+        tree.handles = [(23, "first-handle"), (24, "second-handle")]
+        tree.kernel.CloseHandle.side_effect = [False, True]
+        with self.assertRaisesRegex(RuntimeError, "closure failed.*23"):
+            tree.close()
+        self.assertEqual(tree.kernel.CloseHandle.call_count, 2)
+        self.assertEqual(tree.handles, [])
 
     def test_cleanup_error_cannot_be_a_success(self):
         cleanup = scheduler.CaseProcess.cleanup
