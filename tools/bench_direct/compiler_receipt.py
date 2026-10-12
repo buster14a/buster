@@ -298,7 +298,7 @@ PRODUCTION_PROFILE_PROFILE = {
 # claims. tools/fast_ra_scaling.c and tools/machine_line_mark_scaling.c include
 # compiler internals, so they cannot be direct workloads. One fresh exact line
 # in ANALYZER_REQUEST_PATH selects this on the pull-compare route:
-# tools/bench_direct/compiler_probes.py copies the head's probe sources outside
+# tools/bench_direct/compiler_probes.c (native, from the trusted checkout) copies the head's probe sources outside
 # both checkouts (the audits' practice), builds each probe with the command its
 # audit records against the merge base's and the head's own src/ in isolated
 # clones, then times both builds as fixed alternating pairs on the pinned CPU.
@@ -312,6 +312,9 @@ COMPILER_PROBES_ROLES = ("baseline", "candidate")
 # every median and ratio finite before any float arithmetic.
 COMPILER_PROBES_INVOCATION_TIMEOUT_SECONDS = 60
 COMPILER_PROBES_SAMPLE_LIMIT_NS = COMPILER_PROBES_INVOCATION_TIMEOUT_SECONDS * 1_000_000_000
+COMPILER_PROBES_HARNESS = "compiler_probes.c"
+COMPILER_PROBES_HARNESS_FLAGS = ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-fwrapv",
+                                 "-fno-strict-aliasing", "-funsigned-char"]
 _PROBE_DEFINES = ["-DBUSTER_INCLUDE_TESTS=0", "-DBUSTER_LINK_LIBC=1", "-DBUSTER_OPTIMIZE=1", "-DBUSTER_SINGLE_THREADED=1"]
 _PROBE_LANGUAGE = ["-Isrc", "-fwrapv", "-fno-strict-aliasing", "-funsigned-char"]
 _PROBE_LIBRARY = ["src/buster/lib/arena.c", "src/buster/lib/os.c", "src/buster/lib/integer.c", "src/buster/lib/string.c",
@@ -323,6 +326,8 @@ COMPILER_PROBES_PROFILE = {
     "build": "the candidate head's probe source, copied outside both checkouts, compiled by clang against the merge "
              "base's and the head's own src/ in isolated shared clones; one binary per probe and revision",
     "compiler": "clang",
+    "harness": "tools/bench_direct/compiler_probes.c from the trusted checkout, compiled by clang with "
+               "COMPILER_PROBES_HARNESS_FLAGS; its --profile output equals this profile",
     "probes": {
         "fast_ra": {
             "source": "tools/fast_ra_scaling.c",
@@ -860,11 +865,14 @@ def compiler_probes_digest(summary: object) -> list[dict]:
     return digest
 
 
-def validate_compiler_probes(status: object, summary: object, base: str, head: str, binaries: object) -> list[str]:
+def validate_compiler_probes(status: object, summary: object, base: str, head: str, binaries: object,
+                             sources: object) -> list[str]:
     """Reasons the evidence is not one complete COMPILER_PROBES_PROFILE run of these probe binaries.
 
-    status is compiler_probes.py's exit and summary its summary.json; base and head are the compared
-    revisions; binaries maps probe -> role -> {"sha256"} as hashed independently of the summary.
+    status is the compiler_probes.c harness's exit and summary its summary.json; base and head are the
+    compared revisions. binaries maps probe -> role -> {"sha256", "revision"} and sources maps probe ->
+    the copied probe source's sha256, both hashed by compiler_compare independently of the harness.
+    Every statistic is re-derived from the raw samples; the harness states none.
     """
     label = "compiler probes"
     profile = COMPILER_PROBES_PROFILE
@@ -873,39 +881,33 @@ def validate_compiler_probes(status: object, summary: object, base: str, head: s
         problems.append(f"{label} exited {status!r}, not 0")
     if not isinstance(summary, dict):
         return [*problems, f"{label} summary is missing or malformed"]
-    for key, wanted in (("schema", COMPILER_PROBES_SCHEMA), ("profile", profile), ("base", base), ("head", head),
-                        ("status", "complete"), ("errors", [])):
+    for key, wanted in (("schema", COMPILER_PROBES_SCHEMA), ("profile", profile["name"]), ("base", base),
+                        ("head", head), ("status", "complete"), ("errors", [])):
         if summary.get(key) != wanted:
-            problems.append(f"{label} summary {key} is not {wanted if key != 'profile' else profile['name']!r}")
-    sources = summary.get("probe_source_sha256")
-    built = summary.get("binaries")
+            problems.append(f"{label} summary {key} is not {wanted!r}")
+    wanted_builds = [{"probe": probe, "role": role, "revision": revision, "exit": 0}
+                     for probe in profile["probes"] for role, revision in zip(COMPILER_PROBES_ROLES, (base, head))]
+    if summary.get("builds") != wanted_builds:
+        problems.append(f"{label} builds are not one passed build per probe and revision")
     for probe in profile["probes"]:
         if not isinstance(sources, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(sources.get(probe, ""))):
             problems.append(f"{label} {probe} source hash is missing")
         for role, revision in zip(COMPILER_PROBES_ROLES, (base, head)):
-            entry = built.get(probe, {}).get(role) if isinstance(built, dict) and isinstance(built.get(probe), dict) else None
             measured = binaries.get(probe, {}).get(role) if isinstance(binaries, dict) and \
                 isinstance(binaries.get(probe), dict) else None
-            digest = entry.get("sha256") if isinstance(entry, dict) else None
-            if not isinstance(entry, dict) or entry.get("revision") != revision or \
-                    not re.fullmatch(r"[0-9a-f]{64}", str(digest)) or \
-                    not isinstance(measured, dict) or measured.get("sha256") != digest:
-                problems.append(f"{label} {probe} {role} binary is not the measured {revision[:12]} build")
+            if not isinstance(measured, dict) or measured.get("revision") != revision or \
+                    not re.fullmatch(r"[0-9a-f]{64}", str(measured.get("sha256", ""))):
+                problems.append(f"{label} {probe} {role} binary is not a measured {revision[:12]} build")
     cases = summary.get("cases")
     wanted_cases = [(probe, case["name"]) for probe, definition in profile["probes"].items() for case in definition["cases"]]
     names = [(case.get("probe"), case.get("name")) if isinstance(case, dict) else None
              for case in (cases if isinstance(cases, list) else [])]
     if names != wanted_cases:
         problems.append(f"{label} cases are not the frozen {len(wanted_cases)} cases in order")
-    stated = summary.get("results")
-    derived = []
     for case in cases if isinstance(cases, list) else []:
-        value, case_problems = compiler_probes_case_statistics(case.get("probe") if isinstance(case, dict) else None, case)
+        unused_value, case_problems = compiler_probes_case_statistics(
+            case.get("probe") if isinstance(case, dict) else None, case)
         problems.extend(case_problems)
-        if value is not None:
-            derived.append(value)
-    if stated != derived:
-        problems.append(f"{label} stated results do not match the raw samples")
     return problems
 
 

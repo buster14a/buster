@@ -31,9 +31,10 @@ PRODUCTION_PROFILE_REQUEST_LINE adds the PGO/LTO production-profile leg
 (#2761): the head's own `./build.sh production_profile` builds its compilers in
 an isolated clone of the head, then the base revision's harness times that
 run's Release compiler against its PGO+LTO compiler on the corpus. A fresh
-exact COMPILER_PROBES_REQUEST_LINE adds the compiler-probes leg (#2761):
-compiler_probes.py builds the FAST register-allocation and scheduler line-mark
-probes against both revisions in isolated clones and times them as pairs.
+exact COMPILER_PROBES_REQUEST_LINE adds the compiler-probes leg (#2761): the
+trusted native compiler_probes.c harness builds the FAST register-allocation and
+scheduler line-mark probes against both revisions in isolated clones and times
+them as pairs.
 
 The receipt records identities, the profile, toolchain versions, binary hashes
 and timings, and is written even when a step fails. The candidate's build runs
@@ -76,6 +77,7 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               throughput_real_source_digest, validate_throughput_real_source,
                               PRODUCTION_PROFILE_PROFILE, PRODUCTION_PROFILE_REQUEST_LINE, validate_production_profile,
                               COMPILER_PROBES_PROFILE, COMPILER_PROBES_REQUEST_LINE, COMPILER_PROBES_ROLES,
+                              COMPILER_PROBES_HARNESS, COMPILER_PROBES_HARNESS_FLAGS,
                               compiler_probes_digest, validate_compiler_probes,
                               INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUEST_LINE,
                               ANALYZER_REQUEST_LINES,
@@ -101,9 +103,9 @@ REAL_SOURCE_TIMEOUT_SECONDS = 1800
 # 2.8 GHz Xeon. Twice that keeps the leg, its corpus run and the ordinary
 # comparison inside the unchanged 90-minute compare-pull job.
 PRODUCTION_PROFILE_BUILD_TIMEOUT_SECONDS = 40 * 60
-# Measured: the whole compiler-probes leg (two clones, four probe builds, 12
-# cases of 2 + 30 pairs) took 218 s on a hosted 4-vCPU 2.8 GHz Xeon; this
-# bound keeps it inside the unchanged compare-pull budget.
+# Measured: the whole compiler-probes leg (the native harness build, two
+# clones, four probe builds, 12 cases of 2 + 30 pairs) took 241 s on a hosted
+# 4-vCPU 2.8 GHz Xeon; this bound keeps it inside the unchanged compare-pull budget.
 COMPILER_PROBES_TIMEOUT_SECONDS = 20 * 60
 ANALYZER_DRIVER_BUILD_TIMEOUT_SECONDS = 600
 ANALYZER_GENERATE_TIMEOUT_SECONDS = 900
@@ -1546,25 +1548,37 @@ def measure_production_profile(candidate: Path, bins: Path, work: Path, evidence
 
 
 def measure_compiler_probes(candidate: Path, work: Path, evidence: Path, base: str, head: str, receipt: dict) -> None:
-    """Run #2761's probe leg on both revisions and record it, with independently hashed binaries, in the receipt."""
+    """Build the trusted native probe harness, run #2761's probe leg and record it with independently hashed inputs."""
     record = receipt["compiler_probes"]
     output = work / "compiler-probes"
+    scratch = work / "compiler-probes-work"
+    harness = work / "compiler-probes-harness"
     exported = evidence / "compiler_probes"
+    log = evidence / "compiler-probes.log"
     errors: list[str] = []
-    argv = [sys.executable, "-B", str(Path(__file__).resolve().with_name("compiler_probes.py")), "run",
-            "--repository", str(candidate), "--base", base, "--head", head,
-            "--work", str(work / "compiler-probes-work"), "--output", str(output)]
     measured = time.monotonic()
-    status = run(argv, candidate, evidence / "compiler-probes.log", COMPILER_PROBES_TIMEOUT_SECONDS)
+    # The harness comes from this trusted checkout's tools/, never from the candidate.
+    status = run(["clang", *COMPILER_PROBES_HARNESS_FLAGS,
+                  str(Path(__file__).resolve().with_name(COMPILER_PROBES_HARNESS)), "-o", str(harness)],
+                 candidate, log, GIT_TIMEOUT_SECONDS)
+    record["harness_exit"] = status
+    if status == 0:
+        status = run([str(harness), str(candidate), base, head, str(scratch), str(output)], candidate, log,
+                     COMPILER_PROBES_TIMEOUT_SECONDS)
     receipt["timings"]["compiler_probes_seconds"] = round(time.monotonic() - measured, 3)
     binaries: dict = {}
-    for probe in COMPILER_PROBES_PROFILE["probes"]:
+    sources: dict = {}
+    for probe, definition in COMPILER_PROBES_PROFILE["probes"].items():
+        copied = scratch / "probe-sources" / Path(definition["source"]).name
+        if copied.is_file():
+            sources[probe] = sha256(copied)
         for role, revision in zip(COMPILER_PROBES_ROLES, (base, head)):
             built = output / "bin" / f"{probe}-{role}"
             if built.is_file():
                 binaries.setdefault(probe, {})[role] = {"sha256": sha256(built), "size_bytes": built.stat().st_size,
                                                         "revision": revision}
     record["binaries"] = binaries
+    record["probe_source_sha256"] = sources
     summary = None
     if output.is_dir():
         problems, record["evidence_omissions"] = export_tree(output, exported, evidence, COMPILER_PROBES_IGNORE,
@@ -1573,7 +1587,7 @@ def measure_compiler_probes(candidate: Path, work: Path, evidence: Path, base: s
         summary, problem = read_exported_json(exported / "summary.json")
         if problem:
             errors.append(f"exported evidence compiler_probes/summary.json unreadable: {problem}")
-    errors.extend(validate_compiler_probes(status, summary, base, head, binaries))
+    errors.extend(validate_compiler_probes(status, summary, base, head, binaries, sources))
     record["cells"] = compiler_probes_digest(summary)
     record["exit"] = status
     record["errors"] = errors

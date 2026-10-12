@@ -313,7 +313,8 @@ def validate_compiler_probes_bundle(record: object, bundle: object, base: str, h
         problems.append("receipt compiler-probes profile is not the frozen profile")
     if not isinstance(bundle, dict) or set(bundle) != set(COMPILER_PROBES_BUNDLE_FILES):
         return [*problems, "requested compiler-probes evidence bundle is incomplete"]
-    problems.extend(validate_compiler_probes(record.get("exit"), bundle["summary"], base, head, record.get("binaries")))
+    problems.extend(validate_compiler_probes(record.get("exit"), bundle["summary"], base, head, record.get("binaries"),
+                                             record.get("probe_source_sha256")))
     if record.get("cells") != compiler_probes_digest(bundle["summary"]):
         problems.append("receipt compiler-probes cells do not match the exported raw samples")
     return problems

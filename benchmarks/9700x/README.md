@@ -274,7 +274,7 @@ parent, adds the compiler-probes leg (#2761) after the corpus leg. It is the
 route for a targeted register-allocator or scheduler claim.
 `tools/fast_ra_scaling.c` and `tools/machine_line_mark_scaling.c` include
 compiler internals, so they cannot be workloads in this directory. Instead,
-`tools/bench_direct/compiler_probes.py` builds each probe from the head's
+the native harness `tools/bench_direct/compiler_probes.c` builds each probe from the head's
 probe source twice: against the merge base's `src/` and against the head's,
 each in an isolated clone. It then times the two builds as fixed alternating
 pairs on CPU 2. It is report-only and cannot be combined with the

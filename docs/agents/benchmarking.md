@@ -1053,8 +1053,10 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    empty-value chain and fanout CFGs) and `tools/machine_line_mark_scaling.c`
    (`machine_schedule_function` with one line mark per instruction) include
    compiler internals, so they cannot be direct workloads. After the corpus
-   leg, `measure_compiler_probes` runs `tools/bench_direct/compiler_probes.py
-   run`:
+   leg, `measure_compiler_probes` compiles the native harness
+   `tools/bench_direct/compiler_probes.c` from the trusted checkout. It uses
+   only libc, because that checkout holds only `tools/`, so no candidate
+   header reaches it. It then runs the harness, which does the following:
    - It makes two shared clones of the candidate checkout, at the merge base
      and at the head. The base checkout and its closure checks stay untouched.
    - It copies the head's probe sources outside both clones, as the audits do,
@@ -1094,24 +1096,32 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    - an exit other than 0, a failed status or any recorded error;
    - a profile, base or head other than the frozen profile and the compared
      revisions;
-   - a probe binary hash that differs from the one `compiler_compare` hashed
-     itself, or a missing probe source hash;
+   - a build list other than one passed build per probe and revision, or a
+     missing probe binary or source hash. `compiler_compare` hashes the binaries
+     and the copied probe sources itself; the harness reports no hashes;
    - a missing, extra or reordered case, or changed case arguments;
    - fewer than two warmups or 30 pairs, or a pair out of the fixed order;
    - an invocation that failed, timed out or has partial samples, or a sample
      that is not an integer from 1 ns to the 60-second invocation timeout
-     (checked before any median or ratio arithmetic), a self-check field that is missing, extra or malformed, a
-     workload marker other than the case's, or a self-check that changes;
-   - stated results that differ from those re-derived from the raw samples.
+     (checked before any median or ratio arithmetic), a self-check field that
+     is missing, extra or malformed, a workload marker other than the case's,
+     or a self-check that changes.
+
+   The harness states no statistics; every one is re-derived from the raw
+   samples. Its `--self-test` checks output parsing, pair alternation, JSON
+   escaping and a whole fake case, and runs in the benchmark policy job.
+   `compiler_test.py` checks that its `--profile` output equals
+   `COMPILER_PROBES_PROFILE`, so the native and Python copies cannot drift.
 
    Missing, partial, failed or cancelled evidence therefore fails the check.
    The binaries are not exported. Their hashes differ even in an A/A run,
    because `-g` records each clone's path.
 
    Cost: on a hosted 4-vCPU 2.8 GHz Xeon (diagnostic, not Zen 5), a real A/A
-   run at `955ea4b2` took 218 s, partly alongside other test runs. The two
-   clones and four builds took about 3 minutes (each build 35 to 38 s), and
-   the 12 cases about 40 s. Every case's interval contained 1.0. The leg has its
+   run of the whole leg through `measure_compiler_probes` at `8fa1ca80` took
+   241 s, including the harness build. The two clones and four probe builds
+   take about 3 minutes (each probe build 35 to 38 s), and the 12 cases about
+   40 s. Every case's interval contained 1.0. The leg has its
    own 20-minute timeout, so it fits inside the unchanged 90-minute
    `compare-pull` job next to the roughly 14-minute ordinary comparison. No
    job timeout changed. A head whose probe no longer compiles against the
