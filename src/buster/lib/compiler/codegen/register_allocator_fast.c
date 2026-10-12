@@ -5295,8 +5295,9 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         // certifies an address, and the touch census below decodes every
         // row's frame access once for the slot closure to replay; on a `-g0`
         // SQLite compile 1,893 of 2,620 functions had no slot at all (#1722).
-        bool coalesce_slots = reuse_frame_storage && description->frame_address_opcode != 0 && !function->distinct_frame_objects &&
-                              function->stack_slot_count != 0;
+        // Experiment (#1722 9700X attribution, do not merge): the slot-free
+        // frame skip from #3800 is removed so this head measures main without it.
+        bool coalesce_slots = reuse_frame_storage && description->frame_address_opcode != 0 && !function->distinct_frame_objects;
         u8* slot_addressed = arena_allocate(arena, u8, slot_axis);
         u8* address_safe = arena_allocate(arena, u8, slot_axis);
         memset(slot_addressed, 0, slot_axis);
@@ -5313,12 +5314,9 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         // left for it to decide it would walk every row for nothing: on a
         // `-g0` SQLite compile that is every one of the 396 coalescing
         // functions whose frames end up sharing nothing (#1722).
-        bool census_needed = false;
-        for (u32 slot_index = 0; coalesce_slots && slot_index < function->stack_slot_count; slot_index += 1)
-        {
-            census_needed |= !(slot_addressed[slot_index] && !address_safe[slot_index]) &&
-                             !machine_fast_slot_statically_fixed(function, slot_index);
-        }
+        // Experiment (#1722 9700X attribution, do not merge): the all-fixed
+        // census skip from #3857 is removed so this head measures main without it.
+        bool census_needed = coalesce_slots;
         MachineFastTouchCensus touch_census = {
             .rows = census_needed ? arena_allocate(arena, MachineFastRowTouches, function->instruction_count ? function->instruction_count : 1u) : 0,
         };
