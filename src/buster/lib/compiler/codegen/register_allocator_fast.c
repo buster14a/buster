@@ -4581,6 +4581,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 // candidates, so the copy lands where nothing this row reads or
                 // writes. A call clobbers the caller-saved file, where a free
                 // register would be flushed with the rest, so it keeps the store.
+                state.uses_consumed = true;
                 for (u64 clobber_mask = opcode_row.clobber_mask; clobber_mask; clobber_mask &= clobber_mask - 1u)
                 {
                     u32 physical_register = machine_fast_first_set(clobber_mask);
@@ -4593,6 +4594,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         machine_fast_vacate(&state, physical_register, 0);
                     }
                 }
+                state.uses_consumed = false;
                 // Vreg definitions bind their register lazily dirty.
                 for (u32 remaining = virtual_slots & define_slots; remaining; remaining &= remaining - 1u)
                 {
