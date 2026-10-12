@@ -4345,6 +4345,95 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_successors(UnitTestArguments* arg
             }
         }
     }
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        TargetParseResult target = target_parse_triple(S8("i386-linux"));
+        BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+        if (target.error == TARGET_PARSE_ERROR_NONE)
+        {
+            CPreprocessOptions options = {
+                .target = target.target,
+                .data_layout = target_data_layout(target.target),
+                .dialect = C_PREPROCESS_DIALECT_GNU17,
+                .source_path = S8("i386-predefined-macros.c"),
+            };
+            String8 source = S8(
+                "#include <stddef.h>\n"
+                "#if !defined(__i386__) || !defined(__i386) || !defined(i386)\n#error missing i386 macros\n#endif\n"
+                "#if !defined(_ILP32) || !defined(__ILP32__) || !defined(__pentiumpro__)\n#error missing ILP32 CPU macros\n#endif\n"
+                "#if __GCC_ATOMIC_INT_LOCK_FREE != 2 || __GCC_ATOMIC_LLONG_LOCK_FREE != 2 || !defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8)\n#error incorrect i686 baseline atomics\n#endif\n"
+                "#if !defined(__REGISTER_PREFIX__)\n#error missing x86 register prefix macro\n#endif\n"
+                "#if !defined(__code_model_32__) || !defined(__LAHF_SAHF__) || __FLT_EVAL_METHOD__ != 2\n#error missing i386 target macros\n#endif\n"
+                "#if defined(__tune_i686__) || defined(__tune_pentiumpro__)\n#error unexpected i386 baseline tune macros\n#endif\n"
+                "#if defined(__x86_64__) || defined(__amd64__) || defined(__code_model_small__) || defined(__k8)\n#error leaked x86-64 macros\n#endif\n"
+                "#if defined(__SSE__) || defined(__SSE2__) || defined(__SSE3__) || defined(__MMX__)\n#error leaked SIMD macros\n#endif\n"
+                "#if defined(__SIZEOF_INT128__) || __SIZEOF_LONG_DOUBLE__ != 12 || __BIGGEST_ALIGNMENT__ != 16\n#error incorrect i386 layout macros\n#endif\n"
+                "_Static_assert(__builtin_types_compatible_p(__SIZE_TYPE__, unsigned int), \"size type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__PTRDIFF_TYPE__, int), \"ptrdiff type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__INTPTR_TYPE__, int), \"intptr type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__UINTPTR_TYPE__, unsigned int), \"uintptr type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__WCHAR_TYPE__, long int), \"wchar macro type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__WINT_TYPE__, unsigned int), \"wint macro type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__INT64_TYPE__, long long int), \"int64 macro type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__INTMAX_TYPE__, long long int), \"intmax macro type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__INT_FAST16_TYPE__, int), \"fast16 macro type\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__UINT_FAST16_TYPE__, unsigned int), \"ufast16 macro type\");\n"
+                "_Static_assert(__INT_FAST16_WIDTH__ == 32 && __INT_FAST16_MAX__ == 2147483647, \"fast16 width and max\");\n"
+                "_Static_assert(__UINT_FAST16_MAX__ == 4294967295U, \"ufast16 max\");\n"
+                "_Static_assert(sizeof(size_t) == 4 && sizeof(ptrdiff_t) == 4, \"stddef types\");\n"
+                "_Static_assert(sizeof(wchar_t) == 4 && __builtin_types_compatible_p(wchar_t, long int), \"wchar_t\");\n"
+                "_Static_assert(sizeof(L\"\"[0]) == 4 && __builtin_types_compatible_p(__typeof__(L\"\"[0]), long int), \"wide string\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__typeof__(sizeof(int)), unsigned int), \"sizeof result\");\n"
+                "_Static_assert(__builtin_types_compatible_p(__typeof__((int*)0 - (int*)0), int), \"pointer difference\");\n"
+                "_Static_assert(sizeof(long) == 4 && _Alignof(long) == 4, \"long layout\");\n"
+                "_Static_assert(sizeof(long long) == 8 && _Alignof(long long) == 4, \"long long layout\");\n"
+                "_Static_assert(sizeof(double) == 8 && _Alignof(double) == 4, \"double layout\");\n"
+                "_Static_assert(sizeof(long double) == 12 && _Alignof(long double) == 4, \"long double layout\");\n"
+                "_Static_assert(sizeof(void*) == 4 && _Alignof(void*) == 4, \"pointer layout\");\n"
+                "_Static_assert(offsetof(struct { char c; long long value; }, value) == 4, \"long long member offset\");\n"
+                "_Static_assert(offsetof(struct { char c; double value; }, value) == 4, \"double member offset\");\n"
+                "_Static_assert(offsetof(struct { char c; long double value; }, value) == 4, \"long double member offset\");\n"
+                "struct i386_bitfield_layout { unsigned int a : 1; unsigned int b : 31; int value; };\n"
+                "_Static_assert(offsetof(struct i386_bitfield_layout, value) == 4, \"bitfield layout\");\n"
+                "_Static_assert(sizeof(__INT64_TYPE__) == 8 && sizeof(__UINTPTR_TYPE__) == 4, \"integer type widths\");\n"
+                "_Static_assert(__LONG_MAX__ == 2147483647 && __LONG_LONG_MAX__ == 9223372036854775807LL, \"integer limit macros\");\n");
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, options);
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            syntax.string_literal_lengths_only = true;
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            bool valid = !tokens.diagnostic_count && !syntax.diagnostic_count && !semantic.diagnostic_count && semantic.analysis_complete;
+            String8 diagnostic = tokens.diagnostic_count ? tokens.diagnostics[0].message :
+                                 syntax.diagnostic_count ? syntax.diagnostics[0].message :
+                                 semantic.diagnostic_count ? semantic.diagnostics[0].message :
+                                                             S8("semantic analysis incomplete");
+            BUSTER_TEST_RAW(arguments, valid, diagnostic);
+            CPreprocessOptions strict_options = options;
+            strict_options.dialect = C_PREPROCESS_DIALECT_C23;
+            CPreprocessResult strict_macro = c_preprocess(temporary.arena, S8("#ifdef i386\n#error GNU-only i386 macro leaked\n#endif\n"),
+                                                           strict_options);
+            BUSTER_TEST(arguments, strict_macro.diagnostic_count == 0 && strict_macro.error_count == 0);
+            CpuModel atomic_models[] = {CPU_MODEL_X86_I386, CPU_MODEL_AMD_I486, CPU_MODEL_AMD_PENTIUM, CPU_MODEL_BASELINE};
+            String8 atomic_sources[] = {
+                S8("#if __GCC_ATOMIC_BOOL_LOCK_FREE != 1 || __GCC_ATOMIC_INT_LOCK_FREE != 1 || __GCC_ATOMIC_LLONG_LOCK_FREE != 1 || __CLANG_ATOMIC_INT_LOCK_FREE != 2 || __CLANG_ATOMIC_LLONG_LOCK_FREE != 1 || defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8)\n#error incorrect i386 atomics\n#endif\n"),
+                S8("#if __GCC_ATOMIC_BOOL_LOCK_FREE != 2 || __GCC_ATOMIC_LLONG_LOCK_FREE != 1 || __CLANG_ATOMIC_LLONG_LOCK_FREE != 1 || defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8)\n#error incorrect i486 atomics\n#endif\n"),
+                S8("#if __GCC_ATOMIC_BOOL_LOCK_FREE != 2 || __GCC_ATOMIC_LLONG_LOCK_FREE != 2 || __CLANG_ATOMIC_LLONG_LOCK_FREE != 2 || !defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8)\n#error incorrect pentium atomics\n#endif\n"),
+                S8("#if __GCC_ATOMIC_BOOL_LOCK_FREE != 2 || __GCC_ATOMIC_LLONG_LOCK_FREE != 2 || __CLANG_ATOMIC_LLONG_LOCK_FREE != 2 || !defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8)\n#error incorrect baseline atomics\n#endif\n"),
+            };
+            for (u32 model_index = 0; model_index < BUSTER_ARRAY_LENGTH(atomic_models); model_index += 1)
+            {
+                Target model_target = target.target;
+                model_target.cpu_model = atomic_models[model_index];
+                model_target.cpu_features = target_cpu_features_default(CPU_ARCH_I386, atomic_models[model_index]);
+                CPreprocessOptions model_options = options;
+                model_options.target = model_target;
+                model_options.data_layout = target_data_layout(model_target);
+                CPreprocessResult model_macros = c_preprocess(temporary.arena, atomic_sources[model_index], model_options);
+                BUSTER_TEST_RAW(arguments, model_macros.diagnostic_count == 0 && model_macros.error_count == 0,
+                                model_macros.diagnostic_count ? model_macros.diagnostics[0].message : S8("atomic macro error"));
+            }
+        }
+        c_test_scratch_end(temporary);
+    }
     return result;
 }
 
@@ -25918,6 +26007,80 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_target_abi_macros(UnitTestArguments* a
                 c_test_scratch_end(temporary);
             }
         }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_i386_feature_macros(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CTestI386FeatureMacroCase CTestI386FeatureMacroCase;
+    struct CTestI386FeatureMacroCase
+    {
+        CpuModel model;
+        String8 source;
+    };
+    CTestI386FeatureMacroCase cases[] = {
+        {CPU_MODEL_INTEL_CORE_2,
+         S8("#if !defined(__MMX__) || !defined(__SSE__) || !defined(__SSE2__) || !defined(__SSE3__) || !defined(__SSSE3__) || !defined(__FXSR__)\n"
+            "#error incorrect core2 feature macros\n#endif\n")},
+        {CPU_MODEL_AMD_ZEN_1,
+         S8("#if !defined(__MMX__) || !defined(__SSE__) || !defined(__SSE2__) || !defined(__SSSE3__) || !defined(__POPCNT__) || !defined(__FXSR__)\n"
+            "#error incorrect znver1 feature macros\n#endif\n")},
+        {CPU_MODEL_AMD_ATHLON_XP,
+         S8("#if !defined(__MMX__) || !defined(__SSE__) || !defined(__3dNOW__) || !defined(__FXSR__)\n"
+            "#error incorrect athlon-xp feature macros\n#endif\n")},
+        {CPU_MODEL_AMD_PENTIUM,
+         S8("#if !defined(__i586__) || !defined(__tune_i586__) || !defined(__tune_pentium__) || defined(__MMX__)\n"
+            "#error incorrect pentium feature macros\n#endif\n")},
+    };
+    TargetParseResult parsed = target_parse_triple(S8("i386-unknown-linux-gnu"));
+    BUSTER_TEST(arguments, parsed.error == TARGET_PARSE_ERROR_NONE);
+    if (parsed.error == TARGET_PARSE_ERROR_NONE)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            Target target = parsed.target;
+            target.cpu_model = cases[index].model;
+            CPreprocessResult macros = c_preprocess(arguments->arena, cases[index].source,
+                                                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target),
+                                                                         .source_path = S8("i386-feature-macros.c")});
+            BUSTER_TEST(arguments, macros.diagnostic_count == 0);
+        }
+        Target target = parsed.target;
+        target.cpu_model = CPU_MODEL_INTEL_CORE_2;
+        target.cpu_features = target_cpu_features_x86_apply_with_closure(target_cpu_features_effective(target),
+                                                                          TARGET_CPU_FEATURE_X86_SSE, false);
+        target.cpu_features_explicit = true;
+        CPreprocessResult no_sse = c_preprocess(arguments->arena,
+                                                S8("#if defined(__SSE__) || defined(__SSE2__) || defined(__SSE3__) || defined(__SSSE3__) || !defined(__FXSR__)\n"
+                                                   "#error -mno-sse did not remove dependent features\n#endif\n"),
+                                                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target),
+                                                                     .source_path = S8("i386-no-sse-macros.c")});
+        BUSTER_TEST(arguments, no_sse.diagnostic_count == 0);
+
+        Target hosted_target = target_parse_triple(S8("x86_64-unknown-linux-gnu")).target;
+        CPreprocessResult hosted = c_preprocess(arguments->arena,
+                                                S8("#if __STDC_HOSTED__ != 1\n#error hosted default changed\n#endif\n"),
+                                                (CPreprocessOptions){.target = hosted_target,
+                                                                     .data_layout = target_data_layout(hosted_target),
+                                                                     .source_path = S8("hosted-default.c")});
+        CPreprocessResult freestanding = c_preprocess(arguments->arena,
+                                                      S8("#if __STDC_HOSTED__ != 0\n#error -ffreestanding not published\n#endif\n"),
+                                                      (CPreprocessOptions){.target = hosted_target,
+                                                                           .data_layout = target_data_layout(hosted_target),
+                                                                           .source_path = S8("freestanding.c"),
+                                                                           .freestanding = true});
+        BUSTER_TEST(arguments, hosted.diagnostic_count == 0 && freestanding.diagnostic_count == 0);
+
+        Target wasm32_target = target_parse_triple(S8("wasm32-wasip1")).target;
+        CPreprocessResult wasm_limits = c_preprocess(arguments->arena,
+                                                     S8("#include <limits.h>\n"
+                                                        "_Static_assert(__SIZEOF_LONG__ == 4 && LONG_MAX == 2147483647L, \"wasm32 long limits\");\n"),
+                                                     (CPreprocessOptions){.target = wasm32_target,
+                                                                          .data_layout = target_data_layout(wasm32_target),
+                                                                          .source_path = S8("wasm32-limits.c")});
+        BUSTER_TEST(arguments, wasm_limits.diagnostic_count == 0);
     }
     return result;
 }
@@ -63651,6 +63814,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_tagged_member_declares_nothing);
     C_TEST_FIXTURE(arguments, c_test_tagged_member_microsoft_anonymous);
     C_TEST_FIXTURE(arguments, c_test_target_abi_macros);
+    C_TEST_FIXTURE(arguments, c_test_i386_feature_macros);
     C_TEST_FIXTURE(arguments, c_test_gnu_common_predefined_macros);
     C_TEST_FIXTURE(arguments, c_test_tgmath_runtime);
     C_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);

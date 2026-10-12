@@ -667,6 +667,8 @@ struct CPreprocessOptions
     // Preserve expansion boundary whitespace for a subsequent text printer.
     // This does not widen CToken or allocate a sidecar in ordinary compilation.
     bool retain_output_spacing;
+    // The driver accepted -ffreestanding; publishes __STDC_HOSTED__ as zero.
+    bool freestanding;
     // Render the surviving macro table into CPreprocessDetail.macro_dump.
     bool dump_macros;
     // 0: none, 1: -fpic/-fpie, 2: -fPIC/-fPIE.
