@@ -17,6 +17,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -82,6 +83,7 @@ DRAIN_RECORD_GRACE_SECONDS = 1
 # job could not be emptied.
 DRAIN_ABSENT_EXIT = 3
 LAUNCH_DRAIN_FAILED_EXIT = 125
+LAUNCH_RUNTIME_TIMEOUT_EXIT = 124
 
 
 def process_tree_command():
@@ -132,12 +134,27 @@ class CaseProcess(bootstrap.WrapperProcess):
         self.descendant_waited_pids = []
         self.job_drain = None
         self.job_name = None
+        self.launch_status_path = None
+        self.runtime_deadline_ns = None
+        self.launch_terminal_record = None
         if os.name == "nt":
             # The launcher assigns the suspended command to a fresh job before
             # it runs, so every descendant is a kernel-tracked member (#3690).
             self.job_name = "Local\\buster-bootstrap-case-%d-%s" % (os.getpid(), uuid.uuid4().hex)
+            clock = {"QueryPerformanceCounter()": "qpc", "GetTickCount64()": "tick"}.get(
+                time.get_clock_info("monotonic").implementation)
+            if clock is None:
+                raise RuntimeError("bootstrap native deadline requires a known Windows monotonic clock")
+            status_directory = tempfile.TemporaryDirectory(prefix="buster-case-status-")
+            owner.addCleanup(status_directory.cleanup)
+            self.launch_status_path = Path(status_directory.name) / "terminal.json"
+            # Set the native deadline before launcher startup. Its separate
+            # cleanup allowance must not extend the payload's frozen budget.
+            self.runtime_deadline_ns = time.monotonic_ns() + int(bootstrap.WRAPPER_TIMEOUT_SECONDS * 1_000_000_000)
             command = process_tree_command() + [
                 "launch", self.job_name, str(int(bootstrap.CLEANUP_TIMEOUT_SECONDS * 1000)),
+                "--deadline-ns", str(self.runtime_deadline_ns), "--clock", clock,
+                "--status-path", str(self.launch_status_path),
                 subprocess.list2cmdline(command)]
         with self.ownership.lock:
             if self.ownership.cancelled.is_set():
@@ -150,6 +167,37 @@ class CaseProcess(bootstrap.WrapperProcess):
             "test": self.test_id, "pid": self.process.pid, "job": self.job_name,
             "elapsed_seconds": time.monotonic() - self.started,
         }), flush=True)
+
+    def launch_status(self):
+        try:
+            record = json.loads(self.launch_status_path.read_text())
+        except (AttributeError, OSError, ValueError) as error:
+            raise RuntimeError("bootstrap native launch record missing or malformed") from error
+        integer_fields = ("runtime_deadline_ns", "root_returncode", "root_pid", "root_finished_ns",
+                          "cleanup_started_ns", "cleanup_finished_ns")
+        if (not isinstance(record, dict) or record.get("complete") is not True or
+                record.get("runtime_deadline_ns") != self.runtime_deadline_ns or
+                type(record.get("runtime_timed_out")) is not bool or
+                any(type(record.get(field)) is not int for field in integer_fields)):
+            raise RuntimeError("bootstrap native launch did not certify completion: " + repr(record))
+        cleanup_budget_ns = int(bootstrap.CLEANUP_TIMEOUT_SECONDS * 1_000_000_000)
+        cleanup_limit_ns = min(record["cleanup_started_ns"], self.runtime_deadline_ns) + cleanup_budget_ns
+        if (not 0 <= record["root_pid"] <= 0xFFFFFFFF or
+                not -1 <= record["root_returncode"] <= 0xFFFFFFFF or
+                not 0 <= record["root_finished_ns"] <= record["cleanup_started_ns"] or
+                not record["cleanup_started_ns"] <= record["cleanup_finished_ns"] <= cleanup_limit_ns or
+                (not record["runtime_timed_out"] and
+                 (not record["root_pid"] or record["root_returncode"] < 0 or
+                  record["root_finished_ns"] > self.runtime_deadline_ns))):
+            raise RuntimeError("bootstrap native launch record violates its deadlines: " + repr(record))
+        if (getattr(self, "require_terminal_observation", False) and
+                time.monotonic_ns() > self.terminal_deadline_ns):
+            raise RuntimeError("bootstrap native launch terminal record observed after its deadline")
+        expected = LAUNCH_RUNTIME_TIMEOUT_EXIT if record["runtime_timed_out"] else 0
+        if self.process.returncode != expected:
+            raise RuntimeError("bootstrap native launch status disagrees with its exit: " + repr(record))
+        self.launch_terminal_record = record
+        return record
 
     def cleanup(self):
         # finish() and cancellation may reach the same child concurrently.
@@ -167,6 +215,9 @@ class CaseProcess(bootstrap.WrapperProcess):
                 # exits with its command, before the frozen reap looks at it.
                 if not self.cleaned and os.name == "nt" and self.process.poll() is None:
                     deadline = started + bootstrap.CLEANUP_TIMEOUT_SECONDS
+                    terminal_deadline_ns = getattr(self, "terminal_deadline_ns", None)
+                    if terminal_deadline_ns is not None:
+                        deadline = min(deadline, terminal_deadline_ns / 1_000_000_000)
                     try:
                         self.job_drain = drain_job(self.job_name, deadline)
                         if self.job_drain.get("absent") and self.process.poll() is None:
@@ -186,10 +237,14 @@ class CaseProcess(bootstrap.WrapperProcess):
                         error = RuntimeError("bootstrap descendant cleanup failures: " +
                                              repr([drain_error, error]))
                     drain_error = error
-                if (drain_error is None and os.name == "nt" and
-                        self.process.returncode == LAUNCH_DRAIN_FAILED_EXIT):
-                    drain_error = RuntimeError("bootstrap case job kept members after its command exited: " +
-                                               self.job_name)
+                if drain_error is None and os.name == "nt":
+                    # Reaping the launcher alone cannot certify its job empty.
+                    # Broker status and the record must agree for every
+                    # Windows completion, including cleanup without finish().
+                    try:
+                        self.launch_status()
+                    except RuntimeError as error:
+                        drain_error = error
                 if drain_error is not None:
                     raise drain_error
             except Exception as error:
@@ -202,13 +257,28 @@ class CaseProcess(bootstrap.WrapperProcess):
     def finish(self, timeout_seconds=None):
         started = time.monotonic()
         try:
+            if self.job_name is not None and timeout_seconds is None:
+                # The native owner enforces the original payload deadline.
+                # Collection also allows its original, separately bounded
+                # cleanup; explicit shorter waits still use the frozen reap.
+                self.terminal_deadline_ns = self.runtime_deadline_ns + int(bootstrap.CLEANUP_TIMEOUT_SECONDS * 1_000_000_000)
+                observed_ns = time.monotonic_ns()
+                self.require_terminal_observation = observed_ns < self.terminal_deadline_ns
+                timeout_seconds = max(0.0, (self.terminal_deadline_ns - observed_ns) / 1_000_000_000)
             result = super().finish(timeout_seconds)
+            if self.job_name is not None:
+                record = self.launch_status()
+                if record["runtime_timed_out"]:
+                    raise AssertionError("bootstrap child timed out: " + repr(self.process.args) +
+                                         "\nstdout:\n" + result.stdout + "\nstderr:\n" + result.stderr)
+                result.returncode = record["root_returncode"]
         finally:
             print("BOOTSTRAP_COLLECTION " + json.dumps({
                 "test": self.test_id, "pid": self.process.pid,
                 "elapsed_seconds": time.monotonic() - started,
                 "cleanup_seconds": self.cleanup_seconds,
                 "job_drain": self.job_drain,
+                "native_launch": self.launch_terminal_record,
             }), flush=True)
         return result
 
