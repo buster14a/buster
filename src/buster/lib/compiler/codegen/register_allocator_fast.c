@@ -34,8 +34,8 @@
 // write-back of one no path out of the block reads, and `machine_fast_dead_in`
 // lets an edge conform leave one its destination does not read dirty for the
 // source's other successors. A fixed or tied operand that
-// needs an occupied register moves the live occupant to a free one
-// (`machine_fast_vacate`) rather than storing it. A reload prefers the
+// needs an occupied register, and a non-call row's clobber, moves the live
+// occupant to a free one (`machine_fast_vacate`) rather than storing it. A reload prefers the
 // register the value was first bound to (`MachineFastState.preferred_registers`),
 // so the copies that repair cross-path disagreement mostly vanish.
 // `machine_fast_placement_build_pinned` then lays the frame out
@@ -474,9 +474,9 @@ BUSTER_GLOBAL_LOCAL void machine_fast_spill(MachineFastState* state, u32 physica
     state->virtual_register_locations[owner] = UINT32_MAX;
 }
 
-// Frees `target` for a fixed or tied operand of the row being scanned. A live
-// occupant moves to a free register with one copy instead of a store now and
-// a reload at its next use; dead or recreatable occupants, and every case
+// Frees `target` for a fixed or tied operand, or a non-call clobber, of the row
+// being scanned. A live occupant moves to a free register with one copy
+// instead of a store now and a reload at its next use; dead or recreatable occupants, and every case
 // without a suitable free register, fall back to the eviction. The use phase
 // keeps the row's placed inputs held, so a free register here is never one of
 // them; the row's reservations and active pins are excluded, and a value
@@ -4574,13 +4574,23 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         }
                     }
                 }
-                u64 clobber_mask = opcode_row.clobber_mask;
-                for (u32 physical_register = 0; clobber_mask; physical_register += 1)
+                // A non-call clobber (RDX at a division, an encoder sequence's
+                // scratch) moves a live occupant to a free register instead of
+                // storing it and reloading it at its next use. The row's
+                // reservations, held inputs and pins are excluded from the
+                // candidates, so the copy lands where nothing this row reads or
+                // writes. A call clobbers the caller-saved file, where a free
+                // register would be flushed with the rest, so it keeps the store.
+                for (u64 clobber_mask = opcode_row.clobber_mask; clobber_mask; clobber_mask &= clobber_mask - 1u)
                 {
-                    if (clobber_mask & (1ull << physical_register))
+                    u32 physical_register = machine_fast_first_set(clobber_mask);
+                    if (is_call)
                     {
-                        clobber_mask &= ~(1ull << physical_register);
                         machine_fast_spill(&state, physical_register);
+                    }
+                    else
+                    {
+                        machine_fast_vacate(&state, physical_register, 0);
                     }
                 }
                 // Vreg definitions bind their register lazily dirty.
