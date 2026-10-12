@@ -894,9 +894,22 @@ struct IrFastStatistics
 
 // Direct-call expansion is independent of register allocation and FAST cleanup.
 // Zero option limits select these defaults; limits count canonical rows/sites.
+// A zero module limit is relative to the module: the larger of
+// IR_INLINE_MODULE_GROWTH and the module's lowered canonical instruction rows
+// shifted right by IR_INLINE_MODULE_GROWTH_SHIFT (1/32 growth). A fixed
+// module cap starves optional sites in large translation units, because
+// callers are visited in module order rather than by profit (#48).
 #define IR_INLINE_TINY_INSTRUCTIONS 16u
 #define IR_INLINE_FUNCTION_GROWTH (2u * IR_INLINE_TINY_INSTRUCTIONS * IR_INLINE_CALL_SITES)
 #define IR_INLINE_MODULE_GROWTH 4096u
+#define IR_INLINE_MODULE_GROWTH_SHIFT 5u
+// Optional splices into a caller are kept only when their planned row growth,
+// shifted left by this amount, reaches the caller's instruction rows: the
+// first splice relocates the caller's tables and the arena retains the old
+// copy, so a few tiny sites in a large caller cost more memory than they save.
+// IrInlineOptions.caller_growth_shift overrides it; zero selects this default
+// and values of 32 or more keep every planned site.
+#define IR_INLINE_CALLER_GROWTH_SHIFT 5u
 #define IR_INLINE_CALL_SITES 64u
 
 typedef struct IrInlineOptions IrInlineOptions;
@@ -907,7 +920,11 @@ struct IrInlineOptions
     u32 max_function_growth;
     u32 max_module_growth;
     u32 max_call_sites;
+    u32 caller_growth_shift;
 };
+
+// Effective module row-growth limit for `module_rows` lowered canonical rows.
+BUSTER_F_DECL u32 ir_inline_module_growth_limit(u32 max_module_growth, u64 module_rows);
 
 typedef enum IrInlineBudgetReason
 {
@@ -983,6 +1000,11 @@ struct IrModule
     IrLocalPromotionStatistics local_promotion;
     bool inline_complete;
     IrInlineStatistics inlining;
+    // Callers whose splices were all optional and whose strict output check
+    // ir_inline_module deferred to preparation's next module-wide scan. Cleared
+    // once that scan proves them; see ir_prepare_canonical_module.
+    u32* inline_unchecked_callers;
+    u32 inline_unchecked_count;
     bool fast_complete;
     IrFastStatistics fast;
 };

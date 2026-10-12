@@ -14491,7 +14491,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_wide_aggregate_va_a
 
 // Packed `struct { long double }` wrappers (alignment one, sixteen bytes) cross
 // calls as the x87 pair and a memory slot, and `va_arg` of aggregates aligned
-// past sixteen bytes rounds the overflow area up to the alignment. Each
+// past sixteen bytes (up to 256 here) rounds the overflow area up to the
+// alignment. Each
 // direction is checked against Clang and, where installed, GCC: Buster calling
 // the foreign definitions and the foreign code calling Buster's.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_packed_x87_overaligned_va_arg(UnitTestArguments* arguments)
@@ -14509,6 +14510,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_packed_x87_overalig
         "typedef struct { _Alignas(32) long a[4]; } A32;\n"
         "typedef struct { _Alignas(32) long a[12]; } A32L;\n"
         "typedef struct { _Alignas(64) long a[8]; } A64;\n"
+        "typedef struct { _Alignas(128) long a[16]; } A128;\n"
+        "typedef struct { _Alignas(256) long a[32]; } A256;\n"
         "typedef struct { PL inner; } PW;\n"
         "typedef struct __attribute__((packed)) { char c; PL p; } Off;\n"
         "\n"
@@ -14563,6 +14566,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_packed_x87_overalig
         "    bad |= va_arg(ap, long) != 4;\n"
         "    A32 d = va_arg(ap, A32);\n"
         "    bad |= d.a[0] != 50 || d.a[3] != 53;\n"
+        "    bad |= va_arg(ap, int) != 5;\n"
+        "    A128 e = va_arg(ap, A128);\n"
+        "    bad |= (((unsigned long)&e) & 127) != 0 || e.a[0] != 60 || e.a[15] != 75;\n"
+        "    bad |= va_arg(ap, long) != 6;\n"
+        "    A256 g = va_arg(ap, A256);\n"
+        "    bad |= (((unsigned long)&g) & 255) != 0 || g.a[0] != 80 || g.a[31] != 111;\n"
+        "    bad |= va_arg(ap, long) != 7;\n"
         "    va_end(ap);\n"
         "    return bad;\n"
         "}\n"
@@ -14618,7 +14628,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_packed_x87_overalig
         "    A64 b = {{20, 21, 22, 23, 24, 25, 26, 27}};\n"
         "    A32L c = {{30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41}};\n"
         "    A32 d = {{50, 51, 52, 53}};\n"
-        "    bad |= aligned(19, 1L, a, 2L, b, 3, c, 4L, d) << 7;\n"
+        "    A128 e;\n"
+        "    A256 g;\n"
+        "    for (int i = 0; i < 16; i += 1) { e.a[i] = 60 + i; }\n"
+        "    for (int i = 0; i < 32; i += 1) { g.a[i] = 80 + i; }\n"
+        "    bad |= aligned(19, 1L, a, 2L, b, 3, c, 4L, d, 5, e, 6L, g, 7L) << 7;\n"
         "    bad |= odd_aligned(23, 1L, 2L, 3L, 4L, 5L, 6L, a, 7L, b) << 6;\n"
         "    return bad;\n"
         "}\n"
@@ -34355,6 +34369,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_canonical_inlining(UnitT
                 String8 assembly = BYTE_SLICE_TO_STRING(8, file_read(arena, listing_path, (FileReadOptions){0}));
                 BUSTER_TEST(arguments, compiler_driver_test_assembly_calls(assembly, S8("budget_tiny")));
             }
+        }
+
+        // The caller relocation bound is a budget flag like the others: a
+        // positive 32-bit shift reaches the IR options and zero is rejected.
+        {
+            String8 shift_command[] = {S8("-fcanonical-inline-caller-growth-shift=32"), S8("-c"), budget_source_path};
+            CompilerDriverInvocation shift = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(shift_command));
+            BUSTER_TEST(arguments, shift.error == COMPILER_DRIVER_ERROR_NONE && shift.inline_options.caller_growth_shift == 32);
+            String8 zero_command[] = {S8("-fcanonical-inline-caller-growth-shift=0"), S8("-c"), budget_source_path};
+            CompilerDriverInvocation zero = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(zero_command));
+            BUSTER_TEST(arguments, zero.error != COMPILER_DRIVER_ERROR_NONE);
         }
 
         String8 debug_command[] = {
