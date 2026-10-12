@@ -393,10 +393,14 @@ expression task stack without a row; its value belongs to lowering. Each query
 re-walks its range, so a site whose row is retained is recognized from its
 slot's hint without a search.
 
-Lowering's own constant evaluator does not yet fold a `__builtin_choose_expr`
-value in a deferred `_Static_assert`, and lowering cannot take a choice whose
-condition is another choice (#3860); `c_test_builtin_operand_types` therefore
-checks those forms through the parser only. Append-only answers participate in semantic
+Lowering follows the same `__builtin_choose_expr` row through
+`c_ir_selection_answer`, as it does for `_Generic` (#3860). Prepared-call
+lowering, `c_ir_constant_evaluate` (deferred `_Static_assert`, static-storage
+array bounds) and the strict sizeof walk take the retained arm, so a choice
+whose condition is another choice needs no folding in lowering. They fold the
+condition themselves only when the parser recorded no row, which happens for a
+`__builtin_constant_p` condition. `c_test_builtin_operand_types` lowers and
+runs those forms in both frontend forms. Append-only answers participate in semantic
 result checkpoints. Lowering consumes retained answers; model-building-only
 callers resolve missing answers through the same semantic helper.
 
