@@ -496,8 +496,10 @@ BUSTER_F_DECL bool os_file_preallocate(OsFileDescriptor* file_descriptor, u64 si
 // child calls os_early_exit_release and then _exits with the status it was
 // sent, or, if the child dies first, with the child's own status. The child
 // returns true and carries on with the work. Arming fails (false, nothing
-// forked) on Windows, once any thread exists, or when pipe/fork fail, and
-// the caller simply continues in-process.
+// forked) on Windows, Android and iOS, once any tracked thread exists, or when
+// the status pipe cannot be created above the standard streams or fork fails;
+// the caller then simply continues in-process. os_is_only_live_thread does
+// not see untracked threads, so a caller must also have started none.
 //
 // The trade-offs are why it is never the default: time(1), getrusage and
 // per-process counters see only the parent; a debugger follows the parent;

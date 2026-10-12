@@ -1788,6 +1788,39 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_diagnostic_streams(UnitT
     return result;
 }
 
+#if !BUSTER_ANDROID && !BUSTER_IOS && !defined(_WIN32)
+// Runs `ide cc <cc_arguments>` under /bin/sh with `prelude` applied first (a
+// redirection closing standard streams, optionally a descriptor limit), so the
+// compiler starts with those streams closed. Returns the raw waitpid status
+// word, so distinct exit codes stay distinct, or UINT64_MAX when the shell
+// could not be run or timed out.
+BUSTER_GLOBAL_LOCAL u64 compiler_driver_test_early_exit_closed_run(UnitTestArguments* arguments, String8 prelude,
+                                                                            SliceString8 cc_arguments)
+{
+    String8 command[16];
+    u32 count = 0;
+    command[count++] = S8("/bin/sh");
+    command[count++] = S8("-c");
+    command[count++] = string_format(arguments->arena, S8("{S8}; exec \"$@\""), prelude);
+    command[count++] = S8("sh");
+    command[count++] = program_state->input.arguments.pointer[0];
+    command[count++] = S8("cc");
+    for (u64 index = 0; index < cc_arguments.length && count < BUSTER_ARRAY_LENGTH(command); index += 1)
+    {
+        command[count++] = cc_arguments.pointer[index];
+    }
+    ProcessSpawnOptions capture = {.capture = (u64)1 << STANDARD_STREAM_ERROR, .use_process_environment = 1};
+    ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0}, capture);
+    u64 status = UINT64_MAX;
+    if (spawned.handle != 0)
+    {
+        ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, spawned, 30000000);
+        status = waited.timed_out ? UINT64_MAX : waited.platform_status;
+    }
+    return status;
+}
+#endif
+
 // -fearly-exit (#3686): the forked parent's status, streams and artifacts
 // match the default path's, including a replaced object and a failure.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_early_exit(UnitTestArguments* arguments)
@@ -1830,6 +1863,38 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_early_exit(UnitTestArgum
         BUSTER_TEST(arguments, compiler_driver_test_contains(error, S8("early-exit-failure")));
         ByteSlice kept = file_read(arena, early_path, (FileReadOptions){0});
         BUSTER_TEST(arguments, kept.length == expected.length && memory_compare(kept.pointer, expected.pointer, expected.length));
+#if !defined(_WIN32)
+        // Closed standard streams: the status pipe must never land on fds
+        // 0-2, where -v output would reach the parent as a status byte. The
+        // last prelude also exhausts descriptors so the pipe cannot move
+        // above fd 2, which must fall back to an in-process compile. Every
+        // case must give the default path's status and artifact.
+        BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        String8 preludes[] = {S8("exec 0<&- 1>&-"), S8("exec 0<&- 1>&- 2>&-"), S8("exec 0<&- 1>&-; ulimit -n 3")};
+        String8 modes[] = {S8("-fno-early-exit"), S8("-fearly-exit")};
+        for (u32 prelude = 0; prelude < BUSTER_ARRAY_LENGTH(preludes); prelude += 1)
+        {
+            for (u32 verbose = 0; verbose < 2; verbose += 1)
+            {
+                u64 statuses[2];
+                ByteSlice objects[2];
+                for (u32 mode = 0; mode < 2; mode += 1)
+                {
+                    String8 object_path = mode ? early_path : default_path;
+                    (void)os_file_delete(object_path);
+                    String8 compile[] = {modes[mode], S8("-march=native"), verbose ? S8("-v") : S8("-w"), S8("-c"), source_path, S8("-o"), object_path};
+                    statuses[mode] = compiler_driver_test_early_exit_closed_run(arguments, preludes[prelude], (SliceString8)BUSTER_ARRAY_TO_SLICE(compile));
+                    objects[mode] = file_read(arena, object_path, (FileReadOptions){0});
+                }
+                BUSTER_TEST(arguments, statuses[0] != UINT64_MAX && statuses[0] == statuses[1]);
+                BUSTER_TEST(arguments, objects[0].length == objects[1].length &&
+                                           memory_compare(objects[0].pointer, objects[1].pointer, objects[0].length));
+                // Without -v nothing is written to the closed streams, so the
+                // compile itself must succeed in both modes.
+                BUSTER_TEST(arguments, verbose || prelude == 2 || (statuses[1] == 0 && objects[1].length == expected.length));
+            }
+        }
+#endif
     }
     if (source_written) { BUSTER_TEST(arguments, os_file_delete(source_path)); }
     (void)os_file_delete(early_path);

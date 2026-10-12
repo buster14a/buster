@@ -58,8 +58,14 @@ restores the default) is mold and wild's fork trick (#3686). It lives in
 
 - **Arming.** After argument parsing, and before the first `lane_run` starts
   the gang, `ide cc` forks. The parent only waits on a pipe. Arming is
-  skipped when any thread already exists, on Windows, and when `pipe` or
-  `fork` fails; the compile then simply runs in-process.
+  skipped on Windows, Android and iOS, and when a tracked thread already
+  exists (`os_is_only_live_thread` does not see untracked threads; desktop
+  `ide cc` starts none before this point). It is also skipped when the
+  status pipe cannot be created through `os_process_spawn_pipe_create`
+  (close-on-exec, both ends moved above fd 2), or when `fork` fails. The
+  compile then simply runs in-process. Because the status pipe never lands
+  on fds 0-2, a process started with standard streams closed cannot write
+  compiler output into it.
 - **Release.** Once every artifact and report is out, the child calls
   `os_early_exit_release`. It points its standard streams at `/dev/null`,
   so a build system's pipes reach EOF, and sends its status. The parent
