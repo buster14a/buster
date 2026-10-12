@@ -3302,4 +3302,59 @@ the same way and diagnostic only:
   default path and for bodies the tree does not index.
 - Zen 5 validation stays incomplete (#2761).
 
+### Statement-keyword gate in lowering's classification
+
+Two map-row follow-ups were left open after the
+[extent table](#statement-extents-in-lowering):
+- `c_ir_lower_body_advance`'s first-token classification;
+- `c_ir_control_substatement_position`, the switch label scan.
+
+A throwaway census build with noinline wrappers and counters ran on base main
+`b71dfc89` (unity self-host, `-g0 -c -fc-ast-pilot`, tests-off
+`-march=x86-64-v3` Release, Callgrind):
+- **The switch label scan's call:** 0.22 M Ir over 5,224 calls, none true.
+- **The classification:** 155,771 statements.
+  - The typedef probe costs 38.5 M. 65,611 first tokens take its scope
+    lookup, and 53,835 of them are statement keywords: `if`, `return` and
+    the like.
+  - `c_parse_type_word_for_dialect` costs 9.0 M.
+  - The label proof costs 5.7 M and finds 12 labels.
+
+A keyword is never a type word and never names an entity, so the probe's
+answer for one is always false. A token gate can skip the lookup for these
+keywords on both paths, with no tree.
+
+These budgets were declared before the measured runs. The input is the
+self-host unity input, at `-g0 -c` for the instruction counts and at
+`-g -c` for the objects. Four arms are counted with Callgrind
+(`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3` Release
+builds, with the driver built by Clang (no TCC on the host):
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `b71dfc89`, which the candidate branches from. The budgets:
+- **Correctness.** The gate is exact by construction: the gated set
+  (`break`, `case`, `continue`, `default`, `do`, `for`, `goto`, `if`,
+  `return`, `switch`, `while`) is keywords in every dialect. Reference-check
+  builds (Debug and sanitized) run the skipped lookup behind every gated
+  token and check that it answers false. The `-c` objects (`-g0` and `-g`)
+  must be byte-identical across the four arms. `test_self_host` must keep
+  its fixed point, and `test_all` must pass.
+- **The probe (D against A, and C against B).** `c_ir_lower_body_advance`'s
+  calls to `c_parse_scope_for_token_near` fall from 65,611 to at most
+  11,776, the unbound first tokens that are not gated keywords.
+- **The whole compile.** `-c` (`-g0`) must fall by at least 0.05% Ir, both D
+  against A and C against B. `-fsyntax-only` runs no lowering, so it is not
+  measured.
+- **The tree reads.** Each is built only if its census ceiling, net of the
+  gate, clears 1 M and the cost of the per-body table that answers it. The
+  [extent table](#statement-extents-in-lowering) measured that cost at about
+  400 to 700 Ir per entry. A read that does not clear the bar is recorded as
+  a negative result, with no code.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested. The report-only main comparison runs after the merge, and Zen 5
+  validation stays incomplete (#2761).
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
