@@ -45,6 +45,7 @@
 // tests; mobile test staging does not need to carry this private source file.
 #define BUSTER_QUALITY_SWITCH_FIXTURE(...) BUSTER_GLOBAL_LOCAL char8 const machine_quality_switch_source[] = #__VA_ARGS__;
 #include <buster/tests/compiler/codegen/fixtures/quality_switch_cfg.c>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 // Size census for the hot records the register-allocator project depends
 // on. The machine rows are all-integer and hold everywhere; the typed IR and
@@ -872,7 +873,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_a64_atomic_pair_updates(UnitTest
                             direct.code.length, order_flags[order], compare_exchange, operation), description);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -1313,7 +1314,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_source_writer_guards(UnitTestArg
         unknown = false;
         machine_test_source_scan_writers(source, body, test.default_arch, writers, 0, &x86, &aarch64, &unknown);
         BUSTER_TEST(arguments, !x86 && !aarch64 && !unknown);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // Preserve the legacy stack limit rather than silently changing guard
     // classification when an opening brace cannot be pushed.
@@ -1332,7 +1333,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_source_writer_guards(UnitTestArg
         bool unknown = false;
         machine_test_source_scan_writers(body, body, MACHINE_X64_SOURCE_ARCH_X86, writers, BUSTER_ARRAY_LENGTH(writers), &x86, &aarch64, &unknown);
         BUSTER_TEST(arguments, x86 == (depth >= 256) && aarch64 == (depth < 256) && !unknown);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -1682,7 +1683,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_a64_large_aggregate_copy(UnitTes
 #endif
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -2449,7 +2450,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
         IrProgram* volatile_program = machine_test_compile_c(arguments->arena, S8("volatile-alias.c"),
             S8("unsigned long f(void) { volatile unsigned long a = 1, b = 2; a = b; return a + b; }"), target);
@@ -3315,7 +3316,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_incoming_aggregate_capacity(Unit
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
         // Keep ordinary large stack parameters supported.
@@ -3332,7 +3333,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_incoming_aggregate_capacity(Unit
                 BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -3419,7 +3420,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_capacity(UnitTestArguments
                 {
                     BUSTER_TEST(arguments, placement.frame_size == 0);
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -3474,7 +3475,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_capacity(UnitTestArguments
                 {
                     BUSTER_TEST(arguments, placement.stack_slot_offsets[0] != placement.stack_slot_offsets[1]);
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -3513,7 +3514,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_capacity(UnitTestArguments
             {
                 BUSTER_TEST(arguments, placement.virtual_register_offsets[0] == 64 && placement.frame_size >= 208);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 
@@ -3546,7 +3547,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_capacity(UnitTestArguments
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -4430,7 +4431,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_boolean_i128_cast(UnitTestArgume
                     BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -4511,7 +4512,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_i128_block_parameters(UnitTestAr
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -4626,7 +4627,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_pointer_block_parameters(UnitTes
 #endif
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -4700,7 +4701,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_i128_complement(UnitTestArgu
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -4774,7 +4775,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_dynamic_stack(UnitTestArgume
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -4900,7 +4901,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_backward_switch_cfg(Unit
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -5037,7 +5038,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_switch_cfg(UnitTestArgum
 #endif
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -5149,7 +5150,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_division_clobber_vacate(Unit
 #endif
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -5281,7 +5282,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_unsigned_switch(UnitTestArgument
 #endif
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -5445,7 +5446,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_clear_instruction_cache(UnitTest
 #endif
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -5579,7 +5580,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_inline_timestamps(UnitTestAr
 #endif
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -5645,7 +5646,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_inline_timestamps(UnitTestAr
             MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, program->modules->functions, target);
             BUSTER_TEST(arguments, !selected.supported && selected.failed_opcode == IR_OPCODE_INLINE_ASSEMBLY);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -5785,7 +5786,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_inline_shift_breakpoint(Unit
 #endif
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -5962,7 +5963,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_inline_port_environment(Unit
 #endif
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     // The refusals GNU as shares: the mnemonics take exactly the operands they have.
@@ -5988,7 +5989,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_inline_port_environment(Unit
             MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, program->modules->functions, target);
             BUSTER_TEST_RAW(arguments, !selected.supported && selected.failed_opcode == IR_OPCODE_INLINE_ASSEMBLY, rejected[invalid]);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -6114,7 +6115,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_counters(UnitTes
 #endif
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -6183,7 +6184,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_cpu_queries(UnitTestArguments* a
                     BUSTER_TEST(arguments, standalone.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
                 }
             }
-            scratch_end(assembly_temporary);
+            c_test_scratch_end(assembly_temporary);
             for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -6290,7 +6291,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_cpu_queries(UnitTestArguments* a
 #endif
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
             BUSTER_TEST(arguments, target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_XSAVE) == target_has_xsave);
         }
@@ -6445,7 +6446,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_compiler_barrier(UnitTestArgumen
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -6574,7 +6575,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_fixed_register_a
 #endif
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -6642,7 +6643,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_fixed_register_o
             }
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -6710,7 +6711,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_uefi_platform_variadic(UnitT
                         BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -6788,7 +6789,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_variadic_workspace(UnitTestA
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -6854,7 +6855,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_constraint_union
                             BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
                         }
                     }
-                    scratch_end(temporary);
+                    c_test_scratch_end(temporary);
                 }
             }
         }
@@ -6909,7 +6910,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_reverse_postorder_layout(UnitTes
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -7041,7 +7042,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_goto(UnitTestArg
                     BUSTER_TEST_RAW(arguments, assembly_blocks != 0, names[name]);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -7103,7 +7104,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_hints(UnitTestArguments* 
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -7304,7 +7305,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_sysv_va_list_extent(UnitTestArgu
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -7544,7 +7545,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_native_variadic(UnitTestArgument
 #endif
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -7626,7 +7627,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_wide_vector_boundaries(UnitTestA
                 }
             }
             BUSTER_TEST(arguments, transfers != 0);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -7786,7 +7787,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_win64_wide(UnitTestArguments* ar
 #endif
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -7950,7 +7951,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_win64_aligned(UnitTestArguments*
 #endif
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -8129,7 +8130,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_win64_vector(UnitTestArguments* 
 #endif
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -8294,7 +8295,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_result_alignment(UnitTestArg
 #endif
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -8375,7 +8376,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_native_aggregate(UnitTestArgumen
 
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -8485,7 +8486,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_f80(UnitTestArguments* arguments
 #endif
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -8591,7 +8592,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_source(UnitTestArgumen
 #endif
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -9302,15 +9303,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_sparse_pins(UnitTestArgu
                                         gap, variant.virtual_register_count, variant.instruction_count, repeat - 1, ns,
                                         retained, placement.pinned_register_count);
                                 }
-                                scratch_end(placement_temporary);
+                                c_test_scratch_end(placement_temporary);
                             }
-                            scratch_end(variant_temporary);
+                            c_test_scratch_end(variant_temporary);
                         }
                     }
-                    scratch_end(function_temporary);
+                    c_test_scratch_end(function_temporary);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #if BUSTER_BENCH_ALLOCATIONS
@@ -9482,7 +9483,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_values_differential(UnitTe
             }
             BUSTER_TEST(arguments, same);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -9572,7 +9573,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_values_sparse_work(UnitTes
         }
         BUSTER_TEST(arguments, same);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -9767,7 +9768,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_capacity(UnitTestArg
                                    dense_value.kind == indexed_value.kind && dense_value.first_instruction == indexed_value.first_instruction &&
                                    dense_value.instruction_count == indexed_value.instruction_count);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -9872,7 +9873,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_initialized_blocks(U
                                    dense_value.tail_instruction_count == indexed_value.tail_instruction_count &&
                                    dense_value.kind == indexed_value.kind);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -9964,7 +9965,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_initialized_run(Unit
                                    dense_value.tail_first_instruction == indexed_value.tail_first_instruction &&
                                    dense_value.tail_instruction_count == indexed_value.tail_instruction_count);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -10071,7 +10072,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_initialized_budget(U
                                        left.tail_instruction_count == right.tail_instruction_count);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -10110,7 +10111,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_sparse_local_state(UnitTestArgum
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -10473,7 +10474,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_constant_short_circuit(UnitTestA
                     BUSTER_TEST_RAW(arguments, selected.supported && selected.selector_certified && verified.error == MACHINE_VERIFY_NONE, description);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -10602,7 +10603,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_encode_into_caller_buffer(UnitTe
         BUSTER_TEST(arguments, generated.statistics.machine_code_bytes_in_place > 0 && generated.statistics.machine_code_bytes_copied == 0 &&
                                    generated.statistics.machine_code_bytes_in_place <= generated.code.length);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 

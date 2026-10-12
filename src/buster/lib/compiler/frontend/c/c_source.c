@@ -14728,18 +14728,21 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
 #if BUSTER_INCLUDE_TESTS
 #define C_TEST_UNIT_REGISTRY_RESERVED_SIZE BUSTER_MB(64)
 // One unit this thread preprocessed and has not yet released: its three
-// private arenas, the arena its result lives in, and that arena's position
-// when preprocessing began (rewinding below it kills the result).
+// private arenas, the arena its result lives in, that arena's position
+// when preprocessing began (rewinding below it kills the result), and the
+// thread's registration serial, which orders units against test scopes.
 typedef struct CTestUnitEntry CTestUnitEntry;
 struct CTestUnitEntry
 {
     Arena* arenas[3];
     Arena* owner;
     u64 owner_position;
+    u64 serial;
 };
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL Arena* c_test_unit_registry_arena;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestUnitEntry* c_test_unit_registry;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_registry_count;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_serial;
 
 BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Arena* shapes, Arena* owner, u64 owner_position)
 {
@@ -14754,8 +14757,9 @@ BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Ar
         {
             c_test_unit_registry = entry;
         }
-        *entry = (CTestUnitEntry){.arenas = {spelling, tokens, shapes}, .owner = owner, .owner_position = owner_position};
+        *entry = (CTestUnitEntry){.arenas = {spelling, tokens, shapes}, .owner = owner, .owner_position = owner_position, .serial = c_test_unit_serial};
         c_test_unit_registry_count += 1;
+        c_test_unit_serial += 1;
     }
 }
 
@@ -14824,14 +14828,17 @@ BUSTER_GLOBAL_LOCAL void c_test_unit_unregister(Arena* spelling)
     }
 }
 
-void c_test_release_preprocess_arenas_from(Arena* owner, u64 position)
+// Releases every unit the predicate selects: those owned by `owner` at or
+// above `position` (every unit when `owner` is null) that registered at or
+// after `serial`.
+BUSTER_GLOBAL_LOCAL void c_test_release_preprocess_units(Arena* owner, u64 position, u64 serial)
 {
     u64 index = c_test_unit_registry_count;
     while (index > 0)
     {
         index -= 1;
         CTestUnitEntry entry = c_test_unit_registry[index];
-        if (!owner || (entry.owner == owner && entry.owner_position >= position))
+        if (entry.serial >= serial && (!owner || (entry.owner == owner && entry.owner_position >= position)))
         {
             c_test_unit_remove(index);
             for (u32 arena_index = 0; arena_index < BUSTER_ARRAY_LENGTH(entry.arenas); arena_index += 1)
@@ -14840,6 +14847,21 @@ void c_test_release_preprocess_arenas_from(Arena* owner, u64 position)
             }
         }
     }
+}
+
+void c_test_release_preprocess_arenas_from(Arena* owner, u64 position)
+{
+    c_test_release_preprocess_units(owner, position, 0);
+}
+
+u64 c_test_preprocess_unit_mark(void)
+{
+    return c_test_unit_serial;
+}
+
+void c_test_release_preprocess_arenas_since(u64 mark)
+{
+    c_test_release_preprocess_units(0, 0, mark);
 }
 
 void c_test_release_preprocess_arenas(void)
