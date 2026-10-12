@@ -32,6 +32,57 @@ BUSTER_GLOBAL_LOCAL IrInlineCfgReserve ir_inline_cfg_reserve(IrFunction const* c
     };
     return result;
 }
+// Grow the caller's block, instruction, value and extra tables once, to the
+// planned final counts, before its first splice. A frontend-built caller's
+// tables are exactly sized, so the first append would otherwise double each
+// one and leave both the original and the doubling slack in the arena (#48).
+// Counts that exceed a target still grow through the ordinary appenders.
+BUSTER_GLOBAL_LOCAL void ir_inline_cfg_reserve_tables(Arena* arena, IrFunction* caller, u64 blocks, u64 instructions,
+                                                      u64 values, u64 extras)
+{
+    if (blocks > caller->block_capacity && blocks <= UINT32_MAX)
+    {
+        IrBlock* rows = arena_allocate(arena, IrBlock, blocks);
+        if (caller->block_count) memcpy(rows, caller->blocks, sizeof(*rows) * caller->block_count);
+        caller->blocks = rows;
+        caller->block_capacity = (u32)blocks;
+    }
+    if (instructions > caller->instruction_capacity && instructions <= UINT32_MAX)
+    {
+        IrInstruction* rows = arena_allocate(arena, IrInstruction, instructions);
+        IrSourceRange* sources = arena_allocate(arena, IrSourceRange, instructions);
+        memset(sources, 0, sizeof(*sources) * instructions);
+        if (caller->instruction_count) memcpy(rows, caller->instructions, sizeof(*rows) * caller->instruction_count);
+        if (caller->instruction_canonical_sources)
+        {
+            memcpy(sources, caller->instruction_canonical_sources, sizeof(*sources) * caller->instruction_count);
+        }
+        caller->instructions = rows;
+        caller->instruction_canonical_sources = sources;
+        caller->instruction_capacity = (u32)instructions;
+    }
+    if (values > caller->value_capacity && values <= UINT32_MAX)
+    {
+        IrValue* rows = arena_allocate(arena, IrValue, values);
+        if (caller->value_count) memcpy(rows, caller->values, sizeof(*rows) * caller->value_count);
+        caller->values = rows;
+        caller->value_capacity = (u32)values;
+    }
+    if (extras > caller->extra_capacity && extras <= UINT32_MAX)
+    {
+        IrInstructionId* rows = arena_allocate(arena, IrInstructionId, extras);
+        IrInstructionExtra* payloads = arena_allocate(arena, IrInstructionExtra, extras);
+        if (caller->extra_count)
+        {
+            memcpy(rows, caller->extra_instructions, sizeof(*rows) * caller->extra_count);
+            memcpy(payloads, caller->extras, sizeof(*payloads) * caller->extra_count);
+        }
+        caller->extra_instructions = rows;
+        caller->extras = payloads;
+        caller->extra_capacity = (u32)extras;
+    }
+}
+
 BUSTER_GLOBAL_LOCAL IrLocalId ir_inline_cfg_local(IrLocalId id, u32 base)
 {
     return id.value == IR_ID_UNDERLYING_INVALID ? id : (IrLocalId){.value = base + id.value};

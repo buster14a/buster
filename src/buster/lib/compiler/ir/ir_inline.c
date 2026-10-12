@@ -1342,6 +1342,18 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     }
                     bool changed = false;
                     bool required_splice = false;
+                    if (function_sites != function_sites_used[caller_index])
+                    {
+                        // One growth per table; each site may add a branch and a
+                        // continuation row beyond its copied body.
+                        u64 site_slack = 2u * (u64)(function_sites - function_sites_used[caller_index]);
+                        ir_inline_cfg_reserve_tables(program->arena, caller,
+                            ir_inline_storage_add(caller->block_count, function_projected_blocks),
+                            ir_inline_storage_add(caller->instruction_count,
+                                                  ir_inline_storage_add(function_projected_instructions, site_slack)),
+                            ir_inline_storage_add(caller->value_count, function_projected_values),
+                            ir_inline_storage_add(caller->extra_count, function_projected_extras));
+                    }
                     IrInlineCfgReserve reserve = ir_inline_cfg_reserve(caller, function_projected_locals, function_projected_debug,
                                                                        function_projected_scopes);
                     for (u32 block = 0; block < original_blocks && result.error == IR_VALIDATION_NONE; block += 1)

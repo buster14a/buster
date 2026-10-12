@@ -266,7 +266,13 @@ caller-wide widening per site. Other repeated splice work stays charged per site
 counts rather than unrelated instruction/value payload counts; call membership
 checks stop when they reach the call. Growing table storage is charged from the caller's actual
 capacities through projected appends, including geometric growth floors and
-alignment. Callee payloads and clone maps remain charged per splice.
+alignment; that charge is an upper bound, because before a caller's first splice
+`ir_inline_cfg_reserve_tables` grows its block, instruction, value and extra
+tables once to the planned final counts instead of doubling them. Relocating a
+touched caller's exactly sized frontend tables still retains the old copy in the
+arena: on the unity self-host source, tiny inlining touches 809 callers whose
+tables total 65.5 MB, which is most of its peak-RSS cost (#48). Callee payloads
+and clone maps remain charged per splice.
 Tiny bodies are screened before payload scans. Mandatory expansion is still
 subject to resource guards,
 including bounded planning work and retained cloning storage. Expansion checks
