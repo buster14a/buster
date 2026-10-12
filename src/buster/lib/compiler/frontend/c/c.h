@@ -971,6 +971,8 @@ struct CArrayBound
     // Bounds made while parsing a parameter (nested prototypes included).
     // Definition parameters receive the additional signature-scope check.
     bool is_parameter_declarator;
+    // Captured before later tag or array completion can erase the constraint.
+    bool has_invalid_element_type;
 };
 
 typedef struct CType CType;

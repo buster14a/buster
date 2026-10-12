@@ -5364,6 +5364,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         String8 expected_diagnostic;
         String8 dialect;
     } cases[] = {
+        {S8("enum E : int { N = sizeof(enum E[2]) }; enum E a[2];"), true, false, {0}, S8("-std=c23")},
+        {S8("typedef int F(void); F a[2];"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int F(void); typedef F A[2];"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int F(void); void f(void) { F a[2]; }"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int F(void); void f(void) { (void)sizeof(F[2]); }"), false, false, S8("array element type must be a complete object type")},
+        {S8("struct S; struct S a[2];"), false, false, S8("array element type must be a complete object type")},
+        {S8("struct S; extern struct S a[2]; struct S { int n; };"), false, false, S8("array element type must be a complete object type")},
+        {S8("struct S; struct S (*p)[2]; struct S { int n; };"), false, false, S8("array element type must be a complete object type")},
+        {S8("struct S; void f(struct S a[2]); struct S { int n; };"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int A[]; A a[2];"), false, false, S8("array element type must be a complete object type")},
+        {S8("typedef int F(void); F *a[2]; struct S; struct S *b[2];"), true},
         {S8("int f()[3]; int recovered;\n"), false, false, S8("a function cannot return an array")},
         {S8("int f()(void); int recovered;\n"), false, false, S8("a function cannot return a function")},
         {S8("typedef int A[3]; A f(void);\n"), false, false, S8("a function cannot return an array")},
