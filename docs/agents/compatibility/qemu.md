@@ -76,7 +76,7 @@ input admission requires any existing copies to match the pinned QEMU
 With the trusted Release compiler built, run on authorized cloud infrastructure:
 
 ```sh
-./build.sh test_qemu --self-test
+./build.sh qemu_input_self_test
 ./build.sh test_qemu /absolute/path/to/qemu /absolute/path/to/build/Release/ide
 ```
 
@@ -124,8 +124,10 @@ branch/manual QEMU workflow is removed under #3501. This census is not yet
 assigned to the shared owner: its source/dependency/firmware intake and full
 candidate qualification remain incomplete under #3185. Add a pinned recipe
 and assignment to the shared Linux job when ready; do not restore a per-project
-workflow or dispatch route. The native refusal self-test uses only synthetic
-Git fixtures and runs in the existing TCC bootstrap job.
+workflow or dispatch route. The separate `qemu_input_self_test` command accepts no QEMU source or compiler
+inputs: it creates only synthetic Git fixtures and runs in the existing TCC
+bootstrap job. The scheduling scanner continues to refuse `test_qemu` routes
+outside the shared owner.
 
 Historical run [38137123079](https://github.com/buster14a/buster/actions/runs/38137123079)
 at `0abe1ac3216de3dd3bbdbc8111ae6d614f87dc83` retains the independent reference

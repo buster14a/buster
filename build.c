@@ -156,6 +156,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_DIFFERENTIAL,
     BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS,
     BUILD_COMMAND_TEST_QEMU,
+    BUILD_COMMAND_QEMU_INPUT_SELF_TEST,
     BUILD_COMMAND_TEST_CLANG_SUITE,
     BUILD_COMMAND_TEST_GPU_TOOLCHAINS,
     BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS,
@@ -25541,6 +25542,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
         {.command = BUILD_COMMAND_COMPILER_CLOSURE, .owns_arguments = true},
         {.command = BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION, .owns_arguments = true},
         {.command = BUILD_COMMAND_TEST_QEMU, .owns_arguments = true},
+        {.command = BUILD_COMMAND_QEMU_INPUT_SELF_TEST, .owns_arguments = false},
         {.command = BUILD_COMMAND_TEST_CLANG_SUITE, .owns_arguments = true},
         {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
         {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
@@ -39543,6 +39545,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_DIFFERENTIAL] = S8_INITIALIZER("test_differential"),
         [BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS] = S8_INITIALIZER("test_aarch64_assembly_census"),
         [BUILD_COMMAND_TEST_QEMU] = S8_INITIALIZER("test_qemu"),
+        [BUILD_COMMAND_QEMU_INPUT_SELF_TEST] = S8_INITIALIZER("qemu_input_self_test"),
         [BUILD_COMMAND_TEST_CLANG_SUITE] = S8_INITIALIZER("test_clang_suite"),
         [BUILD_COMMAND_TEST_GPU_TOOLCHAINS] = S8_INITIALIZER("test_gpu_toolchains"),
         [BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS] = S8_INITIALIZER("native_retirement_census"),
@@ -40721,6 +40724,11 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_LUA_STAGING_SELF_TEST:
         {
             result = lua_staging_self_test(arena);
+        }
+        break;
+        case BUILD_COMMAND_QEMU_INPUT_SELF_TEST:
+        {
+            result = qemu_self_test(arena);
         }
         break;
         case BUILD_COMMAND_COMPATIBILITY_SPAWN_SELF_TEST:
