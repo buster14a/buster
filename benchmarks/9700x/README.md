@@ -281,6 +281,23 @@ combined with the other opt-in profiles. Its evidence is under
 cancelled leg fails the check. Its method is in
 [benchmarking.md](../../docs/agents/benchmarking.md).
 
+A fresh exact `profile: wild-linker-v1` line, added once against every
+parent, adds the host Wild linker leg (#2761, #2645) after the corpus leg.
+It uses the Wild installed on this host (`command -v wild`) and nothing is
+downloaded onto the host. Its comparator is mold, or the host's default
+GNU `ld` only when mold is not installed. The receipt records the paths,
+versions and SHA-256 of both linkers. The trusted revision's
+`tools/wild_linker_acceptance.c --link-only` times the audit's three
+direct link-only `ide` cells, at default threads and at one thread, on
+the head's own no-LTO objects, pinned to CPUs 2-5. The cells use the
+audit's link policy (`--no-gc-sections --icf=none --no-fork`, fixed build
+ID). Repeat links must be byte-identical, and the timings are
+report-only. The profile cannot be combined with the other opt-in
+profiles. Its evidence is under `wild_linker/` in the artifact, and a
+missing linker or a partial, failed or cancelled leg fails the check. Its
+method and the linkers' licenses are in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
 V1 preserves its historical fixed 182-row qualification and 135-execution,
 47-alias candidate profile. V2 independently derives the ordered Release
 inventory and analyzer argument projection from the exact retained candidate

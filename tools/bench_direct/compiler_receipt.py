@@ -46,6 +46,8 @@ Map (searchable symbols):
         production_profile_fields                          PGO/LTO production profile (#2761)
     FRONTEND_SELECTOR_PROFILE, validate_frontend_selector, selection_medians,
         frontend_selector_digest                           frontend and selector probes (#2761)
+    WILD_LINKER_PROFILE, validate_wild_linker, wild_linker_population,
+        wild_linker_digest                                 host Wild against its comparator (#2761)
     REGRESSION_POLICIES, regression_policy                 report-only switch
     range_label                                            main baseline relation
     render                                                 readable report
@@ -347,6 +349,53 @@ FRONTEND_SELECTOR_PROFILE = {
         "correctness": "every run exits 0 with exactly one BENCH_C_FRONTEND line for the same source and bytes",
     },
     "decision": "report-only: medians are reported and never gate",
+    "report_only": True,
+}
+# Issue #2761: the Zen 5 route for tool:wild_linker_bench.c (#2645). One fresh
+# exact line in ANALYZER_REQUEST_PATH selects it on the pull-compare route. The
+# head's own ide objects are built by clang without LTO in an isolated clone of
+# the head, in the audit's unity and separate trees; the trusted revision's
+# tools/wild_linker_acceptance.c --link-only then times the host's installed
+# Wild against the audit's comparator, mold, on the audit's three direct
+# link-only ide cells under its fixed link policy (2026-10-04T185601Z). Nothing
+# is downloaded: both linkers are found with `command -v`; a host without mold
+# compares against its default `ld` with that kind's own equivalent options.
+# Cells, populations and CPUs are frozen here; changing any value needs a new
+# name. It is report-only, but every link must succeed and repeat byte-identically.
+WILD_LINKER_REQUEST_LINE = "profile: wild-linker-v1"
+WILD_LINKER_SCHEMA = "buster-wild-linker-v1"
+WILD_LINKER_BUILD_ID = "0x2645264526452645264526452645264526452645"
+# kind -> its `command -v` name, how its --version output starts, its options
+# matching Wild's --no-fork --icf=none, and its one-thread option. GNU ld neither
+# forks nor folds identical code and links on one thread, so it adds none.
+WILD_LINKER_COMPARATORS = {
+    "mold": {"command": "mold", "version": "mold ", "policy": "--no-fork --icf=none", "threads1": "--threads=1"},
+    "bfd": {"command": "ld", "version": "GNU ld ", "policy": "", "threads1": ""},
+}
+WILD_LINKER_CELLS = ["ide-debug", "ide-unity-release", "ide-separate-release"]
+WILD_LINKER_LINKERS = ("comparator", "wild")
+WILD_LINKER_TREE_ARGUMENTS = ["--cc", "clang", "--linker", "DEFAULT", "--no-include-tests", "--no-fuzz", "--no-sanitize",
+                              "--no-lto", "--", "-DBUSTER_DEBUG_INFO=ON", "-DBUSTER_FRAME_POINTERS=ON"]
+WILD_LINKER_PROFILE = {
+    "name": "wild-linker-v1",
+    "harness": "tools/wild_linker_acceptance.c --link-only at the trusted revision, built with clang -std=c11 -O2",
+    "inputs": "the head's own ide objects and archives, clang without LTO, with debug information and frame "
+              "pointers, built once in an isolated clone of the head; system startup files and libraries are the host's",
+    "trees": {"build-wild-unity": [*WILD_LINKER_TREE_ARGUMENTS, "-DBUSTER_UNITY_BUILD=ON"],
+              "build-wild-separate": [*WILD_LINKER_TREE_ARGUMENTS, "-DBUSTER_UNITY_BUILD=OFF"]},
+    "builds": [["build-wild-unity", "Release"], ["build-wild-separate", "Debug"], ["build-wild-separate", "Release"]],
+    "cells": WILD_LINKER_CELLS,
+    "wild": {"command": "wild", "policy": "--no-fork --icf=none", "threads1": "--threads=1"},
+    "comparator": "mold, the audit's comparator; the host's default ld (GNU ld) only when mold is absent",
+    "policy": f"Clang's printed Wild argv for each cell, identical for both linkers, plus --no-gc-sections and "
+              f"--build-id={WILD_LINKER_BUILD_ID}; no LTO",
+    "cpus": [2, 3, 4, 5],
+    "seed": 2645, "warmups": 2, "pairs": 21, "control_pairs": 9, "bootstraps": 4001,
+    "sampling": "per cell, 2 warmups then 21 seeded randomized AB/BA pairs at default threads and at one thread; "
+                "9 A/A pairs per linker on ide-debug; fixed populations, no adaptive stopping",
+    "correctness": "every link exits 0; each linker's output links again byte-identically and compiles a probe; "
+                   "the object and archive manifest is unchanged at the end",
+    "decision": "report-only: paired medians are reported and never gate",
     "report_only": True,
 }
 SCALING_SCHEMA = "buster-throughput-scaling-v1"
@@ -948,6 +997,278 @@ def frontend_selector_digest(results: object, report: object, bench: object) -> 
                        "values": [statistics.median(medians[role]) if medians[role] else None
                                   for role in ("baseline", "candidate")]})
     return digest
+
+
+def wild_linker_population() -> list[tuple[str, int, str, str]]:
+    """(cell, pairs, A linker, B linker) of every WILD_LINKER_PROFILE comparison, in the harness's run order."""
+    profile = WILD_LINKER_PROFILE
+    population = []
+    for cell in profile["cells"]:
+        population += [(f"{cell}-default", profile["pairs"], "comparator", "wild"),
+                       (f"{cell}-threads1", profile["pairs"], "comparator", "wild")]
+        if cell == "ide-debug":
+            population += [("ide-debug-aa-comparator", profile["control_pairs"], "comparator", "comparator"),
+                           ("ide-debug-aa-wild", profile["control_pairs"], "wild", "wild")]
+    return population
+
+
+def wild_linker_bundle_files() -> dict[str, str]:
+    """Bundle key -> the harness output each one reads, relative to the exported wild_linker directory."""
+    files = {"identity": "wild-linker.json", "raw": "raw.csv", "summary": "summary.csv", "commands": "commands.tsv",
+             "affinity": "affinity.txt", "completion": "completion.txt"}
+    for cell in WILD_LINKER_CELLS:
+        files[f"inputs {cell}"] = f"{cell}-inputs.sha256"
+        for linker in WILD_LINKER_LINKERS:
+            files[f"output {cell} {linker}"] = f"{cell}-{linker}.output.sha256"
+    return files
+
+
+def _xorshift(state: int) -> int:
+    state ^= (state << 13) & 0xFFFFFFFF
+    state ^= state >> 17
+    return state ^ ((state << 5) & 0xFFFFFFFF)
+
+
+def wild_linker_schedule() -> tuple[dict, dict]:
+    """Replay the harness's seeded generator: ({cell: [first variant index per round]}, {cell: state before
+    its bootstrap}), so the run order and every bootstrap interval are re-derived rather than trusted."""
+    state = WILD_LINKER_PROFILE["seed"]
+    orders, bootstrap = {}, {}
+    for cell, pairs, _, _ in wild_linker_population():
+        order = []
+        for _ in range(pairs + WILD_LINKER_PROFILE["warmups"]):
+            state = _xorshift(state)
+            order.append(state & 1)
+        orders[cell] = order
+        bootstrap[cell] = state
+        for _ in range(WILD_LINKER_PROFILE["bootstraps"] * pairs):
+            state = _xorshift(state)
+    return orders, bootstrap
+
+
+def _paired_interval(ratios: list[float], state: int) -> tuple[float, float]:
+    """The harness's report(): 4001 resampled medians from the seeded generator, [100] and [3900] once sorted."""
+    count = len(ratios)
+    boots = []
+    for _ in range(WILD_LINKER_PROFILE["bootstraps"]):
+        sample = []
+        for _ in range(count):
+            state = _xorshift(state)
+            sample.append(ratios[state % count])
+        boots.append(sorted(sample)[count // 2])
+    boots.sort()
+    return boots[100], boots[3900]
+
+
+def _csv_rows(text: object) -> list[dict] | None:
+    try:
+        rows = list(csv.DictReader(text.splitlines())) if isinstance(text, str) else None
+    except csv.Error:
+        rows = None
+    return rows
+
+
+def _close(left: float, right: object) -> bool:
+    """The harness prints %.6f of double arithmetic; a re-derivation from printed samples agrees to 1e-5."""
+    return _number(right) and abs(left - right) <= 1e-5 * max(1.0, abs(left))
+
+
+def wild_linker_cells(raw: object, summary: object) -> tuple[list[dict], list[str]]:
+    """(cells, problems): every comparison re-derived from raw.csv against the frozen population, seeded order
+    and summary.csv; a cell whose samples are incomplete is reported with no values."""
+    problems: list[str] = []
+    rows = _csv_rows(raw)
+    reported = _csv_rows(summary)
+    if rows is None or reported is None:
+        return [], ["wild-linker raw.csv or summary.csv is not CSV"]
+    reported_by_cell = {}
+    for row in reported:
+        if row.get("cell") in reported_by_cell:
+            problems.append(f"wild-linker summary repeats cell {row.get('cell')!r}")
+        reported_by_cell[row.get("cell")] = row
+    population = wild_linker_population()
+    if sorted(reported_by_cell, key=str) != sorted(cell for cell, _, _, _ in population):
+        problems.append("wild-linker summary cells are not exactly the profile's comparisons")
+    orders, states = wild_linker_schedule()
+    warmups = WILD_LINKER_PROFILE["warmups"]
+    cells = []
+    for cell, pairs, first, second in population:
+        timed = [row for row in rows if row.get("cell") == cell]
+        expected = [(variant, str(round_)) for round_, lead in zip(range(-warmups, pairs), orders[cell])
+                    for variant in (("A", "B") if lead == 0 else ("B", "A"))]
+        values = {"A": [], "B": []}
+        complete = [(row.get("variant"), row.get("round")) for row in timed] == expected
+        for row in timed if complete else []:
+            try:
+                wall = float(row["wall_ms"])
+                exit_status = int(row["exit"])
+            except (TypeError, ValueError):
+                wall, exit_status = math.nan, -1
+            if exit_status != 0 or not (math.isfinite(wall) and wall > 0):
+                complete = False
+            elif int(row["round"]) >= 0:
+                values[row["variant"]].append(wall)
+        record = {"name": cell, "pairs": pairs, "linkers": [first, second], "values": [None, None],
+                  "ratio": None, "ci95": [None, None]}
+        if not complete:
+            problems.append(f"wild-linker {cell} is not {warmups} warmups and {pairs} seeded pairs, each linked successfully")
+        else:
+            ratios = [b / a for a, b in zip(values["A"], values["B"])]
+            medians = [sorted(values[key])[pairs // 2] for key in ("A", "B")]
+            ratio = sorted(ratios)[pairs // 2]
+            interval = _paired_interval(ratios, states[cell])
+            row = reported_by_cell.get(cell) or {}
+            try:
+                printed = [float(row.get(key)) for key in ("median_A_ms", "median_B_ms", "median_paired_B_over_A",
+                                                            "ci95_low", "ci95_high")]
+                printed_pairs = int(row.get("n"))
+            except (TypeError, ValueError):
+                printed, printed_pairs = [], None
+            if printed_pairs != pairs or len(printed) != 5 or \
+                    not all(_close(mine, theirs) for mine, theirs in zip([*medians, ratio, *interval], printed)):
+                problems.append(f"wild-linker {cell} summary does not match its raw samples")
+            record.update({"values": medians, "ratio": ratio, "ci95": list(interval)})
+        cells.append(record)
+    return cells, problems
+
+
+def wild_linker_digest(raw: object, summary: object) -> list[dict]:
+    """The report's view of every comparison, re-derived from the raw samples."""
+    return wild_linker_cells(raw, summary)[0]
+
+
+def _unique_pairs(pairs: list) -> dict:
+    """json object hook: a repeated key could hide a second value, so it is malformed."""
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError("duplicate JSON key")
+    return dict(pairs)
+
+
+def _wild_linker_identity_problems(identity: object, head: str) -> tuple[dict, list[str]]:
+    """(linkers, problems) for the harness-side identity record."""
+    profile = WILD_LINKER_PROFILE
+    identity = identity if isinstance(identity, dict) else {}
+    problems: list[str] = []
+    for key, wanted in (("schema", WILD_LINKER_SCHEMA), ("profile", profile["name"]), ("head", head),
+                        ("cpus", profile["cpus"]), ("exit", 0)):
+        if type(identity.get(key)) is not type(wanted) or identity.get(key) != wanted:
+            problems.append(f"wild-linker record {key} {identity.get(key)!r} is not {wanted!r}")
+    if not (isinstance(identity.get("cpu_model"), str) and APPROVED_HOST.search(identity["cpu_model"])):
+        problems.append(f"wild-linker observed CPU {identity.get('cpu_model')!r} is not the approved Zen 5 host "
+                        "(AMD Ryzen 7 9700X)")
+    linkers = identity.get("linkers") if isinstance(identity.get("linkers"), dict) else {}
+    usable = {}
+    for role in WILD_LINKER_LINKERS:
+        linker = linkers.get(role) if isinstance(linkers.get(role), dict) else {}
+        kind = linker.get("kind")
+        frozen = profile["wild"] if role == "wild" else WILD_LINKER_COMPARATORS.get(kind) if isinstance(kind, str) else None
+        if role == "wild" and kind != "wild":
+            frozen = None
+        version = linker.get("version")
+        if frozen is None:
+            problems.append(f"wild-linker {role} kind {kind!r} is not supported")
+        elif linker.get("command") != frozen["command"] or linker.get("policy") != frozen["policy"] or \
+                linker.get("threads1") != frozen["threads1"]:
+            problems.append(f"wild-linker {role} command or options are not the frozen ones for {kind!r}")
+        elif role == "comparator" and not (isinstance(version, str) and version.startswith(frozen["version"])):
+            problems.append(f"wild-linker comparator version {version!r} is not a {kind} version")
+        if role == "comparator" and linker.get("substituted") is not (kind != "mold"):
+            problems.append("wild-linker comparator substitution flag does not match its kind")
+        if not (isinstance(version, str) and version.strip()):
+            problems.append(f"wild-linker {role} has no recorded version output")
+        if not all(isinstance(linker.get(key), str) and linker[key].startswith("/") and "'" not in linker[key] and
+                   '"' not in linker[key] for key in ("path", "realpath")):
+            problems.append(f"wild-linker {role} path is not a recorded absolute path")
+        if not (isinstance(linker.get("sha256"), str) and SHA256.fullmatch(linker["sha256"])) or \
+                linker.get("sha256_after") != linker.get("sha256"):
+            problems.append(f"wild-linker {role} SHA-256 is missing or changed during the leg")
+        usable[role] = linker
+    if usable.get("wild", {}).get("sha256") == usable.get("comparator", {}).get("sha256"):
+        problems.append("wild-linker Wild and its comparator are the same executable")
+    harness = identity.get("harness") if isinstance(identity.get("harness"), dict) else {}
+    if sorted(harness) != ["wild_linker_acceptance.c", "wild_linker_bench.c"] or \
+            not all(isinstance(value, str) and SHA256.fullmatch(value) for value in harness.values()):
+        problems.append("wild-linker harness sources are not both identified")
+    return usable, problems
+
+
+def validate_wild_linker(status: object, files: object, head: str, expected_identity: object = None) -> list[str]:
+    """Reasons the evidence is not one complete WILD_LINKER_PROFILE run of these linkers on these inputs.
+
+    status is the harness exit; files maps wild_linker_bundle_files() keys to their exported text, and
+    expected_identity, when given, is the receipt's copy of the identity record, which must match the export.
+    """
+    profile = WILD_LINKER_PROFILE
+    files = files if isinstance(files, dict) else {}
+    problems: list[str] = []
+    if type(status) is not int or status != 0:
+        problems.append(f"wild-linker harness exited {status!r}, not 0")
+    missing = [key for key in wild_linker_bundle_files() if not isinstance(files.get(key), str)]
+    if missing:
+        return [*problems, f"wild-linker evidence lacks {', '.join(missing)}"]
+    try:
+        identity = json.loads(files["identity"], object_pairs_hook=_unique_pairs)
+    except ValueError:
+        identity = None
+    if expected_identity is not None and identity != expected_identity:
+        problems.append("wild-linker exported identity record differs from the receipt")
+    linkers, found = _wild_linker_identity_problems(identity, head)
+    problems.extend(found)
+    if files["affinity"] != "affinity=%s\n" % ",".join(str(cpu) for cpu in profile["cpus"]):
+        problems.append(f"wild-linker harness affinity {files['affinity'].strip()!r} is not CPUs {profile['cpus']!r}")
+    if files["completion"] != "link_only=PASS\n":
+        problems.append("wild-linker harness did not record a complete link-only pass")
+    inputs = identity.get("inputs") if isinstance(identity, dict) and isinstance(identity.get("inputs"), dict) else {}
+    for cell in profile["cells"]:
+        manifest = files[f"inputs {cell}"]
+        lines = manifest.splitlines()
+        if not lines or not all(re.fullmatch(r"[0-9a-f]{64}  \S.*", line) for line in lines) or \
+                not any(line.endswith((".o", ".a")) for line in lines):
+            problems.append(f"wild-linker {cell} input manifest is empty or malformed")
+        if inputs.get(cell) != hashlib.sha256(manifest.encode()).hexdigest():
+            problems.append(f"wild-linker {cell} input manifest is not the one the receipt records")
+        for linker in WILD_LINKER_LINKERS:
+            if not SHA256.fullmatch(files[f"output {cell} {linker}"].strip()):
+                problems.append(f"wild-linker {cell} {linker} output has no SHA-256")
+    _, cell_problems = wild_linker_cells(files["raw"], files["summary"])
+    problems.extend(cell_problems)
+    rows = _csv_rows(files["raw"]) or []
+    # Every setup step ran (the harness stops on the first failure); a timed or check row never failed.
+    counts = {"validated-link": 6, "output-identity": 6, "linked-compiler-smoke": 6, "same-linker-repeat": 6,
+              "same-linker-byte-identity": 6, "unchanged-object-manifest": 3, "freeze-object-manifest": 3,
+              "capture-direct-linker": 3}
+    for name, count in counts.items():
+        if [row.get("exit") for row in rows if row.get("cell") == name] != ["0"] * count:
+            problems.append(f"wild-linker {name} did not pass {count} times")
+    # Each timed command runs the linker its slot names with the frozen options, nothing else.
+    commands = {}
+    for line in files["commands"].splitlines():
+        fields = line.split("\t", 4)
+        if len(fields) == 5:
+            commands[fields[0]] = fields
+    roles = {cell: (first, second) for cell, _, first, second in wild_linker_population()}
+    common = f" --no-gc-sections --build-id={WILD_LINKER_BUILD_ID}"
+    for row in rows:
+        cell = row.get("cell")
+        if cell not in roles or row.get("variant") not in ("A", "B"):
+            continue
+        role = roles[cell][0 if row["variant"] == "A" else 1]
+        linker = linkers.get(role, {})
+        fields = commands.get(row.get("sequence"))
+        command = fields[4] if fields and fields[1:4] == [cell, row["variant"], row.get("round")] else ""
+        threads = cell.endswith("-threads1")
+        if role == "wild":
+            wanted = f"{common} {profile['wild']['policy']}" + (f" {profile['wild']['threads1']}" if threads else "")
+            invoked = f' && "{linker.get("path")}" '
+        else:
+            wanted = f"{common} {linker.get('policy')}" + (f" {linker.get('threads1')}" if threads else "")
+            invoked = f" && '{linker.get('path')}' "
+        if invoked not in command or not command.endswith(wanted) or WILD_LINKER_BUILD_ID not in command:
+            problems.append(f"wild-linker {cell} {row['variant']} round {row.get('round')} did not run the recorded "
+                            f"{role} with the frozen options")
+            break
+    return problems
 
 
 def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expected_candidate_sha: str | None = None) -> list[str]:
@@ -3650,6 +3971,34 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
         for key, value in exits.items():
             if value not in (None, 0):
                 lines.append(f"Frontend-selector {key} exit: {value}.")
+    linker = receipt.get("wild_linker") if isinstance(receipt, dict) else None
+    if isinstance(linker, dict) and linker.get("requested"):
+        linkers = linker.get("linkers") if isinstance(linker.get("linkers"), dict) else {}
+        named = []
+        for role in ("wild", "comparator"):
+            item = linkers.get(role) if isinstance(linkers.get(role), dict) else {}
+            named.append("%s `%s` (%s, `%s`)" % (role, item.get("path", "NA"), item.get("version", "NA"),
+                                                 str(item.get("sha256", "NA"))[:12]))
+        substituted = isinstance(linkers.get("comparator"), dict) and linkers["comparator"].get("substituted") is True
+        lines += ["", f"Host Wild linker ({WILD_LINKER_PROFILE['name']}): {linker.get('status', 'NA')} (direct link-only "
+                  "ide cells on the head's own objects; A = comparator, B = Wild; seeded paired medians with the "
+                  "harness's bootstrap 95% interval; report-only). " + "; ".join(named) + "." +
+                  (" mold is not installed on this host, so the comparator is its default ld." if substituted else ""), "",
+                  "| Cell | Pairs | A median (ms) | B median (ms) | Paired B / A | 95% interval |",
+                  "| --- | ---: | ---: | ---: | ---: | --- |"]
+        for row in linker.get("cells") if isinstance(linker.get("cells"), list) else []:
+            row = row if isinstance(row, dict) else {}
+            values = row.get("values") if isinstance(row.get("values"), list) else []
+            interval = row.get("ci95") if isinstance(row.get("ci95"), list) else []
+            ok = len(values) == 2 and all(_finite_positive(value) for value in values) and _finite_positive(row.get("ratio"))
+            bounds = len(interval) == 2 and all(_finite_positive(value) for value in interval)
+            lines.append("| %s | %s | %s | %s | %s | %s |" % (
+                row.get("name", "NA"), row.get("pairs", "NA"), "%.3f" % values[0] if ok else "NA",
+                "%.3f" % values[1] if ok else "NA", "%.4f" % row["ratio"] if ok else "NA",
+                "[%.4f, %.4f]" % tuple(interval) if bounds else "NA"))
+        for key, title in (("build_exit", "input build"), ("exit", "harness")):
+            if linker.get(key) not in (None, 0):
+                lines.append(f"Wild linker {title} exit: {linker.get(key)}.")
     reasons = receipt.get("reasons") if isinstance(receipt, dict) else None
     warnings = summary.get("warnings")
     for item in (*notes, *(reasons if isinstance(reasons, list) else ()),

@@ -30,8 +30,8 @@ how many performance entries are covered; the inventory never claims more.
 Each owner-requested fixed profile on the pull-compare route (PROFILE_ROWS)
 needs its own covered `<entry>@<profile>` row (`uarch_lab:compare@...`, or
 `build:bench_throughput@...` for a harness profile, or the entry's own row
-when the profile is its only Zen 5 route, as for `build:production_profile` and the
-three frontend-selector probes) whose consumer
+when the profile is its only Zen 5 route, as for `build:production_profile`, the
+three frontend-selector probes and `tool:wild_linker_bench.c`) whose consumer
 validates that exact frozen profile, so a flag-pair profile cannot be added,
 or its validation dropped, without the inventory noticing.
 
@@ -65,6 +65,7 @@ PROFILE_ROWS = {
     "tool:benchmark_frontend_scaling.py": "FRONTEND_SELECTOR_PROFILE",
     "tool:selection_benchmark.py": "FRONTEND_SELECTOR_PROFILE",
     "ide:bench": "FRONTEND_SELECTOR_PROFILE",
+    "tool:wild_linker_bench.c": "WILD_LINKER_PROFILE",
 }
 
 

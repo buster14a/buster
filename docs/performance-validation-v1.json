@@ -241,13 +241,13 @@
       "id": "tool:wild_linker_bench.c",
       "kind": "tool",
       "validation": "performance",
-      "measures": "linker experiment (#2645), link-only cells",
+      "measures": "#2761 fixed wild-linker-v1 on an owner request line: the trusted revision's wild_linker_acceptance.c --link-only (sharing this harness's process capture and paired statistics) times the host-installed Wild against mold, or the host's default ld when mold is absent, on the audit's three direct link-only ide cells built from the head without LTO, at default threads and one thread, under --no-gc-sections --icf=none --no-fork and the fixed build ID; report-only",
       "zen5": {
-        "route": "none",
-        "status": "NOT VALIDATED",
-        "consumer": "",
-        "resolution": "Linker timing on the 9700X has no route; results stay diagnostic.",
-        "claim_route": "none"
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "wild-linker-v1",
+        "request": "one exact fresh line, profile: wild-linker-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
       }
     },
     {
