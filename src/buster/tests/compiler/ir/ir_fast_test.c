@@ -151,8 +151,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_cse_tests(UnitTestArguments* argument
         // Equal unsigned constants share one row, which then exposes a*3 twice.
         {S8("unsigned test(unsigned a){return (a*3u)^(a*3u)^(a+7u);}"), cse, 2, 0, 1, false},
     };
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    // Every case is short enough that the linear window arm must agree.
+    for (u32 run = 0; run < 2 * BUSTER_ARRAY_LENGTH(cases); run += 1)
     {
+        u32 index = run / 2;
         TemporalArena temporary = arena_begin_temporal(arguments->arena);
         IrProgram* program = ir_fast_cse_lower(arguments, cases[index].source);
         if (BUSTER_REQUIRE(arguments, program != 0))
@@ -163,12 +165,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_cse_tests(UnitTestArguments* argument
             u32 constants = ir_test_opcode_count(function, IR_OPCODE_CONSTANT_INTEGER);
             u32 loads = ir_test_opcode_count(function, IR_OPCODE_LOAD);
             program->fast_passes = cases[index].passes;
+            program->fast_cse_window = run & 1;
             BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
             BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
             IrFastCseStatistics census = module->fast.cse;
             if (census.hits != cases[index].hits || census.commuted_hits != cases[index].commuted || census.constant_hits != cases[index].constants)
             {
-                arguments->show(arguments, S8("CSE case {u32}: hits={u64} commuted={u64} constants={u64} candidates={u64}\n"), index, census.hits,
+                arguments->show(arguments, S8("CSE case {u32} window={u32}: hits={u64} commuted={u64} constants={u64} candidates={u64}\n"), index, run & 1, census.hits,
                                 census.commuted_hits, census.constant_hits, census.candidates);
             }
             BUSTER_TEST(arguments, census.hits == cases[index].hits && module->fast.passes[IR_FAST_CSE].changes == cases[index].hits);
@@ -204,6 +207,29 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_cse_tests(UnitTestArguments* argument
             BUSTER_TEST(arguments, census.hits == 2 && census.constant_hits == 1 && census.window_hits == 0);
             BUSTER_TEST(arguments, census.saturation_declines != 0 && census.collisions != 0);
             BUSTER_TEST(arguments, census.max_block_candidates > IR_FAST_CSE_SLOTS && census.table_bytes != 0);
+        }
+        scratch_end(temporary);
+    }
+    // The linear arm keeps only the last IR_FAST_CSE_WINDOW keyed rows: a
+    // duplicate behind WINDOW-1 other keyed rows still hits, one more pushes
+    // its representative out. The table arm catches both.
+    for (u32 run = 0; run < 4; run += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        u32 distinct = IR_FAST_CSE_WINDOW - 1 + (run >> 1);
+        // Each s*=c is a new keyed row; nothing else between the two a+b is keyed.
+        String8 source = S8("unsigned test(unsigned a,unsigned b,unsigned c){unsigned s=a+b;");
+        for (u32 index = 1; index <= distinct; index += 1) source = string_format(arguments->arena, S8("{S8}s*=c;"), source);
+        source = string_format(arguments->arena, S8("{S8}return s^(a+b);}"), source);
+        IrProgram* program = ir_fast_cse_lower(arguments, source);
+        if (BUSTER_REQUIRE(arguments, program != 0))
+        {
+            program->fast_passes = cse;
+            program->fast_cse_window = run & 1;
+            BUSTER_TEST(arguments, ir_prepare_canonical_module(program, program->modules, false).error == IR_VALIDATION_NONE);
+            IrFastCseStatistics census = program->modules->fast.cse;
+            if (census.hits != (u64)((run & 1) && (run >> 1) ? 0 : 1)) arguments->show(arguments, S8("CSE window run {u32}: hits={u64} candidates={u64}\n"), run, census.hits, census.candidates);
+            BUSTER_TEST(arguments, census.hits == (u64)((run & 1) && (run >> 1) ? 0 : 1) && !census.saturation_declines);
         }
         scratch_end(temporary);
     }

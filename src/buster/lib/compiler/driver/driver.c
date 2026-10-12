@@ -2899,6 +2899,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             fast_override_mask = IR_FAST_PASS_MASK;
             continue;
         }
+        if (string_equal(argument, S8("-fcanonical-fast-cse-strategy=window")) || string_equal(argument, S8("-fcanonical-fast-cse-strategy=table")))
+        {
+            invocation.fast_cse_window = string_equal(argument, S8("-fcanonical-fast-cse-strategy=window"));
+            continue;
+        }
         if (string_equal(argument, S8("-ftime-canonical-fast")))
         {
             invocation.measure_fast_passes = true;
@@ -8652,6 +8657,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion || lowered.program->pin_debug_locals;
     lowered.program->fast_passes = invocation.fast_passes;
     lowered.program->measure_fast_passes = invocation.measure_fast_passes;
+    lowered.program->fast_cse_window = invocation.fast_cse_window;
     lowered.program->inline_options = invocation.inline_options;
     WORK_LEDGER_PHASE(PREPARE);
     IrValidationResult validation = ir_prepare_canonical_module(lowered.program, module,

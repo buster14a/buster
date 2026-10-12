@@ -872,6 +872,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_optimization_poli
         {S8("-O0"), S8("-fcanonical-fast-cse"), cse},
         {S8("-fcanonical-fast-cse"), S8("-fno-canonical-fast-cse"), IR_FAST_ALL},
     };
+    struct { String8 first; String8 second; bool window; } strategies[] = {
+        {S8("-fcanonical-fast-cse-strategy=window"), S8("source.c"), true},
+        {S8("-fcanonical-fast-cse-strategy=window"), S8("-fcanonical-fast-cse-strategy=table"), false},
+        {S8("-fcanonical-fast-cse-strategy=table"), S8("-fcanonical-fast-cse-strategy=window"), true},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(strategies); index += 1)
+    {
+        String8 command[] = {strategies[index].first, strategies[index].second, S8("source.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.fast_cse_window == strategies[index].window);
+        BUSTER_TEST(arguments, invocation.fast_passes == IR_FAST_ALL);
+    }
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cse_orders); index += 1)
     {
         String8 command[] = {cse_orders[index].first, cse_orders[index].second, S8("source.c")};
@@ -1102,10 +1114,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
     for (u32 backend = 0; backend < native_count + 3; backend += 1)
     {
         // Every subset of the adopted recipe, then the recipe plus opt-in CSE
-        // on the shared fixture and, natively, on the separate CSE control.
-        for (u32 selection = 0; selection <= IR_FAST_ALL + 2; selection += 1)
+        // on the shared fixture and, natively, on the separate CSE control
+        // with the table and then the linear window strategy.
+        for (u32 selection = 0; selection <= IR_FAST_ALL + 3; selection += 1)
         {
-            bool control = selection == IR_FAST_ALL + 2;
+            bool control = selection >= IR_FAST_ALL + 2;
+            bool window = selection == IR_FAST_ALL + 3;
             if (control && backend >= native_count) continue;
             u32 mask = selection <= IR_FAST_ALL ? selection : IR_FAST_ALL | IR_FAST_PASS_BIT(IR_FAST_CSE);
             TemporalArena temporary = arena_begin_temporal(arguments->arena);
@@ -1140,6 +1154,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
                 command[count++] = S8("-c");
             }
             command[count++] = S8("-fcanonical-fast");
+            if (window) command[count++] = S8("-fcanonical-fast-cse-strategy=window");
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
             {
                 bool selected = (mask & IR_FAST_PASS_BIT(pass)) != 0;
@@ -1151,6 +1166,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
             }
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){command, count});
             BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.fast_passes == mask);
+            BUSTER_TEST(arguments, invocation.fast_cse_window == window);
             CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
             if (compiled.error != COMPILER_DRIVER_ERROR_NONE) arguments->show(arguments, S8("FAST backend={u32} mask={u32}: {S8}\n"), backend, mask, compiled.diagnostic);
             BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
@@ -1161,7 +1177,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
                     BUSTER_TEST(arguments, !compiled.codegen_statistics.fallback_function_count);
                     if (control)
                     {
-                        // Three commuted arithmetic rows and the repeated 5u.
+                        // Three commuted arithmetic rows and the repeated 5u,
+                        // all adjacent enough for the window strategy too.
                         BUSTER_TEST(arguments, compiled.fast.cse.hits == 4 && compiled.fast.cse.commuted_hits == 3 &&
                                                compiled.fast.cse.constant_hits == 1);
                     }

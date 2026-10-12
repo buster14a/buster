@@ -346,7 +346,10 @@ BUSTER_GLOBAL_LOCAL void ir_fast_dce(IrProgram* program, IrFunction* function, u
 // decided) or in another block. A block walked later can still replace that
 // operand, but a replacement only joins equal values, so an earlier hit stays
 // sound and its entry has already expired. A full table or exhausted probe
-// sequence declines insertion; it never changes a result.
+// sequence declines insertion; it never changes a result. The census's
+// linear arm (IrProgram.fast_cse_window) instead compares each candidate
+// with the block's last IR_FAST_CSE_WINDOW keyed rows in a ring held in the
+// table's first slots; its entries count candidates, so it never saturates.
 typedef struct IrFastCseEntry IrFastCseEntry;
 struct IrFastCseEntry
 {
@@ -424,6 +427,7 @@ BUSTER_GLOBAL_LOCAL void ir_fast_cse(IrProgram* program, IrFunction* function, u
                                      IrFastPassStatistics* statistics, IrFastCseStatistics* census)
 {
     IrFastCseEntry* table = cse->entries;
+    bool window = program->fast_cse_window;
     u32 mask = IR_FAST_CSE_SLOTS - 1;
     u32 limit = IR_FAST_CSE_SLOTS - IR_FAST_CSE_SLOTS / 4;
     for (u32 block = 0; block < function->block_count; block += 1)
@@ -473,17 +477,33 @@ BUSTER_GLOBAL_LOCAL void ir_fast_cse(IrProgram* program, IrFunction* function, u
                 }
                 ordinal += 1;
                 census->candidates += 1;
-                u32 hash = left * 0x9E3779B1u ^ right * 0x85EBCA77u ^ type * 0xC2B2AE3Du ^ operation;
-                hash ^= hash >> 15;
                 IrFastCseEntry* match = 0;
                 IrFastCseEntry* empty = 0;
-                for (u32 probe = 0; !match && !empty && probe < IR_FAST_CSE_PROBES; probe += 1)
+                if (window)
                 {
-                    IrFastCseEntry* entry = table + ((hash + probe) & mask);
-                    census->probes += 1;
-                    if (entry->generation != generation) empty = entry;
-                    else if (entry->operation == operation && entry->type == type && entry->left == left && entry->right == right) match = entry;
-                    else census->collisions += 1;
+                    // Linear arm: compare against the most recent keyed rows
+                    // of this block, newest first, then overwrite the oldest.
+                    u32 live = BUSTER_MIN(entries, IR_FAST_CSE_WINDOW);
+                    for (u32 offset = 1; !match && offset <= live; offset += 1)
+                    {
+                        IrFastCseEntry* entry = table + ((entries - offset) % IR_FAST_CSE_WINDOW);
+                        census->probes += 1;
+                        if (entry->operation == operation && entry->type == type && entry->left == left && entry->right == right) match = entry;
+                    }
+                    empty = table + (entries % IR_FAST_CSE_WINDOW);
+                }
+                else
+                {
+                    u32 hash = left * 0x9E3779B1u ^ right * 0x85EBCA77u ^ type * 0xC2B2AE3Du ^ operation;
+                    hash ^= hash >> 15;
+                    for (u32 probe = 0; !match && !empty && probe < IR_FAST_CSE_PROBES; probe += 1)
+                    {
+                        IrFastCseEntry* entry = table + ((hash + probe) & mask);
+                        census->probes += 1;
+                        if (entry->generation != generation) empty = entry;
+                        else if (entry->operation == operation && entry->type == type && entry->left == left && entry->right == right) match = entry;
+                        else census->collisions += 1;
+                    }
                 }
                 if (match)
                 {
@@ -502,7 +522,7 @@ BUSTER_GLOBAL_LOCAL void ir_fast_cse(IrProgram* program, IrFunction* function, u
                     }
                     else census->metadata_declines += 1;
                 }
-                else if (empty && entries < limit)
+                else if (empty && (window || entries < limit))
                 {
                     *empty = (IrFastCseEntry){.left = left, .right = right, .type = type, .value = row->result.value, .ordinal = ordinal,
                         .generation = generation, .operation = operation};

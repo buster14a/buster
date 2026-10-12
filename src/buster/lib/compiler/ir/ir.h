@@ -877,7 +877,7 @@ typedef enum IrFastPass
 #define IR_FAST_PASS_MASK ((1u << IR_FAST_PASS_COUNT) - 1)
 // One generation-tagged CSE table per module preparation, at most three
 // quarters full per block, with a bounded probe sequence. The window is the
-// census's simpler linear-window arm.
+// census's linear arm: the number of recent keyed rows it compares.
 #define IR_FAST_CSE_SLOTS 256u
 #define IR_FAST_CSE_PROBES 8u
 #define IR_FAST_CSE_WINDOW 8u
@@ -1082,6 +1082,9 @@ struct IrProgram
     IrInlineOptions inline_options;
     u32 fast_passes;
     bool measure_fast_passes;
+    // Selects the CSE census's linear recent-row window arm instead of its
+    // hash table (#3011). Only meaningful when IR_FAST_CSE is selected.
+    bool fast_cse_window;
     u32 module_count;
     u32 lowered_function_count;
     u32 rejected_function_count;

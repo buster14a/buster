@@ -220,39 +220,64 @@ scratch, recorded as `table_bytes`, not to the per-function bound.
 candidates, hits, commuted, constant and window hits, probes, collisions,
 metadata and saturation declines, initialized table bytes and the largest
 block candidate count. A window hit's representative is at most eight
-candidates earlier, so a linear recent-expression window would also catch it.
+candidates earlier.
 
-### Census (diagnostic, not performance evidence)
+`-fcanonical-fast-cse-strategy=window` replaces the table lookup with the
+issue's linear arm: each candidate is compared, newest first, with the last
+eight keyed rows of its block, kept in a ring in the table's first slots. A
+miss overwrites the oldest entry, so the arm never saturates; `probes` counts
+its comparisons. `=table` (the default) restores the hash table. The strategy
+changes nothing unless `cse` is selected.
+
+### Three-arm census (diagnostic, not performance evidence)
 
 These results come from a hosted 4-vCPU container, using a Clang-built Release
-`ide` with the default four passes plus `cse`. Stage-1 self-host input is
-`ide.c` with tests off and `-g -march=native`:
+`ide` with the default four passes, alone or plus `cse` in either strategy.
+The self-host input is `ide.c` with tests off and `-g -march=native`, using
+`-ftime-canonical-fast -v`. Each arm ran 7 times, interleaved; the table
+shows medians and the wall range.
 
-| Workload | Candidates | Hits | Constant hits | Arithmetic hits | Window hits | Saturation declines |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| self-host `ide.c` | 268,023 | 94,821 | 94,784 | 37 | 41,116 | 21 |
-| `tests/basic_c_operations.c` | 506 | 98 | 98 | 0 | 66 | 0 |
-| `tests/c_abi_cfuncs.c` | 1,224 | 116 | 116 | 0 | 25 | 1 |
-| `tests/basic_c_machine_alias.c` | 645 | 3 | 3 | 0 | 3 | 42 |
+| Self-host arm | Wall s (min-max) | Peak RSS KiB | `cse` ms | Compact ms | Hits (constant) | Probes | Rows after FAST | `.text` bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| No CSE | 5.714 (5.511-6.050) | 846,104 | 0 | 54.6 | - | - | 1,810,042 | 28,401,354 |
+| Linear window (8) | 5.699 (5.370-5.901) | 844,680 | 21.7 | 57.4 | 92,986 (92,949) | 426,585 | 1,718,976 | 28,150,371 |
+| Table (256 slots) | 5.826 (5.363-6.054) | 844,264 | 21.7 | 59.3 | 94,824 (94,787) | 277,788 | 1,717,374 | 28,148,682 |
 
-On self-host, canonical rows after FAST fall from 1,809,862 to 1,717,197
-(-5.1%) and object `.text` shrinks from 28,400,206 to 28,147,518 bytes
-(-0.9%). The `cse` pass reports about 22 ms and compaction about 10 ms more,
-against a 6.2-6.4 s compile. A compiler built with CSE recompiles itself with
-CSE to byte-identical output. The data reject the arithmetic arm as framed:
-after frontend SSA and folding, repeated unsigned arithmetic in one block
-almost never survives. The opportunity is repeated constant
-materialization, and a construction-time constant cache or a short linear
-window are cheaper candidates (#3010). The pass therefore stays opt-in.
-Adopting it, or any of those alternatives, requires the Zen 5 A/A and A/B
-comparison (#2761), with allocation, peak RSS, spill and runtime data.
+| Smaller workload | Candidates | Table hits | Window hits | Arithmetic hits | Table saturation declines |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `tests/basic_c_operations.c` | 506 | 98 | 86 | 0 | 0 |
+| `tests/c_abi_cfuncs.c` | 1,224 | 116 | 96 | 0 | 1 |
+| `tests/basic_c_machine_alias.c` | 645 | 3 | 3 | 0 | 42 |
+
+Both arms remove about 5% of canonical rows after FAST and 0.9% of `.text` on
+self-host. A compiler built with table CSE recompiles itself with CSE to
+byte-identical output. What the data show:
+
+- **Arithmetic arm as framed:** after frontend SSA and folding, repeated
+  unsigned arithmetic in one block almost never survives. Self-host has 37
+  arithmetic hits under both arms; the other workloads have none.
+- **Constants:** almost every hit is a repeated constant.
+- **Window versus table:** the window catches 98% of the table's self-host
+  hits and 82-100% elsewhere, with no table-sizing or saturation state, but
+  makes 1.5x the probes. Both arms report about the same pass time.
+- **Compile time and memory:** hosted wall-time differences are inside the
+  run-to-run range. Peak RSS falls by about 1.5 MiB in both arms. Neither
+  effect is established here.
+
+So this census answers the recurrence question and makes the cost comparison
+diagnostically. It does not complete #3011's first gate, which needs the
+matched Zen 5 A/A and A/B comparison (#2761). Because hits concentrate in
+constants, a construction-time constant cache (#3010) remains a cheaper
+candidate that neither arm measures. The pass stays opt-in. Adopting either
+arm, or that alternative, also needs allocation, spill and runtime data.
 
 ## Tests
 
 `ir_fast_test.c` checks all 16 subsets structurally, transitive dead work,
 retained calls/memory effects, existing trivial parameters, repeat preparation,
 classification exclusions and budget refusal before value-storage access.
-`ir_fast_cse_tests` covers commuted and ordered pairs, duplicate operands,
+`ir_fast_cse_tests` runs each case under both strategies, checks the window
+boundary, and covers commuted and ordered pairs, duplicate operands,
 block boundaries, excluded signed, load, division and shift rows, and roots
 resolved by folding. It also covers constants, table saturation and
 collisions, metadata declines, volatile rows and generation rollover.
