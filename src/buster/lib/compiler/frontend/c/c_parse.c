@@ -37658,13 +37658,14 @@ BUSTER_C_SHARED u32 c_switch_first_overlapping_label(Arena* scratch, u64 const* 
 
 BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                      CDeclaration const* declaration, u32 switch_index, u32 function_end, u8* suffix,
-                                                     CParseLoweringConstraintDiagnostic* diagnostic)
+                                                     CParseStatementEnds* statement_ends, CParseLoweringConstraintDiagnostic* diagnostic)
 {
     bool header = switch_index + 1 < function_end &&
                   c_token_is_punctuator(&preprocess.tokens[switch_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
     u32 header_close = header ? c_parse_matching_delimiter_indexed(result, preprocess, switch_index + 1) : function_end;
     u32 switch_end = header_close < function_end && header_close + 1 < function_end
-        ? c_parse_statement_end(preprocess, c_parse_statement_delimiters(result), header_close + 1, function_end, suffix, function_end - header_close, 0)
+        ? c_parse_statement_end(preprocess, c_parse_statement_delimiters(result), header_close + 1, function_end, suffix, function_end - header_close,
+                                statement_ends)
         : UINT32_MAX;
     bool braced_body = header_close < function_end && header_close + 1 < function_end &&
                        c_token_is_punctuator(&preprocess.tokens[header_close + 1], C_PUNCTUATOR_LEFT_BRACE);
@@ -37744,11 +37745,15 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
                 {
                     if (index + 1 < switch_end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
                     {
+                        // The memo is keyed to `function_end`. A walk bounded by `switch_end` follows the
+                        // same path and fails where it would cross that bound, so an end past it reads
+                        // as not closed, exactly as the bounded walk answers.
                         u32 nested_header = c_parse_matching_delimiter_indexed(result, preprocess, index + 1);
                         u32 nested_end = nested_header + 1 < switch_end
-                                             ? c_parse_statement_end(preprocess, c_parse_statement_delimiters(result), nested_header + 1, switch_end, suffix,
-                                                                     switch_end - nested_header, 0)
+                                             ? c_parse_statement_end(preprocess, c_parse_statement_delimiters(result), nested_header + 1, function_end, suffix,
+                                                                     function_end - nested_header, statement_ends)
                                              : UINT32_MAX;
+                        nested_end = nested_end <= switch_end ? nested_end : UINT32_MAX;
                         if (nested_end != UINT32_MAX)
                         {
                             index = nested_end - 1;
@@ -37883,13 +37888,22 @@ BUSTER_C_INTERNAL void c_parse_validate_switch_duplicates(CTypeParseMachine* mac
     // Guarded per-body scratch (#1256): without the suffix stack the walk is skipped.
     u8* suffix = C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, u8, end - start + 1);
     u32 walk_end = suffix ? end : start;
+    // A braceless nest `switch (x) switch (x) ... ;` asks for the end of every
+    // switch's body, each containing the next: one memo walks the nest once
+    // (#2676). It is created at the first switch, so a body without one pays nothing.
+    CParseStatementEnds statement_ends = {0};
     CParseCandidates switches = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_SWITCH, C_PARSE_POPULATION_NONE, start);
     for (u32 index = c_parse_candidates_next(&switches, start, end); index < walk_end; index = c_parse_candidates_next(&switches, index + 1, end))
     {
         CToken token = preprocess.tokens[index];
         if (token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SWITCH))
         {
-            c_parse_validate_one_switch(machine, result, preprocess, declaration, index, end, suffix, diagnostic);
+            if (!statement_ends.ends)
+            {
+                statement_ends = c_parse_statement_ends_create(machine->scratch_arena, start, end - start);
+            }
+            c_parse_validate_one_switch(machine, result, preprocess, declaration, index, end, suffix, statement_ends.ends ? &statement_ends : 0,
+                                        diagnostic);
         }
     }
     arena_set_position(machine->scratch_arena, mark);
