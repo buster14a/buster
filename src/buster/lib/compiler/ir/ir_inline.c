@@ -1455,4 +1455,3 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
     }
     return result;
 }
-
