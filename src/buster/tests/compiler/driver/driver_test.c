@@ -34564,10 +34564,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_image_retention_spawn(Un
             }
             BUSTER_TEST(arguments, waited);
             BUSTER_TEST(arguments, os_file_delete(executable_path) && compiler_driver_test_image_retention_exists(executable_path));
-            os_image_retention_set_active(false);
-            BUSTER_TEST(arguments, os_file_delete(executable_path) && !compiler_driver_test_image_retention_exists(executable_path));
+            // This copy is never spawned, so inactive deletion cannot remove an
+            // image loaded by the surrounding profiling capture.
+            String8 inactive_path = buster_test_temporary_path(arguments->arena, S8("buster-c-image-retention-inactive"), S8(".bin"));
+            ByteSlice executable_bytes = file_read(arguments->arena, executable_path, (FileReadOptions){0});
+            if (BUSTER_REQUIRE(arguments, executable_bytes.pointer && executable_bytes.length))
+            {
+                bool inactive_written = file_write(inactive_path, executable_bytes);
+                if (BUSTER_REQUIRE(arguments, inactive_written))
+                {
+                    os_image_retention_register(inactive_path);
+                    BUSTER_TEST(arguments, os_file_delete(inactive_path) && compiler_driver_test_image_retention_exists(inactive_path));
+                    os_image_retention_set_active(false);
+                    BUSTER_TEST(arguments, os_file_delete(inactive_path) && !compiler_driver_test_image_retention_exists(inactive_path));
+                }
+            }
+            os_image_retention_set_active(previous_active);
+            BUSTER_TEST(arguments, os_file_delete(executable_path) &&
+                                   compiler_driver_test_image_retention_exists(executable_path) == previous_active);
             BUSTER_TEST(arguments, os_file_delete(source_path));
-            if (previous_active) os_image_retention_set_active(true);
         }
     }
     BUSTER_TEST(arguments, os_file_delete(source_path));
