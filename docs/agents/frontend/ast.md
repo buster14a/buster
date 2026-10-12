@@ -4016,11 +4016,15 @@ The floor for extending the table to those bodies was declared on #3102
 before any measured run: 5 M Ir of walker work inside statement expressions,
 on the self-host unity input at `-g0 -c`, with and without `-fc-ast-pilot`.
 
-A census on main `7bc92b2d` found **no statement expression** in that input,
-on either arm. It lowered 0 statement-expression frames out of 6,389 body
-frames, and the base's `-E` output holds no `({`. The walker work there is
-0 Ir, so the item is negative and no code ships. The census is
+A census on main `7bc92b2d` reported **no statement expression** in that
+input, on either arm. It reported 0 statement-expression frames out of 6,389
+body frames lowered, and no `({` in the base's `-E` output. These counts are
+the census session's own observations. Its logs were not retained, and the
+counts have not been independently replayed. The 0 Ir of walker work is
+inferred from the zero frames, not measured with Callgrind. On that report
+the item is negative, and no code ships. The census is
 [`2026-10-12T213925Z`](../../performance-audits/2026-10-12T213925Z.md),
-diagnostic only. A later attempt needs a workload that has statement
+diagnostic only. Its appended note lists what is retained: the full
+instrument patch, the positive control and the artifact hashes. A later attempt needs a workload that has statement
 expressions, such as a GNU-heavy compatibility input, and a floor declared
 on that workload. Zen 5 validation stays incomplete (#2761).
