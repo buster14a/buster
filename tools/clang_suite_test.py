@@ -48,7 +48,7 @@ DRIVER_CASES = {
     "redundant-args": ("redundant-args.c", "7d00699c446dfb7e62148423f8c28dcd7d0f065e", (("refusal", 3421),)),
     "working-directory-and-abs": ("working-directory-and-abs.c", "6738c776d40cf772a2bedd2fd0139238627b870b", (("pass", 0),)),
     "print-target-triple": ("print-target-triple.c", "3b15f44d4d9c45107ee3719149e9558d08fcf59e", (("pass", 0),)),
-    "dumpmachine": ("dumpmachine.c", "41dda5590eb8297bbc40ac7f87f4ca6061e81a74", (("check-mismatch", 3421), ("pass", 0), ("refusal", 3421))),
+    "dumpmachine": ("dumpmachine.c", "41dda5590eb8297bbc40ac7f87f4ca6061e81a74", (("check-mismatch", 3421), ("check-mismatch", 3421), ("refusal", 3421))),
     "mg": ("mg.c", "b7458a08698d311aa996d3229dc55e18975eef09", (("refusal", 2293),)),
 }
 

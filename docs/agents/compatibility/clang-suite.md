@@ -132,7 +132,7 @@ Both make the mode fail.
 | `redundant-args.c` | 1 | refuses target `x86_64-apple-darwin11` | [#3421](https://github.com/buster14a/buster/issues/3421) |
 | `working-directory-and-abs.c` | 1 | pass | — |
 | `print-target-triple.c` | 1 | pass | — |
-| `dumpmachine.c` | 3 | prints `x86_64-linux-gnu`, supports `-m32`, refuses `xxx-pc-freebsd` | [#3421](https://github.com/buster14a/buster/issues/3421) |
+| `dumpmachine.c` | 3 | prints `x86_64-linux-gnu`; prints `i386-linux-gnu` for `-m32` (upstream expects `i386-redhat-linux`); refuses `xxx-pc-freebsd` | [#3421](https://github.com/buster14a/buster/issues/3421) |
 | `mg.c` | 1 | refuses `-M` | [#2293](https://github.com/buster14a/buster/issues/2293) |
 
 Each RUN retains per-compiler `.argv`, stdout, stderr and a receipt with
