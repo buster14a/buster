@@ -465,7 +465,9 @@ sys.exit(0 if summary['success'] else 1)
         self.assertIn("timeout-minutes: ${{ matrix.platform == 'windows' && 20 || 2 }}", wrappers)
         self.assertNotIn("continue-on-error", wrappers)
         for step in (policy, wrappers):
-            self.assertIn("tools/windows_process_tree.c", step)
+            self.assertIn("build.c", step)
+            self.assertIn("bootstrap_process_owner", step)
+            self.assertNotIn("tools/windows_process_tree.c", step)
             self.assertIn("export BUSTER_WINDOWS_PROCESS_TREE=", step)
 
 

@@ -168,9 +168,22 @@ original ten-second cleanup deadline:
   before exiting. Members that outlive the budget make it exit with 125, which
   also fails the owner.
 
-CI builds the helper with the host Clang (GCC where Clang is absent) in the
-workflow-tools and bootstrap-wrapper steps, and exports its path as
-`BUSTER_WINDOWS_PROCESS_TREE`. Python only receives that path; Windows case
+`./build.sh bootstrap_process_owner` (or `build.ps1 bootstrap_process_owner`)
+builds the helper through the native driver. It qualifies host Clang, applies
+strict warnings and the existing C semantic flags, and always compiles into a
+fresh, exclusively claimed `.cache/bootstrap-process-owner/` directory outside
+`generate`'s disposable trees. Compilation and the Windows `selftest` each have
+one 60-second native deadline; any nonzero exit, capture or cleanup failure prevents
+publication of `BOOTSTRAP_PROCESS_OWNER <absolute-path>`. Outputs remain available
+for the invoking test process's lifetime. This retains the existing helper's
+`launch`, `drain`, `fixture` and `selftest` protocols.
+`bootstrap_process_owner_test` also builds and runs the standalone native
+deadline controls, under the same flags and a single 60-second deadline.
+
+CI bootstraps `build.c` with hosted image Clang under the documented exception,
+runs the native control command in the workflow-tools and bootstrap-wrapper
+steps, and mechanically exports its returned path as `BUSTER_WINDOWS_PROCESS_TREE`.
+Python only receives that path; Windows case
 execution refuses to start without it. Native `fixture` modes supply silent,
 partial, repeated and late drain records for the caller controls on every
 host, and `selftest` checks on Windows that a live non-member process is

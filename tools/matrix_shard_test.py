@@ -387,6 +387,26 @@ class NativePartitionTests(unittest.TestCase):
 
 class WorkflowSetupTests(unittest.TestCase):
     """Run the actual step bodies with controlled tools and empty log roots."""
+    @classmethod
+    def setUpClass(cls):
+        # Compile one real native authority. The replay copies this binary for
+        # the shell bootstrap only; its helper command still qualifies and
+        # invokes the real compiler against the isolated source fixture.
+        cls.driver_temporary = tempfile.TemporaryDirectory(ignore_cleanup_errors=os.name == "nt")
+        cls.driver = Path(cls.driver_temporary.name).resolve() / "build.exe"
+        compiler = shutil.which("clang")
+        if not compiler:
+            raise RuntimeError("Native bootstrap helper controls require Clang")
+        command = [compiler, "-Isrc", "-Wall", "-Werror", "-Wno-unused-function", "-Wno-unused-variable",
+                   "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", "build.c", "-o", str(cls.driver)]
+        if os.name == "nt":
+            command += ["-Wno-microsoft-enum-forward-reference", "-lws2_32"]
+        subprocess.run(command, cwd=ROOT, check=True, timeout=120)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.driver_temporary.cleanup()
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -407,17 +427,25 @@ class WorkflowSetupTests(unittest.TestCase):
         self.steps = dict(re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", desktop))
         self.environment = dict(os.environ, BUSTER_CI_PYTHON=Path(sys.executable).as_posix(),
                                 RUNNER_TEMP=self.root.as_posix(), BUSTER_MATRIX_SHARD="checks",
-                                ZIG_TARGET="fixture", FIXTURE_EXIT="0", RUNNER_OS="Linux")
+                                ZIG_TARGET="fixture", FIXTURE_EXIT="0", RUNNER_OS="Linux",
+                                MATRIX_WORKFLOW_DRIVER=self.driver.as_posix())
 
     def copy_process_tree_source(self):
-        # Both bootstrap steps build the native case-job owner first.
-        for relative in ("tools/windows_process_tree.c", "src/buster/lib/base.h", "src/buster/lib/system_headers.h"):
+        # These are the actual helper command's input and discovery closure.
+        # The build driver itself was compiled once from the real source above.
+        for relative in ("tools/windows_process_tree.c", "tools/windows_process_tree_test.c",
+                         "src/buster/lib/base.h", "src/buster/lib/system_headers.h", "tests/build_compiler_identity.h"):
             (self.root / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / relative, self.root / relative)
 
     def run_step(self, name):
         body = self.steps[name].split("        run: |\n", 1)[1]
         script = "\n".join(line[10:] for line in body.splitlines() if line.startswith("          "))
+        if name in ("Workflow tool regression tests", "Bootstrap wrapper regression tests"):
+            # Intercept only the hosted driver bootstrap in the replay shell.
+            # Native os_process_spawn does not inherit shell functions, so
+            # bootstrap_process_owner still compiles and tests the real helper.
+            script = 'clang() { cp "$MATRIX_WORKFLOW_DRIVER" "${@: -1}"; }\n' + script
         return subprocess.run([self.shell, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
                               cwd=self.root, env=self.environment, text=True, capture_output=True, timeout=30)
 
