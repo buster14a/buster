@@ -17,7 +17,8 @@ attempt:
   An optional member must also leave 4 MiB and 32 entries for later trees'
   required members.
 - The exports stop 6 MiB and 3 entries short of the sealed bounds, so the
-  control files always fit.
+  control files always fit. Entries count directories as well as files, as
+  the verifier does.
 - Every omission is recorded with its fixed reason code.
 
 Once the attempt is measured, the producer writes `evidence-omissions.json`

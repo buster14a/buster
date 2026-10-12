@@ -643,9 +643,13 @@ def toolchain() -> dict:
 
 
 def evidence_usage(evidence: Path) -> tuple[int, int]:
-    """(bytes, files) already under the evidence root, without following symlinks."""
+    """(bytes, entries) already under the evidence root, without following symlinks.
+
+    Entries are files and directories below the root, as the sealed bound counts them (#2918).
+    """
     total = count = 0
-    for directory, _, names in os.walk(evidence):
+    for directory, folders, names in os.walk(evidence):
+        count += len(folders)
         for name in names:
             try:
                 total += os.lstat(os.path.join(directory, name)).st_size
@@ -676,6 +680,8 @@ def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, 
     if destination.is_dir():  # a re-export replaces it
         replaced = evidence_usage(destination)
         used, files = used - replaced[0], files - replaced[1]
+    else:  # the destination directory itself is a retained entry
+        files += 1
     present: set[str] = set()
     if staging.exists():
         shutil.rmtree(staging)
@@ -694,6 +700,7 @@ def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, 
                     codes.append("excluded-type")
                     continue
                 kept.append(name)
+                files += 1
                 (staging / relative / name).mkdir(parents=True, exist_ok=True)
             names[:] = kept
             leaves.extend(((relative / name).as_posix(), os.path.join(directory, name)) for name in found

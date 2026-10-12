@@ -2712,7 +2712,8 @@ class ExportTest(unittest.TestCase):
         self.assertLessEqual(total, 100)
         self.assertTrue(omissions)
         self.assertTrue(all("budget" in item["reason"] for item in omissions))
-        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_COUNT", 3), \
+        # The lab directory itself is one of the four entries (#2918 counts directories too).
+        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_COUNT", 4), \
                 mock.patch.object(compiler_compare, "EVIDENCE_REQUIRED_HEADROOM", (0, 0)):
             self.export()
         self.assertEqual(len(self.exported()), 3)
@@ -2725,7 +2726,8 @@ class ExportTest(unittest.TestCase):
             (self.source / "artifacts" / f"run-{index}.log").write_text("log")
         (self.source / "inputs" / "tiny.c").write_text("int main;")
         compiler_compare.EVIDENCE_OMISSION_LEDGER.clear()
-        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_COUNT", 4), \
+        # Seven entries: lab/, artifacts/ and inputs/, then two required and two optional files.
+        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_COUNT", 7), \
                 mock.patch.object(compiler_compare, "EVIDENCE_REQUIRED_HEADROOM", (0, 0)):
             problems, omissions = self.export(required=("summary.json", "inputs/tiny.c"))
         self.assertEqual(problems, [])
@@ -2735,7 +2737,7 @@ class ExportTest(unittest.TestCase):
         self.assertEqual(compiler_compare.EVIDENCE_OMISSION_LEDGER, [("lab/" + path, "file-budget") for path in dropped])
 
     def test_optional_members_leave_headroom_for_later_required_members(self) -> None:
-        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_COUNT", 3), \
+        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_COUNT", 4), \
                 mock.patch.object(compiler_compare, "EVIDENCE_REQUIRED_HEADROOM", (0, 2)):
             problems, omissions = self.export()
         self.assertEqual(problems, [])
