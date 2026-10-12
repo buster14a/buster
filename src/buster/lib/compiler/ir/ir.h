@@ -997,6 +997,11 @@ struct IrModule
     IrLocalPromotionStatistics local_promotion;
     bool inline_complete;
     IrInlineStatistics inlining;
+    // Callers whose splices were all optional and whose strict output check
+    // ir_inline_module deferred to preparation's next module-wide scan. Cleared
+    // once that scan proves them; see ir_prepare_canonical_module.
+    u32* inline_unchecked_callers;
+    u32 inline_unchecked_count;
     bool fast_complete;
     IrFastStatistics fast;
 };

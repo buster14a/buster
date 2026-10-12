@@ -516,7 +516,12 @@ u32 ir_inline_module_growth_limit(u32 max_module_growth, u64 module_rows)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrModule* module)
+// `defer_optional_output` lets a caller whose splices were all optional skip
+// its own strict output check and be listed in module->inline_unchecked_callers
+// instead. Preparation passes it only when the FAST input guard will scan the
+// whole module anyway, and attributes any failure of a listed caller to this
+// pass (ir_inline_check_unchecked_callers).
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrModule* module, bool defer_optional_output)
 {
     IrValidationResult result = (IrValidationResult){.error = IR_VALIDATION_NONE, .boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT};
     if (!program || !program->arena || !module)
@@ -526,6 +531,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
     else if (!module->inline_complete)
     {
         module->inlining = (IrInlineStatistics){0};
+        module->inline_unchecked_callers = 0;
+        module->inline_unchecked_count = 0;
         IrInlineOptions options = program->inline_options;
         if (!options.max_callee_instructions) options.max_callee_instructions = IR_INLINE_TINY_INSTRUCTIONS;
         if (!options.max_function_growth) options.max_function_growth = IR_INLINE_FUNCTION_GROWTH;
@@ -1334,6 +1341,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         }
                     }
                     bool changed = false;
+                    bool required_splice = false;
                     IrInlineCfgReserve reserve = ir_inline_cfg_reserve(caller, function_projected_locals, function_projected_debug,
                                                                        function_projected_scopes);
                     for (u32 block = 0; block < original_blocks && result.error == IR_VALIDATION_NONE; block += 1)
@@ -1356,6 +1364,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             changed = true;
                             module->inlining.inlined += 1;
                             module->inlining.always_inlined += symbol && symbol->always_inline;
+                            required_splice |= symbol && symbol->always_inline;
                             module->inlining.copied_instructions += copied;
                             module->inlining.growth += caller->instruction_count - rows_before;
                         }
@@ -1370,12 +1379,26 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         // over-approximates, so no full-function remap or compaction is needed here.
                         ir_inline_cfg_rebuild_predecessors(program->arena, caller);
                         ir_function_invalidate_cfg(caller);
-                        IrValidationResult output = ir_validate_canonical_function(program, caller);
-                        strict[caller_index] = output.error == IR_VALIDATION_NONE ? IR_INLINE_STRICT_VALID : IR_INLINE_STRICT_INVALID;
-                        if (output.error != IR_VALIDATION_NONE)
+                        if (defer_optional_output && !required_splice)
                         {
-                            result = output;
-                            result.boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT;
+                            // Unknown again: a later read as a callee rechecks it.
+                            strict[caller_index] = 0;
+                            if (!module->inline_unchecked_callers)
+                            {
+                                module->inline_unchecked_callers = arena_allocate(program->arena, u32, count);
+                            }
+                            module->inline_unchecked_callers[module->inline_unchecked_count] = caller_index;
+                            module->inline_unchecked_count += 1;
+                        }
+                        else
+                        {
+                            IrValidationResult output = ir_validate_canonical_function(program, caller);
+                            strict[caller_index] = output.error == IR_VALIDATION_NONE ? IR_INLINE_STRICT_VALID : IR_INLINE_STRICT_INVALID;
+                            if (output.error != IR_VALIDATION_NONE)
+                            {
+                                result = output;
+                                result.boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT;
+                            }
                         }
                         module->local_promotion_complete = false;
                         module->local_promotion = (IrLocalPromotionStatistics){0};
@@ -1394,5 +1417,19 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
             }
         }
     }
+    return result;
+}
+
+// The deferred output check: the first listed caller that fails the strict
+// validator is an inlining-output error. Run only after a module-wide scan
+// failed, so legacy shapes elsewhere keep their FAST validation skip.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_check_unchecked_callers(IrProgram* program, IrModule* module)
+{
+    IrValidationResult result = ir_validation_ok();
+    for (u32 index = 0; index < module->inline_unchecked_count && result.error == IR_VALIDATION_NONE; index += 1)
+    {
+        result = ir_validate_canonical_function(program, module->functions + module->inline_unchecked_callers[index]);
+    }
+    result.boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT;
     return result;
 }

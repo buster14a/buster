@@ -274,10 +274,16 @@ strict canonical validity per function, never by a module-wide scan: each
 candidate's caller and callee once before they are read, and each spliced caller
 again after its last splice (an output failure reports the `inlining output`
 boundary). A mandatory call whose caller or callee is a legacy producer-certified
-shape that fails that check is diagnosed; an optional one stays a call. Rewritten
-callers pass the same check, so a module the input scan already proved stays proven
-and the FAST input guard described above still pays the only module-wide scan on a
-producer-certified default compile. The verbose
+shape that fails that check is diagnosed; an optional one stays a call. When FAST
+is selected, a caller whose splices were all optional skips that output check:
+it is listed in `inline_unchecked_callers` and proven by the module-wide scan
+that follows anyway (the promotion output check of a checked build, else the FAST
+input guard). If that scan fails, each listed caller is validated and the first
+failure reports the `inlining output` boundary; a failure only outside the list
+keeps the legacy FAST validation skip. This removed 0.87 G of 3.4 G inliner
+instructions from an uncapped tiny self-host compile under cachegrind (#48). Any
+other rewritten caller is checked at once, so the FAST input guard still pays the
+only module-wide scan on a producer-certified default compile. The verbose
 `IR_INLINE` record reports candidates, accepted/mandatory calls, copied rows,
 growth, rejection categories and visits. These counts are diagnostics, not a
 performance result. Mandatory budget refusals additionally report the first

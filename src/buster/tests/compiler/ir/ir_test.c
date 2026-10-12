@@ -1987,6 +1987,80 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         scratch_end(defaults_temporary);
     }
 
+    // With FAST selected, a caller whose splices were all optional defers its
+    // strict output check to the FAST input guard's module scan (#48). The
+    // normal path proves and clears it; a deferred caller that fails that scan
+    // is an inlining-output error, while the same defect in an unlisted
+    // function keeps the legacy FAST validation skip.
+    for (u32 variant = 0; variant < 3; variant += 1)
+    {
+        TemporalArena deferred_temporary = scratch_begin(&arguments->arena, 1);
+        String8 deferred_source = S8(
+            "static int small_leaf(int value) { return value + 1; }\n"
+            "int small_caller(int value) { return small_leaf(value); }\n");
+        CPreprocessResult deferred_preprocess = c_preprocess(deferred_temporary.arena, deferred_source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult deferred_analysis = c_parse(deferred_temporary.arena, deferred_preprocess);
+        CIRLowerResult deferred_lowered = {0};
+        if (!deferred_preprocess.error_count && !deferred_analysis.diagnostic_count)
+        {
+            deferred_lowered = c_lower_to_ir(deferred_temporary.arena, S8("canonical-inline-deferred.c"),
+                deferred_preprocess, deferred_analysis, target_native);
+        }
+        BUSTER_TEST(arguments, deferred_lowered.diagnostic_count == 0 && deferred_lowered.program != 0);
+        if (BUSTER_REQUIRE(arguments, deferred_lowered.program && deferred_lowered.program->module_count == 1))
+        {
+            IrProgram* deferred_program = deferred_lowered.program;
+            IrModule* deferred_module = deferred_program->modules;
+            deferred_program->fast_passes = IR_FAST_ALL;
+            deferred_program->inline_options = (IrInlineOptions){.tiny = true};
+            IrFunction* deferred_caller = ir_test_inline_find_function(deferred_module, S8("small_caller"));
+            BUSTER_TEST(arguments, deferred_caller != 0);
+            if (variant == 0)
+            {
+                IrValidationResult prepared = ir_prepare_canonical_module(deferred_program, deferred_module, true);
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, deferred_module->inlining.inlined == 1);
+                BUSTER_TEST(arguments, deferred_module->inline_unchecked_count == 0);
+                BUSTER_TEST(arguments, deferred_module->fast.validation_skips == 0);
+                BUSTER_TEST(arguments, deferred_caller &&
+                                           ir_test_direct_call_count(deferred_program, deferred_caller, S8("small_leaf")) == 0);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(deferred_program, deferred_module).error == IR_VALIDATION_NONE);
+            }
+            else if (deferred_caller)
+            {
+                // Stand in for a defective splice: keep the earlier stages
+                // complete and give the caller's return an out-of-range value.
+                IrInstruction* tail = deferred_caller->instructions +
+                                      deferred_caller->blocks[deferred_caller->entry.value].last_instruction.value;
+                BUSTER_TEST(arguments, tail->opcode == IR_OPCODE_RETURN && tail->operand_count == 1);
+                tail->operands[0].value = deferred_caller->value_count + 7u;
+                u32 caller_index = (u32)(deferred_caller - deferred_module->functions);
+                deferred_module->inline_complete = true;
+                deferred_module->local_promotion_complete = true;
+                deferred_module->fast_complete = false;
+                if (variant == 1)
+                {
+                    deferred_module->inline_unchecked_callers = arena_allocate(deferred_temporary.arena, u32, 1);
+                    deferred_module->inline_unchecked_callers[0] = caller_index;
+                    deferred_module->inline_unchecked_count = 1;
+                }
+                IrValidationResult prepared = ir_prepare_canonical_module(deferred_program, deferred_module, true);
+                if (variant == 1)
+                {
+                    BUSTER_TEST(arguments, prepared.error != IR_VALIDATION_NONE);
+                    BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_INLINE_OUTPUT);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, deferred_module->fast.validation_skips == 1);
+                }
+                BUSTER_TEST(arguments, deferred_module->inline_unchecked_count == 0);
+            }
+        }
+        scratch_end(deferred_temporary);
+    }
+
     // Mandatory sites must be budgeted before optional sites, even when
     // the optional caller appears first in source/module order. Measure the
     // exact cost of this required expansion from a control module, then give
