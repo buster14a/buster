@@ -1071,7 +1071,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_linker_argument_takes_operand(String8 a
 {
     bool result = string_equal(argument, S8("-soname")) || string_equal(argument, S8("--soname")) ||
                   string_equal(argument, S8("-h")) || string_equal(argument, S8("-z")) ||
-                  string_equal(argument, S8("--version-script"));
+                  string_equal(argument, S8("--version-script")) || string_equal(argument, S8("-rpath")) ||
+                  string_equal(argument, S8("--rpath"));
     return result;
 }
 

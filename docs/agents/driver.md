@@ -2005,6 +2005,15 @@ The supported subset is:
 - Linux and Android ELF links: `--no-undefined`, `-no-undefined`, and the
   two arguments `-z defs` require strong references to resolve. Executables
   already enforce this rule; on a shared object it overrides loader resolution.
+- x86-64 Linux executables, PIEs and shared objects: `-rpath DIR`,
+  `--rpath DIR`, `-rpath=DIR` and `--rpath=DIR` write a runtime search path.
+  Repeated paths are joined with `:` in command-line order. The default and
+  `--enable-new-dtags` write `DT_RUNPATH`; `--disable-new-dtags` writes
+  `DT_RPATH`, and the last dtag switch wins. Loader tokens such as `$ORIGIN`
+  are preserved literally (quote them in the shell). Each image's loader
+  expands `$ORIGIN` relative to that image. This is a runtime path, separate
+  from `-L` library discovery at link time; `-rpath-link` remains refused.
+  Missing or empty operands and unsupported targets fail before publication.
 - x86-64 Linux shared objects: `-soname NAME`, `--soname NAME`, `-h NAME`,
   `-soname=NAME`, and `--soname=NAME` set `DT_SONAME`.
 
