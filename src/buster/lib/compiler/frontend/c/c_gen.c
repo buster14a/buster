@@ -62224,6 +62224,132 @@ BUSTER_C_INTERNAL bool c_ir_type_mapping_pending(CParseResult* parse, IrProgram*
     return false;
 }
 
+// The mapping passes' retry list (#3312). An attempt that leaves its type
+// pending because a type it needs is unmapped or has no layout yet waits on
+// that type, and is retried as soon as an attempt of that type maps it or
+// completes its layout, before the pass moves on. Without it a type listed
+// before what it needs -- an aggregate before the array type of its member --
+// advanced one link per pass, so a chain of D links took D passes over the
+// worklist and re-evaluated every waiting array's bound on each.
+#define C_IR_TYPE_MAPPING_FREE 0
+#define C_IR_TYPE_MAPPING_WAITING 1
+#define C_IR_TYPE_MAPPING_READY 2
+
+typedef struct CIrTypeMappingWaits CIrTypeMappingWaits;
+struct CIrTypeMappingWaits
+{
+    // By C type id: the head of the chain of types waiting on it and the next
+    // link, each plus one, and the waiting state.
+    u32* head;
+    u32* next;
+    u8* state;
+    u32* ready;
+    u32 ready_count;
+    u64 attempts;
+    // The type being attempted, and its mapping and layout state before it.
+    u32 current;
+    IrTypeId current_map;
+    bool current_resolved;
+};
+
+BUSTER_C_INTERNAL bool c_ir_type_mapping_layout_resolved(IrProgram* program, IrTypeId type)
+{
+    IrType* mapped = type.value == IR_ID_UNDERLYING_INVALID ? 0 : ir_type_from_id(&program->types, type);
+    return mapped && mapped->layout.resolved;
+}
+
+// The first type a pending attempt of `type_index` still needs, by the branch
+// it takes, or UINT32_MAX when none is unmapped or unlaid. An element a
+// pointer names only needs a mapping.
+BUSTER_C_INTERNAL u32 c_ir_type_mapping_blocker(CParseResult* parse, IrProgram* program, IrTypeId* c_type_ir_map, u32 type_index)
+{
+    CType* c_type = &parse->types[type_index];
+    u32 result = UINT32_MAX;
+    if (c_type->has_unqualified_type || c_type->kind == C_TYPE_POINTER || c_type->kind == C_TYPE_ARRAY || c_type->kind == C_TYPE_VECTOR)
+    {
+        u32 needed = c_type->has_unqualified_type ? c_type->unqualified_type.value : c_type->element_type.value;
+        if (needed < parse->type_count &&
+            (c_type_ir_map[needed].value == IR_ID_UNDERLYING_INVALID ||
+             (c_type->kind != C_TYPE_POINTER && !c_ir_type_mapping_layout_resolved(program, c_type_ir_map[needed]))))
+        {
+            result = needed;
+        }
+    }
+    else if (c_type->kind == C_TYPE_STRUCT || c_type->kind == C_TYPE_UNION)
+    {
+        for (u32 member_index = 0; member_index < c_type->member_count && result == UINT32_MAX; member_index += 1)
+        {
+            u32 member_type = parse->members[c_type->member_start + member_index].type.value;
+            if (member_type < parse->type_count && !c_ir_type_mapping_layout_resolved(program, c_type_ir_map[member_type]))
+            {
+                result = member_type;
+            }
+        }
+    }
+    return result != type_index ? result : UINT32_MAX;
+}
+
+// Settles the attempt that just ended, then returns the next type to attempt:
+// a ready one first, otherwise the worklist from `*position`, or UINT32_MAX at
+// the end of the pass. An attempt that changed its type's mapping or layout
+// readies the types waiting on it; one that left its type pending waits on its
+// blocker. A retry only moves earlier an attempt the next pass would make.
+BUSTER_C_INTERNAL u32 c_ir_type_mapping_next(CIrTypeMappingWaits* waits, CParseResult* parse, IrProgram* program, IrTypeId* c_type_ir_map, u32 const* worklist,
+                                             u32 worklist_count, u32* position)
+{
+    u32 current = waits->current;
+    if (current != UINT32_MAX)
+    {
+        if ((c_type_ir_map[current].value != waits->current_map.value ||
+             c_ir_type_mapping_layout_resolved(program, c_type_ir_map[current]) != waits->current_resolved))
+        {
+            u32 link = waits->head[current];
+            waits->head[current] = 0;
+            while (link)
+            {
+                u32 waiter = link - 1;
+                link = waits->next[waiter];
+                waits->state[waiter] = C_IR_TYPE_MAPPING_READY;
+                waits->ready[waits->ready_count++] = waiter;
+            }
+        }
+        if (waits->state[current] == C_IR_TYPE_MAPPING_FREE && c_ir_type_mapping_pending(parse, program, c_type_ir_map, current))
+        {
+            u32 blocker = c_ir_type_mapping_blocker(parse, program, c_type_ir_map, current);
+            if (blocker != UINT32_MAX)
+            {
+                waits->state[current] = C_IR_TYPE_MAPPING_WAITING;
+                waits->next[current] = waits->head[blocker];
+                waits->head[blocker] = current + 1;
+            }
+        }
+    }
+    u32 result = UINT32_MAX;
+    while (result == UINT32_MAX && waits->ready_count)
+    {
+        waits->ready_count -= 1;
+        u32 type_index = waits->ready[waits->ready_count];
+        waits->state[type_index] = C_IR_TYPE_MAPPING_FREE;
+        if (c_ir_type_mapping_pending(parse, program, c_type_ir_map, type_index))
+        {
+            result = type_index;
+        }
+    }
+    if (result == UINT32_MAX && *position < worklist_count)
+    {
+        result = worklist[*position];
+        *position += 1;
+    }
+    waits->current = result;
+    if (result != UINT32_MAX)
+    {
+        waits->attempts += 1;
+        waits->current_map = c_type_ir_map[result];
+        waits->current_resolved = c_ir_type_mapping_layout_resolved(program, c_type_ir_map[result]);
+    }
+    return result;
+}
+
 // A function's construction rows are sized before its body is lowered, from
 // its body tokens: three instruction, source and value slots per token and one
 // block slot per token. Most of that capacity is never written -- the
@@ -63087,6 +63213,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         }
     }
     u32* type_mapping_worklist = arena_allocate(temporary_arena, u32, parse.type_count);
+    CIrTypeMappingWaits type_mapping_waits = {
+        .head = arena_allocate(temporary_arena, u32, parse.type_count),
+        .next = arena_allocate(temporary_arena, u32, parse.type_count),
+        .state = arena_allocate(temporary_arena, u8, parse.type_count),
+        .ready = arena_allocate(temporary_arena, u32, parse.type_count),
+    };
     for (u32 type_mapping_round = 0; type_mapping_round < 2; type_mapping_round += 1)
     {
         // Rebuilt each round because c_ir_infer_incomplete_array_bounds below
@@ -63094,6 +63226,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         // array member.  Nothing inside the pass loop edits types or bounds.
         c_ir_collect_flexible_array_types(&parse, flexible_array_types);
         u32 type_mapping_worklist_count = 0;
+        memset(type_mapping_waits.head, 0, sizeof(*type_mapping_waits.head) * parse.type_count);
+        memset(type_mapping_waits.state, 0, sizeof(*type_mapping_waits.state) * parse.type_count);
         for (u32 type_index = 0; type_index < parse.type_count; type_index += 1)
         {
             if (c_ir_type_mapping_pending(&parse, program, c_type_ir_map, type_index))
@@ -63116,9 +63250,16 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                 kept_count += c_ir_type_mapping_pending(&parse, program, c_type_ir_map, kept_index);
             }
             type_mapping_worklist_count = kept_count;
-            for (u32 position = 0; position < type_mapping_worklist_count; position += 1)
+            u32 position = 0;
+            type_mapping_waits.current = UINT32_MAX;
+            // Every branch below leaves an attempt by `continue` or by
+            // falling through; c_ir_type_mapping_next settles it.
+            for (u32 type_index = c_ir_type_mapping_next(&type_mapping_waits, &parse, program, c_type_ir_map, type_mapping_worklist,
+                                                         type_mapping_worklist_count, &position);
+                 type_index != UINT32_MAX;
+                 type_index = c_ir_type_mapping_next(&type_mapping_waits, &parse, program, c_type_ir_map, type_mapping_worklist,
+                                                     type_mapping_worklist_count, &position))
             {
-                u32 type_index = type_mapping_worklist[position];
                 CType* c_type = &parse.types[type_index];
                 if (c_type->has_unqualified_type)
                 {
@@ -63843,6 +63984,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             }
         }
         constant_builder.sizeof_defers_unmapped_local_arrays = false;
+        result.type_mapping_attempts = type_mapping_waits.attempts;
         if (type_mapping_round == 0)
         {
             c_ir_infer_incomplete_array_bounds(&constant_builder, &result, arena, lowering_diagnostic_capacity);

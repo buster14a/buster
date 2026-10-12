@@ -2148,6 +2148,9 @@ struct CIRLowerResult
 {
     CIRDirectSsaStatistics direct_ssa;
     CTypeLayoutStatistics type_layout;
+    // Attempts the lowering's type-mapping passes made, retries included, so
+    // a test can pin them to the unit's size (#3312).
+    u64 type_mapping_attempts;
     IrProgram* program;
     CDiagnostic* diagnostics;
     u32 diagnostic_count;
