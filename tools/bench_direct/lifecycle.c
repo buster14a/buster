@@ -343,8 +343,13 @@ BUSTER_GLOBAL_LOCAL char *lc_body(const LcIdentity *id, const char *prior, int c
                 {
                     const char *next = strchr(line, '\n');
                     size_t width = next ? (size_t)(next - line) : strlen(line);
-                    if (width >= 8 && memcmp(line, "Baseline", 8) == 0)
-                    { fprintf(text, "%.*s\n", (int)(width > 2048 ? 2048 : width), line); baseline = 1; }
+                    char sha[41] = {0};
+                    if (width >= 51 && memcmp(line, "Baseline `", 10) == 0)
+                    {
+                        memcpy(sha, line + 10, 40);
+                        if (cm_sha(sha) && line[50] == '`')
+                        { fprintf(text, "%.*s\n", (int)(width > 2048 ? 2048 : width), line); baseline = 1; }
+                    }
                     line = next ? next + 1 : NULL;
                 }
                 if (!baseline) fputs("Baseline: unavailable.\n", text);

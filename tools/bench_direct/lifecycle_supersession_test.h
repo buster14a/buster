@@ -436,16 +436,27 @@ BUSTER_GLOBAL_LOCAL int lcn_test(unsigned *count)
     failures += !rendered;
     printf("{\"fixture\":\"neutral report has one current terminal heading and exact provenance\",\"status\":\"%s\"}\n", rendered ? "pass" : "fail");
     cm_json_free(&report); free(body);
-    body = lc_body(&id, "Baseline: 0123456789012345678901234567890123456789.\n", 0);
-    failures += !body || !strstr(body, "Baseline: 0123456789012345678901234567890123456789.");
-    free(body);
+    body = lc_body(&id, "Baseline `0123456789012345678901234567890123456789` (first parent).\n", 0);
+    report = cm_json_parse(body ? body : "", body ? strlen(body) : 0);
+    summary = cm_get(&report, cm_member(&report, 1, "output"), "summary");
+    failures += !report.valid || !lc_line(summary, "Baseline `0123456789012345678901234567890123456789` (first parent).");
+    cm_json_free(&report); free(body);
+    body = lc_body(&id, "Baseline: its first parent (selection policy, no known SHA).\n", 0);
+    report = cm_json_parse(body ? body : "", body ? strlen(body) : 0);
+    summary = cm_get(&report, cm_member(&report, 1, "output"), "summary");
+    failures += !report.valid || !lc_line(summary, "Baseline: unavailable.");
+    cm_json_free(&report); free(body);
+    failures += lc_pending_annotation("<!DOCTYPE html><html>unavailable</html>", id.executor);
+    failures += lc_pending_annotation("malformed", id.executor);
+    failures += lc_pending_annotation(NULL, id.executor);
+    failures += lc_pending_annotation("<a href=\"/buster14a/buster/actions/runs/38297977458/workflow\"><strong>9700X direct workload benchmark</strong></a><div class=\"color-fg-muted\"><div data-target=\"annotation-message.annotationContainer\" class=\"text-small text-mono annotation--contracted\">\n  <div>Canceling since a higher priority waiting request for buster-9700x-direct-bench-main-compare exists</div>\n</div></div><!DOCTYPE html><html><a href=\"/buster14a/buster/actions/runs/38297977458/workflow\"><strong>9700X direct workload benchmark</strong></a><div class=\"color-fg-muted\"><div data-target=\"annotation-message.annotationContainer\" class=\"text-small text-mono annotation--contracted\">\n  <div>Canceling since a higher priority waiting request for buster-9700x-direct-bench-main-compare exists</div>\n</div></div></html>", id.executor);
     // Even a copied flag cannot neutralize PR/research/request-only outcomes.
     id.pull = 1; failures += !cm_equal(lc_conclusion(&id), "cancelled"); id.pull = 0;
     id.research = LC_RESEARCH_SAMPLING; failures += !cm_equal(lc_conclusion(&id), "cancelled"); id.research = 0;
     id.request_only = 1; failures += !cm_equal(lc_conclusion(&id), "cancelled"); id.request_only = 0;
     id.attempt = 2; failures += !cm_equal(lc_conclusion(&id), "cancelled"); id.attempt = 1;
     cm_copy(id.outcome, sizeof(id.outcome), "failure"); failures += !cm_equal(lc_conclusion(&id), "failure");
-    *count = (unsigned)BUSTER_ARRAY_LENGTH(cases) + 32;
+    *count = (unsigned)BUSTER_ARRAY_LENGTH(cases) + 37;
     int result = (int)failures;
     return result;
 }
