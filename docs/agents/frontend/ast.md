@@ -3851,6 +3851,34 @@ default path's ±0.05% band in the same frame step. The segment frames,
 alignment frames, declarators and layout attributes stay with the machine.
 Zen 5 validation stays incomplete (#2761).
 
+**The one disagreement is benign.** The census left one member unidentified:
+the tree test admitted it and the token predicate rejected it. A later rerun
+of both instruments, audit
+[`2026-10-12T205005Z`](../../performance-audits/2026-10-12T205005Z.md), logged
+every segment frame where they disagree. It ran on main `f0f84944` over three
+inputs only: the unity self-host input under `-fc-ast-pilot`, `c_ast_tests` and
+`c_frontend_tests`. The audit keeps the instrument and the raw rows. The member is
+`u32 fallback_opcode_counts[IR_OPCODE_COUNT + 1];` in `CodegenStatistics`
+(`codegen.h`). Its tree is `(declarator_array (declarator_name ...) (add
+(identifier IR_OPCODE_COUNT) (number 1)))`. The member carries no decoration,
+so the tree is right. The token predicate is stricter than it needs to be: it
+admits only words, numbers, `*`, `[`, `]` and `,`, so an operator other than
+`*` in an array size fails it. So do the parentheses that the tree does not
+keep as nodes. The test corpora add only `char c[(68) - 4];`, which is the
+same case. On those inputs every other disagreement goes the other way,
+where the tree declines and the token predicate admits:
+- **Tagged specifiers.** These are `struct`, `union`, `enum` and
+  `_Atomic struct` heads. They have no word-only list, so the tree test does
+  not look at them.
+- **One fixture, `int first [[maybe_unused]];`.** The tree holds an
+  `ATTRIBUTE_LIST` there. The token predicate calls the member plain, because
+  a C23 `[[...]]` attribute is spelled only with tokens it admits. A read
+  gated on that predicate would skip a real attribute. The self-host rerun
+  logged no such row, so the census and the oracle's object identity stand.
+  The tree test is the one to ship.
+
+No AST construction defect was found on these inputs.
+
 ### Statement-keyword gate in lowering's classification
 
 Two map-row follow-ups were left open after the

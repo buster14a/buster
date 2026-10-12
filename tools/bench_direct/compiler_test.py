@@ -2888,6 +2888,18 @@ class HarnessTest(unittest.TestCase):
         self.assertIn("unsupported historical throughput harness",
                       compiler_compare.throughput_harness_problem(root, historical))
 
+    def test_native_evidence_inventory_matches_the_receipt_contract(self) -> None:
+        # tools/compiler_evidence.c derives required raw members from the same admitted profiles (#2918).
+        import re
+        source = (Path(__file__).resolve().parents[2] / "tools" / "compiler_evidence.c").read_text()
+        table = re.search(r"compiler_evidence_workloads\[\] = \{(.*?)\};", source, re.S)
+        self.assertIsNotNone(table)
+        self.assertEqual(re.findall(r'S8_INITIALIZER\("([^"]+)"\)', table.group(1)), compiler_receipt.THROUGHPUT_PROFILE["workloads"])
+        self.assertIn(f'#define COMPILER_EVIDENCE_HARNESS_REVISION "{compiler_receipt.THROUGHPUT_HISTORICAL_HARNESS_REVISION}"', source)
+        for name in (compiler_receipt.PROFILE["name"], compiler_receipt.THROUGHPUT_PROFILE["name"],
+                     compiler_receipt.THROUGHPUT_HISTORICAL_PROFILE["name"]):
+            self.assertIn(f'S8("{name}")', source)
+
     def historical_fixture(self, extra_lines: tuple[str, ...] = ()) -> tuple[str, str, str]:
         """(pinned harness commit, head commit, head tree) for the #3714 historical recipe.
 
