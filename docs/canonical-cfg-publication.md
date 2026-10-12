@@ -45,8 +45,8 @@ The authoritative instruction row remains 64 bytes.
 The block-ID order of spans is load-bearing, not cosmetic. The published-shape
 validator, the DWARF definition-to-end ranges, and linear row scans in the
 Wasm, eBPF and LLVM backends depend on it. Audit
-[`2026-10-12T214222Z`](performance-audits/2026-10-12T214222Z.md) lists them,
-and measures why spans in any order are not worth that cost.
+[`2026-10-12T214222Z`](performance-audits/2026-10-12T214222Z.md) lists them.
+They are why spans keep block-ID order.
 
 Native selectors, native canonical emission, Wasm, eBPF and LLVM consume the
 same instruction spans and dense parameter/argument arrays. Both selectors'
