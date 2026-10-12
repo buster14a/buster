@@ -362,6 +362,9 @@ struct ObjectSymbol
     // function there. `kind` is unchanged and still what every other
     // consumer reads; Mach-O and COFF have no such state and ignore this.
     bool untyped;
+    // An undefined ELF STT_NOTYPE reference, independent of TLS identity.
+    // Relocations may prove a call without changing what its producer stated.
+    bool undefined_untyped;
     // The name is already the object-level symbol name.  The Mach-O writer
     // normally prepends the C-level `_`; hand-written assembly spells that
     // underscore itself, so the driver strips it, or sets this when the
@@ -435,6 +438,8 @@ struct ObjectFile
     // unsupported input feature (for example an ELF relocation) for a
     // user-facing diagnostic.  Empty means no more-specific text exists.
     String8 diagnostic;
+    // Driver-supplied input spelling for symbol-type refusal attribution.
+    String8 source_name;
     u32 section_count;
     u32 symbol_count;
     u32 relocation_count;

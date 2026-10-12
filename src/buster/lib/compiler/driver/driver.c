@@ -4395,7 +4395,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
 // also covers Debian's cross-libc/compiler-runtime installation convention.
 BUSTER_GLOBAL_LOCAL u32 compiler_driver_elf_library_roots(Arena* arena, CompilerDriverInvocation invocation, String8* roots)
 {
-    String8 multiarch = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("aarch64-linux-gnu") : S8("x86_64-linux-gnu");
+    bool android = invocation.target.os == OPERATING_SYSTEM_ANDROID;
+    String8 multiarch = android ? (invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("aarch64-linux-android") : S8("x86_64-linux-android"))
+                               : invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("aarch64-linux-gnu") : S8("x86_64-linux-gnu");
     u32 root_count = 0;
     if (invocation.sysroot.length)
     {
@@ -4406,7 +4408,7 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_elf_library_roots(Arena* arena, Compiler
         roots[root_count++] = string_format(arena, S8("{S8}/lib"), invocation.sysroot);
         roots[root_count++] = string_format(arena, S8("{S8}/usr/lib"), invocation.sysroot);
     }
-    else
+    else if (!android)
     {
         roots[root_count++] = string_format(arena, S8("/lib/{S8}"), multiarch);
         roots[root_count++] = string_format(arena, S8("/usr/lib/{S8}"), multiarch);
@@ -4415,6 +4417,10 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_elf_library_roots(Arena* arena, Compiler
         roots[root_count++] = S8("/usr/lib64");
         roots[root_count++] = S8("/lib");
         roots[root_count++] = S8("/usr/lib");
+    }
+    else if (BUSTER_ANDROID)
+    {
+        roots[root_count++] = S8("/system/lib64");
     }
     return root_count;
 }
@@ -6880,7 +6886,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
             result.export_map_count += export_map->bytes.pointer != 0;
         }
     }
-    else if (invocation.target.os == OPERATING_SYSTEM_LINUX)
+    else if (invocation.target.os == OPERATING_SYSTEM_LINUX || invocation.target.os == OPERATING_SYSTEM_ANDROID)
     {
         // libc.so.6 is the library the ELF writers name themselves, so it is
         // read as the runtime rather than as one of the requested ones.
@@ -6893,7 +6899,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         // libc.so.6 where nothing did before costs about 0,65 M instructions
         // on this host, a tenth of a percent of the smallest hosted compile.
         result.export_maps = arena_allocate(arena, FileMapRead, count + 2);
-        result.runtime.name = S8("libc.so.6");
+        result.runtime.name = invocation.target.os == OPERATING_SYSTEM_ANDROID ? S8("libc.so") : S8("libc.so.6");
         FileMapRead* export_map = result.export_maps + result.export_map_count;
         compiler_driver_elf_library_exports(arena, invocation, imports_data, &result.runtime, export_map, 0, (String8){0}, false, false);
         result.export_map_count += export_map->bytes.pointer != 0;
@@ -7817,7 +7823,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
 // address model establishes that cause. Malformed sites and TLS failures do
 // not say anything about the input's code model. A
 // failed artifact write names the operating-system error that refused it.
-BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena, CompilerDriverInvocation invocation, NativeExecutableLinkResult link)
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena, CompilerDriverInvocation invocation, NativeExecutableLinkResult link,
+                                                                         ObjectFile* objects, u32 object_count)
 {
     String8 diagnostic;
     if (link.error == LINK_ERROR_FILE_WRITE)
@@ -7834,6 +7841,23 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena,
                        link.requires_position_independent_objects
                            ? S8(" (a position-independent image needs objects compiled with -fPIC)") : S8("");
         diagnostic = string_format(arena, S8("native C link failed with {S8}: {S8}{S8}"), link_error_name(link.error), link.symbol, hint);
+    }
+    if ((link.error == LINK_ERROR_UNSUPPORTED_FEATURE || link.error == LINK_ERROR_UNRESOLVED_SYMBOL) && link.symbol.length)
+    {
+        bool attributed = false;
+        for (u32 input = 0; !attributed && input < object_count; input += 1)
+        {
+            for (u32 symbol = 0; !attributed && objects[input].source_name.length && symbol < objects[input].symbol_count; symbol += 1)
+            {
+                ObjectSymbol* reference = objects[input].symbols + symbol;
+                if (reference->undefined_untyped && string_equal(reference->name, link.symbol))
+                {
+                    diagnostic = string_format(arena, S8("{S8}: cannot determine ELF import type for {S8} from the providing library"),
+                                               objects[input].source_name, reference->name);
+                    attributed = true;
+                }
+            }
+        }
     }
     return diagnostic;
 }
@@ -8016,7 +8040,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
         if (result->native_link.error != LINK_ERROR_NONE)
         {
             result->error = COMPILER_DRIVER_ERROR_LINK;
-            result->diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result->native_link);
+            result->diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result->native_link, &object, 1);
         }
     }
 }
@@ -8179,6 +8203,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
         .symbol_count = unit.symbol_count,
         .requires_executable_stack = unit.requires_executable_stack,
         .executable_stack_source = unit.requires_executable_stack ? path : (String8){0},
+        .source_name = path,
     };
     for (u32 index = 0; index < unit.section_count; index += 1)
     {
@@ -8215,6 +8240,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
             .weak = symbol.weak,
             .hidden = symbol.hidden,
             .untyped = symbol.untyped,
+            .undefined_untyped = !symbol.defined && !symbol.typed,
+            .thread_local_state = symbol.typed ? OBJECT_SYMBOL_THREAD_LOCAL_NO : OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN,
         };
     }
     for (u32 index = 0; index < unit.relocation_count; index += 1)
@@ -10654,6 +10681,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 goto finish;
             }
             ObjectFile object = object_read(arena, object_file.bytes, invocation.target);
+            object.source_name = input_path;
             if (object.requires_executable_stack) object.executable_stack_source = input_path;
             file_map_unmap(object_file);
             if (object.error != OBJECT_ERROR_NONE)
@@ -11073,11 +11101,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             if (unit_in_result_arena)
             {
+                unit.object.source_name = input_path;
                 objects[object_count++] = unit.object;
             }
             else
             {
                 ObjectFile object = {
+                    .source_name = string_duplicate_arena(arena, input_path, false),
                     .target = unit.object.target,
                     .error = unit.object.error,
                     .section_count = unit.object.section_count,
@@ -11318,7 +11348,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     if (result.native_link.error != LINK_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result.native_link);
+        result.diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result.native_link, objects, object_count);
     }
 finish:
     result.linker_report = linker_report;
