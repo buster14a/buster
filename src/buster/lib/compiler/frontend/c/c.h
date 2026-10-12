@@ -1591,6 +1591,18 @@ struct CAstSpecifierStatistics
     u64 typedef_answers;
     u64 fallbacks;
     u64 fallback_counts[C_AST_SPECIFIER_FALLBACK_COUNT];
+    // Type-name runs (c_parse_type_name_specifiers: `sizeof` and `_Alignof`
+    // operands, compound literals and the other type names the validators
+    // read): the runs skipped because no specifier list begins at their first
+    // token, those of them a `typeof` aggregate definition sent back to the
+    // machine, the runs read from the tree by base, and the runs left to the
+    // machine by reason.
+    u64 type_name_skips;
+    u64 type_name_retries;
+    u64 type_name_primitive_answers;
+    u64 type_name_typedef_answers;
+    u64 type_name_fallbacks;
+    u64 type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_COUNT];
     // The last fallback: its reason, and the run's first token.
     CAstSpecifierFallback reason;
     u32 fallback_token;

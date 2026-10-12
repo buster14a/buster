@@ -1179,9 +1179,55 @@ each case:
   `c_type_parse_root_finish` checks again.
 
 The machine remains the default path and the fallback for every run that is
-not read from the tree. Type names (casts, `sizeof`, compound literals),
-members, tag definitions and declarator derivations still go through the
-machine.
+not read from the tree. Members, tag definitions, declarator derivations and
+the type names typed inside machine frames (casts among them) still go through
+the machine.
+
+### Type names
+
+`c_parse_type_name_specifiers` reads the specifier run of a type name for
+the validators: every grouped `sizeof` and `_Alignof` operand
+(`c_parse_validate_sizeof_operands`), every `( ... )` written before a `{`
+(`c_parse_validate_compound_literals`), and the smaller callers'
+type names. Many of those runs are not type names at all: `sizeof (x)`,
+`if (c) {`, `switch (x) {`. The machine attempts each one, fails, rolls back
+and keeps no row. Under `-fc-ast-pilot`, when the machine has no frame open,
+the tree settles the run first (`c_parse_tree_type_name_type`):
+- **Skip.** No `DECL_SPECIFIERS` node of any kind begins at the run's first
+  token, so no type name begins there. The specifier index's pass sets one bit
+  per list's first token for this. The machine's attempt is not run; its
+  failure path is, in the order `c_parse_scalar_type_in_scope_context` runs
+  it. `c_parse_type_identity_prepare` settles the range's identity answers,
+  and `c_parse_define_typeof_aggregates` defines the bodies written in a
+  `typeof` operand there. If it defines one, the machine's retry
+  (`c_parse_scalar_type_in_scope_attempt`) reads the run, as there.
+- **Read.** A plain list begins there, and `c_parse_tree_specifiers_type`
+  reads it exactly as it reads a declaration's.
+
+Every other run goes to the machine. A run with a frame open, which includes
+the type names typed under a type-mode constant evaluation, is counted under
+`input`, and the other fallbacks keep their `CAstSpecifierFallback` reasons.
+A failed attempt keeps the diagnostics it reported and rolls everything else
+back. The member index's generation is the one exception: the next member
+lookup rebuilds that index, and no answer changes. So the skip is exact when
+the attempt reports nothing on such a run. Verify mode
+(`c_test_ast_type_names_verify_set`) runs the attempt on every skipped run and
+counts any that answered, kept a row or reported a diagnostic. The
+[corpus differential](#corpus-differential) requires none, over the fixtures
+and the frontend sources. No input tried has the failure path define a
+`typeof` body, because earlier passes have defined it; no input tried
+has its identity answers settled first by a skipped run either. Both calls
+stay, so that the skip is the machine's failure path, not a guess about it.
+
+`c_ast_test_type_names` runs, in every layout, these units:
+- one unit whose type names are all read;
+- one whose runs are skipped, including one that holds a `typeof` aggregate;
+- one shape per fallback reason, the `storage` and `primitive` shapes on
+  tampered trees;
+- a tree whose type name's list is moved off its first token. Verify mode must
+  catch the machine answering that skipped run. This is the mutation check.
+
+`-v` prints `C_AST_TYPE_NAMES`.
 
 `c_ast_test_specifiers` runs, in every layout, one unit whose block,
 file-scope and parameter runs are all read from the tree, and one shape per
@@ -1625,7 +1671,7 @@ differential tests pass.
 |---|---|---|---|
 | `c_parse_ast_run`, `c_parser_parse_function_body`, `c_parser_parse_declaration_expression` | declaration split, declarator name, body range, static-assert ranges | `DECLARATION`, `FUNCTION_DEFINITION`, `INIT_DECLARATOR`, `STATIC_ASSERT` | Retired under `-fc-ast-pilot` by the [declaration split](#declaration-split-from-the-tree). The walker stays the default path and the per-unit fallback. |
 | `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, plain segments bound in one pass, and each block declarator's `,`, `=` and plain initializer. The token loop stays the engine, the default path and the per-body fallback; the type machine still reads specifiers and declarators from tokens (next row), and the switch and control-statement validators keep `c_parse_statement_end`, whose calls cost about 1 M instructions on the self-host. |
-| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)). Tags, `typeof`, attributes, type names, members and every declarator derivation stay with the machine. |
+| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)), and so do the validators' plain type names; their runs where no type name begins are skipped ([type names](#type-names)). Tags, `typeof`, attributes, type names typed in machine frames, members and every declarator derivation stay with the machine. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Controlled-body extents (`c_ir_controlled_body_range`, and through it `c_ir_statement_end*` and `c_ir_statement_labels_end`) are read under `-fc-ast-pilot` from the [extent table](#statement-extents-in-lowering). The walkers stay the default path and the per-body and per-query fallback. `c_ir_lower_body_advance`'s first-token classification is not migrated. |
 | `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | `c_ir_root_conditional` is read under `-fc-ast-pilot` ([lowering from the tree](#lowering-from-the-tree)); the rest is not migrated. The evaluator's walk is designed in [Expression lowering from the tree](#expression-lowering-from-the-tree). |
@@ -2252,6 +2298,71 @@ the same way and diagnostic only:
   calls, and D against A is +0.003%, all of it libc string comparison with
   identical call counts.
 - Acceptance stays with Zen 5 (#2761), so the default stays off.
+
+For the type-name specifier runs (`c_parse_type_name_specifiers`: `sizeof`
+and `_Alignof` operands, compound literals, and the smaller callers), these
+budgets were declared before their measured runs. The census came first. It
+was a throwaway build of the base with one no-inline wrapper per shape, with
+Callgrind's callers separated, on the same input and flags as the
+declaration specifier read. It found 70.2 K root runs costing 169.8 M:
+
+| Caller | Shape | Runs | Ir |
+| --- | --- | ---: | ---: |
+| `c_parse_validate_sizeof_operands` | no type name begins at the run | 36,710 | 68.8 M |
+| `c_parse_validate_compound_literals` | plain typedef name | 15,503 | 30.5 M |
+| `c_parse_validate_compound_literals` | no type name (`if (c) {`, ...) | 10,575 | 24.5 M |
+| `c_parse_validate_sizeof_operands` | plain typedef name | 5,544 | 10.5 M |
+| `c_parse_typed_constant` | no type name, typedef name | 1,701 | 3.9 M |
+| every other caller and shape | | < 1,000 | < 1 M each |
+
+A (caller, shape) row is taken when its removable Ir clears **5 M**, about
+0.05% of the pilot compile. The removable Ir is the row's cost less the work
+that remains. A plain typedef name keeps the declaration read's cost, about
+556 Ir a run. A run where no type name begins keeps the machine's failure
+path, about 110 Ir a run: the identity prepare and the outermost `typeof`
+aggregate scan. The first four rows clear the gate, for about 117 M. Both
+mechanisms sit in the shared entry, so the rows below the gate take them at
+no extra code.
+
+The input, flags and four Callgrind arms are the declaration specifier
+read's. The base is `b9c17db2`, the head of
+[#3483](https://github.com/buster14a/buster/pull/3483), which the candidate
+branches from. The budgets:
+- **Correctness.**
+  - 0 model differences over the corpus and the frontend sources: the
+    analysis model field by field and the bindings, with the diagnostics;
+  - a one-off comparison of the same fields on the self-host unity input, also
+    with 0 differences;
+  - in verify mode, over the same inputs, the machine answers, appends a row
+    or reports a diagnostic for none of the runs skipped as no type name;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **Coverage (reported, not gated).** The runs skipped, the runs read and the
+  runs handed back, by reason, from the `-v` counters.
+- **The change's own effect (C against B).** The whole compile falls by at
+  least 60 M Ir, about half the estimate, with the first-token bitmap charged.
+  The machine's root runs fall by exactly the runs skipped and read.
+- **The default path (D against A).** One test of a null index per type-name
+  run, so the difference stays within ±0.05% Ir.
+- **Adoption of the hook as the default.** Unchanged: acceptance on the Zen 5
+  route (#2761), with no 9700X comparison requested.
+
+The type-name runs' hosted census is
+[`2026-10-11T145510Z`](../../performance-audits/2026-10-11T145510Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes:
+  - the model and the bindings match over the corpus, the frontend sources
+    and the self-host unity input;
+  - verify mode finds the machine silent on all 45,547 skipped runs there;
+  - the objects of all four arms are identical.
+- On the self-host, 44,295 runs are skipped as no type name and 26,885 are read
+  (140 primitive, 26,745 typedef). Another 26 go to the machine as `input`. The
+  machine's root runs fall by exactly the 71,180 runs skipped and read.
+- The pilot's compile falls by 117.4 M Ir (−1.29%), with the 1.76 M bitmap
+  charged.
+- The default path is −0.0011%.
+- The skip's identity prepare and `typeof` definition never change a result on
+  any input tried. They stay, so the skip remains the machine's failure path.
+- Zen 5 validation stays incomplete (#2761), so the hook stays opt-in.
 
 For the split's [diagnostic probe](#declaration-split-from-the-tree)
 (`c_parser_tree_probe`), these budgets were declared before its measured runs.

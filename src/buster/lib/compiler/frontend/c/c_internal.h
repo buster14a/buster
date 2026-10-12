@@ -1570,6 +1570,12 @@ struct CTypeParseMachine
     u32* ast_specifier_nodes;
     u32 ast_specifier_count;
     u32 ast_specifier_cursor;
+    // Beside it, one bit per token for the first token of every
+    // DECL_SPECIFIERS node, word-only or not, over `ast_specifier_first_limit`
+    // tokens: a type-name run whose first token has no bit begins no type
+    // name (c_parse_type_name_specifiers).
+    u64* ast_specifier_firsts;
+    u32 ast_specifier_first_limit;
     CAstTypeBodyIndex* ast_bodies;
     CAstTypeBody* ast_types;
     CParseExpressionQuery* expression_queries;
