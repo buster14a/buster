@@ -44036,9 +44036,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArgument
 // itself instead of handing them to the widest-identifier guess, which typed
 // `__builtin_ffs(i) + (char)l` as long because of the cast's operand (GitHub
 // #2531). Every _Static_assert runs again in lowering, and the conditional's
-// result type and value come from the same typer. __builtin_constant_p and
-// __builtin_choose_expr are left out: the parser's semantic typer cannot yet
-// type them in a constant expression, so it rejects the assertion first.
+// result type and value come from the same typer. The parser's semantic
+// typer checks each assertion first, so it must type __builtin_constant_p as
+// int and __builtin_choose_expr as its selected arm too.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -44048,8 +44048,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArgument
         "    SAME(__builtin_ffs(i) + (char)l, int);\n"
         "    SAME(__builtin_ffsl(l) + (char)l, int);\n"
         "    SAME(__builtin_ffsll(l) + (char)l, int);\n"
+        "    SAME(__builtin_constant_p(l) + (char)l, int);\n"
         "    SAME(__builtin_types_compatible_p(int, long) + (char)l, int);\n"
         "    SAME(__builtin_classify_type(l) + (char)l, int);\n"
+        "    SAME(__builtin_choose_expr(1, i, l) + (char)l, int);\n"
+        "    SAME(__builtin_choose_expr(0, i, l) + (char)i, long);\n"
         "    SAME(_Generic(l, long: i, default: l) + (char)l, int);\n"
         "    SAME(_Generic(i, long: i, default: l) + (char)i, long);\n"
         "    SAME(__real__ z + (char)l, double);\n"
@@ -44057,7 +44060,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArgument
         "    SAME(__real__ i + (char)l, int);\n"
         "    SAME(~z, _Complex double);\n"
         "    SAME(c ? __builtin_ffs(i) + (char)l : 0, int);\n"
-        "    return (c ? __builtin_ffs(i) - (int)l : 0) < 0;\n"
+        "    _Static_assert(__builtin_choose_expr(1, 3, l) == 3, \"selected constant\");\n"
+        "    __typeof__(__builtin_choose_expr(0, i, l)) chosen = l;\n"
+        "    __typeof__(__builtin_constant_p(l)) probed = 0;\n"
+        "    SAME(chosen, long);\n"
+        "    SAME(probed, int);\n"
+        "    return (c ? __builtin_ffs(i) - (int)l : 0) < 0 || chosen != l || probed;\n"
         "}\n");
     for (u32 form = 0; form < 2; form += 1)
     {
@@ -44070,6 +44078,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArgument
         {
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
         }
+        c_test_scratch_end(temporary);
+    }
+    // The parser settles a choice whose condition is itself a choice without
+    // a nested walk: the inner one starts later, so it is recorded first.
+    // Lowering cannot yet take a choice as a choice's condition, so this
+    // source is checked by the parser only.
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, S8(
+            "#define SAME(e, T) _Static_assert(sizeof(e) == sizeof(T) && _Generic(e, T: 1, default: 0), #e)\n"
+            "int nested_choice(int i, long l) {\n"
+            "    SAME(__builtin_choose_expr(__builtin_choose_expr(1, 0, 1), i, (char)l), char);\n"
+            "    _Static_assert(__builtin_choose_expr(__builtin_choose_expr(0, 0, 1), 5, l) == 5, \"nested constant\");\n"
+            "    return 0;\n"
+            "}\n"), (CPreprocessOptions){0});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count);
         c_test_scratch_end(temporary);
     }
     // A choose_expr condition holding a sizeof of the previous level reaches
