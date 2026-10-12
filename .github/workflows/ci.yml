@@ -923,10 +923,13 @@ jobs:
 
       - name: Upload backend capability evidence report (Linux, macOS)
         if: ${{ always() && steps.backend_capability_report_unix.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: ./.github/actions/native-artifact-upload
         with:
+          label: backend-capability
+          label_title: Backend capability
           name: backend-capability-evidence-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/backend-capabilities-report.md
+          compression-level: 6
           if-no-files-found: error
           retention-days: 7
 
@@ -942,10 +945,13 @@ jobs:
 
       - name: Upload backend capability evidence report (Windows)
         if: ${{ always() && steps.backend_capability_report_windows.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: ./.github/actions/native-artifact-upload
         with:
+          label: backend-capability
+          label_title: Backend capability
           name: backend-capability-evidence-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/backend-capabilities-report.md
+          compression-level: 6
           if-no-files-found: error
           retention-days: 7
 
