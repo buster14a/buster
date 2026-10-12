@@ -3544,6 +3544,8 @@ struct LinkElfTlsIndex
 {
     LinkElfTlsSite* sites;
     u64 capacity;
+    // #1915 9700X experiment only: membership scans this object's relocations, as before #2247.
+    ObjectFile* object;
 #if BUSTER_INCLUDE_TESTS
     u64 build_rows;
     u64 queries;
@@ -3615,6 +3617,7 @@ BUSTER_GLOBAL_LOCAL bool link_elf_tls_index_build(Arena* temporary, ObjectFile* 
         {
             index->sites = arena_allocate_zeroed(temporary, LinkElfTlsSite, capacity);
             index->capacity = capacity;
+            index->object = object;
             for (u32 row = 0; valid && row < object->relocation_count; row += 1)
             {
                 ObjectRelocation* relocation = object->relocations + row;
@@ -3655,20 +3658,23 @@ BUSTER_GLOBAL_LOCAL bool link_elf_relocation_is_relaxed_tls_get_addr(LinkElfTlsI
     bool result = false;
     if (index->capacity && (direct || indirect) && string_equal(symbol->name, S8("__tls_get_addr")))
     {
-        u32 deltas[] = {BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET,
-                        direct ? BUSTER_X86_METADATA_TLS_LD_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET
-                               : BUSTER_X86_METADATA_TLS_LD_INDIRECT_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET};
-        u8 kinds[] = {LINK_ELF_TLS_SITE_GENERAL, LINK_ELF_TLS_SITE_LOCAL};
-        for (u32 kind = 0; !result && kind < BUSTER_ARRAY_LENGTH(deltas); kind += 1)
+        // #1915 9700X experiment only: the pre-#2247 full-table candidate scan, with the
+        // index's defined-TLS restriction applied to the matching candidate row.
+        ObjectFile* object = index->object;
+        u64 general_delta = BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET;
+        u64 local_delta = direct ? BUSTER_X86_METADATA_TLS_LD_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET
+                                 : BUSTER_X86_METADATA_TLS_LD_INDIRECT_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_LD_ADDRESS_OFFSET;
+        for (u32 row = 0; !result && row < object->relocation_count; row += 1)
         {
-            if (relocation->offset >= deltas[kind])
-            {
-#if BUSTER_INCLUDE_TESTS
-                index->queries += 1;
-#endif
-                LinkElfTlsSite* site = link_elf_tls_site(index, relocation->section, relocation->offset - deltas[kind], false);
-                result = site && ((defined_tls_only ? site->defined_kinds : site->kinds) & kinds[kind]);
-            }
+            ObjectRelocation* candidate = object->relocations + row;
+            u64 delta = candidate->kind == OBJECT_RELOCATION_X86_64_TLSGD   ? general_delta
+                        : candidate->kind == OBJECT_RELOCATION_X86_64_TLSLD ? local_delta
+                                                                            : 0;
+            bool defined_tls = candidate->symbol < object->symbol_count &&
+                               (object->symbols[candidate->symbol].section == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                                object->symbols[candidate->symbol].section == OBJECT_SECTION_THREAD_LOCAL_ZERO);
+            result = delta && candidate->section == relocation->section && candidate->offset <= UINT64_MAX - delta &&
+                     candidate->offset + delta == relocation->offset && (!defined_tls_only || defined_tls);
         }
     }
     return result;
