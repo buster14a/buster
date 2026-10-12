@@ -483,6 +483,85 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_frame_chunk(UnitTestArg
     return result;
 }
 
+// The pointer-side sixteen-byte aggregate-copy chunk (movups xmm0 <-> [base +
+// offset]) copies a prewarmed row per base register and displacement class.
+// Every base, both directions, each class boundary and the disp32 limit must
+// match the metadata MOVUPS byte for byte, including RSP/R12 (SIB) and
+// RBP/R13 (a zero disp8 for the no-displacement row), with and without a
+// frame_base_offset (which rebases an RBP base). Offsets past the disp32
+// field keep the metadata lane, and an exhausted encoder writes nothing.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_pointer_vector_chunk(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 const offsets[] = {0, 0x10, 0x70, 0x7f, 0x80, 0x90, 0x1000, 0x12345670, 0x7fffffff, 0x80000000u};
+    u32 const starts[] = {0, 1, 15, 16, 17};
+    u32 const frame_bases[] = {0, 0x30};
+    bool matches = true;
+    String8 failure = S8("pointer vector chunk matches the metadata MOVUPS");
+    for (u32 case_index = 0; case_index < 2u * BUSTER_ARRAY_LENGTH(frame_bases); case_index += 1)
+    {
+        u32 frame_base = frame_bases[case_index >> 1];
+        bool load = (case_index & 1u) == 0;
+        for (u32 base = 0; base < 16; base += 1)
+        {
+            for (u32 offset_index = 0; offset_index < BUSTER_ARRAY_LENGTH(offsets); offset_index += 1)
+            {
+                u32 offset = offsets[offset_index];
+                for (u32 start_index = 0; start_index < BUSTER_ARRAY_LENGTH(starts); start_index += 1)
+                {
+                    u32 start = starts[start_index];
+                    bool case_matches = true;
+                    u8 reference[64];
+                    memset(reference, 0xa5, sizeof(reference));
+                    MachineEncodeResult oracle = machine_x64_test_emit_pointer_vector_chunk(reference, sizeof(reference), start, frame_base, load, base, offset, true);
+                    u32 length = oracle.byte_count - start;
+                    // An RBP base is rebased by the frame offset, which can push
+                    // the largest offset past the disp32 field.
+                    if (offset <= INT32_MAX && (base != 5 || frame_base == 0))
+                    {
+                        case_matches &= oracle.valid && length >= 3 && length <= 9;
+                    }
+                    for (u32 available = 0; available <= 17; available += 1)
+                    {
+                        u32 capacity = start + available;
+                        u8 bytes[64];
+                        memset(bytes, 0xa5, sizeof(bytes));
+                        memset(reference, 0xa5, sizeof(reference));
+                        MachineEncodeResult prepared = machine_x64_test_emit_pointer_vector_chunk(bytes, capacity, start, frame_base, load, base, offset, false);
+                        oracle = machine_x64_test_emit_pointer_vector_chunk(reference, capacity, start, frame_base, load, base, offset, true);
+                        case_matches &= prepared.valid == oracle.valid && prepared.byte_count == oracle.byte_count;
+                        case_matches &= memcmp(bytes, reference, prepared.byte_count) == 0;
+                        for (u32 index = 0; index < sizeof(bytes); index += 1)
+                        {
+                            bool untouched = index < start || index >= capacity || !prepared.valid;
+                            case_matches &= !untouched || bytes[index] == 0xa5;
+                        }
+                    }
+                    if (!case_matches && matches)
+                    {
+                        failure = string_format(arguments->arena, S8("case {u32} base {u32} offset {u32} start {u32}"), case_index, base, offset,
+                                                start);
+                    }
+                    matches &= case_matches;
+                }
+            }
+        }
+    }
+    BUSTER_TEST_RAW(arguments, matches, failure);
+    // movups xmm0, [rax]; movups [r12 + 0x10], xmm0; movups xmm0, [rbp + 0x1000].
+    static u8 const load_rax[] = {0x0f, 0x10, 0x00};
+    static u8 const store_r12[] = {0x41, 0x0f, 0x11, 0x44, 0x24, 0x10};
+    static u8 const load_rbp[] = {0x0f, 0x10, 0x85, 0x00, 0x10, 0x00, 0x00};
+    u8 bytes[16];
+    MachineEncodeResult emitted = machine_x64_test_emit_pointer_vector_chunk(bytes, sizeof(bytes), 0, 0, true, 0, 0, false);
+    BUSTER_TEST(arguments, emitted.valid && emitted.byte_count == sizeof(load_rax) && memcmp(bytes, load_rax, sizeof(load_rax)) == 0);
+    emitted = machine_x64_test_emit_pointer_vector_chunk(bytes, sizeof(bytes), 0, 0, false, 12, 0x10, false);
+    BUSTER_TEST(arguments, emitted.valid && emitted.byte_count == sizeof(store_r12) && memcmp(bytes, store_r12, sizeof(store_r12)) == 0);
+    emitted = machine_x64_test_emit_pointer_vector_chunk(bytes, sizeof(bytes), 0, 0, true, 5, 0x1000, false);
+    BUSTER_TEST(arguments, emitted.valid && emitted.byte_count == sizeof(load_rbp) && memcmp(bytes, load_rbp, sizeof(load_rbp)) == 0);
+    return result;
+}
+
 // Compiles one C source through the C frontend into a canonical IrProgram
 // for machine-selection tests. Diagnostics fail the caller's assertions.
 BUSTER_GLOBAL_LOCAL IrProgram* machine_test_compile_c_with_options(Arena* arena, String8 name, String8 source, Target target, CIRLowerOptions options)
@@ -11746,9 +11825,11 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // metadata authority accepted; a refused row would silently keep the
     // slower metadata lane for its shape. The vpermt2d variant of the
     // VPERMT2B family adds sixteen rows, one per mask-source GPR, and
-    // MULH64's mul rcx adds one static row.
-    BUSTER_TEST_RAW(arguments, exact_map.fixed_template_rows == 1503,
-                    string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1503 (rows: {u32})"), exact_map.fixed_template_rows));
+    // MULH64's mul rcx adds one static row, and the pointer-side MOVUPS
+    // copy chunk adds 96: two directions, three displacement classes and
+    // sixteen base registers.
+    BUSTER_TEST_RAW(arguments, exact_map.fixed_template_rows == 1599,
+                    string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1599 (rows: {u32})"), exact_map.fixed_template_rows));
     BUSTER_TEST(arguments, exact_map.fixed_template_pending_rows == 0);
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
@@ -11756,6 +11837,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_movabs);
     BUSTER_TEST_FIXTURE(arguments, machine_test_condition_bindings);
     BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_frame_chunk);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_pointer_vector_chunk);
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
     // Atomic NAND adds the 8-, 16-, 32- and 64-bit NOT register shapes; the
