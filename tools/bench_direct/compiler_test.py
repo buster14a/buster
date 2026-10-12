@@ -4163,5 +4163,175 @@ class ProductionProfileTest(unittest.TestCase):
             self.assertEqual((record["status"], record["missing_tools"]), ("failed", ["ld.lld"]))
             self.assertIn("production profile host lacks ld.lld", record["errors"][0])
 
+
+class InventoryCoverageTest(unittest.TestCase):
+    """#2761: a published attempt names exactly the inventory rows its validated evidence discharged."""
+
+    PULL_ROWS = ["build:bench_throughput", "build:bench_throughput@throughput-real-source", "build:production_profile",
+                 "uarch_lab:compare", "uarch_lab:compare@ast-pilot-acceptance",
+                 "uarch_lab:compare@canonical-inline-self-host"]
+
+    def pull(self, **records) -> dict:
+        result = receipt()
+        result["mode"] = "pull"
+        result["identity"].update(mode="pull", ref="refs/pull/7/head")
+        result["inline_acceptance"] = {"requested": False, "status": "not requested"}
+        result["throughput"] = dict(compiler_receipt.throughput_digest(corpus()["summary"]), exit=0)
+        result.update(records)
+        return result
+
+    def opt_ins(self, status: str = "complete") -> dict:
+        record = {"requested": True, "status": status}
+        return {"inline_acceptance": dict(record), "ast_pilot_acceptance": dict(record),
+                "throughput_real_source": dict(record), "production_profile": dict(record),
+                "scaling_profile": copy.deepcopy(compiler_receipt.SCALING_PROFILE),
+                "scaling": {name: {"status": "valid"} for name in compiler_receipt.SCALING_PROFILE["series"]}}
+
+    def legs(self, coverage: dict) -> dict:
+        return {entry["leg"]: entry["status"] for entry in coverage["legs"]}
+
+    def test_every_mapped_leg_is_recognized_and_names_rows(self) -> None:
+        for mode, legs in compiler_receipt.INVENTORY_LEGS.items():
+            self.assertIn(mode, compiler_receipt.MODES)
+            for leg, rows in legs.items():
+                with self.subTest(mode=mode, leg=leg):
+                    self.assertTrue(rows)
+                    self.assertNotEqual(compiler_receipt.inventory_leg_record(self.pull(), leg)[1], "unknown leg")
+
+    def test_validated_main_attempt_discharges_the_lab_and_corpus_rows(self) -> None:
+        main = dict(receipt(), throughput=dict(compiler_receipt.throughput_digest(corpus()["summary"]), exit=0))
+        coverage = compiler_receipt.covered_inventory_rows(main, "success", "main")
+        self.assertEqual(coverage["schema"], compiler_receipt.INVENTORY_COVERAGE_SCHEMA)
+        self.assertEqual(coverage["route"], "main-compare")
+        self.assertEqual(coverage["discharged"], ["build:bench_throughput@main", "uarch_lab:compare@main"])
+        self.assertEqual(set(self.legs(coverage).values()), {"discharged"})
+
+    def test_validated_pull_attempt_discharges_each_requested_leg_only(self) -> None:
+        coverage = compiler_receipt.covered_inventory_rows(self.pull(**self.opt_ins()), "success", "pull")
+        self.assertEqual(coverage["discharged"], self.PULL_ROWS)
+        self.assertEqual(self.legs(coverage)["analyzer"], "not discharged: not requested")
+        for row in ("build:clang_analyze_benchmark", "tool:clang_analyze_benchmark.c"):
+            self.assertEqual(coverage["rows"][row], "not discharged: not requested")
+        # A default pull request discharges only the lab and the corpus.
+        plain = compiler_receipt.covered_inventory_rows(self.pull(), "success", "pull")
+        self.assertEqual(plain["discharged"], ["build:bench_throughput", "uarch_lab:compare"])
+        for leg in ("scaling", "inline", "ast-pilot", "real-source", "production-profile"):
+            self.assertEqual(self.legs(plain)[leg], "not discharged: not requested")
+
+    def test_mode_is_trusted_not_the_receipts_claim(self) -> None:
+        coverage = compiler_receipt.covered_inventory_rows(self.pull(**self.opt_ins()), "success", "main")
+        self.assertEqual(coverage["discharged"], ["build:bench_throughput@main", "uarch_lab:compare@main"])
+        unknown = compiler_receipt.covered_inventory_rows(self.pull(), "success", "other")
+        self.assertEqual((unknown["route"], unknown["legs"], unknown["discharged"]), ("none", [], []))
+
+    def test_failed_legs_discharge_nothing(self) -> None:
+        failed = self.pull(**dict(self.opt_ins(), production_profile={"requested": True, "status": "failed"}))
+        failed["state"] = "failed"
+        coverage = compiler_receipt.covered_inventory_rows(failed, "failure", "pull")
+        self.assertEqual(coverage["discharged"], [])
+        legs = self.legs(coverage)
+        self.assertEqual(legs["production-profile"], "not discharged: leg failed")
+        self.assertEqual(legs["self-host"], "not discharged: leg failed")
+        self.assertEqual(coverage["rows"]["build:production_profile"], "not discharged: leg failed")
+        # A leg the host recorded complete is still not covered when the publisher refused the attempt.
+        refused = compiler_receipt.covered_inventory_rows(self.pull(**self.opt_ins()), "failure", "pull")
+        self.assertEqual(refused["discharged"], [])
+        self.assertEqual(self.legs(refused)["inline"], "not discharged: evidence refused by the publisher")
+        # Pending, skipped or malformed records are failures, never coverage.
+        for status in ("pending", "skipped", "unknown"):
+            with self.subTest(status=status):
+                record = self.pull(**dict(self.opt_ins(), throughput_real_source={"requested": True, "status": status}))
+                coverage = compiler_receipt.covered_inventory_rows(record, "failure", "pull")
+                self.assertEqual(self.legs(coverage)["real-source"], f"not discharged: leg {status}")
+        broken_corpus = self.pull(throughput=dict(self.pull()["throughput"], exit=2))
+        coverage = compiler_receipt.covered_inventory_rows(broken_corpus, "failure", "pull")
+        self.assertEqual(self.legs(coverage)["corpus"], "not discharged: leg failed")
+        partial_scaling = self.pull(**dict(self.opt_ins(), scaling={"equal": {"status": "valid"}}))
+        coverage = compiler_receipt.covered_inventory_rows(partial_scaling, "failure", "pull")
+        self.assertEqual(self.legs(coverage)["scaling"], "not discharged: leg failed")
+        # A row both scaling and the corpus discharge is not covered while either requested leg is not.
+        self.assertEqual(coverage["rows"]["build:bench_throughput"], "not discharged: evidence refused by the publisher")
+
+    def test_malformed_leg_values_are_not_discharged_and_never_raise(self) -> None:
+        # Valid JSON can hold an object or a list where a string belongs; none may stop publication.
+        for bad in ({}, [], None, 3, "pending"):
+            with self.subTest(value=bad):
+                scaling = {name: {"status": bad} for name in compiler_receipt.SCALING_PROFILE["series"]}
+                record = self.pull(**dict(self.opt_ins(), scaling=scaling, inline_acceptance={"requested": True, "status": bad},
+                                          throughput_real_source={"requested": bad, "status": "complete"}),
+                                   throughput=dict(self.pull()["throughput"], valid=bad, exit=bad), state=bad)
+                for conclusion in ("success", "failure", "neutral"):
+                    coverage = compiler_receipt.covered_inventory_rows(record, conclusion, "pull")
+                    if conclusion != "success":
+                        self.assertEqual(coverage["discharged"], [])
+                self.assertEqual(compiler_receipt.inventory_leg_record(record, "scaling"), (True, "failed"))
+                self.assertEqual(compiler_receipt.inventory_leg_record(record, "corpus"), (True, "failed"))
+                failed = compiler_receipt.covered_inventory_rows(record, "failure", "pull")
+                self.assertEqual(self.legs(failed)["scaling"], "not discharged: leg failed")
+        for bad in ({}, [], 3):
+            with self.subTest(record=bad):
+                coverage = compiler_receipt.covered_inventory_rows(self.pull(production_profile=bad), "failure", "pull")
+                self.assertEqual(self.legs(coverage)["production-profile"],
+                                 "not discharged: no production-profile record (malformed)")
+                coverage = compiler_receipt.covered_inventory_rows(self.pull(scaling_profile={}, scaling=bad), "failure", "pull")
+                self.assertEqual(self.legs(coverage)["scaling"], "not discharged: leg failed")
+
+    def test_missing_legs_discharge_nothing(self) -> None:
+        for conclusion in ("success", "failure"):
+            coverage = compiler_receipt.covered_inventory_rows(None, conclusion, "pull")
+            self.assertEqual(coverage["discharged"], [])
+            self.assertEqual(set(self.legs(coverage).values()), {"not discharged: no readable receipt"})
+            self.assertEqual(set(coverage["rows"]), {row for rows in compiler_receipt.INVENTORY_LEGS["pull"].values()
+                                                     for row in rows})
+        legacy = receipt()
+        legacy.pop("throughput_profile")
+        coverage = compiler_receipt.covered_inventory_rows(legacy, "success", "main")
+        self.assertEqual(coverage["discharged"], ["uarch_lab:compare@main"])
+        self.assertEqual(self.legs(coverage)["corpus"], "not discharged: no corpus record (missing)")
+        malformed = self.pull(production_profile="complete")
+        coverage = compiler_receipt.covered_inventory_rows(malformed, "success", "pull")
+        self.assertEqual(self.legs(coverage)["production-profile"], "not discharged: no production-profile record (malformed)")
+        self.assertNotIn("build:production_profile", coverage["discharged"])
+
+    def test_superseded_receipt_discharges_nothing(self) -> None:
+        coverage = compiler_receipt.covered_inventory_rows(dict(self.pull(**self.opt_ins()), state="superseded"),
+                                                           "neutral", "pull")
+        self.assertEqual(coverage["discharged"], [])
+        self.assertEqual(self.legs(coverage)["self-host"], "not discharged: superseded before measurement")
+        self.assertEqual(self.legs(coverage)["analyzer"], "not discharged: not requested")
+
+    def test_analyzer_only_profile_discharges_only_the_analyzer_rows(self) -> None:
+        coverage = compiler_receipt.covered_inventory_rows(analyzer_receipt(), "success", "pull")
+        self.assertEqual(coverage["discharged"], ["build:clang_analyze_benchmark", "tool:clang_analyze_benchmark.c"])
+        legs = self.legs(coverage)
+        for leg in ("self-host", "corpus", "scaling", "inline", "ast-pilot", "real-source", "production-profile"):
+            self.assertEqual(legs[leg], "not discharged: not requested")
+        for row in ("uarch_lab:compare", "build:bench_throughput"):
+            self.assertEqual(coverage["rows"][row], "not discharged: not requested")
+        # An analyzer receipt cannot discharge a main row.
+        self.assertEqual(compiler_receipt.covered_inventory_rows(analyzer_receipt(), "success", "main")["discharged"], [])
+        failed = compiler_receipt.covered_inventory_rows(analyzer_receipt("failed"), "failure", "pull")
+        self.assertEqual(self.legs(failed)["analyzer"], "not discharged: leg failed")
+
+    def test_coverage_is_report_only_and_rendered(self) -> None:
+        pull = self.pull(**self.opt_ins())
+        before = copy.deepcopy(pull)
+        coverage = compiler_receipt.covered_inventory_rows(pull, "success", "pull")
+        self.assertEqual(pull, before, "the mapping never edits the receipt")
+        report = compiler_receipt.render(dict(pull, inventory_coverage=coverage), summary(), "success", [])
+        self.assertIn("route `pull-compare`): 6 rows discharged", report)
+        self.assertIn("| production-profile | `build:production_profile` | complete | discharged |", report)
+        self.assertIn("| analyzer | `build:clang_analyze_benchmark`, `tool:clang_analyze_benchmark.c` | not requested "
+                      "| not discharged: not requested |", report)
+        analyzer = analyzer_receipt()
+        rendered = compiler_receipt.render(
+            dict(analyzer, inventory_coverage=compiler_receipt.covered_inventory_rows(analyzer, "failure", "pull")),
+            {}, "failure", [])
+        self.assertIn("0 rows discharged", rendered)
+        shown = {"inventory_coverage": coverage}
+        self.assertIn("`build:production_profile`", compiler_publish.inventory_rows(shown))
+        self.assertEqual(compiler_publish.inventory_rows({}), "none")
+
+
 if __name__ == "__main__":
     unittest.main()
