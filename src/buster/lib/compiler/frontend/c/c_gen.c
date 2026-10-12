@@ -17922,6 +17922,7 @@ BUSTER_C_INTERNAL u32 c_ir_find_function_for_call(CIntegerIrBuilder* builder, u3
     u32 best_rank = UINT32_MAX;
     u32 sole_candidate = UINT32_MAX;
     u32 candidate_count = 0;
+    u32 untyped_argument = UINT32_MAX;
     bool ambiguous = false;
     for (u32 name_candidate = resolution ? resolution->first_candidate : UINT32_MAX; name_candidate != UINT32_MAX;
          name_candidate = builder->function_names->candidates[name_candidate].next)
@@ -17939,6 +17940,10 @@ BUSTER_C_INTERNAL u32 c_ir_find_function_for_call(CIntegerIrBuilder* builder, u3
         for (u32 argument_index = 0; !signature.is_unprototyped && argument_index < signature.parameter_count; argument_index += 1)
         {
             IrTypeId argument_type = c_ir_predict_expression_type(builder, argument_starts[argument_index], argument_ends[argument_index]);
+            if (argument_type.value == IR_ID_UNDERLYING_INVALID)
+            {
+                untyped_argument = argument_starts[argument_index];
+            }
             u32 conversion_rank = c_ir_implicit_conversion_rank(builder, argument_type, signature.parameter_types[argument_index]);
             if (conversion_rank == UINT32_MAX || rank > UINT32_MAX - conversion_rank)
             {
@@ -17962,10 +17967,17 @@ BUSTER_C_INTERNAL u32 c_ir_find_function_for_call(CIntegerIrBuilder* builder, u3
             ambiguous = true;
         }
     }
+    // One candidate is taken whatever the arguments are. Between several, an
+    // argument without a type cannot be ranked, so no candidate is chosen.
     u32 result;
     if (candidate_count == 1)
     {
         result = sole_candidate;
+    }
+    else if (untyped_argument != UINT32_MAX)
+    {
+        c_ir_report_untyped_expression(builder, untyped_argument);
+        result = UINT32_MAX;
     }
     else
     {
@@ -26035,13 +26047,20 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
     {
         // The CRT's __builtin_va_end(cursor) names the Windows char* cursor itself. Its parse admission is
         // target-gated; here the operand's type selects the place bridge, and the end acts on the bridged list.
+        // An operand without a type cannot select between the two forms.
         IrTypeId end_character = c_ir_builder_scalar_type(builder, C_TYPE_CHAR);
-        IrType* end_operand = builder->target.os == OPERATING_SYSTEM_WINDOWS &&
-            string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__builtin_va_end"))
-                                  ? ir_type_from_id(&builder->program->types, c_ir_predict_expression_type(builder, starts[0], ends[0])) : 0;
+        bool end_bridge_candidate = builder->target.os == OPERATING_SYSTEM_WINDOWS &&
+            string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__builtin_va_end"));
+        IrTypeId end_operand_type = end_bridge_candidate ? c_ir_predict_expression_type(builder, starts[0], ends[0]) : IR_TYPE_ID_INVALID;
+        IrType* end_operand = ir_type_from_id(&builder->program->types, end_operand_type);
         bool end_cursor = end_operand && end_operand->kind == IR_TYPE_POINTER && end_character.value != IR_ID_UNDERLYING_INVALID &&
                           end_operand->element_type.value == end_character.value;
-        if (continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_END)
+        if (end_bridge_candidate && !end_operand)
+        {
+            c_ir_report_untyped_expression(builder, starts[0]);
+            valid = false;
+        }
+        else if (continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_END)
         {
             source_list = child_value;
             if (end_cursor && child_success)
@@ -28508,7 +28527,15 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                         if (callee_start < callee_end &&
                             c_token_is_punctuator(&builder->preprocess.tokens[callee_start], C_PUNCTUATOR_STAR))
                         {
+                            // Without the operand's type the dereference
+                            // cannot be judged redundant, and stripping it
+                            // could call q where (*q) was written.
                             IrTypeId operand_type = c_ir_predict_expression_type(builder, callee_start + 1, callee_end);
+                            if (operand_type.value == IR_ID_UNDERLYING_INVALID)
+                            {
+                                c_ir_report_untyped_expression(builder, callee_start + 1);
+                                return C_IR_PREPARED_CALL_STEP_FAILED;
+                            }
                             IrType* operand = ir_type_from_id(&builder->program->types, operand_type);
                             IrType* pointee = operand && operand->kind == IR_TYPE_POINTER ? ir_type_from_id(&builder->program->types, operand->element_type) : 0;
                             if (!pointee || pointee->kind == IR_TYPE_FUNCTION)
@@ -28649,7 +28676,11 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         {
             if (declaration_index == UINT32_MAX)
             {
-                builder->failure_token_index = selected->token_index;
+                // A message recorded during overload ranking keeps its token.
+                if (!builder->failure_message.length)
+                {
+                    builder->failure_token_index = selected->token_index;
+                }
                 // The name may be undeclared, or it may resolve to the one
                 // declaration these arguments do not fit. Only the second is
                 // knowable here, and saying so beats reporting that the call
@@ -53549,7 +53580,9 @@ BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIr
         }
     }
     // A braced list is an initializer, not an expression with a type: an
-    // element inside it never makes the list an aggregate value.
+    // element inside it never makes the list an aggregate value. Prediction
+    // only classifies here, choosing whole-value capture or element-wise
+    // initialization; an untyped expression is never captured whole.
     if (expression_type.value == IR_ID_UNDERLYING_INVALID &&
         !(start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE)))
     {
