@@ -1913,6 +1913,159 @@ BUSTER_GLOBAL_LOCAL bool os_test_image_retention_exists(String8 path)
     return stats.valid && stats.kind != OS_FILE_KIND_MISSING;
 }
 
+BUSTER_GLOBAL_LOCAL String8 os_test_image_retention_relative_path(Arena* arena, String8 absolute_path)
+{
+    String8 result = {0};
+    String8 current_directory = os_path_absolute_lexical(arena, S8("."), false);
+#if defined(_WIN32)
+    char8 separator = '\\';
+    bool same_root = current_directory.length >= 3 && absolute_path.length >= 3 &&
+                     (current_directory.pointer[0] == absolute_path.pointer[0] ||
+                      (current_directory.pointer[0] >= 'A' && current_directory.pointer[0] <= 'Z' &&
+                       current_directory.pointer[0] + ('a' - 'A') == absolute_path.pointer[0]) ||
+                      (absolute_path.pointer[0] >= 'A' && absolute_path.pointer[0] <= 'Z' &&
+                       absolute_path.pointer[0] + ('a' - 'A') == current_directory.pointer[0])) &&
+                     current_directory.pointer[1] == ':' && absolute_path.pointer[1] == ':' &&
+                     current_directory.pointer[2] == separator && absolute_path.pointer[2] == separator;
+    u64 root_length = same_root ? 3 : 0;
+#else
+    char8 separator = '/';
+    if (current_directory.length >= 2 && current_directory.pointer[current_directory.length - 2] == separator &&
+        current_directory.pointer[current_directory.length - 1] == '.')
+    {
+        current_directory.length -= 2;
+    }
+    bool same_root = current_directory.length && absolute_path.length && current_directory.pointer[0] == separator &&
+                     absolute_path.pointer[0] == separator;
+    u64 root_length = same_root ? 1 : 0;
+#endif
+    while (current_directory.length > root_length && current_directory.pointer[current_directory.length - 1] == separator)
+    {
+        current_directory.length -= 1;
+    }
+
+    if (same_root)
+    {
+        u64 common_length = root_length;
+        while (common_length < current_directory.length && common_length < absolute_path.length)
+        {
+            char8 current_byte = current_directory.pointer[common_length];
+            char8 absolute_byte = absolute_path.pointer[common_length];
+#if defined(_WIN32)
+            if (current_byte >= 'A' && current_byte <= 'Z')
+            {
+                current_byte = (char8)(current_byte + ('a' - 'A'));
+            }
+            if (absolute_byte >= 'A' && absolute_byte <= 'Z')
+            {
+                absolute_byte = (char8)(absolute_byte + ('a' - 'A'));
+            }
+#endif
+            if (current_byte != absolute_byte)
+            {
+                break;
+            }
+            common_length += 1;
+        }
+
+        bool current_is_parent = common_length == current_directory.length &&
+                                 (common_length == absolute_path.length || absolute_path.pointer[common_length] == separator);
+        if (!current_is_parent)
+        {
+            while (common_length > root_length && current_directory.pointer[common_length - 1] != separator)
+            {
+                common_length -= 1;
+            }
+        }
+
+        u64 parent_count = 0;
+        bool in_component = false;
+        for (u64 index = common_length; index <= current_directory.length; index += 1)
+        {
+            bool at_end = index == current_directory.length;
+            bool is_separator = !at_end && current_directory.pointer[index] == separator;
+            if (at_end || is_separator)
+            {
+                parent_count += in_component;
+                in_component = false;
+            }
+            else
+            {
+                in_component = true;
+            }
+        }
+
+        u64 destination_index = common_length;
+        while (destination_index < absolute_path.length && absolute_path.pointer[destination_index] == separator)
+        {
+            destination_index += 1;
+        }
+        u64 destination_length = absolute_path.length - destination_index;
+        u64 relative_length = parent_count * 3 + destination_length;
+        if (relative_length)
+        {
+            char8* pointer = (char8*)arena_allocate_bytes(arena, relative_length, 1);
+            u64 cursor = 0;
+            for (u64 parent_index = 0; parent_index < parent_count; parent_index += 1)
+            {
+                pointer[cursor++] = '.';
+                pointer[cursor++] = '.';
+                pointer[cursor++] = separator;
+            }
+            for (u64 index = destination_index; index < absolute_path.length; index += 1)
+            {
+                pointer[cursor++] = absolute_path.pointer[index];
+            }
+            result = (String8){.pointer = pointer, .length = relative_length};
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 os_test_image_retention_dot_path(Arena* arena, String8 absolute_path)
+{
+#if defined(_WIN32)
+    char8 separator = '\\';
+#else
+    char8 separator = '/';
+#endif
+    u64 component_start = 0;
+    for (u64 index = 0; index < absolute_path.length; index += 1)
+    {
+#if defined(_WIN32)
+        if (absolute_path.pointer[index] == '/' || absolute_path.pointer[index] == '\\')
+        {
+            separator = absolute_path.pointer[index];
+            component_start = index + 1;
+        }
+#else
+        if (absolute_path.pointer[index] == separator)
+        {
+            component_start = index + 1;
+        }
+#endif
+    }
+    String8 result = absolute_path;
+    if (component_start < absolute_path.length)
+    {
+        u64 result_length = absolute_path.length + 2;
+        char8* pointer = (char8*)arena_allocate_bytes(arena, result_length, 1);
+        u64 cursor = 0;
+        for (u64 index = 0; index < component_start; index += 1)
+        {
+            pointer[cursor++] = absolute_path.pointer[index];
+        }
+        pointer[cursor++] = '.';
+        pointer[cursor++] = separator;
+        for (u64 index = component_start; index < absolute_path.length; index += 1)
+        {
+            pointer[cursor++] = absolute_path.pointer[index];
+        }
+        result = (String8){.pointer = pointer, .length = result_length};
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult os_test_image_retention(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1921,7 +2074,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_image_retention(UnitTestArguments* ar
     String8 inactive_shared = buster_test_temporary_path(arguments->arena, S8("image-retention-inactive-elf"), S8(".bin"));
     String8 inactive_registered = buster_test_temporary_path(arguments->arena, S8("image-retention-inactive-registered"), S8(".txt"));
     String8 active_registered = buster_test_temporary_path(arguments->arena, S8("image-retention-registered"), S8(".txt"));
-    String8 active_relative = string_format(arguments->arena, S8("build/cache/image-retention-relative-{u64}.bin"), os_now_microseconds());
+    String8 active_relative_temporary = buster_test_temporary_path(arguments->arena, S8("image-retention-relative"), S8(".bin"));
+    String8 active_relative = os_test_image_retention_relative_path(arguments->arena, active_relative_temporary);
+    if (!active_relative.length)
+    {
+        active_relative = os_test_image_retention_dot_path(arguments->arena, active_relative_temporary);
+    }
     String8 active_relative_absolute = os_path_absolute_lexical(arguments->arena, active_relative, false);
     String8 active_elf = buster_test_temporary_path(arguments->arena, S8("image-retention-elf-dyn"), S8(".bin"));
     String8 active_macho = buster_test_temporary_path(arguments->arena, S8("image-retention-macho-dylib"), S8(".bin"));
@@ -1946,7 +2104,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_image_retention(UnitTestArguments* ar
     BUSTER_TEST(arguments, os_file_delete(inactive_shared) && !os_test_image_retention_exists(inactive_shared));
     BUSTER_TEST(arguments, os_file_delete(inactive_registered) && !os_test_image_retention_exists(inactive_registered));
 
-    BUSTER_TEST(arguments, os_make_directory_attempt(S8("build/cache")));
     os_image_retention_set_active(true);
     BUSTER_TEST(arguments, file_write(active_registered, BUSTER_SLICE_TO_BYTE_SLICE(text)));
     os_image_retention_register(active_registered);
