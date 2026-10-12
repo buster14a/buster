@@ -1092,7 +1092,10 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
      admitted operands, `-L` system directories, plain `-l` names, and
      object or archive operands. It refuses response files (`@file`, which
      Wild expands recursively), linker scripts, plugins and any other option
-     that would read an input the manifest does not hash;
+     that would read an input the manifest does not hash. Each relative
+     operand, each manifest path and the build root must already be canonical,
+     with no `..`, `.` or empty component, and must lie inside the cell's
+     tree, so a traversal cannot hide behind a matching raw string;
    - a timed, validated or repeated link command that is not exactly the
      command rebuilt from that argv's admitted tokens and the frozen options.
      No other input, linker or shell text can run, even in a packet that
