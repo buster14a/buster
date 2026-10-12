@@ -1052,59 +1052,57 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_align(AssemblyUnitBuilder* buil
 {
     String8 parts[3] = {0};
     u32 part_count = assembly_unit_split_operands(operands, parts, BUSTER_ARRAY_LENGTH(parts));
-    if (part_count == UINT32_MAX || !part_count || part_count > 2)
-    {
-        return false;
-    }
     // GNU as reads `.align` as a byte count on x86 ELF but as a power of two
     // on AArch64, where it is the same directive as `.p2align`.
     bool power = string_equal(directive, S8(".p2align")) || (string_equal(directive, S8(".align")) && builder->target.cpu_arch == CPU_ARCH_AARCH64);
     s64 requested = 0;
-    if (!assembly_unit_evaluate_absolute(builder, parts[0], &requested) || requested < 0 || requested > (power ? 20 : 1 << 20))
-    {
-        return false;
-    }
-    u64 alignment = power ? (u64)1 << (u64)requested : (u64)requested;
-    if (!alignment || (alignment & (alignment - 1)))
-    {
-        return false;
-    }
     s64 fill = 0;
-    if (part_count == 2 && (!assembly_unit_evaluate_absolute(builder, parts[1], &fill) || fill < 0 || fill > 255))
+    s64 maximum_skip = 0;
+    bool explicit_fill = part_count >= 2 && parts[1].length != 0;
+    bool valid = part_count >= 1 && part_count <= BUSTER_ARRAY_LENGTH(parts) &&
+                 assembly_unit_evaluate_absolute(builder, parts[0], &requested) && requested >= 0 && requested <= (power ? 20 : 1 << 20) &&
+                 (!explicit_fill || (assembly_unit_evaluate_absolute(builder, parts[1], &fill) && fill >= 0 && fill <= 255)) &&
+                 (part_count < 3 || (assembly_unit_evaluate_absolute(builder, parts[2], &maximum_skip) && maximum_skip >= 0 && maximum_skip <= UINT32_MAX));
+    if (valid)
     {
-        return false;
+        u64 alignment = power ? (u64)1 << (u64)requested : (u64)requested;
+        valid = alignment && !(alignment & (alignment - 1)) && assembly_unit_section_current(builder);
+        if (valid)
+        {
+            AssemblyUnitSection* section = builder->result.sections + builder->current_section;
+            if (alignment > section->alignment)
+            {
+                section->alignment = (u32)alignment;
+            }
+            u64 offset = builder->section_offsets[builder->current_section];
+            u64 padding = (alignment - (offset & (alignment - 1))) & (alignment - 1);
+            // Zero means unlimited. Even a suppressed gap retains the section's
+            // alignment; replay reevaluates the gap after branch relaxation.
+            if (maximum_skip && padding > (u64)maximum_skip) padding = 0;
+            if (padding)
+            {
+                if (assembly_unit_section_kind_is_zero_fill(section->kind))
+                {
+                    valid = assembly_unit_append(builder, 0, padding);
+                }
+                else
+                {
+                    u8* bytes = arena_allocate(builder->arena, u8, padding);
+                    if (!explicit_fill && section->kind == ASSEMBLY_UNIT_SECTION_TEXT)
+                    {
+                        valid = assembly_fill_executable_padding(builder->target, bytes, offset, padding);
+                    }
+                    else
+                    {
+                        // An explicit fill is user data, even inside an executable section.
+                        memset(bytes, explicit_fill ? (u8)fill : 0, padding);
+                    }
+                    if (valid) valid = assembly_unit_append(builder, bytes, padding);
+                }
+            }
+        }
     }
-    if (!assembly_unit_section_current(builder))
-    {
-        return false;
-    }
-    AssemblyUnitSection* section = builder->result.sections + builder->current_section;
-    if (alignment > section->alignment)
-    {
-        section->alignment = (u32)alignment;
-    }
-    u64 offset = builder->section_offsets[builder->current_section];
-    u64 padding = (alignment - (offset & (alignment - 1))) & (alignment - 1);
-    if (!padding)
-    {
-        return true;
-    }
-    if (assembly_unit_section_kind_is_zero_fill(section->kind))
-    {
-        return assembly_unit_append(builder, 0, padding);
-    }
-    u8* bytes = arena_allocate(builder->arena, u8, padding);
-    bool filled = true;
-    if (part_count == 1 && section->kind == ASSEMBLY_UNIT_SECTION_TEXT)
-    {
-        filled = assembly_fill_executable_padding(builder->target, bytes, offset, padding);
-    }
-    else
-    {
-        // An explicit fill is user data, even inside an executable section.
-        memset(bytes, part_count == 2 ? (u8)fill : 0, padding);
-    }
-    return filled && assembly_unit_append(builder, bytes, padding);
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_zero(AssemblyUnitBuilder* builder, String8 operands)

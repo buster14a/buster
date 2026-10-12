@@ -13085,6 +13085,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_spelling_movabs_moffs(AssemblyBuilder* bui
 //   accumulator/absolute-address movabs[bwlq] -> mov[bwlq], with the metadata
 //   selector told to pick the moffs row (A0..A3) even for a short address
 //   AT&T retq/callq -> ret/call
+//   operand-free rep/repe/repz nop -> pause (F3 90)
 //   rep bsf/bsr -> tzcnt/lzcnt (GCC's spelling; F3 0F BC/BD either way,
 //   executing as BSF/BSR on CPUs without BMI1/LZCNT)
 //   one-operand shift/rotate -> explicit count 1
@@ -13148,7 +13149,12 @@ BUSTER_GLOBAL_LOCAL String8 assembly_x86_spelling_normalize(AssemblyBuilder* bui
         if (rep_prefix)
         {
             String8 bit_scan = suffix ? base : mnemonic;
-            if (assembly_word_equal(bit_scan, S8("bsf")) || assembly_word_equal(bit_scan, S8("bsr")))
+            if (operand_count == 0 && assembly_word_equal(mnemonic, S8("nop")))
+            {
+                drop_prefix = true;
+                new_mnemonic = S8("pause");
+            }
+            else if (assembly_word_equal(bit_scan, S8("bsf")) || assembly_word_equal(bit_scan, S8("bsr")))
             {
                 bool forward = assembly_word_equal(bit_scan, S8("bsf"));
                 drop_prefix = true;
