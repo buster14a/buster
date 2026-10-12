@@ -1352,6 +1352,64 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    Buster invokes all three as external executables. None is vendored,
    linked into Buster or redistributed.
 
+   **Issue #1915 opt-in TLS companion link leg.** The same route accepts one
+   fresh exact line `profile: link-tls-v1`, selected by the same
+   every-parent freshness rule. It is the Zen 5 route for
+   `tool:link_tls_bench.py`, and the whole-link measurement of the x86-64 ELF
+   TLS companion lookup that #2247 indexed. It cannot be combined with an
+   analyzer, real-source, ast-pilot, production, compiler-probes,
+   frontend-selector or wild-linker profile. `measure_link_tls` runs the
+   trusted revision's `tools/link_tls_bench.py` after the corpus leg, on the
+   same two `ide` binaries:
+   - **Inputs.** It writes the profile's generated sources and builds them
+     with the host's `clang` and `ar`: `main.o`, which calls `sum_all` twice
+     and prints both sums; `tls:N` objects whose `sum_all` reads and
+     increments N global `__thread long` variables (two general-dynamic
+     sites each) at N = 1024, 4096 and 16384, with `-O0 -fPIC -g0`; a
+     `-fno-plt` variant and a one-member archive of the largest; and a
+     no-TLS control of 4096 globals and functions. The summary records every
+     input's SHA-256 and both tools' version lines.
+   - **Correctness first.** Each binary links every cell once with
+     `ide cc {-no-pie|-pie} main.o INPUT -o IMAGE`. Both images must be
+     byte-identical, exit 0 and print the cell's frozen output, which follows
+     from the source (`LinkTlsTest` checks the arithmetic). A cell that fails
+     is not timed.
+   - **Sampling.** Frozen before the run: per cell, 2 warmups alternating
+     baseline and candidate, then 20 pairs, baseline first on even pairs and
+     candidate first on odd ones. Each timed link is a fresh
+     `taskset -c 2 ide ...` process. Its wall time runs from spawn to a
+     blocking `wait4`, which also gives its own user plus system CPU time. A
+     timed wait with polling would quantize short links. There is no adaptive
+     stopping.
+
+   `compiler_publish.py` re-validates the receipt's `link_tls` record against
+   `link_tls/summary.json` (`validate_link_tls`). It refuses:
+   - a harness exit other than 0, or a summary that is not complete;
+   - measured binaries that are not the receipt's baseline and candidate, or
+     that are the same binary;
+   - an input set that is not the frozen one with a SHA-256 for each, or an
+     unrecorded clang or ar;
+   - cells that are not the frozen cells, in order, with their frozen
+     arguments;
+   - images that differ between the binaries, fail, or print anything but the
+     frozen output;
+   - a warmup or pair population that is not exact, in the fixed order, with
+     every link exiting 0 and a positive integer wall time within the
+     60-second invocation timeout;
+   - receipt cells that the raw samples do not give. Each cell's median pair
+     ratio and its distribution-free 95% interval are re-derived.
+
+   Every timing is report-only. On a pull request the merge base is the
+   baseline. To measure a change that has already landed, the owner opens a
+   draft whose head restores the earlier behavior, so the ratio reads
+   inverted.
+
+   Cost: on a hosted 4-vCPU 2.8 GHz Xeon (diagnostic, not Zen 5), against a
+   pre-#2247 baseline whose scan dominates, the whole leg took 248 s and its
+   evidence was 68 KB. Its 20-minute timeout keeps it inside the unchanged
+   90-minute `compare-pull` job next to the roughly 14-minute ordinary
+   comparison. No job timeout changed.
+
    **Without perf (#2768).** Before the first timed run the lab runs
    `perf stat -- true` once (`probe_counters`). If perf is missing, exits
    nonzero (for example under a strict `perf_event_paranoid`), or writes no

@@ -263,6 +263,24 @@ in both frontend forms.
   alignment to reserve and materialize dynamically aligned storage. The parameter
   alignment tests inspect IR on all six native targets and use an opaque,
   separately host-compiled observer for native x86-64 callee addresses.
+- SysV i386 uses `IR_ABI_CONVENTION_SYSTEMV_I386`, selected independently of
+  x86-64 by `ir_abi_convention_for_target`. Its baseline cdecl classifier
+  (`ir_i386_abi_value`) carries scalar and aggregate arguments as by-value
+  memory images. Stack placement must round those images to four-byte slots;
+  the classifier retains their exact object sizes. Integer results occupy
+  EAX, or EDX:EAX for 64-bit values; pointers and the pointer-shaped i386
+  `va_list` occupy EAX. Scalar float, double and twelve-byte x87 long double
+  results have one X87 part, describing ST(0) and the value's storage size.
+  Struct/union results, including GNU empty records, use a four-byte hidden
+  pointer; the callee must return that pointer in EAX and pop its stack word.
+  `_Complex float` returns its real and imaginary bit images in EAX/EDX;
+  wider complex types use the hidden-pointer convention. Vector transport and
+  scalar formats outside this baseline retain an empty unsupported shape.
+  The rules follow [Intel386 psABI 1.1, section 2.2.3 and table 2.4](https://github.com/hjl-tools/x86-psabi/wiki/intel386-psABI-1.1.pdf).
+  `ir_test_i386_abi` covers independent transport expectations and cache reuse;
+  the existing interleaved ABI cache/reference matrix includes i386. This
+  classification is a prerequisite for #3692: the native i386 backend and
+  ELF32 path are still absent, and all i386 artifact actions remain refused.
 - System V x86-64 padding-only eightbytes retain NO_CLASS and consume no
   argument or result register. `ir_classify_abi_value` publishes only live
   pieces, preserving their offsets in the complete aggregate storage image;

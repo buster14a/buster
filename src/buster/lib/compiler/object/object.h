@@ -1,6 +1,6 @@
 #pragma once
 
-// Format-neutral object model: the ObjectFile shape shared by the ELF64,
+// Format-neutral object model: the ObjectFile shape shared by the ELF32/ELF64,
 // COFF, and Mach-O readers/writers, the codegen-module converter, archive
 // reading, the disassembly printer, and in-process execution of a linked
 // object. Readers bounds-check hostile input and return an invalid file
@@ -15,6 +15,7 @@ typedef enum ObjectFormat
     OBJECT_FORMAT_ELF64,
     OBJECT_FORMAT_COFF,
     OBJECT_FORMAT_MACH_O64,
+    OBJECT_FORMAT_ELF32,
     OBJECT_FORMAT_COUNT,
 } ObjectFormat;
 
@@ -232,6 +233,15 @@ typedef enum ObjectRelocationKind
     // of an unsigned-immediate load or store, which Clang and MSVC emit for the
     // access that follows SECREL_HIGH12A.
     OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L,
+    // i386 ELF REL fields. ABSOLUTE32 is shared with R_386_32; keep the
+    // PC/GOT/PLT formulas and 16-bit fields distinct from x86-64 kinds.
+    OBJECT_RELOCATION_I386_PC32,
+    OBJECT_RELOCATION_I386_GOTPC,
+    OBJECT_RELOCATION_I386_GOTOFF,
+    OBJECT_RELOCATION_I386_PLT32,
+    OBJECT_RELOCATION_I386_GOT32X,
+    OBJECT_RELOCATION_I386_16,
+    OBJECT_RELOCATION_I386_PC16,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
@@ -241,7 +251,7 @@ typedef enum ObjectRelocationKind
 // wherever only that shared contract matters.
 BUSTER_F_DECL bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind);
 // Shared field facts: two bytes for COFF_SECTION16, eight for the 64-bit
-// data forms, four for the remaining kinds. Invalid kinds have zero width
+// data forms, two for i386 16-bit fields, four for the remaining kinds. Invalid kinds have zero width
 // and are not TLS. These classify fields, not a consumer's supported kinds.
 BUSTER_F_DECL u32 object_relocation_kind_width(ObjectRelocationKind kind);
 BUSTER_F_DECL bool object_relocation_kind_is_tls(ObjectRelocationKind kind);
@@ -455,7 +465,7 @@ struct ObjectFile
     // The GNU `constructor(N)`/`destructor(N)` priority of every entry of
     // OBJECT_SECTION_INIT_ARRAY (index 0) and OBJECT_SECTION_FINI_ARRAY
     // (index 1): one u32 per OBJECT_INITIALIZER_ENTRY_SIZE bytes of that
-    // section, in slot order, ascending by order key because the entries were
+    // section (four bytes on i386), in slot order, ascending by order key because the entries were
     // sorted into it, with IR_INITIALIZER_PRIORITY_NONE for an attribute that named none
     // and IR_INITIALIZER_PRIORITY_PREINIT for an ELF `.preinit_array` entry,
     // which sorts first (IR_INITIALIZER_PRIORITY_ORDER_KEY) and so is not
@@ -465,7 +475,7 @@ struct ObjectFile
     // what the attribute named and the ELF and COFF writers split the array
     // back into the sections their linkers order by --
     // `.init_array.NNNNN` and `.CRT$XCA00101`, see
-    // object_split_initializer_priorities -- while object_read_elf64 and
+    // object_split_initializer_priorities -- while object_read_elf and
     // object_read_coff recover it from those same names so the linker can
     // order one program's whole array (link_initializer_arrays_order).  A
     // producer that has no priorities to state -- the Mach-O reader, whose
