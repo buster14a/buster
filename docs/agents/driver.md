@@ -2145,7 +2145,15 @@ The globals and publics streams index each module's top-level procedures
 `S_GDATA32`/`S_LDATA32`); global ones also get an `S_PUB32` and an entry in the
 publics address map, sorted by section and offset (`pdb_gsi_emit`). With these
 empty, DbgHelp loads the PDB only as "public symbols & lines". The regression is
-`pdb_test_global_indexes`.
+`pdb_test_global_indexes`. Bucket ordering retains the format hash and name
+comparison, with stable insertion sort capped at 16 entries and stable bottom-up
+merge sort for larger buckets (#3737). One scratch array sized to the largest
+bucket is reused, bounding comparisons to O(N log N) even for repeated-hash
+names. `pdb_test_gsi_sorting` checks comparison bounds and stable ties;
+`pdb_test_gsi_colliding_indexes` checks both emitted indexes. The existing
+mixed ASCII/non-ASCII comparator can be non-transitive (#3752); for such inputs the
+large-bucket merge order is deterministic but may differ from insertion order.
+No comparator or on-disk format change is made.
 
 CodeView names a frame-resident location with `S_DEFRANGE_REGISTER_REL`
 against RBP (x86-64) or X29 (AArch64), the base codegen normalizes FRAME offsets
