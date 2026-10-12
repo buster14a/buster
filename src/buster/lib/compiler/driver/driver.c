@@ -4346,7 +4346,19 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_native_shared_library_input(String8 pat
     bool result = string_ends_with_sequence(path, S8(".so"));
     for (u64 index = 0; !result && index + 4 <= path.length; index += 1)
     {
-        result = string_equal(string_slice(path, index, index + 4), S8(".so.")) && index + 4 < path.length;
+        if (string_equal(string_slice(path, index, index + 4), S8(".so.")) && index + 4 < path.length)
+        {
+            bool digit = false;
+            bool valid = true;
+            for (u64 version = index + 4; valid && version < path.length; version += 1)
+            {
+                char8 byte = path.pointer[version];
+                if (byte >= '0' && byte <= '9') { digit = true; }
+                else if (byte == '.' && digit) { digit = false; }
+                else { valid = false; }
+            }
+            result = valid && digit;
+        }
     }
     return result;
 }
@@ -6471,9 +6483,9 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
                            (invocation.target.os == OPERATING_SYSTEM_LINUX ? 1u : 0u);
     NativeDynamicLibrary* libraries =
         arena_allocate(arena, NativeDynamicLibrary, library_capacity);
-    // The `-l` spelling that produced each entry, kept beside the mapped file
-    // name so a library the search below never finds is reported as the
-    // request the caller wrote rather than as the soname it was mapped to.
+    // The caller's -l name or direct path beside each mapped file name.
+    // A failed lookup reports that request rather than the SONAME.
+    // Direct paths stay distinct until their actual ELF identity is read.
     // Entries the caller did not request -- the Windows defaults and the
     // Apple frameworks -- keep an empty request and are never reported.
     CompilerDriverDynamicRequest* requests = arena_allocate(arena, CompilerDriverDynamicRequest, library_capacity);

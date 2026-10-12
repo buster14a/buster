@@ -1361,7 +1361,7 @@ and archiver, links an independent host control, and runs both Buster's direct
 and sysroot-default named links.
 
 Native x86-64 and AArch64 Linux ELF image links also accept direct `.so`
-and versioned `.so.N` file operands, including the full paths returned by
+and versioned `.so.N` file operands (numeric version components), including the full paths returned by
 CMake's `find_library`. They retain their position among `-l` occurrences
 and form a serial translation-unit boundary. The driver reads exactly the
 supplied path; `-L` and default roots cannot substitute for a missing or

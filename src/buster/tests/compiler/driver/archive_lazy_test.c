@@ -1832,7 +1832,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_path_inputs(UnitTestA
             String8 root = buster_test_temporary_path(arena, S8("buster-shared.so.7-inputs"), S8(""));
             if (BUSTER_REQUIRE(arguments, os_make_directory_attempt(root)))
             {
-                String8 source = string_format_z(arena, S8("{S8}/main.c"), root);
+                String8 source = string_format_z(arena, S8("{S8}/main.so.c"), root);
                 String8 object = string_format_z(arena, S8("{S8}/main.o"), root);
                 String8 library = string_format_z(arena, S8("{S8}/libpath.so"), root);
                 String8 versioned = string_format_z(arena, S8("{S8}/libpath.so.7"), root);
@@ -1977,7 +1977,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_path_native(UnitTestA
         if (BUSTER_REQUIRE(arguments, os_make_directory_attempt(root)))
         {
             String8 provider = string_format_z(arena, S8("{S8}/provider.c"), root);
-            String8 source = string_format_z(arena, S8("{S8}/main.c"), root);
+            String8 source = string_format_z(arena, S8("{S8}/main.so.c"), root);
             String8 library = string_format_z(arena, S8("{S8}/libactual.so.7"), root);
             String8 absolute_root = os_path_absolute(arena, root, false);
             BUSTER_TEST(arguments, absolute_root.length != 0);
