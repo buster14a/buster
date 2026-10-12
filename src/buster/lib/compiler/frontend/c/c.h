@@ -1862,6 +1862,7 @@ struct CTokenPositionIndex
     u32 label_address_count;
     // Natural expression endpoints, built backwards for one validated body.
     // A query with an earlier bound clamps the endpoint to that bound.
+    CToken const* body_expression_tokens;
     u32* body_expression_ends;
     u32 body_expression_start;
     u32 body_expression_count;

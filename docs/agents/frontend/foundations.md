@@ -21,7 +21,9 @@ still runs through the original path.
 
 During body validation, `c_parse_body_expression_ends_build` computes natural
 expression endpoints backwards, using the existing delimiter index. Queries
-clamp that endpoint to their own bound. The table uses guarded body scratch,
+clamp that endpoint to their own bound. Reuse also requires the exact supplying
+token-stream pointer; a private query with different tokens takes the scalar
+walk even when its copied model retains the position index. The table uses guarded body scratch,
 is detached before the arena rewinds, and malformed delimiter streams retain
 the scalar walk. The private boundary regression compares every subrange with
 that walk, including bounds inside delimiter groups.

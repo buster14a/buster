@@ -34970,7 +34970,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_body_expression_ends_build(CParseResult* result
 BUSTER_C_SHARED u32 c_parse_constraint_expression_end(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
 {
     CTokenPositionIndex* positions = result->position_index;
-    bool indexed = start < end && positions && positions->body_expression_ends &&
+    bool indexed = start < end && positions && positions->body_expression_ends && positions->body_expression_tokens == preprocess.tokens &&
         start - positions->body_expression_start < positions->body_expression_count;
     u32 cursor = indexed ? BUSTER_MIN(end, positions->body_expression_ends[start - positions->body_expression_start]) : start;
     bool done = indexed;
@@ -35008,6 +35008,7 @@ bool c_test_constraint_expression_ends_agree(Arena* arena, CPreprocessResult pre
     model.position_index = &positions;
     u32* ends = arena_allocate(arena, u32, count);
     c_parse_body_expression_ends_build(&model, preprocess, start, count, ends);
+    positions.body_expression_tokens = preprocess.tokens;
     positions.body_expression_start = start;
     positions.body_expression_count = count;
     bool agree = true;
@@ -35022,7 +35023,23 @@ bool c_test_constraint_expression_ends_agree(Arena* arena, CPreprocessResult pre
             agree &= indexed == walked;
         }
     }
-    return agree;
+    // A private query may retain the model's position index while supplying
+    // a different token stream. Its endpoint must come from that stream.
+    CPreprocessResult other = preprocess;
+    other.tokens = arena_allocate(arena, CToken, preprocess.token_count);
+    memcpy(other.tokens, preprocess.tokens, (u64)preprocess.token_count * sizeof(CToken));
+    bool changed = false;
+    for (u32 index = start; !changed && index < start + count; index += 1)
+    {
+        if (other.tokens[index].kind != C_TOKEN_PUNCTUATOR)
+        {
+            other.tokens[index] = (CToken){.kind = C_TOKEN_PUNCTUATOR, .punctuator = C_PUNCTUATOR_SEMICOLON};
+            positions.body_expression_ends = ends;
+            agree &= c_parse_constraint_expression_end(&model, other, index, start + count) == index;
+            changed = true;
+        }
+    }
+    return agree && changed;
 }
 #endif
 
@@ -41870,6 +41887,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
             if (expression_index)
             {
                 c_parse_body_expression_ends_build(result, preprocess, declaration->body_start, declaration->body_token_count, expression_ends);
+                expression_index->body_expression_tokens = preprocess.tokens;
                 expression_index->body_expression_ends = expression_ends;
                 expression_index->body_expression_start = declaration->body_start;
                 expression_index->body_expression_count = declaration->body_token_count;
@@ -41937,7 +41955,11 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         {
             body_scope_index->body_scopes = 0;
         }
-        if (expression_index) expression_index->body_expression_ends = 0;
+        if (expression_index)
+        {
+            expression_index->body_expression_tokens = 0;
+            expression_index->body_expression_ends = 0;
+        }
         bool exhausted = c_parse_body_scratch_guard_end();
         arena_set_position(machine->scratch_arena, validation_mark);
         if (exhausted)
