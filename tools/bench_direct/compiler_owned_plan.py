@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 from compiler_receipt import (PROFILE, THROUGHPUT_PROFILE, SCALING_PROFILE, INLINE_ACCEPTANCE_PROFILE,
-                              AST_PILOT_ACCEPTANCE_PROFILE, named_main_profile)
+                              AST_PILOT_ACCEPTANCE_PROFILE, CONSTANT_REUSE_ACCEPTANCE_PROFILE, named_main_profile)
 
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 COMMIT = re.compile(r"[a-f0-9]{40}\Z")
@@ -23,6 +23,7 @@ CORPUS_TIMEOUT = 1800
 SCALING_TIMEOUT = 1200
 INLINE_TIMEOUT = 10800
 AST_PILOT_TIMEOUT = 7200
+CONSTANT_REUSE_TIMEOUT = 7200
 POPULATION_SCHEMA = "buster-compiler-snapshot-phases-v1"
 UTILITY_POPULATION_SCHEMA = "buster-compiler-utility-phases-v1"
 MAIN_POPULATION_SCHEMA = "buster-compiler-main-owned-phases-v1"
@@ -93,6 +94,11 @@ def _commands(receipt: dict, ownership: dict, *, utility: bool = False,
         add("ast-pilot-acceptance", [python, "-B", trusted + "/tools/bench_direct/ast_pilot_acceptance.py",
             "--lab", lab, "--candidate-ide", bins + "/ide-cand", "--repo-root", root, "--head-revision", head,
             "--cpu", str(AST_PILOT_ACCEPTANCE_PROFILE["cpu"]), "--output", work + "/ast-pilot-acceptance"], AST_PILOT_TIMEOUT)
+    if receipt.get("constant_reuse_acceptance") is not None:
+        add("constant-reuse-acceptance", [python, "-B", trusted + "/tools/bench_direct/constant_reuse_acceptance.py",
+            "--lab", lab, "--candidate-ide", bins + "/ide-cand", "--repo-root", root, "--head-revision", head,
+            "--cpu", str(CONSTANT_REUSE_ACCEPTANCE_PROFILE["cpu"]), "--output", work + "/constant-reuse-acceptance"],
+            CONSTANT_REUSE_TIMEOUT)
     if legacy:
         build("closure", base)
     else:
@@ -212,6 +218,11 @@ def validate_plan(receipt: object, ownership: object, core_rows: object, *,
         if ast is not None and (restricted or receipt["mode"] != "pull" or not isinstance(ast, dict) or
                                 ast.get("requested") is not True or
                                 not _same(ast.get("profile"), AST_PILOT_ACCEPTANCE_PROFILE)):
+            return ["ordinary snapshot semantic plan extension profile/mode unsupported"]
+        reuse = receipt.get("constant_reuse_acceptance")
+        if reuse is not None and (restricted or receipt["mode"] != "pull" or not isinstance(reuse, dict) or
+                                  reuse.get("requested") is not True or
+                                  not _same(reuse.get("profile"), CONSTANT_REUSE_ACCEPTANCE_PROFILE)):
             return ["ordinary snapshot semantic plan extension profile/mode unsupported"]
         planned = _commands(receipt, ownership, utility=utility, main_profile=profile if main else None)
         if len(core_rows) != len(planned):
