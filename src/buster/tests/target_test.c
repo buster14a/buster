@@ -1114,17 +1114,28 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, target_parse_triple(S8("bpf-unknown-linux")).target.cpu_arch == CPU_ARCH_BPFEL);
     BUSTER_TEST(arguments, target_parse_triple(S8("ebpf-unknown-linux")).target.cpu_arch == CPU_ARCH_BPFEL);
     TargetParseResult i386_linux = target_parse_triple(S8("i386-linux"));
+    TargetParseResult i386_freestanding = target_parse_triple(S8("i386-freestanding"));
     TargetParseResult i686_linux = target_parse_triple(S8("i686-unknown-linux-gnu"));
     TargetParseResult i386_code16 = target_parse_triple(S8("i386-unknown-linux-code16"));
     TargetParseResult x64_code16 = target_parse_triple(S8("x86_64-linux-code16"));
     TargetParseResult i386_windows = target_parse_triple(S8("i386-windows"));
+    TargetParseResult x64_uefi = target_parse_triple(S8("x86_64-uefi"));
     BUSTER_TEST(arguments, i386_linux.error == TARGET_PARSE_ERROR_NONE && i386_linux.target.cpu_arch == CPU_ARCH_I386);
+    BUSTER_TEST(arguments, i386_freestanding.error == TARGET_PARSE_ERROR_NONE &&
+                               i386_freestanding.target.os == OPERATING_SYSTEM_FREESTANDING);
     BUSTER_TEST(arguments, i686_linux.error == TARGET_PARSE_ERROR_NONE && i686_linux.target.cpu_arch == CPU_ARCH_I386 &&
                              i686_linux.target.cpu_model == CPU_MODEL_BASELINE);
     BUSTER_TEST(arguments, i386_code16.error == TARGET_PARSE_ERROR_NONE && i386_code16.target.x86_code16);
     BUSTER_STRING_TEST(arguments, target_to_string(arguments->arena, i386_code16.target), S8("i386-linux-code16"));
     BUSTER_TEST(arguments, x64_code16.error == TARGET_PARSE_ERROR_ENVIRONMENT);
     BUSTER_TEST(arguments, i386_windows.error == TARGET_PARSE_ERROR_OPERATING_SYSTEM);
+    BUSTER_TEST(arguments, x64_uefi.error == TARGET_PARSE_ERROR_NONE && x64_uefi.target.os == OPERATING_SYSTEM_UEFI);
+    BUSTER_TEST(arguments, target_os_supports_arch(CPU_ARCH_I386, OPERATING_SYSTEM_LINUX));
+    BUSTER_TEST(arguments, target_os_supports_arch(CPU_ARCH_I386, OPERATING_SYSTEM_FREESTANDING));
+    BUSTER_TEST(arguments, !target_os_supports_arch(CPU_ARCH_I386, OPERATING_SYSTEM_WINDOWS));
+    BUSTER_TEST(arguments, !target_os_supports_arch(CPU_ARCH_I386, OPERATING_SYSTEM_MACOS));
+    BUSTER_TEST(arguments, !target_os_supports_arch(CPU_ARCH_I386, OPERATING_SYSTEM_UEFI));
+    BUSTER_TEST(arguments, target_os_supports_arch(CPU_ARCH_X86_64, OPERATING_SYSTEM_WINDOWS));
     BUSTER_STRING_TEST(arguments, cpu_arch_to_string_os(CPU_ARCH_I386), S8("i386"));
     BUSTER_TEST(arguments, cpu_model_from_string(S8("i386")) == CPU_MODEL_X86_I386);
     BUSTER_TEST(arguments, cpu_model_from_string(S8("i686")) == CPU_MODEL_X86_I686);

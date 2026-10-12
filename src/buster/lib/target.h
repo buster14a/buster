@@ -564,6 +564,7 @@ BUSTER_F_DECL CpuModel cpu_detect_model(void);
 BUSTER_F_DECL CpuModel cpu_model_from_string(String8 string);
 BUSTER_F_DECL bool cpu_arch_is_x86(CpuArch arch);
 BUSTER_F_DECL bool cpu_model_supports_arch(CpuModel model, CpuArch arch);
+BUSTER_F_DECL bool target_os_supports_arch(CpuArch arch, OperatingSystem os);
 BUSTER_F_DECL TargetCpuFeatures target_cpu_features_empty(void);
 BUSTER_F_DECL TargetCpuFeatures target_cpu_features_singleton(TargetCpuFeature feature);
 BUSTER_F_DECL TargetCpuFeatures target_cpu_features_add(TargetCpuFeatures features, TargetCpuFeature feature);

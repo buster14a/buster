@@ -1662,6 +1662,68 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
                 arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(line));
             BUSTER_STRING_TEST(arguments, refused.diagnostic, S8("unsupported option: -m16 for this target"));
         }
+        String8 freestanding_mode_line[] = {
+            S8("--target=x86_64-freestanding"), S8("-m32"), S8("-fsyntax-only"), S8("source.c"),
+        };
+        CompilerDriverInvocation freestanding_mode = compiler_driver_parse_arguments(
+            arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(freestanding_mode_line));
+        BUSTER_TEST_RAW(arguments, freestanding_mode.error == COMPILER_DRIVER_ERROR_NONE, freestanding_mode.diagnostic);
+        BUSTER_TEST(arguments, freestanding_mode.target.cpu_arch == CPU_ARCH_I386 &&
+                                   freestanding_mode.target.os == OPERATING_SYSTEM_FREESTANDING);
+        struct
+        {
+            String8 option;
+            String8 target_string;
+        } incompatible_mode_targets[] = {
+            {S8("--target=x86_64-windows"), S8("x86_64-windows")},
+            {S8("--target=x86_64-macos"), S8("x86_64-macos")},
+            {S8("--target=x86_64-uefi"), S8("x86_64-uefi")},
+        };
+        String8 incompatible_mode_options[] = {S8("-m16"), S8("-m32")};
+        String8 incompatible_mode_actions[] = {
+            S8("-E"), S8("-fsyntax-only"), S8("-dumpmachine"), S8("-print-target-triple"),
+        };
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(incompatible_mode_targets); target_index += 1)
+        {
+            for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(incompatible_mode_options); mode_index += 1)
+            {
+                for (u32 order = 0; order < 2; order += 1)
+                {
+                    for (u32 action_index = 0; action_index < BUSTER_ARRAY_LENGTH(incompatible_mode_actions); action_index += 1)
+                    {
+                        String8 line[4] = {0};
+                        u32 line_count = 0;
+                        if (!order)
+                        {
+                            line[line_count++] = incompatible_mode_targets[target_index].option;
+                            line[line_count++] = incompatible_mode_options[mode_index];
+                        }
+                        else
+                        {
+                            line[line_count++] = incompatible_mode_options[mode_index];
+                            line[line_count++] = incompatible_mode_targets[target_index].option;
+                        }
+                        String8 action = incompatible_mode_actions[action_index];
+                        line[line_count++] = action;
+                        if (string_equal(action, S8("-E")) || string_equal(action, S8("-fsyntax-only")))
+                        {
+                            line[line_count++] = S8("source.c");
+                        }
+                        CompilerDriverInvocation refused = compiler_driver_parse_arguments(
+                            arguments->arena, (SliceString8){line, line_count});
+                        String8 expected = string_format(arguments->arena, S8("unsupported option: {S8} for target {S8}"),
+                                                         incompatible_mode_options[mode_index],
+                                                         incompatible_mode_targets[target_index].target_string);
+                        BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                        BUSTER_STRING_TEST(arguments, refused.diagnostic, expected);
+                        CompilerDriverResult refused_result =
+                            compiler_driver_execute_invocation(arguments->arena, refused);
+                        BUSTER_TEST(arguments, refused_result.error == COMPILER_DRIVER_ERROR_ARGUMENT &&
+                                                   refused_result.output.length == 0);
+                    }
+                }
+            }
+        }
         String8 model_line[] = {S8("-m16"), S8("-march=i386"), S8("-c"), S8("source.c")};
         CompilerDriverInvocation model = compiler_driver_parse_arguments(
             arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(model_line));

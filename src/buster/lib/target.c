@@ -589,8 +589,8 @@ TargetParseResult target_parse_triple(String8 triple)
         result.invalid_component = gnu_environment;
         result.error = TARGET_PARSE_ERROR_ENVIRONMENT;
     }
-    else if (result.error == TARGET_PARSE_ERROR_NONE && result.target.cpu_arch == CPU_ARCH_I386 &&
-             result.target.os != OPERATING_SYSTEM_LINUX && result.target.os != OPERATING_SYSTEM_FREESTANDING)
+    else if (result.error == TARGET_PARSE_ERROR_NONE &&
+             !target_os_supports_arch(result.target.cpu_arch, result.target.os))
     {
         result.invalid_component = operating_system_to_string_os(result.target.os);
         result.error = TARGET_PARSE_ERROR_OPERATING_SYSTEM;
@@ -651,6 +651,12 @@ CpuModel cpu_model_from_string(String8 string)
 bool cpu_arch_is_x86(CpuArch arch)
 {
     bool result = arch == CPU_ARCH_X86_64 || arch == CPU_ARCH_I386;
+    return result;
+}
+
+bool target_os_supports_arch(CpuArch arch, OperatingSystem os)
+{
+    bool result = arch != CPU_ARCH_I386 || os == OPERATING_SYSTEM_LINUX || os == OPERATING_SYSTEM_FREESTANDING;
     return result;
 }
 

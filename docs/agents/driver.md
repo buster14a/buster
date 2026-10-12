@@ -342,7 +342,10 @@ mode, with the last spelling winning independently of `--target` order;
 preprocessing (`-E`, including `-dM`) and frontend-only validation
 (`-fsyntax-only`). I386 artifact generation—including assembly, objects,
 LLVM output and links—is deliberately refused with an explicit #3654
-diagnostic. `-m64` remains unsupported and is tracked separately by #3458.
+diagnostic. I386 is supported only for Linux and freestanding targets; an
+execution-mode option on an x86 target with another OS is refused using the
+pre-mode target triple in its diagnostic. `-m64` remains unsupported and is
+tracked separately by #3458.
 
 Without `-march`/`-mcpu` the CPU model is `baseline`, matching Clang's and
 GCC's portable `x86-64` default. A command with no `-target` compiles for the
@@ -1647,7 +1650,7 @@ are tracked on GitHub #1418.
 | `-nostdlib++`, `-nostdlibs`, `-nolibc` | `unsupported option` | Not spellings of the above. |
 | `-mfoo`, `-mno-foo` (no architecture has the feature) | `unsupported option: -mfoo` | `-m<feature>` takes only the names `-mattr` takes. |
 | `-mavx2` for a non-x86 target or a GPU target | `unsupported option: -mavx2` | The feature belongs to another architecture, or the GPU pipeline has no feature overrides. |
-| `-m32`, `-mred-zone`, `-mno-red-zone` | `unsupported option` | They name no target feature and have no implementation. |
+| `-mred-zone`, `-mno-red-zone` | `unsupported option` | They name no target feature and have no implementation. |
 | `-mAVX2`, `-mavx2=1`, `-m`, `-mno-` | `unsupported option` | Feature names are exact lower case; `=` forms belong to `-march=`, `-mcpu=`, `-mtune=`, `-mattr=`, `-masm=`. |
 | `-mno-sse2` | `unsupported option: -mno-sse2 (SSE2 is part of the x86-64 baseline)` | Every x86-64 target here requires SSE2. |
 | `-xc++` and other unknown joined `-x<lang>` | `unsupported language: c++` | Same language names as `-x <lang>`; C is the only source frontend. |
