@@ -172,6 +172,16 @@ group unproven (#2380). Disappearance of the leader or of an identified member
 still retries, an exited member reaped between snapshots makes them differ, and
 live members, namespace identity and the reservation recheck are unchanged.
 
+A task the kernel is releasing reports state `X` (`x` before Linux 3.14) with
+parent, group and session `-1` until its PID is unhashed. The stat parser
+rejects group `-1`, so `os_linux_process_stat_classify` reports such a record as
+vanished rather than malformed; before this, the race made the census fail
+fatally on its first attempt without any retry. Under 16 concurrent
+`/bin/true` loops this was the dominant #2380 failure, observed directly as
+`<pid> (true) X 0 -1 -1 …`. Other malformed records, including group `-1` in
+any other state, still fail closed; `os_linux_process_stat_parse_self_test`
+covers both classifications.
+
 `os_linux_process_group_churn_self_test` uses per-thread seams: one unrelated
 PID vanishes once, then every non-leader PID vanishes in every snapshot. Each
 case must be proven in one attempt, consume its seam and count the skips; on

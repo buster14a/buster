@@ -5332,6 +5332,25 @@ BUSTER_GLOBAL_LOCAL bool os_linux_process_stat_parse(char* bytes, ssize_t length
     return result;
 }
 
+// A task being released reports state X (x before Linux 3.14) with parent, group and session -1
+// until its PID is unhashed. It is already reaped, so it is classified as
+// vanished like an ENOENT/ESRCH read instead of as a malformed record.
+BUSTER_GLOBAL_LOCAL bool os_linux_process_stat_classify(char* bytes, ssize_t length, pid_t expected_process_id,
+                                                         pid_t* process_group, char* state, bool* vanished)
+{
+    char parsed_state = 0;
+    pid_t parsed_group = 0;
+    bool parsed = os_linux_process_stat_parse(bytes, length, expected_process_id, &parsed_group, &parsed_state);
+    *vanished = parsed_state == 'X' || parsed_state == 'x';
+    bool result = parsed && !*vanished;
+    if (result)
+    {
+        *process_group = parsed_group;
+        *state = parsed_state;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool os_linux_proc_read_descriptor(int descriptor, char* bytes, u64 capacity, u64* length, bool* vanished)
 {
     *vanished = false;
@@ -5465,7 +5484,7 @@ BUSTER_GLOBAL_LOCAL bool os_linux_process_stat_at(int proc_descriptor, pid_t pro
         os_linux_proc_read_at(proc_descriptor, path, bytes, sizeof(bytes), &length, vanished);
     if (result)
     {
-        result = os_linux_process_stat_parse(bytes, (ssize_t)length, process_id, process_group, state);
+        result = os_linux_process_stat_classify(bytes, (ssize_t)length, process_id, process_group, state, vanished);
     }
     return result;
 }
@@ -5960,14 +5979,15 @@ bool os_linux_process_group_churn_self_test(Arena* arena)
     bool observed = observation.valid && observation.exited;
 
     // One unrelated PID disappears between readdir and stat. It must be
-    // omitted without spending a retry, and the seam must be consumed.
+    // omitted without spending a retry, and the seam must be consumed. Real
+    // host churn may add further skips, so the count is a lower bound.
     os_linux_process_group_test_vanished = 0;
     os_linux_process_group_test_vanishing_process = observed ? unrelated : 0;
     bool single_quiescent = observed && os_linux_process_group_is_quiescent(arena, &reservation);
     OsLinuxProcessGroupQuiescenceTrace single = os_linux_process_group_test_trace;
     bool single_consumed = os_linux_process_group_test_vanishing_process == 0 && os_linux_process_group_test_vanished == 1;
     os_linux_process_group_test_vanishing_process = 0;
-    bool single_valid = single_quiescent && single_consumed && single.attempts == 1 && single.skipped == 1;
+    bool single_valid = single_quiescent && single_consumed && single.attempts == 1 && single.skipped >= 1;
 
     // Persistent churn: every non-leader PID disappears in every snapshot,
     // which previously exhausted all bounded attempts.
@@ -6040,6 +6060,22 @@ bool os_linux_process_stat_parse_self_test(void)
     result = !os_linux_process_stat_parse(zombie, sizeof(zombie) - 1, 124, &group, &state) && result;
     result = !os_linux_process_stat_parse(malformed, sizeof(malformed) - 1, 789, &group, &state) && result;
     result = !os_linux_process_stat_parse(invalid_group, sizeof(invalid_group) - 1, 321, &group, &state) && result;
+    // Observed while a churned task was released: state X, group -1.
+    char dead[] = "5048 (true) X 0 -1 -1 0 -1 4227084 76 0";
+    char dead_grouped[] = "5049 (true) X 1 5049 5049 0";
+    bool vanished = false;
+    result = !os_linux_process_stat_classify(dead, sizeof(dead) - 1, 5048, &group, &state, &vanished) && vanished && result;
+    result = !os_linux_process_stat_classify(dead_grouped, sizeof(dead_grouped) - 1, 5049, &group, &state, &vanished) &&
+        vanished && result;
+    result = !os_linux_process_stat_classify(dead, sizeof(dead) - 1, 5047, &group, &state, &vanished) && !vanished && result;
+    result = !os_linux_process_stat_classify(invalid_group, sizeof(invalid_group) - 1, 321, &group, &state, &vanished) &&
+        !vanished && result;
+    result = !os_linux_process_stat_classify(malformed, sizeof(malformed) - 1, 789, &group, &state, &vanished) &&
+        !vanished && result;
+    group = 0;
+    state = 0;
+    result = os_linux_process_stat_classify(zombie, sizeof(zombie) - 1, 123, &group, &state, &vanished) && !vanished &&
+        group == 123 && state == 'Z' && result;
     result = os_linux_process_status_parse(status_text, sizeof(status_text) - 1, 999, &status) &&
         status.namespace_depth == 3 && status.namespace_process_ids[0] == 999 && status.namespace_process_ids[1] == 12 &&
         status.namespace_process_ids[2] == 7 && result;
