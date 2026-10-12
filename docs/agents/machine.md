@@ -413,7 +413,13 @@ hosts execute its independent expected-value fixture.
   which no recipe covers. A constant that only such rows and constant-copying
   casts read is `fused_dead`. A `GLOBAL` base folds like a pointer, so its
   element address is not rematerialized. Negative indices keep the computed
-  form. AArch64 selection does not fold `INDEX` indices yet.
+  form. AArch64 selection applies the same rule through
+  `machine_a64_index_constant_offset` and
+  `machine_a64_select_place_address_offset`, emitting `MACHINE_A64_LEA_FRAME`,
+  `MACHINE_A64_LEA_OFFSET` or `MACHINE_A64_MOV_RR`; the `LEA_OFFSET` encoder
+  materializes offsets past `ADD`'s 12-bit immediate. Its classification pass
+  counts folded `INDEX` reads together with copy-cast reads for the same
+  `fused_dead` marking.
 - FAST/QUALITY start a join's or loop header's general block parameters in
   registers. `machine_fast_parameter_contract` gives each non-pinned,
   non-mutable general parameter a caller-saved (or already-saved) register
