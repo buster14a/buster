@@ -73,6 +73,9 @@
 //                                              driver's per-line scans read
 //                                              instead of walking token rows
 //   c_preprocess_directive_line_end             comment-aware directive ends
+//   c_token_kind_name                          token-kind spelling (one
+//                                              definition for unity and
+//                                              split builds)
 //   c_frame_wrap_conditional_tokens             conditional whitespace and sites
 //   c_integer_operation,                       C integer operators over the
 //   c_integer_constant_binary/unary            shared ir_integer_* semantics:
@@ -14978,32 +14981,43 @@ void c_prewarm(void)
     }
 }
 
-#if !BUSTER_UNITY_BUILD
 String8 c_token_kind_name(CTokenKind kind)
 {
+    String8 result;
     switch (kind)
     {
     case C_TOKEN_INVALID:
-        return S8("invalid");
+        result = S8("invalid");
+        break;
     case C_TOKEN_END_OF_FILE:
-        return S8("end of file");
+        result = S8("end of file");
+        break;
     case C_TOKEN_IDENTIFIER:
-        return S8("identifier");
+        result = S8("identifier");
+        break;
     case C_TOKEN_PREPROCESSING_NUMBER:
-        return S8("preprocessing number");
+        result = S8("preprocessing number");
+        break;
     case C_TOKEN_CHARACTER_LITERAL:
-        return S8("character literal");
+        result = S8("character literal");
+        break;
     case C_TOKEN_STRING_LITERAL:
-        return S8("string literal");
+        result = S8("string literal");
+        break;
     case C_TOKEN_PUNCTUATOR:
-        return S8("punctuator");
+        result = S8("punctuator");
+        break;
     case C_TOKEN_NEWLINE:
-        return S8("newline");
+        result = S8("newline");
+        break;
     case C_TOKEN_PRAGMA:
-        return S8("pragma");
+        result = S8("pragma");
+        break;
     case C_TOKEN_KIND_COUNT:
-        return S8("invalid token kind");
+    default:
+        result = S8("invalid token kind");
+        break;
     }
-    return S8("invalid token kind");
+
+    return result;
 }
-#endif
