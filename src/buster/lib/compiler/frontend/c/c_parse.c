@@ -17463,7 +17463,10 @@ BUSTER_C_INTERNAL bool c_parse_storage_classes_valid(CParseResult* result, CPrep
         else
         {
             CEntityId named = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
-            if (!has_type && named.value < result->entity_count && result->entities[named.value].kind == C_ENTITY_TYPEDEF)
+            // Parameter callers pass the successfully parsed specifier prefix.
+            // Its typedef may be block-local even though the parameter type
+            // reader uses the global scope; keep checking later specifiers.
+            if (!has_type && (parameter || (named.value < result->entity_count && result->entities[named.value].kind == C_ENTITY_TYPEDEF)))
             {
                 has_type = true;
                 index += 1;
