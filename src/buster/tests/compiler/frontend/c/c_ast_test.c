@@ -3920,7 +3920,12 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     {S8_INITIALIZER("int f(int* a, int i) { return a[i++]; }"), S8_INITIALIZER("a"), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("int f(int* p) { return *p++ + 1; }"), S8_INITIALIZER("*"), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("void f(int a[4]) { a++; }"), S8_INITIALIZER("a"), 1, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_ARRAY},
-    {S8_INITIALIZER("struct S { int n; }; void f(struct S volatile* p) { p->n++; }"), S8_INITIALIZER("p"), 1, 4, C_TEST_AST_TYPE_PROBE_DECLINE,
+    // Over a qualified aggregate's member, which the pass now types through
+    // its shared qualified copy, and over an element of a qualified array
+    // member, which it still declines.
+    {S8_INITIALIZER("struct S { int n; }; void f(struct S volatile* p) { p->n++; }"), S8_INITIALIZER("p"), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_INT},
+    {S8_INITIALIZER("struct S { int v[4]; }; void f(struct S volatile* p) { p->v[1]++; }"), S8_INITIALIZER("p"), 1, 7, C_TEST_AST_TYPE_PROBE_DECLINE,
      C_TYPE_INVALID},
     {S8_INITIALIZER("int f(long a, int b) { return (a, b); }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("double f(int c, int a, double b) { return c ? a : b; }"), S8_INITIALIZER("c"), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_DOUBLE},
