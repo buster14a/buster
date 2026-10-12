@@ -180,3 +180,5 @@ request: issue #2761 refresh of ast-pilot-acceptance-v1 through the joined inven
 profile: ast-pilot-acceptance-v1
 request: issue #2761 refresh of throughput-real-source-v1 through the joined inventory consumer (#3656); request-only head over main bc3ac2eaa; A/A, report-only
 profile: throughput-real-source-v1
+request: issue #2761 refresh of throughput-real-source-v1, re-requested because the ff53347e request never started (PR was conflicted with main); request-only head over main 1287d5523; A/A, report-only
+profile: throughput-real-source-v1
