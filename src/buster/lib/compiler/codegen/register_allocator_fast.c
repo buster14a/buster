@@ -34,8 +34,9 @@
 // write-back of one no path out of the block reads, and `machine_fast_dead_in`
 // lets an edge conform leave one its destination does not read dirty for the
 // source's other successors. A fixed or tied operand that
-// needs an occupied register moves the live occupant to a free one
-// (`machine_fast_vacate`) rather than storing it. A reload prefers the
+// needs an occupied register, and a non-call row's clobber, moves the live
+// occupant to a free one (`machine_fast_vacate`) rather than storing it; an
+// occupant whose last use is the clobbering row is dropped. A reload prefers the
 // register the value was first bound to (`MachineFastState.preferred_registers`),
 // so the copies that repair cross-path disagreement mostly vanish.
 // `machine_fast_placement_build_pinned` then lays the frame out
@@ -474,14 +475,16 @@ BUSTER_GLOBAL_LOCAL void machine_fast_spill(MachineFastState* state, u32 physica
     state->virtual_register_locations[owner] = UINT32_MAX;
 }
 
-// Frees `target` for a fixed or tied operand of the row being scanned. A live
-// occupant moves to a free register with one copy instead of a store now and
-// a reload at its next use; dead or recreatable occupants, and every case
-// without a suitable free register, fall back to the eviction. The use phase
-// keeps the row's placed inputs held, so a free register here is never one of
-// them; the row's reservations and active pins are excluded, and a value
-// crossing the next call only moves into an already-saved callee-saved
-// register, since a caller-saved one would be flushed at the call anyway.
+// Frees `target` for a fixed or tied operand, or a non-call clobber, of the
+// row being scanned. A live occupant moves to a free register with one copy
+// instead of a store now and a reload at its next use; dead or recreatable
+// occupants, and every case without a suitable register, fall back to the
+// eviction. When no register is free, one held by a value already past its
+// last use serves instead. The use phase keeps the row's placed inputs held,
+// so a free register here is never one of them; the row's reservations and
+// active pins are excluded, and a value crossing the next call only moves
+// into an already-saved callee-saved register, since a caller-saved one would
+// be flushed at the call anyway.
 BUSTER_GLOBAL_LOCAL void machine_fast_vacate(MachineFastState* state, u32 target, u64 forbidden_mask)
 {
     u32 owner = state->owner[target];
@@ -494,9 +497,29 @@ BUSTER_GLOBAL_LOCAL void machine_fast_vacate(MachineFastState* state, u32 target
                          ~machine_fast_pin_active(state, state->current_point >> 2) & ~state->held_mask &
                          ~(description->callee_saved_mask & ~state->placement->callee_saved_mask) & ~state->physical_live_mask;
         candidates &= machine_fast_crosses_call(state, owner) ? description->callee_saved_mask : ~0ull;
-        if (candidates)
+        // With no free register, a held one whose owner is already dead is
+        // as good: releasing it costs nothing, since a dead owner is never
+        // stored. Its lanes are walked only on this fallback. The test is
+        // strict even while the row's uses count as consumed, so an input
+        // this row still reads is never overwritten before the row runs.
+        u64 reusable = candidates ? candidates
+                                  : machine_fast_class_mask(state, owner) & ~forbidden_mask & ~state->row_reserved_mask &
+                                        ~machine_fast_lane(target) & ~machine_fast_pin_active(state, state->current_point >> 2) &
+                                        state->held_mask & ~(description->callee_saved_mask & ~state->placement->callee_saved_mask) &
+                                        ~state->physical_live_mask &
+                                        (machine_fast_crosses_call(state, owner) ? description->callee_saved_mask : ~0ull);
+        bool uses_consumed = state->uses_consumed;
+        state->uses_consumed = false;
+        for (u64 remaining = candidates ? 0 : reusable; remaining; remaining &= remaining - 1u)
         {
-            moved_to = machine_fast_first_set(candidates);
+            u32 lane = machine_fast_first_set(remaining);
+            reusable &= machine_fast_owner_is_dead(state, lane) ? ~0ull : ~machine_fast_lane(lane);
+        }
+        state->uses_consumed = uses_consumed;
+        if (reusable)
+        {
+            moved_to = machine_fast_first_set(reusable);
+            machine_fast_spill(state, moved_to);
             MachineEdit* edit = (MachineEdit*)machine_stream_append(state->arena, state->edits);
             *edit = (MachineEdit){
                 .point = state->current_point,
@@ -4574,15 +4597,32 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         }
                     }
                 }
-                u64 clobber_mask = opcode_row.clobber_mask;
-                for (u32 physical_register = 0; clobber_mask; physical_register += 1)
+                // A non-call clobber (RDX at a division, an encoder sequence's
+                // scratch) moves a live occupant to a free register instead of
+                // storing it and reloading it at its next use. The row's
+                // reservations, held inputs and pins are excluded from the
+                // candidates, so the copy lands where nothing this row reads or
+                // writes. A call clobbers the caller-saved file, where a free
+                // register would be flushed with the rest, so it keeps the store.
+                // The row has read its inputs by the time a clobber lands, so an
+                // occupant whose last use is this row is dead: a constrained
+                // row's input forced into its own clobbered scratch (AArch64
+                // X9-X13) is dropped rather than stored or copied, the rule the
+                // physical-definition eviction above already applies.
+                state.uses_consumed = true;
+                for (u64 clobber_mask = opcode_row.clobber_mask; clobber_mask; clobber_mask &= clobber_mask - 1u)
                 {
-                    if (clobber_mask & (1ull << physical_register))
+                    u32 physical_register = machine_fast_first_set(clobber_mask);
+                    if (is_call)
                     {
-                        clobber_mask &= ~(1ull << physical_register);
                         machine_fast_spill(&state, physical_register);
                     }
+                    else
+                    {
+                        machine_fast_vacate(&state, physical_register, 0);
+                    }
                 }
+                state.uses_consumed = false;
                 // Vreg definitions bind their register lazily dirty.
                 for (u32 remaining = virtual_slots & define_slots; remaining; remaining &= remaining - 1u)
                 {
