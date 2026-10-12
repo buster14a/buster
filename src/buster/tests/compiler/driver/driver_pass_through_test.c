@@ -650,6 +650,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_runtime_path_arguments(U
         BUSTER_TEST(arguments, parsed.error == COMPILER_DRIVER_ERROR_NONE && parsed.linker_verbose && parsed.linker_argument_count == 2);
         if (parsed.linker_argument_count == 2) BUSTER_STRING_TEST(arguments, parsed.linker_arguments[1], operands[operand]);
     }
+    String8 literal_equals[] = {S8("-Wl,-rpath=/tmp/runtime="), S8("-Wl,--rpath=/tmp/runtime="),
+        S8("-Wl,-rpath=="), S8("-Wl,--rpath=="), S8("-Wl,-rpath,/tmp/runtime="), S8("-Wl,--rpath,=")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(literal_equals); index += 1)
+    {
+        String8 command[] = {S8("--target=x86_64-linux-gnu"), literal_equals[index], S8("main.o")};
+        BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)).error == COMPILER_DRIVER_ERROR_NONE);
+    }
     String8 malformed[] = {S8("-Wl,-rpath"), S8("-Wl,--rpath"), S8("-Wl,-rpath="), S8("-Wl,--rpath="), S8("-Wl,-rpath,,/opt")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(malformed); index += 1)
     {
@@ -754,6 +761,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_runtime_path_images(Unit
     {
         BUSTER_TEST(arguments, compiler_driver_test_runtime_path_tag(arena, executable, S8("$ORIGIN/lib"), 29));
     }
+    String8 literal_flags[] = {S8("-Wl,-rpath=/tmp/runtime="), S8("-Wl,--rpath=/tmp/runtime="),
+        S8("-Wl,-rpath=="), S8("-Wl,--rpath=="), S8("-Wl,-rpath,/tmp/runtime="), S8("-Wl,--rpath,=")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(literal_flags); index += 1)
+    {
+        String8 command[] = {S8("-g0"), main_source, literal_flags[index], S8("-o"), executable};
+        CompilerDriverResult literal = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        if (BUSTER_REQUIRE(arguments, literal.error == COMPILER_DRIVER_ERROR_NONE))
+        {
+            String8 expected = index == 2 || index == 3 || index == 5 ? S8("=") : S8("/tmp/runtime=");
+            BUSTER_TEST(arguments, compiler_driver_test_runtime_path_tag(arena, executable, expected, 29));
+        }
+    }
     os_file_delete(leaf_source);
     os_file_delete(wrapper_source);
     os_file_delete(main_source);
@@ -795,6 +814,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_default_arguments(Un
     {
         BUSTER_TEST(arguments, parsed.link_operations[0].as_needed && !parsed.link_operations[2].as_needed && !parsed.link_operations[3].as_needed);
         BUSTER_TEST(arguments, parsed.linker_argument_count == 2);
+    }
+    String8 direct_ordered[] = {S8("--target=x86_64-linux-gnu"), S8("-Wl,--as-needed"), S8("main.o"), S8("libfirst.so.1"),
+        S8("-Wl,--no-as-needed"), S8("libsecond.so"), S8("-Wl,--as-needed"), S8("-x"), S8("c"), S8("source.so")};
+    CompilerDriverInvocation direct = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(direct_ordered));
+    if (BUSTER_REQUIRE(arguments, direct.error == COMPILER_DRIVER_ERROR_NONE && direct.link_operation_count == 4))
+    {
+        BUSTER_TEST(arguments, !direct.link_operations[0].as_needed && direct.link_operations[1].as_needed &&
+                     !direct.link_operations[2].as_needed && !direct.link_operations[3].as_needed);
     }
     String8 compile[] = {S8("--target=x86_64-linux-gnu"), S8("-c"), S8("-Wl,--as-needed"), S8("main.c")};
     BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)).error == COMPILER_DRIVER_ERROR_ARGUMENT);
@@ -911,10 +938,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_default_images(UnitT
     String8 modes[] = {S8("-no-pie"), S8("-pie")};
     for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
     {
-        for (u32 keep = 0; keep < 2; keep += 1)
+        for (u32 occurrence = 0; occurrence < 4; occurrence += 1)
         {
+            bool keep = (occurrence & 1) != 0;
+            bool direct = (occurrence & 2) != 0;
             String8 command[] = {S8("-g0"), modes[mode], main_source, defaults, string_format_z(arena, S8("-L{S8}"), root),
-                S8("-lneeded"), keep ? S8("-Wl,--no-as-needed") : S8("-Wl,--as-needed"), S8("-lunused"), S8("-Wl,-rpath,$ORIGIN"), S8("-o"), executable};
+                direct ? library : S8("-lneeded"), keep ? S8("-Wl,--no-as-needed") : S8("-Wl,--as-needed"),
+                direct ? unused : S8("-lunused"), S8("-Wl,-rpath,$ORIGIN"), S8("-o"), executable};
             CompilerDriverResult linked = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
             if (BUSTER_REQUIRE(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE))
             {
@@ -937,6 +967,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_default_images(UnitT
         S8("-lneeded"), S8("-Wl,-rpath,$ORIGIN"), S8("-o"), executable};
     CompilerDriverResult kept_later = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(repeated)));
     BUSTER_TEST(arguments, kept_later.error == COMPILER_DRIVER_ERROR_NONE && compiler_driver_test_needed_tag(arena, executable, S8("libneeded.so")));
+    String8 direct_before[] = {S8("-g0"), defaults, library, main_source, S8("-o"), executable};
+    CompilerDriverResult direct_refused = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(direct_before)));
+    BUSTER_TEST(arguments, direct_refused.error == COMPILER_DRIVER_ERROR_LINK);
+    String8 direct_repeated[] = {S8("-g0"), defaults, library, main_source, library, S8("-o"), executable};
+    CompilerDriverResult direct_kept = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(direct_repeated)));
+    BUSTER_TEST(arguments, direct_kept.error == COMPILER_DRIVER_ERROR_NONE && compiler_driver_test_needed_tag(arena, executable, S8("libneeded.so")));
     BUSTER_TEST(arguments, file_write(main_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
     String8 trivial_command[] = {S8("-g0"), main_source, defaults, S8("-o"), executable};
     CompilerDriverResult trivial = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(trivial_command)));

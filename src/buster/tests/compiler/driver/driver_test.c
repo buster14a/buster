@@ -1,5 +1,7 @@
 // Driver integration tests: compiler_driver_tests registers argument parsing,
 // artifact, link, runtime, and cross-mode checks.
+// compiler_driver_test_image_retention_spawn checks executable registration
+// across a native spawn and the active/inactive deletion boundary.
 // compiler_driver_test_executable_cleanup checks bounded just-run image cleanup,
 // native Windows locks/denials and checked native-error propagation.
 // compiler_driver_test_empty_dependency_names owns argv/API refusal and output preservation.
@@ -14,6 +16,7 @@
 // compiler_driver_test_debug_options owns the default and ordered debug switches.
 // compiler_driver_test_nonnative_debug_options owns direct Wasm/eBPF debug refusals.
 // driver_metrics_test.c holds the per-input metrics / -fkeep-going fixtures.
+// compiler_driver_test_idirafter owns late system search and dependency classification.
 // macro_prefix_map_test.c owns builtin filename spelling, oracle and depfile checks.
 // compiler_driver_test_aarch64_elf_ldst checks foreign non-PIC memory references
 // against native host-linked controls, including each scaled low12 form.
@@ -74,6 +77,7 @@
 #include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 #include <buster/tests/compiler/driver/driver_test.h>
+#include <buster/lib/os_internal.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/tests/compiler/driver/fixtures/wasi_test_data.h>
 #include <buster/tests/compiler/codegen/codegen_test.h>
@@ -1365,7 +1369,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_forced_include(UnitTestA
     }
 
     // Other -include-* and -i* options are not -include.
-    String8 refused[] = {S8("-include-pch"), S8("-iprefix"), S8("-include-pch=x"), S8("-idirafter")};
+    String8 refused[] = {S8("-include-pch"), S8("-iprefix"), S8("-include-pch=x")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
     {
         String8 command_line[] = {refused[index], S8("source.c")};
@@ -1431,6 +1435,55 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
     BUSTER_TEST(arguments, x86_64.target.cpu_model == baseline.target.cpu_model);
     BUSTER_TEST(arguments, x86_64.target.cpu_features_explicit == baseline.target.cpu_features_explicit);
     BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(x86_64.target), target_cpu_features_effective(baseline.target)));
+    String8 abi_control_line[] = {S8("--target=x86_64-linux"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation abi_control = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(abi_control_line));
+    // QEMU's host probe repeats -m64. It must preserve the x86-64 ABI and
+    // diagnose the final target in either option order.
+    for (u32 order = 0; order < 2; order += 1)
+    {
+        String8 targets[] = {S8("--target=x86_64-linux"), S8("--target=aarch64-linux"), S8("--target=wasm32-wasi"), S8("--target=spirv64")};
+        for (u32 target_i = 0; target_i < BUSTER_ARRAY_LENGTH(targets); target_i += 1)
+        {
+            String8 line[] = {order ? targets[target_i] : S8("-m64"), order ? S8("-m64") : targets[target_i],
+                              S8("-m64"), S8("-c"), S8("source.c")};
+            CompilerDriverInvocation abi = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(line));
+            BUSTER_TEST(arguments, abi.error == (target_i ? COMPILER_DRIVER_ERROR_ARGUMENT : COMPILER_DRIVER_ERROR_NONE));
+            if (target_i)
+            {
+                BUSTER_STRING_TEST(arguments, abi.diagnostic, S8("unsupported option: -m64 for this target"));
+            }
+            else
+            {
+                BUSTER_TEST(arguments, abi.target.cpu_arch == CPU_ARCH_X86_64 && abi.target.os == OPERATING_SYSTEM_LINUX);
+                BUSTER_TEST(arguments, abi.target.cpu_model == abi_control.target.cpu_model);
+                BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(abi.target), target_cpu_features_effective(abi_control.target)));
+            }
+        }
+    }
+    // The last execution mode wins, including restoring long mode from i386.
+    String8 modes[] = {S8("-m16"), S8("-m32"), S8("-m64")};
+    for (u32 first = 0; first < BUSTER_ARRAY_LENGTH(modes); first += 1)
+    {
+        for (u32 last = 0; last < BUSTER_ARRAY_LENGTH(modes); last += 1)
+        {
+            for (u32 order = 0; order < 2; order += 1)
+            {
+                String8 line[] = {order ? S8("--target=i386-linux") : modes[first],
+                                  order ? modes[first] : S8("--target=i386-linux"), modes[last], S8("-fsyntax-only"), S8("source.c")};
+                CompilerDriverInvocation abi = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(line));
+                BUSTER_TEST(arguments, abi.error == COMPILER_DRIVER_ERROR_NONE);
+                BUSTER_TEST(arguments, abi.target.cpu_arch == (last == 2 ? CPU_ARCH_X86_64 : CPU_ARCH_I386));
+                BUSTER_TEST(arguments, abi.target.x86_code16 == (last == 0));
+            }
+        }
+    }
+    String8 unsupported_abis[] = {S8("-mx32"), S8("-m640")};
+    for (u32 abi_i = 0; abi_i < BUSTER_ARRAY_LENGTH(unsupported_abis); abi_i += 1)
+    {
+        String8 line[] = {S8("--target=x86_64-linux"), unsupported_abis[abi_i], S8("-c"), S8("source.c")};
+        CompilerDriverInvocation abi = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(line));
+        BUSTER_STRING_TEST(arguments, abi.diagnostic, string_format(arguments->arena, S8("unsupported option: {S8}"), unsupported_abis[abi_i]));
+    }
     // -mattr keeps refining the level in either order, and -mcpu is the same option.
     String8 refined_line[] = {S8("-mattr=-avx2"), S8("--target=x86_64-linux"), S8("-mcpu=x86-64-v3"), S8("-c"), S8("source.c")};
     CompilerDriverInvocation refined = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(refined_line));
@@ -1618,7 +1671,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
     }
     // A spelling that names no feature stays an unsupported option, typed as
     // the user wrote it, and the options that are not features keep failing.
-    String8 refused_spellings[] = {S8("-mfoo"), S8("-mno-foo"), S8("-m64"), S8("-mred-zone"), S8("-mno-red-zone"), S8("-mno-"), S8("-m"),
+    String8 refused_spellings[] = {S8("-mfoo"), S8("-mno-foo"), S8("-mred-zone"), S8("-mno-red-zone"), S8("-mno-"), S8("-m"),
                                    S8("-mavx2=1"), S8("-mtune="), S8("-march="), S8("-mAVX2")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused_spellings); index += 1)
     {
@@ -34520,6 +34573,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_ide_run(UnitTestArgument
 }
 #endif
 
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SANITIZE && BUSTER_LINK_LIBC
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_image_retention_exists(String8 path)
+{
+    FileStats stats = os_path_followed_stats(path);
+    return stats.valid && stats.kind != OS_FILE_KIND_MISSING;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_image_retention_spawn(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-c-image-retention-spawn"), S8(".c"));
+    String8 executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-image-retention-spawn"),
+#if BUSTER_WINDOWS
+                                                          S8(".exe"));
+#else
+                                                          S8(""));
+#endif
+    String8 source = S8("int main(void) { return 0; }\n");
+    bool source_written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, source_written);
+    if (source_written)
+    {
+        String8 command[] = {S8("-o"), executable_path, source_path};
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            bool previous_active = os_image_retention_set_active(true);
+            String8 run_arguments[] = {executable_path};
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                           (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+            BUSTER_TEST(arguments, spawned.handle != 0);
+            bool waited = false;
+            if (spawned.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_sync(arguments->arena, spawned);
+                waited = wait.result == PROCESS_RESULT_SUCCESS;
+            }
+            BUSTER_TEST(arguments, waited);
+            BUSTER_TEST(arguments, os_file_delete(executable_path) && compiler_driver_test_image_retention_exists(executable_path));
+            // This copy is never spawned, so inactive deletion cannot remove an
+            // image loaded by the surrounding profiling capture.
+            String8 inactive_path = buster_test_temporary_path(arguments->arena, S8("buster-c-image-retention-inactive"), S8(".bin"));
+            ByteSlice executable_bytes = file_read(arguments->arena, executable_path, (FileReadOptions){0});
+            if (BUSTER_REQUIRE(arguments, executable_bytes.pointer && executable_bytes.length))
+            {
+                bool inactive_written = file_write(inactive_path, executable_bytes);
+                if (BUSTER_REQUIRE(arguments, inactive_written))
+                {
+                    os_image_retention_register(inactive_path);
+                    BUSTER_TEST(arguments, os_file_delete(inactive_path) && compiler_driver_test_image_retention_exists(inactive_path));
+                    os_image_retention_set_active(false);
+                    BUSTER_TEST(arguments, os_file_delete(inactive_path) && !compiler_driver_test_image_retention_exists(inactive_path));
+                }
+            }
+            os_image_retention_set_active(previous_active);
+            BUSTER_TEST(arguments, os_file_delete(executable_path) &&
+                                   compiler_driver_test_image_retention_exists(executable_path) == previous_active);
+            BUSTER_TEST(arguments, os_file_delete(source_path));
+        }
+    }
+    BUSTER_TEST(arguments, os_file_delete(source_path));
+    return result;
+}
+#endif
+
 // The host default is documented in docs/agents/driver.md (#1557).
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_default_cpu_model(UnitTestArguments* arguments)
 {
@@ -34587,6 +34707,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_warning_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_gcc_spellings);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_default_cpu_model);
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SANITIZE && BUSTER_LINK_LIBC
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_image_retention_spawn);
+#endif
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_forced_include);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_pack_state);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_arguments);
@@ -34597,6 +34720,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_default_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_depfiles);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_dependency_files);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_idirafter);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_macro_prefix_map);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_macro_prefix_map_files);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_images);

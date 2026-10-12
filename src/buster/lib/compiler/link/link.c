@@ -16338,7 +16338,11 @@ bool link_validate_linker_arguments(Target target, NativeExecutableLinkOptions o
                 valid = valid && index + 1 < options.linker_argument_count && options.linker_arguments[index + 1].length;
                 if (valid) index += 1;
             }
-            else valid = valid && argument.pointer[argument.length - 1] != '=';
+            else
+            {
+                u64 prefix = argument.pointer[1] == '-' ? sizeof("--rpath=") - 1 : sizeof("-rpath=") - 1;
+                valid = valid && argument.length > prefix;
+            }
         }
         else if (string_equal(argument, S8("--enable-new-dtags")) || string_equal(argument, S8("--disable-new-dtags")))
         {

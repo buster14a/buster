@@ -384,6 +384,12 @@ publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
 the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
 not predefined at any level. `-mattr` overrides still refine the level.
 The psABI's LAHF-SAHF has no target feature and is implied by long mode.
+`-m64` selects x86-64 execution mode, including from an i386 target, and clears
+`code16`. Together with `-m16` and `-m32`, the last spelling wins independently
+of `--target` order. Repeated `-m64` preserves an existing x86-64 target's OS
+data model and CPU features. All three modes are refused for foreign and GPU
+targets; `-mx32` remains unsupported (#3458).
+
 For 32-bit x86, the canonical target architecture is `i386`; `i386`, `i486`,
 `i586` and `i686` are accepted architecture spellings, while `-march=i386`
 and `-march=i686` select explicit CPU models. The I386 baseline models GCC's
@@ -475,7 +481,17 @@ disables it. A later `-std=` restores that dialect's default (on in strict C99
 to C17, off in GNU modes and C23), so the last of these options wins, as in
 Clang. `-nostdlibinc` drops the system include directories but keeps the
 compiler resource directory (`stddef.h` and the other freestanding headers);
-`-nostdinc` drops both. `-working-directory=DIR` and `-working-directory DIR`
+`-nostdinc` drops both. Explicit `-I`, `-isystem` and `-idirafter`
+directories remain available with either switch. `-idirafter DIR` and
+`-idirafterDIR` add system-header directories after `-I`, `-isystem`, the
+compiler resource headers and the default system roots, preserving the order
+of repeated `-idirafter` options. Both quoted and angle includes consult them;
+quoted includes still search the including file\'s directory first. Headers
+resolved there are excluded by `-MMD`. External GPU pipelines refuse
+`-idirafter` explicitly because their system-path forwarding would lose its
+late search position. The registered
+`compiler_driver_test_idirafter` covers shadowed headers, sysroot defaults,
+`-nostdinc`/`-nostdlibinc`, `#include_next`, both spellings and MD/MMD classification. `-working-directory=DIR` and `-working-directory DIR`
 resolve relative input paths against `DIR` with host path rules (on POSIX only
 a leading `/` is absolute and `\` and `:` are ordinary filename bytes; on
 Windows `\x.c` takes the root name of `DIR` (`C:` or UNC `\\server`) and
@@ -1360,6 +1376,29 @@ Its configured native Linux control builds a real archive with host compiler
 and archiver, links an independent host control, and runs both Buster's direct
 and sysroot-default named links.
 
+Native x86-64 and AArch64 Linux ELF image links also accept direct `.so`
+and versioned `.so.N` file operands (numeric version components), including the full paths returned by
+CMake's `find_library`. Classification uses the per-input language snapshot:
+`-x c`, `-x cpp-output` and `-x assembler` select source even with a
+`.so` suffix; `-x none` restores DSO admission. Automatic `.so.c`,
+`.so.i` and `.so.s` inputs keep their source phases.
+DSOs retain their position among `-l` occurrences
+and form a serial translation-unit boundary. The driver reads exactly the
+supplied path; `-L` and default roots cannot substitute for a missing or
+incompatible direct input. The ordinary ELF export/version reader supplies
+imports, and `DT_NEEDED` uses `DT_SONAME` when present, otherwise the
+operand's original spelling. Repeated identities are emitted once.
+The `-v` `buster-native-ld` line includes each original file operand.
+
+Direct DSOs are refused for compile-only, preprocessing, syntax-only,
+assembly, LLVM/GPU output, foreign/non-ELF targets and the in-memory
+retained-object route. Missing, malformed and target-incompatible files
+fail the link with the supplied path and preserve existing output.
+`compiler_driver_library_path_inputs` checks both ELF targets and allocators,
+SONAME/no-SONAME identity, versioned paths, mixed `-l` order, duplicates,
+linker scripts and refusals. `compiler_driver_library_path_native` compares
+native links and execution against the configured GCC/Clang.
+
 For requested Linux shared libraries, located GNU linker scripts support
 `INPUT(...)`, `GROUP(...)` and `AS_NEEDED(...)`, including nested commands,
 commas, quoted filenames, whitespace and C block comments. Members name ELF64
@@ -1940,7 +1979,9 @@ The supported subset is:
   two arguments `-z defs` require strong references to resolve. Executables
   already enforce this rule; on a shared object it overrides loader resolution.
 - x86-64 Linux driver links: `--as-needed` and `--no-as-needed` select
-  subsequent `-l` requests in input order (the default is no-as-needed). A DSO
+  subsequent `-l` requests and automatic-language direct `.so` / `.so.N`
+  operands in input order (the default is no-as-needed). Explicit `-x` source
+  inputs retain their selected language. A DSO
   is retained when it satisfies a strong unresolved reference from preceding
   objects or a previously retained DSO. Later objects and weak references do
   not keep it. The driver consumes these switches before the native image API,

@@ -30,6 +30,8 @@
 // Its inventory value queries the table without running any registered module.
 // test_native_host_profile records the same binary's usable native features
 // and compiled SIMD tiers only for that independent inventory query.
+// BUSTER_TEST_RETAIN_IMAGES activates the test-only os_image_retention_* seam
+// and publishes TEST_IMAGE_RETENTION_V1 after temporary-root teardown.
 // CI_UNIT_MODULE_V1 inventories and the post-cleanup CI_UNIT_BATCH_V1 bind
 // selected timing rows to the complete registered suite for the parent.
 
@@ -37,6 +39,7 @@
 #include <buster/lib/entry_point.h>
 
 #include <buster/lib/os.h>
+#include <buster/lib/os_internal.h>
 #include <buster/lib/system_headers.h>
 #include <buster/lib/arena.h>
 #include <buster/lib/string.h>
@@ -3908,6 +3911,95 @@ BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_preservation_self_test(UnitT
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL void buster_test_temporary_root_test_preserve_setting(Arena* arena, bool enabled)
+{
+    SliceString8 inherited_keys = program_state->input.environment_keys;
+    SliceString8 inherited_values = program_state->input.environment_values;
+    String8* keys = arena_allocate(arena, String8, inherited_keys.length + 1);
+    String8* values = arena_allocate(arena, String8, inherited_keys.length + 1);
+    keys[0] = S8("BUSTER_TEST_PRESERVE_TEMPORARIES_ON_FAILURE");
+    values[0] = enabled ? S8("1") : S8("");
+    for (u64 index = 0; index < inherited_keys.length; index += 1)
+    {
+        keys[index + 1] = inherited_keys.pointer[index];
+        values[index + 1] = inherited_values.pointer[index];
+    }
+    program_state->input.environment_keys = (SliceString8){keys, inherited_keys.length + 1};
+    program_state->input.environment_values = (SliceString8){values, inherited_values.length + 1};
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_finish(UnitTestArguments* arguments, bool run_succeeded, bool retain_images)
+{
+    String8 preserve_setting = os_get_environment_variable(S8("BUSTER_TEST_PRESERVE_TEMPORARIES_ON_FAILURE"));
+    bool preserve_on_failure = string_equal(preserve_setting, S8("1")) && !run_succeeded;
+    bool preserve_root = retain_images || preserve_on_failure;
+    bool result = true;
+    if (buster_test_temporary_root.length)
+    {
+        result = preserve_root ? buster_test_temporary_root_preserve(arguments, !retain_images) :
+                                buster_test_temporary_root_delete(arguments);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_test_image_retention_parse(String8 value, bool* invalid)
+{
+    bool result = string_equal(value, S8("1"));
+    *invalid = value.length && !result;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_test_image_retention_self_test(UnitTestArguments* arguments)
+{
+    bool invalid = false;
+    bool empty = buster_test_image_retention_parse(S8(""), &invalid);
+    bool empty_valid = !empty && !invalid;
+    bool one = buster_test_image_retention_parse(S8("1"), &invalid);
+    bool one_valid = one && !invalid;
+    bool zero = buster_test_image_retention_parse(S8("0"), &invalid);
+    bool zero_invalid = !zero && invalid;
+    bool other = buster_test_image_retention_parse(S8("true"), &invalid);
+    bool other_invalid = !other && invalid;
+
+    SliceString8 saved_keys = program_state->input.environment_keys;
+    SliceString8 saved_values = program_state->input.environment_values;
+    buster_test_temporary_root_test_preserve_setting(arguments->arena, false);
+    bool retention_created = buster_test_temporary_root_create();
+    String8 retention_root = buster_test_temporary_root;
+    bool retention_finished = retention_created && buster_test_temporary_root_finish(arguments, true, true);
+    FileStats retention_stats = os_path_followed_stats(retention_root);
+    bool retention_kept = retention_stats.valid && retention_stats.kind == OS_FILE_KIND_DIRECTORY;
+    bool retention_cleaned = !retention_kept || os_directory_delete(retention_root);
+
+    bool default_created = buster_test_temporary_root_create();
+    String8 default_root = buster_test_temporary_root;
+    bool default_finished = default_created && buster_test_temporary_root_finish(arguments, true, false);
+    FileStats default_stats = os_path_followed_stats(default_root);
+    bool default_deleted = default_stats.valid && default_stats.kind == OS_FILE_KIND_MISSING;
+
+    buster_test_temporary_root_test_preserve_setting(arguments->arena, true);
+    bool preserved_success_created = buster_test_temporary_root_create();
+    String8 preserved_success_root = buster_test_temporary_root;
+    bool preserved_success_finished = preserved_success_created && buster_test_temporary_root_finish(arguments, true, false);
+    FileStats preserved_success_stats = os_path_followed_stats(preserved_success_root);
+    bool preserved_success_deleted = preserved_success_stats.valid && preserved_success_stats.kind == OS_FILE_KIND_MISSING;
+
+    bool preserved_failure_created = buster_test_temporary_root_create();
+    String8 preserved_failure_root = buster_test_temporary_root;
+    bool preserved_failure_finished = preserved_failure_created && buster_test_temporary_root_finish(arguments, false, false);
+    FileStats preserved_failure_stats = os_path_followed_stats(preserved_failure_root);
+    bool preserved_failure_kept = preserved_failure_stats.valid && preserved_failure_stats.kind == OS_FILE_KIND_DIRECTORY;
+    bool preserved_failure_cleaned = !preserved_failure_kept || os_directory_delete(preserved_failure_root);
+    program_state->input.environment_keys = saved_keys;
+    program_state->input.environment_values = saved_values;
+
+    bool result = empty_valid && one_valid && zero_invalid && other_invalid && retention_created && retention_finished && retention_kept &&
+                  retention_cleaned && default_created && default_finished && default_deleted && preserved_success_created &&
+                  preserved_success_finished && preserved_success_deleted && preserved_failure_created && preserved_failure_finished &&
+                  preserved_failure_kept && preserved_failure_cleaned;
+    return result;
+}
+
 BatchTestResult library_tests(UnitTestArguments* arguments)
 {
 #if BUSTER_IOS
@@ -3972,6 +4064,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
 
     BUSTER_CHECK(buster_test_temporary_root_failure_self_test(arguments));
     BUSTER_CHECK(buster_test_temporary_root_preservation_self_test(arguments));
+    BUSTER_CHECK(buster_test_image_retention_self_test(arguments));
     BUSTER_VALIDATE(test_debugger_failure_self_test());
     BUSTER_VALIDATE(test_arena_self_test());
     BUSTER_VALIDATE(test_require_self_test());
@@ -3990,6 +4083,21 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     if (timing_enabled)
     {
         BUSTER_CHECK(test_timing_self_test(arguments));
+    }
+
+    String8 image_retention_setting = os_get_environment_variable(S8("BUSTER_TEST_RETAIN_IMAGES"));
+    bool image_retention_setting_invalid = false;
+    bool retain_images = buster_test_image_retention_parse(image_retention_setting, &image_retention_setting_invalid);
+    bool previous_image_retention_active = false;
+    OsImageRetentionCounters image_retention_before = {0};
+    if (image_retention_setting_invalid)
+    {
+        string_print(S8("test: invalid BUSTER_TEST_RETAIN_IMAGES='{S8}' (expected 1)\n"), image_retention_setting);
+    }
+    else if (retain_images)
+    {
+        previous_image_retention_active = os_image_retention_set_active(true);
+        image_retention_before = os_image_retention_counters();
     }
 
     // A module selection marks the modules it leaves out in a working copy,
@@ -4058,15 +4166,34 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
         result.registered_module_count = TEST_ID_COUNT;
         result.unit_test_count += !selection_valid;
     }
+    result.unit_test_count += (u64)image_retention_setting_invalid;
 
-    String8 preserve_temporary_root = os_get_environment_variable(S8("BUSTER_TEST_PRESERVE_TEMPORARIES_ON_FAILURE"));
-    bool preserve_temporary_root_on_failure = string_equal(preserve_temporary_root, S8("1")) && !batch_test_succeeded(result);
     bool temporary_root_succeeded = true;
+    String8 image_retention_root = buster_test_temporary_root;
     if (buster_test_temporary_root.length)
     {
-        temporary_root_succeeded = preserve_temporary_root_on_failure ?
-                                   buster_test_temporary_root_preserve(arguments, true) :
-                                   buster_test_temporary_root_delete(arguments);
+        temporary_root_succeeded = buster_test_temporary_root_finish(arguments, batch_test_succeeded(result), retain_images);
+    }
+    if (retain_images)
+    {
+        OsImageRetentionCounters image_retention_after = os_image_retention_counters();
+        String8 reported_root = image_retention_root.length ? image_retention_root : S8("none");
+        string_print(S8("TEST_IMAGE_RETENTION_V1 status=retained root={S8} registered={u64} retained_files={u64} retained_directories={u64} overflowed={u64}\n"),
+                     reported_root, image_retention_after.registered - image_retention_before.registered,
+                     image_retention_after.retained_files - image_retention_before.retained_files,
+                     image_retention_after.retained_directories - image_retention_before.retained_directories,
+                     image_retention_after.overflowed - image_retention_before.overflowed);
+        if (image_retention_root.length)
+        {
+            string_print(S8("test: generated images retained under {S8}; after capture and symbol processing finish, remove it with: rm -rf '{S8}'\n"),
+                         image_retention_root, image_retention_root);
+        }
+        else
+        {
+            string_print(S8("test: generated images retained under none; no temporary root was created.\n"));
+        }
+        os_image_retention_set_active(false);
+        if (previous_image_retention_active) os_image_retention_set_active(true);
     }
     temporary_root_succeeded = temporary_root_succeeded && !buster_test_temporary_root_failed;
     if (!temporary_root_succeeded && !buster_test_temporary_root_failed)

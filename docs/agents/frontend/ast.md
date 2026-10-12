@@ -1392,7 +1392,7 @@ typedef.
 ## Lowering from the tree
 
 Under `-fc-ast-pilot` the driver also hands the tree to lowering, in
-`CIRLowerOptions.syntax_tree`. Without it, lowering is unchanged. The tree
+`CIRLowerOptions.syntax_tree`. Without it, lowering reads tokens as before. The tree
 outlives lowering: the driver releases it at the end of the unit, after the
 backend. Lowering reads nodes only while `c_lower_to_ir_with_options` runs,
 and no IR record, type or source range refers to a node.
@@ -1401,7 +1401,8 @@ and no IR record, type or source range refers to a node.
 token range, after its outer parentheses are stripped, is a `?:` at the root.
 If it is, it reports the `?` and the `:`. The expression, condition and
 logical-value steps and the query machine ask this about 800 k times on the
-self-host. Each time, the token scan walks the range.
+self-host. Without a tree, a per-body prefix count of `?` tokens refuses a
+range that holds none (#3467), and the token scan walks the rest.
 
 With the tree, `c_ir_tree_conditionals_build` runs once, before the first
 function is lowered. It indexes every top-level function body's `CONDITIONAL`
@@ -1674,7 +1675,7 @@ differential tests pass.
 | `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)), and so do the validators' plain type names; their runs where no type name begins are skipped ([type names](#type-names)). Tags, `typeof`, attributes, type names typed in machine frames, members and every declarator derivation stay with the machine. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Controlled-body extents (`c_ir_controlled_body_range`, and through it `c_ir_statement_end*` and `c_ir_statement_labels_end`) are read under `-fc-ast-pilot` from the [extent table](#statement-extents-in-lowering). The walkers stay the default path and the per-body and per-query fallback. `c_ir_lower_body_advance`'s first-token classification is not migrated. |
-| `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | `c_ir_root_conditional` is read under `-fc-ast-pilot` ([lowering from the tree](#lowering-from-the-tree)); the rest is not migrated. The evaluator's walk is designed in [Expression lowering from the tree](#expression-lowering-from-the-tree). |
+| `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | `c_ir_root_conditional` is read under `-fc-ast-pilot` ([lowering from the tree](#lowering-from-the-tree)); the rest is not migrated. The evaluator's walk is designed in [Expression lowering from the tree](#expression-lowering-from-the-tree). Without the tree, `c_ir_root_conditional` refuses a body range that holds no `?` by a per-body prefix count (#3467). |
 | `c_ir_predict_expression_type*`, `c_ir_query_*` | type-name probes, operand types over token ranges | `TYPE_NAME` / `CAST` / `SIZEOF_*` nodes plus retained semantic facts | Not migrated. Only negative type-name answers are cheap to take from the tree, and an exact first-token gate removes most of those without it (audit [`2026-10-11T104652Z`](../../performance-audits/2026-10-11T104652Z.md)); the tree slice waits on that gate. |
 | `c_ir_build_delimiter_index`, `CTokenPositionIndex` matching delimiters | bracket matching for every structural query | subtree extents | Not migrated. Lowering's retirement plan is in [Delimiters (map row 8)](#delimiters-map-row-8). |
 
@@ -3253,6 +3254,52 @@ the same way and diagnostic only:
 - `c_ast_types_type_body` falls from 329.2 M to 274.2 M Ir (−16.7%), and the
   pilot's compile by 54.2 M (−0.58%).
 - The default path is within −0.001% on `-fsyntax-only` and +0.001% on `-c`.
+
+### Root-conditional `?` refusal without the tree
+
+For the tree-free negative test in `c_ir_root_conditional` (a per-body prefix
+count of `?` tokens, built in lowering scratch the first time a query asks),
+these budgets were declared before its measured runs. It is a default-path
+change and needs no tree, so it is measured as its own arm, apart from any
+tree slice that answers the same predicate. Two arms are counted with
+Callgrind (`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3`
+Release builds, on the self-host unity input:
+- A: base, default flags;
+- D: candidate, default flags.
+
+The base is main `4e5d563f`, which the candidate branches from. The budgets:
+- **Correctness.** The answer is exact by construction: the scan can return
+  true only at a `?` in its range, and the count uses the scan's own token
+  test. Reference-check builds run the scan behind every refused range and
+  check it agrees. `-c` objects (`-g0` and `-g`) are byte-identical between
+  A and D, `test_self_host` keeps its fixed point, and `test_all` passes.
+- **The predicate's own cost (D against A, `-c` `-g0`).**
+  `c_ir_root_conditional`'s inclusive instructions, with the prefix build
+  charged, fall by at least 50%.
+- **The whole compile (D against A).** `-c` (`-g0`) falls by at least 0.2%
+  Ir. `-fsyntax-only` runs no lowering, so it must stay within the ±0.05%
+  rebuild noise.
+- **The same pattern elsewhere.** `c_ir_has_root_comma` and the scanning
+  arm of `c_ir_group_fact` ship a count only if each one alone meets the
+  same 50% inclusive budget and moves `-c` by at least 0.05%. Otherwise the
+  audit records the negative result.
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested. The report-only main comparison runs after the
+  merge, and Zen 5 validation stays incomplete (#2761).
+
+The negative test's hosted census is
+[`2026-10-11T102547Z`](../../performance-audits/2026-10-11T102547Z.md), taken
+the same way and diagnostic only:
+- The objects are byte-identical between A and D, at `-g0` and at `-g`.
+- `-c` (`-g0`) falls by 96.5 M Ir (−0.40%). That is about 62% of the
+  predicate's 154.6 M, with the 16.4 M prefix build charged.
+- `-fsyntax-only` moves by −0.002%.
+- A `,` count for `c_ir_has_root_comma` measured −0.007% and did not ship.
+- `c_ir_group_fact`'s scanning arm is below the bar by census.
+- The tree slice ([lowering from the tree](#lowering-from-the-tree)) landed
+  first and was measured without this refusal. When lowering has a tree for a
+  body it takes the tree's answers, so the count is built only on the
+  default path and for bodies the tree does not index.
 - Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
