@@ -553,6 +553,9 @@ struct ObjectExecutable
 BUSTER_F_DECL ObjectFormat object_format_for_target(Target target);
 BUSTER_F_DECL String8 object_format_name(ObjectFormat format);
 BUSTER_F_DECL void object_write_statistics_add(ObjectWriteStatistics* total, ObjectWriteStatistics const* unit);
+// Supported text snapshot: generated code is copied into arena. Data payloads
+// and symbol names retain their existing program/module lifetimes; this does
+// not make the complete ObjectFile independent of its producers.
 BUSTER_F_DECL ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program, CodegenModule* module, Target target);
 BUSTER_F_DECL String8 object_print_assembly(Arena* arena, ObjectFile* object);
 BUSTER_F_DECL ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat format);

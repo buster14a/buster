@@ -110,6 +110,7 @@
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/aarch64_semantics.h>
 #include <buster/lib/compiler/object/object.h>
+#include <buster/lib/compiler/object/object_internal.h>
 #include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/file.h>
 #include <buster/lib/string.h>
@@ -8947,7 +8948,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     WORK_LEDGER_PHASE(OBJECT);
     compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_OBJECT);
-    ObjectFile object = object_from_canonical_codegen_module(arena, lowered.program, &code, invocation.target);
+    // Codegen completed all fixups in this arena. Single-TU results retain
+    // it; the multi-TU collector evacuates the object before releasing it.
+    // No writer may mutate the borrowed bytes or outlive that ownership.
+    ObjectFile object = object_from_canonical_codegen_module_borrowed_text(arena, lowered.program, &code, invocation.target);
     result.object_error = object.error;
     if (object.error != OBJECT_ERROR_NONE)
     {

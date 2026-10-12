@@ -7387,8 +7387,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batches(UnitTestArg
                 BUSTER_TEST(arguments, serial.compilation_workers == 1 && serial.tokenizer_warning_count == 3);
                 ByteSlice original = file_read(arena, output, (FileReadOptions){0});
                 BUSTER_TEST(arguments, original.length != 0);
+                ObjectArtifact retained = {0};
+                bool retained_object = BUSTER_REQUIRE(arguments, serial.error == COMPILER_DRIVER_ERROR_NONE && serial.has_object);
+                if (retained_object)
+                {
+                    retained = object_write(arena, &serial.object, object_format_for_target(serial.object.target));
+                    retained_object = BUSTER_REQUIRE(arguments, retained.error == OBJECT_ERROR_NONE && retained.bytes.pointer && retained.bytes.length);
+                }
                 // Grow/reuse a gang, take an odd final batch, then shrink it.
-                // The final serial repetition also catches recycled arenas.
+                // Re-serialize the previous returned object after each run:
+                // comparing only output files would miss dangling TU payloads.
                 u32 repeats[] = {workers, workers, 1};
                 for (u32 repetition = 0; repetition < BUSTER_ARRAY_LENGTH(repeats); repetition += 1)
                 {
@@ -7402,6 +7410,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batches(UnitTestArg
                     ByteSlice candidate = file_read(arena, output, (FileReadOptions){0});
                     BUSTER_TEST(arguments, candidate.length == original.length && candidate.length &&
                                           memory_compare(candidate.pointer, original.pointer, candidate.length));
+                    if (retained_object)
+                    {
+                        ObjectArtifact again = object_write(arena, &serial.object, object_format_for_target(serial.object.target));
+                        if (BUSTER_REQUIRE(arguments, again.error == OBJECT_ERROR_NONE && again.bytes.pointer && again.bytes.length == retained.bytes.length))
+                        {
+                            BUSTER_TEST(arguments, memory_compare(again.bytes.pointer, retained.bytes.pointer, retained.bytes.length));
+                        }
+                    }
                 }
             }
             scratch_end(attempt);

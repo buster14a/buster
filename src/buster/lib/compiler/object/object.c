@@ -1,7 +1,8 @@
 // The format-neutral object model and its three on-disk formats. An
 // ObjectFile is the shared in-memory shape — sections, symbols,
 // relocations, debug payloads — that codegen output is converted into
-// (object_from_canonical_codegen_module), textual disassembly is printed
+// (object_from_canonical_codegen_module; the driver-private borrowed-text
+// entry shares object_build_canonical_codegen_module), textual disassembly is printed
 // from (object_print_assembly), and ELF64/COFF/Mach-O are read into and
 // written from. Readers treat input as hostile: every offset, count, and
 // string is bounds-checked before use, and malformed bytes produce an
@@ -12875,720 +12876,750 @@ BUSTER_GLOBAL_LOCAL u32 object_named_section_map(ObjectNamedSectionPlan const* p
     return result;
 }
 
-ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program, CodegenModule* module, Target target)
+BUSTER_GLOBAL_LOCAL ObjectFile object_build_canonical_codegen_module(Arena* arena, IrProgram* program, CodegenModule* module, Target target, bool borrow_text)
 {
     ObjectFile result = {
         .target = target,
     };
-    if (!arena || !program || !module || module->error != CODEGEN_ERROR_NONE || module->data_relocation_count || !object_codegen_functions_valid(module) ||
-        (target.cpu_arch != CPU_ARCH_X86_64 && target.cpu_arch != CPU_ARCH_AARCH64))
+    do
     {
-        result.error = OBJECT_ERROR_INVALID_INPUT;
-        return result;
-    }
-    // The sections `section` attributes name, split off the tails of the
-    // images below and appended past OBJECT_SECTION_COUNT (issue 1276).
-    ObjectNamedSectionPlan named = object_named_section_plan(arena, program, module, target);
-    if (named.error != OBJECT_ERROR_NONE)
-    {
-        result.error = named.error;
-        result.diagnostic = named.diagnostic;
-        return result;
-    }
-    result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT + named.count);
-    result.section_count = OBJECT_SECTION_COUNT + named.count;
-    u8* text = arena_allocate(arena, u8, module->code.length);
-    if (module->code.length)
-    {
-        memcpy(text, module->code.pointer, module->code.length);
-    }
-    u32 read_only_alignment = 16;
-    u32 writable_alignment = 16;
-    u32 thread_local_alignment = 16;
-    u32 text_section_alignment = 16;
-    for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
-    {
-        text_section_alignment = BUSTER_MAX(text_section_alignment, object_function_alignment(ir_symbol_from_id(&program->symbols, module->entries[entry_index].symbol)));
-    }
-    for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
-    {
-        CodegenModuleGlobal global = module->globals[global_index];
-        if (global.is_thread_local)
+        if (!arena || !program || !module || module->error != CODEGEN_ERROR_NONE || module->data_relocation_count ||
+            (module->code.length && !module->code.pointer) || !object_codegen_functions_valid(module) ||
+            (target.cpu_arch != CPU_ARCH_X86_64 && target.cpu_arch != CPU_ARCH_AARCH64))
         {
-            thread_local_alignment = BUSTER_MAX(thread_local_alignment, global.alignment);
+            result.error = OBJECT_ERROR_INVALID_INPUT;
+            break;
         }
-        else if (global.read_only)
+        // The sections `section` attributes name, split off the tails of the
+        // images below and appended past OBJECT_SECTION_COUNT (issue 1276).
+        ObjectNamedSectionPlan named = object_named_section_plan(arena, program, module, target);
+        if (named.error != OBJECT_ERROR_NONE)
         {
-            read_only_alignment = BUSTER_MAX(read_only_alignment, global.alignment);
+            result.error = named.error;
+            result.diagnostic = named.diagnostic;
+            break;
         }
-        else
+        result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT + named.count);
+        result.section_count = OBJECT_SECTION_COUNT + named.count;
+        u8* text = module->code.pointer;
+        if (!borrow_text)
         {
-            writable_alignment = BUSTER_MAX(writable_alignment, global.alignment);
-        }
-    }
-    result.sections[OBJECT_SECTION_TEXT] = (ObjectSection){
-        .name = S8(".text"),
-        .data =
+            text = arena_allocate(arena, u8, module->code.length);
+            if (module->code.length)
             {
-                .pointer = text,
-                .length = named.tail_starts[OBJECT_SECTION_TEXT],
-            },
-        .kind = OBJECT_SECTION_TEXT,
-        .alignment = text_section_alignment,
-    };
-    result.sections[OBJECT_SECTION_READ_ONLY_DATA] = (ObjectSection){
-        .name = S8(".rodata"),
-        .data =
-            {
-                .pointer = module->read_only_data.pointer,
-                .length = named.tail_starts[OBJECT_SECTION_READ_ONLY_DATA],
-            },
-        .kind = OBJECT_SECTION_READ_ONLY_DATA,
-        .alignment = read_only_alignment,
-    };
-    result.sections[OBJECT_SECTION_DATA] = (ObjectSection){
-        .name = S8(".data"),
-        .data =
-            {
-                .pointer = module->writable_data.pointer,
-                .length = named.tail_starts[OBJECT_SECTION_DATA],
-            },
-        .kind = OBJECT_SECTION_DATA,
-        .alignment = writable_alignment,
-    };
-    result.sections[OBJECT_SECTION_ZERO] = (ObjectSection){
-        .name = S8(".bss"),
-        .virtual_size = named.tail_starts[OBJECT_SECTION_ZERO],
-        .kind = OBJECT_SECTION_ZERO,
-        .alignment = writable_alignment,
-    };
-    // A named section takes its bytes from the tail of its image. They are
-    // copied rather than sliced, because the section's offsets count from
-    // `base`, which can lie below the first member.
-    for (u32 index = 0; index < named.count; index += 1)
-    {
-        ObjectNamedSection* plan = named.sections + index;
-        ByteSlice image = plan->source == OBJECT_SECTION_TEXT             ? (ByteSlice){.pointer = text, .length = module->code.length}
-                          : plan->source == OBJECT_SECTION_READ_ONLY_DATA ? module->read_only_data
-                          : plan->source == OBJECT_SECTION_DATA           ? module->writable_data
-                                                                          : (ByteSlice){0};
-        bool zero_fill = plan->source == OBJECT_SECTION_ZERO;
-        u64 size = plan->end - plan->base;
-        u8* bytes = zero_fill ? 0 : arena_allocate_zeroed(arena, u8, size ? size : 1);
-        if (!zero_fill && image.pointer && plan->end > plan->start)
-        {
-            memcpy(bytes + (plan->start - plan->base), image.pointer + plan->start, plan->end - plan->start);
+                memcpy(text, module->code.pointer, module->code.length);
+            }
         }
-        result.sections[OBJECT_SECTION_COUNT + index] = (ObjectSection){
-            .name = plan->name,
+        u32 read_only_alignment = 16;
+        u32 writable_alignment = 16;
+        u32 thread_local_alignment = 16;
+        u32 text_section_alignment = 16;
+        for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
+        {
+            text_section_alignment = BUSTER_MAX(text_section_alignment, object_function_alignment(ir_symbol_from_id(&program->symbols, module->entries[entry_index].symbol)));
+        }
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            CodegenModuleGlobal global = module->globals[global_index];
+            if (global.is_thread_local)
+            {
+                thread_local_alignment = BUSTER_MAX(thread_local_alignment, global.alignment);
+            }
+            else if (global.read_only)
+            {
+                read_only_alignment = BUSTER_MAX(read_only_alignment, global.alignment);
+            }
+            else
+            {
+                writable_alignment = BUSTER_MAX(writable_alignment, global.alignment);
+            }
+        }
+        result.sections[OBJECT_SECTION_TEXT] = (ObjectSection){
+            .name = S8(".text"),
             .data =
                 {
-                    .pointer = bytes,
-                    .length = zero_fill ? 0 : size,
+                    .pointer = text,
+                    .length = named.tail_starts[OBJECT_SECTION_TEXT],
                 },
-            .virtual_size = zero_fill ? size : 0,
-            .kind = plan->kind,
-            .alignment = plan->alignment,
+            .kind = OBJECT_SECTION_TEXT,
+            .alignment = text_section_alignment,
         };
-    }
-    result.sections[OBJECT_SECTION_THREAD_LOCAL_DATA] = (ObjectSection){
-        .name = S8(".tdata"),
-        .data = module->thread_local_data,
-        .kind = OBJECT_SECTION_THREAD_LOCAL_DATA,
-        .alignment = thread_local_alignment,
-    };
-    result.sections[OBJECT_SECTION_THREAD_LOCAL_ZERO] = (ObjectSection){
-        .name = S8(".tbss"),
-        .virtual_size = module->thread_local_zero_size,
-        .kind = OBJECT_SECTION_THREAD_LOCAL_ZERO,
-        .alignment = thread_local_alignment,
-    };
-    object_metadata_sections_initialize(&result);
-    ObjectWindowsUnwindResult windows_unwind = {0};
-    if (target_uses_pe_unwind(target))
-    {
-        u32 compiler_function_count = module->function_count - module->assembly_function_count;
-        windows_unwind = target.cpu_arch == CPU_ARCH_X86_64 ? object_windows_x64_unwind_build(arena, module->functions, module->function_count)
-                                                             : object_windows_arm64_unwind_build(arena, module->functions, compiler_function_count);
-        if (!windows_unwind.valid)
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            return result;
-        }
-    }
-    DwarfCfiResult cfi = {0};
-    if (object_format_for_target(target) != OBJECT_FORMAT_COFF && module->function_count)
-    {
-        cfi = dwarf_cfi_build(arena, (DwarfCfiInput){
-                                         .functions = module->functions,
-                                         .target = target,
-                                         .function_count = module->function_count,
-                                     });
-        if (!cfi.valid)
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            return result;
-        }
-    }
-    DwarfResult dwarf = {0};
-    CodeviewResult codeview = {0};
-    if (module->debug_info && program->sources.count && (module->entry_count || module->global_count))
-    {
-        IrModule* debug_ir_module = module->ir_module;
-        for (u32 module_index = 0; module_index < program->module_count && !debug_ir_module; module_index += 1)
-        {
-            IrModule* candidate = program->modules + module_index;
-            for (u32 function_index = 0; function_index < candidate->function_count && module->entry_count; function_index += 1)
-            {
-                if (candidate->functions[function_index].symbol.value == module->entries[0].symbol.value)
+        result.sections[OBJECT_SECTION_READ_ONLY_DATA] = (ObjectSection){
+            .name = S8(".rodata"),
+            .data =
                 {
-                    debug_ir_module = candidate;
-                    break;
-                }
+                    .pointer = module->read_only_data.pointer,
+                    .length = named.tail_starts[OBJECT_SECTION_READ_ONLY_DATA],
+                },
+            .kind = OBJECT_SECTION_READ_ONLY_DATA,
+            .alignment = read_only_alignment,
+        };
+        result.sections[OBJECT_SECTION_DATA] = (ObjectSection){
+            .name = S8(".data"),
+            .data =
+                {
+                    .pointer = module->writable_data.pointer,
+                    .length = named.tail_starts[OBJECT_SECTION_DATA],
+                },
+            .kind = OBJECT_SECTION_DATA,
+            .alignment = writable_alignment,
+        };
+        result.sections[OBJECT_SECTION_ZERO] = (ObjectSection){
+            .name = S8(".bss"),
+            .virtual_size = named.tail_starts[OBJECT_SECTION_ZERO],
+            .kind = OBJECT_SECTION_ZERO,
+            .alignment = writable_alignment,
+        };
+        // A named section takes its bytes from the tail of its image. They are
+        // copied rather than sliced, because the section's offsets count from
+        // `base`, which can lie below the first member.
+        for (u32 index = 0; index < named.count; index += 1)
+        {
+            ObjectNamedSection* plan = named.sections + index;
+            ByteSlice image = plan->source == OBJECT_SECTION_TEXT             ? (ByteSlice){.pointer = text, .length = module->code.length}
+                              : plan->source == OBJECT_SECTION_READ_ONLY_DATA ? module->read_only_data
+                              : plan->source == OBJECT_SECTION_DATA           ? module->writable_data
+                                                                              : (ByteSlice){0};
+            bool zero_fill = plan->source == OBJECT_SECTION_ZERO;
+            u64 size = plan->end - plan->base;
+            u8* bytes = zero_fill ? 0 : arena_allocate_zeroed(arena, u8, size ? size : 1);
+            if (!zero_fill && image.pointer && plan->end > plan->start)
+            {
+                memcpy(bytes + (plan->start - plan->base), image.pointer + plan->start, plan->end - plan->start);
             }
-            for (u32 global_index = 0; global_index < candidate->global_count && !debug_ir_module && module->global_count; global_index += 1)
+            result.sections[OBJECT_SECTION_COUNT + index] = (ObjectSection){
+                .name = plan->name,
+                .data =
+                    {
+                        .pointer = bytes,
+                        .length = zero_fill ? 0 : size,
+                    },
+                .virtual_size = zero_fill ? size : 0,
+                .kind = plan->kind,
+                .alignment = plan->alignment,
+            };
+        }
+        result.sections[OBJECT_SECTION_THREAD_LOCAL_DATA] = (ObjectSection){
+            .name = S8(".tdata"),
+            .data = module->thread_local_data,
+            .kind = OBJECT_SECTION_THREAD_LOCAL_DATA,
+            .alignment = thread_local_alignment,
+        };
+        result.sections[OBJECT_SECTION_THREAD_LOCAL_ZERO] = (ObjectSection){
+            .name = S8(".tbss"),
+            .virtual_size = module->thread_local_zero_size,
+            .kind = OBJECT_SECTION_THREAD_LOCAL_ZERO,
+            .alignment = thread_local_alignment,
+        };
+        object_metadata_sections_initialize(&result);
+        ObjectWindowsUnwindResult windows_unwind = {0};
+        if (target_uses_pe_unwind(target))
+        {
+            u32 compiler_function_count = module->function_count - module->assembly_function_count;
+            windows_unwind = target.cpu_arch == CPU_ARCH_X86_64 ? object_windows_x64_unwind_build(arena, module->functions, module->function_count)
+                                                                 : object_windows_arm64_unwind_build(arena, module->functions, compiler_function_count);
+            if (!windows_unwind.valid)
             {
-                for (u32 object_global_index = 0; object_global_index < module->global_count; object_global_index += 1)
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+        }
+        DwarfCfiResult cfi = {0};
+        if (object_format_for_target(target) != OBJECT_FORMAT_COFF && module->function_count)
+        {
+            cfi = dwarf_cfi_build(arena, (DwarfCfiInput){
+                                             .functions = module->functions,
+                                             .target = target,
+                                             .function_count = module->function_count,
+                                         });
+            if (!cfi.valid)
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+        }
+        DwarfResult dwarf = {0};
+        CodeviewResult codeview = {0};
+        if (module->debug_info && program->sources.count && (module->entry_count || module->global_count))
+        {
+            IrModule* debug_ir_module = module->ir_module;
+            for (u32 module_index = 0; module_index < program->module_count && !debug_ir_module; module_index += 1)
+            {
+                IrModule* candidate = program->modules + module_index;
+                for (u32 function_index = 0; function_index < candidate->function_count && module->entry_count; function_index += 1)
                 {
-                    if (candidate->globals[global_index].symbol.value == module->globals[object_global_index].symbol.value)
+                    if (candidate->functions[function_index].symbol.value == module->entries[0].symbol.value)
                     {
                         debug_ir_module = candidate;
                         break;
                     }
                 }
-            }
-        }
-        String8* file_paths = arena_allocate(arena, String8, program->sources.count);
-        for (u32 source_index = 0; source_index < program->sources.count; source_index += 1)
-        {
-            file_paths[source_index] = program->sources.sources[source_index].path;
-        }
-        IrSourceRange* declaration_sources = arena_allocate(arena, IrSourceRange, program->symbols.count);
-        memset(declaration_sources, 0, (u64)program->symbols.count * sizeof(*declaration_sources));
-        for (u32 module_index = 0; module_index < program->module_count; module_index += 1)
-        {
-            IrModule* ir_module = program->modules + module_index;
-            for (u32 function_index = 0; function_index < ir_module->function_count; function_index += 1)
-            {
-                IrFunction* function = ir_module->functions + function_index;
-                if (function->symbol.value < program->symbols.count)
+                for (u32 global_index = 0; global_index < candidate->global_count && !debug_ir_module && module->global_count; global_index += 1)
                 {
-                    declaration_sources[function->symbol.value] = function->source;
+                    for (u32 object_global_index = 0; object_global_index < module->global_count; object_global_index += 1)
+                    {
+                        if (candidate->globals[global_index].symbol.value == module->globals[object_global_index].symbol.value)
+                        {
+                            debug_ir_module = candidate;
+                            break;
+                        }
+                    }
                 }
             }
-        }
-        // A function split off into a named section (issue 1276) leaves the
-        // debug information, with its rows and locations: a unit here
-        // describes one text range from `.text`'s start, and those functions
-        // are the text image's tail, past what `.text` keeps.
-        u64 debug_text_end = named.tail_starts[OBJECT_SECTION_TEXT];
-        u32 debug_entry_count = 0;
-        while (debug_entry_count < module->entry_count && module->entries[debug_entry_count].offset < debug_text_end)
-        {
-            debug_entry_count += 1;
-        }
-        DwarfFunction* functions = arena_allocate(arena, DwarfFunction, module->entry_count);
-        DebugFunctionSeed* debug_functions = arena_allocate(arena, DebugFunctionSeed, module->entry_count);
-        for (u32 entry_index = 0; entry_index < debug_entry_count; entry_index += 1)
-        {
-            CodegenModuleEntry* entry = module->entries + entry_index;
-            u64 end = entry->offset + module->functions[entry_index].code_size;
-            IrSymbol* entry_symbol = ir_symbol_from_id(&program->symbols, entry->symbol);
-            IrSourceRange declaration = entry->symbol.value < program->symbols.count ? declaration_sources[entry->symbol.value] : (IrSourceRange){0};
-            functions[entry_index] = (DwarfFunction){
-                .name = entry_symbol ? entry_symbol->name : S8("unknown"),
-                .code_offset = entry->offset,
-                .code_size = (u32)(end - entry->offset),
-                .file = declaration.source.value < program->sources.count ? declaration.source.value : 0,
-                .line = ir_source_position(program, declaration).line,
-            };
-            debug_functions[entry_index] = (DebugFunctionSeed){
-                .name = functions[entry_index].name,
-                .symbol = entry->symbol,
-                .code_offset = entry->offset,
-                .code_size = (u32)(end - entry->offset),
-            };
-        }
-        u32 line_count = module->entry_count ? module->line_entry_count : 0;
-        DebugLocationSeed* debug_locations = module->debug_locations;
-        u32 debug_location_count = module->debug_location_count;
-        // The module's own rows serve as the builders' input: DwarfLineEntry is
-        // CodegenLineEntry field for field, and codegen recorded every source
-        // already clamped to the program's source table (its
-        // `line_source_limit`), which is the one thing a copy here used to do
-        // to a million rows.
-        DwarfLineEntry* lines = (DwarfLineEntry*)module->line_entries;
-        if (debug_text_end < module->code.length)
-        {
-            DwarfLineEntry* kept_lines = arena_allocate(arena, DwarfLineEntry, line_count ? line_count : 1);
-            u32 kept_line_count = 0;
-            for (u32 line_index = 0; line_index < line_count; line_index += 1)
+            String8* file_paths = arena_allocate(arena, String8, program->sources.count);
+            for (u32 source_index = 0; source_index < program->sources.count; source_index += 1)
             {
-                kept_lines[kept_line_count] = lines[line_index];
-                kept_line_count += lines[line_index].code_offset < debug_text_end;
+                file_paths[source_index] = program->sources.sources[source_index].path;
             }
-            DebugLocationSeed* kept_locations = arena_allocate(arena, DebugLocationSeed, debug_location_count ? debug_location_count : 1);
-            u32 kept_location_count = 0;
-            for (u32 location_index = 0; location_index < debug_location_count; location_index += 1)
+            IrSourceRange* declaration_sources = arena_allocate(arena, IrSourceRange, program->symbols.count);
+            memset(declaration_sources, 0, (u64)program->symbols.count * sizeof(*declaration_sources));
+            for (u32 module_index = 0; module_index < program->module_count; module_index += 1)
             {
-                kept_locations[kept_location_count] = debug_locations[location_index];
-                kept_location_count += debug_locations[location_index].start < debug_text_end;
-            }
-            lines = kept_lines;
-            line_count = kept_line_count;
-            debug_locations = kept_locations;
-            debug_location_count = kept_location_count;
-        }
-        if (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI)
-        {
-            DebugModel debug_model = debug_model_build(arena, (DebugModelInput){
-                                                                   .program = program,
-                                                                   .module = debug_ir_module,
-                                                                   .producer = S8("buster"),
-                                                                   .comp_dir = S8("."),
-                                                                   .functions = debug_functions,
-                                                                   .locations = debug_locations,
-                                                                   .function_count = debug_entry_count,
-                                                                   .location_count = debug_location_count,
-                                                               });
-            codeview = codeview_build(arena, (CodeviewInput){
-                                                 .model = &debug_model,
-                                                 .producer = S8("buster"),
-                                                 .file_paths = file_paths,
-                                                 .functions = functions,
-                                                 .lines = lines,
-                                                 .file_count = program->sources.count,
-                                                 .function_count = debug_entry_count,
-                                                 .line_count = line_count,
-                                                 .machine = target.cpu_arch == CPU_ARCH_AARCH64 ? CODEVIEW_MACHINE_ARM64 : CODEVIEW_MACHINE_X64,
-                                             });
-            if (!codeview.valid)
-            {
-                result.error = OBJECT_ERROR_DEBUG_INFO;
-            }
-        }
-        else
-        {
-            DebugModel debug_model = debug_model_build(arena, (DebugModelInput){
-                                                                   .program = program,
-                                                                   .module = debug_ir_module,
-                                                                   .producer = S8("buster"),
-                                                                   .comp_dir = S8("."),
-                                                                   .functions = debug_functions,
-                                                                   .locations = debug_locations,
-                                                                   .function_count = debug_entry_count,
-                                                                   .location_count = debug_location_count,
-                                                               });
-            dwarf = dwarf_build(arena, (DwarfInput){
-                                           .model = &debug_model,
-                                           .target = target,
-                                           .producer = S8("buster"),
-                                           .comp_dir = S8("."),
-                                           .file_paths = file_paths,
-                                           .functions = functions,
-                                           .lines = lines,
-                                           .code_size = debug_text_end,
-                                           .file_count = program->sources.count,
-                                           .function_count = debug_entry_count,
-                                           .line_count = line_count,
-                                           .language = 0x000c,
-                                       });
-        }
-    }
-    u32 metadata_relocation_count = (dwarf.valid ? dwarf.relocation_count : 0) + (codeview.valid ? codeview.relocation_count : 0) + cfi.relocation_count +
-                                    windows_unwind.function_count * (windows_unwind.aarch64 ? 2u : 3u);
-    bool apple_thread_local = false;
-    if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
-    {
-        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
-        {
-            apple_thread_local |= module->globals[global_index].is_thread_local;
-        }
-    }
-    IrModule* ir_module = module->ir_module;
-    u32 alias_count = ir_module ? ir_module->alias_count : 0;
-    // __attribute__((constructor))/((destructor)) arrive as
-    // IrModule.initializers and become one pointer-sized, relocated slot each
-    // in .init_array or .fini_array.  The order inside a section is the order
-    // the entries run in, so the list is sorted by priority here rather than
-    // left to the format: this model has one section per kind, so a
-    // translation unit's whole array is one section and the sort is what makes
-    // `constructor(101)` run before an unprioritized sibling.  The priority
-    // itself is kept beside the section in ObjectFile.initializer_priorities,
-    // because the cross-translation-unit order is `ld`'s and `ld` reads it off
-    // the section name -- see object_split_initializer_priorities.
-    u32 initializer_count = ir_module ? ir_module->initializer_count : 0;
-    u32* initializer_order = arena_allocate(arena, u32, initializer_count ? initializer_count : 1);
-    u32 initializer_counts[2] = {0};
-    for (u32 index = 0; index < initializer_count; index += 1)
-    {
-        // Insertion by (destructor, priority) keeps equal priorities in the
-        // declaration order the frontend appended them in.
-        IrModuleInitializer current = ir_module->initializers[index];
-        u32 position = index;
-        while (position)
-        {
-            IrModuleInitializer previous = ir_module->initializers[initializer_order[position - 1]];
-            bool after = previous.is_destructor < current.is_destructor ||
-                         (previous.is_destructor == current.is_destructor && previous.priority <= current.priority);
-            if (after)
-            {
-                break;
-            }
-            initializer_order[position] = initializer_order[position - 1];
-            position -= 1;
-        }
-        initializer_order[position] = index;
-        initializer_counts[current.is_destructor ? 1 : 0] += 1;
-    }
-    for (u32 slot = 0; slot < 2; slot += 1)
-    {
-        ObjectSectionKind kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
-        u64 length = (u64)initializer_counts[slot] * OBJECT_INITIALIZER_ENTRY_SIZE;
-        u8* entries = arena_allocate(arena, u8, length ? length : 1);
-        memset(entries, 0, length);
-        result.initializer_priorities[slot] = arena_allocate(arena, u32, initializer_counts[slot] ? initializer_counts[slot] : 1);
-        result.sections[kind] = (ObjectSection){
-            .name = object_section_name_for_kind(kind),
-            .data =
+                IrModule* ir_module = program->modules + module_index;
+                for (u32 function_index = 0; function_index < ir_module->function_count; function_index += 1)
                 {
-                    .pointer = entries,
-                    .length = length,
-                },
-            .kind = kind,
-            .alignment = object_section_default_alignment(kind),
-        };
-    }
-    result.symbols = arena_allocate(arena, ObjectSymbol,
-                                    module->entry_count + module->global_count + alias_count + module->relocation_count + (apple_thread_local ? 1 : 0) +
-                                        (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0) + (windows_unwind.function_count ? 1 : 0) +
-                                        (cfi.valid && object_format_for_target(target) == OBJECT_FORMAT_ELF64 ? 1 : 0) + named.count);
-    for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
-    {
-        CodegenModuleEntry entry = module->entries[entry_index];
-        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, entry.symbol);
-        if (!symbol)
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            return result;
-        }
-        u64 end = entry.offset + module->functions[entry_index].code_size;
-        u64 value = entry.offset;
-        u32 section = object_named_section_map(&named, OBJECT_SECTION_TEXT, &value);
-        result.symbols[result.symbol_count++] = (ObjectSymbol){
-            .name = symbol->link_name.length ? symbol->link_name : symbol->name,
-            .value = value,
-            .size = end - entry.offset,
-            .section = section,
-            .kind = OBJECT_SYMBOL_FUNCTION,
-            .global = symbol->linkage != IR_LINKAGE_INTERNAL,
-            .weak = symbol->is_weak,
-            .hidden = symbol->is_hidden,
-            .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO,
-        };
-    }
-    for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
-    {
-        CodegenModuleGlobal global = module->globals[global_index];
-        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global.symbol);
-        if (!symbol || symbol->kind != IR_SYMBOL_DATA)
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            return result;
-        }
-        ByteSlice section_data =
-            global.zero_fill ? (ByteSlice){.length = global.is_thread_local ? module->thread_local_zero_size : module->zero_fill_size} :
-            global.is_thread_local ?
-                module->thread_local_data :
-            global.read_only ?
-                module->read_only_data :
-                module->writable_data;
-        if ((u64)global.offset + global.size > section_data.length)
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            return result;
-        }
-        u64 value = global.offset;
-        ObjectSectionKind image = global.zero_fill         ? (global.is_thread_local ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_ZERO)
-                                  : global.is_thread_local ? OBJECT_SECTION_THREAD_LOCAL_DATA
-                                  : global.read_only       ? OBJECT_SECTION_READ_ONLY_DATA
-                                                           : OBJECT_SECTION_DATA;
-        u32 section = object_named_section_map(&named, image, &value);
-        result.symbols[result.symbol_count++] = (ObjectSymbol){
-            .name = symbol->link_name.length ? symbol->link_name : symbol->name,
-            .value = value,
-            .size = global.size,
-            .section = section,
-            .kind = OBJECT_SYMBOL_DATA,
-            .global = symbol->linkage != IR_LINKAGE_INTERNAL,
-            .weak = symbol->is_weak,
-            .hidden = symbol->is_hidden,
-            .thread_local_state = global.is_thread_local ? OBJECT_SYMBOL_THREAD_LOCAL_YES : OBJECT_SYMBOL_THREAD_LOCAL_NO,
-        };
-    }
-    // An alias owns no storage: it is a second name for a definition this
-    // module already placed, so it takes that definition's section, offset,
-    // size and kind, and only its binding is its own. The two loops above
-    // wrote one symbol per entry and then one per global in order, so a
-    // target's symbol index is its entry index, or the entry count plus its
-    // global index -- no lookup structure for a list that is empty in nearly
-    // every translation unit.
-    for (u32 alias_index = 0; alias_index < alias_count; alias_index += 1)
-    {
-        IrSymbolAlias alias = ir_module->aliases[alias_index];
-        IrSymbol* symbol = ir_symbol_from_id(&program->symbols, alias.symbol);
-        u32 target_index = UINT32_MAX;
-        for (u32 entry_index = 0; entry_index < module->entry_count && target_index == UINT32_MAX; entry_index += 1)
-        {
-            target_index = module->entries[entry_index].symbol.value == alias.target.value ? entry_index : UINT32_MAX;
-        }
-        for (u32 global_index = 0; global_index < module->global_count && target_index == UINT32_MAX; global_index += 1)
-        {
-            target_index = module->globals[global_index].symbol.value == alias.target.value ? module->entry_count + global_index : UINT32_MAX;
-        }
-        if (!symbol || target_index >= result.symbol_count)
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            return result;
-        }
-        ObjectSymbol definition = result.symbols[target_index];
-        result.symbols[result.symbol_count++] = (ObjectSymbol){
-            .name = symbol->link_name.length ? symbol->link_name : symbol->name,
-            .value = definition.value,
-            .size = definition.size,
-            .section = definition.section,
-            .kind = definition.kind,
-            .global = symbol->linkage != IR_LINKAGE_INTERNAL,
-            .weak = symbol->is_weak,
-            .hidden = symbol->is_hidden,
-            .thread_local_state = definition.thread_local_state,
-            .indirect = alias.is_indirect,
-        };
-    }
-    if (apple_thread_local)
-    {
-        result.symbols[result.symbol_count++] = (ObjectSymbol){
-            .name = S8("_tlv_bootstrap"),
-            .section = OBJECT_SECTION_UNDEFINED,
-            .kind = OBJECT_SYMBOL_FUNCTION,
-            .global = true,
-        };
-    }
-    result.relocations = arena_allocate(arena, ObjectRelocation, module->relocation_count + metadata_relocation_count + initializer_count);
-    Arena* name_conflicts[] = {
-        arena,
-    };
-    TemporalArena name_temporary = scratch_begin(name_conflicts, BUSTER_ARRAY_LENGTH(name_conflicts));
-    u32 entry_symbol_capacity = program->symbols.count ? program->symbols.count : 1;
-    u32* entry_by_symbol = arena_allocate(name_temporary.arena, u32, entry_symbol_capacity);
-    memset(entry_by_symbol, 0xFF, sizeof(*entry_by_symbol) * entry_symbol_capacity);
-    for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
-    {
-        u32 symbol_value = module->entries[entry_index].symbol.value;
-        if (symbol_value < entry_symbol_capacity && entry_by_symbol[symbol_value] == UINT32_MAX)
-        {
-            entry_by_symbol[symbol_value] = entry_index;
-        }
-    }
-    // Every add after the build comes from one of three places: the
-    // relocation loop below, which appends at most one symbol per distinct
-    // name it resolves and so at most one per program symbol plus the
-    // substituted `__tls_get_addr`; and the .text and per-section symbols
-    // object_append_dwarf appends. Bounding it by the relocation count
-    // instead -- a self-host stage has 100 k relocations against 18 k
-    // symbols -- sized the table at 262.144 slots and paid an 8 MB zero fill
-    // to hold 18 k names.
-    u64 name_index_capacity =
-        (u64)result.symbol_count + program->symbols.count + 1 + (dwarf.valid ? (u64)OBJECT_DWARF_EXTRA_SYMBOLS : 0);
-    u32* defined_owner = arena_allocate(name_temporary.arena, u32, result.symbol_count ? result.symbol_count : 1);
-    ObjectSymbolNameIndex name_index =
-        object_symbol_name_index_build(name_temporary.arena, result.symbols, result.symbol_count, name_index_capacity, defined_owner);
-    // Globals and aliases were placed just above at entry_count + index, in
-    // order, and each program symbol keeps one name, so the definition its
-    // relocations resolve to is the one the build just recorded for that
-    // position. Seeding it here spares their first reference the name hash;
-    // entries keep their own index as before.
-    for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
-    {
-        u32 symbol_value = module->globals[global_index].symbol.value;
-        if (symbol_value < entry_symbol_capacity && entry_by_symbol[symbol_value] == UINT32_MAX)
-        {
-            entry_by_symbol[symbol_value] = defined_owner[module->entry_count + global_index];
-        }
-    }
-    for (u32 alias_index = 0; alias_index < alias_count; alias_index += 1)
-    {
-        u32 symbol_value = ir_module->aliases[alias_index].symbol.value;
-        if (symbol_value < entry_symbol_capacity && entry_by_symbol[symbol_value] == UINT32_MAX)
-        {
-            entry_by_symbol[symbol_value] = defined_owner[module->entry_count + module->global_count + alias_index];
-        }
-    }
-    for (u32 relocation_index = 0; relocation_index < module->relocation_count; relocation_index += 1)
-    {
-        CodegenModuleRelocation source = module->relocations[relocation_index];
-        ObjectRelocationKind kind = OBJECT_RELOCATION_X86_64_PC32;
-        if (!codegen_module_relocation_valid(&source) || !object_relocation_kind_from_codegen((CodegenModuleRelocationKind)source.kind, &kind))
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            break;
-        }
-        IrSymbol* target_symbol = ir_symbol_from_id(&program->symbols, source.symbol);
-        ByteSlice source_data = source.source == CODEGEN_MODULE_RELOCATION_CODE                ? module->code
-                                : source.source == CODEGEN_MODULE_RELOCATION_READ_ONLY_DATA    ? module->read_only_data
-                                : source.source == CODEGEN_MODULE_RELOCATION_DATA              ? module->writable_data
-                                : source.source == CODEGEN_MODULE_RELOCATION_THREAD_LOCAL_DATA ? module->thread_local_data
-                                                                                               : (ByteSlice){0};
-        u32 relocation_width = object_relocation_kind_width(kind);
-        if (!target_symbol || source.source >= CODEGEN_MODULE_RELOCATION_SOURCE_COUNT || source.offset > source_data.length ||
-            relocation_width > source_data.length - source.offset)
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            break;
-        }
-        // The general-dynamic call names the thread-local symbol so the two
-        // sites of one sequence stay one relocation record each, but what it
-        // actually calls is the runtime helper. Substituting the name here
-        // keeps the byte offsets with the emitter that produced them.
-        bool tls_get_addr = source.kind == CODEGEN_MODULE_RELOCATION_X86_64_TLS_GET_ADDR_PLT32;
-        u32 symbol_index = !tls_get_addr && source.symbol.value < entry_symbol_capacity ? entry_by_symbol[source.symbol.value] : UINT32_MAX;
-        String8 name = tls_get_addr                        ? S8("__tls_get_addr")
-                       : target_symbol->link_name.length   ? target_symbol->link_name
-                                                           : target_symbol->name;
-        ObjectSymbolNameSlot* slot = 0;
-        if (symbol_index == UINT32_MAX)
-        {
-            slot = object_symbol_name_slot(name_index, name);
-            if (slot->used)
-            {
-                symbol_index = slot->defined != UINT32_MAX ? slot->defined : slot->undefined;
+                    IrFunction* function = ir_module->functions + function_index;
+                    if (function->symbol.value < program->symbols.count)
+                    {
+                        declaration_sources[function->symbol.value] = function->source;
+                    }
+                }
             }
-        }
-        if (symbol_index == UINT32_MAX)
-        {
-            symbol_index = result.symbol_count++;
-            result.symbols[symbol_index] = (ObjectSymbol){
-                .name = name,
-                .section = OBJECT_SECTION_UNDEFINED,
-                .kind = !tls_get_addr && target_symbol->kind == IR_SYMBOL_DATA ? OBJECT_SYMBOL_DATA : OBJECT_SYMBOL_FUNCTION,
-                .global = true,
-                .weak = !tls_get_addr && target_symbol->is_weak,
-                .hidden = !tls_get_addr && target_symbol->is_hidden,
-                .thread_local_state = tls_get_addr ? OBJECT_SYMBOL_THREAD_LOCAL_NO
-                                                   : target_symbol->is_thread_local ? OBJECT_SYMBOL_THREAD_LOCAL_YES : OBJECT_SYMBOL_THREAD_LOCAL_NO,
-            };
-            object_symbol_name_slot_claim(slot, &result.symbols[symbol_index], symbol_index);
-        }
-        // The answer holds for the rest of the loop -- a name in the index is
-        // never added again, and only undefined symbols are added here, so a
-        // name's first-defined-then-first-undefined resolution cannot change
-        // once it has one -- and a program symbol has one name, so every later
-        // relocation against it takes the index from the table instead of
-        // hashing the name: data symbols and externs, which the table above
-        // did not carry, are most of a module's relocations.
-        if (!tls_get_addr && source.symbol.value < entry_symbol_capacity)
-        {
-            entry_by_symbol[source.symbol.value] = symbol_index;
-        }
-        u64 relocation_offset = source.offset;
-        u32 relocation_section = object_named_section_map(&named,
-                                                          source.source == CODEGEN_MODULE_RELOCATION_CODE                ? OBJECT_SECTION_TEXT
-                                                          : source.source == CODEGEN_MODULE_RELOCATION_READ_ONLY_DATA    ? OBJECT_SECTION_READ_ONLY_DATA
-                                                          : source.source == CODEGEN_MODULE_RELOCATION_THREAD_LOCAL_DATA ? OBJECT_SECTION_THREAD_LOCAL_DATA
-                                                                                                                         : OBJECT_SECTION_DATA,
-                                                          &relocation_offset);
-        result.relocations[result.relocation_count++] = (ObjectRelocation){
-            .addend = source.addend + (kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_PLT32 ||
-                                               object_relocation_kind_is_x86_got(kind) ||
-                                               kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
-                                               kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32 ||
-                                               kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD
-                                           ? -4
-                                           : 0),
-            .offset = relocation_offset,
-            .section = relocation_section,
-            .symbol = symbol_index,
-            .kind = kind,
-        };
-    }
-    // One absolute pointer-width relocation per initializer, in the sorted
-    // order, filling the two sections reserved above.  The target is always a
-    // function this module emits (ir_validate_initializer), so its symbol is
-    // the entry index the table above already carries.
-    u64 initializer_offsets[2] = {0};
-    for (u32 index = 0; index < initializer_count && result.error == OBJECT_ERROR_NONE; index += 1)
-    {
-        IrModuleInitializer initializer = ir_module->initializers[initializer_order[index]];
-        u32 slot = initializer.is_destructor ? 1u : 0u;
-        u32 symbol_index = initializer.symbol.value < entry_symbol_capacity ? entry_by_symbol[initializer.symbol.value] : UINT32_MAX;
-        if (symbol_index == UINT32_MAX)
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            break;
-        }
-        result.relocations[result.relocation_count++] = (ObjectRelocation){
-            .offset = initializer_offsets[slot],
-            .section = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY,
-            .symbol = symbol_index,
-            .kind = OBJECT_RELOCATION_ABSOLUTE64,
-        };
-        result.initializer_priorities[slot][initializer_offsets[slot] / OBJECT_INITIALIZER_ENTRY_SIZE] = initializer.priority;
-        initializer_offsets[slot] += OBJECT_INITIALIZER_ENTRY_SIZE;
-    }
-    if (result.error == OBJECT_ERROR_NONE)
-    {
-        u32 dwarf_text_symbol = object_append_dwarf(&result, dwarf, name_index, entry_by_symbol, entry_symbol_capacity);
-        object_append_codeview(&result, codeview, entry_by_symbol, entry_symbol_capacity);
-        // ELF unwind relocations always use local section anchors. Reuse the
-        // debug text anchor when present; -g0 still needs an independent one.
-        u32* cfi_section_symbols = 0;
-        if (cfi.valid && object_format_for_target(target) == OBJECT_FORMAT_ELF64)
-        {
-            cfi_section_symbols = arena_allocate(arena, u32, result.section_count);
-            memset(cfi_section_symbols, 0xFF, sizeof(*cfi_section_symbols) * result.section_count);
-            u32 cfi_text_symbol = dwarf_text_symbol;
-            if (cfi_text_symbol == UINT32_MAX)
+            // A function split off into a named section (issue 1276) leaves the
+            // debug information, with its rows and locations: a unit here
+            // describes one text range from `.text`'s start, and those functions
+            // are the text image's tail, past what `.text` keeps.
+            u64 debug_text_end = named.tail_starts[OBJECT_SECTION_TEXT];
+            u32 debug_entry_count = 0;
+            while (debug_entry_count < module->entry_count && module->entries[debug_entry_count].offset < debug_text_end)
             {
-                cfi_text_symbol = result.symbol_count++;
-                result.symbols[cfi_text_symbol] = (ObjectSymbol){
-                    .name = S8(".text"),
-                    .section = OBJECT_SECTION_TEXT,
-                    .kind = OBJECT_SYMBOL_FUNCTION,
+                debug_entry_count += 1;
+            }
+            DwarfFunction* functions = arena_allocate(arena, DwarfFunction, module->entry_count);
+            DebugFunctionSeed* debug_functions = arena_allocate(arena, DebugFunctionSeed, module->entry_count);
+            for (u32 entry_index = 0; entry_index < debug_entry_count; entry_index += 1)
+            {
+                CodegenModuleEntry* entry = module->entries + entry_index;
+                u64 end = entry->offset + module->functions[entry_index].code_size;
+                IrSymbol* entry_symbol = ir_symbol_from_id(&program->symbols, entry->symbol);
+                IrSourceRange declaration = entry->symbol.value < program->symbols.count ? declaration_sources[entry->symbol.value] : (IrSourceRange){0};
+                functions[entry_index] = (DwarfFunction){
+                    .name = entry_symbol ? entry_symbol->name : S8("unknown"),
+                    .code_offset = entry->offset,
+                    .code_size = (u32)(end - entry->offset),
+                    .file = declaration.source.value < program->sources.count ? declaration.source.value : 0,
+                    .line = ir_source_position(program, declaration).line,
+                };
+                debug_functions[entry_index] = (DebugFunctionSeed){
+                    .name = functions[entry_index].name,
+                    .symbol = entry->symbol,
+                    .code_offset = entry->offset,
+                    .code_size = (u32)(end - entry->offset),
                 };
             }
-            cfi_section_symbols[OBJECT_SECTION_TEXT] = cfi_text_symbol;
-            // A named text section gets a local symbol of its own, spelled
-            // like the section; it never enters the name index, so no
-            // reference can resolve to it by name.
-            for (u32 index = 0; index < named.count; index += 1)
+            u32 line_count = module->entry_count ? module->line_entry_count : 0;
+            DebugLocationSeed* debug_locations = module->debug_locations;
+            u32 debug_location_count = module->debug_location_count;
+            // The module's own rows serve as the builders' input: DwarfLineEntry is
+            // CodegenLineEntry field for field, and codegen recorded every source
+            // already clamped to the program's source table (its
+            // `line_source_limit`), which is the one thing a copy here used to do
+            // to a million rows.
+            DwarfLineEntry* lines = (DwarfLineEntry*)module->line_entries;
+            if (debug_text_end < module->code.length)
             {
-                if (named.sections[index].kind == OBJECT_SECTION_TEXT)
+                DwarfLineEntry* kept_lines = arena_allocate(arena, DwarfLineEntry, line_count ? line_count : 1);
+                u32 kept_line_count = 0;
+                for (u32 line_index = 0; line_index < line_count; line_index += 1)
                 {
-                    cfi_section_symbols[OBJECT_SECTION_COUNT + index] = result.symbol_count;
-                    result.symbols[result.symbol_count++] = (ObjectSymbol){
-                        .name = named.sections[index].name,
-                        .section = OBJECT_SECTION_COUNT + index,
+                    kept_lines[kept_line_count] = lines[line_index];
+                    kept_line_count += lines[line_index].code_offset < debug_text_end;
+                }
+                DebugLocationSeed* kept_locations = arena_allocate(arena, DebugLocationSeed, debug_location_count ? debug_location_count : 1);
+                u32 kept_location_count = 0;
+                for (u32 location_index = 0; location_index < debug_location_count; location_index += 1)
+                {
+                    kept_locations[kept_location_count] = debug_locations[location_index];
+                    kept_location_count += debug_locations[location_index].start < debug_text_end;
+                }
+                lines = kept_lines;
+                line_count = kept_line_count;
+                debug_locations = kept_locations;
+                debug_location_count = kept_location_count;
+            }
+            if (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI)
+            {
+                DebugModel debug_model = debug_model_build(arena, (DebugModelInput){
+                                                                       .program = program,
+                                                                       .module = debug_ir_module,
+                                                                       .producer = S8("buster"),
+                                                                       .comp_dir = S8("."),
+                                                                       .functions = debug_functions,
+                                                                       .locations = debug_locations,
+                                                                       .function_count = debug_entry_count,
+                                                                       .location_count = debug_location_count,
+                                                                   });
+                codeview = codeview_build(arena, (CodeviewInput){
+                                                     .model = &debug_model,
+                                                     .producer = S8("buster"),
+                                                     .file_paths = file_paths,
+                                                     .functions = functions,
+                                                     .lines = lines,
+                                                     .file_count = program->sources.count,
+                                                     .function_count = debug_entry_count,
+                                                     .line_count = line_count,
+                                                     .machine = target.cpu_arch == CPU_ARCH_AARCH64 ? CODEVIEW_MACHINE_ARM64 : CODEVIEW_MACHINE_X64,
+                                                 });
+                if (!codeview.valid)
+                {
+                    result.error = OBJECT_ERROR_DEBUG_INFO;
+                }
+            }
+            else
+            {
+                DebugModel debug_model = debug_model_build(arena, (DebugModelInput){
+                                                                       .program = program,
+                                                                       .module = debug_ir_module,
+                                                                       .producer = S8("buster"),
+                                                                       .comp_dir = S8("."),
+                                                                       .functions = debug_functions,
+                                                                       .locations = debug_locations,
+                                                                       .function_count = debug_entry_count,
+                                                                       .location_count = debug_location_count,
+                                                                   });
+                dwarf = dwarf_build(arena, (DwarfInput){
+                                               .model = &debug_model,
+                                               .target = target,
+                                               .producer = S8("buster"),
+                                               .comp_dir = S8("."),
+                                               .file_paths = file_paths,
+                                               .functions = functions,
+                                               .lines = lines,
+                                               .code_size = debug_text_end,
+                                               .file_count = program->sources.count,
+                                               .function_count = debug_entry_count,
+                                               .line_count = line_count,
+                                               .language = 0x000c,
+                                           });
+            }
+        }
+        u32 metadata_relocation_count = (dwarf.valid ? dwarf.relocation_count : 0) + (codeview.valid ? codeview.relocation_count : 0) + cfi.relocation_count +
+                                        windows_unwind.function_count * (windows_unwind.aarch64 ? 2u : 3u);
+        bool apple_thread_local = false;
+        if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
+        {
+            for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+            {
+                apple_thread_local |= module->globals[global_index].is_thread_local;
+            }
+        }
+        IrModule* ir_module = module->ir_module;
+        u32 alias_count = ir_module ? ir_module->alias_count : 0;
+        // __attribute__((constructor))/((destructor)) arrive as
+        // IrModule.initializers and become one pointer-sized, relocated slot each
+        // in .init_array or .fini_array.  The order inside a section is the order
+        // the entries run in, so the list is sorted by priority here rather than
+        // left to the format: this model has one section per kind, so a
+        // translation unit's whole array is one section and the sort is what makes
+        // `constructor(101)` run before an unprioritized sibling.  The priority
+        // itself is kept beside the section in ObjectFile.initializer_priorities,
+        // because the cross-translation-unit order is `ld`'s and `ld` reads it off
+        // the section name -- see object_split_initializer_priorities.
+        u32 initializer_count = ir_module ? ir_module->initializer_count : 0;
+        u32* initializer_order = arena_allocate(arena, u32, initializer_count ? initializer_count : 1);
+        u32 initializer_counts[2] = {0};
+        for (u32 index = 0; index < initializer_count; index += 1)
+        {
+            // Insertion by (destructor, priority) keeps equal priorities in the
+            // declaration order the frontend appended them in.
+            IrModuleInitializer current = ir_module->initializers[index];
+            u32 position = index;
+            while (position)
+            {
+                IrModuleInitializer previous = ir_module->initializers[initializer_order[position - 1]];
+                bool after = previous.is_destructor < current.is_destructor ||
+                             (previous.is_destructor == current.is_destructor && previous.priority <= current.priority);
+                if (after)
+                {
+                    break;
+                }
+                initializer_order[position] = initializer_order[position - 1];
+                position -= 1;
+            }
+            initializer_order[position] = index;
+            initializer_counts[current.is_destructor ? 1 : 0] += 1;
+        }
+        for (u32 slot = 0; slot < 2; slot += 1)
+        {
+            ObjectSectionKind kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+            u64 length = (u64)initializer_counts[slot] * OBJECT_INITIALIZER_ENTRY_SIZE;
+            u8* entries = arena_allocate(arena, u8, length ? length : 1);
+            memset(entries, 0, length);
+            result.initializer_priorities[slot] = arena_allocate(arena, u32, initializer_counts[slot] ? initializer_counts[slot] : 1);
+            result.sections[kind] = (ObjectSection){
+                .name = object_section_name_for_kind(kind),
+                .data =
+                    {
+                        .pointer = entries,
+                        .length = length,
+                    },
+                .kind = kind,
+                .alignment = object_section_default_alignment(kind),
+            };
+        }
+        result.symbols = arena_allocate(arena, ObjectSymbol,
+                                        module->entry_count + module->global_count + alias_count + module->relocation_count + (apple_thread_local ? 1 : 0) +
+                                            (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0) + (windows_unwind.function_count ? 1 : 0) +
+                                            (cfi.valid && object_format_for_target(target) == OBJECT_FORMAT_ELF64 ? 1 : 0) + named.count);
+        for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
+        {
+            CodegenModuleEntry entry = module->entries[entry_index];
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, entry.symbol);
+            if (!symbol)
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            u64 end = entry.offset + module->functions[entry_index].code_size;
+            u64 value = entry.offset;
+            u32 section = object_named_section_map(&named, OBJECT_SECTION_TEXT, &value);
+            result.symbols[result.symbol_count++] = (ObjectSymbol){
+                .name = symbol->link_name.length ? symbol->link_name : symbol->name,
+                .value = value,
+                .size = end - entry.offset,
+                .section = section,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = symbol->linkage != IR_LINKAGE_INTERNAL,
+                .weak = symbol->is_weak,
+                .hidden = symbol->is_hidden,
+                .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO,
+            };
+        }
+        if (result.error != OBJECT_ERROR_NONE)
+        {
+            break;
+        }
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            CodegenModuleGlobal global = module->globals[global_index];
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global.symbol);
+            if (!symbol || symbol->kind != IR_SYMBOL_DATA)
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            ByteSlice section_data =
+                global.zero_fill ? (ByteSlice){.length = global.is_thread_local ? module->thread_local_zero_size : module->zero_fill_size} :
+                global.is_thread_local ?
+                    module->thread_local_data :
+                global.read_only ?
+                    module->read_only_data :
+                    module->writable_data;
+            if ((u64)global.offset + global.size > section_data.length)
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            u64 value = global.offset;
+            ObjectSectionKind image = global.zero_fill         ? (global.is_thread_local ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_ZERO)
+                                      : global.is_thread_local ? OBJECT_SECTION_THREAD_LOCAL_DATA
+                                      : global.read_only       ? OBJECT_SECTION_READ_ONLY_DATA
+                                                               : OBJECT_SECTION_DATA;
+            u32 section = object_named_section_map(&named, image, &value);
+            result.symbols[result.symbol_count++] = (ObjectSymbol){
+                .name = symbol->link_name.length ? symbol->link_name : symbol->name,
+                .value = value,
+                .size = global.size,
+                .section = section,
+                .kind = OBJECT_SYMBOL_DATA,
+                .global = symbol->linkage != IR_LINKAGE_INTERNAL,
+                .weak = symbol->is_weak,
+                .hidden = symbol->is_hidden,
+                .thread_local_state = global.is_thread_local ? OBJECT_SYMBOL_THREAD_LOCAL_YES : OBJECT_SYMBOL_THREAD_LOCAL_NO,
+            };
+        }
+        if (result.error != OBJECT_ERROR_NONE)
+        {
+            break;
+        }
+        // An alias owns no storage: it is a second name for a definition this
+        // module already placed, so it takes that definition's section, offset,
+        // size and kind, and only its binding is its own. The two loops above
+        // wrote one symbol per entry and then one per global in order, so a
+        // target's symbol index is its entry index, or the entry count plus its
+        // global index -- no lookup structure for a list that is empty in nearly
+        // every translation unit.
+        for (u32 alias_index = 0; alias_index < alias_count; alias_index += 1)
+        {
+            IrSymbolAlias alias = ir_module->aliases[alias_index];
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, alias.symbol);
+            u32 target_index = UINT32_MAX;
+            for (u32 entry_index = 0; entry_index < module->entry_count && target_index == UINT32_MAX; entry_index += 1)
+            {
+                target_index = module->entries[entry_index].symbol.value == alias.target.value ? entry_index : UINT32_MAX;
+            }
+            for (u32 global_index = 0; global_index < module->global_count && target_index == UINT32_MAX; global_index += 1)
+            {
+                target_index = module->globals[global_index].symbol.value == alias.target.value ? module->entry_count + global_index : UINT32_MAX;
+            }
+            if (!symbol || target_index >= result.symbol_count)
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            ObjectSymbol definition = result.symbols[target_index];
+            result.symbols[result.symbol_count++] = (ObjectSymbol){
+                .name = symbol->link_name.length ? symbol->link_name : symbol->name,
+                .value = definition.value,
+                .size = definition.size,
+                .section = definition.section,
+                .kind = definition.kind,
+                .global = symbol->linkage != IR_LINKAGE_INTERNAL,
+                .weak = symbol->is_weak,
+                .hidden = symbol->is_hidden,
+                .thread_local_state = definition.thread_local_state,
+                .indirect = alias.is_indirect,
+            };
+        }
+        if (result.error != OBJECT_ERROR_NONE)
+        {
+            break;
+        }
+        if (apple_thread_local)
+        {
+            result.symbols[result.symbol_count++] = (ObjectSymbol){
+                .name = S8("_tlv_bootstrap"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            };
+        }
+        result.relocations = arena_allocate(arena, ObjectRelocation, module->relocation_count + metadata_relocation_count + initializer_count);
+        Arena* name_conflicts[] = {
+            arena,
+        };
+        TemporalArena name_temporary = scratch_begin(name_conflicts, BUSTER_ARRAY_LENGTH(name_conflicts));
+        u32 entry_symbol_capacity = program->symbols.count ? program->symbols.count : 1;
+        u32* entry_by_symbol = arena_allocate(name_temporary.arena, u32, entry_symbol_capacity);
+        memset(entry_by_symbol, 0xFF, sizeof(*entry_by_symbol) * entry_symbol_capacity);
+        for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
+        {
+            u32 symbol_value = module->entries[entry_index].symbol.value;
+            if (symbol_value < entry_symbol_capacity && entry_by_symbol[symbol_value] == UINT32_MAX)
+            {
+                entry_by_symbol[symbol_value] = entry_index;
+            }
+        }
+        // Every add after the build comes from one of three places: the
+        // relocation loop below, which appends at most one symbol per distinct
+        // name it resolves and so at most one per program symbol plus the
+        // substituted `__tls_get_addr`; and the .text and per-section symbols
+        // object_append_dwarf appends. Bounding it by the relocation count
+        // instead -- a self-host stage has 100 k relocations against 18 k
+        // symbols -- sized the table at 262.144 slots and paid an 8 MB zero fill
+        // to hold 18 k names.
+        u64 name_index_capacity =
+            (u64)result.symbol_count + program->symbols.count + 1 + (dwarf.valid ? (u64)OBJECT_DWARF_EXTRA_SYMBOLS : 0);
+        u32* defined_owner = arena_allocate(name_temporary.arena, u32, result.symbol_count ? result.symbol_count : 1);
+        ObjectSymbolNameIndex name_index =
+            object_symbol_name_index_build(name_temporary.arena, result.symbols, result.symbol_count, name_index_capacity, defined_owner);
+        // Globals and aliases were placed just above at entry_count + index, in
+        // order, and each program symbol keeps one name, so the definition its
+        // relocations resolve to is the one the build just recorded for that
+        // position. Seeding it here spares their first reference the name hash;
+        // entries keep their own index as before.
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            u32 symbol_value = module->globals[global_index].symbol.value;
+            if (symbol_value < entry_symbol_capacity && entry_by_symbol[symbol_value] == UINT32_MAX)
+            {
+                entry_by_symbol[symbol_value] = defined_owner[module->entry_count + global_index];
+            }
+        }
+        for (u32 alias_index = 0; alias_index < alias_count; alias_index += 1)
+        {
+            u32 symbol_value = ir_module->aliases[alias_index].symbol.value;
+            if (symbol_value < entry_symbol_capacity && entry_by_symbol[symbol_value] == UINT32_MAX)
+            {
+                entry_by_symbol[symbol_value] = defined_owner[module->entry_count + module->global_count + alias_index];
+            }
+        }
+        for (u32 relocation_index = 0; relocation_index < module->relocation_count; relocation_index += 1)
+        {
+            CodegenModuleRelocation source = module->relocations[relocation_index];
+            ObjectRelocationKind kind = OBJECT_RELOCATION_X86_64_PC32;
+            if (!codegen_module_relocation_valid(&source) || !object_relocation_kind_from_codegen((CodegenModuleRelocationKind)source.kind, &kind))
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            IrSymbol* target_symbol = ir_symbol_from_id(&program->symbols, source.symbol);
+            ByteSlice source_data = source.source == CODEGEN_MODULE_RELOCATION_CODE                ? module->code
+                                    : source.source == CODEGEN_MODULE_RELOCATION_READ_ONLY_DATA    ? module->read_only_data
+                                    : source.source == CODEGEN_MODULE_RELOCATION_DATA              ? module->writable_data
+                                    : source.source == CODEGEN_MODULE_RELOCATION_THREAD_LOCAL_DATA ? module->thread_local_data
+                                                                                                   : (ByteSlice){0};
+            u32 relocation_width = object_relocation_kind_width(kind);
+            if (!target_symbol || source.source >= CODEGEN_MODULE_RELOCATION_SOURCE_COUNT || source.offset > source_data.length ||
+                relocation_width > source_data.length - source.offset)
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            // The general-dynamic call names the thread-local symbol so the two
+            // sites of one sequence stay one relocation record each, but what it
+            // actually calls is the runtime helper. Substituting the name here
+            // keeps the byte offsets with the emitter that produced them.
+            bool tls_get_addr = source.kind == CODEGEN_MODULE_RELOCATION_X86_64_TLS_GET_ADDR_PLT32;
+            u32 symbol_index = !tls_get_addr && source.symbol.value < entry_symbol_capacity ? entry_by_symbol[source.symbol.value] : UINT32_MAX;
+            String8 name = tls_get_addr                        ? S8("__tls_get_addr")
+                           : target_symbol->link_name.length   ? target_symbol->link_name
+                                                               : target_symbol->name;
+            ObjectSymbolNameSlot* slot = 0;
+            if (symbol_index == UINT32_MAX)
+            {
+                slot = object_symbol_name_slot(name_index, name);
+                if (slot->used)
+                {
+                    symbol_index = slot->defined != UINT32_MAX ? slot->defined : slot->undefined;
+                }
+            }
+            if (symbol_index == UINT32_MAX)
+            {
+                symbol_index = result.symbol_count++;
+                result.symbols[symbol_index] = (ObjectSymbol){
+                    .name = name,
+                    .section = OBJECT_SECTION_UNDEFINED,
+                    .kind = !tls_get_addr && target_symbol->kind == IR_SYMBOL_DATA ? OBJECT_SYMBOL_DATA : OBJECT_SYMBOL_FUNCTION,
+                    .global = true,
+                    .weak = !tls_get_addr && target_symbol->is_weak,
+                    .hidden = !tls_get_addr && target_symbol->is_hidden,
+                    .thread_local_state = tls_get_addr ? OBJECT_SYMBOL_THREAD_LOCAL_NO
+                                                       : target_symbol->is_thread_local ? OBJECT_SYMBOL_THREAD_LOCAL_YES : OBJECT_SYMBOL_THREAD_LOCAL_NO,
+                };
+                object_symbol_name_slot_claim(slot, &result.symbols[symbol_index], symbol_index);
+            }
+            // The answer holds for the rest of the loop -- a name in the index is
+            // never added again, and only undefined symbols are added here, so a
+            // name's first-defined-then-first-undefined resolution cannot change
+            // once it has one -- and a program symbol has one name, so every later
+            // relocation against it takes the index from the table instead of
+            // hashing the name: data symbols and externs, which the table above
+            // did not carry, are most of a module's relocations.
+            if (!tls_get_addr && source.symbol.value < entry_symbol_capacity)
+            {
+                entry_by_symbol[source.symbol.value] = symbol_index;
+            }
+            u64 relocation_offset = source.offset;
+            u32 relocation_section = object_named_section_map(&named,
+                                                              source.source == CODEGEN_MODULE_RELOCATION_CODE                ? OBJECT_SECTION_TEXT
+                                                              : source.source == CODEGEN_MODULE_RELOCATION_READ_ONLY_DATA    ? OBJECT_SECTION_READ_ONLY_DATA
+                                                              : source.source == CODEGEN_MODULE_RELOCATION_THREAD_LOCAL_DATA ? OBJECT_SECTION_THREAD_LOCAL_DATA
+                                                                                                                             : OBJECT_SECTION_DATA,
+                                                              &relocation_offset);
+            result.relocations[result.relocation_count++] = (ObjectRelocation){
+                .addend = source.addend + (kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_PLT32 ||
+                                                   object_relocation_kind_is_x86_got(kind) ||
+                                                   kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
+                                                   kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32 ||
+                                                   kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD
+                                               ? -4
+                                               : 0),
+                .offset = relocation_offset,
+                .section = relocation_section,
+                .symbol = symbol_index,
+                .kind = kind,
+            };
+        }
+        // One absolute pointer-width relocation per initializer, in the sorted
+        // order, filling the two sections reserved above.  The target is always a
+        // function this module emits (ir_validate_initializer), so its symbol is
+        // the entry index the table above already carries.
+        u64 initializer_offsets[2] = {0};
+        for (u32 index = 0; index < initializer_count && result.error == OBJECT_ERROR_NONE; index += 1)
+        {
+            IrModuleInitializer initializer = ir_module->initializers[initializer_order[index]];
+            u32 slot = initializer.is_destructor ? 1u : 0u;
+            u32 symbol_index = initializer.symbol.value < entry_symbol_capacity ? entry_by_symbol[initializer.symbol.value] : UINT32_MAX;
+            if (symbol_index == UINT32_MAX)
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                break;
+            }
+            result.relocations[result.relocation_count++] = (ObjectRelocation){
+                .offset = initializer_offsets[slot],
+                .section = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY,
+                .symbol = symbol_index,
+                .kind = OBJECT_RELOCATION_ABSOLUTE64,
+            };
+            result.initializer_priorities[slot][initializer_offsets[slot] / OBJECT_INITIALIZER_ENTRY_SIZE] = initializer.priority;
+            initializer_offsets[slot] += OBJECT_INITIALIZER_ENTRY_SIZE;
+        }
+        if (result.error == OBJECT_ERROR_NONE)
+        {
+            u32 dwarf_text_symbol = object_append_dwarf(&result, dwarf, name_index, entry_by_symbol, entry_symbol_capacity);
+            object_append_codeview(&result, codeview, entry_by_symbol, entry_symbol_capacity);
+            // ELF unwind relocations always use local section anchors. Reuse the
+            // debug text anchor when present; -g0 still needs an independent one.
+            u32* cfi_section_symbols = 0;
+            if (cfi.valid && object_format_for_target(target) == OBJECT_FORMAT_ELF64)
+            {
+                cfi_section_symbols = arena_allocate(arena, u32, result.section_count);
+                memset(cfi_section_symbols, 0xFF, sizeof(*cfi_section_symbols) * result.section_count);
+                u32 cfi_text_symbol = dwarf_text_symbol;
+                if (cfi_text_symbol == UINT32_MAX)
+                {
+                    cfi_text_symbol = result.symbol_count++;
+                    result.symbols[cfi_text_symbol] = (ObjectSymbol){
+                        .name = S8(".text"),
+                        .section = OBJECT_SECTION_TEXT,
                         .kind = OBJECT_SYMBOL_FUNCTION,
                     };
                 }
+                cfi_section_symbols[OBJECT_SECTION_TEXT] = cfi_text_symbol;
+                // A named text section gets a local symbol of its own, spelled
+                // like the section; it never enters the name index, so no
+                // reference can resolve to it by name.
+                for (u32 index = 0; index < named.count; index += 1)
+                {
+                    if (named.sections[index].kind == OBJECT_SECTION_TEXT)
+                    {
+                        cfi_section_symbols[OBJECT_SECTION_COUNT + index] = result.symbol_count;
+                        result.symbols[result.symbol_count++] = (ObjectSymbol){
+                            .name = named.sections[index].name,
+                            .section = OBJECT_SECTION_COUNT + index,
+                            .kind = OBJECT_SYMBOL_FUNCTION,
+                        };
+                    }
+                }
+            }
+            if (cfi.valid && !object_append_dwarf_cfi(&result, cfi, cfi_section_symbols))
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+            }
+            else if (windows_unwind.valid && !object_append_windows_unwind(arena, &result, windows_unwind))
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+            }
+            else
+            {
+                object_debug_module_set(arena, &result, program->sources.count ? program->sources.sources[0].path : S8("buster.obj"), module->code.length);
             }
         }
-        if (cfi.valid && !object_append_dwarf_cfi(&result, cfi, cfi_section_symbols))
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-        }
-        else if (windows_unwind.valid && !object_append_windows_unwind(arena, &result, windows_unwind))
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-        }
-        else
-        {
-            object_debug_module_set(arena, &result, program->sources.count ? program->sources.sources[0].path : S8("buster.obj"), module->code.length);
-        }
-    }
-    scratch_end(name_temporary);
+        scratch_end(name_temporary);
+    } while (false);
 
     return result;
+}
+
+ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program, CodegenModule* module, Target target)
+{
+    return object_build_canonical_codegen_module(arena, program, module, target, false);
+}
+
+ObjectFile object_from_canonical_codegen_module_borrowed_text(Arena* arena, IrProgram* program, CodegenModule* module, Target target)
+{
+    return object_build_canonical_codegen_module(arena, program, module, target, true);
 }
 
 BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocationKind kind)

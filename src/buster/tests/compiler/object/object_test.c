@@ -2,6 +2,7 @@
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/assembly_unit.h>
 #include <buster/lib/compiler/object/object_internal.h>
+#include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/pdb/pdb.h>
 #include <buster/lib/time.h>
 #include <buster/lib/file.h>
@@ -6024,9 +6025,231 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_x86_short_branch_roundtrip(UnitTe
     return result;
 }
 
+// Only the code buffer lives in the producer arena below. Program names and
+// every non-text payload outlive both objects, so destroying that arena tests
+// the public text snapshot, not a nonexistent whole-object ownership promise.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_borrowed_codegen_text(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        Target target = targets[target_index];
+        ObjectFormat format = object_format_for_target(target);
+        IrProgram program = ir_program_initialize(arguments->arena, 0, 0, 256, 0);
+        IrSymbolId defined = ir_program_add_symbol(&program, (IrSymbol){
+            .name = S8("borrowed_text"), .kind = IR_SYMBOL_FUNCTION, .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true,
+        });
+        IrSymbolId external = ir_program_add_symbol(&program, (IrSymbol){
+            .name = S8("borrowed_external"), .kind = IR_SYMBOL_FUNCTION, .linkage = IR_LINKAGE_EXTERNAL,
+        });
+        IrSymbolId data_symbol = ir_program_add_symbol(&program, (IrSymbol){
+            .name = S8("borrowed_data"), .kind = IR_SYMBOL_DATA, .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true,
+        });
+        u8 x64[] = {0xe8, 0, 0, 0, 0, 0xc3};
+        // Canonical FP/LR frame, call, restore and return. Windows ARM64
+        // requires the matching unwind description even for this small fixture.
+        u8 arm64[] = {0xfd, 0x7b, 0xbf, 0xa9, 0xfd, 0x03, 0, 0x91, 0, 0, 0, 0x94,
+                      0xfd, 0x7b, 0xc1, 0xa8, 0xc0, 0x03, 0x5f, 0xd6};
+        bool aarch64 = target.cpu_arch == CPU_ARCH_AARCH64;
+        ByteSlice expected = aarch64 ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(arm64) : (ByteSlice)BUSTER_ARRAY_TO_SLICE(x64);
+        u8 pristine[sizeof(arm64)];
+        memcpy(pristine, expected.pointer, expected.length);
+        Arena* producer = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = 1}});
+        if (BUSTER_REQUIRE(arguments, producer != 0))
+        {
+            u8* text = arena_allocate(producer, u8, expected.length);
+            if (BUSTER_REQUIRE(arguments, text != 0))
+            {
+                memcpy(text, expected.pointer, expected.length);
+                CodegenModuleEntry entry = {.symbol = defined};
+                u32 epilog = 12;
+                CodegenUnwindAction actions[] = {
+                    {.code_offset = 4, .value = 16, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK},
+                    {.code_offset = 4, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 29},
+                    {.code_offset = 4, .value = 8, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 30},
+                    {.code_offset = 8, .kind = CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, .register_index = 29},
+                };
+                CodegenFunctionDescriptor function = {
+                    .symbol = defined, .code_size = (u32)expected.length,
+                    .prolog_size = aarch64 ? 8u : 0u,
+                    .unwind_actions = aarch64 ? actions : 0, .unwind_action_count = aarch64 ? BUSTER_ARRAY_LENGTH(actions) : 0u,
+                    .epilog_offsets = aarch64 ? &epilog : 0, .epilog_count = aarch64 ? 1u : 0u,
+                };
+                CodegenModuleRelocation relocation = {
+                    .symbol = external, .offset = aarch64 ? 8u : 1u,
+                    .kind = aarch64 ? CODEGEN_MODULE_RELOCATION_AARCH64_CALL26 : CODEGEN_MODULE_RELOCATION_X86_64_PC32,
+                };
+                CodegenModule module = {
+                    .code = {.pointer = text, .length = expected.length}, .entries = &entry, .functions = &function,
+                    .relocations = &relocation, .abi = codegen_abi_for_target(target),
+                    .entry_count = 1, .function_count = 1, .relocation_count = 1,
+                };
+                ObjectFile owned = object_from_canonical_codegen_module(arguments->arena, &program, &module, target);
+                ObjectFile borrowed = object_from_canonical_codegen_module_borrowed_text(arguments->arena, &program, &module, target);
+                if (BUSTER_REQUIRE(arguments, owned.error == OBJECT_ERROR_NONE && borrowed.error == OBJECT_ERROR_NONE &&
+                                               owned.sections && borrowed.sections &&
+                                               owned.section_count > OBJECT_SECTION_TEXT && borrowed.section_count > OBJECT_SECTION_TEXT))
+                {
+                    BUSTER_TEST(arguments, owned.sections[OBJECT_SECTION_TEXT].data.pointer != text);
+                    BUSTER_TEST(arguments, borrowed.sections[OBJECT_SECTION_TEXT].data.pointer == text);
+                    BUSTER_TEST(arguments, owned.sections[OBJECT_SECTION_TEXT].data.length == expected.length);
+                    BUSTER_TEST(arguments, borrowed.sections[OBJECT_SECTION_TEXT].data.length == expected.length);
+                    BUSTER_TEST(arguments, owned.symbol_count == borrowed.symbol_count && owned.relocation_count == borrowed.relocation_count);
+                    // Alternate consumers and repeat writers. COFF and Mach-O
+                    // inline addends must patch the artifact, never the module.
+                    for (u32 repeat = 0; repeat < 2; repeat += 1)
+                    {
+                        ObjectArtifact left = object_write(arguments->arena, &owned, format);
+                        ObjectArtifact right = object_write(arguments->arena, &borrowed, format);
+                        if (BUSTER_REQUIRE(arguments, left.error == OBJECT_ERROR_NONE && right.error == OBJECT_ERROR_NONE &&
+                                                       left.bytes.pointer && right.bytes.pointer && left.bytes.length == right.bytes.length))
+                        {
+                            BUSTER_TEST(arguments, memory_compare(left.bytes.pointer, right.bytes.pointer, left.bytes.length));
+                            ObjectFile decoded = object_read(arguments->arena, right.bytes, target);
+                            BUSTER_TEST(arguments, decoded.error == OBJECT_ERROR_NONE);
+                        }
+                        String8 left_assembly = object_print_assembly(arguments->arena, &owned);
+                        String8 right_assembly = object_print_assembly(arguments->arena, &borrowed);
+                        BUSTER_TEST(arguments, left_assembly.length && string_equal(left_assembly, right_assembly));
+                        BUSTER_TEST(arguments, memory_compare(text, expected.pointer, expected.length));
+                    }
+                    // Both linker policies consume the same immutable input.
+                    // The normal copy is the evacuation operation needed before
+                    // a producer dies; the one-input opt-in retains its lifetime.
+                    LinkObjectResult evacuated = link_objects(arguments->arena, &borrowed, 1, (LinkOptions){.allow_undefined_symbols = true});
+                    LinkObjectResult aliased = link_objects(arguments->arena, &borrowed, 1,
+                        (LinkOptions){.allow_undefined_symbols = true, .alias_single_input_sections = true});
+                    if (BUSTER_REQUIRE(arguments, evacuated.error == LINK_ERROR_NONE && aliased.error == LINK_ERROR_NONE &&
+                                                   evacuated.object.sections && aliased.object.sections &&
+                                                   evacuated.object.section_count > OBJECT_SECTION_TEXT && aliased.object.section_count > OBJECT_SECTION_TEXT))
+                    {
+                        BUSTER_TEST(arguments, evacuated.object.sections[OBJECT_SECTION_TEXT].data.pointer != text);
+                        BUSTER_TEST(arguments, aliased.object.sections[OBJECT_SECTION_TEXT].data.pointer == text);
+                        BUSTER_TEST(arguments, memory_compare(text, expected.pointer, expected.length));
+                        // All borrowed consumers finish before teardown. Do not
+                        // access borrowed or aliased after destroying producer.
+                        ObjectArtifact before_teardown = object_write(arguments->arena, &owned, format);
+                        ObjectArtifact before_copy_teardown = object_write(arguments->arena, &evacuated.object, format);
+                        BUSTER_TEST(arguments, before_teardown.error == OBJECT_ERROR_NONE && before_copy_teardown.error == OBJECT_ERROR_NONE);
+                        memset(text, 0xa5, expected.length);
+                        BUSTER_TEST(arguments, arena_destroy(producer, 1));
+                        producer = 0;
+                        ObjectArtifact retained = object_write(arguments->arena, &owned, format);
+                        ObjectArtifact copied = object_write(arguments->arena, &evacuated.object, format);
+                        if (BUSTER_REQUIRE(arguments, retained.error == OBJECT_ERROR_NONE && copied.error == OBJECT_ERROR_NONE &&
+                                                       before_teardown.bytes.length == retained.bytes.length && before_copy_teardown.bytes.length == copied.bytes.length))
+                        {
+                            BUSTER_TEST(arguments, memory_compare(retained.bytes.pointer, before_teardown.bytes.pointer, retained.bytes.length));
+                            BUSTER_TEST(arguments, memory_compare(copied.bytes.pointer, before_copy_teardown.bytes.pointer, copied.bytes.length));
+                        }
+                        BUSTER_TEST(arguments, memory_compare(owned.sections[OBJECT_SECTION_TEXT].data.pointer, expected.pointer, expected.length));
+                        BUSTER_TEST(arguments, memory_compare(evacuated.object.sections[OBJECT_SECTION_TEXT].data.pointer, expected.pointer, expected.length));
+                    }
+                }
+                // Reuse independent valid bytes for every diagnostic control;
+                // the former producer may already be unmapped.
+                module.code = expected;
+                for (u32 failure = 0; failure < 9; failure += 1)
+                {
+                    CodegenModule bad = module;
+                    CodegenModuleEntry bad_entry = entry;
+                    CodegenFunctionDescriptor bad_function = function;
+                    CodegenModuleRelocation bad_relocation = relocation;
+                    CodegenModuleGlobal bad_global = {.symbol = data_symbol, .size = 1};
+                    IrSymbolAlias bad_alias = {.symbol = defined, .target = {.value = UINT32_MAX}};
+                    IrModule bad_ir = {.aliases = &bad_alias, .alias_count = 1};
+                    bad.entries = &bad_entry;
+                    bad.functions = &bad_function;
+                    bad.relocations = &bad_relocation;
+                    switch (failure)
+                    {
+                        case 0: bad.error = CODEGEN_ERROR_INVALID_IR; break;
+                        case 1: bad.entry_count = 0; break;
+                        case 2: bad_function.code_size += 1; break;
+                        case 3: bad_relocation.offset = (u32)expected.length; break;
+                        case 4: bad_entry.symbol.value = UINT32_MAX; bad_function.symbol = bad_entry.symbol; break;
+                        case 5: bad_global.symbol = external; bad.globals = &bad_global; bad.global_count = 1; break;
+                        case 6: bad.globals = &bad_global; bad.global_count = 1; break;
+                        case 7: bad.ir_module = &bad_ir; break;
+                        // Newly explicit refusal, not a historical diagnostic oracle.
+                        case 8: bad.code.pointer = 0; break;
+                        default: BUSTER_TODO();
+                    }
+                    ObjectFile left = object_from_canonical_codegen_module(arguments->arena, &program, &bad, target);
+                    ObjectFile right = object_from_canonical_codegen_module_borrowed_text(arguments->arena, &program, &bad, target);
+                    BUSTER_TEST(arguments, left.error == OBJECT_ERROR_INVALID_INPUT && right.error == left.error);
+                    ObjectArtifact refused = object_write(arguments->arena, &right, format);
+                    BUSTER_TEST(arguments, refused.error != OBJECT_ERROR_NONE && !refused.bytes.length);
+                    BUSTER_TEST(arguments, memory_compare(expected.pointer, pristine, expected.length));
+                }
+            }
+            if (producer) BUSTER_TEST(arguments, arena_destroy(producer, 1));
+        }
+        CodegenModule empty = {0};
+        ObjectFile empty_owned = object_from_canonical_codegen_module(arguments->arena, &program, &empty, target);
+        ObjectFile empty_borrowed = object_from_canonical_codegen_module_borrowed_text(arguments->arena, &program, &empty, target);
+        if (BUSTER_REQUIRE(arguments, empty_owned.error == OBJECT_ERROR_NONE && empty_borrowed.error == OBJECT_ERROR_NONE &&
+                                       empty_owned.sections && empty_borrowed.sections &&
+                                       empty_owned.section_count > OBJECT_SECTION_TEXT && empty_borrowed.section_count > OBJECT_SECTION_TEXT))
+        {
+            BUSTER_TEST(arguments, !empty_owned.sections[OBJECT_SECTION_TEXT].data.length && !empty_borrowed.sections[OBJECT_SECTION_TEXT].data.length);
+            ObjectArtifact left = object_write(arguments->arena, &empty_owned, format);
+            ObjectArtifact right = object_write(arguments->arena, &empty_borrowed, format);
+            if (BUSTER_REQUIRE(arguments, left.error == OBJECT_ERROR_NONE && right.error == OBJECT_ERROR_NONE &&
+                                           left.bytes.pointer && right.bytes.pointer && left.bytes.length == right.bytes.length))
+            {
+                BUSTER_TEST(arguments, memory_compare(left.bytes.pointer, right.bytes.pointer, left.bytes.length));
+            }
+        }
+        // Payload sizes exercise empty, small, cache-line boundary and larger
+        // text independently of target-specific function/unwind fixtures.
+        u32 sizes[] = {0, 1, 8, 63, 64, 4096, 65536};
+        for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(sizes); size_index += 1)
+        {
+            TemporalArena size_temporary = arena_begin_temporal(arguments->arena);
+            u32 size = sizes[size_index];
+            u8* bytes = arena_allocate(arguments->arena, u8, size);
+            for (u32 index = 0; index < size; index += 1)
+            {
+                bytes[index] = (u8)index;
+            }
+            CodegenModule sized = {.code = {.pointer = bytes, .length = size}, .abi = codegen_abi_for_target(target)};
+            ObjectFile owned = object_from_canonical_codegen_module(arguments->arena, &program, &sized, target);
+            ObjectFile borrowed = object_from_canonical_codegen_module_borrowed_text(arguments->arena, &program, &sized, target);
+            if (BUSTER_REQUIRE(arguments, owned.error == OBJECT_ERROR_NONE && borrowed.error == OBJECT_ERROR_NONE))
+            {
+                ByteSlice snapshot = owned.sections[OBJECT_SECTION_TEXT].data;
+                ByteSlice alias = borrowed.sections[OBJECT_SECTION_TEXT].data;
+                BUSTER_TEST(arguments, snapshot.length == size && alias.length == size && alias.pointer == bytes);
+                if (size)
+                {
+                    BUSTER_TEST(arguments, snapshot.pointer != bytes && memory_compare(snapshot.pointer, bytes, size));
+                    bytes[0] = 0xa5;
+                    BUSTER_TEST(arguments, snapshot.pointer[0] == 0 && alias.pointer[0] == 0xa5);
+                }
+            }
+            scratch_end(size_temporary);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = object_test_assembly_index_order(arguments);
+    UnitTestResult borrowed_text = object_test_borrowed_codegen_text(arguments);
+    result.test_count += borrowed_text.test_count;
+    result.succeeded_test_count += borrowed_text.succeeded_test_count;
     BUSTER_TEST_FIXTURE(arguments, object_test_mach_relocation_identity);
     BUSTER_TEST_FIXTURE(arguments, object_test_x86_short_branch_roundtrip);
     BUSTER_TEST_FIXTURE(arguments, object_test_elf_semantic_refusals);

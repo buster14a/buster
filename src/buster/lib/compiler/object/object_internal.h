@@ -1,6 +1,12 @@
 #pragma once
 #include <buster/lib/compiler/object/object.h>
 
+// Driver-private ownership opt-in. The completed module's code bytes must
+// remain immutable and live until every object, linker and writer consumer
+// finishes. Other borrowed payload/name lifetimes are unchanged. This is not
+// incremental publication: the same complete builder and validation run.
+BUSTER_F_DECL ObjectFile object_from_canonical_codegen_module_borrowed_text(Arena* arena, IrProgram* program, CodegenModule* module, Target target);
+
 #if BUSTER_INCLUDE_TESTS
 // Compare indexed printer queries against original-table scan semantics.
 BUSTER_F_DECL bool object_assembly_test_index_queries(Arena* arena, ObjectFile* object);
