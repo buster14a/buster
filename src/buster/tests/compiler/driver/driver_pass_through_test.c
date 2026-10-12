@@ -660,6 +660,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_runtime_path_arguments(U
     return result;
 }
 
+#if BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_runtime_path_tag(Arena* arena, String8 file, String8 path, u64 expected_tag)
 {
     FileMapRead map = file_map_read(arena, file, (FileReadOptions){0});
@@ -688,6 +689,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_runtime_path_tag(Arena* arena, Str
     file_map_unmap(map);
     return valid;
 }
+
+#endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_runtime_path_images(UnitTestArguments* arguments)
 {
