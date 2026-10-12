@@ -37,7 +37,10 @@
 // needs an occupied register, and a non-call row's clobber, moves the live
 // occupant to a free one (`machine_fast_vacate`) rather than storing it. A reload prefers the
 // register the value was first bound to (`MachineFastState.preferred_registers`),
-// so the copies that repair cross-path disagreement mostly vanish.
+// so the copies that repair cross-path disagreement mostly vanish. A free
+// pick for a value whose last use lies past any later call in layout order
+// (`machine_fast_crosses_call` over the function-wide `next_call`) prefers a
+// callee-saved register, so the value survives that call on every path.
 // `machine_fast_placement_build_pinned` then lays the frame out
 // for both scan modes: `machine_fast_close_live_ranges` widens selector slots
 // and proven direct-chain allocator homes to every row where their contents
@@ -211,9 +214,9 @@ struct MachineFastState
     u64 const* live_out_row;
     u64 const* live_in_row;
     u32 live_words;
-    // Index of the next call at or after each instruction within its own
-    // block, or UINT32_MAX: a value whose last use lies past it crosses
-    // the call and is worth a callee-saved binding.
+    // Index of the next call at or after each instruction in layout order,
+    // across block boundaries, or UINT32_MAX: a value whose last use lies
+    // past it crosses the call and is worth a callee-saved binding.
     u32* next_call;
     // Immediate index per vreg whose entire definition is one constant
     // materialization, MACHINE_FAST_REMATERIALIZE_FRAME for one frame
@@ -1451,8 +1454,10 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_source_dies_here(MachineFastState* state, 
     return !state->escapes[virtual_register] && state->last_use[virtual_register] == (state->current_point >> 2);
 }
 
-// True when the virtual register stays live past the next call in the
-// current block, making a callee-saved binding worth its push/pop pair.
+// True when the virtual register's last use lies past the next call in
+// layout order, in this block or a later one, making a callee-saved binding
+// worth its push/pop pair. The interval over-approximates on a sibling arm's
+// call and misses a loop body call past the value's last textual use.
 BUSTER_GLOBAL_LOCAL bool machine_fast_crosses_call(MachineFastState* state, u32 virtual_register)
 {
     u32 upcoming_call = state->next_call[state->current_point >> 2];
@@ -2766,16 +2771,17 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
         // next-call pass reads the call bit out of that word instead of
         // reloading the opcode and probing the descriptor table again. The
         // test is a select on a sequentially streamed u32, which leaves the
-        // loop with no data-dependent branch of its own.
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        // loop with no data-dependent branch of its own. The fill runs across
+        // block boundaries: a value whose last use lies past a call in a later
+        // block crosses it as surely as one in its own block, and a
+        // callee-saved binding keeps it in a register through every later
+        // call on every path, so no join loses it (#56).
         {
-            MachineBlock* block = function->blocks + block_index;
             u32 upcoming_call = UINT32_MAX;
-            for (u32 offset = block->instruction_count; offset > 0; offset -= 1)
+            for (u32 instruction_index = function->instruction_count; instruction_index > 0; instruction_index -= 1)
             {
-                u32 instruction_index = block->first_instruction + offset - 1;
-                upcoming_call = (prepass.operand_masks[instruction_index] & MACHINE_FAST_OPERAND_CALL_ROW) ? instruction_index : upcoming_call;
-                prepass.next_call[instruction_index] = upcoming_call;
+                upcoming_call = (prepass.operand_masks[instruction_index - 1] & MACHINE_FAST_OPERAND_CALL_ROW) ? instruction_index - 1 : upcoming_call;
+                prepass.next_call[instruction_index - 1] = upcoming_call;
             }
         }
         // A function with no vector virtual registers can never own a vector
