@@ -10973,10 +10973,11 @@ struct CParseInitializerElement
 };
 
 // What one walk records, in walk order (#3102). A walk keeps its log only
-// when its path depends on nothing that can change before validation: the
-// tokens, the pair table, the member lists of complete types and the bound
-// being inferred. Every other step clears replayable. record_only also skips
-// the element checks, for the reference re-walk.
+// when it reaches the frame loop and its path depends on nothing that can
+// change before validation: the tokens, the pair table, the member lists of
+// complete types and the bound being inferred. Every other step clears
+// replayable. record_only also skips the element checks, for the reference
+// re-walk.
 struct CParseInitializerLog
 {
     CParseInitializerElement* elements;
@@ -12164,6 +12165,8 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
     };
     bool workspace = frames && continuation_work;
     u32 frame_count = workspace ? 1 : 0;
+    // Only a list that reaches the frame loop has element checks to log.
+    if (log) log->replayable = workspace;
     if (workspace)
     {
         frames[0] = (CParseInitializerInferenceFrame){
@@ -12571,7 +12574,6 @@ BUSTER_C_SHARED void c_parse_infer_file_array_bounds(CTypeParseMachine* machine,
         {
             log.elements = arena_allocate(machine->scratch_arena, CParseInitializerElement, log_capacity);
             log.capacity = log_capacity;
-            log.replayable = true;
             machine->initializer_log = &log;
         }
         bool inferred = c_parse_infer_initializer_array_count(machine, arena, preprocess, result, (CScopeId){.value = 0}, type.element_type, initializer, end, &count);
