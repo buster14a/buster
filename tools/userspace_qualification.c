@@ -664,7 +664,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult userspace_main(Arena* arena, SliceString8 argu
             String8 requested = os_path_absolute_lexical(arena, arguments.pointer[3], true);
             String8 parent = os_path_absolute(arena, path_parent(arena, requested), true);
             String8 directory = path_join(arena, parent, quickjs_basename(requested));
-            String8 ide = os_path_absolute(arena, musl_ide_path(arena, S8("Release")), true);
+            String8 ide = os_path_absolute(arena, compat_ide_resolve(arena, S8("test_userspace"), (String8){0}, S8("Release")), true);
             driver = os_path_absolute(arena, driver, true);
             valid = source.length && musl.length && libc_test.length && parent.length && ide.length && driver.length &&
                     !string_equal(directory, source) && !string_starts_with_sequence(directory, path_join(arena, source, S8(""))) &&
