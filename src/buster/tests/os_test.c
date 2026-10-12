@@ -1,3 +1,6 @@
+// OS tests cover process, filesystem, and synchronization contracts. os_tests
+// registers their focused fixtures; os_test_image_retention exercises the
+// test-only generated-image seam and its deletion/whole-tree behavior.
 #include <buster/tests/os_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/file.h>
@@ -1511,13 +1514,40 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission(UnitTestArgume
     String8 values[] = {S8("capture-sink-admission"), marker, S8("1")};
     OsTestEnvironment environment = os_test_environment(arena, keys, values, BUSTER_ARRAY_LENGTH(keys));
     String8 child[] = {program_state->input.arguments.pointer[0], S8("test")};
-    u64 resources = os_process_spawn_test_resource_count();
     ProcessSpawnOptions outer = {
         .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .new_process_group = 1,
     };
     outer.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = BUSTER_KB(4);
     outer.capture_limits.per_stream[STANDARD_STREAM_ERROR] = BUSTER_KB(4);
     outer.capture_limits.total = BUSTER_KB(8);
+#if BUSTER_WINDOWS
+    // A cold CreateProcess initializes process-lifetime tracing/registry state.
+    // Full-suite runs already reached it before this fixture; isolated OS runs
+    // must calibrate before the exact census, without accepting owned leaks.
+    u64 cold_resources = os_process_spawn_test_resource_count();
+    String8 warm_values[] = {S8("capture-small"), marker, S8("1")};
+    OsTestEnvironment warm_environment = os_test_environment(arena, keys, warm_values, BUSTER_ARRAY_LENGTH(keys));
+    ProcessSpawnResult warm_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child),
+        warm_environment.keys, warm_environment.values, outer);
+    BUSTER_VALIDATE(warm_spawn.handle != 0 && warm_spawn.process_group);
+    ProcessWaitResult warm_wait = os_process_wait_deadline(arena, warm_spawn, 30000000);
+    BUSTER_VALIDATE(warm_wait.result == PROCESS_RESULT_SUCCESS && !warm_wait.timed_out && !warm_wait.capture_failed &&
+        !warm_wait.output_truncated && !warm_wait.capture_limit_exceeded && !warm_wait.process_tree_cleanup_failed &&
+        !warm_wait.process_group_reservation_retained && !warm_wait.process_group_ownership_lost &&
+        warm_wait.streams[STANDARD_STREAM_OUTPUT].length == 5);
+    // Direct ownership checks cover the cold launch too, before taking a
+    // steady-state census that includes the native runtime's persistent state.
+    HANDLE owned[] = {(HANDLE)warm_spawn.handle, (HANDLE)warm_spawn.process_tree,
+        (HANDLE)warm_spawn.pipes[STANDARD_STREAM_OUTPUT][0], (HANDLE)warm_spawn.pipes[STANDARD_STREAM_ERROR][0]};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(owned); index += 1)
+    {
+        DWORD flags = 0;
+        BUSTER_VALIDATE(owned[index] && !GetHandleInformation(owned[index], &flags) && GetLastError() == ERROR_INVALID_HANDLE);
+    }
+    arguments->show(arguments, S8("OS_CAPTURE_CENSUS_WARMUP_V1 before={u64} after={u64} owned_handles=closed status=pass\n"),
+        cold_resources, os_process_spawn_test_resource_count());
+#endif
+    u64 resources = os_process_spawn_test_resource_count();
     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child), environment.keys, environment.values, outer);
     if (BUSTER_REQUIRE(arguments, spawn.handle != 0 && spawn.process_group))
     {
@@ -1547,7 +1577,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission(UnitTestArgume
         }
     }
     BUSTER_TEST(arguments, !os_test_regular_file_exists(marker));
-    BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources);
+    u64 resources_after = os_process_spawn_test_resource_count();
+    if (resources_after != resources)
+    {
+        arguments->show(arguments, S8("CAPTURE_SINK_RESOURCES_V1 before={u64} after={u64}\n"), resources, resources_after);
+    }
+    BUSTER_TEST(arguments, resources_after == resources);
     BUSTER_TEST(arguments, os_file_delete(marker));
 
     // These fields are deliberately invalid but ignored by their policies.
@@ -1862,6 +1897,304 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_group_churn(UnitTestArguments
 }
 #endif
 
+BUSTER_GLOBAL_LOCAL bool os_test_image_retention_write_elf(String8 path, u16 image_type)
+{
+    u8 header[64] = {0};
+    header[0] = 0x7f;
+    header[1] = 'E';
+    header[2] = 'L';
+    header[3] = 'F';
+    header[4] = 2;
+    header[5] = 1;
+    header[6] = 1;
+    header[16] = (u8)image_type;
+    header[17] = (u8)(image_type >> 8);
+    return file_write(path, (ByteSlice){.pointer = header, .length = sizeof(header)});
+}
+
+BUSTER_GLOBAL_LOCAL bool os_test_image_retention_write_macho(String8 path, u32 file_type)
+{
+    u8 header[64] = {0};
+    header[0] = 0xcf;
+    header[1] = 0xfa;
+    header[2] = 0xed;
+    header[3] = 0xfe;
+    header[12] = (u8)file_type;
+    header[13] = (u8)(file_type >> 8);
+    header[14] = (u8)(file_type >> 16);
+    header[15] = (u8)(file_type >> 24);
+    return file_write(path, (ByteSlice){.pointer = header, .length = sizeof(header)});
+}
+
+BUSTER_GLOBAL_LOCAL bool os_test_image_retention_write_pe(String8 path, u16 characteristics)
+{
+    u8 image[88] = {0};
+    image[0] = 'M';
+    image[1] = 'Z';
+    image[0x3c] = 64;
+    image[64] = 'P';
+    image[65] = 'E';
+    image[86] = (u8)characteristics;
+    image[87] = (u8)(characteristics >> 8);
+    return file_write(path, (ByteSlice){.pointer = image, .length = sizeof(image)});
+}
+
+BUSTER_GLOBAL_LOCAL bool os_test_image_retention_exists(String8 path)
+{
+    FileStats stats = os_path_followed_stats(path);
+    return stats.valid && stats.kind != OS_FILE_KIND_MISSING;
+}
+
+BUSTER_GLOBAL_LOCAL String8 os_test_image_retention_relative_path(Arena* arena, String8 absolute_path)
+{
+    String8 result = {0};
+    String8 current_directory = os_path_absolute_lexical(arena, S8("."), false);
+#if defined(_WIN32)
+    char8 separator = '\\';
+    bool same_root = current_directory.length >= 3 && absolute_path.length >= 3 &&
+                     (current_directory.pointer[0] == absolute_path.pointer[0] ||
+                      (current_directory.pointer[0] >= 'A' && current_directory.pointer[0] <= 'Z' &&
+                       current_directory.pointer[0] + ('a' - 'A') == absolute_path.pointer[0]) ||
+                      (absolute_path.pointer[0] >= 'A' && absolute_path.pointer[0] <= 'Z' &&
+                       absolute_path.pointer[0] + ('a' - 'A') == current_directory.pointer[0])) &&
+                     current_directory.pointer[1] == ':' && absolute_path.pointer[1] == ':' &&
+                     current_directory.pointer[2] == separator && absolute_path.pointer[2] == separator;
+    u64 root_length = same_root ? 3 : 0;
+#else
+    char8 separator = '/';
+    if (current_directory.length >= 2 && current_directory.pointer[current_directory.length - 2] == separator &&
+        current_directory.pointer[current_directory.length - 1] == '.')
+    {
+        current_directory.length -= 2;
+    }
+    bool same_root = current_directory.length && absolute_path.length && current_directory.pointer[0] == separator &&
+                     absolute_path.pointer[0] == separator;
+    u64 root_length = same_root ? 1 : 0;
+#endif
+    while (current_directory.length > root_length && current_directory.pointer[current_directory.length - 1] == separator)
+    {
+        current_directory.length -= 1;
+    }
+
+    if (same_root)
+    {
+        u64 common_length = root_length;
+        while (common_length < current_directory.length && common_length < absolute_path.length)
+        {
+            char8 current_byte = current_directory.pointer[common_length];
+            char8 absolute_byte = absolute_path.pointer[common_length];
+#if defined(_WIN32)
+            if (current_byte >= 'A' && current_byte <= 'Z')
+            {
+                current_byte = (char8)(current_byte + ('a' - 'A'));
+            }
+            if (absolute_byte >= 'A' && absolute_byte <= 'Z')
+            {
+                absolute_byte = (char8)(absolute_byte + ('a' - 'A'));
+            }
+#endif
+            if (current_byte != absolute_byte)
+            {
+                break;
+            }
+            common_length += 1;
+        }
+
+        bool current_is_parent = common_length == current_directory.length &&
+                                 (common_length == absolute_path.length || absolute_path.pointer[common_length] == separator);
+        if (!current_is_parent)
+        {
+            while (common_length > root_length && current_directory.pointer[common_length - 1] != separator)
+            {
+                common_length -= 1;
+            }
+        }
+
+        u64 parent_count = 0;
+        bool in_component = false;
+        for (u64 index = common_length; index <= current_directory.length; index += 1)
+        {
+            bool at_end = index == current_directory.length;
+            bool is_separator = !at_end && current_directory.pointer[index] == separator;
+            if (at_end || is_separator)
+            {
+                parent_count += in_component;
+                in_component = false;
+            }
+            else
+            {
+                in_component = true;
+            }
+        }
+
+        u64 destination_index = common_length;
+        while (destination_index < absolute_path.length && absolute_path.pointer[destination_index] == separator)
+        {
+            destination_index += 1;
+        }
+        u64 destination_length = absolute_path.length - destination_index;
+        u64 relative_length = parent_count * 3 + destination_length;
+        if (relative_length)
+        {
+            char8* pointer = (char8*)arena_allocate_bytes(arena, relative_length, 1);
+            u64 cursor = 0;
+            for (u64 parent_index = 0; parent_index < parent_count; parent_index += 1)
+            {
+                pointer[cursor++] = '.';
+                pointer[cursor++] = '.';
+                pointer[cursor++] = separator;
+            }
+            for (u64 index = destination_index; index < absolute_path.length; index += 1)
+            {
+                pointer[cursor++] = absolute_path.pointer[index];
+            }
+            result = (String8){.pointer = pointer, .length = relative_length};
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 os_test_image_retention_dot_path(Arena* arena, String8 absolute_path)
+{
+#if defined(_WIN32)
+    char8 separator = '\\';
+#else
+    char8 separator = '/';
+#endif
+    u64 component_start = 0;
+    for (u64 index = 0; index < absolute_path.length; index += 1)
+    {
+#if defined(_WIN32)
+        if (absolute_path.pointer[index] == '/' || absolute_path.pointer[index] == '\\')
+        {
+            separator = absolute_path.pointer[index];
+            component_start = index + 1;
+        }
+#else
+        if (absolute_path.pointer[index] == separator)
+        {
+            component_start = index + 1;
+        }
+#endif
+    }
+    String8 result = absolute_path;
+    if (component_start < absolute_path.length)
+    {
+        u64 result_length = absolute_path.length + 2;
+        char8* pointer = (char8*)arena_allocate_bytes(arena, result_length, 1);
+        u64 cursor = 0;
+        for (u64 index = 0; index < component_start; index += 1)
+        {
+            pointer[cursor++] = absolute_path.pointer[index];
+        }
+        pointer[cursor++] = '.';
+        pointer[cursor++] = separator;
+        for (u64 index = component_start; index < absolute_path.length; index += 1)
+        {
+            pointer[cursor++] = absolute_path.pointer[index];
+        }
+        result = (String8){.pointer = pointer, .length = result_length};
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_image_retention(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    bool previous_active = os_image_retention_set_active(false);
+    String8 inactive_text = buster_test_temporary_path(arguments->arena, S8("image-retention-inactive-text"), S8(".txt"));
+    String8 inactive_shared = buster_test_temporary_path(arguments->arena, S8("image-retention-inactive-elf"), S8(".bin"));
+    String8 inactive_registered = buster_test_temporary_path(arguments->arena, S8("image-retention-inactive-registered"), S8(".txt"));
+    String8 active_registered = buster_test_temporary_path(arguments->arena, S8("image-retention-registered"), S8(".txt"));
+    String8 active_relative_temporary = buster_test_temporary_path(arguments->arena, S8("image-retention-relative"), S8(".bin"));
+    String8 active_relative = os_test_image_retention_relative_path(arguments->arena, active_relative_temporary);
+    if (!active_relative.length)
+    {
+        active_relative = os_test_image_retention_dot_path(arguments->arena, active_relative_temporary);
+    }
+    String8 active_relative_absolute = os_path_absolute_lexical(arguments->arena, active_relative, false);
+    String8 active_elf = buster_test_temporary_path(arguments->arena, S8("image-retention-elf-dyn"), S8(".bin"));
+    String8 active_macho = buster_test_temporary_path(arguments->arena, S8("image-retention-macho-dylib"), S8(".bin"));
+    String8 active_pe = buster_test_temporary_path(arguments->arena, S8("image-retention-pe-dll"), S8(".bin"));
+    String8 active_rel = buster_test_temporary_path(arguments->arena, S8("image-retention-elf-rel"), S8(".bin"));
+    String8 active_exec = buster_test_temporary_path(arguments->arena, S8("image-retention-elf-exec"), S8(".bin"));
+    String8 active_text = buster_test_temporary_path(arguments->arena, S8("image-retention-active-text"), S8(".txt"));
+    String8 injected = buster_test_temporary_path(arguments->arena, S8("image-retention-injected-delete"), S8(".txt"));
+    String8 retained_directory = buster_test_temporary_path(arguments->arena, S8("image-retention-directory"), S8(""));
+    String8 directory_image = string_format(arguments->arena, S8("{S8}/image.bin"), retained_directory);
+    String8 directory_text = string_format(arguments->arena, S8("{S8}/text.txt"), retained_directory);
+    String8 empty_directory = buster_test_temporary_path(arguments->arena, S8("image-retention-empty-directory"), S8(""));
+    String8 empty_directory_text = string_format(arguments->arena, S8("{S8}/text.txt"), empty_directory);
+    String8 text = S8("ordinary text");
+    OsImageRetentionCounters before = os_image_retention_counters();
+
+    BUSTER_TEST(arguments, file_write(inactive_text, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    BUSTER_TEST(arguments, os_test_image_retention_write_elf(inactive_shared, 3));
+    BUSTER_TEST(arguments, file_write(inactive_registered, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    os_image_retention_register(inactive_registered);
+    BUSTER_TEST(arguments, os_file_delete(inactive_text) && !os_test_image_retention_exists(inactive_text));
+    BUSTER_TEST(arguments, os_file_delete(inactive_shared) && !os_test_image_retention_exists(inactive_shared));
+    BUSTER_TEST(arguments, os_file_delete(inactive_registered) && !os_test_image_retention_exists(inactive_registered));
+
+    os_image_retention_set_active(true);
+    BUSTER_TEST(arguments, file_write(active_registered, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    os_image_retention_register(active_registered);
+    BUSTER_TEST(arguments, os_file_delete(active_registered) && os_test_image_retention_exists(active_registered));
+    BUSTER_TEST(arguments, file_write(active_relative, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    os_image_retention_register(active_relative);
+    BUSTER_TEST(arguments, active_relative_absolute.length &&
+                           os_file_delete(active_relative_absolute) && os_test_image_retention_exists(active_relative_absolute));
+    BUSTER_TEST(arguments, os_test_image_retention_write_elf(active_elf, 3));
+    BUSTER_TEST(arguments, os_file_delete(active_elf) && os_test_image_retention_exists(active_elf));
+    BUSTER_TEST(arguments, os_test_image_retention_write_macho(active_macho, 6));
+    BUSTER_TEST(arguments, os_file_delete(active_macho) && os_test_image_retention_exists(active_macho));
+    BUSTER_TEST(arguments, os_test_image_retention_write_pe(active_pe, 0x2000));
+    BUSTER_TEST(arguments, os_file_delete(active_pe) && os_test_image_retention_exists(active_pe));
+    BUSTER_TEST(arguments, os_test_image_retention_write_elf(active_rel, 1));
+    BUSTER_TEST(arguments, os_file_delete(active_rel) && !os_test_image_retention_exists(active_rel));
+    BUSTER_TEST(arguments, os_test_image_retention_write_elf(active_exec, 2));
+    BUSTER_TEST(arguments, os_file_delete(active_exec) && !os_test_image_retention_exists(active_exec));
+    BUSTER_TEST(arguments, file_write(active_text, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    BUSTER_TEST(arguments, os_file_delete(active_text) && !os_test_image_retention_exists(active_text));
+
+    BUSTER_TEST(arguments, file_write(injected, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    os_image_retention_register(injected);
+    OsFileTestStep injected_delete[] = {{OS_FILE_TEST_DELETE, OS_FILE_TEST_ERROR, 12345}};
+    os_file_test_begin(injected, injected_delete, BUSTER_ARRAY_LENGTH(injected_delete));
+    OsError injected_result = os_file_delete_checked(injected);
+    u32 consumed = os_file_test_end();
+    BUSTER_TEST(arguments, injected_result.v == 12345 && consumed == 1 && os_test_image_retention_exists(injected));
+
+    BUSTER_TEST(arguments, os_make_directory_attempt(retained_directory));
+    BUSTER_TEST(arguments, os_test_image_retention_write_elf(directory_image, 3));
+    BUSTER_TEST(arguments, file_write(directory_text, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    OsImageRetentionCounters before_directory_delete = os_image_retention_counters();
+    BUSTER_TEST(arguments, os_directory_delete(retained_directory));
+    OsImageRetentionCounters after_directory_delete = os_image_retention_counters();
+    BUSTER_TEST(arguments, os_test_image_retention_exists(retained_directory) &&
+                           os_test_image_retention_exists(directory_image) && os_test_image_retention_exists(directory_text));
+    BUSTER_TEST(arguments, after_directory_delete.retained_directories - before_directory_delete.retained_directories == 1);
+    BUSTER_TEST(arguments, os_make_directory_attempt(empty_directory));
+    BUSTER_TEST(arguments, file_write(empty_directory_text, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+    BUSTER_TEST(arguments, os_directory_delete(empty_directory) && !os_test_image_retention_exists(empty_directory));
+
+    OsImageRetentionCounters after_retained_files = os_image_retention_counters();
+    BUSTER_TEST(arguments, after_retained_files.registered - before.registered >= 3);
+    BUSTER_TEST(arguments, after_retained_files.retained_files - before.retained_files >= 5);
+    os_image_retention_set_active(false);
+    BUSTER_TEST(arguments, os_file_delete(active_registered) && !os_test_image_retention_exists(active_registered));
+    BUSTER_TEST(arguments, os_file_delete(active_relative_absolute) && !os_test_image_retention_exists(active_relative_absolute));
+    BUSTER_TEST(arguments, os_file_delete(active_elf) && !os_test_image_retention_exists(active_elf));
+    BUSTER_TEST(arguments, os_file_delete(active_macho) && !os_test_image_retention_exists(active_macho));
+    BUSTER_TEST(arguments, os_file_delete(active_pe) && !os_test_image_retention_exists(active_pe));
+    BUSTER_TEST(arguments, os_file_delete(injected) && !os_test_image_retention_exists(injected));
+    BUSTER_TEST(arguments, os_directory_delete(retained_directory) && !os_test_image_retention_exists(retained_directory));
+    BUSTER_TEST(arguments, os_file_delete(active_text) && !os_test_image_retention_exists(active_text));
+    BUSTER_TEST(arguments, os_file_delete(active_rel) && os_file_delete(active_exec));
+    os_image_retention_set_active(previous_active);
+    return result;
+}
+
 UnitTestResult os_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -1900,6 +2233,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_replay);
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_storage);
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_limits);
+    BUSTER_TEST_FIXTURE(arguments, os_test_image_retention);
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_overflow);
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_sink_admission);
@@ -2072,6 +2406,26 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         String8 absent = string_format_z(arena, S8("{S8}/absent/child"), root);
         BUSTER_TEST(arguments, !os_make_directory_attempt(absent));
         BUSTER_TEST(arguments, !os_make_directory_attempt((String8){0}));
+        BUSTER_TEST(arguments, !os_make_directory_attempt((String8){.pointer = root.pointer, .length = 0}));
+        BUSTER_TEST(arguments, !os_make_directory_attempt((String8){.pointer = 0, .length = 1}));
+        // #3735: rejected NULs must fail even when the prefix is a directory.
+        char8 leading_nul[] = {0, 'x'};
+        BUSTER_TEST(arguments, !os_make_directory_attempt((String8){leading_nul, sizeof(leading_nul)}));
+        String8 missing_prefix = string_format_z(arena, S8("{S8}/nul-prefix"), root);
+        String8 prefixes[] = {missing_prefix, root};
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(prefixes); index += 1)
+        {
+            String8 prefix = prefixes[index];
+            char8* bytes = arena_allocate(arena, char8, prefix.length + 2);
+            memcpy(bytes, prefix.pointer, prefix.length);
+            bytes[prefix.length] = 0;
+            bytes[prefix.length + 1] = 'x';
+            BUSTER_TEST(arguments, !os_make_directory_attempt((String8){bytes, prefix.length + 1}));
+            BUSTER_TEST(arguments, !os_make_directory_attempt((String8){bytes, prefix.length + 2}));
+        }
+        // Exclusive creation proves the malformed calls did not create the prefix.
+        OsDirectoryCreateResult prefix_created = os_make_directory_exclusive(missing_prefix);
+        BUSTER_TEST(arguments, prefix_created.created && !prefix_created.error.v && !prefix_created.already_exists);
         OsDirectoryCreateResult missing_parent = os_make_directory(absent);
         BUSTER_TEST(arguments, missing_parent.error.v != 0 && !missing_parent.created && !missing_parent.existing_directory);
         u8 original[257];
@@ -2096,6 +2450,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, os_file_close(file));
         }
         OsDirectoryCreateResult file_collision = os_make_directory(path);
+        BUSTER_TEST(arguments, !os_make_directory_attempt(path));
         BUSTER_TEST(arguments, file_collision.error.v != 0 && file_collision.already_exists && !file_collision.existing_directory &&
                                    !file_collision.created);
         file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){ .read = 1 }, (OsFileCreateMode){0}, (OsFileShareFlags){ .read = 1 });
@@ -2976,8 +3331,9 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     // A held unread proc descriptor must classify a reaped task as vanished;
     // empty, oversized and invalid-descriptor reads remain ordinary failures.
     BUSTER_TEST(arguments, os_linux_proc_read_self_test());
-    // An unrelated PID disappearing between readdir and stat is ordinary
-    // host churn and cannot invalidate a stable target-group proof.
+    // Unrelated PIDs disappearing between readdir and stat, once or in every
+    // snapshot, are ordinary host churn and cannot invalidate a stable
+    // target-group proof or consume a retry.
     BUSTER_TEST(arguments, os_linux_process_group_churn_self_test(arguments->arena));
 #endif
 

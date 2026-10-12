@@ -6,6 +6,8 @@
 // both frontend forms, small/large frame expansion and the direct CAS oracle.
 // machine_test_a64_large_aggregate_copy covers pointer/frame copies beyond imm12.
 // machine_test_x64_narrow_call_results checks ABI-width RAX captures.
+// machine_test_x64_division_clobber_vacate keeps a value live across a division
+// clobber in a register (#3783).
 // machine_test_boolean_i128_cast checks Boolean widening and its strict IR contract.
 // machine_test_frame_capacity guards checked placement and capacity diagnostics.
 // machine_test_sparse_local_state compares sparse and row-based local discovery.
@@ -4957,6 +4959,87 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_switch_cfg(UnitTestArgum
             scratch_end(temporary);
         }
     }
+    return result;
+}
+
+// A value live in RDX across an x86-64 division, which clobbers RDX, moves
+// to a free register instead of being stored before the division and
+// reloaded after it (#3783). The third System V argument arrives in RDX and
+// is read only after the quotient, while RSI, RDI and R8-R11 stay free.
+// Both allocators consume the same clobber eviction; native hosts also run
+// the generated code.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_division_clobber_vacate(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    IrProgram* program = machine_test_compile_c(temporary.arena, S8("division-clobber.c"),
+        S8("typedef unsigned long u64; u64 divide_live(u64 a, u64 d, u64 c) { u64 q = a / d; return q + c * 3; }"), target);
+    if (BUSTER_REQUIRE(arguments, program && program->module_count == 1))
+    {
+        IrModule* module = program->modules;
+        IrFunction* function = machine_test_ir_function_find(module, S8("divide_live"));
+        MachineSelectResult selected = function ? machine_select_canonical_function(temporary.arena, program, function, target) : (MachineSelectResult){0};
+        if (BUSTER_REQUIRE(arguments, function && selected.supported))
+        {
+            for (u32 mode = 0; mode < 2; mode += 1)
+            {
+                MachineStackPlacement placement = mode == 0 ? machine_fast_placement_build(temporary.arena, &selected.function)
+                                                            : machine_quality_placement_build(temporary.arena, &selected.function);
+                BUSTER_TEST(arguments, placement.valid);
+                u32 divisions = 0;
+                u32 division_spills = 0;
+                u32 division_moves = 0;
+                for (u32 instruction_index = 0; instruction_index < selected.function.instruction_count; instruction_index += 1)
+                {
+                    if (selected.function.instructions[instruction_index].opcode == MACHINE_X64_UDIV64)
+                    {
+                        divisions += 1;
+                        MachinePoint before = machine_point_make(instruction_index, MACHINE_POINT_BEFORE);
+                        for (u32 edit_index = 0; edit_index < placement.edit_count; edit_index += 1)
+                        {
+                            MachineEdit edit = placement.edits[edit_index];
+                            division_spills += edit.point == before && edit.kind == MACHINE_EDIT_SPILL;
+                            division_moves += edit.point == before && edit.kind == MACHINE_EDIT_COPY && edit.subject == MACHINE_X64_RDX;
+                        }
+                    }
+                }
+                BUSTER_TEST_RAW(arguments, divisions == 1 && division_spills == 0 && division_moves == 1,
+                                string_format(temporary.arena, S8("mode {u32} divisions {u32} spills {u32} moves {u32}"), mode, divisions,
+                                              division_spills, division_moves));
+                BUSTER_TEST(arguments, placement.spill_count == 0 && placement.reload_count == 0);
+                MachineEncodeResult encoded = machine_encode_x86_64(temporary.arena, &selected.function, &placement);
+                BUSTER_TEST(arguments, encoded.valid);
+            }
+        }
+        for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+        {
+            CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+            BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+            BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+            if (generated.error == CODEGEN_ERROR_NONE)
+            {
+                CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
+                BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
+                u32 offset = machine_test_module_offset(&generated, module, S8("divide_live"));
+                BUSTER_TEST(arguments, offset != UINT32_MAX);
+                if (executable.address && offset != UINT32_MAX)
+                {
+                    typedef u64 DivideCall(u64, u64, u64);
+                    DivideCall* call = 0;
+                    void* address = (u8*)executable.address + offset;
+                    memcpy(&call, &address, sizeof(call));
+                    BUSTER_TEST(arguments, call(100, 7, 5) == 14 + 15);
+                    BUSTER_TEST(arguments, call(UINT64_MAX, 3, UINT64_C(0x123456789)) == UINT64_MAX / 3 + UINT64_C(0x123456789) * 3);
+                }
+                codegen_release_executable(executable);
+            }
+#endif
+        }
+    }
+    scratch_end(temporary);
     return result;
 }
 
@@ -10427,6 +10510,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST(arguments, machine_fast_close_live_ranges_test(arguments->arena));
+    BUSTER_TEST(arguments, machine_fast_solve_liveness_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_close_slot_ranges_test(arguments->arena));
     BUSTER_TEST_FIXTURE(arguments, machine_test_fast_consumer_register_hint);
     BUSTER_TEST_FIXTURE(arguments, machine_test_source_writer_guards);
@@ -10478,6 +10562,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_hints);
     BUSTER_TEST_FIXTURE(arguments, machine_test_clear_instruction_cache);
     BUSTER_TEST_FIXTURE(arguments, machine_test_unsigned_switch);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_division_clobber_vacate);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_switch_cfg);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_backward_switch_cfg);
     BUSTER_TEST_FIXTURE(arguments, machine_test_disconnected_dominance);
@@ -10791,8 +10876,15 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     slot_size = 24;
     BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
     // A MEMORY aggregate aligned past a sixteen-byte slot rounds the overflow
-    // area up to its alignment: any size from 32 bytes up, powers of two to the
-    // frame-copy limit, and only on x86-64 where the row copies it exactly.
+    // area up to its alignment: any size from 32 bytes up, powers of two no
+    // larger than the size, and only on x86-64 where the row copies it exactly.
+    va_arg.size = 256;
+    va_arg.stack_size = 256;
+    slot_size = 256;
+    va_arg.alignment = 128;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    va_arg.alignment = 256;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
     va_arg.size = 96;
     va_arg.stack_size = 96;
     slot_size = 96;
@@ -10914,7 +11006,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // check the full domain so adding or dropping membership fails locally.
     // These are scheduler obligations, not a census of hardware memory or
     // vector instructions: explicit virtual vector dataflow needs no chain.
-    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 306);
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 307);
     u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
         [MACHINE_X64_F80_BINARY] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_F80_NEGATE] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
@@ -10934,6 +11026,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         [MACHINE_A64_TLS_WINDOWS] = MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_TLS_DARWIN] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_A64_TLS_DARWIN] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_TLS_DESCRIPTOR] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_COMPILER_BARRIER] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_A64_COMPILER_BARRIER] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_NOP] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
@@ -11407,7 +11500,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 103);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 66);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 133);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 134);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     // Equal recipe indices in different categories are distinct identities.

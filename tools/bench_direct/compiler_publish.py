@@ -53,8 +53,9 @@ step may lack the machine record (machine_record_required); a record that is
 present is still checked.
 
 Map: validate_inline_bundle and validate_ast_pilot_bundle (opt-in flag pairs),
-validate_real_source_bundle, validate_production_profile_bundle and
-validate_compiler_probes_bundle and validate_frontend_selector_bundle (#2761 opt-in legs),
+validate_real_source_bundle, validate_production_profile_bundle,
+validate_compiler_probes_bundle, validate_frontend_selector_bundle and
+validate_wild_linker_bundle (#2761 opt-in legs),
 decide (pure decision), inventory_rows (discharged inventory rows),
 machine_record and machine_record_required (#2758 host facts), read_evidence,
 verify_analyzer_request_freshness (fresh request selectors), queue_delay, links,
@@ -97,10 +98,14 @@ from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE,
                               validate_compiler_probes,
                               FRONTEND_SELECTOR_PROFILE, FRONTEND_SELECTOR_REQUEST_LINE, frontend_selector_digest,
                               validate_frontend_selector,
+                              WILD_LINKER_PROFILE, WILD_LINKER_REQUEST_LINE, validate_wild_linker, wild_linker_bundle_files,
+                              wild_linker_digest,
                               MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
                               check_name, classify, classify_scaling, classify_throughput, host_problem, number,
                               range_label, regression_policy, render, SCALING_PROFILE, scaling_digest, validate_inline_acceptance,
-                              THROUGHPUT_PROFILE, throughput_digest, validate_analyzer_bundle, covered_inventory_rows)
+                              THROUGHPUT_PROFILE, throughput_digest, validate_analyzer_bundle, covered_inventory_rows,
+                              HARNESS_ADMISSIONS, THROUGHPUT_HARNESS_FLOOR, THROUGHPUT_HISTORICAL_HARNESS_REVISION,
+                              THROUGHPUT_HISTORICAL_PROFILE, THROUGHPUT_HISTORICAL_REQUEST_LINE)
 
 ARTIFACT_PREFIX = "buster-9700x-compiler-"
 MEMBER_LIMIT = 8 * 1024 * 1024
@@ -358,6 +363,33 @@ def validate_frontend_selector_bundle(record: object, bundle: object, binaries: 
     return problems
 
 
+WILD_LINKER_BUNDLE_FILES = {key: f"wild_linker/{name}" for key, name in wild_linker_bundle_files().items()}
+
+
+def validate_wild_linker_bundle(record: object, bundle: object, head: str) -> list[str]:
+    """Re-derive the requested #2761 Wild linker leg from its exported samples, manifests and linker identities."""
+    if record is None:
+        return []
+    if not isinstance(record, dict) or record.get("requested") is not True:
+        return ["receipt wild-linker record is present but not a request"]
+    problems: list[str] = []
+    if record.get("status") != "complete" or record.get("build_exit") != 0 or record.get("exit") != 0:
+        problems.append("receipt wild-linker run did not complete successfully")
+    if record.get("request_line") != WILD_LINKER_REQUEST_LINE:
+        problems.append("receipt wild-linker request selector is not the exact supported line")
+    if record.get("profile") != WILD_LINKER_PROFILE:
+        problems.append("receipt wild-linker profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(WILD_LINKER_BUNDLE_FILES):
+        return [*problems, "requested wild-linker evidence bundle is incomplete"]
+    identity = record.get("identity") if isinstance(record.get("identity"), dict) else {}
+    if record.get("linkers") != identity.get("linkers"):
+        problems.append("receipt wild-linker linkers differ from its identity record")
+    problems.extend(validate_wild_linker(record.get("exit"), bundle, head, identity))
+    if record.get("cells") != wild_linker_digest(bundle["raw"], bundle["summary"]):
+        problems.append("receipt wild-linker cells do not match the exported samples")
+    return problems
+
+
 def decide(expected: dict, authorized: bool, compare_result: str, receipt: object, summary: object,
            policy_value: str, throughput: object = None, require_throughput: bool = True,
            extra_reasons: list[str] | None = None, *,
@@ -365,8 +397,14 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
            expected_profile: str | None = None, expected_preparation_policy: str | None = None,
            require_owned_phases: bool = False, require_owned_preflight: bool = False,
            expected_phase_driver_sha256: str | None = None,
-           expected_measurement_revision: str | None = None) -> tuple[str, str, list[str]]:
+           expected_measurement_revision: str | None = None,
+           expected_throughput_profile: dict | None = None,
+           dispatch_refusal: str = "") -> tuple[str, str, list[str]]:
     """(conclusion, title, reasons) for one attempt; never consults the verdict's direction.
+
+    expected_throughput_profile is THROUGHPUT_PROFILE unless hosted pull authorization admitted
+    the named historical recipe (#3714); a receipt can never select it by itself. A non-empty
+    dispatch_refusal is that authorization's explicit unsupported disposition: no host ran.
 
     throughput is {"summary": ..., "metadata": ..., "scaling": {series: {"summary", "metadata"}}}
     from the evidence artifact. Scaling is checked whenever the receipt names
@@ -392,7 +430,10 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
         reasons.append("Main-owned publication requires trusted main profile, preparation policy and owned preflight")
     conclusion, title = "failure", "Not benchmarked"
     policy, problem = regression_policy(policy_value)
-    if not authorized:
+    if dispatch_refusal:
+        title = "Not benchmarked: unsupported historical harness"
+        reasons.append(dispatch_refusal)
+    elif not authorized:
         reasons.append("authorization refused or did not complete in this attempt; this candidate has a "
                        "benchmark coverage gap (see the authorize-compiler job)")
     elif not isinstance(receipt, dict):
@@ -445,6 +486,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.append(f"{selected_profile['name']} cannot be combined with the compiler probes")
                 if receipt.get("frontend_selector") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with the frontend-selector probes")
+                if receipt.get("wild_linker") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with the wild-linker leg")
                 reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
                 reasons.extend(validate_analyzer_bundle(receipt,
                                                         analyzer_bundle.get("summary") if isinstance(analyzer_bundle, dict) else None,
@@ -460,8 +503,19 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                                                 expected_trusted_revision=expected_measurement_revision))
                 if require_throughput or "throughput_profile" in receipt:
                     corpus = throughput if isinstance(throughput, dict) else {}
-                    if receipt.get("throughput_profile") != THROUGHPUT_PROFILE:
+                    wanted = expected_throughput_profile or THROUGHPUT_PROFILE
+                    if receipt.get("throughput_profile") != wanted:
                         reasons.append("receipt throughput profile is not the frozen corpus profile")
+                    if wanted == THROUGHPUT_HISTORICAL_PROFILE:
+                        revision = THROUGHPUT_HISTORICAL_HARNESS_REVISION
+                        if expected.get("mode") != "pull":
+                            reasons.append(f"{wanted['name']} is valid only in pull mode")
+                        if receipt.get("throughput_historical") != {"harness_revision": revision,
+                                                                    "observed_revision": revision,
+                                                                    "status": "prepared"}:
+                            reasons.append(f"{wanted['name']} harness was not the prepared pinned revision {revision}")
+                    elif "throughput_historical" in receipt:
+                        reasons.append("receipt carries a historical corpus harness the route did not admit")
                     reasons.extend(classify_throughput(corpus.get("summary"), corpus.get("metadata"),
                                                        receipt.get("binaries")))
                 if "scaling_profile" in receipt:
@@ -521,6 +575,18 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.extend(validate_frontend_selector_bundle(receipt["frontend_selector"],
                                                                      corpus.get("frontend_selector_bundle"),
                                                                      receipt.get("binaries")))
+                if receipt.get("wild_linker") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("the wild-linker leg is valid only in pull mode")
+                    if any(receipt.get(key) is not None for key in
+                           ("throughput_real_source", "ast_pilot_acceptance", "production_profile", "compiler_probes",
+                            "frontend_selector")):
+                        reasons.append("the wild-linker leg cannot be combined with real-source throughput, ast-pilot "
+                                       "acceptance, the PGO/LTO production profile, the compiler probes or the "
+                                       "frontend-selector probes")
+                    reasons.extend(validate_wild_linker_bundle(receipt["wild_linker"], corpus.get("wild_linker_bundle"),
+                                                               expected.get("head", "")))
             if compare_result != "success":
                 reasons.append(f"compare job result is {compare_result!r}, not success")
             if problem:
@@ -869,7 +935,7 @@ def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
     if receipt.get("throughput_profile") != THROUGHPUT_PROFILE or "scaling_profile" in receipt or \
             not isinstance(receipt.get("inline_acceptance"), dict) or receipt["inline_acceptance"].get("requested") is not False or \
             "ast_pilot_acceptance" in receipt or "throughput_real_source" in receipt or "production_profile" in receipt or \
-            "compiler_probes" in receipt or "frontend_selector" in receipt:
+            "compiler_probes" in receipt or "frontend_selector" in receipt or "wild_linker" in receipt:
         raise ValueError("owned ordinary Main evidence changed the complete original corpus recipe")
     identity = receipt.get("identity")
     if not isinstance(identity, dict) or identity.get("trusted_revision") != route["main_measurement_revision"]:
@@ -1209,6 +1275,20 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         break
                 throughput["frontend_selector_bundle"] = (bundle if not problem and
                                                           len(bundle) == len(FRONTEND_SELECTOR_BUNDLE_FILES) else None)
+            if isinstance(receipt, dict) and receipt.get("wild_linker") is not None and not problem:
+                bundle = {}
+                for key, member in WILD_LINKER_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required wild-linker evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = archive.read(info).decode("utf-8")
+                    except UnicodeDecodeError:
+                        problem = f"evidence member {member} is malformed"
+                        break
+                throughput["wild_linker_bundle"] = (bundle if not problem and
+                                                    len(bundle) == len(WILD_LINKER_BUNDLE_FILES) else None)
     return receipt, summary, problem, artifact, throughput
 
 
@@ -1278,12 +1358,14 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     head_production_count = head_lines.count(PRODUCTION_PROFILE_REQUEST_LINE)
     head_probes_count = head_lines.count(COMPILER_PROBES_REQUEST_LINE)
     head_selector_count = head_lines.count(FRONTEND_SELECTOR_REQUEST_LINE)
+    head_linker_count = head_lines.count(WILD_LINKER_REQUEST_LINE)
     parent_analyzer_deltas = {line: [] for line in ANALYZER_REQUEST_LINES}
     parent_inline_counts = []
     ast_deltas = []
     real_deltas = []
     production_deltas = []
     probes_deltas = []
+    linker_deltas = []
     selector_deltas = []
     for parent in parent_shas:
         parent_bytes, problem = _github_file(api, parent)
@@ -1301,6 +1383,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
         production_deltas.append(head_production_count - parent_lines.count(PRODUCTION_PROFILE_REQUEST_LINE))
         probes_deltas.append(head_probes_count - parent_lines.count(COMPILER_PROBES_REQUEST_LINE))
         selector_deltas.append(head_selector_count - parent_lines.count(FRONTEND_SELECTOR_REQUEST_LINE))
+        linker_deltas.append(head_linker_count - parent_lines.count(WILD_LINKER_REQUEST_LINE))
     ast_record = receipt.get("ast_pilot_acceptance")
     if ast_record is not None and not all(delta == 1 for delta in ast_deltas):
         return ("the exact ast-pilot selector was not freshly added once at this head relative to every parent; "
@@ -1331,6 +1414,12 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
                 "parent; append one selector line for each explicit frontend-selector request")
     if selector_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in selector_deltas):
         return "a fresh frontend-selector selector has no frontend-selector record in the receipt"
+    linker_record = receipt.get("wild_linker")
+    if linker_record is not None and not all(delta == 1 for delta in linker_deltas):
+        return ("the exact wild-linker selector was not freshly added once at this head relative to every "
+                "parent; append one selector line for each explicit wild-linker request")
+    if linker_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in linker_deltas):
+        return "a fresh wild-linker selector has no wild-linker record in the receipt"
     if analyzer_profile:
         selected_deltas = parent_analyzer_deltas[request_line]
         other_deltas = [delta for line, values in parent_analyzer_deltas.items() if line != request_line
@@ -5440,6 +5529,21 @@ def main() -> int:
                 authorized = False
                 problem = "Main route refused: " + str(error)
                 notes.append(problem)
+        # #3714: the hosted pre-dispatch corpus disposition. An unsupported base was never
+        # dispatched, so it has no evidence to read; only "historical" admits the named recipe.
+        admission = get("BQ_HARNESS_ADMISSION") if mode == "pull" and not recover else "admitted"
+        expected_corpus = THROUGHPUT_HISTORICAL_PROFILE if admission == "historical" else THROUGHPUT_PROFILE
+        refusal = ""
+        if authorized and admission not in HARNESS_ADMISSIONS:
+            authorized = False
+            problem = f"hosted harness admission {admission!r} is not a reviewed disposition"
+            notes.append(problem)
+        elif authorized and admission == "unsupported":
+            authorized = False
+            refusal = (f"unsupported historical throughput harness: merge base {expected.get('base')} predates "
+                       f"{THROUGHPUT_HARNESS_FLOOR}, so its --mode all is not the {THROUGHPUT_PROFILE['name']} "
+                       f"FAST/QUALITY population; not dispatched to the 9700X. Only a fresh "
+                       f"`{THROUGHPUT_HISTORICAL_REQUEST_LINE}` request line can measure this base")
         if authorized:
             receipt, summary, problem, artifact, throughput = read_evidence(api, run_id, artifact_name(head, attempt),
                 trusted_main_route=route if route is not None and route["main_owned"] else None)
@@ -5466,7 +5570,9 @@ def main() -> int:
                                                 "require_owned_phases": True, "require_owned_preflight": True,
                                                 "expected_phase_driver_sha256": route["driver_sha256"],
                                                 "expected_measurement_revision": route["main_measurement_revision"]}
-                                               if route is not None and route["main_owned"] else {}))
+                                               if route is not None and route["main_owned"] else
+                                               {"expected_throughput_profile": expected_corpus,
+                                                "dispatch_refusal": refusal}))
         shown = dict(receipt) if isinstance(receipt, dict) else {"mode": mode, "identity": expected}
         # The authorized range, never the host's own account of it.
         shown.pop("coverage", None)

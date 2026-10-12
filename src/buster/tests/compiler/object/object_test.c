@@ -3519,6 +3519,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_empty_reader(UnitTestArgument
                 BUSTER_STRING_TEST(arguments, object.sections[OBJECT_SECTION_COUNT].name, S8("registry"));
                 BUSTER_TEST(arguments, object.sections[OBJECT_SECTION_COUNT].virtual_size == 0 && object.sections[OBJECT_SECTION_COUNT].alignment == 32);
             }
+            if (!referenced)
+            {
+                bytes.pointer[124] = 0x10;
+                ObjectFile untyped = object_read(temporary.arena, bytes, target);
+                BUSTER_TEST(arguments, untyped.error == OBJECT_ERROR_NONE && untyped.symbol_count == 2);
+                if (untyped.error == OBJECT_ERROR_NONE && untyped.symbol_count == 2)
+                {
+                    BUSTER_TEST(arguments, untyped.symbols[1].undefined_untyped && untyped.symbols[1].section == OBJECT_SECTION_UNDEFINED);
+                }
+                bytes.pointer[124] = 0x11;
+            }
             // Zero size does not excuse malformed alignment or an invalid
             // ordinary section index in the symbol table.
             object_test_write_u64(bytes, 256 + 2 * 64 + 48, 3);
@@ -3571,6 +3582,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_thread_local_symbol_identity(
             {.name = S8("defined_data"), .size = sizeof(data), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
             {.name = S8("defined_function"), .size = text.length, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
             {.name = S8("defined_tls_data"), .size = sizeof(data), .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
+            {.name = S8("untyped_address"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true,
+             .undefined_untyped = true, .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO},
+            {.name = S8("untyped_call"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true,
+             .undefined_untyped = true, .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO},
             {.name = S8("defined_tls_zero"), .size = sizeof(data), .section = OBJECT_SECTION_THREAD_LOCAL_ZERO, .kind = OBJECT_SYMBOL_DATA, .global = true},
         };
         ObjectFile object = {
@@ -3584,9 +3599,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_thread_local_symbol_identity(
         BUSTER_TEST(arguments, artifact.error == OBJECT_ERROR_NONE);
         String8 names[] = {
             S8("undefined_tls"), S8("undefined_data"), S8("undefined_function"), S8("defined_data"),
-            S8("defined_function"), S8("defined_tls_data"), S8("defined_tls_zero"),
+            S8("defined_function"), S8("defined_tls_data"), S8("untyped_address"), S8("untyped_call"), S8("defined_tls_zero"),
         };
-        u8 expected_types[] = {6, 1, 2, 1, 2, 6, 6};
+        u8 expected_types[] = {6, 1, 2, 1, 2, 6, 0, 0, 6};
         if (artifact.error == OBJECT_ERROR_NONE)
         {
             for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
@@ -3602,7 +3617,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_thread_local_symbol_identity(
                 u8 expected_states[] = {
                     OBJECT_SYMBOL_THREAD_LOCAL_YES, OBJECT_SYMBOL_THREAD_LOCAL_NO, OBJECT_SYMBOL_THREAD_LOCAL_NO,
                     OBJECT_SYMBOL_THREAD_LOCAL_NO, OBJECT_SYMBOL_THREAD_LOCAL_NO, OBJECT_SYMBOL_THREAD_LOCAL_YES,
-                    OBJECT_SYMBOL_THREAD_LOCAL_YES,
+                    OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN, OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN, OBJECT_SYMBOL_THREAD_LOCAL_YES,
                 };
                 for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
                 {
@@ -3614,6 +3629,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_thread_local_symbol_identity(
                         {
                             found = true;
                             BUSTER_TEST(arguments, symbol->thread_local_state == expected_states[index]);
+                            BUSTER_TEST(arguments, symbol->undefined_untyped == (expected_types[index] == 0));
                             break;
                         }
                     }
@@ -3760,6 +3776,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_test_elf_shape_object(Arena* arena, u64 se
             .weak = object_test_random_below(&state, 4) == 0,
             .hidden = object_test_random_below(&state, 4) == 0,
             .thread_local_state = (u8)object_test_random_below(&state, 3),
+            .undefined_untyped = placement >= section_count && (symbol & 1) != 0,
         };
     }
     u32 initializer_relocations = initializer_entries[0] + initializer_entries[1];
@@ -4327,8 +4344,7 @@ BUSTER_GLOBAL_LOCAL bool object_test_elf_shape_readback(Arena* arena, ObjectFile
         ObjectSectionKind kind = defined ? expected[source->section].kind : OBJECT_SECTION_COUNT;
         bool tls = defined ? kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO
                            : source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES;
-        u8 type = tls ? 6 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2
-                         : !defined && source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN ? 0 : 1;
+        u8 type = tls ? 6 : !defined && source->undefined_untyped ? 0 : source->kind == OBJECT_SYMBOL_FUNCTION ? 2 : 1;
         u8 binding = source->global ? (source->weak ? 0x20 : 0x10) : 0;
         result = decoded_name == name_offset && name_offset < strtab.size && source->name.length < strtab.size - name_offset &&
                  memcmp(image.pointer + strtab.offset + name_offset, source->name.pointer, source->name.length) == 0 &&
@@ -6160,6 +6176,10 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         {CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_LD64_LO12, true, false, false, false, false},
         {CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21, true, false, false, false, false},
         {CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12, true, false, false, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21, true, false, true, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12, true, false, true, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12, true, false, true, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_ELF_TLSDESC_CALL, true, false, true, false, false},
     };
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(relocation_kinds) == CODEGEN_MODULE_RELOCATION_COUNT);
     for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(relocation_kinds); kind_index += 1)

@@ -309,11 +309,20 @@ trees. Their serialized test phases receive
 the whole low-core budget (see [build guidance](agents/build.md)).
 CI trees expose `test_units_partitioned` and `test_unit_inventory` for the
 native `build.c test_units_partitioned <ide-path>` diagnostic. The partition
-driver runs `c_frontend_tests` as the `primary` module on partitioned trees
-except Windows AArch64, where `compiler_driver_tests` is primary; the
-remaining enabled modules run in a separate process. It shares one built
-executable, divides its supplied test budget between the children, and replays
-their captured output in stable order.
+driver normally schedules enabled modules across two process slots, starting
+with `c_frontend_tests` and `compiler_driver_tests`, prioritizing `c_ast_tests`,
+then claiming contiguous batches of at most four canonical descriptors as
+slots finish (#3620). It shares one built executable, divides its
+supplied test budget between the slots and replays captured output in canonical
+module order. Each child proves its exact selected inventory slice; the parent
+rejects duplicate or missing module coverage. Priority modules keep separate
+children, while other modules share bounded batch children.
+`BUSTER_TEST_UNIT_SCHEDULE=pair` retains the historical primary/rest split:
+frontend primary except on Windows AArch64, where the driver is primary.
+An unset schedule under `BUSTER_CI_CHECKS_EVIDENCE` retains this pair protocol
+for existing qualification consumers. Explicit `modules` still takes precedence.
+The [scheduler contract](agents/testing.md#work-conserving-sanitized-unit-processes-3620)
+describes the deadline, capture bounds and matched Release qualification.
 It rejects missing/duplicate module evidence, failed assertions/processes,
 timeouts, capture failures and incomplete cleanup. Whole-table audit exclusions
 remain owned by the original tree policy. Each child retains at least two test
@@ -326,8 +335,8 @@ the current checkout's `HEAD`. A source archive without Git runs with
 explicit revision fails before grouped child admission.
 
 The [diagnostic workflow](../.github/workflows/ci-unit-partitions.yml) runs only
-on its owning experiment branch or explicit dispatch. Both arms use the same
-sanitized Debug binary and independent complete registry query. The baseline
+on its owning experiment branches or explicit dispatch. Historical dispatches
+use the same sanitized Debug binary and independent complete registry query. The baseline
 uses two test workers; the candidate uses two children with two workers each,
 within a four-worker available budget. One-worker children would omit three
 OS concurrency assertions relative to the standard two-worker invocation.

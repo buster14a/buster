@@ -1358,9 +1358,9 @@ BUSTER_GLOBAL_LOCAL void machine_x64_va_named_cursors(MachineX64Selector* select
 // An aggregate aligned beyond a 16-byte slot is always MEMORY class on SysV
 // (its size is a multiple of the alignment), so it travels whole in the
 // overflow area, rounded up to its alignment, and never touches the register
-// save area. The overflow rounding in MACHINE_X64_VA_ARG already handles
-// powers of two up to the largest alignment a frame copy can name. Scalars and
-// vectors keep their established limits.
+// save area. The overflow rounding in MACHINE_X64_VA_ARG handles every power
+// of two up to MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT. Scalars and vectors
+// keep their established limits.
 BUSTER_GLOBAL_LOCAL bool machine_x64_va_arg_over_aligned_memory(MachineX64Selector* selector, IrType* type)
 {
     bool result = false;

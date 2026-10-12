@@ -2764,7 +2764,7 @@ class HarnessTest(unittest.TestCase):
         self.directory.cleanup()
 
     def run_harness(self, live: object, cpu: str = HOST["cpu_model"], corpus_behavior: str = "",
-                    scaling_behavior: str = "", **change) -> tuple[int, dict, Path]:
+                    scaling_behavior: str = "", floor: str | None = None, **change) -> tuple[int, dict, Path]:
         values = {"mode": "main", "candidate": str(self.repo), "lab": str(self.lab), "work": str(self.root / "work"),
                   "evidence": str(self.root / "evidence"), "summary": str(self.root / "step.md"),
                   "repository": "buster14a/buster", "ref": "refs/heads/main",
@@ -2773,8 +2773,10 @@ class HarnessTest(unittest.TestCase):
                   "request-run-id": "91", "run-id": "92", "run-attempt": "1"}
         values.update(change)
         argv = [item for key, value in values.items() for item in ("--" + key, value)]
+        # The fixture's own base stands in for the real harness floor unless a test names another.
         with mock.patch.object(compiler_compare, "queue_head", return_value=live), \
                 mock.patch.object(compiler_compare, "cpu_model", return_value=cpu), \
+                mock.patch.object(compiler_compare, "THROUGHPUT_HARNESS_FLOOR", floor or self.base), \
                 mock.patch.dict(os.environ, {"PATH": os.environ.get("PATH", ""), "FAKE_THROUGHPUT": corpus_behavior,
                                              "FAKE_SCALING": scaling_behavior}):
             code = compiler_compare.main(argv)
@@ -2833,6 +2835,163 @@ class HarnessTest(unittest.TestCase):
         # A main-mode publisher never accepts a pull-mode receipt.
         self.assertEqual(compiler_publish.decide(dict(expected, mode="main"), True, "success", result, summary, "", retained(evidence))[0],
                          "failure")
+
+    def assert_unadmitted(self, code: int, result: dict, evidence: Path, reason: str) -> None:
+        self.assertEqual((code, result["state"]), (1, "failed"))
+        self.assertEqual(len(result["reasons"]), 1, result["reasons"])
+        self.assertIn(reason, result["reasons"][0])
+        # Rejected before the expensive work: nothing built, no lab and no corpus.
+        self.assertEqual((result["timings"]["build_seconds"], result["binaries"], result["lab"]), ({}, {}, {}))
+        self.assertNotIn("throughput", result)
+        self.assertFalse((evidence / "lab").exists())
+        self.assertFalse((evidence / "throughput").exists())
+
+    def test_base_predating_the_harness_floor_is_rejected_before_measurement(self) -> None:
+        # #3714: the floor (here the pull head) is not in the base's history, as #3406's base lacks
+        # the FAST/QUALITY retirement, so its --mode all cannot produce the v2 population.
+        pull_tree = fixture_git(self.repo, "rev-parse", self.pull_head + "^{tree}")
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.pull_head)
+        code, result, evidence = self.run_harness(self.pull_head, mode="pull", ref="refs/pull/7/head", head=self.pull_head,
+                                                  floor=self.pull_head, **{"head-tree": pull_tree})
+        self.assert_unadmitted(code, result, evidence, "unsupported historical throughput harness")
+        self.assertIn(compiler_receipt.THROUGHPUT_PROFILE["name"], result["reasons"][0])
+
+    def test_unplaceable_harness_floor_fails_closed(self) -> None:
+        code, result, evidence = self.run_harness(self.head, floor="f" * 40)
+        self.assert_unadmitted(code, result, evidence, "throughput harness admission could not place")
+
+    def test_harness_floor_probe_faults_retain_a_failed_receipt(self) -> None:
+        # A timed-out or unlaunchable floor probe is a retained refusal, never an escaped exception.
+        real = compiler_compare.captured_run
+        for fault in (subprocess.TimeoutExpired(["git"], 120), FileNotFoundError("git")):
+            def probe(argv, **options):
+                if argv[3:5] == ["merge-base", "--is-ancestor"] and argv[5] == self.base:
+                    raise fault
+                return real(argv, **options)
+            with self.subTest(fault=type(fault).__name__), mock.patch.object(compiler_compare, "captured_run", probe):
+                code, result, evidence = self.run_harness(self.head)
+                self.assert_unadmitted(code, result, evidence, "throughput harness admission probe failed")
+                self.assertIn(type(fault).__name__, result["reasons"][0])
+
+    def test_harness_floor_is_the_fast_quality_retirement(self) -> None:
+        # #3406's historical base 3bf9d004 predates the floor; current history contains it.
+        floor = compiler_receipt.THROUGHPUT_HARNESS_FLOOR
+        self.assertRegex(floor, "^[0-9a-f]{40}$")
+        historical = "3bf9d004f2d1f6b4312e02825f17c56d7f3da14c"
+        root = Path(__file__).resolve().parents[2]
+        present = [subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{commit}^{{commit}}"],
+                                  capture_output=True, check=False).returncode == 0 for commit in (floor, historical)]
+        if not all(present):
+            self.skipTest("this checkout lacks the floor or #3406's base commit")
+        self.assertEqual(compiler_compare.throughput_harness_problem(root, "HEAD"), "")
+        self.assertIn("unsupported historical throughput harness",
+                      compiler_compare.throughput_harness_problem(root, historical))
+
+    def historical_fixture(self, extra_lines: tuple[str, ...] = ()) -> tuple[str, str, str]:
+        """(pinned harness commit, head commit, head tree) for the #3714 historical recipe.
+
+        The pinned commit's fake corpus also writes pinned.txt, so the export shows which harness ran.
+        """
+        git = lambda *arguments: fixture_git(self.repo, *arguments)  # noqa: E731
+        git("checkout", "-q", "--detach", self.base)
+        marker = "open(os.path.join(output, 'pinned.txt'), 'w').write('pinned harness')\nsys.exit("
+        self.assertEqual(FAKE_THROUGHPUT.count("\nsys.exit("), 1)
+        (self.repo / "throughput_fake.py").write_text(FAKE_THROUGHPUT.replace("\nsys.exit(", "\n" + marker))
+        git("commit", "-qam", "pinned harness")
+        pinned = git("rev-parse", "HEAD")
+        git("checkout", "-q", "--detach", self.pull_head)
+        request = self.repo / compiler_receipt.ANALYZER_REQUEST_PATH
+        request.parent.mkdir(parents=True, exist_ok=True)
+        request.write_text("".join(line + "\n" for line in (compiler_receipt.THROUGHPUT_HISTORICAL_REQUEST_LINE,
+                                                            *extra_lines)))
+        git("add", compiler_receipt.ANALYZER_REQUEST_PATH)
+        git("commit", "-qm", "request the historical corpus")
+        return pinned, git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+
+    def run_historical(self, pinned: str, head: str, tree: str, admission: str = "historical",
+                       floor: str | None = None) -> tuple[int, dict, Path]:
+        # The pull head stands in for a floor the base predates.
+        with mock.patch.object(compiler_compare, "THROUGHPUT_HISTORICAL_HARNESS_REVISION", pinned):
+            return self.run_harness(head, mode="pull", ref="refs/pull/7/head", head=head, floor=floor or self.pull_head,
+                                    **{"head-tree": tree, "pull-head": head, "harness-admission": admission})
+
+    def test_historical_recipe_measures_the_corpus_with_the_pinned_harness(self) -> None:
+        pinned, head, tree = self.historical_fixture()
+        code, result, evidence = self.run_historical(pinned, head, tree)
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertEqual(result["throughput_profile"], compiler_receipt.THROUGHPUT_HISTORICAL_PROFILE)
+        self.assertEqual(result["throughput_historical"],
+                         {"harness_revision": pinned, "observed_revision": pinned, "status": "prepared"})
+        # The corpus ran from the pinned worktree; the candidate checkout kept the base tree.
+        self.assertEqual((evidence / "throughput" / "pinned.txt").read_text(), "pinned harness")
+        self.assertEqual((self.repo / "compiler.txt").read_text(), "base compiler\n")
+        summary = json.loads((evidence / "lab" / "summary.json").read_text())
+        expected = dict(result["identity"])
+        historical = compiler_receipt.THROUGHPUT_HISTORICAL_PROFILE
+        with mock.patch.object(compiler_publish, "THROUGHPUT_HISTORICAL_HARNESS_REVISION", pinned):
+            decided = compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence),
+                                              expected_throughput_profile=historical)
+            self.assertEqual(decided[0], "success", decided[2])
+            # It discharges only its own inventory row, never the v2 corpus row.
+            rows = compiler_receipt.covered_inventory_rows(result, "success", "pull")["rows"]
+            self.assertEqual(rows["build:bench_throughput@throughput-corpus-historical"], "discharged")
+            self.assertEqual(rows["build:bench_throughput"], "not discharged: not requested")
+            # Without the hosted historical admission the same receipt never publishes.
+            self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "",
+                                                     retained(evidence))[0], "failure")
+        # Nor does a receipt whose harness was not the pinned revision.
+        decided = compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence),
+                                          expected_throughput_profile=historical)
+        self.assertEqual(decided[0], "failure")
+        self.assertTrue(any("pinned revision" in reason for reason in decided[2]), decided[2])
+
+    def test_historical_recipe_refusals_happen_before_any_build(self) -> None:
+        pinned, head, tree = self.historical_fixture()
+        cases = (
+            # The recipe on a base that already carries the floor.
+            ({"floor": self.base}, "already carries"),
+            # The host and the hosted disposition disagree.
+            ({"admission": "admitted"}, "hosted harness admission 'admitted'"),
+        )
+        for change, reason in cases:
+            with self.subTest(reason=reason):
+                code, result, evidence = self.run_historical(pinned, head, tree, **change)
+                self.assert_unadmitted(code, result, evidence, reason)
+        # An unpreparable pinned revision fails before any build.
+        code, result, evidence = self.run_historical("f" * 40, head, tree)
+        self.assert_unadmitted(code, result, evidence, "historical corpus harness worktree exited")
+        self.assertEqual(result["throughput_historical"]["status"], "failed")
+
+    def test_historical_recipe_refuses_every_other_opt_in_leg_before_preparation(self) -> None:
+        # Each fresh opt-in selector beside the historical one would still run the base's own harness.
+        for line in (compiler_receipt.WILD_LINKER_REQUEST_LINE, compiler_receipt.THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
+                     compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE, compiler_receipt.COMPILER_PROBES_REQUEST_LINE,
+                     compiler_receipt.FRONTEND_SELECTOR_REQUEST_LINE,
+                     compiler_receipt.AST_PILOT_ACCEPTANCE_REQUEST_LINE):
+            with self.subTest(line=line):
+                fixture_git(self.repo, "checkout", "-q", "main")
+                pinned, head, tree = self.historical_fixture((line,))
+                with mock.patch.object(compiler_compare, "prepare_historical_harness",
+                                       side_effect=AssertionError("prepared beside another opt-in leg")):
+                    code, result, evidence = self.run_historical(pinned, head, tree)
+                self.assertEqual((code, result["state"]), (1, "failed"))
+                self.assertTrue(any("cannot be combined" in reason for reason in result["reasons"]), result["reasons"])
+                self.assertEqual((result["timings"]["build_seconds"], result["binaries"], result["lab"]), ({}, {}, {}))
+                self.assertNotIn("throughput_historical", result)
+
+    def test_hosted_historical_admission_without_the_request_is_refused(self) -> None:
+        pull_tree = fixture_git(self.repo, "rev-parse", self.pull_head + "^{tree}")
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.pull_head)
+        code, result, evidence = self.run_harness(self.pull_head, mode="pull", ref="refs/pull/7/head",
+                                                  head=self.pull_head, **{"head-tree": pull_tree,
+                                                                          "harness-admission": "historical"})
+        self.assert_unadmitted(code, result, evidence, "hosted harness admission 'historical'")
+
+    def test_publisher_reports_an_undispatched_unsupported_base_explicitly(self) -> None:
+        conclusion, title, reasons = compiler_publish.decide({}, False, "skipped", None, None, "",
+                                                             dispatch_refusal="unsupported historical throughput harness")
+        self.assertEqual((conclusion, title, reasons), ("failure", "Not benchmarked: unsupported historical harness",
+                                                        ["unsupported historical throughput harness"]))
 
     def scaling_head(self) -> tuple[str, str]:
         """A pull request head that adds the scaling request on top of the candidate; (commit, tree)."""
@@ -5216,6 +5375,578 @@ class FrontendSelectorTest(unittest.TestCase):
             self.assertTrue(any("frontend scaling exited 2" in error for error in record["errors"]), record["errors"])
             self.assertTrue(any("ide bench run 0" in error for error in record["errors"]), record["errors"])
             self.assertTrue((root / "evidence" / "frontend_selector" / "ide_bench" / "ide-bench.json").is_file())
+
+WILD_PATH = "/usr/local/bin/wild"
+# Wild's own identity format (Args::linker_identity at wild e9a9b0cb): the positive control, in the
+# form the 9700X host's distribution Wild reports (run 38242826849).
+WILD_VERSION = "Wild 0.10.0 non-git-build (compatible with GNU linkers)"
+WILD_ROOT = "/work/wild-linker-source"
+
+
+def wild_linker_evidence(head: str = "a" * 40, kind: str = "mold") -> tuple[dict, dict]:
+    """A complete synthetic wild-linker-v1 record and its exported bundle, laid out as the harness writes them."""
+    profile = compiler_receipt.WILD_LINKER_PROFILE
+    frozen = compiler_receipt.WILD_LINKER_COMPARATORS[kind]
+    comparator_path = "/usr/bin/" + frozen["command"]
+    linkers = {"wild": {"command": "wild", "path": WILD_PATH, "realpath": WILD_PATH, "version": WILD_VERSION,
+                        "sha256": "7" * 64, "sha256_after": "7" * 64, "kind": "wild",
+                        "policy": profile["wild"]["policy"], "threads1": profile["wild"]["threads1"]},
+               "comparator": {"command": frozen["command"], "path": comparator_path, "realpath": comparator_path,
+                              "version": frozen["version"] + "2.42.1", "sha256": "8" * 64, "sha256_after": "8" * 64,
+                              "kind": kind, "policy": frozen["policy"], "threads1": frozen["threads1"],
+                              "substituted": kind != "mold"}}
+    raw = ["sequence,cell,variant,round,exit,wall_ms,user_ms,system_ms,maxrss_kib,minor_faults,major_faults"]
+    commands, summary = [], ["cell,n,median_A_ms,median_B_ms,mad_A_ms,mad_B_ms,median_paired_B_over_A,ci95_low,ci95_high"]
+    sequence = 0
+
+    def row(cell: str, variant: str, round_: int, command: str, exit_status: int = 0, wall: float = 1.0) -> None:
+        nonlocal sequence
+        raw.append(f"{sequence},{cell},{variant},{round_},{exit_status},{wall:.6f},1.000000,1.000000,100,10,0")
+        commands.append(f"{sequence}\t{cell}\t{variant}\t{round_}\t{command}")
+        sequence += 1
+
+    for cell, variant, exit_status in (("self-test-exit", "zero", 0), ("self-test-exit", "seven", 7),
+                                       ("self-test-quoting", "literal", 0)):
+        row(cell, variant, -1, "exit 0", exit_status)
+    orders, states = compiler_receipt.wild_linker_schedule()
+    common = f"--no-gc-sections --build-id={compiler_receipt.WILD_LINKER_BUILD_ID}"
+    manifests, argvs = {}, {}
+    for cell in profile["cells"]:
+        tree, config = profile["cell_trees"][cell]
+        directory = f"{WILD_ROOT}/{tree}"
+        objects = [f"CMakeFiles/ide.dir/{config}/src/{name}.c.o" for name in ("ide", "os", "arena")]
+        argvs[cell] = (f'"{WILD_PATH}" "-z" "relro" "-pie" "-o" "{config}/ide" '
+                       f'"--dependency-file=CMakeFiles/ide.dir/{config}/link.d" "/lib/x86_64-linux-gnu/Scrt1.o" ' +
+                       " ".join(f'"{name}"' for name in objects) + ' "-lm" "/lib/x86_64-linux-gnu/crtn.o"')
+        manifests[cell] = "".join(f"{'3' * 64}  {directory}/{name}\n" for name in objects)
+        wild = f"cd '{directory}' && {argvs[cell]} {common} {profile['wild']['policy']}"
+        reference = f"cd '{directory}' && '{comparator_path}'{argvs[cell][len(WILD_PATH) + 2:]} {common} {frozen['policy']}"
+        for name in ("capture-link-command", "capture-direct-linker", "freeze-object-manifest"):
+            row(name, "setup", -1, "true")
+        comparisons = [(f"{cell}-default", reference, wild, profile["pairs"]),
+                       (f"{cell}-threads1", f"{reference} {frozen['threads1']}", f"{wild} {profile['wild']['threads1']}",
+                        profile["pairs"])]
+        if cell == "ide-debug":
+            comparisons += [("ide-debug-aa-comparator", reference, reference, profile["control_pairs"]),
+                            ("ide-debug-aa-wild", wild, wild, profile["control_pairs"])]
+        for name, first, second, pairs in comparisons:
+            walls = {"A": [], "B": []}
+            for index, lead in enumerate(orders[name]):
+                round_ = index - profile["warmups"]
+                for variant in ("A", "B") if lead == 0 else ("B", "A"):
+                    wall = (20.0 if variant == "A" else 15.0) + (index % 5) * 0.25
+                    row(name, variant, round_, first if variant == "A" else second, wall=wall)
+                    if round_ >= 0:
+                        walls[variant].append(wall)
+            ratios = [b / a for a, b in zip(walls["A"], walls["B"])]
+            low, high = compiler_receipt._paired_interval(ratios, states[name])
+            summary.append("%s,%d,%.6f,%.6f,0.000000,0.000000,%.6f,%.6f,%.6f" % (
+                name, pairs, sorted(walls["A"])[pairs // 2], sorted(walls["B"])[pairs // 2], sorted(ratios)[pairs // 2],
+                low, high))
+        for command in (reference, wild):
+            for name in ("validated-link", "output-identity", "linked-compiler-smoke", "same-linker-repeat",
+                         "same-linker-byte-identity"):
+                row(name, "setup", -1, command)
+        row("unchanged-object-manifest", "setup", -1, "sha256sum --quiet --check")
+    identity = {"schema": compiler_receipt.WILD_LINKER_SCHEMA, "profile": profile["name"], "head": head, "cpu_model": ZEN5,
+                "cpus": list(profile["cpus"]), "linkers": linkers,
+                "harness": {"wild_linker_acceptance.c": "4" * 64, "wild_linker_bench.c": "5" * 64},
+                "inputs": {cell: hashlib.sha256(text.encode()).hexdigest() for cell, text in manifests.items()},
+                "build_root": WILD_ROOT, "exit": 0}
+    bundle = {"identity": json.dumps(identity), "raw": "\n".join(raw) + "\n", "summary": "\n".join(summary) + "\n",
+              "commands": "\n".join(commands) + "\n",
+              "affinity": "affinity=%s\n" % ",".join(str(cpu) for cpu in profile["cpus"]), "completion": "link_only=PASS\n"}
+    for cell in profile["cells"]:
+        bundle[f"inputs {cell}"] = manifests[cell]
+        bundle[f"argv {cell}"] = argvs[cell]
+        for linker in compiler_receipt.WILD_LINKER_LINKERS:
+            bundle[f"output {cell} {linker}"] = ("9" if linker == "wild" else "6") * 64 + "\n"
+            bundle[f"comment {cell} {linker}"] = "clang version 21.1.8\n" + (
+                "Linker: " + WILD_VERSION + "\n" if linker == "wild" else
+                "mold 2.42.1 (compatible with GNU ld)\n" if kind == "mold" else "")
+    record = {"requested": True, "request_line": compiler_receipt.WILD_LINKER_REQUEST_LINE,
+              "profile": copy.deepcopy(profile), "status": "complete", "errors": [], "build_exit": 0, "exit": 0,
+              "linkers": copy.deepcopy(linkers), "identity": copy.deepcopy(identity),
+              "cells": compiler_receipt.wild_linker_digest(bundle["raw"], bundle["summary"])}
+    return record, bundle
+
+
+class WildLinkerTest(unittest.TestCase):
+    """#2761: the fixed wild-linker-v1 leg times the host's installed Wild on the pull-compare route."""
+
+    def validate(self, bundle: dict, status: object = 0, head: str = "a" * 40, identity: object = None) -> list[str]:
+        return compiler_receipt.validate_wild_linker(status, bundle, head, identity)
+
+    def test_profile_is_frozen_report_only_and_fits_the_job(self) -> None:
+        profile = compiler_receipt.WILD_LINKER_PROFILE
+        self.assertEqual(profile["name"], "wild-linker-v1")
+        self.assertEqual(compiler_receipt.WILD_LINKER_REQUEST_LINE, "profile: " + profile["name"])
+        self.assertIs(profile["report_only"], True)
+        self.assertEqual(profile["cells"], ["ide-debug", "ide-unity-release", "ide-separate-release"])
+        # The audit's link policy: no LTO, Wild never forks or folds code, one fixed benchmark build ID.
+        self.assertEqual({key: profile["wild"][key] for key in ("command", "policy", "threads1")},
+                         {"command": "wild", "policy": "--no-fork --icf=none", "threads1": "--threads=1"})
+        self.assertTrue(compiler_receipt.WILD_IDENTITY.fullmatch(WILD_VERSION))
+        self.assertEqual(sorted(profile["cell_trees"]), sorted(profile["cells"]))
+        self.assertEqual(compiler_receipt.WILD_LINKER_COMPARATORS["mold"]["policy"], profile["wild"]["policy"])
+        for arguments in profile["trees"].values():
+            self.assertIn("--no-lto", arguments)
+            self.assertEqual(arguments[arguments.index("--linker") + 1], "DEFAULT")
+        self.assertEqual(len(compiler_receipt.wild_linker_population()), 8)
+        self.assertEqual(json.loads(json.dumps(profile)), profile)
+        # Both bounds together stay inside the unchanged 90-minute compare-pull job with its ordinary comparison.
+        self.assertLessEqual(compiler_compare.WILD_LINKER_BUILD_TIMEOUT_SECONDS +
+                             compiler_compare.WILD_LINKER_HARNESS_TIMEOUT_SECONDS, 40 * 60)
+
+    def test_identity_accepts_every_version_form_wild_builds(self) -> None:
+        # wild/build.rs at e9a9b0cb: release tag, merge-base hash, modified checkout, no git. The
+        # 9700X host's distribution Wild reports the last form (run 38242826849).
+        merge_base = "e9a9b0cb6fd63a23cc7b93aafc931aadd5746be6"
+        for version in ("0.10.0", merge_base, f"0.10.0 {merge_base}-modified", "0.10.0 non-git-build"):
+            with self.subTest(version=version):
+                self.assertTrue(compiler_receipt.WILD_IDENTITY.fullmatch(
+                    f"Wild {version} (compatible with GNU linkers)"))
+        for line in ("Ubuntu LLD 18.1.3 (compatible with GNU linkers)", "Wild (compatible with GNU linkers)",
+                     "Wild 0.10.0 dirty (compatible with GNU linkers)", "Wild 0.10.0 non-git-build",
+                     f"Wild {merge_base[:12]} (compatible with GNU linkers)",
+                     "Wild 0.10.0 non-git-build (compatible with GNU linkers)\nmold 2.42.1"):
+            with self.subTest(line=line):
+                self.assertIsNone(compiler_receipt.WILD_IDENTITY.fullmatch(line))
+
+    def test_schedule_replays_the_harness_generator(self) -> None:
+        """The seeded xorshift order and bootstrap match the C harness's random_u32 (seed 2645)."""
+        state, draws = 2645, []
+        for _ in range(3):
+            state = compiler_receipt._xorshift(state)
+            draws.append(state)
+        self.assertEqual(draws, [673182960, 112355760, 990757426])
+        orders, states = compiler_receipt.wild_linker_schedule()
+        self.assertEqual([len(orders[cell]) for cell, pairs, _, _ in compiler_receipt.wild_linker_population()],
+                         [pairs + 2 for _, pairs, _, _ in compiler_receipt.wild_linker_population()])
+        self.assertEqual(len(set(states.values())), len(states))
+
+    def test_complete_evidence_validates_and_every_gap_fails(self) -> None:
+        for kind in compiler_receipt.WILD_LINKER_COMPARATORS:
+            with self.subTest(comparator=kind):
+                record, bundle = wild_linker_evidence(kind=kind)
+                self.assertEqual(self.validate(bundle, identity=record["identity"]), [])
+        record, bundle = wild_linker_evidence()
+
+        def identity(mutate) -> dict:
+            changed = json.loads(bundle["identity"])
+            mutate(changed)
+            return dict(bundle, identity=json.dumps(changed))
+
+        def text(key: str, mutate) -> dict:
+            return dict(bundle, **{key: mutate(bundle[key])})
+
+        def raw_line(match: str, mutate) -> dict:
+            lines = bundle["raw"].splitlines()
+            index = next(index for index, line in enumerate(lines) if match in line)
+            lines[index] = mutate(lines[index])
+            return dict(bundle, raw="\n".join(lines) + "\n")
+
+        def manifest(cell: str, mutate) -> dict:
+            """A changed manifest whose hash the identity also records, so only the binding predicates refuse it."""
+            changed = mutate(bundle[f"inputs {cell}"])
+            record = json.loads(bundle["identity"])
+            record["inputs"][cell] = hashlib.sha256(changed.encode()).hexdigest()
+            return dict(bundle, identity=json.dumps(record), **{f"inputs {cell}": changed})
+
+        def without(key: str) -> dict:
+            return {name: value for name, value in bundle.items() if name != key}
+
+        def swap_first_round(raw: str) -> str:
+            lines = raw.splitlines()
+            index = next(index for index, line in enumerate(lines) if ",ide-debug-default," in line)
+            first, second = lines[index].split(","), lines[index + 1].split(",")
+            first[2], second[2] = second[2], first[2]
+            lines[index:index + 2] = [",".join(first), ",".join(second)]
+            return "\n".join(lines) + "\n"
+
+        def summary_field(cell: str, column: int, value: str):
+            def mutate(summary: str) -> str:
+                lines = summary.splitlines()
+                for index, line in enumerate(lines):
+                    fields = line.split(",")
+                    if fields[0] == cell:
+                        fields[column] = value
+                        lines[index] = ",".join(fields)
+                return "\n".join(lines) + "\n"
+            return mutate
+
+        def linker(role: str, **values):
+            return identity(lambda value: value["linkers"][role].update(values))
+
+        cases = {
+            "failed harness": (bundle, {"status": 1}),
+            "cancelled harness": (bundle, {"status": None}),
+            "timed-out harness": (bundle, {"status": 124}),
+            "missing raw": (without("raw"), {}),
+            "missing summary": (without("summary"), {}),
+            "missing completion": (without("completion"), {}),
+            "missing output": (without("output ide-debug wild"), {}),
+            "missing manifest": (without("inputs ide-unity-release"), {}),
+            "malformed identity": (dict(bundle, identity="{"), {}),
+            "duplicate identity key": (dict(bundle, identity=bundle["identity"][:-1] + ', "exit": 0}'), {}),
+            "not Zen 5": (identity(lambda value: value.update(cpu_model="AMD EPYC 9V74 96-Core Processor")), {}),
+            "other head": (identity(lambda value: value.update(head="f" * 40)), {}),
+            "other CPUs": (identity(lambda value: value.update(cpus=[2])), {}),
+            "nonzero recorded exit": (identity(lambda value: value.update(exit=1)), {}),
+            "Wild replaced during the leg": (linker("wild", sha256_after="0" * 64), {}),
+            "Wild unhashed": (linker("wild", sha256=None, sha256_after=None), {}),
+            "Wild without version": (linker("wild", version=""), {}),
+            "relative Wild path": (linker("wild", path="wild"), {}),
+            "Wild under another name": (linker("wild", command="ld.wild"), {}),
+            "Wild without no-fork": (linker("wild", policy="--icf=none"), {}),
+            "unsupported comparator": (linker("comparator", kind="lld", command="ld.lld"), {}),
+            "comparator not mold": (linker("comparator", version="GNU ld 2.42"), {}),
+            "unrecorded substitution": (linker("comparator", substituted=True), {}),
+            "comparator without its policy": (linker("comparator", policy=""), {}),
+            "same executable": (linker("comparator", sha256="7" * 64, sha256_after="7" * 64), {}),
+            "unidentified harness": (identity(lambda value: value["harness"].pop("wild_linker_bench.c")), {}),
+            "other input manifest": (text("inputs ide-debug", lambda value: value.replace("3" * 64, "4" * 64)), {}),
+            "empty input manifest": (dict(bundle, **{"inputs ide-separate-release": ""}), {}),
+            "unhashed output": (dict(bundle, **{"output ide-unity-release comparator": "NA\n"}), {}),
+            "unpinned": (dict(bundle, affinity="affinity=0,1,2,3,4,5,6,7\n"), {}),
+            "incomplete pass": (dict(bundle, completion=""), {}),
+            "partial population": (text("raw", lambda value: "\n".join(value.splitlines()[:-60]) + "\n"), {}),
+            "failed link": (raw_line(",ide-unity-release-threads1,B,3,", lambda line: line.replace(",B,3,0,", ",B,3,1,")), {}),
+            "zero wall": (raw_line(",ide-separate-release-default,A,0,", lambda line: ",".join(
+                [*line.split(",")[:5], "0.000000", *line.split(",")[6:]])), {}),
+            "unseeded order": (text("raw", swap_first_round), {}),
+            "edited median": (text("summary", summary_field("ide-debug-default", 3, "1.000000")), {}),
+            "edited interval": (text("summary", summary_field("ide-unity-release-default", 8, "2.000000")), {}),
+            "missing summary cell": (text("summary", lambda value: "\n".join(value.splitlines()[:-1]) + "\n"), {}),
+            "failed byte identity": (raw_line(",same-linker-byte-identity,", lambda line: line.replace(",-1,0,", ",-1,1,")), {}),
+            "changed object manifest": (raw_line(",unchanged-object-manifest,", lambda line: line.replace(",-1,0,", ",-1,1,")), {}),
+            "other linker in a slot": (text("commands", lambda value: value.replace(f'"{WILD_PATH}"', '"/tmp/wild"', 1)), {}),
+            "other build ID": (text("commands", lambda value: value.replace("0x2645", "0x1111", 1)), {}),
+            "one-thread option dropped": (text("commands", lambda value: value.replace(" --threads=1", "", 1)), {}),
+            "receipt identity differs": (bundle, {"identity": dict(record["identity"], cpus=[2, 3])}),
+            # #3689 review: an impostor installed as `wild` is refused by its version and by its output.
+            "impostor Wild version": (linker("wild", version="Ubuntu LLD 18.1.3 (compatible with GNU linkers)"), {}),
+            "Wild prefix only": (linker("wild", version="Wild version 0.10.0"), {}),
+            "Wild output without identity": (dict(bundle, **{"comment ide-unity-release wild": "Linker: LLD 18\n"}), {}),
+            "Wild output with another version": (dict(bundle, **{"comment ide-debug wild": (
+                "Linker: Wild 0.9.0 (compatible with GNU linkers)\n")}), {}),
+            "Wild identity without Wild's prefix": (dict(bundle, **{"comment ide-debug wild": WILD_VERSION + "\n"}), {}),
+            "comparator output is Wild": (dict(bundle, **{"comment ide-debug comparator": "Linker: " + WILD_VERSION + "\n"}),
+                                          {}),
+            "comparator output is bare Wild": (dict(bundle, **{"comment ide-debug comparator": WILD_VERSION + "\n"}), {}),
+            "dependency file elsewhere": (text("argv ide-debug", lambda value: value.replace(
+                "CMakeFiles/ide.dir/Debug/link.d", "/tmp/link.d")), {}),
+            "dependency file of another config": (text("argv ide-debug", lambda value: value.replace(
+                "CMakeFiles/ide.dir/Debug/link.d", "CMakeFiles/ide.dir/Release/link.d")), {}),
+            "missing comment": (without("comment ide-separate-release wild"), {}),
+            "no build root": (identity(lambda value: value.pop("build_root")), {}),
+            # #3689 review: the timed argv is bound to the hashed inputs and nothing else can run.
+            "missing argv": (without("argv ide-debug"), {}),
+            "unhashed object": (text("argv ide-debug", lambda value: value.replace("/src/os.c.o", "/src/other.c.o")), {}),
+            "object dropped from manifest": (manifest("ide-unity-release", lambda value: value.split("\n", 1)[1]), {}),
+            "foreign absolute object": (text("argv ide-separate-release", lambda value: value.replace(
+                '"/lib/x86_64-linux-gnu/crtn.o"', '"/tmp/payload.o"')), {}),
+            "object under the build root": (text("argv ide-debug", lambda value: value.replace(
+                '"/lib/x86_64-linux-gnu/crtn.o"', f'"{WILD_ROOT}/build-wild-unity/x.o"')), {}),
+            "manifest outside its tree": (manifest("ide-debug", lambda value: value.replace(
+                "build-wild-separate", "build-wild-unity", 1)), {}),
+            "argv writes elsewhere": (text("argv ide-debug", lambda value: value.replace('"Debug/ide"', '"Debug/other"')), {}),
+            "argv not Wild": (text("argv ide-debug", lambda value: value.replace(f'"{WILD_PATH}"', '"/usr/bin/ld.lld"')), {}),
+            "injected command": (text("commands", lambda value: value.replace(" --icf=none", " --icf=none; touch /tmp/x", 1)), {}),
+            "injected object": (text("commands", lambda value: value.replace(' "-lm"', ' "/tmp/payload.o" "-lm"', 1)), {}),
+            "identity comment disabled": (text("commands", lambda value: value.replace(
+                " --icf=none", " --icf=none --no-identity-comment")), {}),
+            "validated link replaced": (text("commands", lambda value: value.replace(
+                "\tvalidated-link\tsetup\t-1\tcd ", "\tvalidated-link\tsetup\t-1\ttrue; cd ", 1)), {}),
+        }
+        for name, (changed, options) in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(self.validate(changed, **options), name)
+
+    def test_cells_are_rederived_from_the_samples(self) -> None:
+        record, bundle = wild_linker_evidence()
+        cells = {row["name"]: row for row in record["cells"]}
+        self.assertEqual(sorted(cells), sorted(cell for cell, _, _, _ in compiler_receipt.wild_linker_population()))
+        self.assertEqual(cells["ide-debug-default"]["linkers"], ["comparator", "wild"])
+        self.assertEqual(cells["ide-debug-aa-wild"]["pairs"], 9)
+        self.assertTrue(all(row["ratio"] < 1 for name, row in cells.items() if "-aa-" not in name))
+        edited = bundle["summary"].replace(bundle["summary"].splitlines()[1].split(",")[2], "99.000000", 1)
+        self.assertEqual(compiler_receipt.wild_linker_digest(bundle["raw"], edited), record["cells"])
+
+    def publish(self, record: dict, bundle: dict, **extra) -> tuple:
+        """ZIP -> read_evidence -> decide on a pull receipt carrying record, as the publisher runs it."""
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["wild_linker"] = record
+        pull.update(extra)
+        members = {"receipt.json": json.dumps(pull), "lab/summary.json": json.dumps(summary()),
+                   "throughput/summary.json": json.dumps(corpus()["summary"]),
+                   "throughput/metadata.json": json.dumps(corpus()["metadata"]),
+                   **{path: bundle[key] for key, path in compiler_publish.WILD_LINKER_BUNDLE_FILES.items() if key in bundle}}
+        read, lab, problem, unused_artifact, throughput = compiler_publish.read_evidence(
+            FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+        if problem:
+            return "failure", "", [problem]
+        return compiler_publish.decide(dict(EXPECTED, mode="pull"), True, "success", read, lab, "", throughput)
+
+    def test_forged_argv_with_matching_commands_fails_publication(self) -> None:
+        """#3689 review: a packet whose retained argv and every derived command row are rewritten in lockstep."""
+        record, bundle = wild_linker_evidence()
+        self.assertEqual(self.publish(record, bundle)[0], "success")
+        tail = bundle["argv ide-debug"][len(WILD_PATH) + 2:]
+        for name, suffix in (("appended shell syntax", " ; :"), ("command substitution", ' "$(touch /tmp/x)"'),
+                             ("quoted separator", ' "; :"'), ("unquoted extra word", " -lm"),
+                             ("backquoted word", ' "`id`"'), ("redirection", ' > "/tmp/x"')):
+            with self.subTest(case=name):
+                changed = dict(bundle, **{"argv ide-debug": bundle["argv ide-debug"] + suffix,
+                                          "commands": bundle["commands"].replace(tail, tail + suffix)})
+                self.assertIn(tail + suffix, changed["commands"])
+                problems = self.validate(changed, identity=record["identity"])
+                self.assertTrue(any("shell-inert" in problem for problem in problems), problems)
+                conclusion, unused_title, reasons = self.publish(record, changed)
+                self.assertEqual(conclusion, "failure", reasons)
+        # A clean extra argument in Clang's own form is admitted, and the commands are rebuilt from tokens.
+        plain = ' "-lm"'
+        changed = dict(bundle, **{"argv ide-debug": bundle["argv ide-debug"] + plain,
+                                  "commands": bundle["commands"].replace(tail, tail + plain)})
+        self.assertEqual(self.validate(changed, identity=record["identity"]), [])
+
+    def test_argv_grammar_refuses_unbound_linker_inputs(self) -> None:
+        """#3689 review: inputs Wild would read beyond the hashed manifest, forged into the argv and every
+        derived command row in lockstep, fail publication; Clang's own flags stay admitted."""
+        record, bundle = wild_linker_evidence()
+        tail = bundle["argv ide-debug"][len(WILD_PATH) + 2:]
+
+        def forged(suffix: str) -> dict:
+            return dict(bundle, **{"argv ide-debug": bundle["argv ide-debug"] + suffix,
+                                   "commands": bundle["commands"].replace(tail, tail + suffix)})
+
+        for name, suffix, reason in (
+                ("response file", ' "@/tmp/foreign.rsp"', "response file"),
+                ("relative response file", ' "@inputs.rsp"', "response file"),
+                ("linker script", ' "-T" "/tmp/x.ld"', "unadmitted option"),
+                ("joined script", ' "--script=/tmp/x.ld"', "unadmitted option"),
+                ("plugin", ' "--plugin" "/tmp/p.so"', "unadmitted option"),
+                ("just symbols", ' "--just-symbols=/tmp/x"', "unadmitted option"),
+                ("foreign search directory", ' "-L/tmp" "-lfoo"', "not a system directory"),
+                ("escaping search directory", ' "-L/usr/../tmp"', "not a system directory"),
+                ("foreign shared object", ' "/tmp/x.so"', "not an object or archive"),
+                ("relative shared object", ' "x.so"', "not an object or archive"),
+                ("library path as name", ' "-l/tmp/x"', "unadmitted option"),
+                ("unadmitted -z keyword", ' "-z" "muldefs"', "unadmitted operand"),
+                ("second output", ' "-o" "Debug/other"', "unadmitted operand"),
+                ("escaping system object", ' "/usr/../tmp/x.o"', "neither a hashed input nor a system file")):
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = self.publish(record, forged(suffix))
+                self.assertEqual(conclusion, "failure", reasons)
+                self.assertTrue(any(reason in item for item in reasons), reasons)
+        for name, suffix in (("as-needed libraries", ' "--as-needed" "-lm" "--no-as-needed"'),
+                             ("system search directory", ' "-L/usr/lib/../lib64"'),
+                             ("now", ' "-z" "now"')):
+            with self.subTest(positive=name):
+                self.assertEqual(self.publish(record, forged(suffix))[:3:2], ("success", []))
+
+    def test_traversal_out_of_the_cell_tree_fails_publication(self) -> None:
+        """#3689 review: an object operand and its manifest entry rewritten in lockstep to a path that leaves the
+        cell's tree once normalised, with the manifest hash recomputed in the export and the receipt."""
+        record, bundle = wild_linker_evidence()
+        original = "CMakeFiles/ide.dir/Debug/src/ide.c.o"
+        directory = f"{WILD_ROOT}/build-wild-separate"
+
+        def forged(operand: str | None, extra: str = "") -> tuple[dict, dict]:
+            changed = dict(bundle)
+            manifest = bundle["inputs ide-debug"]
+            if operand is not None:
+                changed["argv ide-debug"] = bundle["argv ide-debug"].replace(f'"{original}"', f'"{operand}"')
+                changed["commands"] = bundle["commands"].replace(f'"{original}"', f'"{operand}"')
+                manifest = manifest.replace(f"{directory}/{original}", f"{directory}/{operand}")
+            changed["inputs ide-debug"] = manifest + extra
+            identity = json.loads(bundle["identity"])
+            identity["inputs"]["ide-debug"] = hashlib.sha256(changed["inputs ide-debug"].encode()).hexdigest()
+            changed["identity"] = json.dumps(identity)
+            return dict(copy.deepcopy(record), identity=identity), changed
+
+        self.assertEqual(self.publish(*forged(original))[0], "success")
+        for name, operand, extra, reason in (
+                ("reviewer's traversal", "../../tmp/foreign.o", "", "leaves build-wild-separate"),
+                ("deep traversal", "CMakeFiles/ide.dir/../../../../tmp/x.o", "", "leaves build-wild-separate"),
+                ("dot component", "./CMakeFiles/ide.dir/Debug/src/ide.c.o", "", "leaves build-wild-separate"),
+                ("empty component", "CMakeFiles//ide.dir/Debug/src/ide.c.o", "", "leaves build-wild-separate"),
+                ("manifest-only traversal", None, f"{'3' * 64}  {directory}/../../tmp/foreign.o\n",
+                 "lists files outside build-wild-separate")):
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = self.publish(*forged(operand, extra))
+                self.assertEqual(conclusion, "failure", reasons)
+                self.assertTrue(any(reason in item for item in reasons), reasons)
+
+    def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
+        record, bundle = wild_linker_evidence()
+        self.assertEqual(self.publish(record, bundle), ("success", self.publish(record, bundle)[1], []))
+        substituted, substituted_bundle = wild_linker_evidence(kind="bfd")
+        self.assertEqual(self.publish(substituted, substituted_bundle)[0], "success")
+        pull = receipt()
+        pull.update(mode="pull", wild_linker=record)
+        pull["identity"].update(mode="pull")
+        values = {"expected": dict(EXPECTED, mode="pull"), "authorized": True, "compare_result": "success",
+                  "receipt": pull, "summary": summary(), "policy_value": "",
+                  "throughput": dict(corpus(), wild_linker_bundle=bundle)}
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        stale = copy.deepcopy(record)
+        stale["cells"][0]["values"] = [1.0, 0.1]
+        widened = copy.deepcopy(record)
+        widened["profile"]["pairs"] = 5
+        relinked = copy.deepcopy(record)
+        relinked["linkers"]["wild"]["path"] = "/opt/wild"
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "partial bundle": {"throughput": dict(corpus(), wild_linker_bundle={
+                key: value for key, value in bundle.items() if key != "raw"})},
+            "failed run": {"receipt": dict(pull, wild_linker=dict(record, status="failed", exit=2))},
+            "failed input build": {"receipt": dict(pull, wild_linker=dict(record, build_exit=1))},
+            "cancelled run": {"receipt": dict(pull, wild_linker=dict(record, status="pending", exit=None))},
+            "stale cells": {"receipt": dict(pull, wild_linker=stale)},
+            "changed profile": {"receipt": dict(pull, wild_linker=widened)},
+            "linkers differ from identity": {"receipt": dict(pull, wild_linker=relinked)},
+            "not a request": {"receipt": dict(pull, wild_linker=dict(record, requested=False))},
+            "other selector": {"receipt": dict(pull, wild_linker=dict(record, request_line="profile: wild-linker-v2"))},
+            "with production profile": {"receipt": dict(pull, production_profile=production_profile_evidence()[0]),
+                                        "throughput": dict(corpus(), wild_linker_bundle=bundle,
+                                                           production_profile_bundle=production_profile_evidence()[1])},
+            "with frontend-selector probes": {"receipt": dict(pull, frontend_selector=frontend_selector_evidence()[0]),
+                                              "throughput": dict(corpus(), wild_linker_bundle=bundle,
+                                                                 frontend_selector_bundle=frontend_selector_evidence()[1])},
+            "with compiler probes": {"receipt": dict(pull, compiler_probes=compiler_probes_evidence()[0]),
+                                     "throughput": dict(corpus(), wild_linker_bundle=bundle,
+                                                        compiler_probes_bundle=compiler_probes_evidence()[1])},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        for name, member in (("missing member", "raw"), ("missing output", "output ide-debug wild")):
+            with self.subTest(case=name):
+                partial = {key: value for key, value in bundle.items() if key != member}
+                self.assertEqual(self.publish(record, partial)[0], "failure")
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("Host Wild linker (wild-linker-v1): complete", report)
+        self.assertIn(f"wild `{WILD_PATH}` ({WILD_VERSION}, `777777777777`)", report)
+        self.assertRegex(report, r"\| ide-debug-default \| 21 \| 20\.\d{3} \| 15\.\d{3} \| 0\.\d{4} \| \[0\.\d{4}, 0\.\d{4}\] \|")
+        self.assertNotIn("default ld", report)
+        pull["wild_linker"] = substituted
+        self.assertIn("mold is not installed on this host, so the comparator is its default ld",
+                      compiler_receipt.render(pull, summary(), "success", []))
+
+    def test_selector_needs_one_exact_fresh_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Wild Linker Test")
+            fixture_git(repo, "config", "user.email", "wild-linker@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            fixture_git(repo, "add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            fixture_git(repo, "commit", "-qm", "seed")
+            line = compiler_receipt.WILD_LINKER_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                fixture_git(repo, "commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.wild_linker_request_selection(
+                        repo, fixture_git(repo, "rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            fixture_git(repo, "commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.wild_linker_request_selection(repo, fixture_git(repo, "rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.WILD_LINKER_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", wild_linker=wild_linker_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("wild_linker")
+        self.assertIn("no wild-linker record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+
+    def leg(self, root: Path, tools: dict, run_status: int = 1) -> tuple[dict, list]:
+        """measure_wild_linker with only `tools` on PATH; run is mocked, so nothing builds or links."""
+        directory = root / "path"
+        directory.mkdir(exist_ok=True)
+        for name, version in tools.items():
+            (directory / name).write_text(f"#!/bin/sh\necho '{version}'\n", encoding="utf-8")
+            (directory / name).chmod(0o755)
+        for name in ("work", "evidence"):
+            (root / name).mkdir(exist_ok=True)
+        receipt_value = {"timings": {}, "wild_linker": {"requested": True, "status": "pending"}}
+        with mock.patch.dict(os.environ, {"PATH": str(directory)}), \
+                mock.patch.object(compiler_compare, "run", return_value=run_status) as run:
+            compiler_compare.measure_wild_linker(root, root / "work", root / "evidence", "a" * 40, receipt_value)
+        return receipt_value["wild_linker"], [call.args[0] for call in run.call_args_list]
+
+    def test_leg_finds_installed_linkers_and_records_missing_ones(self) -> None:
+        cases = {
+            "no Wild": ({"mold": "mold 2.42.1"}, "the host has no installed wild"),
+            "no comparator": ({"wild": WILD_VERSION}, "comparator bfd: the host has no installed ld"),
+            "mold that is not mold": ({"wild": WILD_VERSION, "mold": "LLD 18", "ld": "GNU ld 2.42"},
+                                      "not a mold version"),
+            "silent Wild": ({"wild": ""}, "did not report a version"),
+            "impostor Wild": ({"wild": "Ubuntu LLD 18.1.3 (compatible with GNU linkers)", "mold": "mold 2.42.1"},
+                              "not Wild's own identity"),
+        }
+        for name, (tools, reason) in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temporary:
+                record, commands = self.leg(Path(temporary), tools)
+                self.assertEqual((record["status"], commands), ("failed", []))
+                self.assertTrue(any(reason in error for error in record["errors"]), record["errors"])
+        with tempfile.TemporaryDirectory() as temporary:
+            record, commands = self.leg(Path(temporary), {"wild": WILD_VERSION, "mold": "mold 2.42.1",
+                                                          "ld": "GNU ld 2.42"})
+            self.assertEqual(record["linkers"]["comparator"]["kind"], "mold")
+            self.assertIs(record["linkers"]["comparator"]["substituted"], False)
+            self.assertEqual(record["linkers"]["wild"]["sha256"],
+                             hashlib.sha256(f"#!/bin/sh\necho '{WILD_VERSION}'\n".encode()).hexdigest())
+            # The input build failed, so nothing was timed; the failure is recorded.
+            self.assertEqual((record["status"], record["build_exit"], len(commands)), ("failed", 1, 1))
+            self.assertEqual(commands[0][:4], ["git", "-c", "core.hooksPath=/dev/null", "clone"])
+        with tempfile.TemporaryDirectory() as temporary:
+            record, commands = self.leg(Path(temporary), {"wild": WILD_VERSION, "ld": "GNU ld 2.42"}, 0)
+            self.assertEqual((record["linkers"]["comparator"]["kind"], record["linkers"]["comparator"]["substituted"]),
+                             ("bfd", True))
+            generates = [command for command in commands if command[:2] == ["./build.sh", "generate"]]
+            self.assertEqual([command[3] for command in generates], ["build-wild-unity", "build-wild-separate"])
+            harness = commands[-1]
+            self.assertEqual(harness[:3], ["taskset", "-c", "2,3,4,5"])
+            self.assertEqual(harness[4:5] + harness[6:], ["--link-only", str(Path(temporary) / "work/wild-linker-source"),
+                                                         str(Path(temporary) / "path/wild"), str(Path(temporary) / "path/ld"),
+                                                         "", ""])
+            # The mocked harness wrote nothing, so publication evidence is refused.
+            self.assertEqual(record["status"], "failed")
+            self.assertTrue(any("wild-linker evidence lacks" in error for error in record["errors"]), record["errors"])
+
 
 if __name__ == "__main__":
     unittest.main()

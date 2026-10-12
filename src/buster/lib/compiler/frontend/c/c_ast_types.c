@@ -113,9 +113,11 @@
 // file scope has (c_ast_types_locals_build) finds nothing in any scope before
 // the file scope, so from any query scope whose chain reaches the file scope
 // it resolves as it does from the file scope, where the settlement checks it
-// once against its binding. The settlement holds while the lookup generation
-// (c_parse_lookup_generation: entities added, rollbacks that take entities,
-// scopes or uses away) and the identifier use count are unchanged. A query
+// once against its binding; the file scope's answer for each symbol is looked
+// up once per generation (CAstTypeSymbol). The settlement holds while the
+// lookup generation (c_parse_lookup_generation: entities added, rollbacks
+// that take entities, scopes or uses away) and the identifier use count are
+// unchanged. A query
 // over a mark that a parameter or local also spells, or made after the
 // settlement stopped holding, walks its subtree as before.
 //
@@ -239,7 +241,8 @@
 //   c_ast_types_locate, c_ast_types_answer       query lookup and the decision
 //   c_ast_types_decline                          declines, and the qualified
 //                                                member replay, out of line
-//   c_ast_types_lookups_agree                    query-scope name checks
+//   c_ast_types_mark_token,                      query-scope name checks
+//   c_ast_types_lookups_agree
 //   c_ast_types_locals_build,                    the settled name checks
 //   c_ast_types_mark_resolves_at_file,
 //   c_ast_types_lookups_settled
@@ -338,11 +341,12 @@ struct CAstTypeBodyIndex
     u32* declaration_nodes;
     u32 count;
     u32 declaration_count;
-    // Indexed by symbol: nonzero when some entity outside the file scope has
-    // that symbol, as of lookup generation `local_generation`
-    // (c_ast_types_locals_build). Null without a binding array.
-    u8* local_symbols;
-    u32 local_symbol_capacity;
+    // Indexed by symbol, as of lookup generation `local_generation`: what the
+    // file scope answers for it (CAstTypeSymbol), or that some entity outside
+    // the file scope has it (c_ast_types_locals_build). Null without a
+    // binding array.
+    u32* symbols;
+    u32 symbol_capacity;
     // Indexed by scope, below `rooted_count`: nonzero when the scope's parent
     // chain reaches the file scope, as of the same generation.
     u8* rooted;
@@ -357,6 +361,19 @@ struct CAstTypeBodyIndex
     // literal leaf cannot append one.
     bool scalars_published;
 };
+
+// CAstTypeBodyIndex.symbols: a symbol's file-scope answer, looked up the first
+// time a settlement needs it (c_ast_types_mark_resolves_at_file); the entity
+// is stored plus C_AST_TYPE_SYMBOL_ENTITY.
+typedef enum CAstTypeSymbol
+{
+    C_AST_TYPE_SYMBOL_UNSEEN,
+    // Some entity outside the file scope has the symbol.
+    C_AST_TYPE_SYMBOL_LOCAL,
+    // The file scope answers nothing.
+    C_AST_TYPE_SYMBOL_NONE,
+    C_AST_TYPE_SYMBOL_ENTITY,
+} CAstTypeSymbol;
 
 // A region's settled lookups (c_ast_types_lookups_settled).
 typedef enum CAstTypeLookups
@@ -546,9 +563,9 @@ BUSTER_C_SHARED void c_ast_types_bodies_prepare(CTypeParseMachine* machine, CPar
         index->declaration_nodes = arena_allocate(machine->scratch_arena, u32, declaration_count + 1);
         index->count = count;
         index->declaration_count = declaration_count;
-        index->local_symbol_capacity = result->binding_by_symbol ? result->binding_capacity : 0;
-        index->local_symbols = index->local_symbol_capacity ? arena_allocate(machine->scratch_arena, u8, index->local_symbol_capacity) : 0;
-        index->rooted_capacity = index->local_symbols ? result->scope_capacity : 0;
+        index->symbol_capacity = result->binding_by_symbol ? result->binding_capacity : 0;
+        index->symbols = index->symbol_capacity ? arena_allocate(machine->scratch_arena, u32, index->symbol_capacity) : 0;
+        index->rooted_capacity = index->symbols ? result->scope_capacity : 0;
         index->rooted = index->rooted_capacity ? arena_allocate(machine->scratch_arena, u8, index->rooted_capacity) : 0;
         index->rooted_count = 0;
         index->local_generation = 0;
@@ -2296,6 +2313,16 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_types_locate(CAstTypeBody const* body, u32 start, 
     return relative;
 }
 
+// The name a lookup mark stands for: an identifier's own token, a call's
+// callee, which the call rules mark only when it is the identifier directly
+// before the `(` that is the call's token (c_ast_types_call), and otherwise
+// the typedef name after a cast's or compound literal's `(`.
+BUSTER_GLOBAL_LOCAL u32 c_ast_types_mark_token(CAst const* ast, u32 node)
+{
+    u32 kind = ast->kinds[node];
+    return kind == C_AST_CALL ? ast->tokens[node] - 1 : kind == C_AST_IDENTIFIER ? ast->tokens[node] : ast->tokens[node] + 1;
+}
+
 // Whether every name the answer rests on resolves, in the query's scope, as
 // the machine will resolve it: a callee by spelling to the entity the binder
 // bound it to (or to nothing, in which case the machine falls back to the
@@ -2318,9 +2345,8 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_agree(CAstTypeBody const* body, CPr
         u32 flags = body->flags[cursor - body->begin];
         if (flags & C_AST_TYPE_FLAG_LOOKUP)
         {
-            u32 kind = ast->kinds[cursor];
-            bool call = kind == C_AST_CALL;
-            u32 token = call ? ast->tokens[c_ast_types_first_child(ast, cursor)] : kind == C_AST_IDENTIFIER ? ast->tokens[cursor] : ast->tokens[cursor] + 1;
+            bool call = ast->kinds[cursor] == C_AST_CALL;
+            u32 token = c_ast_types_mark_token(ast, cursor);
             CEntityId looked = c_parse_lookup_entity_token(result, preprocess->spelling_base, scope, &preprocess->tokens[token]);
             CEntity const* bound = c_ast_types_bound_entity(result, token);
             u32 expected = body->entities && !call ? body->entities[cursor - body->begin]
@@ -2340,20 +2366,22 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_agree(CAstTypeBody const* body, CPr
 }
 
 // Marks the symbol of every entity outside the file scope, and every scope
-// whose parent chain reaches the file scope. Entities and scopes change only
-// with the lookup generation (c_parse_lookup_generation), so the tables hold
-// while that is `generation`. A scope is created after its parent, so one
+// whose parent chain reaches the file scope, and forgets every symbol's
+// file-scope answer. Entities and scopes change only with the lookup
+// generation (c_parse_lookup_generation), so the tables hold, and a
+// file-scope answer once looked up stays the answer, while that is
+// `generation`. A scope is created after its parent, so one
 // forward pass settles each chain; a parent at or after its child is left
 // unrooted, and a query in that scope walks its subtree.
 BUSTER_GLOBAL_LOCAL void c_ast_types_locals_build(CAstTypeBodyIndex* index, CParseResult const* result, u64 generation)
 {
-    memset(index->local_symbols, 0, index->local_symbol_capacity);
+    memset(index->symbols, 0, sizeof(*index->symbols) * index->symbol_capacity);
     for (u32 entity = 0; entity < result->entity_count; entity += 1)
     {
         u32 symbol = result->entities[entity].symbol;
-        if (result->entities[entity].scope.value && symbol < index->local_symbol_capacity)
+        if (result->entities[entity].scope.value && symbol < index->symbol_capacity)
         {
-            index->local_symbols[symbol] = 1;
+            index->symbols[symbol] = C_AST_TYPE_SYMBOL_LOCAL;
         }
     }
     index->rooted_count = result->scope_count < index->rooted_capacity ? result->scope_count : index->rooted_capacity;
@@ -2372,25 +2400,35 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_locals_build(CAstTypeBodyIndex* index, CPar
 // there. A name whose symbol no entity outside the file scope has finds
 // nothing in any scope before the file scope, so it resolves as it does from
 // the file scope. Its binding must also be a file-scope entity or none, and
-// the file scope's answer must agree with it.
-BUSTER_GLOBAL_LOCAL bool c_ast_types_mark_resolves_at_file(CAstTypeBodyIndex const* index, CAstTypeBody const* body,
-                                                           CPreprocessResult const* preprocess, CParseResult* result, u32 relative)
+// the file scope's answer must agree with it. That answer is looked up once
+// per symbol and generation; a name that cannot spell a word, which the
+// lookup answers with nothing whatever its symbol, is looked up each time.
+// An entity the file scope answers is a file-scope entity, so only an answer
+// of nothing needs the binding's scope.
+BUSTER_GLOBAL_LOCAL bool c_ast_types_mark_resolves_at_file(CAstTypeBodyIndex* index, CAstTypeBody const* body, CPreprocessResult const* preprocess,
+                                                           CParseResult* result, u32 relative)
 {
     CAst const* ast = body->ast;
     u32 node = body->begin + relative;
-    u32 kind = ast->kinds[node];
-    bool call = kind == C_AST_CALL;
-    u32 token = call ? ast->tokens[c_ast_types_first_child(ast, node)] : kind == C_AST_IDENTIFIER ? ast->tokens[node] : ast->tokens[node] + 1;
-    u32 symbol = preprocess->tokens[token].symbol;
-    CEntity const* bound = c_ast_types_bound_entity(result, token);
-    u32 expected = body->entities && !call ? body->entities[relative] : bound ? (u32)(bound - result->entities) : C_AST_TYPE_NONE;
-    bool file = symbol && symbol < index->local_symbol_capacity && !index->local_symbols[symbol] &&
-                (expected >= result->entity_count || !result->entities[expected].scope.value);
+    bool call = ast->kinds[node] == C_AST_CALL;
+    CToken const* token = &preprocess->tokens[c_ast_types_mark_token(ast, node)];
+    u32 symbol = token->symbol;
+    bool spells = c_token_may_spell_word(*token);
+    u32 answer = symbol && symbol < index->symbol_capacity ? index->symbols[symbol] : C_AST_TYPE_SYMBOL_LOCAL;
+    if (answer != C_AST_TYPE_SYMBOL_LOCAL && (answer == C_AST_TYPE_SYMBOL_UNSEEN || !spells))
+    {
+        CEntityId looked = c_parse_lookup_entity_token(result, preprocess->spelling_base, (CScopeId){0}, token);
+        answer = looked.value < result->entity_count ? looked.value + C_AST_TYPE_SYMBOL_ENTITY : C_AST_TYPE_SYMBOL_NONE;
+        index->symbols[symbol] = spells ? answer : index->symbols[symbol];
+    }
+    bool file = answer != C_AST_TYPE_SYMBOL_LOCAL;
     if (file)
     {
-        CEntityId looked = c_parse_lookup_entity_token(result, preprocess->spelling_base, (CScopeId){0}, &preprocess->tokens[token]);
-        file = ((call || (body->flags[relative] & C_AST_TYPE_FLAG_FAILS)) && looked.value >= result->entity_count) ||
-               (expected < result->entity_count && looked.value == expected);
+        CEntity const* bound = call || !body->entities ? c_ast_types_bound_entity(result, (u32)(token - preprocess->tokens)) : 0;
+        u32 expected = body->entities && !call ? body->entities[relative] : bound ? (u32)(bound - result->entities) : C_AST_TYPE_NONE;
+        file = answer == C_AST_TYPE_SYMBOL_NONE
+                   ? (call || (body->flags[relative] & C_AST_TYPE_FLAG_FAILS)) && (expected >= result->entity_count || !result->entities[expected].scope.value)
+                   : expected == answer - C_AST_TYPE_SYMBOL_ENTITY;
     }
     return file;
 }
@@ -2408,7 +2446,7 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_settled(CAstTypeBodyIndex* index, C
                                                      CParseResult* result, CScopeId scope, u32 node)
 {
     u64 generation = 0;
-    bool stamped = index && index->local_symbols && index->rooted && c_parse_lookup_generation(result, &generation);
+    bool stamped = index && index->symbols && index->rooted && c_parse_lookup_generation(result, &generation);
     if (stamped && body->lookups == C_AST_TYPE_LOOKUPS_UNSETTLED)
     {
         u32 count = body->node + 1 - body->begin;
@@ -2418,28 +2456,34 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_settled(CAstTypeBodyIndex* index, C
         }
         index->settled_nodes += count;
         bool file = index->local_generation == generation;
-        // Eight flag bytes at a time: almost none carry the mark, and a group
-        // that holds one is read byte by byte.
+        // Eight flag bytes at a time: almost none carry the mark, and each
+        // mark in a group is found from the group's mask, the low byte first
+        // (every supported host is little-endian).
         u64 const lookup_bytes = 0x0101010101010101ull * C_AST_TYPE_FLAG_LOOKUP;
         for (u32 group = 0; file && group < count; group += 8)
         {
             u32 width = count - group < 8 ? count - group : 8;
-            u64 word = lookup_bytes;
+            u64 word = 0;
             if (width == 8)
             {
                 memcpy(&word, body->flags + group, 8);
             }
-            for (u32 relative = group; file && (word & lookup_bytes) && relative < group + width; relative += 1)
+            else
             {
-                if (body->flags[relative] & C_AST_TYPE_FLAG_LOOKUP)
+                for (u32 byte = 0; byte < width; byte += 1)
                 {
-                    bool other = !c_ast_types_mark_resolves_at_file(index, body, preprocess, result, relative);
-                    file = !other || body->other_count < C_AST_TYPE_LOOKUP_OTHER_LIMIT;
-                    if (other && file)
-                    {
-                        body->others[body->other_count] = relative;
-                        body->other_count += 1;
-                    }
+                    word |= (u64)body->flags[group + byte] << (8 * byte);
+                }
+            }
+            for (u64 marks = word & lookup_bytes; file && marks; marks &= marks - 1)
+            {
+                u32 relative = group + mask64_first_set(marks) / 8;
+                bool other = !c_ast_types_mark_resolves_at_file(index, body, preprocess, result, relative);
+                file = !other || body->other_count < C_AST_TYPE_LOOKUP_OTHER_LIMIT;
+                if (other && file)
+                {
+                    body->others[body->other_count] = relative;
+                    body->other_count += 1;
                 }
             }
         }

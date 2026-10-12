@@ -4,8 +4,9 @@
 // demand-driven agenda's work is pinned exactly on shapes whose closure is
 // known, so a regression toward whole-table work fails by count, not timing.
 // Map: c_type_layout_test_query / _sweep (the differential), the exact-count
-// families (stable region, chain, fan-out, diamond, cycle), the fallback
-// cases, the seeded random programs (c_type_layout_test_program), and the
+// families (stable region, chain, fan-out, diamond, cycle), the backward
+// chains the ordered passes retry (c_type_layout_test_backward_chains), the
+// fallback cases, the seeded random programs (c_type_layout_test_program), and the
 // validation scaling fixtures (c_type_layout_test_scales).
 #include <buster/tests/compiler/frontend/c/type_layout_test.h>
 
@@ -908,9 +909,9 @@ BUSTER_GLOBAL_LOCAL CTypeLayoutTestScale c_type_layout_test_scale_unit(Arena* ar
 
 // Requires the unit to compile without diagnostics and to solve at least one
 // layout, the whole-table pass solves to stay constant, and every other
-// counter of layout work to grow no faster than the unit. A pass that solves
-// once per item multiplies pass solves by the factor and pass state by its
-// square.
+// counter of layout work to grow no faster than the unit, up to a constant.
+// A pass that solves once per item multiplies pass solves by the factor and
+// pass state by its square.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_scales(UnitTestArguments* arguments, String8 item)
 {
     UnitTestResult result = {0};
@@ -923,7 +924,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_scales(UnitTestArguments* 
     bool compiled = !small.diagnostics && !large.diagnostics;
     bool exercised = large.type_count > small.type_count && s.solves;
     bool constant = l.pass_solves == s.pass_solves;
-    bool linear = l.pass_state_types <= factor * s.pass_state_types && l.pass_attempts <= factor * s.pass_attempts &&
+    // Attempts are affine in the unit, and a retried attempt (#3312) can
+    // leave the constant term negative, so they get the same slack as solves.
+    bool linear = l.pass_state_types <= factor * s.pass_state_types && l.pass_attempts <= factor * s.pass_attempts + factor &&
                   l.solves <= factor * s.solves + factor && l.agenda_types <= factor * s.agenda_types &&
                   l.agenda_attempts <= factor * s.agenda_attempts;
     BUSTER_TEST(arguments, compiled);
@@ -997,6 +1000,71 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_validation_scaling(UnitTes
     return result;
 }
 
+// Chains whose links are listed before what they contain (#3312): a record
+// before the array type of its member, and an outer record before the records
+// nested in its definition. A `_Static_assert` asks the top's size during the
+// parse, a cold query the ordered passes answer. An attempt that stops at an
+// open type waits on it and is retried as soon as that type resolves, so the
+// chain settles in one pass and the attempts grow with its depth, where one
+// pass per link made them quadratic. Lowering's type-mapping passes retry the
+// same way and are held to the same bound.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_backward_chains(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 const depths[] = {64, 512};
+    for (u32 shape = 0; shape < 2; shape += 1)
+    {
+        for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+        {
+            u32 depth = depths[depth_index];
+            TemporalArena temporary = scratch_begin(0, 0);
+            CTypeLayoutTestText text = {.arena = temporary.arena};
+            if (shape == 0)
+            {
+                c_type_layout_test_append(&text, S8("struct S0 { char c; };\n"));
+                for (u32 link = 1; link <= depth; link += 1)
+                {
+                    c_type_layout_test_append(&text, string_format(temporary.arena, S8("struct S{u32} {{ struct S{u32} arr[1]; char c; };\n"), link, link - 1));
+                }
+                c_type_layout_test_append(&text, string_format(temporary.arena, S8("_Static_assert(sizeof(struct S{u32}) == {u32}, \"layout\");\n"), depth,
+                                                               depth + 1));
+            }
+            else
+            {
+                for (u32 link = 0; link < depth; link += 1)
+                {
+                    c_type_layout_test_append(&text, string_format(temporary.arena, S8("struct S{u32} {{ "), link));
+                }
+                c_type_layout_test_append(&text, S8("int x; "));
+                for (u32 link = depth; link > 1; link -= 1)
+                {
+                    c_type_layout_test_append(&text, string_format(temporary.arena, S8("}} m{u32}; "), link - 1));
+                }
+                c_type_layout_test_append(&text, S8("};\n_Static_assert(sizeof(struct S0) == sizeof(int), \"layout\");\n"));
+            }
+            CTypeLayoutTestUnit unit = c_type_layout_test_parse(temporary.arena, c_type_layout_test_string(&text));
+            CTypeLayoutStatistics statistics = unit.parse.type_layout_statistics ? *unit.parse.type_layout_statistics : (CTypeLayoutStatistics){0};
+            BUSTER_TEST(arguments, unit.preprocess.diagnostic_count == 0 && unit.parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, statistics.pass_solves >= 1);
+            BUSTER_TEST(arguments, statistics.pass_attempts <= 3ull * (depth + 1));
+            // Lowering maps the same table through passes of its own, with
+            // an array bound evaluated on each attempt of an array type.
+            TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+            CIRLowerResult lowered = c_analyze(temporary.arena, S8("backward-chain.c"), unit.preprocess, c_parse_ast(temporary.arena, unit.preprocess),
+                                               target.target);
+            BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
+            BUSTER_TEST(arguments, lowered.type_mapping_attempts <= 4ull * (depth + 1));
+            if (statistics.pass_attempts > 3ull * (depth + 1) || lowered.type_mapping_attempts > 4ull * (depth + 1))
+            {
+                BUSTER_TEST_ERROR(S8("backward chain shape {u32} depth {u32}: {u64} pass attempts over {u64} pass solves, {u64} type mapping attempts\n"),
+                                  shape, depth, statistics.pass_attempts, statistics.pass_solves, lowered.type_mapping_attempts);
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult c_type_layout_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1007,6 +1075,7 @@ UnitTestResult c_type_layout_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_offset_search_work);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_stable_region);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_chain);
+    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_backward_chains);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_fan_out);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_diamond);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_cycles);

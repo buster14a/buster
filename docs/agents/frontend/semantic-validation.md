@@ -69,6 +69,15 @@ thread-local aliases and retains C23's permitted `auto`, `constexpr`, and
 thread-local combinations. A typed `auto` declaration at file scope or with
 another storage class still requires type inference under C23 6.7.1p4.
 
+Storage-class context validation uses the same specifier reader: parameters
+permit only `register`, and resolved function declarations cannot carry thread
+storage (`_Thread_local`, C23 `thread_local`, or GNU `__thread`). Direct and
+nested parameter readers validate the specifier prefix before array adjustment,
+so `int a[static 4]` remains valid. File and block function declarations are
+checked after type resolution, including function typedefs and prototypes.
+`c_test_storage_class_contexts` covers four dialects and three target layouts;
+the driver diagnostic-equivalence matrix compares syntax-only and object paths.
+
 Windows target predefines in `c_source.c` preserve the `__inline` spelling and
 map `__forceinline` to it, without injecting a storage class. The existing needed
 function dependency walk decides which header bodies are reachable; the two late
@@ -418,6 +427,11 @@ frontend forms and both native allocators, with syntax/object diagnostic
 equivalence for a missing semicolon or attribute arguments.
 
 A modification destination is typed from its whole operand.
+Function-typed destinations are refused before assignment-source conversions,
+including direct, parenthesized and dereferenced designators in unevaluated
+operands. Function pointer objects retain their pointer type and remain valid
+assignment destinations. The driver diagnostic-equivalence corpus covers these
+negative and positive neighbors in C17/C23 and both frontend SSA forms (#3746).
 `c_parse_assignment_identifier_is_operand` is the one rule both assignment
 scans in `c_parse_validate_const_assignments` use for when the identifier in
 front of `=` is that whole operand: a member access, indirection, address-of
