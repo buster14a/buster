@@ -64819,8 +64819,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_tall_expression_types);
     C_TEST_FIXTURE(arguments, c_test_builtin_operand_types);
     C_TEST_FIXTURE(arguments, c_test_untyped_operand_diagnostics);
-    C_TEST_FIXTURE(arguments, c_test_prediction_caller_checks);
     C_TEST_FIXTURE(arguments, c_test_nested_offsetof_pointer_prediction);
+    C_TEST_FIXTURE(arguments, c_test_prediction_caller_checks);
     C_TEST_FIXTURE(arguments, c_test_nonvoid_falloff);
     C_TEST_FIXTURE(arguments, c_test_noreturn_call_expression_statements);
     C_TEST_FIXTURE(arguments, c_test_noreturn_call_value_operands);
