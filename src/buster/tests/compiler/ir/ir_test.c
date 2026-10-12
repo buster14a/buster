@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/ir/ir_test.h>
 #include <buster/lib/compiler/ir/ir_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/os.h>
 #include <buster/lib/time.h>
 #if BUSTER_INCLUDE_TESTS
 
@@ -2119,6 +2120,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, remaining == (variant ? 0u : 1u));
             BUSTER_TEST(arguments, bound_module->inlining.inlined == variant);
             BUSTER_TEST(arguments, variant || bound_module->inlining.budget_skips >= 1);
+            // Relocating the caller abandons its old instruction table, which
+            // spans whole pages here; the pass hands them back to the OS and
+            // the relocated caller still reads and validates (#3854). A caller
+            // the bound keeps as a call is never relocated.
+            u64 page_rows = os_get_page_size() / sizeof(IrInstruction);
+            BUSTER_TEST(arguments, !variant || !bound_caller || bound_caller->instruction_count < 2u * page_rows ||
+                                       bound_module->inlining.released_bytes >= os_get_page_size());
+            BUSTER_TEST(arguments, variant || bound_module->inlining.released_bytes == 0);
+            BUSTER_TEST(arguments, !bound_caller ||
+                                       ir_validate_canonical_module(bound_program, bound_module).error == IR_VALIDATION_NONE);
         }
         scratch_end(bound_temporary);
     }

@@ -992,6 +992,8 @@ struct IrInlineStatistics
     u64 linkage_skips;
     u64 recursion_skips;
     u64 visits;
+    // Bytes of relocated caller tables handed back to the OS (os_discard).
+    u64 released_bytes;
     IrInlineBudgetReason required_budget_reason;
     u64 required_budget_demand;
     u64 required_budget_limit;

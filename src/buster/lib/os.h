@@ -768,6 +768,12 @@ BUSTER_F_DECL OsPrefaultResult os_prefault(void* address, u64 size);
 BUSTER_F_DECL void os_advise_huge_pages(void* address, u64 size);
 BUSTER_F_DECL bool os_protect(void* address, u64 size, ProtectionFlags protection);
 BUSTER_F_DECL bool os_decommit(void* address, u64 size);
+// Releases the physical pages wholly inside [address, address + size) that a
+// caller has abandoned within a live, committed mapping: no other pointer may
+// read them as data again. The range stays mapped and writable with undefined
+// contents, so an arena may later reuse it. Returns the bytes advised; zero
+// when no complete page lies inside the range or the platform refuses.
+BUSTER_F_DECL u64 os_discard(void* address, u64 size);
 BUSTER_F_DECL bool os_unreserve(void* address, u64 size);
 BUSTER_F_DECL bool os_flush_instruction_cache(void* address, u64 size);
 // Selects write (false) or execute (true) access for MAP_JIT mappings on the
