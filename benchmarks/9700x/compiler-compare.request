@@ -171,3 +171,5 @@ request: issue #2761 first 9700X wild-linker run after #3689 landed; request-onl
 profile: wild-linker-v1
 request: issue #2761 fresh 9700X wild-linker run after #3786 fixed the Wild identity check (46bca10b attempt 1 refused the host's 'Wild 0.10.0 non-git-build'; that receipt stays); request-only head over main edb379fbd; fresh compiler-compare-v1 plus wild-linker-v1 leg (report-only)
 profile: wild-linker-v1
+request: issue #2761 fresh 9700X wild-linker run after #3817 (Wild's 'Linker: ' .comment prefix and CMake's link.d dependency file); attempts 46bca10b and bb13d2ac stay as recorded; request-only head over main bc3ac2eaa; fresh compiler-compare-v1 plus wild-linker-v1 leg (report-only)
+profile: wild-linker-v1
