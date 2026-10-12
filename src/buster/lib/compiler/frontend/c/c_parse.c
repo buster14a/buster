@@ -38613,7 +38613,8 @@ BUSTER_C_INTERNAL void c_parse_validate_bit_field_addresses(CTypeParseMachine* m
         {
             String8 before = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]);
             unary = string_equal(before, S8("return")) || string_equal(before, S8("case")) || string_equal(before, S8("sizeof")) ||
-                    c_parse_alignof_word(before) || string_equal(before, S8("else")) || string_equal(before, S8("do"));
+                    c_parse_alignof_word(before) || string_equal(before, S8("else")) || string_equal(before, S8("do")) ||
+                    c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[index - 1], C_SYMBOL_WELL_KNOWN_EXTENSION);
         }
         if (index && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
         {
@@ -38648,8 +38649,13 @@ BUSTER_C_INTERNAL void c_parse_validate_bit_field_addresses(CTypeParseMachine* m
             while (selected && operand_start < operand_end)
             {
                 selected = false;
-                if (c_token_is_punctuator(&preprocess.tokens[operand_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-                    c_parse_matching_delimiter_indexed(result, preprocess, operand_start) == operand_end - 1)
+                if (c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[operand_start], C_SYMBOL_WELL_KNOWN_EXTENSION))
+                {
+                    operand_start += 1;
+                    selected = true;
+                }
+                else if (c_token_is_punctuator(&preprocess.tokens[operand_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                         c_parse_matching_delimiter_indexed(result, preprocess, operand_start) == operand_end - 1)
                 {
                     operand_start += 1;
                     operand_end -= 1;

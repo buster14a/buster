@@ -31,7 +31,8 @@ member authority and nonconstant-index validation remain separate work.
 
 `c_parse_validate_bit_field_addresses` checks unary address operands against
 semantic member widths before constant folding, including parenthesized,
-indirect and promoted anonymous members. Unevaluated and unselected operands
+indirect and promoted anonymous members. GNU `__extension__` prefixes before
+`&` and around its operand retain the same constraint. Unevaluated and unselected operands
 retain this constraint; binary `&` remains a value operation. The registered
 `compiler_driver_test_bit_field_addresses` matrix requires matching structured
 syntax-only/object diagnostics and no object for rejected source in four C
