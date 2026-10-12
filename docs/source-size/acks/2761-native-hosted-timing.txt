@@ -1,0 +1,4 @@
+# Source-size acknowledgement; see docs/source-size.md.
+schema buster-source-size-ack-v1
+build 33464
+reason Informative native macOS/Windows hosted timing analysis, issue publisher, inventory rule and their tests (#2761, #3688).
