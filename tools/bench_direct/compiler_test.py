@@ -4857,6 +4857,28 @@ class WildLinkerTest(unittest.TestCase):
             return "failure", "", [problem]
         return compiler_publish.decide(dict(EXPECTED, mode="pull"), True, "success", read, lab, "", throughput)
 
+    def test_forged_argv_with_matching_commands_fails_publication(self) -> None:
+        """#3689 review: a packet whose retained argv and every derived command row are rewritten in lockstep."""
+        record, bundle = wild_linker_evidence()
+        self.assertEqual(self.publish(record, bundle)[0], "success")
+        tail = bundle["argv ide-debug"][len(WILD_PATH) + 2:]
+        for name, suffix in (("appended shell syntax", " ; :"), ("command substitution", ' "$(touch /tmp/x)"'),
+                             ("quoted separator", ' "; :"'), ("unquoted extra word", " -lm"),
+                             ("backquoted word", ' "`id`"'), ("redirection", ' > "/tmp/x"')):
+            with self.subTest(case=name):
+                changed = dict(bundle, **{"argv ide-debug": bundle["argv ide-debug"] + suffix,
+                                          "commands": bundle["commands"].replace(tail, tail + suffix)})
+                self.assertIn(tail + suffix, changed["commands"])
+                problems = self.validate(changed, identity=record["identity"])
+                self.assertTrue(any("shell-inert" in problem for problem in problems), problems)
+                conclusion, unused_title, reasons = self.publish(record, changed)
+                self.assertEqual(conclusion, "failure", reasons)
+        # A clean extra argument in Clang's own form is admitted, and the commands are rebuilt from tokens.
+        plain = ' "-lm"'
+        changed = dict(bundle, **{"argv ide-debug": bundle["argv ide-debug"] + plain,
+                                  "commands": bundle["commands"].replace(tail, tail + plain)})
+        self.assertEqual(self.validate(changed, identity=record["identity"]), [])
+
     def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
         record, bundle = wild_linker_evidence()
         self.assertEqual(self.publish(record, bundle), ("success", self.publish(record, bundle)[1], []))

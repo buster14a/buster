@@ -379,6 +379,9 @@ WILD_LINKER_CELLS = ["ide-debug", "ide-unity-release", "ide-separate-release"]
 # `wild` is refused by both checks.
 WILD_IDENTITY = re.compile(r"Wild [0-9][0-9A-Za-z.+-]* \(compatible with GNU linkers\)\Z")
 WILD_LINKER_LINKERS = ("comparator", "wild")
+# Every token of a retained Wild argv: inert inside double quotes and outside them, so the
+# canonical quoted join is one simple command whatever the shell.
+WILD_ARGV_TOKEN = re.compile(r"[A-Za-z0-9_./+=,:@%-]+\Z")
 WILD_LINKER_TREE_ARGUMENTS = ["--cc", "clang", "--linker", "DEFAULT", "--no-include-tests", "--no-fuzz", "--no-sanitize",
                               "--no-lto", "--", "-DBUSTER_DEBUG_INFO=ON", "-DBUSTER_FRAME_POINTERS=ON"]
 WILD_LINKER_PROFILE = {
@@ -1323,6 +1326,14 @@ def wild_linker_cell_commands(cell: str, argv: str, manifest: str, root: str, li
     except ValueError:
         tokens = None
     argv = argv.rstrip("\n")
+    # The retained argv must be exactly Clang's form, one double-quoted inert word per token; a packet
+    # that appends shell syntax (`; :`) and rewrites its commands to match is refused here, and the
+    # expected commands are rebuilt from the admitted tokens rather than from the raw text.
+    if tokens is not None and (not all(WILD_ARGV_TOKEN.match(token) for token in tokens) or
+                               argv != " ".join(f'"{token}"' for token in tokens)):
+        problems.append(f"wild-linker {cell} retained argv is not one double-quoted shell-inert word per argument")
+        tokens = None
+    argv = " ".join(f'"{token}"' for token in tokens or [])
     listed = {line[66:] for line in manifest.splitlines() if len(line) > 66}
     if not tokens or not isinstance(wild, str) or tokens[0] != wild or not argv.startswith(f'"{wild}" '):
         problems.append(f"wild-linker {cell} retained argv does not start with the recorded Wild")
@@ -1347,7 +1358,7 @@ def wild_linker_cell_commands(cell: str, argv: str, manifest: str, root: str, li
     common = f" --no-gc-sections --build-id={WILD_LINKER_BUILD_ID}"
     prefix = f"cd {_shell_quote(directory)} && "
     commands = {}
-    if isinstance(wild, str) and argv.startswith(f'"{wild}"') and isinstance(comparator.get("path"), str):
+    if tokens and isinstance(wild, str) and tokens[0] == wild and isinstance(comparator.get("path"), str):
         candidate = f"{prefix}{argv}{common} {profile['wild']['policy']}"
         reference = (f"{prefix}{_shell_quote(comparator['path'])}{argv[len(wild) + 2:]}{common} "
                      f"{comparator.get('policy')}")

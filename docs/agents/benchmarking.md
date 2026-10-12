@@ -1080,14 +1080,17 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    - a population that is not exactly the eight comparisons in the seeded
      order. The generator is replayed in Python, each with every warmup and
      pair linked successfully;
-   - a cell whose retained Wild argv (`<cell>-argv.txt`) does not start with
-     the recorded Wild, write `<config>/ide`, and take every relative object
+   - a cell whose retained Wild argv (`<cell>-argv.txt`) is not exactly
+     Clang's form, one double-quoted word per argument drawn from
+     `[A-Za-z0-9_./+=,:@%-]`, or does not start with the recorded Wild,
+     write `<config>/ide`, and take every relative object
      and archive from that cell's hashed input manifest. System startup
      objects must come from `/usr` or `/lib`, and nothing else may come from
      the build root;
    - a timed, validated or repeated link command that is not exactly the
-     command derived from that argv and the frozen options, so no other
-     input, linker or shell text can run;
+     command rebuilt from that argv's admitted tokens and the frozen options.
+     No other input, linker or shell text can run, even in a packet that
+     rewrites its argv and commands together;
    - a failed byte-identity, probe or manifest check;
    - a summary median, paired ratio or bootstrap interval that the raw
      samples do not give. The report's cells are re-derived from `raw.csv`;
