@@ -1451,6 +1451,39 @@ bool c_test_source_allocation_plan(u64 length, CSourceAllocationPlan* plan)
 }
 #endif
 
+// Each translated file reserves one checkpoint row per source byte and each
+// lexed file one token row per byte, but uses a few percent of them. Two
+// arrays filled together sit back to back; left as reserved, the first one's
+// unwritten tail separates live rows, and the pages and huge pages around it
+// fault in for nothing (#1307). When the pair is still the arena's newest
+// allocation, the second array's used rows move down behind the first one's
+// written prefix and the cursor returns to their end, so the next file packs
+// against them. The vacated rows are cleared again: everything above the
+// pair's written extent stays zero, and the arena's dirty mark stops there
+// instead of covering the gap no row ever reached. No reader goes past a
+// count. Returns the second array's possibly moved start.
+BUSTER_GLOBAL_LOCAL u8* c_source_trim_row_pair(Arena* arena, u8* first, u64 first_used, u64 first_written, u64 first_reserved, u8* second,
+                                               u64 second_used, u64 second_reserved, u64 second_alignment)
+{
+    u8* result = second;
+    u8* base = (u8*)arena;
+    if (second_used && second == first + first_reserved && base + arena->position == second + second_reserved)
+    {
+        u8* moved = (u8*)align_forward_unchecked((u64)(first + first_used), second_alignment);
+        if (moved < second)
+        {
+            memmove(moved, second, second_used);
+            u8* moved_end = moved + second_used;
+            u8* vacated = BUSTER_MAX(moved_end, second);
+            memset(vacated, 0, (u64)(second + second_used - vacated));
+            u8* written_end = BUSTER_MAX(moved_end, first + BUSTER_MIN(first_written, first_reserved));
+            arena_release_unwritten_tail(arena, (u64)(moved_end - base), (u64)(written_end - base));
+            result = moved;
+        }
+    }
+    return result;
+}
+
 // GNU modes preserve literal question-mark sequences. C23 removed trigraphs;
 // the supported earlier strict C modes require their phase-one replacement.
 BUSTER_C_INTERNAL bool c_translate_trigraphs_enabled(CPreprocessDialect dialect)
@@ -1729,6 +1762,10 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
             .pointer = translated,
             .length = output,
         };
+        checkpoint_offsets = (u32*)c_source_trim_row_pair(arena, (u8*)checkpoints, sizeof(*checkpoints) * checkpoint_count,
+                                                          sizeof(*checkpoints) * checkpoint_count, sizeof(*checkpoints) * plan->checkpoint_capacity, (u8*)checkpoint_offsets,
+                                                          sizeof(*checkpoint_offsets) * checkpoint_count,
+                                                          sizeof(*checkpoint_offsets) * plan->checkpoint_capacity, BUSTER_ALIGN_OF(u32));
         result.checkpoints = checkpoints;
         result.checkpoint_offsets = checkpoint_offsets;
         result.checkpoint_count = checkpoint_count;
@@ -3815,6 +3852,12 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
                     C_CENSUS_RECORD(LEX_TOKEN_ROWS, result.token_count);
                     C_CENSUS_RECORD(LEX_TOKEN_ROW_BYTES, result.token_count * (sizeof(CToken) + sizeof(CTokenShape)));
                     C_CENSUS_RECORD(LEX_RESERVED_ROW_BYTES, token_capacity * (sizeof(CToken) + sizeof(CTokenShape)));
+                    // The emitter's full-width stores may have written its
+                    // sixteen slack rows past the count.
+                    result.token_shapes = (CTokenShape*)c_source_trim_row_pair(arena, (u8*)result.tokens, sizeof(CToken) * result.token_count,
+                                                                               sizeof(CToken) * (result.token_count + 16), sizeof(CToken) * token_capacity, (u8*)result.token_shapes,
+                                                                               sizeof(CTokenShape) * result.token_count,
+                                                                               sizeof(CTokenShape) * token_capacity, BUSTER_ALIGN_OF(CTokenShape));
                     CDiagnostic* diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_count);
                     if (result.diagnostic_count)
                     {
