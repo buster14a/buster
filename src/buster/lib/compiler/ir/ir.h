@@ -674,15 +674,6 @@ typedef struct IrPublishedCfg IrPublishedCfg;
 struct IrPublishedCfg
 {
     Arena* arena;
-    // Null means instruction IDs were already in block order. Otherwise this
-    // is the one map from prepublication IDs to the published dense rows.
-    IrInstructionId const* instruction_remap;
-    IrValueId const* operand_pool;
-    IrBlockId const* target_pool;
-    u64 const* immediate_pool;
-    u64 operand_count;
-    u64 target_count;
-    u64 immediate_count;
     IrCfgBlock const* blocks;
     IrCfgEdge const* edges;
     u32 const* predecessors;

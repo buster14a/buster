@@ -68,7 +68,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_publication_span_tests(UnitTestArguments* 
                 {
                     IrPublishedCfg const* cfg = function->published_cfg;
                     BUSTER_TEST(arguments, cfg->blocks[0].first_instruction == 0 && cfg->blocks[0].instruction_count == count);
-                    BUSTER_TEST(arguments, (cfg->instruction_remap != 0) == (variant == 2));
                     for (u32 index = 0; index < count; index += 1)
                     {
                         IrInstruction* row = function->instructions + index;
