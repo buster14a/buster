@@ -1,10 +1,48 @@
 # Sealed raw compiler evidence v1 (#2918)
 
-Status: the native verifier and sealer are in the trusted driver. No producer
-seals a bundle yet, and no publisher route requires one. Until the producer
-and publisher land (#2918), every ordinary 9700X compiler artifact is
-`legacy-unsealed`. Its outcome stays as published, but its retained raw bytes
-are unverified, never upgraded.
+Status: the ordinary pull and main routes seal their raw evidence, and their
+publishers verify it natively. Sealing is not yet required. An artifact with
+neither control file is `legacy-unsealed`: its outcome stands, but its
+retained raw bytes are unverified, never upgraded. Requiring v1 on the
+ordinary routes is the next step on #2918.
+
+## Producer and publisher
+
+`compiler_compare.py --request-attempt N` marks an ordinary attempt for
+sealing. That excludes the owned, analyzer and snapshot routes. For such an
+attempt:
+
+- It exports the lab and corpus with this inventory as required.
+- `export_tree` copies required members of a whole tree before optional ones.
+  An optional member must also leave 4 MiB and 32 entries for later trees'
+  required members.
+- The exports stop 6 MiB and 3 entries short of the sealed bounds, so the
+  control files always fit.
+- Every omission is recorded with its fixed reason code.
+
+Once the attempt is measured, the producer writes `evidence-omissions.json`
+and runs the trusted `./build.sh compiler_evidence seal` on the bundle, with
+the receipt's own identity. Only then does it write the final receipt, whose
+`evidence_bundle` names the seal: members, payload bytes, manifest bytes and
+SHA-256, and the omission count. A missing required member, or a refused
+seal, fails the attempt.
+
+`compiler_publish.py` handles each artifact as follows:
+
+- **Neither control file:** the artifact is `legacy-unsealed`. The outcome
+  stands, and the report notes that the raw bytes are unverified.
+- **Manifest or seal present:**
+  1. It reads the whole archive through the strict `sampling_archive` reader
+     and extracts it.
+  2. It runs `./build.sh compiler_evidence verify` under the identity that
+     hosted authorization produced; the receipt's identity is not used.
+  3. A refusal fails the check.
+  4. A verified bundle must match the receipt's `evidence_bundle`.
+- **Publication-only recovery:** it notes a sealed bundle without
+  re-verifying it.
+
+`publish-pull` bootstraps the driver with the pinned TinyCC, as
+`publish-compiler` does.
 
 ## Scope
 

@@ -53,9 +53,15 @@ The receipt records identities, the profile, toolchain versions, binary hashes
 and timings, and is written even when a step fails. The candidate's build runs
 as the runner account before measurement, so the receipt is evidence produced
 under the direct path's owner-only trust boundary, not a sealed result.
+With --request-attempt, an ordinary (not owned, analyzer or snapshot) attempt
+also exports the v1 raw inventory as required (#2918), writes
+evidence-omissions.json and, once measured, seals the retained bundle last with
+the trusted `./build.sh compiler_evidence seal`; the receipt's evidence_bundle
+names that seal, and a refused seal fails the attempt.
 
 Map: queue_head (pull-mode supersession), build (one ide), toolchain, export_tree (bounded evidence export),
-read_exported_json (classification reads the export, #2929), collect_evidence,
+read_exported_json (classification reads the export, #2929), lab_evidence_required and collect_evidence,
+evidence_omissions_document and seal_evidence (#2918 sealed raw evidence),
 throughput_harness_problem (#3714 base-harness admission), historical_request_selection and
 prepare_historical_harness (#3714 named historical corpus), measure_throughput (corpus leg),
 scaling_requested and measure_scaling (scaling leg),
@@ -112,6 +118,9 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               render, scaling_digest, throughput_digest, validate_inline_acceptance,
                               analyzer_bootstrap_provenance, analyzer_profile_summary)
 from compiler_receipt import observed_cpu_model as cpu_model
+from compiler_receipt import (EVIDENCE_INVENTORY, EVIDENCE_OMISSIONS, EVIDENCE_OMISSIONS_SCHEMA,
+                              EVIDENCE_OMISSION_REASONS, EVIDENCE_OMISSION_EXAMPLES, EVIDENCE_SEAL,
+                              evidence_lab_required, evidence_corpus_required, evidence_identity)
 import throughput_real_source
 
 BUILD_TIMEOUT_SECONDS = 1800
@@ -160,8 +169,18 @@ EVIDENCE_FILE_LIMIT = 32 * 1024 * 1024
 # (compiler_publish.MEMBER_LIMIT; compiler_test keeps them equal), and the whole
 # evidence directory within three quarters of the 64 MiB artifact limit.
 EVIDENCE_MEMBER_LIMIT = 8 * 1024 * 1024
-EVIDENCE_TOTAL_LIMIT = ARTIFACT_LIMIT * 3 // 4
-EVIDENCE_FILE_COUNT = 4096
+# The sealed raw-evidence contract (#2918, docs/compiler-evidence-v1.md): the
+# native verifier bounds the retained bundle by EVIDENCE_SEALED_LIMITS, and
+# the exports keep EVIDENCE_CONTROL_RESERVE for the manifest, seal and
+# omissions document written after them.
+EVIDENCE_SEALED_LIMITS = (ARTIFACT_LIMIT * 3 // 4, 4096)
+EVIDENCE_CONTROL_RESERVE = (6 * 1024 * 1024, 3)
+EVIDENCE_TOTAL_LIMIT = EVIDENCE_SEALED_LIMITS[0] - EVIDENCE_CONTROL_RESERVE[0]
+EVIDENCE_FILE_COUNT = EVIDENCE_SEALED_LIMITS[1] - EVIDENCE_CONTROL_RESERVE[1]
+# An optional member also leaves this (bytes, files) for later trees' required members.
+EVIDENCE_REQUIRED_HEADROOM = (4 * 1024 * 1024, 32)
+# (bundle path, reason code) of every omission in this attempt, for evidence-omissions.json.
+EVIDENCE_OMISSION_LEDGER: list[tuple[str, str]] = []
 OMISSIONS_SHOWN = 50
 LAB_REQUIRED = ("summary.json",)
 THROUGHPUT_REQUIRED = ("summary.json", "metadata.json")
@@ -642,12 +661,16 @@ def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, 
     Only regular files are admitted: symlinks and other types are never followed or copied. A file over
     its limit (EVIDENCE_MEMBER_LIMIT for JSON, else EVIDENCE_FILE_LIMIT), one that would exceed the
     aggregate budget, one that grows while being read, or one that cannot be read is omitted and listed.
-    The tree is staged beside its destination and moved into place afterwards. Returns (problems,
-    omissions); an omitted or absent required member is a problem, so the export is incomplete rather than
-    quietly successful. The source is never modified.
+    Required members of the whole tree are copied before any optional one, and an optional one must leave
+    EVIDENCE_REQUIRED_HEADROOM for later trees' required members, so an exhausted budget never starves
+    them (#2918). The tree is staged beside its destination and moved into place afterwards. Returns
+    (problems, omissions); an omitted or absent required member is a problem, so the export is incomplete
+    rather than quietly successful. Each omission also reaches EVIDENCE_OMISSION_LEDGER with its fixed
+    reason code. The source is never modified.
     """
     problems: list[str] = []
     omissions: list = []
+    codes: list[str] = []
     staging = destination.with_name(destination.name + ".staging")
     used, files = evidence_usage(evidence)
     if destination.is_dir():  # a re-export replaces it
@@ -658,7 +681,8 @@ def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, 
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
     try:
-        for directory, names, leaves in os.walk(source, followlinks=False):
+        leaves: list[tuple[str, str]] = []
+        for directory, names, found in os.walk(source, followlinks=False):
             relative = Path(directory).relative_to(source)
             kept = []
             for name in sorted(names):
@@ -667,47 +691,52 @@ def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, 
                     continue
                 if os.path.islink(os.path.join(directory, name)):
                     omissions.append({"path": shown, "reason": "symlink is not followed"})
+                    codes.append("excluded-type")
                     continue
                 kept.append(name)
                 (staging / relative / name).mkdir(parents=True, exist_ok=True)
             names[:] = kept
-            # Required members first, so an exhausted budget never starves them.
-            for name in sorted(leaves, key=lambda leaf: ((relative / leaf).as_posix() not in required, leaf)):
-                shown = (relative / name).as_posix()
-                if any(fnmatch.fnmatch(name, pattern) for pattern in ignore):
-                    continue
-                reason = ""
-                path = os.path.join(directory, name)
-                limit = EVIDENCE_MEMBER_LIMIT if name.endswith(".json") else EVIDENCE_FILE_LIMIT
-                try:
-                    status = os.lstat(path)
-                    if not stat.S_ISREG(status.st_mode):
-                        reason = "not a regular file"
-                    elif status.st_size > limit:
-                        reason = f"{status.st_size} bytes exceeds the {limit} byte file limit"
-                    elif used + status.st_size > EVIDENCE_TOTAL_LIMIT or files + 1 > EVIDENCE_FILE_COUNT:
-                        reason = "evidence byte or file-count budget exhausted"
+            leaves.extend(((relative / name).as_posix(), os.path.join(directory, name)) for name in found
+                          if not any(fnmatch.fnmatch(name, pattern) for pattern in ignore))
+        # Required members first across the whole tree, then the rest in bytewise path order.
+        for shown, path in sorted(leaves, key=lambda leaf: (leaf[0] not in required, leaf[0].encode())):
+            reason = code = ""
+            optional = shown not in required
+            limit = EVIDENCE_MEMBER_LIMIT if shown.endswith(".json") else EVIDENCE_FILE_LIMIT
+            byte_budget = EVIDENCE_TOTAL_LIMIT - (EVIDENCE_REQUIRED_HEADROOM[0] if optional else 0)
+            file_budget = EVIDENCE_FILE_COUNT - (EVIDENCE_REQUIRED_HEADROOM[1] if optional else 0)
+            try:
+                status = os.lstat(path)
+                if not stat.S_ISREG(status.st_mode):
+                    reason, code = "not a regular file", "excluded-type"
+                elif status.st_size > limit:
+                    reason, code = f"{status.st_size} bytes exceeds the {limit} byte file limit", "member-limit"
+                elif used + status.st_size > byte_budget:
+                    reason, code = "evidence byte budget exhausted", "byte-budget"
+                elif files + 1 > file_budget:
+                    reason, code = "evidence file-count budget exhausted", "file-budget"
+                else:
+                    target = staging / shown
+                    copied = 0
+                    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                    with os.fdopen(descriptor, "rb") as reader, target.open("wb") as writer:
+                        for block in iter(lambda: reader.read(1 << 20), b""):
+                            copied += len(block)
+                            if copied > limit or used + copied > byte_budget:
+                                reason, code = "grew past its limit while being copied", "changed-during-copy"
+                                break
+                            writer.write(block)
+                    if reason:
+                        target.unlink()
                     else:
-                        target = staging / shown
-                        copied = 0
-                        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-                        with os.fdopen(descriptor, "rb") as reader, target.open("wb") as writer:
-                            for block in iter(lambda: reader.read(1 << 20), b""):
-                                copied += len(block)
-                                if copied > limit or used + copied > EVIDENCE_TOTAL_LIMIT:
-                                    reason = "grew past its limit while being copied"
-                                    break
-                                writer.write(block)
-                        if reason:
-                            target.unlink()
-                        else:
-                            used += copied
-                            files += 1
-                            present.add(shown)
-                except OSError as error:
-                    reason = f"copy failed: {error}"
-                if reason:
-                    omissions.append({"path": shown, "reason": reason})
+                        used += copied
+                        files += 1
+                        present.add(shown)
+            except OSError as error:
+                reason, code = f"copy failed: {error}", "read-error"
+            if reason:
+                omissions.append({"path": shown, "reason": reason})
+                codes.append(code)
         for member in required:
             if member not in present:
                 why = next((item["reason"] for item in omissions if item["path"] == member), "absent from the source")
@@ -719,6 +748,11 @@ def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, 
     except OSError as error:
         problems.append(f"evidence export of {destination.name} failed: {error}")
         shutil.rmtree(staging, ignore_errors=True)
+    try:
+        prefix = destination.relative_to(evidence).as_posix() + "/"
+    except ValueError:
+        prefix = destination.name + "/"
+    EVIDENCE_OMISSION_LEDGER.extend((prefix + item["path"], code) for item, code in zip(omissions, codes))
     return problems, omissions
 
 
@@ -764,17 +798,39 @@ def note_omissions(omissions: dict, name: str, found: list) -> None:
         omissions[name] = {"count": len(found), "shown": found[:OMISSIONS_SHOWN]}
 
 
-def collect_evidence(lab: Path, evidence: Path, omissions: dict) -> list[str]:
+def lab_evidence_required(lab: Path) -> tuple[str, ...]:
+    """The v1 required lab members (#2918) from the source lab's own plan and availability records.
+
+    An unreadable or malformed record leaves the fixed members only; the native seal then refuses the bundle.
+    """
+    compare, _ = read_exported_json(lab / "compare.json")
+    plan = compare.get("plan") if isinstance(compare, dict) else None
+    pairs = plan.get("pairs") if isinstance(plan, dict) else None
+    variants = [read_exported_json(lab / variant / "lab.json")[0] for variant in "ab"]
+
+    def flag(document: object, section: str, key: str) -> bool:
+        value = document.get(section) if isinstance(document, dict) else None
+        if section == "capabilities" and isinstance(value, dict):
+            value = value.get("perf_stat")
+        return isinstance(value, dict) and value.get(key) is True
+
+    valid = type(pairs) is int and 0 < pairs <= 1000
+    return evidence_lab_required(pairs if valid else 0, tuple(flag(item, "capabilities", "usable") for item in variants),
+                                 tuple(flag(item, "collection", "metrics_out") for item in variants))
+
+
+def collect_evidence(lab: Path, evidence: Path, omissions: dict, sealed: bool = False) -> list[str]:
     problems: list[str] = []
     if lab.is_dir():
-        problems, found = export_tree(lab, evidence / "lab", evidence, EVIDENCE_IGNORE, LAB_REQUIRED)
+        required = lab_evidence_required(lab) if sealed else LAB_REQUIRED
+        problems, found = export_tree(lab, evidence / "lab", evidence, EVIDENCE_IGNORE, required)
         note_omissions(omissions, "lab", found)
     return problems
 
 
 def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, base: str, head: str,
                        binaries: dict, omissions: dict, harness: Path | None = None,
-                       cwd: Path | None = None) -> tuple[list[str], dict]:
+                       cwd: Path | None = None, sealed: bool = False) -> tuple[list[str], dict]:
     """Run and validate the exported corpus before admitting a later snapshot child.
 
     cwd is the pinned historical harness worktree (#3714); its own build.sh runs the corpus there.
@@ -793,7 +849,8 @@ def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, 
                                      exit_policy="corpus-report-only-v1").returncode
         reasons = []
         if output.is_dir():
-            problems, found = export_tree(output, evidence / "throughput", evidence, EVIDENCE_IGNORE, THROUGHPUT_REQUIRED)
+            required = evidence_corpus_required(THROUGHPUT_PROFILE) if sealed else THROUGHPUT_REQUIRED
+            problems, found = export_tree(output, evidence / "throughput", evidence, EVIDENCE_IGNORE, required)
             reasons.extend(problems)
             note_omissions(omissions, "throughput", found)
         # Classify the exact exported bytes the hosted publisher will read.
@@ -817,9 +874,12 @@ def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, 
     return reasons, section
 
 
+# The trusted native sealer (#2918); compiler_test substitutes a stand-in.
+EVIDENCE_SEAL_TIMEOUT_SECONDS = 600
 SCRATCH_MARKER = ".buster-compiler-compare-scratch"
 SCRATCH_PROTOCOL = "buster-compiler-compare-scratch-v1\n"
 TRUSTED_ROOT = Path(__file__).resolve().parents[2]
+EVIDENCE_SEAL_COMMAND = (str(TRUSTED_ROOT / "build.sh"), "compiler_evidence")
 
 
 class ScratchError(Exception):
@@ -1472,6 +1532,8 @@ def parse(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--mode", choices=sorted(MODES), required=True)
     parser.add_argument("--harness-admission", choices=HARNESS_ADMISSIONS[:2],
                         help="pull only: the hosted pre-dispatch corpus disposition this host must re-derive (#3714)")
+    parser.add_argument("--request-attempt",
+                        help="the request run's attempt; seals the ordinary raw evidence for the publisher (#2918)")
     for name in IDENTITY_KEYS[1:]:
         parser.add_argument("--" + name.replace("_", "-"), required=True)
     arguments = parser.parse_args(argv)
@@ -1483,6 +1545,10 @@ def parse(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--main-profile requires --main-owned-phases")
     if arguments.harness_admission is not None and arguments.mode != "pull":
         parser.error("--harness-admission is the pull route's hosted disposition")
+    if arguments.request_attempt is not None and (not arguments.request_attempt.isdigit() or
+                                                  not arguments.request_attempt.isascii() or
+                                                  arguments.request_attempt.startswith("0")):
+        parser.error("--request-attempt must be a positive decimal attempt")
     if arguments.main_owned_phases and arguments.main_profile is None:
         arguments.main_profile = PROFILE["name"]
     return arguments
@@ -1524,6 +1590,57 @@ def mark(receipt: dict, evidence: Path, phase: str) -> None:
     problem = checkpoint(receipt, evidence, phase)
     if problem:
         receipt.setdefault("notes", []).append(problem)
+
+
+def evidence_omissions_document() -> dict:
+    """evidence-omissions.json from this attempt's omission ledger: fixed reason codes and at most 50 examples."""
+    counts = {reason: 0 for reason in EVIDENCE_OMISSION_REASONS}
+    for _, code in EVIDENCE_OMISSION_LEDGER:
+        counts[code] += 1
+    return {"schema": EVIDENCE_OMISSIONS_SCHEMA, "total": len(EVIDENCE_OMISSION_LEDGER), "by_reason": counts,
+            "examples": [{"path": path, "reason": code} for path, code in EVIDENCE_OMISSION_LEDGER[:EVIDENCE_OMISSION_EXAMPLES]]}
+
+
+def seal_evidence(receipt: dict, evidence: Path, work: Path, request_attempt: str) -> str:
+    """Write the omissions document, then seal the retained bundle with the trusted native driver (#2918).
+
+    Runs after every export and before the final receipt, which binds the seal through
+    receipt["evidence_bundle"]. Returns '' or why the bundle is not sealed; the native seal refuses an
+    incomplete bundle, so an unsealed measured attempt fails rather than publishing unverifiable raw bytes.
+    """
+    identity = evidence_identity(receipt, request_attempt)
+    problem = "" if identity else "sealed evidence identity is incomplete"
+    output = ""
+    if not problem:
+        try:
+            (evidence / EVIDENCE_OMISSIONS).write_text(dumps(evidence_omissions_document()) + "\n", encoding="utf-8")
+            (work / "evidence-identity.tsv").write_text(identity, encoding="utf-8")
+            completed = captured_run([*EVIDENCE_SEAL_COMMAND, "seal", str(evidence), str(work / "evidence-identity.tsv")],
+                                     cwd=TRUSTED_ROOT, capture_output=True, text=True, timeout=EVIDENCE_SEAL_TIMEOUT_SECONDS,
+                                     check=False)
+            lines = (completed.stdout or "").strip().splitlines()
+            output = lines[-1] if lines else ""
+            if completed.returncode != 0 or output != "COMPILER_EVIDENCE_SEALED":
+                problem = f"raw evidence not sealed (exit {completed.returncode}): {output or (completed.stderr or '').strip()[-400:]}"
+        except (OSError, subprocess.SubprocessError, UnicodeError) as error:
+            problem = f"raw evidence not sealed: {error.__class__.__name__}: {error}"
+    seal: dict = {}
+    if not problem:
+        try:
+            with os.fdopen(os.open(evidence / EVIDENCE_SEAL, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as reader:
+                text = reader.read(4097).decode("ascii")
+            seal = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+        except (OSError, UnicodeError, ValueError) as error:
+            problem = f"evidence seal unreadable after sealing: {error}"
+    if not problem and not all(seal.get(key, "").isdigit() for key in ("manifest_bytes", "members", "payload_bytes")):
+        problem = "evidence seal is malformed after sealing"
+    bundle = {"inventory": EVIDENCE_INVENTORY, "state": "failed", "reason": problem}
+    if not problem:
+        bundle = {"inventory": EVIDENCE_INVENTORY, "state": "sealed", "manifest_sha256": seal.get("manifest_sha256", ""),
+                  "manifest_bytes": int(seal["manifest_bytes"]), "members": int(seal["members"]),
+                  "payload_bytes": int(seal["payload_bytes"]), "omissions": len(EVIDENCE_OMISSION_LEDGER)}
+    receipt["evidence_bundle"] = bundle
+    return problem
 
 
 class ClosureCleanupUncertain(RuntimeError):
@@ -2171,7 +2288,8 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         receipt["timings"]["measurement_seconds"] = round(time.monotonic() - measured, 3)
         receipt["lab"]["exit"] = status
         mark(receipt, evidence, "lab-evidence")
-        reasons.extend(collect_evidence(lab, evidence, receipt.setdefault("evidence_omissions", {})))
+        reasons.extend(collect_evidence(lab, evidence, receipt.setdefault("evidence_omissions", {}),
+                                        getattr(arguments, "evidence_seal", False)))
         summary, problem = read_exported_json(evidence / "lab" / "summary.json")
         if problem:
             reasons.append(f"lab summary unreadable: {problem}")
@@ -2193,7 +2311,8 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         corpus, receipt["throughput"] = measure_throughput(candidate, bins, work, evidence, arguments.base,
                                                            arguments.head, receipt["binaries"],
                                                            receipt.setdefault("evidence_omissions", {}), harness,
-                                                           cwd=historical_root)
+                                                           cwd=historical_root,
+                                                           sealed=getattr(arguments, "evidence_seal", False))
         receipt["timings"]["throughput_seconds"] = round(time.monotonic() - measured, 3)
         reasons.extend(corpus)
         if arguments.mode == "pull" and scaling_requested(candidate, arguments.base, arguments.head):
@@ -2366,6 +2485,10 @@ def main(argv: list[str] | None = None) -> int:
     main_owned = getattr(arguments, "main_owned_phases", False)
     selected_profile = named_main_profile(arguments.main_profile) if main_owned else PROFILE
     early_owned = utility or main_owned or (arguments.mode == "main" and arguments.closure_policy == "snapshot-v1")
+    # Contract v1 (#2918) seals the ordinary lab and corpus: not owned, analyzer or snapshot routes.
+    arguments.evidence_seal = getattr(arguments, "request_attempt", None) is not None and not early_owned and \
+        not analyzer_requested and arguments.closure_policy == "legacy-rebuild"
+    EVIDENCE_OMISSION_LEDGER.clear()
     receipt = {"schema": RECEIPT_SCHEMA, "mode": arguments.mode, "state": "failed", "reasons": [], "identity": identity,
                "profile": ANALYZER_PROFILE_BY_LINE[analyzer_request_line] if analyzer_requested else selected_profile,
                "throughput_profile": THROUGHPUT_PROFILE if not analyzer_requested else None,
@@ -2492,6 +2615,11 @@ def main(argv: list[str] | None = None) -> int:
     receipt.pop("phase", None)
     if not receipt.get("evidence_omissions"):
         receipt.pop("evidence_omissions", None)
+    if arguments.evidence_seal and receipt["state"] == "measured" and aborted is None:
+        problem = seal_evidence(receipt, evidence, work, arguments.request_attempt)
+        if problem:
+            reasons.append(problem)
+            receipt["state"] = "failed"
     persisted = write_receipt(receipt, evidence)
     if persisted:
         reasons.append(persisted)
