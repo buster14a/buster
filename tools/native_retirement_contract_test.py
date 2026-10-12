@@ -419,7 +419,8 @@ class ContractTests(unittest.TestCase):
                        contract.ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256,
                        contract.MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
                        contract.ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
-                       contract.STACK_CALLER_SUPPORT_CONTRACT_SHA256):
+                       contract.STACK_CALLER_SUPPORT_CONTRACT_SHA256,
+                       contract.SIMD_VOCABULARY_SUPPORT_CONTRACT_SHA256):
             with self.subTest(digest=digest):
                 manifest["support_contract_sha256"] = digest
                 self.assertEqual(contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT),
@@ -427,6 +428,91 @@ class ContractTests(unittest.TestCase):
         manifest["support_contract_sha256"] = "0" * 64
         with self.assertRaises(AssertionError):
             contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT)
+
+    def test_simd_reader_bootstrap_and_policy_are_separate(self):
+        import native_retirement_integration as integration
+        paths = ["tools/native_retirement_contract.py", "tools/native_retirement_materializer.py",
+                 "tools/native_retirement_performance_binding.py",
+                 "tools/native_retirement_contract_test.py", "tools/native_retirement_materializer_test.py",
+                 "tools/native_retirement_performance_binding_test.py",
+                 "docs/native-retirement-performance-v1.blocked", "docs/native-retirement-rebinding.md"]
+        report = integration.classify_paths(paths)
+        self.assertEqual(report.kind, "bootstrap")
+        with self.assertRaisesRegex(integration.IntegrationError, "requires"):
+            integration.enforce_classification(report, "bootstrap", False)
+        integration.enforce_classification(report, "bootstrap", True)
+        for policy in ("docs/native-retirement-support-v1.tsv", "tools/native_retirement_census.c"):
+            with self.subTest(policy=policy):
+                combined = integration.classify_paths(paths + [policy])
+                self.assertEqual(combined.kind, "split-required")
+                with self.assertRaisesRegex(integration.IntegrationError, "split"):
+                    integration.enforce_classification(combined, "bootstrap", True)
+
+    def test_simd_applicability_successor_authenticates_exact_projection(self):
+        root = Path(__file__).resolve().parents[1]
+        checked = (root / "docs/native-retirement-applicability-v1.tsv").read_bytes()
+        revisions = (
+            (b"tests/basic_c_predicate_bank.c\t",
+             b"16c2a225a704db51239cfb34bfbf98a214c1af038ecdad0a8c1ea0d9afbff432",
+             b"a194061e5e518e7c422cce6aea3af406aa01939297e3479c74098cd4bfd3cc64"),
+            (b"tests/basic_c_simd_translate.c\t",
+             b"76c1e91820227dcad6fd44a1ed159db4581006f86b6ba673f3834a13b5647d81",
+             b"e283fc4b47513fecd564ebdedf4c2beab9a889fd2673287f522b2248a82859ce"),
+        )
+        baseline = checked
+        for _prefix, old, new in revisions:
+            baseline = baseline.replace(new, old)
+        successor = baseline
+        for prefix, old, new in revisions:
+            successor = successor.replace(old, new)
+            self.assertEqual(sum(line.startswith(prefix) for line in successor.splitlines()),
+                             6 if b"predicate_bank" in prefix else 2)
+        changed = [(old, new) for old, new in zip(baseline.splitlines(), successor.splitlines())
+                   if old != new]
+        self.assertEqual(len(changed), 8)
+        self.assertEqual(len(successor), 65467)
+        self.assertEqual(successor.count(b"\n"), 375)
+        self.assertEqual([line.split(b"\t")[:2] + line.split(b"\t")[3:]
+                          for line in baseline.splitlines()],
+                         [line.split(b"\t")[:2] + line.split(b"\t")[3:]
+                          for line in successor.splitlines()])
+        directory = self.root / "simd-applicability"
+        directory.mkdir()
+        path = directory / "applicability-ledger.tsv"
+        for data, pin in ((baseline, contract.PROPOSED_APPLICABILITY_LEDGER_SHA256),
+                          (successor, contract.SIMD_VOCABULARY_APPLICABILITY_LEDGER_SHA256)):
+            with self.subTest(pin=pin):
+                self.assertEqual(sha(data), pin)
+                path.write_bytes(data)
+                _fields, records = read_table(path)
+                inputs = {record["fixture"]: {"role": "subject", "sha256": record["fixture_sha256"]}
+                          for record in records}
+                manifest = {"applicability_ledger": "docs/native-retirement-applicability-v1.tsv",
+                            "applicability_ledger_sha256": pin, "applicability_ledger_entries": "374"}
+                projection, observed = contract.validate_applicability_ledger(
+                    directory, manifest, [], inputs, contract.FULL_CENSUS_PROFILE, set())
+                self.assertEqual(observed, pin)
+                self.assertEqual(len(projection), 374)
+                mismatched = copy.deepcopy(inputs)
+                mismatched["tests/basic_c_predicate_bank.c"]["sha256"] = "0" * 64
+                with self.assertRaises(AssertionError):
+                    contract.validate_applicability_ledger(
+                        directory, manifest, [], mismatched, contract.FULL_CENSUS_PROFILE, set())
+        row = changed[0][1]
+        fields = row.split(b"\t")
+        invalid = [successor + b"\n", successor[:-1] + b" ",
+                   successor.replace(row, b"\t".join([*fields[:2], b"0" * 64, *fields[3:]])),
+                   successor.replace(row, row.replace(fields[1], b"unknown-target")),
+                   successor.replace(row, row.replace(fields[-1], b"changed-reason")),
+                   successor.replace(row + b"\n", b""),
+                   successor.replace(row, row + b"\n" + row)]
+        invalid.extend(baseline.replace(old, new) for old, new in changed)
+        for data in invalid:
+            path.write_bytes(data)
+            manifest["applicability_ledger_sha256"] = sha(data)
+            with self.subTest(invalid=sha(data)), self.assertRaises(AssertionError):
+                contract.validate_applicability_ledger(
+                    directory, manifest, [], inputs, contract.FULL_CENSUS_PROFILE, set())
 
     def test_checked_in_production_gap_ledger_is_canonical_and_authenticated(self):
         ledger_path = Path(__file__).resolve().parents[1] / "docs/native-retirement-supported-gaps-v1.tsv"
