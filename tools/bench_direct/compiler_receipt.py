@@ -47,6 +47,8 @@ Map (searchable symbols):
     INLINE_ACCEPTANCE_PROFILE, validate_inline_acceptance  issue #48 same-candidate inliner pair
     AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_BUDGET, ast_pilot_budget_verdict,
         validate_ast_pilot_acceptance                      issue #3397 -fc-ast-pilot pair
+    CONSTANT_REUSE_ACCEPTANCE_PROFILE,
+        validate_constant_reuse_acceptance                 issue #3011 constant-reuse flag pairs
     THROUGHPUT_REAL_SOURCE_PROFILE, validate_throughput_real_source,
         throughput_real_source_digest                      real-source throughput (#2761)
     PRODUCTION_PROFILE_PROFILE, validate_production_profile,
@@ -223,6 +225,31 @@ AST_PILOT_ACCEPTANCE_PROFILE = {
 # every cell: B's median peak RSS above A's by at most retained bytes times
 # (1 + rss_slack).
 AST_PILOT_BUDGET = {"syntax_only_min_gain": 0.01, "rss_slack": 0.05}
+# Issue #3011: the opt-in constant-reuse arms on the pull-compare route. One
+# fresh exact line in ANALYZER_REQUEST_PATH selects it. Each cell times the one
+# frozen candidate binary on the same -g0 unity object compile, A default and
+# B passing that cell's flag; the flags, cells, pair and warm-up counts are
+# frozen here and nothing in the request can change them. B's object differs
+# from A's by design; diagnostics must not. It is report-only.
+CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE = "profile: constant-reuse-acceptance-v1"
+CONSTANT_REUSE_ACCEPTANCE_SCHEMA = "buster-constant-reuse-acceptance-v1"
+CONSTANT_REUSE_COMPILE = AST_PILOT_COMPILE + ["-c"]
+CONSTANT_REUSE_CELLS = {"intern": "-fcanonical-intern-constants", "cse": "-fcanonical-fast-cse"}
+CONSTANT_REUSE_ACCEPTANCE_PROFILE = {
+    "name": "constant-reuse-acceptance-v1",
+    "source": "candidate-HEAD src/buster/apps/ide/ide.c with that build's generated headers, -g0, -c, no link",
+    "compiler": "the one frozen candidate-HEAD tests-off Clang Release ide for both variants",
+    "compiler_modes": {"a": "default; the cell's flag omitted", "b": "the cell's one opt-in flag"},
+    "cells": dict(CONSTANT_REUSE_CELLS),
+    "pairs": 20,
+    "warmups": 1,
+    "pairing": "ABBA",
+    "fresh_copy": True,
+    "cpu": 2,
+    "measurements": ["wall", "instructions:u", "peak RSS", "executable-section code bytes"],
+    "correctness": "identical stdout/stderr in every run of both cells; B's object differs from A's by design",
+    "report_only": True,
+}
 # Issue #2761: the Zen 5 route for real-source throughput. One fresh exact line
 # in ANALYZER_REQUEST_PATH selects it on the pull-compare route. After the
 # corpus leg, the base revision's `bench_throughput run --real-source` times
@@ -765,12 +792,10 @@ def validate_inline_acceptance(summary: object, expected_revision: str, expected
             if not isinstance(values.get(metric), dict):
                 problems.append(f"issue #48 {stage_name} metric {metric} is missing")
         wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
-        if not all(is_number(wall.get(key)) and math.isfinite(wall[key]) and wall[key] > 0
-                   for key in ("a_median", "b_median", "ratio")):
+        if not all(_finite_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio")):
             problems.append(f"issue #48 {stage_name} wall-time measurements are missing")
         code = values.get("code_bytes") if isinstance(values.get("code_bytes"), dict) else {}
-        if not all(is_number(code.get(key)) and math.isfinite(code[key]) and code[key] > 0
-                   for key in ("a_value", "b_value", "ratio")):
+        if not all(_finite_positive(code.get(key)) for key in ("a_value", "b_value", "ratio")):
             problems.append(f"issue #48 {stage_name} executable-section code-byte measurements are missing")
         instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else {}
         instruction_ratio = instructions.get("ratio")
@@ -778,16 +803,11 @@ def validate_inline_acceptance(summary: object, expected_revision: str, expected
         if instruction_ratio is None:
             if not isinstance(counters, dict) or counters.get("perf_stat") is not False or not counters.get("reason"):
                 problems.append(f"issue #48 {stage_name} retired-instruction NA has no unavailable-counter reason")
-        elif not is_number(instruction_ratio) or not math.isfinite(instruction_ratio) or instruction_ratio <= 0:
+        elif not _finite_positive(instruction_ratio):
             problems.append(f"issue #48 {stage_name} retired-instruction ratio is invalid")
-        elif not all(is_number(instructions.get(key)) and math.isfinite(instructions[key]) and instructions[key] > 0
-                     for key in ("a_median", "b_median")):
+        elif not all(_finite_positive(instructions.get(key)) for key in ("a_median", "b_median")):
             problems.append(f"issue #48 {stage_name} retired-instruction counts are missing")
     return problems
-
-
-def _positive(value: object) -> bool:
-    return is_number(value) and math.isfinite(value) and value > 0
 
 
 def ast_pilot_budget_verdict(cells: dict, retained_bytes: int, correctness: dict) -> dict:
@@ -1924,9 +1944,9 @@ def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expec
         wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
         rss = values.get("peak_rss") if isinstance(values.get("peak_rss"), dict) else {}
         instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else None
-        if not all(_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio", "ci_low", "ci_high")):
+        if not all(_finite_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio", "ci_low", "ci_high")):
             problems.append(f"{label} {cell} wall-time measurements are missing")
-        if not all(_positive(rss.get(key)) for key in ("a_median", "b_median")):
+        if not all(_finite_positive(rss.get(key)) for key in ("a_median", "b_median")):
             problems.append(f"{label} {cell} peak-RSS measurements are missing")
         if instructions is None:
             problems.append(f"{label} {cell} retired-instruction metric is missing")
@@ -1934,8 +1954,8 @@ def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expec
             counters = values.get("counter_availability")
             if not isinstance(counters, dict) or counters.get("perf_stat") is not False or not counters.get("reason"):
                 problems.append(f"{label} {cell} retired-instruction NA has no unavailable-counter reason")
-        elif not _positive(instructions.get("ratio")) or \
-                not all(_positive(instructions.get(key)) for key in ("a_median", "b_median")):
+        elif not _finite_positive(instructions.get("ratio")) or \
+                not all(_finite_positive(instructions.get(key)) for key in ("a_median", "b_median")):
             problems.append(f"{label} {cell} retired-instruction counts are invalid")
         for key in ("outputs_identical", "diagnostics_identical"):
             if type(row.get(key)) is not bool:
@@ -1943,7 +1963,9 @@ def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expec
         metrics[cell] = values
     tree = summary.get("tree")
     retained = tree.get("retained_bytes") if isinstance(tree, dict) else None
-    if type(retained) is not int or retained <= 0 or not isinstance(tree.get("nodes"), int) or tree["nodes"] <= 0 or \
+    # Bounded first: ast_pilot_budget_verdict multiplies retained bytes by a float.
+    if type(retained) is not int or not _finite_positive(retained) or not isinstance(tree.get("nodes"), int) or \
+            tree["nodes"] <= 0 or \
             tree.get("a_tree_lines") != 0:
         problems.append(f"{label} tree retained bytes are missing, or variant A built a tree")
     if problems:
@@ -1952,6 +1974,54 @@ def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expec
                    "diagnostics_identical": all(cells[cell]["diagnostics_identical"] for cell in AST_PILOT_CELLS)}
     if summary.get("verdict") != ast_pilot_budget_verdict(metrics, retained, correctness):
         problems.append(f"{label} verdict differs from the budget recomputed from its metrics")
+    return problems
+
+
+def validate_constant_reuse_acceptance(summary: object, expected_revision: str, expected_candidate_sha: str | None = None) -> list[str]:
+    """Validate opt-in #3011 evidence shape: both cells complete, measured and diagnostics-identical."""
+    label = "issue #3011 constant-reuse receipt"
+    if not isinstance(summary, dict) or summary.get("schema") != CONSTANT_REUSE_ACCEPTANCE_SCHEMA or summary.get("status") != "complete":
+        return [f"{label} has an unexpected or incomplete schema"]
+    problems = []
+    if summary.get("source_revision") != expected_revision:
+        problems.append(f"{label} source revision does not match candidate HEAD")
+    profile = summary.get("profile")
+    if not isinstance(profile, dict) or set(profile) != set(CONSTANT_REUSE_ACCEPTANCE_PROFILE) | {"source_sha256"} or \
+            any(profile.get(key) != value for key, value in CONSTANT_REUSE_ACCEPTANCE_PROFILE.items()) or \
+            not SHA256.fullmatch(str(profile.get("source_sha256", ""))):
+        problems.append(f"{label} profile does not match the fixed acceptance profile")
+    candidate = summary.get("candidate_compiler")
+    if not isinstance(candidate, dict) or not SHA256.fullmatch(str(candidate.get("sha256", ""))):
+        problems.append(f"{label} candidate compiler identity is missing")
+    elif expected_candidate_sha and candidate.get("sha256") != expected_candidate_sha:
+        problems.append(f"{label} timed compiler differs from the frozen candidate-HEAD binary")
+    cells = summary.get("cells")
+    if not isinstance(cells, dict) or set(cells) != set(CONSTANT_REUSE_CELLS):
+        return [*problems, f"{label} does not hold exactly the intern and cse cells"]
+    for cell in CONSTANT_REUSE_CELLS:
+        row = cells[cell] if isinstance(cells[cell], dict) else {}
+        values = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
+        rss = values.get("peak_rss") if isinstance(values.get("peak_rss"), dict) else {}
+        code = values.get("code_bytes") if isinstance(values.get("code_bytes"), dict) else {}
+        instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else None
+        if not all(_finite_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio", "ci_low", "ci_high")):
+            problems.append(f"{label} {cell} wall-time measurements are missing")
+        if not all(_finite_positive(rss.get(key)) for key in ("a_median", "b_median")):
+            problems.append(f"{label} {cell} peak-RSS measurements are missing")
+        if not all(_finite_positive(code.get(key)) for key in ("a_value", "b_value")):
+            problems.append(f"{label} {cell} executable-section code bytes are missing")
+        if instructions is None:
+            problems.append(f"{label} {cell} retired-instruction metric is missing")
+        elif instructions.get("ratio") is None:
+            counters = values.get("counter_availability")
+            if not isinstance(counters, dict) or counters.get("perf_stat") is not False or not counters.get("reason"):
+                problems.append(f"{label} {cell} retired-instruction NA has no unavailable-counter reason")
+        elif not _finite_positive(instructions.get("ratio")) or \
+                not all(_finite_positive(instructions.get(key)) for key in ("a_median", "b_median")):
+            problems.append(f"{label} {cell} retired-instruction counts are invalid")
+        if row.get("diagnostics_identical") is not True:
+            problems.append(f"{label} {cell} diagnostics differ between the default and flagged compiles")
     return problems
 
 
@@ -3895,7 +3965,7 @@ def classify(summary: object, binaries: object, *, expected_profile: str | None 
         value = verdict.get(key)
         if not is_number(value):
             reasons.append(f"wall-time verdict has no numeric {key}")
-        elif not (math.isfinite(value) and value > 0):
+        elif not _finite_positive(value):
             reasons.append(f"wall-time verdict {key} {value!r} is not a finite positive ratio")
         elif wall and wall.get(key) != value:
             reasons.append(f"wall-time verdict {key} {value!r} contradicts the wall metric {wall.get(key)!r}")
@@ -3958,10 +4028,7 @@ def classify_throughput_exit(status: object, summary: object, metadata: object, 
     pairs, rounds = profile["pairs_per_round"], profile["rounds"]
 
     def finite(value: object, *, positive: bool = False) -> bool:
-        try:
-            return type(value) in (int, float) and math.isfinite(value) and (value > 0 if positive else value >= 0)
-        except OverflowError:
-            return False
+        return _number(value) and (value > 0 if positive else value >= 0)
 
     def integer(value: object, *, positive: bool = False) -> bool:
         return type(value) is int and (value > 0 if positive else value >= 0)
@@ -4149,7 +4216,8 @@ REPORT_METRICS = (("wall", "wall time (harness span)", "s"), ("task_clock", "tas
 
 
 def number(value: object, form: str) -> str:
-    return form % value if isinstance(value, (int, float)) and not isinstance(value, bool) else "NA"
+    # An out-of-range JSON integer renders as NA; a float format would raise OverflowError on it.
+    return form % value if type(value) is float or _number(value) else "NA"
 
 
 def render_analyzer(receipt: dict, summary: dict, conclusion: str, notes: list[str]) -> str:
@@ -4412,6 +4480,7 @@ INVENTORY_LEGS = {
         "analyzer": ("build:clang_analyze_benchmark", "tool:clang_analyze_benchmark.c"),
         "inline": ("uarch_lab:compare@canonical-inline-self-host",),
         "ast-pilot": ("uarch_lab:compare@ast-pilot-acceptance",),
+        "constant-reuse": ("uarch_lab:compare@constant-reuse-acceptance",),
         "real-source": ("build:bench_throughput@throughput-real-source",),
         "production-profile": ("build:production_profile",),
         "compiler-probes": ("tool:fast_ra_scaling.c", "tool:machine_line_mark_scaling.c"),
@@ -4423,6 +4492,7 @@ INVENTORY_LEGS = {
 }
 # Opt-in legs whose receipt record carries its own requested/status fields.
 INVENTORY_OPT_IN_RECORDS = {"inline": "inline_acceptance", "ast-pilot": "ast_pilot_acceptance",
+                            "constant-reuse": "constant_reuse_acceptance",
                             "real-source": "throughput_real_source", "production-profile": "production_profile",
                             "compiler-probes": "compiler_probes", "frontend-selector": "frontend_selector",
                             "wild-linker": "wild_linker", "link-tls": "link_tls"}
@@ -4687,6 +4757,30 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
                   for name, check in checks.items()]
         if ast.get("exit") not in (None, 0):
             lines.append(f"Issue #3397 profile exit: {ast.get('exit')}.")
+    reuse = receipt.get("constant_reuse_acceptance") if isinstance(receipt, dict) else None
+    if isinstance(reuse, dict) and reuse.get("requested"):
+        reuse_summary = reuse.get("summary") if isinstance(reuse.get("summary"), dict) else {}
+        lines += ["", f"Issue #3011 constant-reuse arms: {reuse.get('status', 'NA')} "
+                  f"({CONSTANT_REUSE_ACCEPTANCE_PROFILE['pairs']} ABBA pairs per cell; report-only).",
+                  "One candidate binary on the -g0 unity object compile: A = default, B passes the cell's flag. "
+                  "Ratios below 1 mean B is lower. Counters may be NA when the host cannot schedule them.", "",
+                  "| Cell (B flag) | Wall B/A [95% CI] | Retired instructions B/A | Peak RSS A / B | Code bytes A / B | Diagnostics identical |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        cells = reuse_summary.get("cells") if isinstance(reuse_summary.get("cells"), dict) else {}
+        for cell, flag in CONSTANT_REUSE_CELLS.items():
+            row = cells.get(cell) if isinstance(cells.get(cell), dict) else {}
+            values = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+            wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
+            rss = values.get("peak_rss") if isinstance(values.get("peak_rss"), dict) else {}
+            code = values.get("code_bytes") if isinstance(values.get("code_bytes"), dict) else {}
+            lines.append("| %s (%s) | %s [%s, %s] | %s | %s / %s | %s / %s | %s |" % (
+                cell, flag, number(wall.get("ratio"), "%.4f"), number(wall.get("ci_low"), "%.4f"),
+                number(wall.get("ci_high"), "%.4f"), number((values.get("instructions") or {}).get("ratio"), "%.4f"),
+                number(rss.get("a_median"), "%.0f"), number(rss.get("b_median"), "%.0f"),
+                number(code.get("a_value"), "%.0f"), number(code.get("b_value"), "%.0f"),
+                row.get("diagnostics_identical", "NA")))
+        if reuse.get("exit") not in (None, 0):
+            lines.append(f"Issue #3011 profile exit: {reuse.get('exit')}.")
     real = receipt.get("throughput_real_source") if isinstance(receipt, dict) else None
     if isinstance(real, dict) and real.get("requested"):
         profile = THROUGHPUT_REAL_SOURCE_PROFILE

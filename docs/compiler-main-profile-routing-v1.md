@@ -69,3 +69,36 @@ Actions retention never changes profile selection.
 
 Activation requires a separate protected, reviewed policy/certificate change
 after real9700X evidence. Hosted native/ZIP fixtures validate contracts only.
+
+## Switch, rollback and reports (#3212)
+
+The `state` row is the single switch: `disabled`, `owned-long`,
+`qualified-40` or `rollback`. Any other state, and any profile other than
+`compiler-compare-v1` (or `compiler-main-40pairs-v1` in `qualified-40`), is
+refused. The exploratory 40- and 80-pair candidate names are never routable.
+`sampling_qualification_test.py` requires `qualified-40` exactly when
+[the protocol](compiler-main-sampling-qualification-v1.json) sets
+`routine_profile_enabled`, and requires `disabled` while that protocol is
+still `predeclared-not-measured`. Activation therefore changes both files in
+one reviewed change.
+
+`rollback` names the previous policy revision. It restores
+`compiler-compare-v1` with `legacy-rebuild` at the same H, runtime pins and
+roots, and carries no certificate. A rollback from `qualified-40` and the
+refused variants are covered by `compiler_main_route_self_test`.
+
+The MAIN commit report shows:
+- the selected profile and the route that chose it (disabled, or
+  authenticated with its policy and certificate);
+- the complete pairs;
+- the achieved 95% CI half-width;
+- per-leg host seconds (builds, self-host measurement, corpus, total) and
+  the queue delay.
+
+A missing value is `NA`. An outcome of no detectable difference, below the
+floor, or inconclusive is labelled as neither equivalence nor a performance
+pass.
+
+If the campaign qualifies no candidate, the switch stays `disabled`, the
+protocol keeps `routine_profile_enabled` false, and that outcome is recorded
+on #3212.

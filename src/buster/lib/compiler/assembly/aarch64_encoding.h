@@ -126,6 +126,20 @@ BUSTER_F_DECL bool a64_pc_relative_displacement(u64 target, u64 place, s64 adden
 // with the same split field. These helpers perform checked subtraction without
 // relying on signed overflow.
 BUSTER_F_DECL bool a64_adrp_encode(u32 destination_register, u64 instruction_address, u64 target_address, u32* word);
+
+// Mach-O style PAGE relocations are emitted against instructions whose
+// immediate field is zero. These predicates are the single authority shared
+// by the object writer, the static linker and the JIT, kept in lockstep with
+// LLVM's AArch64 PAGEOFF12 fixup rules: ADD (immediate) uses byte granularity,
+// while unsigned LD/ST (immediate) scales the low-page offset by access size.
+// a64_page21_instruction_valid accepts an ADRP with any destination register.
+// a64_pageoff12_shift accepts an unsigned-offset LD/ST or a 64-bit non-setting
+// ADD with no LSL #12 and a zero imm12, and reports the implicit scale shift.
+// a64_page_relocation_apply patches the 4-byte instruction at `patch` (whose
+// address is `place`) with target+addend: PAGE21 when `page21`, else PAGEOFF12.
+BUSTER_F_DECL bool a64_page21_instruction_valid(u32 instruction);
+BUSTER_F_DECL bool a64_pageoff12_shift(u32 instruction, u32* shift);
+BUSTER_F_DECL bool a64_page_relocation_apply(bool page21, u8* patch, u64 place, u64 target, s64 addend);
 BUSTER_F_DECL bool a64_adr_encode(u32 destination_register, u64 instruction_address, u64 target_address, u32* word);
 
 // Architectural condition values 0..13 form inverse pairs. AL/NV are valid

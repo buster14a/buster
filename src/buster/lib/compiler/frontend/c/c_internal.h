@@ -144,6 +144,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 c_shape_matching_delimiter(CTokenShap
 
 typedef struct CTypeParseMachine CTypeParseMachine;
 typedef struct CIrDecodedString CIrDecodedString;
+typedef struct CParseInitializerLog CParseInitializerLog;
+typedef struct CParseInitializerReplays CParseInitializerReplays;
 #define C_DECLARATION_KEYWORD_SLOT_COUNT 256
 
 /* Source/preprocessor tables consumed by the parser's keyword classifier. */
@@ -1220,6 +1222,7 @@ typedef enum CTypeParseFrameStage
     C_TYPE_PARSE_STAGE_VENDOR_TYPE,
     C_TYPE_PARSE_STAGE_VENDOR_TYPE_SUFFIX,
     C_TYPE_PARSE_STAGE_VENDOR_OPERAND,
+    C_TYPE_PARSE_STAGE_ATOMIC_OBJECT,
     C_TYPE_PARSE_STAGE_FINISH,
     C_TYPE_PARSE_STAGE_POSTFIX,
 } CTypeParseFrameStage;
@@ -1245,7 +1248,8 @@ struct CParseExpressionTypeTask
     // The false arm of a conditional whose own top-level `?` and `:` its
     // parent already found sits in `split` and `colon`; it skips the scan.
     bool conditional_hinted;
-    u8 reserved[1];
+    // The parent proved this assignment suffix has no top-level comma.
+    bool assignment_rhs;
 };
 
 struct CTypeParseFrame
@@ -1308,6 +1312,7 @@ struct CTypeParseFrame
     // own range holds it.
     u32 shared_specifier_end;
     u32 mutation_mark;
+    // SIZEOF frames also use this as the type-row count at query entry.
     u32 definition_type_start;
     // PARAMETER frames: the diagnostic count at entry, so a failed type
     // specifier that said nothing can be named.
@@ -1620,6 +1625,13 @@ struct CTypeParseMachine
     // CParseResult.phase_released_bytes/phase_releases when analysis returns.
     u64 phase_released_bytes;
     u64 phase_releases;
+    // While c_parse_infer_file_array_bounds walks one list: where that walk
+    // records its element checks. Null at every other time.
+    CParseInitializerLog* initializer_log;
+    // The logs kept from those walks, for static-initializer validation to
+    // replay instead of walking the list again. Null until the first one; in
+    // the phase arena. See c_parse_initializer_replay_find.
+    CParseInitializerReplays* initializer_replays;
     CTypeLayoutCache layout_cache;
     // Owns a grown member-search workspace; the initial buffers stay in the
     // analysis machine arena. Released by semantic teardown, never a query rewind.
@@ -2003,6 +2015,33 @@ struct CIrAtomicBuiltinSpelling
 
 BUSTER_C_EXTERN CIrAtomicBuiltinSpelling c_ir_atomic_builtin_spelling(String8 name);
 BUSTER_C_EXTERN u32 c_semantic_atomic_builtin_arity(CIrAtomicBuiltinSpelling spelling);
+
+// What an atomic builtin call answers: nothing, a _Bool flag, or the
+// unqualified, non-atomic type of the object its first argument points to.
+// Lowering's strict operand walk and the parser's expression typer both read
+// it, so `sizeof` and `__typeof__` agree.
+typedef enum CSemanticAtomicResult
+{
+    C_SEMANTIC_ATOMIC_RESULT_INVALID,
+    C_SEMANTIC_ATOMIC_RESULT_VOID,
+    C_SEMANTIC_ATOMIC_RESULT_FLAG,
+    C_SEMANTIC_ATOMIC_RESULT_OBJECT,
+} CSemanticAtomicResult;
+
+BUSTER_C_EXTERN CSemanticAtomicResult c_semantic_atomic_builtin_result(CIrAtomicBuiltinSpelling spelling);
+
+// The C types a library builtin's standard prototype is spelled in.
+typedef enum CIrLibraryValue
+{
+    C_IR_LIBRARY_VALUE_VOID_POINTER,
+    C_IR_LIBRARY_VALUE_CHAR_POINTER,
+    C_IR_LIBRARY_VALUE_INT,
+    C_IR_LIBRARY_VALUE_SIZE,
+} CIrLibraryValue;
+
+// The result of a `__builtin_mem*`/`__builtin_str*` library-shaped builtin,
+// or false when the name is not one.
+BUSTER_C_EXTERN bool c_semantic_memory_builtin_result(String8 name, CIrLibraryValue* value_out);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_literal_kind(Target target, u64 const* limits, String8 spelling, u64 value);
 BUSTER_C_EXTERN bool c_semantic_ext80_fold_initializer(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end, u64* significand_out, u16* exponent_sign_out, String8* message, u32* location);
 

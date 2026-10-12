@@ -585,6 +585,10 @@ The block-local CSE experiment (#3011) is selected only by
 `-fcanonical-fast-cse-strategy=window|table` picks the census's linear or
 hash-table arm (default `table`; the last one given wins). See
 [opt-in block-local CSE](../canonical-fast-pipeline.md#opt-in-block-local-cse-3011).
+`-fcanonical-intern-constants` / `-fno-canonical-intern-constants` turn on and
+off the construction-time constant interning arm in C lowering (off by
+default, last one wins, independent of `-O` and FAST controls); see
+[opt-in construction-time constant interning](../canonical-fast-pipeline.md#opt-in-construction-time-constant-interning-3011).
 
 Canonical inlining is separate from register allocation. Tiny direct-call
 inlining is opt-in at every optimization level: `-fcanonical-inline` enables
@@ -612,8 +616,9 @@ see the FAST pipeline contract for the measured memory tradeoff.
 Verbose output emits one `IR_INLINE` record when tiny inlining is enabled or
 inlining candidates were encountered. Its fields are `tiny`, `candidates`,
 `inlined`, `always_inlined`, `copied_instructions`, `growth`,
-`budget_skips`, `shape_skips`, `linkage_skips`, `recursion_skips`, and
-`visits`. It is compile-work telemetry, not generated-code runtime.
+`budget_skips`, `shape_skips`, `linkage_skips`, `recursion_skips`, `visits`,
+and `released_bytes` (pages of relocated caller tables handed back to the OS).
+It is compile-work telemetry, not generated-code runtime.
 
 `-fno-frontend-ssa` selects the original memory-form C lowering;
 `-ffrontend-ssa` restores direct SSA for the bounded supported subset. The last

@@ -53,7 +53,9 @@
 // is the one way back into a closed block, retraction and SSA memory
 // restoration use the checked ir_block_* primitives, and
 // c_ir_finish_construction rejects a function with a refused row or an open
-// block.
+// block. Under the opt-in -fcanonical-intern-constants, c_ir_emit_integer_value_at
+// reuses a constant built earlier in the current block (CIrConstantIntern),
+// re-proving the cached row against retraction and truncation on every hit.
 // c_ir_string_object shares typed static storage between literal operands and
 // runtime places; c_ir_static_compound_literal_object guards the new general
 // compound-address materialization entry while retaining legacy shortcuts.
@@ -1075,6 +1077,33 @@ struct CIrArrayTypeSlot
     IrTypeId element;
     IrTypeId id;
     bool used;
+};
+
+// Opt-in construction-time constant interning (#3011, c_ir_emit_integer_value_at).
+// One direct-mapped table serves a whole lowering; each function builder takes
+// a fresh generation, so no entry crosses a function and none is cleared.
+// An entry is only a hint: a lookup re-proves that its value is still defined
+// by its row, that the row is still the same constant and that it lies in the
+// builder's current block, because retraction and truncation free rows and
+// reuse their ids.
+#define C_IR_CONSTANT_INTERN_SLOTS 64u
+typedef struct CIrConstantInternEntry CIrConstantInternEntry;
+struct CIrConstantInternEntry
+{
+    u64 bits;
+    u32 type;
+    u32 value;
+    u32 row;
+    u32 block;
+    u32 generation;
+    bool negative;
+};
+typedef struct CIrConstantIntern CIrConstantIntern;
+struct CIrConstantIntern
+{
+    CIrConstantInternEntry entries[C_IR_CONSTANT_INTERN_SLOTS];
+    CIRConstantInternStatistics* statistics;
+    u32 generation;
 };
 
 typedef struct CIrPointerTypeCache CIrPointerTypeCache;
@@ -2654,15 +2683,6 @@ typedef enum CIrMemoryBuiltin
     C_IR_MEMORY_BUILTIN_COUNT,
 } CIrMemoryBuiltin;
 
-// The C types a library builtin's standard prototype is spelled in.
-typedef enum CIrLibraryValue
-{
-    C_IR_LIBRARY_VALUE_VOID_POINTER,
-    C_IR_LIBRARY_VALUE_CHAR_POINTER,
-    C_IR_LIBRARY_VALUE_INT,
-    C_IR_LIBRARY_VALUE_SIZE,
-} CIrLibraryValue;
-
 // One standard prototype: the return value, then up to four parameters.
 typedef struct CIrLibrarySignature CIrLibrarySignature;
 struct CIrLibrarySignature
@@ -2906,6 +2926,19 @@ BUSTER_C_INTERNAL CIrMemoryBuiltin c_ir_memory_builtin(String8 name)
     return result;
 }
 
+// The parser's expression typer answers a library-shaped builtin call from
+// the same prototype table lowering emits it with.
+BUSTER_C_SHARED bool c_semantic_memory_builtin_result(String8 name, CIrLibraryValue* value_out)
+{
+    CIrMemoryBuiltin builtin = c_ir_memory_builtin(name);
+    bool found = builtin != C_IR_MEMORY_BUILTIN_COUNT;
+    if (found)
+    {
+        *value_out = (CIrLibraryValue)c_ir_memory_builtin_signatures[builtin].return_value;
+    }
+    return found;
+}
+
 // The GNU checked-arithmetic builtins. A typed spelling fixes both the
 // operation and the one operand type; the generic `__builtin_*_overflow`
 // spellings carry C_TYPE_INVALID and take their types from the arguments.
@@ -3116,6 +3149,22 @@ BUSTER_C_SHARED bool c_semantic_simd_builtin(String8 name, CIrSimdBuiltin* entry
     bool found = index != C_IR_SIMD_BUILTIN_NONE;
     if (found) *entry = c_ir_simd_builtins[index];
     return found;
+}
+
+BUSTER_C_SHARED CSemanticAtomicResult c_semantic_atomic_builtin_result(CIrAtomicBuiltinSpelling spelling)
+{
+    CIrAtomicBuiltin operation = spelling.builtin;
+    bool void_result = operation == C_IR_ATOMIC_BUILTIN_STORE || operation == C_IR_ATOMIC_BUILTIN_INIT ||
+                       operation == C_IR_ATOMIC_BUILTIN_THREAD_FENCE || operation == C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE ||
+                       operation == C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE || operation == C_IR_ATOMIC_BUILTIN_CLEAR ||
+                       (spelling.generic && operation != C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG);
+    bool flag_result = operation == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG || operation == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_WEAK ||
+                       operation == C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE || operation == C_IR_ATOMIC_BUILTIN_TEST_AND_SET ||
+                       operation == C_IR_ATOMIC_BUILTIN_SYNC_BOOL_COMPARE_AND_SWAP;
+    return operation == C_IR_ATOMIC_BUILTIN_COUNT ? C_SEMANTIC_ATOMIC_RESULT_INVALID
+           : void_result                         ? C_SEMANTIC_ATOMIC_RESULT_VOID
+           : flag_result                         ? C_SEMANTIC_ATOMIC_RESULT_FLAG
+                                                 : C_SEMANTIC_ATOMIC_RESULT_OBJECT;
 }
 
 BUSTER_C_SHARED u32 c_semantic_atomic_builtin_arity(CIrAtomicBuiltinSpelling spelling)
@@ -3615,6 +3664,10 @@ struct CIntegerIrBuilder
     // (c_ir_initializer_slot_table); shared by the constant builder and
     // every function builder of one lowering, null in the test hooks.
     CIrInitializerSlotCache* slot_cache;
+    // Opt-in constant interning shared by every function builder of one
+    // lowering, and this function's generation in it; null when off.
+    CIrConstantIntern* constant_intern;
+    u32 constant_intern_generation;
     // The interned symbol of every IrField name a member access has compared
     // (c_ir_field_symbols); shared like slot_cache, null in the test hooks.
     CIrFieldSymbolCache* field_symbols;
@@ -6032,6 +6085,9 @@ BUSTER_C_INTERNAL IrInstructionId c_ir_append_instruction(CIntegerIrBuilder* bui
         builder->previous_instruction = builder->last_instruction;
         builder->previous_instruction_known = true;
         builder->last_instruction = id;
+#if BUSTER_BENCH_ALLOCATIONS
+        ir_construction_fold_census(builder->program, builder->function, id);
+#endif
     }
     return id;
 }
@@ -12265,11 +12321,9 @@ BUSTER_C_INTERNAL bool c_ir_emit_parameter(CIntegerIrBuilder* builder, CToken na
 BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_at(CIntegerIrBuilder* builder, u64 value, bool is_negative, IrSourceRange instruction_source,
                                                        IrTypeId type)
 {
-    IrValueId result = c_ir_add_result(builder, type);
-    u64* immediate = arena_allocate(builder->arena, u64, 1);
-    immediate[0] = value;
+    u64 bits = value;
     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_CONSTANT_INTEGER, type);
-    instruction.immediates = immediate;
+    instruction.immediates = &bits;
     instruction.immediate_count = 1;
     instruction.immediate_is_negative = is_negative;
     // A spelling outside the type's range -- a bit-field clear mask built as
@@ -12280,11 +12334,53 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_at(CIntegerIrBuilder* builde
     u32 width = ir_integer_type_width(ir_type_from_id(&builder->program->types, type));
     if (width && !ir_integer_constant_canonical(&instruction, width))
     {
-        immediate[0] = ir_integer_from_magnitude((IrInteger){.low = value}, is_negative, width).low;
+        bits = ir_integer_from_magnitude((IrInteger){.low = value}, is_negative, width).low;
         instruction.immediate_is_negative = false;
     }
-    instruction.result = result;
-    c_ir_append_instruction(builder, instruction, instruction_source);
+    IrValueId result = IR_VALUE_ID_INVALID;
+    CIrConstantIntern* intern = builder->constant_intern;
+    CIrConstantInternEntry* entry = 0;
+    if (intern)
+    {
+        u64 key = bits ^ ((u64)type.value << 32) ^ (u64)instruction.immediate_is_negative;
+        key *= 0x9E3779B97F4A7C15ull;
+        entry = intern->entries + (u32)(key >> 58);
+        intern->statistics->lookups += 1;
+        IrFunction* function = builder->function;
+        bool keyed = entry->generation == builder->constant_intern_generation && entry->block == builder->current_block.value &&
+                     entry->type == type.value && entry->bits == bits && entry->negative == instruction.immediate_is_negative;
+        IrInstruction const* row = keyed && entry->row < function->instruction_count ? function->instructions + entry->row : 0;
+        if (row && entry->value < function->value_count && function->values[entry->value].definition.value == entry->row &&
+            row->result.value == entry->value && row->opcode == IR_OPCODE_CONSTANT_INTEGER && row->canonical_type.value == type.value &&
+            row->immediate_count == 1 && row->immediates[0] == bits && row->immediate_is_negative == instruction.immediate_is_negative)
+        {
+            result = (IrValueId){.value = entry->value};
+            intern->statistics->hits += 1;
+        }
+        else
+        {
+            intern->statistics->stale += keyed;
+        }
+    }
+    if (result.value == IR_ID_UNDERLYING_INVALID)
+    {
+        result = c_ir_add_result(builder, type);
+        u64* immediate = arena_allocate(builder->arena, u64, 1);
+        immediate[0] = bits;
+        instruction.immediates = immediate;
+        instruction.result = result;
+        c_ir_append_instruction(builder, instruction, instruction_source);
+        if (entry && result.value < builder->function->value_count)
+        {
+            u32 row = builder->function->values[result.value].definition.value;
+            if (row < builder->function->instruction_count)
+            {
+                *entry = (CIrConstantInternEntry){.bits = bits, .type = type.value, .value = result.value, .row = row,
+                    .block = builder->current_block.value, .generation = builder->constant_intern_generation,
+                    .negative = instruction.immediate_is_negative};
+            }
+        }
+    }
     return result;
 }
 
@@ -18454,6 +18550,10 @@ struct CIrLowerFrame
             u32 end;
             u32 task_count;
             u32 task_capacity;
+            // The assignment's RHS remains in the comma-free range that
+            // was scanned before its place was lowered.
+            u32 comma_free_start;
+            u32 comma_free_end;
             u32 pending_assignment;
             CConditionalOperator pending_operation;
             IrBlockId pending_true_block;
@@ -35121,23 +35221,15 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_classify(CIntegerIrBu
             c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 close = c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            CIrAtomicBuiltinSpelling atomic = c_ir_atomic_builtin_spelling(name);
-            CIrAtomicBuiltin operation = atomic.builtin;
-            bool void_result = operation == C_IR_ATOMIC_BUILTIN_STORE || operation == C_IR_ATOMIC_BUILTIN_INIT ||
-                               operation == C_IR_ATOMIC_BUILTIN_THREAD_FENCE || operation == C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE ||
-                               operation == C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE || operation == C_IR_ATOMIC_BUILTIN_CLEAR ||
-                               (atomic.generic && operation != C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG);
-            bool flag_result = operation == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG || operation == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_WEAK ||
-                               operation == C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE || operation == C_IR_ATOMIC_BUILTIN_TEST_AND_SET ||
-                               operation == C_IR_ATOMIC_BUILTIN_SYNC_BOOL_COMPARE_AND_SWAP;
+            CSemanticAtomicResult atomic = c_semantic_atomic_builtin_result(c_ir_atomic_builtin_spelling(name));
             u32 object_end = close < end ? c_ir_call_argument_separator(builder, start + 2, close) : close;
             CIrSizeofStep atomic_step = C_IR_SIZEOF_STEP_FAIL;
-            if (close < end && operation != C_IR_ATOMIC_BUILTIN_COUNT && (void_result || flag_result))
+            if (close < end && (atomic == C_SEMANTIC_ATOMIC_RESULT_VOID || atomic == C_SEMANTIC_ATOMIC_RESULT_FLAG))
             {
-                *type_out = void_result ? builder->void_type : builder->bool_type;
+                *type_out = atomic == C_SEMANTIC_ATOMIC_RESULT_VOID ? builder->void_type : builder->bool_type;
                 atomic_step = c_ir_sizeof_step_from_bool(c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields));
             }
-            else if (close < end && operation != C_IR_ATOMIC_BUILTIN_COUNT && start + 2 < object_end)
+            else if (close < end && atomic == C_SEMANTIC_ATOMIC_RESULT_OBJECT && start + 2 < object_end)
             {
                 atomic_step = c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_ATOMIC_OBJECT, close, start + 2, object_end, false);
             }
@@ -40532,6 +40624,14 @@ BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
 
 // The scan behind c_ir_root_conditional: find the root `?:` of [start, end)
 // after peeling redundant parentheses.
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_assignment_lower_work;
+u64 c_test_assignment_lower_work(void)
+{
+    return c_assignment_lower_work;
+}
+#endif
+
 BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question,
                                                     u32* colon, u32* expression_end)
 {
@@ -40548,9 +40648,11 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u3
     }
     u32 found_question = UINT32_MAX;
     u32 nested_questions = 0;
-    bool root_assignment = false;
     for (u32 index = start; index < end; index += 1)
     {
+#if BUSTER_INCLUDE_TESTS
+        c_assignment_lower_work += 1;
+#endif
         u32 punctuator = builder->preprocess.tokens[index].punctuator;
         CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
         if (scan == C_IR_GROUP_SCAN_SKIPPED)
@@ -40567,15 +40669,6 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u3
         }
         if (punctuator == C_PUNCTUATOR_QUESTION)
         {
-            // `lhs = condition ? true_value : false_value` has a
-            // conditional operator in the assignment's right operand, not
-            // at the root of the expression.  Treating it as a root
-            // conditional loses the assignment completion (the Lua
-            // luaV_fastgeti macro relies on this exact precedence).
-            if (root_assignment)
-            {
-                return false;
-            }
             if (found_question == UINT32_MAX)
             {
                 found_question = index;
@@ -40607,7 +40700,12 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u3
         }
         else if (found_question == UINT32_MAX && c_ir_assignment_operator(builder->preprocess.tokens[index]))
         {
-            root_assignment = true;
+            // `lhs = condition ? true_value : false_value` has a
+            // conditional operator in the assignment's right operand, not
+            // at the root of the expression.  Treating it as a root
+            // conditional loses the assignment completion (the Lua
+            // luaV_fastgeti macro relies on this exact precedence).
+            break;
         }
     }
     return false;
@@ -42457,6 +42555,8 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             return;
         }
         frame->as.expression.start = assignment + 1;
+        frame->as.expression.comma_free_start = assignment + 1;
+        frame->as.expression.comma_free_end = frame->as.expression.end;
         frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
     }
     else
@@ -42940,8 +43040,12 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         // `f(g(h(...)))` quadratic.
         u32 last_comma = UINT32_MAX;
         u32 comma_conditionals = 0;
-        for (u32 index = start; index < end; index += 1)
+        bool comma_free = frame->as.expression.comma_free_end == end && start >= frame->as.expression.comma_free_start;
+        for (u32 index = start; !comma_free && index < end; index += 1)
         {
+#if BUSTER_INCLUDE_TESTS
+            c_assignment_lower_work += 1;
+#endif
             CToken token = builder->preprocess.tokens[index];
             CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
             if (scan == C_IR_GROUP_SCAN_UNCLOSED)
@@ -42989,6 +43093,9 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         CConditionalOperator assignment_operation = C_CONDITIONAL_OPERATOR_COUNT;
         for (u32 index = start; index < end && assignment == end; index += 1)
         {
+#if BUSTER_INCLUDE_TESTS
+            c_assignment_lower_work += 1;
+#endif
             CToken token = builder->preprocess.tokens[index];
             CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
             if (scan == C_IR_GROUP_SCAN_UNCLOSED)
@@ -48357,6 +48464,32 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_finish_vla_declaration(CIntegerIrBuilder*
      C_SYMBOL_WELL_KNOWN_BIT(DEFAULT) | C_SYMBOL_WELL_KNOWN_BIT(DO) | C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(GOTO) |       \
      C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) |    \
      C_SYMBOL_WELL_KNOWN_BIT(STATIC_ASSERT) | C_IR_ASM_KEYWORD_SET)
+#if BUSTER_INCLUDE_TESTS
+// Typedef probes the statement walker has made of first tokens on this
+// thread, for the regression c_test_statement_keyword_typedef_probes.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_ir_first_token_typedef_probe_total;
+
+u64 c_test_ir_first_token_typedef_probes(void)
+{
+    return c_ir_first_token_typedef_probe_total;
+}
+#define C_IR_FIRST_TOKEN_TYPEDEF_PROBE() (c_ir_first_token_typedef_probe_total += 1)
+#else
+#define C_IR_FIRST_TOKEN_TYPEDEF_PROBE() ((void)0)
+#endif
+
+// The statement keywords that are keywords in every dialect: never a type
+// word and never an entity's name, so the typedef probe below always answers
+// false for them. STATIC_ASSERT is the reserved `_Static_assert` (C23's
+// `static_assert` is respelled to it; an older dialect's keeps its own
+// symbol), and ASM_GNU and ASM_GNU_ALT are the reserved `__asm` and
+// `__asm__`. Plain `asm` is left out: outside the GNU dialects it is an
+// ordinary identifier, and may name a typedef.
+#define C_IR_STATEMENT_ONLY_KEYWORD_SET                                                                                                    \
+    (C_SYMBOL_WELL_KNOWN_BIT(BREAK) | C_SYMBOL_WELL_KNOWN_BIT(CASE) | C_SYMBOL_WELL_KNOWN_BIT(CONTINUE) |                                  \
+     C_SYMBOL_WELL_KNOWN_BIT(DEFAULT) | C_SYMBOL_WELL_KNOWN_BIT(DO) | C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(GOTO) |       \
+     C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) |    \
+     C_SYMBOL_WELL_KNOWN_BIT(STATIC_ASSERT) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ASM_GNU_ALT))
 
 BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
 {
@@ -48896,16 +49029,32 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 first_entity.value < builder->parse.entity_count && builder->parse.entities[first_entity.value].kind == C_ENTITY_TYPEDEF;
             // An unbound prefix reads the token's own lexical scope, but a
             // declarator is not visible before itself: `for (T T = 0; ...)`
-            // still starts with the outer typedef name.
+            // still starts with the outer typedef name. A statement keyword
+            // is never a typedef name, so it skips the lookup; on the
+            // self-host they are four in five of the unbound first tokens
+            // (GitHub #3102).
             bool first_is_unbound_typedef_name = false;
-            if (first.kind == C_TOKEN_IDENTIFIER && first_entity.value == C_ID_UNDERLYING_INVALID)
+            bool first_is_statement_keyword = first.kind == C_TOKEN_IDENTIFIER &&
+                                              c_token_in_well_known_set(builder->preprocess.spelling_base, first, C_IR_STATEMENT_ONLY_KEYWORD_SET);
+            if (first.kind == C_TOKEN_IDENTIFIER && first_entity.value == C_ID_UNDERLYING_INVALID && !first_is_statement_keyword)
             {
+                C_IR_FIRST_TOKEN_TYPEDEF_PROBE();
                 CScopeId token_scope = c_ir_scope_for_token(builder, index);
                 CEntityId visible = c_parse_lookup_entity_at_token(&builder->parse, builder->preprocess, token_scope, index);
                 first_is_unbound_typedef_name = visible.value < builder->parse.entity_count
                                                     ? builder->parse.entities[visible.value].kind == C_ENTITY_TYPEDEF
                                                     : c_parse_type_start_token(&builder->parse, builder->preprocess, C_SCOPE_ID_INVALID, first);
             }
+#if BUSTER_REFERENCE_CHECKS
+            // The lookup the gate skips, kept as the reference: a Debug or
+            // sanitized build checks that it answers false for every gated keyword.
+            if (first_is_statement_keyword && first_entity.value == C_ID_UNDERLYING_INVALID)
+            {
+                CEntityId visible = c_parse_lookup_entity_at_token(&builder->parse, builder->preprocess, c_ir_scope_for_token(builder, index), index);
+                BUSTER_CHECK(visible.value >= builder->parse.entity_count &&
+                             !c_parse_type_start_token(&builder->parse, builder->preprocess, C_SCOPE_ID_INVALID, first));
+            }
+#endif
             if (c_ir_named_label_at(&builder->preprocess, task.start, index, task.end) &&
                 c_parse_label_candidate_at(&builder->parse, &builder->preprocess, task.start, index))
             {
@@ -63333,6 +63482,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     CIrInitializerSlotCache slot_cache = {
         .arena = arena,
     };
+    CIrConstantIntern constant_intern = {.statistics = &result.constant_interning};
     CIrFieldSymbolCache field_symbols = {
         .arena = arena,
         .symbols = preprocess.symbols,
@@ -65755,6 +65905,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .location_cursor = {.memo_offset = UINT32_MAX},
             .arena = arena,
             .slot_cache = &slot_cache,
+            .constant_intern = options.intern_block_constants ? &constant_intern : 0,
+            .constant_intern_generation = options.intern_block_constants ? ++constant_intern.generation : 0,
             .field_symbols = &field_symbols,
             .over_aligned_array_name = &over_aligned_array_name,
             .scratch_arena = lowering_arena,
