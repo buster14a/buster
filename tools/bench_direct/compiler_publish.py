@@ -7,6 +7,9 @@ the only jobs there that complete the check. It reads this run's evidence
 artifact through the API as data (a size-bounded zip; nothing in it is
 executed), re-checks the receipt against the identities authorization produced
 in the same attempt, requires the observed host to be the approved Zen 5 host,
+requires the job's retained #2758 machine-specification record
+(machine-specifications/report.json, see machine_record) to name that host
+with the receipt's own CPU model and this run, attempt and compare job,
 re-derives validity from the lab's own summary.json and the throughput
 corpus's own summary.json and metadata.json (#2761), and, when the receipt
 names the scaling profile (#424), each scaling bundle's own scaling.json and
@@ -22,6 +25,11 @@ Conclusions (the performance verdict never decides; report-only):
     failure  authorization refused, evidence missing, mismatched or invalid,
              or an unimplemented regression policy was requested
 A failure says the candidate was not benchmarked; it is never relabelled.
+Whatever the conclusion, the check's summary, its JSON (`inventory_coverage`)
+and the main commit report name the inventory rows that this attempt's
+validated legs discharged, from the trusted mode and the decided conclusion
+(compiler_receipt.covered_inventory_rows, #2761). Only a success discharges a
+row.
 
 The check is the attempt's own check (#2803): the request bridge or the start
 job usually created it queued and moved it to in_progress; this completes the
@@ -40,10 +48,16 @@ re-derives a past main attempt's identity from GitHub's records
 (recovered_identity, bind_request), re-reads that attempt's retained
 evidence, and emits only the comment entry. It writes no check and runs no
 measurement; expired or unverifiable evidence is reported and not published.
+Only an attempt whose authenticated workflow revision has no record retention
+step may lack the machine record (machine_record_required); a record that is
+present is still checked.
 
 Map: validate_inline_bundle and validate_ast_pilot_bundle (opt-in flag pairs),
-decide (pure decision), read_evidence, verify_analyzer_request_freshness
-(fresh request selectors), queue_delay, links,
+validate_real_source_bundle, validate_production_profile_bundle and
+validate_compiler_probes_bundle and validate_frontend_selector_bundle (#2761 opt-in legs),
+decide (pure decision), inventory_rows (discharged inventory rows),
+machine_record and machine_record_required (#2758 host facts), read_evidence,
+verify_analyzer_request_freshness (fresh request selectors), queue_delay, links,
 commit_report, recovered_identity, bind_request, report_check_url, main.
 Api lives in compiler_github.
 """
@@ -71,17 +85,22 @@ from compiler_github import (ARTIFACT_LIMIT, BENCH_WORKFLOW, COMPARE_JOBS, SERVE
 from inline_acceptance import metrics as inline_metrics, validate_documents as validate_inline_documents
 from ast_pilot_acceptance import (cell_record as ast_pilot_cell_record, validate_documents as validate_ast_pilot_documents,
                                   validate_probe as validate_ast_pilot_probe)
-from compiler_receipt import (validate_closure, ANALYZER_PROFILE, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUIRED_FILES,
+from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUIRED_FILES,
                               ANALYZER_REQUEST_LINES, ANALYZER_REQUEST_PATH, DECIMAL, IDENTITY_KEYS,
                               INLINE_ACCEPTANCE_REQUEST_LINE, INLINE_ACCEPTANCE_PROFILE,
                               AST_PILOT_ACCEPTANCE_REQUEST_LINE, AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_CELLS,
                               validate_ast_pilot_acceptance,
                               THROUGHPUT_REAL_SOURCE_PROFILE, THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
                               throughput_real_source_digest, validate_throughput_real_source,
+                              PRODUCTION_PROFILE_PROFILE, PRODUCTION_PROFILE_REQUEST_LINE, validate_production_profile,
+                              COMPILER_PROBES_PROFILE, COMPILER_PROBES_REQUEST_LINE, compiler_probes_digest,
+                              validate_compiler_probes,
+                              FRONTEND_SELECTOR_PROFILE, FRONTEND_SELECTOR_REQUEST_LINE, frontend_selector_digest,
+                              validate_frontend_selector,
                               MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
                               check_name, classify, classify_scaling, classify_throughput, host_problem, number,
                               range_label, regression_policy, render, SCALING_PROFILE, scaling_digest, validate_inline_acceptance,
-                              THROUGHPUT_PROFILE, throughput_digest, validate_analyzer_bundle)
+                              THROUGHPUT_PROFILE, throughput_digest, validate_analyzer_bundle, covered_inventory_rows)
 
 ARTIFACT_PREFIX = "buster-9700x-compiler-"
 MEMBER_LIMIT = 8 * 1024 * 1024
@@ -89,6 +108,16 @@ ANALYZER_MEMBER_LIMIT = 32 * 1024 * 1024
 ANALYZER_BUNDLE_LIMIT = ARTIFACT_LIMIT * 3 // 4
 AUTHORIZE_JOBS = {"main": "Authorize the main commit comparison"}
 REPORT_MARKDOWN_LIMIT = 36000
+# The #2758 startup record, retained by the 9700X comparison job (#2761).
+MACHINE_RECORD = "machine-specifications/report.json"
+MACHINE_SCHEMA = "buster-machine-specifications-v1"
+MACHINE_JOBS = {"main": "compare", "pull": "compare-pull"}
+MACHINE_STATUSES = ("available", "partial", "unknown", "unavailable", "not_applicable")
+MACHINE_REQUIRED = ("schema", "run_id", "run_attempt", "job", "cpu_model", "machine_arch")
+# A bench workflow revision retains the record exactly when one of its steps is named this.
+MACHINE_RETENTION_STEP = "machine-specification record\n"
+MACHINE_OPTIONAL = ("cpu_vendor", "cpu_logical_online", "cpu_process_available", "cpu_affinity",
+                    "memory_total_bytes", "kernel_release", "execution_context")
 
 
 def artifact_name(head: str, attempt: str) -> str:
@@ -242,6 +271,93 @@ def validate_real_source_bundle(record: object, bundle: object, binaries: object
     return problems
 
 
+PRODUCTION_PROFILE_BUNDLE_FILES = {
+    "build_summary": "production_profile/summary.txt",
+    "ledger": "production_profile/evidence/phases.tsv",
+    "summary": "production_profile/throughput/summary.json",
+    "metadata": "production_profile/throughput/metadata.json",
+}
+
+
+def validate_production_profile_bundle(record: object, bundle: object, head: str) -> list[str]:
+    """Re-derive the requested #2761 PGO/LTO result from its exported build summary, ledger and corpus."""
+    if record is None:
+        return []
+    if not isinstance(record, dict) or record.get("requested") is not True:
+        return ["receipt production-profile record is present but not a request"]
+    problems: list[str] = []
+    if record.get("status") != "complete" or record.get("build_exit") != 0 or record.get("exit") not in (0, 1):
+        problems.append("receipt production-profile run did not complete successfully")
+    if record.get("request_line") != PRODUCTION_PROFILE_REQUEST_LINE:
+        problems.append("receipt production-profile request selector is not the exact supported line")
+    if record.get("profile") != PRODUCTION_PROFILE_PROFILE:
+        problems.append("receipt production-profile profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(PRODUCTION_PROFILE_BUNDLE_FILES):
+        return [*problems, "requested production-profile evidence bundle is incomplete"]
+    problems.extend(validate_production_profile(record.get("build_exit"), bundle["build_summary"], bundle["ledger"], head,
+                                                record.get("exit"), bundle["summary"], bundle["metadata"],
+                                                record.get("binaries")))
+    if record.get("cells") != throughput_real_source_digest(bundle["summary"]):
+        problems.append("receipt production-profile cells do not match the exported corpus summary")
+    return problems
+
+
+COMPILER_PROBES_BUNDLE_FILES = {"summary": "compiler_probes/summary.json"}
+
+
+def validate_compiler_probes_bundle(record: object, bundle: object, base: str, head: str) -> list[str]:
+    """Re-derive the requested #2761 probe result from its exported raw samples."""
+    if record is None:
+        return []
+    if not isinstance(record, dict) or record.get("requested") is not True:
+        return ["receipt compiler-probes record is present but not a request"]
+    problems: list[str] = []
+    if record.get("status") != "complete" or record.get("exit") != 0:
+        problems.append("receipt compiler-probes run did not complete successfully")
+    if record.get("request_line") != COMPILER_PROBES_REQUEST_LINE:
+        problems.append("receipt compiler-probes request selector is not the exact supported line")
+    if record.get("profile") != COMPILER_PROBES_PROFILE:
+        problems.append("receipt compiler-probes profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(COMPILER_PROBES_BUNDLE_FILES):
+        return [*problems, "requested compiler-probes evidence bundle is incomplete"]
+    problems.extend(validate_compiler_probes(record.get("exit"), bundle["summary"], base, head, record.get("binaries"),
+                                             record.get("probe_source_sha256")))
+    if record.get("cells") != compiler_probes_digest(bundle["summary"]):
+        problems.append("receipt compiler-probes cells do not match the exported raw samples")
+    return problems
+
+
+FRONTEND_SELECTOR_BUNDLE_FILES = {
+    "provenance": "frontend_selector/frontend_scaling/provenance.json",
+    "results": "frontend_selector/frontend_scaling/results.json",
+    "report": "frontend_selector/selection/report.json",
+    "bench": "frontend_selector/ide_bench/ide-bench.json",
+}
+
+
+def validate_frontend_selector_bundle(record: object, bundle: object, binaries: object) -> list[str]:
+    """Re-derive the requested #2761 frontend and selector probes from their exported records."""
+    if record is None:
+        return []
+    if not isinstance(record, dict) or record.get("requested") is not True:
+        return ["receipt frontend-selector record is present but not a request"]
+    problems: list[str] = []
+    if record.get("status") != "complete" or record.get("exits") != {"frontend_scaling": 0, "selection": 0}:
+        problems.append("receipt frontend-selector run did not complete successfully")
+    if record.get("request_line") != FRONTEND_SELECTOR_REQUEST_LINE:
+        problems.append("receipt frontend-selector request selector is not the exact supported line")
+    if record.get("profile") != FRONTEND_SELECTOR_PROFILE:
+        problems.append("receipt frontend-selector profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(FRONTEND_SELECTOR_BUNDLE_FILES):
+        return [*problems, "requested frontend-selector evidence bundle is incomplete"]
+    exits = record.get("exits") if isinstance(record.get("exits"), dict) else {}
+    problems.extend(validate_frontend_selector(exits.get("frontend_scaling"), bundle["provenance"], bundle["results"],
+                                               exits.get("selection"), bundle["report"], bundle["bench"], binaries))
+    if record.get("cells") != frontend_selector_digest(bundle["results"], bundle["report"], bundle["bench"]):
+        problems.append("receipt frontend-selector cells do not match the exported evidence")
+    return problems
+
+
 def decide(expected: dict, authorized: bool, compare_result: str, receipt: object, summary: object,
            policy_value: str, throughput: object = None, require_throughput: bool = True,
            extra_reasons: list[str] | None = None, *,
@@ -323,6 +439,12 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.append(f"{selected_profile['name']} cannot be combined with issue #3397 ast-pilot acceptance")
                 if receipt.get("throughput_real_source") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with real-source throughput")
+                if receipt.get("production_profile") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with the PGO/LTO production profile")
+                if receipt.get("compiler_probes") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with the compiler probes")
+                if receipt.get("frontend_selector") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with the frontend-selector probes")
                 reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
                 reasons.extend(validate_analyzer_bundle(receipt,
                                                         analyzer_bundle.get("summary") if isinstance(analyzer_bundle, dict) else None,
@@ -367,6 +489,38 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                         reasons.append("real-source throughput is valid only in pull mode")
                     reasons.extend(validate_real_source_bundle(receipt["throughput_real_source"],
                                                                corpus.get("real_source_bundle"), receipt.get("binaries")))
+                if receipt.get("production_profile") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("the PGO/LTO production profile is valid only in pull mode")
+                    if receipt.get("throughput_real_source") is not None or receipt.get("ast_pilot_acceptance") is not None:
+                        reasons.append("the PGO/LTO production profile cannot be combined with real-source "
+                                       "throughput or ast-pilot acceptance")
+                    reasons.extend(validate_production_profile_bundle(receipt["production_profile"],
+                                                                      corpus.get("production_profile_bundle"),
+                                                                      expected.get("head", "")))
+                if receipt.get("compiler_probes") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("the compiler probes are valid only in pull mode")
+                    if any(receipt.get(key) is not None for key in
+                           ("throughput_real_source", "ast_pilot_acceptance", "production_profile")):
+                        reasons.append("the compiler probes cannot be combined with real-source throughput, "
+                                       "ast-pilot acceptance or the PGO/LTO production profile")
+                    reasons.extend(validate_compiler_probes_bundle(receipt["compiler_probes"],
+                                                                   corpus.get("compiler_probes_bundle"),
+                                                                   expected.get("base", ""), expected.get("head", "")))
+                if receipt.get("frontend_selector") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("the frontend-selector probes are valid only in pull mode")
+                    if any(receipt.get(key) is not None for key in
+                           ("throughput_real_source", "ast_pilot_acceptance", "production_profile", "compiler_probes")):
+                        reasons.append("the frontend-selector probes cannot be combined with real-source throughput, "
+                                       "ast-pilot acceptance, the PGO/LTO production profile or the compiler probes")
+                    reasons.extend(validate_frontend_selector_bundle(receipt["frontend_selector"],
+                                                                     corpus.get("frontend_selector_bundle"),
+                                                                     receipt.get("binaries")))
             if compare_result != "success":
                 reasons.append(f"compare job result is {compare_result!r}, not success")
             if problem:
@@ -714,7 +868,8 @@ def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
                         for operation in ("snapshot", "restore", "verify")})
     if receipt.get("throughput_profile") != THROUGHPUT_PROFILE or "scaling_profile" in receipt or \
             not isinstance(receipt.get("inline_acceptance"), dict) or receipt["inline_acceptance"].get("requested") is not False or \
-            "ast_pilot_acceptance" in receipt or "throughput_real_source" in receipt:
+            "ast_pilot_acceptance" in receipt or "throughput_real_source" in receipt or "production_profile" in receipt or \
+            "compiler_probes" in receipt or "frontend_selector" in receipt:
         raise ValueError("owned ordinary Main evidence changed the complete original corpus recipe")
     identity = receipt.get("identity")
     if not isinstance(identity, dict) or identity.get("trusted_revision") != route["main_measurement_revision"]:
@@ -758,11 +913,87 @@ def main_owned_evidence(api: Api, run_id: str, name: str, route: dict) -> tuple[
         digest = hashlib.sha256(payload).hexdigest()
         if len(payload) != artifact["size_in_bytes"] or "sha256:" + digest != artifact["digest"]:
             raise ValueError("owned ordinary downloaded ZIP differs from its immutable API artifact")
-        receipt, summary, throughput = main_owned_files(main_archive_files(payload), route, api=api)
+        files = main_archive_files(payload)
+        receipt, summary, throughput = main_owned_files(files, route, api=api)
+        throughput["machine"] = files.get(MACHINE_RECORD)
         artifact = dict(artifact, verified_archive_sha256=digest)
         return receipt, summary, "", artifact, throughput
     except (OSError, ValueError, KeyError, TypeError, UnicodeError, urllib.error.URLError) as error:
         return None, None, "Main-owned evidence refused: " + str(error), artifact, {}
+
+
+def machine_record(raw: object, receipt: object, mode: str, run_id: str, attempt: str,
+                   require: bool = True) -> tuple[list[str], dict]:
+    """(problems, facts) for the retained #2758 machine-specification record.
+
+    Required facts must be `available` and agree with the approved host, the
+    receipt's observed CPU model and the attempt being published. Optional
+    facts are reported with the collector's own status and reason, never
+    filled in. Only publication-only recovery of an attempt whose authenticated
+    workflow revision predates retention (machine_record_required) passes
+    require=False; a record that is present is always checked.
+    """
+    problems: list[str] = []
+    facts: dict = {}
+    record = None
+    if raw is None:
+        if require:
+            problems.append(f"machine-specification record {MACHINE_RECORD} is missing from the evidence artifact")
+    else:
+        try:
+            record = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
+        except (DuplicateKey, UnicodeDecodeError, ValueError, AttributeError):
+            record = None
+        if not isinstance(record, dict) or not record or any(
+                not isinstance(value, dict) or set(value) != {"value", "status", "reason"} or
+                not all(isinstance(value[key], str) for key in value) or value["status"] not in MACHINE_STATUSES
+                for value in record.values()):
+            problems.append(f"machine-specification record {MACHINE_RECORD} is malformed")
+            record = None
+    if record is not None:
+        for key in (*MACHINE_REQUIRED, *MACHINE_OPTIONAL):
+            field = record.get(key)
+            if field is None:
+                facts[key] = "absent from the record"
+            elif field["status"] == "available":
+                facts[key] = field["value"]
+            else:
+                facts[key] = field["status"] + (f" ({field['reason']})" if field["reason"] else "")
+        missing = [key for key in MACHINE_REQUIRED if (record.get(key) or {}).get("status") != "available"]
+        for key in missing:
+            problems.append(f"machine-specification record lacks required host fact {key}: {facts[key]}")
+        if not missing:
+            value = {key: record[key]["value"] for key in MACHINE_REQUIRED}
+            host = receipt.get("host") if isinstance(receipt, dict) else None
+            observed = host.get("cpu_model") if isinstance(host, dict) else None
+            if value["schema"] != MACHINE_SCHEMA:
+                problems.append(f"machine-specification record schema {value['schema']!r} is not {MACHINE_SCHEMA}")
+            if not APPROVED_HOST.search(value["cpu_model"]):
+                problems.append(f"machine-specification record CPU {value['cpu_model']!r} is not the approved "
+                                "Zen 5 host (AMD Ryzen 7 9700X)")
+            if not isinstance(observed, str) or value["cpu_model"].strip() != observed.strip():
+                problems.append(f"machine-specification record CPU {value['cpu_model']!r} differs from the "
+                                f"receipt's observed CPU {observed!r}")
+            if value["machine_arch"] != "x86_64":
+                problems.append(f"machine-specification record architecture {value['machine_arch']!r} is not x86_64")
+            identity = {"run_id": run_id, "run_attempt": attempt, "job": MACHINE_JOBS.get(mode, "")}
+            for key, wanted in identity.items():
+                if not wanted or value[key] != wanted:
+                    problems.append(f"machine-specification record {key} {value[key]!r} is not this attempt's {wanted!r}")
+    return problems, facts
+
+
+def machine_record_required(api: Api, revision: str) -> bool:
+    """Whether the bench workflow at an authenticated run revision retains the machine record.
+
+    Only a readable workflow without the retention step is a legacy revision
+    whose recovered attempt may lack the record; a malformed revision, an
+    unreadable or absent file and every later revision require it.
+    """
+    content = None
+    if isinstance(revision, str) and SHA.fullmatch(revision):
+        content, unused_problem = _github_file(api, revision, BENCH_WORKFLOW)
+    return not content or MACHINE_RETENTION_STEP in content.decode("utf-8", errors="replace")
 
 
 def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict | None = None) -> tuple[object, object, str, dict, dict]:
@@ -794,6 +1025,9 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                     break
                 aliases.add(alias)
                 members[info.filename] = info
+            machine_info = members.get(MACHINE_RECORD) if not problem else None
+            machine = None if machine_info is None else \
+                archive.read(machine_info) if machine_info.file_size <= MEMBER_LIMIT else b""
             receipt_info = members.get("receipt.json") if not problem else None
             if receipt_info is not None and receipt_info.file_size <= MEMBER_LIMIT:
                 try:
@@ -840,7 +1074,8 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         problem = f"evidence member analyzer/summary.json has duplicate JSON key {error.args[0]!r}"
                     except (UnicodeDecodeError, ValueError):
                         problem = "evidence member analyzer/summary.json is malformed JSON"
-                throughput = {"analyzer": {"summary": summary, "files": raw_files} if not problem else None}
+                throughput = {"analyzer": {"summary": summary, "files": raw_files} if not problem else None,
+                              "machine": machine}
                 return receipt, summary, problem, artifact, throughput
             values = []
             scaling = [f"scaling/{name}/{leaf}" for name in SCALING_PROFILE["series"]
@@ -860,7 +1095,8 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
             receipt, summary = values[:2]
             throughput = {"summary": values[2], "metadata": values[3],
                           "scaling": {name: {"summary": values[4 + 2 * index], "metadata": values[5 + 2 * index]}
-                                      for index, name in enumerate(SCALING_PROFILE["series"])}}
+                                      for index, name in enumerate(SCALING_PROFILE["series"])},
+                          "machine": machine}
             if isinstance(receipt, dict) and receipt.get("closure") is not None:
                 closure_files: dict = {}
                 for operation in ("snapshot", "restore", "verify"):
@@ -921,12 +1157,64 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         problem = f"evidence member {member} is malformed"
                         break
                 throughput["real_source_bundle"] = bundle if not problem and len(bundle) == len(REAL_SOURCE_BUNDLE_FILES) else None
+            if isinstance(receipt, dict) and receipt.get("production_profile") is not None and not problem:
+                bundle = {}
+                for key, member in PRODUCTION_PROFILE_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required production-profile evidence member {member} missing or oversized"
+                        break
+                    try:
+                        text = archive.read(info).decode("utf-8")
+                        bundle[key] = json.loads(text, object_pairs_hook=unique_object) if member.endswith(".json") else text
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed"
+                        break
+                throughput["production_profile_bundle"] = (bundle if not problem and
+                                                           len(bundle) == len(PRODUCTION_PROFILE_BUNDLE_FILES) else None)
+            if isinstance(receipt, dict) and receipt.get("compiler_probes") is not None and not problem:
+                bundle = {}
+                for key, member in COMPILER_PROBES_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required compiler-probes evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed"
+                        break
+                throughput["compiler_probes_bundle"] = (bundle if not problem and
+                                                        len(bundle) == len(COMPILER_PROBES_BUNDLE_FILES) else None)
+            if isinstance(receipt, dict) and receipt.get("frontend_selector") is not None and not problem:
+                bundle = {}
+                for key, member in FRONTEND_SELECTOR_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required frontend-selector evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed"
+                        break
+                throughput["frontend_selector_bundle"] = (bundle if not problem and
+                                                          len(bundle) == len(FRONTEND_SELECTOR_BUNDLE_FILES) else None)
     return receipt, summary, problem, artifact, throughput
 
 
-def _github_file(api: Api, revision: str) -> tuple[bytes | None, str]:
-    """Read the exact request file at a commit from GitHub's immutable contents API."""
-    path = urllib.parse.quote(ANALYZER_REQUEST_PATH, safe="/")
+def _github_file(api: Api, revision: str, name: str = ANALYZER_REQUEST_PATH) -> tuple[bytes | None, str]:
+    """Read one exact file (the request file by default) at a commit from GitHub's immutable contents API."""
+    path = urllib.parse.quote(name, safe="/")
     try:
         value = api.request(f"/contents/{path}?{urllib.parse.urlencode({'ref': revision})}")
     except urllib.error.HTTPError as error:
@@ -987,10 +1275,16 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     head_inline_count = head_lines.count(INLINE_ACCEPTANCE_REQUEST_LINE)
     head_ast_count = head_lines.count(AST_PILOT_ACCEPTANCE_REQUEST_LINE)
     head_real_count = head_lines.count(THROUGHPUT_REAL_SOURCE_REQUEST_LINE)
+    head_production_count = head_lines.count(PRODUCTION_PROFILE_REQUEST_LINE)
+    head_probes_count = head_lines.count(COMPILER_PROBES_REQUEST_LINE)
+    head_selector_count = head_lines.count(FRONTEND_SELECTOR_REQUEST_LINE)
     parent_analyzer_deltas = {line: [] for line in ANALYZER_REQUEST_LINES}
     parent_inline_counts = []
     ast_deltas = []
     real_deltas = []
+    production_deltas = []
+    probes_deltas = []
+    selector_deltas = []
     for parent in parent_shas:
         parent_bytes, problem = _github_file(api, parent)
         if problem:
@@ -1004,6 +1298,9 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
         parent_inline_counts.append(parent_lines.count(INLINE_ACCEPTANCE_REQUEST_LINE))
         ast_deltas.append(head_ast_count - parent_lines.count(AST_PILOT_ACCEPTANCE_REQUEST_LINE))
         real_deltas.append(head_real_count - parent_lines.count(THROUGHPUT_REAL_SOURCE_REQUEST_LINE))
+        production_deltas.append(head_production_count - parent_lines.count(PRODUCTION_PROFILE_REQUEST_LINE))
+        probes_deltas.append(head_probes_count - parent_lines.count(COMPILER_PROBES_REQUEST_LINE))
+        selector_deltas.append(head_selector_count - parent_lines.count(FRONTEND_SELECTOR_REQUEST_LINE))
     ast_record = receipt.get("ast_pilot_acceptance")
     if ast_record is not None and not all(delta == 1 for delta in ast_deltas):
         return ("the exact ast-pilot selector was not freshly added once at this head relative to every parent; "
@@ -1016,6 +1313,24 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
                 "parent; append one selector line for each explicit real-source request")
     if real_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in real_deltas):
         return "a fresh real-source throughput selector has no real-source record in the receipt"
+    production_record = receipt.get("production_profile")
+    if production_record is not None and not all(delta == 1 for delta in production_deltas):
+        return ("the exact production-profile selector was not freshly added once at this head relative to every "
+                "parent; append one selector line for each explicit production-profile request")
+    if production_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in production_deltas):
+        return "a fresh production-profile selector has no production-profile record in the receipt"
+    probes_record = receipt.get("compiler_probes")
+    if probes_record is not None and not all(delta == 1 for delta in probes_deltas):
+        return ("the exact compiler-probes selector was not freshly added once at this head relative to every "
+                "parent; append one selector line for each explicit compiler-probes request")
+    if probes_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in probes_deltas):
+        return "a fresh compiler-probes selector has no compiler-probes record in the receipt"
+    selector_record = receipt.get("frontend_selector")
+    if selector_record is not None and not all(delta == 1 for delta in selector_deltas):
+        return ("the exact frontend-selector selector was not freshly added once at this head relative to every "
+                "parent; append one selector line for each explicit frontend-selector request")
+    if selector_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in selector_deltas):
+        return "a fresh frontend-selector selector has no frontend-selector record in the receipt"
     if analyzer_profile:
         selected_deltas = parent_analyzer_deltas[request_line]
         other_deltas = [delta for line, values in parent_analyzer_deltas.items() if line != request_line
@@ -1066,6 +1381,13 @@ def links(check_url: str, workflow_url: str, attempt: str, evidence_url: str, ex
     return " · ".join(parts)
 
 
+def inventory_rows(shown: dict) -> str:
+    """The discharged inventory row ids of a published attempt, or none."""
+    coverage = shown.get("inventory_coverage") if isinstance(shown.get("inventory_coverage"), dict) else {}
+    rows = coverage.get("discharged") if isinstance(coverage.get("discharged"), list) else []
+    return ", ".join(f"`{row}`" for row in rows) or "none"
+
+
 def commit_report(shown: dict, summary: object, conclusion: str, title: str, notes: list[str],
                   link_line: str) -> str:
     """The commit-page report (#2804): verdict, scope, metrics with units, links; tables collapsed."""
@@ -1088,6 +1410,7 @@ def commit_report(shown: dict, summary: object, conclusion: str, title: str, not
             f"| Candidate executions / aliases | {inventory.get('candidate_unique_executions', 'NA')} / "
             f"{inventory.get('candidate_alias_rows', 'NA')} |",
             f"| Evidence status | `{summary.get('status', 'missing')}` |",
+            f"| Inventory rows discharged | {inventory_rows(shown)} |",
             f"| Captured | {timings.get('started_at', 'NA')} to {timings.get('finished_at', 'NA')} |",
             "", link_line, "",
         ]
@@ -1126,6 +1449,7 @@ def commit_report(shown: dict, summary: object, conclusion: str, title: str, not
         f"{number(wall.get('b_median'), '%.6g')} {unit} |",
         f"| Complete pairs | {number(plan.get('complete_pairs'), '%d')} |",
         f"| Host (observed) | `{host.get('cpu_model', 'NA')}` |",
+        f"| Inventory rows discharged | {inventory_rows(shown)} |",
         f"| Scope | `{profile.get('name', 'NA')}`: {profile.get('workload', 'NA')}; corpus "
         f"{profile.get('corpus', 'NA')} |",
         f"| Captured | {timings.get('started_at', 'NA')} to {timings.get('finished_at', 'NA')} by run "
@@ -5083,10 +5407,13 @@ def main() -> int:
     else:
         api = Api(repository, get("GH_TOKEN"))
         notes: list[str] = []
+        workflow_revision = ""
         if recover:
             expected, authorize_result, compare_result, problems = recovered_identity(api, repository, run_id, attempt)
             head = expected["head"]
             authorized = authorize_result == "success" and not problems
+            # The original run's own workflow revision, before the Main route rebinds trusted_revision.
+            workflow_revision = expected["trusted_revision"]
         else:
             expected = {"mode": mode, "repository": repository, "ref": get("BQ_REF"), "pull": get("BQ_PULL"),
                         "pull_head": get("BQ_PULL_HEAD"), "base": get("BQ_BASE_COMMIT"),
@@ -5103,6 +5430,8 @@ def main() -> int:
         throughput: dict = {}
         problem = ""
         route = None
+        machine_problems: list[str] = []
+        machine_facts: dict = {}
         if mode == "main" and authorized:
             try:
                 route = main_route(api, repository, run_id, attempt)
@@ -5124,9 +5453,13 @@ def main() -> int:
                 problems = bind_request(api, expected, receipt, trusted_main_route=route)
                 notes.extend(problems)
                 authorized = not problems
+            if isinstance(receipt, dict):
+                require = not recover or machine_record_required(api, workflow_revision)
+                machine_problems, machine_facts = machine_record(throughput.get("machine"), receipt, mode, run_id,
+                                                                 attempt, require=require)
         conclusion, title, reasons = decide(expected, authorized, compare_result, receipt, summary,
                                             get("BQ_REGRESSION_POLICY"), throughput, not recover,
-                                            [problem] if problem else [],
+                                            ([problem] if problem else []) + machine_problems,
                                             **({"expected_phase_schema": route["main_phase_schema"],
                                                 "expected_profile": route["main_profile"],
                                                 "expected_preparation_policy": route["main_preparation_policy"],
@@ -5140,6 +5473,11 @@ def main() -> int:
         if mode == "main" and expected.get("range"):
             shown["coverage"] = {"first_parent": expected.get("first_parent"), "range": expected.get("range")}
         shown["reasons"] = reasons
+        # Which inventory rows this attempt discharged (#2761): from the trusted
+        # mode and the decided conclusion, never from the host's own claim.
+        shown["inventory_coverage"] = covered_inventory_rows(receipt, conclusion, mode)
+        if machine_facts:
+            shown["machine"] = machine_facts
         if route is not None:
             shown["main_route"] = {key: route[key] for key in ("main_owned", *MAIN_ROUTE_FIELDS)}
         # The corpus as its own retained summary says, never the host's digest.

@@ -95,6 +95,9 @@ STALE_MAIN_EXIT = 75
 STALE_HEAD_EXIT = 76
 # The catch-up opener uses this bot-owned branch only (#1893).
 CATCH_UP_BRANCH = "native-retirement/catch-up"
+# Automation authorization reads this standing policy at live main; see
+# catch_up_main_admissible.
+AUTOMATION_POLICY_PATH = ".github/native-retirement-automation.json"
 MAX_API_PAGES = 10
 API_READ_ATTEMPTS = 4
 API_READ_BUDGET_SECONDS = 30
@@ -310,12 +313,21 @@ def generated_changed_between(repo: Path, old: str, new: str) -> bool:
     return any(path for path in result.stdout.split("\0"))
 
 
+def policy_changed_between(repo: Path, old: str, new: str) -> bool:
+    result = _git(repo, "diff", "--name-only", "--no-renames", "-z", old, new, "--",
+                  AUTOMATION_POLICY_PATH)
+    return any(path for path in result.stdout.split("\0"))
+
+
 def catch_up_main_admissible(repo: Path, base: str, source: str, live_main: str) -> bool:
     """True when an empty catch-up for base may still publish at live_main.
 
     Main may move during the writer run. While base is an ancestor of live main
     and main published no generated state since base, the merge gate admits the
     catch-up's integration head for base (#1893), so the move is not supersession.
+    Authorization reads the standing policy at live main and compares it with
+    the digest scheduled for base, so a policy change since base is also main
+    movement: the catch-up is superseded (exit 75) instead of failing.
     """
     _require_hex(base, HEX40, "catch-up base")
     _require_hex(live_main, HEX40, "live main")
@@ -323,7 +335,8 @@ def catch_up_main_admissible(repo: Path, base: str, source: str, live_main: str)
         _git(repo, "fetch", "--no-tags", "--quiet", "origin", live_main, check=False)
     ancestor = _git(repo, "merge-base", "--is-ancestor", base, live_main, check=False)
     return (ancestor.returncode == 0 and not changed_paths(repo, base, source) and
-            not generated_changed_between(repo, base, live_main))
+            not generated_changed_between(repo, base, live_main) and
+            not policy_changed_between(repo, base, live_main))
 
 
 def classify_candidate(repo: Path, base: str, head: str) -> Classification:
@@ -1076,7 +1089,8 @@ def main(argv=None) -> int:
         elif arguments.command == "catch-up-main":
             if not catch_up_main_admissible(arguments.repo_root, arguments.base,
                                             arguments.source_head, arguments.live_main):
-                raise StaleMain("main published generated state or diverged since the catch-up base")
+                raise StaleMain("main published generated state, changed the automation policy "
+                                "or diverged since the catch-up base")
             print(canonical_json({"status": "admissible", "base": arguments.base,
                                   "live_main": arguments.live_main}), end="")
         return 0

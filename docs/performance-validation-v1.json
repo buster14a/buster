@@ -84,13 +84,13 @@
       "id": "build:production_profile",
       "kind": "build-command",
       "validation": "performance",
-      "measures": "PGO/LTO training and admission on the native throughput corpus",
+      "measures": "#2761 fixed production-profile-v1 on an owner request line: the head's own production_profile --no-benchmark builds its seven trees, trains both PGO profiles on the native corpus, and inspects and runs test_all on the PGO+LTO compiler in an isolated clone of the head; the base revision's bench_throughput run then times that run's Release compiler against its PGO+LTO compiler on throughput-corpus-v2, FAST and QUALITY; report-only",
       "zen5": {
-        "route": "none",
-        "status": "NOT VALIDATED",
-        "consumer": "",
-        "resolution": "Profile training is not a measurement; admitting a PGO compiler on performance grounds needs a 9700X comparison.",
-        "claim_route": "none"
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "production-profile-v1",
+        "request": "one exact fresh line, profile: production-profile-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
       }
     },
     {
@@ -165,13 +165,13 @@
       "id": "ide:bench",
       "kind": "ide-command",
       "validation": "performance",
-      "measures": "`ide bench` frontend microbenchmark",
+      "measures": "#2761 fixed frontend-selector-v1 on an owner request line: `ide bench` (preprocess, parse and analyze tests/basic_c_operations.c of the base checkout, 30 timed in-process iterations) in 20 alternating pairs of fresh pinned processes of the baseline and candidate binaries; report-only",
       "zen5": {
-        "route": "none",
-        "status": "NOT VALIDATED",
-        "consumer": "",
-        "resolution": "Runs inside uarch_lab's micro step only; it links the compiler, so it cannot be a standalone direct workload. A frontend claim needs pull-compare.",
-        "claim_route": "pull-compare"
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "frontend-selector-v1",
+        "request": "one exact fresh line, profile: frontend-selector-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
       }
     },
     {
@@ -189,52 +189,52 @@
       "id": "tool:benchmark_frontend_scaling.py",
       "kind": "tool",
       "validation": "performance",
-      "measures": "two trusted compilers on frontend scaling inputs",
+      "measures": "#2761 fixed frontend-selector-v1 on an owner request line: the base revision's tool compares the baseline and candidate binaries on --suite all (54 syntax/object cells), one warmup and eleven pinned repetitions each, with byte-identical objects required; report-only",
       "zen5": {
-        "route": "none",
-        "status": "NOT VALIDATED",
-        "consumer": "",
-        "resolution": "Run locally or hosted it is diagnostic; a claim needs pull-compare evidence.",
-        "claim_route": "pull-compare"
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "frontend-selector-v1",
+        "request": "one exact fresh line, profile: frontend-selector-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
       }
     },
     {
       "id": "tool:selection_benchmark.py",
       "kind": "tool",
       "validation": "performance",
-      "measures": "selector replay and end-to-end object compilation",
+      "measures": "#2761 fixed frontend-selector-v1 on an owner request line: the base revision's tool replays selection and compiles -O2 objects under both allocators for its three generated workloads, fifteen pinned samples per binary, with --check, identical work counts and identical objects required; report-only",
       "zen5": {
-        "route": "none",
-        "status": "NOT VALIDATED",
-        "consumer": "",
-        "resolution": "No 9700X route; a selector claim needs pull-compare evidence (end-to-end) until a targeted route exists.",
-        "claim_route": "pull-compare"
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "frontend-selector-v1",
+        "request": "one exact fresh line, profile: frontend-selector-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
       }
     },
     {
       "id": "tool:fast_ra_scaling.c",
       "kind": "tool",
       "validation": "performance",
-      "measures": "FAST register-allocation prepass scaling probe",
+      "measures": "#2761 fixed compiler-probes-v1 on an owner request line: the head's probe, built with its audit's command (plus codegen.c, needed since #2876) against the merge base's and the head's src/ in isolated clones, times the real FAST prepass and placement on chain and fanout CFGs of 256 to 16384 blocks, 2 warmups and 30 alternating pairs per case on CPU 2; report-only",
       "zen5": {
-        "route": "none",
-        "status": "NOT VALIDATED",
-        "consumer": "",
-        "resolution": "The probe links compiler internals, and a direct workload is compiled alone against system headers, so it cannot be ported there. A FAST allocator claim needs pull-compare (its corpus runs FAST).",
-        "claim_route": "pull-compare"
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "compiler-probes-v1",
+        "request": "one exact fresh line, profile: compiler-probes-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
       }
     },
     {
       "id": "tool:machine_line_mark_scaling.c",
       "kind": "tool",
       "validation": "performance",
-      "measures": "scheduler line-mark repair scaling probe",
+      "measures": "#2761 fixed compiler-probes-v1 on an owner request line: the head's probe, built with its audit's schedule-only command against the merge base's and the head's src/ in isolated clones, times machine_schedule_function with one line mark per instruction at 1024 to 65536 leaves, 2 warmups and 30 alternating pairs per case on CPU 2; report-only",
       "zen5": {
-        "route": "none",
-        "status": "NOT VALIDATED",
-        "consumer": "",
-        "resolution": "The probe links compiler internals, and a direct workload is compiled alone against system headers, so it cannot be ported there. A scheduler claim needs pull-compare.",
-        "claim_route": "pull-compare"
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "compiler-probes-v1",
+        "request": "one exact fresh line, profile: compiler-probes-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
       }
     },
     {
@@ -379,13 +379,15 @@
       "id": "workflow:throughput-harness-macos.yml",
       "kind": "workflow",
       "validation": "performance",
-      "measures": "macOS throughput harness self-test",
+      "measures": "macOS throughput harness self-test, plus job timing: the paired bench_throughput_ci guard on the GitHub-hosted macos-26 runner, weekly (main against its first-parent commit from 7 days earlier) and on dispatch",
       "zen5": {
-        "route": "none",
-        "status": "NOT VALIDATED",
-        "consumer": "",
-        "resolution": "Zen 5 measurements do not establish macOS performance; native macOS timing is out of this route.",
-        "claim_route": "none"
+        "route": "hosted-native",
+        "status": "native-informative",
+        "platform": "macos",
+        "job": "timing",
+        "consumer": "tools/bench_direct/native_timing.c",
+        "alert": "docs/agents/benchmarking.md#native-hosted-timing",
+        "resolution": "Zen 5 measurements do not establish macOS performance and the 9700X cannot run macOS. Native macOS timing is informative only (maintainer decision on #2761, 2026-10-11): never Zen 5 evidence and never a gate; a confirmed regression warns and files or updates the macOS tracking issue from a trusted main run."
       }
     },
     {
@@ -410,8 +412,8 @@
         "route": "none",
         "status": "NOT VALIDATED",
         "consumer": "",
-        "resolution": "Profile production is not a measurement; see build:production_profile.",
-        "claim_route": "none"
+        "resolution": "Hosted profile production and its timings are diagnostic; admitting a PGO compiler on performance grounds needs the fixed production-profile-v1 profile on pull-compare (benchmarks/9700x/compiler-compare.request).",
+        "claim_route": "pull-compare"
       }
     },
     {
@@ -429,13 +431,15 @@
       "id": "workflow:issue-708-benchmark.yml",
       "kind": "workflow",
       "validation": "performance",
-      "measures": "Windows paired matrix benchmark",
+      "measures": "Windows paired matrix benchmark: three trials, each timing the baseline and candidate test_all_combinations_ci matrix on one GitHub-hosted windows-2025 VM",
       "zen5": {
-        "route": "none",
-        "status": "NOT VALIDATED",
-        "consumer": "",
-        "resolution": "Windows performance is not established by Zen 5 Linux measurements; no route.",
-        "claim_route": "none"
+        "route": "hosted-native",
+        "status": "native-informative",
+        "platform": "windows",
+        "job": "benchmark",
+        "consumer": "tools/bench_direct/native_timing.c",
+        "alert": "docs/agents/benchmarking.md#native-hosted-timing",
+        "resolution": "Windows performance is not established by Zen 5 Linux measurements and the 9700X cannot run Windows. Native Windows timing is informative only (maintainer decision on #2761, 2026-10-11): never Zen 5 evidence and never a gate; a regression warns and files or updates the Windows tracking issue from a trusted main dispatch."
       }
     },
     {

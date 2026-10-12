@@ -36,10 +36,12 @@ object build is not a substitute.
 
 ## Release string fixtures
 
-String implementation, header and fixture changes also run a focused
+String implementation, header and fixture changes, plus embedding facade and
+fixture changes, also run a focused
 `GCC 13 Release string_tests` job automatically. It builds the complete
 unsanitized, non-fuzz Release `ide` with GCC 13 and warnings as errors,
-then executes only the registered `string_tests` module. GCC uses split
+then executes the registered `string_tests` and `embed_tests` modules. The
+embedding path filter preserves GCC 13 optimized-build coverage for #3583. GCC uses split
 translation units under the native build policy; ordinary platform CI retains
 the Clang unity, Debug/Release, sanitizer, Zig and MSVC coverage.
 
@@ -58,6 +60,7 @@ After bootstrapping the same hosted driver above:
   -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 /tmp/buster-build build --build-directory build-gcc13-string --config Release -t ide -- -j4
 build-gcc13-string/Release/ide test --module=string_tests --verbose=1 --ci=1
+build-gcc13-string/Release/ide test --module=embed_tests --verbose=1 --ci=1
 ```
 
 The focused job retains the exact source revision, compiler versions, build

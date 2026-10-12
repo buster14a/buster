@@ -389,8 +389,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_legacy_layout(UnitTestArguments
     UnitTestResult result = {0};
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
     target.cpu_features_explicit = true;
-    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
-        TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2}, 3);
+    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE,
+        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2}, 4);
 
     // Independent GNU as 2.47 / Clang 22.1.8 oracle: docs/x86-64-source-legacy-oracle.s.
     u8 const expected[] = {
@@ -533,9 +533,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_evex_layout(UnitTestArguments* 
     UnitTestResult result = {0};
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
     target.cpu_features_explicit = true;
-    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
-        TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F,
-        TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW, TARGET_CPU_FEATURE_X86_AVX512DQ}, 7);
+    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE,
+        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2,
+        TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW,
+        TARGET_CPU_FEATURE_X86_AVX512DQ}, 8);
 
     // Independent GNU as 2.47 / Clang 22.1.8 oracle: docs/x86-64-source-evex-oracle.s.
     u8 const expected[] = {
@@ -638,8 +639,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_apx_layout(UnitTestArguments* a
     UnitTestResult result = {0};
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
     target.cpu_features_explicit = true;
-    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
-        TARGET_CPU_FEATURE_X86_APX, TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF}, 3);
+    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE,
+        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_APX, TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF}, 4);
 
     // Independent GNU as 2.47 / Clang 22.1.8 oracle: docs/x86-64-source-apx-oracle.s.
     u8 const expected[] = {
@@ -4442,7 +4443,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_statements(UnitTestArgumen
         AssemblyUnitResult labels = assembly_unit_encode(arguments->arena,
             S8(".text\n1: nop; loop 1b; jmp 1f; 1: nop; loop 1b; ret\n"),
             (AssemblyEncodeOptions){.target = target});
-        u8 const label_bytes[] = {0x90, 0xe2, 0xfd, 0xe9, 0, 0, 0, 0, 0x90, 0xe2, 0xfd, 0xc3};
+        u8 const label_bytes[] = {0x90, 0xe2, 0xfd, 0xeb, 0, 0x90, 0xe2, 0xfd, 0xc3};
         BUSTER_TEST(arguments, !labels.diagnostic_count && !labels.symbol_count && !labels.relocation_count &&
             labels.section_count == 1 && assembly_test_bytes_equal(labels.sections[0].data, label_bytes, sizeof(label_bytes)));
         AssemblyUnitResult diagnostic = assembly_unit_encode(arguments->arena, S8(".text\nnop; bogus\n"),
@@ -5010,15 +5011,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_current_address_branches(U
     String8 const x86_sources[] = {S8(".text\nnop\njmp .\nret\n"), S8(".text\nnop\ncall .\nret\n"),
                                    S8(".text\nnop\njmp .+5\nret\n")};
     u8 const x86_expected[][8] = {
-        {0x90, 0xe9, 0xfb, 0xff, 0xff, 0xff, 0xc3, 0},
+        {0x90, 0xeb, 0xfe, 0xc3, 0, 0, 0, 0},
         {0x90, 0xe8, 0xfb, 0xff, 0xff, 0xff, 0xc3, 0},
-        {0x90, 0xe9, 0x00, 0x00, 0x00, 0x00, 0xc3, 0},
+        {0x90, 0xeb, 0x03, 0xc3, 0, 0, 0, 0},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(x86_sources); index += 1)
     {
         AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, x86_sources[index], (AssemblyEncodeOptions){.target = x86_64});
         BUSTER_TEST_RAW(arguments, !unit.diagnostic_count && !unit.relocation_count && !unit.symbol_count && unit.section_count == 1 &&
-            assembly_test_bytes_equal(unit.sections[0].data, x86_expected[index], 7), x86_sources[index]);
+            assembly_test_bytes_equal(unit.sections[0].data, x86_expected[index], index == 1 ? 7 : 4), x86_sources[index]);
     }
     return result;
 }
@@ -6442,9 +6443,10 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target ace_target = x86_target;
     ace_target.cpu_model = CPU_MODEL_BASELINE;
     ace_target.cpu_features_explicit = true;
-    ace_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
+    ace_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE,
+                                                                                         TARGET_CPU_FEATURE_X86_SSE2,
                                                                                          TARGET_CPU_FEATURE_X86_ACE_1},
-                                                              2);
+                                                              3);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(ace_target));
     AssemblyEncodeResult ace_intel = assembly_encode(arguments->arena, S8("bsrmovf zmm0, zmm0\n"),
                                                       (AssemblyEncodeOptions){.target = ace_target,
@@ -6537,9 +6539,10 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, ace_wrong_width.diagnostic_count == 1 &&
                                ace_wrong_width.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     Target amx_tile_only_target = ace_target;
-    amx_tile_only_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
+    amx_tile_only_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE,
+                                                                                                  TARGET_CPU_FEATURE_X86_SSE2,
                                                                                                   TARGET_CPU_FEATURE_X86_AMX_TILE},
-                                                                       2);
+                                                                       3);
     AssemblyEncodeResult ace_without_feature = assembly_encode(
         arguments->arena, S8("bsrmovf zmm0, zmm1\n"),
         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
@@ -6564,9 +6567,9 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     scalar_feature_target.cpu_model = CPU_MODEL_BASELINE;
     scalar_feature_target.cpu_features_explicit = true;
     scalar_feature_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_F16C,
-        TARGET_CPU_FEATURE_X86_FMA, TARGET_CPU_FEATURE_X86_SSE4_2, TARGET_CPU_FEATURE_X86_BMI2,
-        TARGET_CPU_FEATURE_X86_RDRAND}, 7);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX,
+        TARGET_CPU_FEATURE_X86_F16C, TARGET_CPU_FEATURE_X86_FMA, TARGET_CPU_FEATURE_X86_SSE4_2,
+        TARGET_CPU_FEATURE_X86_BMI2, TARGET_CPU_FEATURE_X86_RDRAND}, 8);
     AssemblyEncodeResult f16c_without_feature = assembly_encode(
         arguments->arena, S8("vcvtph2ps xmm0, xmm1\n"),
         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
@@ -6608,7 +6611,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     sha_target.cpu_model = CPU_MODEL_BASELINE;
     sha_target.cpu_features_explicit = true;
     sha_target.cpu_features = target_cpu_features_from_array(
-        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_SHA}, 2);
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_SHA}, 3);
     AssemblyEncodeResult sha1msg1_intel = assembly_encode(
         arguments->arena, S8("sha1msg1 xmm0, xmm1\n"),
         (AssemblyEncodeOptions){.target = sha_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
@@ -6656,7 +6659,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     legacy_xmm_target.cpu_model = CPU_MODEL_BASELINE;
     legacy_xmm_target.cpu_features_explicit = true;
     legacy_xmm_target.cpu_features = target_cpu_features_from_array(
-        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2}, 1);
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2}, 2);
     AssemblyEncodeResult legacy_xmm_movups_intel = assembly_encode(
         arguments->arena, S8("movups xmm15, xmmword ptr [r15+16]\n"),
         (AssemblyEncodeOptions){.target = legacy_xmm_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
@@ -6741,19 +6744,21 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target sse4a_target = x86_target;
     sse4a_target.cpu_model = CPU_MODEL_AMD_AMD_FAMILY_10;
     sse4a_target.cpu_features_explicit = true;
-    sse4a_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
+    sse4a_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE,
+                                                                                          TARGET_CPU_FEATURE_X86_SSE2,
                                                                                           TARGET_CPU_FEATURE_X86_SSE3,
                                                                                           TARGET_CPU_FEATURE_X86_SSE4A},
-                                                               3);
+                                                               4);
     Target virtualization_target = x86_target;
     virtualization_target.cpu_model = CPU_MODEL_BASELINE;
     virtualization_target.cpu_features_explicit = true;
     virtualization_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_SVM, TARGET_CPU_FEATURE_X86_VMX}, 3);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2,
+        TARGET_CPU_FEATURE_X86_SVM, TARGET_CPU_FEATURE_X86_VMX}, 4);
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("svm")) == TARGET_CPU_FEATURE_X86_SVM);
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("vmx")) == TARGET_CPU_FEATURE_X86_VMX);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(virtualization_target));
-    BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, virtualization_target), S8("sse2,svm,vmx"));
+    BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, virtualization_target), S8("sse,sse2,svm,vmx"));
     AssemblyEncodeResult x86 = assembly_encode(arguments->arena, S8("start:\n nop\n call external\n jmp start\n ret\n"),
                                                 (AssemblyEncodeOptions){
                                                     .target = x86_target,
@@ -6871,10 +6876,11 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target mask_target = x86_target;
     mask_target.cpu_features_explicit = true;
     mask_target.cpu_features = target_cpu_features_from_array(
-        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX,
-                                  TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512VL,
-                                  TARGET_CPU_FEATURE_X86_AVX512BW, TARGET_CPU_FEATURE_X86_AVX512DQ},
-        6);
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2,
+                                  TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX512F,
+                                  TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW,
+                                  TARGET_CPU_FEATURE_X86_AVX512DQ},
+        7);
     String8 mask_intel_source = S8("kmovw k1, k2\n"
                                    "kmovd k3, k4\n"
                                    "kmovq k5, k6\n"
@@ -8196,7 +8202,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target x86_sse3_target = x86_target;
     x86_sse3_target.cpu_features_explicit = true;
     x86_sse3_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_SSE3}, 2);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_SSE3}, 3);
     u8 expected_x86_x87_compare_integer[] = {
         0xd8, 0xd3, 0xd8, 0xdc, 0xd8, 0x10, 0x41, 0xdc, 0x19,
         0xde, 0xd9, 0xdd, 0xe5, 0xdd, 0xee, 0xda, 0xe9,
@@ -8447,7 +8453,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target x86_avx_target = x86_target;
     x86_avx_target.cpu_features_explicit = true;
     x86_avx_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX}, 2);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX}, 3);
     u8 expected_x86_avx[] = {
         0xc5, 0xfc, 0x28, 0xc1,
         0xc4, 0x01, 0x7c, 0x10, 0x44, 0x4c, 0x20,
@@ -8641,8 +8647,8 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     x86_bit_atomic_target.cpu_model = CPU_MODEL_BASELINE;
     x86_bit_atomic_target.cpu_features_explicit = true;
     x86_bit_atomic_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_POPCNT, TARGET_CPU_FEATURE_X86_LZCNT,
-        TARGET_CPU_FEATURE_X86_BMI1, TARGET_CPU_FEATURE_X86_CX16}, 5);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_POPCNT,
+        TARGET_CPU_FEATURE_X86_LZCNT, TARGET_CPU_FEATURE_X86_BMI1, TARGET_CPU_FEATURE_X86_CX16}, 6);
     u8 expected_x86_bit_atomic[] = {
         0x66, 0x0f, 0xbc, 0xc1,
         0x0f, 0xbd, 0xc2,
@@ -12842,11 +12848,11 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target advanced_target = x86_target;
     advanced_target.cpu_features_explicit = true;
     advanced_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX,
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX,
         TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512VL,
         TARGET_CPU_FEATURE_X86_AVX512BW, TARGET_CPU_FEATURE_X86_AVX512DQ,
         TARGET_CPU_FEATURE_X86_APX, TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF, TARGET_CPU_FEATURE_X86_AMX_TILE,
-        TARGET_CPU_FEATURE_X86_AMX_BF16, TARGET_CPU_FEATURE_X86_AMX_INT8}, 11);
+        TARGET_CPU_FEATURE_X86_AMX_BF16, TARGET_CPU_FEATURE_X86_AMX_INT8}, 12);
     AssemblyEncodeResult advanced_evex = assembly_encode(
         arguments->arena,
         S8("vaddps zmm0 {k1}{z}, zmm2, zmm3\n"
@@ -14131,7 +14137,8 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target avx10_1_target = x86_target;
     avx10_1_target.cpu_features_explicit = true;
     avx10_1_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX10_1}, 3);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2,
+        TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX10_1}, 4);
     AssemblyEncodeResult avx10_1 = assembly_encode(arguments->arena, S8("vmovdqa32 ymm0, ymm1\nvmovdqa32 zmm0, zmm1\n"),
                                                      (AssemblyEncodeOptions){.target = avx10_1_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
     u8 expected_avx10_1[] = {0x62, 0xf1, 0x7d, 0x28, 0x6f, 0xc1};
@@ -14148,8 +14155,9 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target avx10_aux_target = x86_target;
     avx10_aux_target.cpu_features_explicit = true;
     avx10_aux_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX10_2,
-        TARGET_CPU_FEATURE_X86_AVX10_V1_AUX, TARGET_CPU_FEATURE_X86_AVX10_512}, 5);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX,
+        TARGET_CPU_FEATURE_X86_AVX10_2, TARGET_CPU_FEATURE_X86_AVX10_V1_AUX,
+        TARGET_CPU_FEATURE_X86_AVX10_512}, 6);
     String8 avx10_aux_intel_source =
         S8("vcvtbf42hf8 xmm0, qword ptr [rax]\n"
            "vcvtbf42hf8 ymm0, xmmword ptr [rax]\n"
@@ -14431,8 +14439,8 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target avx10_vxor_target = x86_target;
     avx10_vxor_target.cpu_features_explicit = true;
     avx10_vxor_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX,
-        TARGET_CPU_FEATURE_X86_AVX10_1, TARGET_CPU_FEATURE_X86_AVX10_512}, 4);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2,
+        TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX10_1, TARGET_CPU_FEATURE_X86_AVX10_512}, 5);
     AssemblyEncodeResult avx10_vxor = assembly_encode(
         arguments->arena, S8("vxorps zmm0, zmm1, dword ptr [rax]{1to16}\n"),
         (AssemblyEncodeOptions){.target = avx10_vxor_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
@@ -14604,9 +14612,9 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target amd_target = x86_target;
     amd_target.cpu_features_explicit = true;
     amd_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_XOP,
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_XOP,
         TARGET_CPU_FEATURE_X86_FMA4, TARGET_CPU_FEATURE_X86_TBM, TARGET_CPU_FEATURE_X86_LWP,
-        TARGET_CPU_FEATURE_X86_3DNOW, TARGET_CPU_FEATURE_X86_3DNOWA}, 8);
+        TARGET_CPU_FEATURE_X86_3DNOW, TARGET_CPU_FEATURE_X86_3DNOWA}, 9);
     String8 amd_intel_source =
         S8("vfrczps xmm1, xmm2\n"
            "vfrczps xmm8, xmm9\n"
@@ -16172,7 +16180,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         public_invlpgb_target.cpu_model = CPU_MODEL_BASELINE;
         public_invlpgb_target.cpu_features_explicit = true;
         public_invlpgb_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-            TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_INVLPGB}, 2);
+            TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_INVLPGB}, 3);
         String8 public_invlpgb_intel_source = S8("invlpgb\naddr32 invlpgb\n");
         AssemblyEncodeResult public_invlpgb_intel = assembly_encode(
             arguments->arena, public_invlpgb_intel_source,
@@ -16237,7 +16245,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         public_monitor_target.cpu_model = CPU_MODEL_BASELINE;
         public_monitor_target.cpu_features_explicit = true;
         public_monitor_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-            TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_MONITOR}, 2);
+            TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_MONITOR}, 3);
         AssemblyEncodeResult public_monitor_intel = assembly_encode(
             arguments->arena, S8("monitor\naddr32 monitor\n"),
             (AssemblyEncodeOptions){.target = public_monitor_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
@@ -16282,7 +16290,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         public_wbnoinvd_target.cpu_model = CPU_MODEL_BASELINE;
         public_wbnoinvd_target.cpu_features_explicit = true;
         public_wbnoinvd_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-            TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_WBNOINVD}, 2);
+            TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_WBNOINVD}, 3);
         AssemblyEncodeResult public_wbnoinvd = assembly_encode(
             arguments->arena, S8("wbnoinvd\n"),
             (AssemblyEncodeOptions){.target = public_wbnoinvd_target, .syntax = ASSEMBLY_SYNTAX_INTEL});

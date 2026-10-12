@@ -256,6 +256,46 @@ evidence is under `throughput_real_source/` in the artifact, and a missing,
 partial, failed or cancelled leg fails the check. Its method is in
 [benchmarking.md](../../docs/agents/benchmarking.md).
 
+A fresh exact `profile: production-profile-v1` line, added once against every
+parent, adds the PGO/LTO production-profile leg (#2761) after the corpus leg.
+The head's own `./build.sh production_profile --no-benchmark` runs in an
+isolated clone of the head: it builds and trains the PGO compilers and runs
+`test_all` on the PGO+LTO one. The merge base's `bench_throughput run` then
+times that run's Release compiler against its PGO+LTO compiler on the same
+corpus as the ordinary leg. It is report-only and cannot be combined with the
+real-source or ast-pilot profiles. The host needs `ld.lld`, `llvm-profdata`,
+`llvm-readobj` and Clang's profile runtime; a missing tool fails the leg
+before the build starts. Its evidence is under
+`production_profile/` in the artifact, and a missing, partial, failed or
+cancelled leg fails the check. Its method is in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
+A fresh exact `profile: compiler-probes-v1` line, added once against every
+parent, adds the compiler-probes leg (#2761) after the corpus leg. It is the
+route for a targeted register-allocator or scheduler claim.
+`tools/fast_ra_scaling.c` and `tools/machine_line_mark_scaling.c` include
+compiler internals, so they cannot be workloads in this directory. Instead,
+the native harness `tools/bench_direct/compiler_probes.c` builds each probe from the head's
+probe source twice: against the merge base's `src/` and against the head's,
+each in an isolated clone. It then times the two builds as fixed alternating
+pairs on CPU 2. It is report-only and cannot be combined with the
+real-source, ast-pilot or production-profile profiles. Its evidence is under
+`compiler_probes/` in the artifact, and a missing, partial, failed or
+cancelled leg fails the check. Its method is in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
+A fresh exact `profile: frontend-selector-v1` line, added once against every
+parent, adds the frontend and selector probes (#2761) after the corpus leg.
+The merge base's `tools/benchmark_frontend_scaling.py` and
+`tools/selection_benchmark.py` run on the same two binaries, pinned to
+CPU 2 and with frozen arguments. Then `ide bench` runs in 20 alternating
+pairs of fresh processes. Objects and selected work counts must match
+between the binaries; the timings are report-only. The profile cannot be
+combined with the other opt-in profiles. Its evidence is under
+`frontend_selector/` in the artifact, and a missing, partial, failed or
+cancelled leg fails the check. Its method is in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
 V1 preserves its historical fixed 182-row qualification and 135-execution,
 47-alias candidate profile. V2 independently derives the ordered Release
 inventory and analyzer argument projection from the exact retained candidate

@@ -180,6 +180,8 @@ collect_lifecycle_context() {
     fi
 }
 
+. "$(dirname "${BASH_SOURCE[0]}")/lifecycle_receipt.sh"
+
 run_lifecycle_phase() {
     local phase=$1 label=$2 evidence_base=$3 seconds=$4
     shift 4
@@ -194,7 +196,7 @@ run_lifecycle_phase() {
     local caller_status=0 caller_admission=0 caller_reported=unavailable caller_invocation=unavailable
     local caller_generation=unavailable caller_monitor=pending caller_reason=unavailable
     local caller_valid=0
-    local supervisor_valid=0 extra= key value expected_helper
+    local supervisor_valid=0 extra= key value expected_helper caller_receipt= supervisor_receipt=
     local supervisor_prefix="${evidence_base}.${phase}"
     local supervisor_fields="${supervisor_prefix}.supervisor-fields.log"
     local supervisor_log="${supervisor_prefix}.supervisor-status.log"
@@ -215,7 +217,7 @@ run_lifecycle_phase() {
         caller_status=$?
     fi
     if [[ -s ${supervisor_prefix}.caller-fields.log ]] \
-        && [[ $(wc -l <"${supervisor_prefix}.caller-fields.log") -eq 1 ]] \
+        && lifecycle_receipt_read "${supervisor_prefix}.caller-fields.log" \
         && read -r caller_admission caller_reported caller_invocation caller_generation caller_monitor caller_reason extra \
             <"${supervisor_prefix}.caller-fields.log" \
         && [[ $caller_admission =~ ^[01]$ \
@@ -224,9 +226,9 @@ run_lifecycle_phase() {
             && $caller_generation =~ ^[A-Za-z0-9]{8,64}$ \
             && ( $caller_monitor =~ ^(pending|invalid)$ || $caller_monitor =~ ^(0|[1-9][0-9]{0,2})$ && $caller_monitor -le 255 ) \
             && $caller_reason =~ ^[a-z0-9-]+$ && -z $extra ]]; then
-        if [[ -s ${supervisor_prefix}.caller-status.log \
-            && $(wc -l <"${supervisor_prefix}.caller-status.log") -eq 1 ]] \
-            && grep -q '^BUSTER_IOS_CALLER version=1 ' "${supervisor_prefix}.caller-status.log"; then
+        if lifecycle_receipt_read "${supervisor_prefix}.caller-status.log" \
+            && [[ $lifecycle_receipt_line == 'BUSTER_IOS_CALLER version=1 '* ]]; then
+            caller_receipt=$lifecycle_receipt_line
             caller_valid=1
             for key in version generation admission helper_status invocation_status command_monitor_status reason; do
                 case "$key" in
@@ -238,8 +240,7 @@ run_lifecycle_phase() {
                     command_monitor_status) value=$caller_monitor ;;
                     reason) value=$caller_reason ;;
                 esac
-                if ! grep -Eq "(^| )${key}=${value}( |$)" "${supervisor_prefix}.caller-status.log" \
-                    || [[ $(grep -oE "(^| )${key}=" "${supervisor_prefix}.caller-status.log" | wc -l) -ne 1 ]]; then
+                if ! lifecycle_receipt_field "$caller_receipt" "$key" "$value"; then
                     caller_valid=0
                 fi
             done
@@ -261,8 +262,9 @@ run_lifecycle_phase() {
     fi
     statuses=(125 1)
     if [[ $caller_admission -eq 1 && -s $supervisor_fields && -s $supervisor_log ]] \
-        && [[ $(wc -l <"$supervisor_fields") -eq 1 && $(wc -l <"$supervisor_log") -eq 1 ]] \
-        && grep -q '^BUSTER_IOS_SUPERVISOR version=1 ' "$supervisor_log" \
+        && lifecycle_receipt_read "$supervisor_fields" \
+        && lifecycle_receipt_read "$supervisor_log" \
+        && [[ $lifecycle_receipt_line == 'BUSTER_IOS_SUPERVISOR version=1 '* ]] \
         && read -r 'statuses[0]' native_status 'statuses[1]' command_elapsed capture_elapsed \
             deadline_reached cleanup_status native_kind launch_error extra <"$supervisor_fields"; then
         if [[ ${statuses[0]} =~ ^(0|[1-9][0-9]{0,2})$ && ${statuses[0]} -le 255 \
@@ -272,7 +274,8 @@ run_lifecycle_phase() {
             && $cleanup_status =~ ^[01]$ && $native_kind =~ ^(exit|signal|unavailable)$ \
             && $launch_error =~ ^(none|ENOENT|EACCES|ENOEXEC|other)$ && -z $extra ]]; then
             supervisor_valid=1
-            if [[ $(grep -oE '(^| )version=' "$supervisor_log" | wc -l) -ne 1 ]]; then
+            supervisor_receipt=$lifecycle_receipt_line
+            if ! lifecycle_receipt_field "$supervisor_receipt" version 1; then
                 supervisor_valid=0
             fi
             # The compact Bash fields and the named retained receipt must agree.
@@ -283,14 +286,12 @@ run_lifecycle_phase() {
                     capture_status) value=${statuses[1]} ;;
                     *) value=${!key} ;;
                 esac
-                if ! grep -Eq "(^| )${key}=${value}( |$)" "$supervisor_log" \
-                    || [[ $(grep -oE "(^| )${key}=" "$supervisor_log" | wc -l) -ne 1 ]]; then
+                if ! lifecycle_receipt_field "$supervisor_receipt" "$key" "$value"; then
                     supervisor_valid=0
                 fi
             done
             for key in capture_eof native_reaped keeper_reaped group_authority_released native_launch; do
-                if ! grep -Eq "(^| )${key}=[01]( |$)" "$supervisor_log" \
-                    || [[ $(grep -oE "(^| )${key}=" "$supervisor_log" | wc -l) -ne 1 ]]; then
+                if ! lifecycle_receipt_field "$supervisor_receipt" "$key" '[01]'; then
                     supervisor_valid=0
                 fi
             done
@@ -303,32 +304,28 @@ run_lifecycle_phase() {
                     command_authenticated) if [[ $caller_monitor -eq 0 ]]; then value=1; else value=0; fi ;;
                     caller_lost) value=0 ;;
                 esac
-                if ! grep -Eq "(^| )${key}=${value}( |$)" "$supervisor_log" \
-                    || [[ $(grep -oE "(^| )${key}=" "$supervisor_log" | wc -l) -ne 1 ]]; then
+                if ! lifecycle_receipt_field "$supervisor_receipt" "$key" "$value"; then
                     supervisor_valid=0
                 fi
             done
             if [[ ( $caller_monitor -eq 124 || $caller_monitor -eq 137 ) && $deadline_reached -ne 1 ]]; then
                 supervisor_valid=0
             fi
-            if ! grep -Eq '(^| )cancellation_signal=(0|2|15)( |$)' "$supervisor_log" \
-                || [[ $(grep -oE '(^| )cancellation_signal=' "$supervisor_log" | wc -l) -ne 1 ]]; then
+            if ! lifecycle_receipt_field "$supervisor_receipt" cancellation_signal '0|2|15'; then
                 supervisor_valid=0
             else
-                value=$(grep -oE '(^| )cancellation_signal=(0|2|15)( |$)' "$supervisor_log")
-                value=${value#*cancellation_signal=}
-                cancellation_signal=${value%% *}
+                cancellation_signal=$lifecycle_receipt_value
             fi
-            value=$(grep -oE '(^| )native_launch=[01]( |$)' "$supervisor_log" || true)
-            value=${value#*native_launch=}
-            native_launch=${value%% *}
-            if ! grep -Eq '(^| )helper_error=[A-Za-z][A-Za-z0-9_]*( |$)' "$supervisor_log" \
-                || [[ $(grep -oE '(^| )helper_error=' "$supervisor_log" | wc -l) -ne 1 ]]; then
+            if lifecycle_receipt_field "$supervisor_receipt" native_launch '[01]'; then
+                native_launch=$lifecycle_receipt_value
+            else
+                supervisor_valid=0
+                native_launch=0
+            fi
+            if ! lifecycle_receipt_field "$supervisor_receipt" helper_error '[A-Za-z][A-Za-z0-9_]*'; then
                 supervisor_valid=0
             else
-                value=$(grep -oE '(^| )helper_error=[A-Za-z][A-Za-z0-9_]*( |$)' "$supervisor_log")
-                value=${value#*helper_error=}
-                helper_error=${value%% *}
+                helper_error=$lifecycle_receipt_value
             fi
             expected_helper=${statuses[0]}
             if [[ $expected_helper -eq 0 && ( ${statuses[1]} -ne 0 || $cleanup_status -ne 0 ) ]]; then
@@ -365,18 +362,18 @@ run_lifecycle_phase() {
                 fi
             elif [[ $native_status == unavailable || ! -s $native_log ]] \
                 || [[ $(cat "$native_log") != "$native_status" ]] \
-                || ! grep -Eq '(^| )native_reaped=1( |$)' "$supervisor_log"; then
+                || ! lifecycle_receipt_field "$supervisor_receipt" native_reaped 1; then
                 supervisor_valid=0
             fi
             if [[ $native_status != unavailable && $cleanup_status -eq 0 ]] \
-                && { ! grep -Eq '(^| )keeper_reaped=1( |$)' "$supervisor_log" \
-                    || ! grep -Eq '(^| )group_authority_released=1( |$)' "$supervisor_log"; }; then
+                && { ! lifecycle_receipt_field "$supervisor_receipt" keeper_reaped 1 \
+                    || ! lifecycle_receipt_field "$supervisor_receipt" group_authority_released 1; }; then
                 supervisor_valid=0
             fi
         fi
     fi
     if [[ $supervisor_valid -eq 1 && ${statuses[1]} -eq 0 && -s ${output_log}.capture-status.log ]] \
-        && grep -Eq '(^| )capture_eof=1( |$)' "$supervisor_log" \
+        && lifecycle_receipt_field "$supervisor_receipt" capture_eof 1 \
         && grep -Eq '^BUSTER_IOS_CAPTURE total_bytes=[0-9]+ retained_bytes=[0-9]+ truncated=[01]$' \
             "${output_log}.capture-status.log"; then
         capture_receipt=complete
@@ -945,10 +942,15 @@ active_launch_pipe_dir=
 cleanup() {
     local status=$?
     local prior_status=$status
+    local cleanup_cancellation_status=0
+    # Cancellation may arrive after a normal failure already entered EXIT
+    # cleanup. Keep its status while the owned bounded shutdown finishes.
+    trap 'cleanup_cancellation_status=130' INT
+    trap 'cleanup_cancellation_status=143' TERM
+    trap - EXIT
     local shutdown_status
     local shutdown_outcome=unavailable
     local cleanup_summary
-    trap - EXIT INT TERM
     if [[ -n ${active_launch_stream_pid:-}${active_launch_reader_pid:-}${active_launch_pipe_dir:-} ]]; then
         stop_launch_stream "$active_launch_stream_pid"
         active_launch_stream_pid=
@@ -971,7 +973,7 @@ cleanup() {
             if [[ $shutdown_outcome == timeout && $shutdown_postcondition_eligible -eq 1 ]]; then
                 if verify_shutdown_postcondition; then
                     echo "warning: iOS simulator shutdown command timed out, but the exact invocation-owned device reached Shutdown" >&2
-                elif [[ $prior_status -eq 0 \
+                elif [[ $prior_status -eq 0 && $cleanup_cancellation_status -eq 0 \
                     && $shutdown_postcondition_probe_status == 0 \
                     && $shutdown_postcondition_parser_status == 4 \
                     && $shutdown_postcondition_state == non-shutdown ]] \
@@ -991,9 +993,17 @@ cleanup() {
                 fi
             fi
         fi
+        if [[ $cleanup_cancellation_status -ne 0 ]]; then
+            status=$cleanup_cancellation_status
+            prior_status=$cleanup_cancellation_status
+        fi
         cleanup_summary="BUSTER_IOS_CLEANUP simulator_udid=$udid prior_status=$prior_status shutdown_status=$shutdown_status shutdown_outcome=$shutdown_outcome postcondition_eligibility=$shutdown_postcondition_eligible postcondition_probe_status=$shutdown_postcondition_probe_status postcondition_parser_status=$shutdown_postcondition_parser_status postcondition_state=$shutdown_postcondition_state shutdown_disposition=$shutdown_disposition result_status=$status"
         printf '%s\n' "$cleanup_summary" >>"${console_log_base}.shutdown.status.log" || true
         printf '%s\n' "$cleanup_summary" >&2
+    fi
+    # A later signal during receipt publication still cannot produce exit 0.
+    if [[ $cleanup_cancellation_status -ne 0 ]]; then
+        status=$cleanup_cancellation_status
     fi
     exit "$status"
 }

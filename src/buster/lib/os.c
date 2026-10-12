@@ -8,7 +8,10 @@
 // os_file_close_checked, os_file_flush), replacement publication
 // (os_file_replacement_target_stats, os_file_staging_create, os_file_replace),
 // process spawn/wait with deadlines, executable lookup, dynamic libraries, and
-// the crash/failure printers. Replacement publication follows os_file_close.
+// the crash/failure printers. Replacement publication follows os_file_close;
+// The opt-in fork-to-exit-early protocol (os_early_exit_arm/
+// os_early_exit_release, #3686) follows the spawn pipe helpers it reuses
+// (os_process_spawn_pipe_create), just before os_process_spawn.
 // Opt-in child resource witnesses in os_process_wait_deadline retain native
 // accounting scope; they do not alter process ownership or cleanup.
 // os_process_capture_step separates ordinary POSIX pipe drain transitions
@@ -3563,6 +3566,183 @@ BUSTER_GLOBAL_LOCAL int os_process_spawn_add_open_descriptor_closes(posix_spawn_
 }
 #endif
 #endif
+
+// Early exit (#3686). The parent's whole job after os_early_exit_arm is the
+// blocking read in os_early_exit_parent_wait; everything else, including
+// every lane thread, exists only in the child. Desktop POSIX only: Android
+// starts an untracked stdio pump thread and iOS forbids fork.
+#if !defined(_WIN32) && !BUSTER_ANDROID && !BUSTER_IOS
+#define OS_EARLY_EXIT_AVAILABLE 1
+#else
+#define OS_EARLY_EXIT_AVAILABLE 0
+#endif
+
+#if OS_EARLY_EXIT_AVAILABLE
+// Both ends sit above the standard streams (os_process_spawn_pipe_create),
+// so neither a process started with 0-2 closed nor the release's dup2 onto
+// 0-2 can alias the one-byte status channel with compiler output.
+BUSTER_GLOBAL_LOCAL int os_early_exit_pipe = -1;
+BUSTER_GLOBAL_LOCAL OsFileDescriptor* os_early_exit_deferred[OS_EARLY_EXIT_DEFERRED_LIMIT];
+BUSTER_GLOBAL_LOCAL AtomicU64 os_early_exit_deferred_count;
+
+BUSTER_GLOBAL_LOCAL BUSTER_NORETURN void os_early_exit_parent_wait(int read_end, pid_t child)
+{
+    u8 status = 0;
+    ssize_t received;
+    do
+    {
+        received = read(read_end, &status, 1);
+    } while (received < 0 && errno == EINTR);
+    int exit_code = status;
+    if (received != 1)
+    {
+        // The child died or closed the pipe without reporting: its own
+        // status is the answer, as a shell would report it.
+        int wait_status = 0;
+        pid_t waited;
+        do
+        {
+            waited = waitpid(child, &wait_status, 0);
+        } while (waited < 0 && errno == EINTR);
+        exit_code = 1;
+        if (waited == child && WIFEXITED(wait_status))
+        {
+            exit_code = WEXITSTATUS(wait_status);
+        }
+        else if (waited == child && WIFSIGNALED(wait_status))
+        {
+            exit_code = 128 + WTERMSIG(wait_status);
+        }
+    }
+    _exit(exit_code);
+}
+#endif
+
+bool os_early_exit_arm(void)
+{
+    bool result = false;
+#if OS_EARLY_EXIT_AVAILABLE
+    // fork() copies only the calling thread. os_is_only_live_thread counts
+    // tracked threads only, so the caller must also start no untracked one
+    // (`ide cc` on desktop starts none before this point).
+    int ends[2] = {-1, -1};
+    ProcessSpawnFailure failure = PROCESS_SPAWN_FAILURE_NONE;
+    bool created = false;
+    if (os_early_exit_pipe < 0 && os_is_only_live_thread())
+    {
+#if BUSTER_INCLUDE_TESTS
+        // Test seam for the setup-failure fallback: fail the pipe's
+        // configuration step deterministically, then insist it happened, so
+        // a control relying on it can never pass through a real fork.
+        bool injected = string_equal(os_get_environment_variable(S8("BUSTER_TEST_EARLY_EXIT_PIPE_FAILURE")), S8("1"));
+        if (injected)
+        {
+            os_process_spawn_test_fail_on_call(OS_PROCESS_SPAWN_TEST_PIPE_CONFIGURATION, 0);
+        }
+#endif
+        created = os_process_spawn_pipe_create(ends, &failure) == 0;
+#if BUSTER_INCLUDE_TESTS
+        if (injected)
+        {
+            BUSTER_VALIDATE(os_process_spawn_test_end() && !created);
+        }
+#endif
+    }
+    if (created)
+    {
+        pid_t child = fork();
+        if (child == 0)
+        {
+            close(ends[0]);
+            os_early_exit_pipe = ends[1];
+            result = true;
+        }
+        else if (child > 0)
+        {
+            close(ends[1]);
+            os_early_exit_parent_wait(ends[0], child);
+        }
+        else
+        {
+            close(ends[0]);
+            close(ends[1]);
+        }
+    }
+#endif
+    return result;
+}
+
+bool os_early_exit_armed(void)
+{
+    bool result = false;
+#if OS_EARLY_EXIT_AVAILABLE
+    result = os_early_exit_pipe >= 0;
+#endif
+    return result;
+}
+
+bool os_early_exit_defer_close(OsFileDescriptor* file_descriptor)
+{
+    bool result = false;
+#if OS_EARLY_EXIT_AVAILABLE
+    if (file_descriptor && os_early_exit_pipe >= 0)
+    {
+        u64 slot = atomic_u64_increment(&os_early_exit_deferred_count);
+        if (slot < OS_EARLY_EXIT_DEFERRED_LIMIT)
+        {
+            os_early_exit_deferred[slot] = file_descriptor;
+            result = true;
+        }
+    }
+#else
+    BUSTER_UNUSED(file_descriptor);
+#endif
+    return result;
+}
+
+void os_early_exit_release(u8 exit_code)
+{
+#if OS_EARLY_EXIT_AVAILABLE
+    if (os_early_exit_pipe >= 0)
+    {
+        // Standard streams first: a build system reading this process's
+        // pipes waits for their EOF as well as for the parent's exit. The
+        // status pipe is above 2, so these dup2 calls cannot replace it.
+        int null_descriptor = open("/dev/null", O_RDWR | O_CLOEXEC);
+        if (null_descriptor >= 0)
+        {
+            for (int stream = 0; stream < 3; stream += 1)
+            {
+                if (stream != null_descriptor)
+                {
+                    (void)dup2(null_descriptor, stream);
+                }
+            }
+            if (null_descriptor > 2)
+            {
+                close(null_descriptor);
+            }
+        }
+        ssize_t sent;
+        do
+        {
+            sent = write(os_early_exit_pipe, &exit_code, 1);
+        } while (sent < 0 && errno == EINTR);
+        close(os_early_exit_pipe);
+        os_early_exit_pipe = -1;
+        // Closing the last reference to a replaced output frees its blocks;
+        // that now happens after the parent has reported.
+        u64 count = atomic_u64_load(&os_early_exit_deferred_count);
+        count = count < OS_EARLY_EXIT_DEFERRED_LIMIT ? count : OS_EARLY_EXIT_DEFERRED_LIMIT;
+        for (u64 index = 0; index < count; index += 1)
+        {
+            (void)os_file_close_checked(os_early_exit_deferred[index]);
+        }
+    }
+#else
+    BUSTER_UNUSED(exit_code);
+#endif
+}
 
 ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environment_keys, SliceString8 environment_values, ProcessSpawnOptions options)
 {

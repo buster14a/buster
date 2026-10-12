@@ -768,6 +768,9 @@ class CatchUpPublicationTests(unittest.TestCase):
         self.later = self.advance(self.base, "README.md", "later\n")
         self.generated = self.advance(
             self.later, "tools/native_retirement_dependency_binding.generated.h", "/* newer */\n")
+        # A main that changed the standing policy after the catch-up's base.
+        self.policy = self.advance(
+            self.later, integration.AUTOMATION_POLICY_PATH, '{"epoch": 2}\n')
         # A rewritten main that no longer contains the expected base.
         git(self.main, "checkout", "-q", "--orphan", "rewritten", self.base)
         self.fork = self.advance(None, "README.md", "fork\n")
@@ -775,6 +778,7 @@ class CatchUpPublicationTests(unittest.TestCase):
     def advance(self, parent: str | None, relative: str, content: str) -> str:
         if parent is not None:
             git(self.main, "checkout", "-q", "--detach", parent)
+        (self.main / relative).parent.mkdir(parents=True, exist_ok=True)
         (self.main / relative).write_text(content)
         git(self.main, "add", relative)
         git(self.main, "commit", "-qm", "main " + relative)
@@ -783,7 +787,7 @@ class CatchUpPublicationTests(unittest.TestCase):
         return commit
 
     def authorize(self, live_main: str, *, source: str | None = None, bot: bool = True,
-                  ref: str = integration.CATCH_UP_BRANCH) -> dict:
+                  ref: str = integration.CATCH_UP_BRANCH, policy_changed: bool = False) -> dict:
         fixture, automation = self.fixture, self.automation
         source = source or self.request
         api = fixture.API()
@@ -793,6 +797,9 @@ class CatchUpPublicationTests(unittest.TestCase):
         request = automation.new_request(fixture.REPOSITORY, 1791, self.base, source, source,
                                          "ordinary", api.policy_digest, 100)
         api.request_data, api.raw_archive = request, fixture.archive(request)
+        if policy_changed:
+            # The request keeps the digest scheduled for base; the live policy differs.
+            api.policy["epoch"] = 2
         api.artifact.update(size_in_bytes=len(api.raw_archive),
                             digest="sha256:" + automation.digest(api.raw_archive))
         for run in api.runs.values():
@@ -828,6 +835,30 @@ class CatchUpPublicationTests(unittest.TestCase):
                     self.authorize(live_main)
                 self.assertEqual(self.catch_up_main(live_main), integration.STALE_MAIN_EXIT)
 
+    def test_catch_up_is_superseded_when_main_changed_the_automation_policy(self):
+        # Main published no generated state, but authorization would read a policy
+        # whose digest differs from the scheduled one: main movement, not failure.
+        with self.assertRaises(integration.StaleMain):
+            self.authorize(self.policy, policy_changed=True)
+        self.assertEqual(self.catch_up_main(self.policy), integration.STALE_MAIN_EXIT)
+        # An unchanged policy file still lets the catch-up publish after main moved.
+        self.assertEqual(self.authorize(self.later)["authorization"]["request"]["base"], self.base)
+        self.assertEqual(self.catch_up_main(self.later), 0)
+        # The predicate has fetched both live mains by now.
+        repo = self.repository.repo
+        self.assertTrue(integration.policy_changed_between(repo, self.base, self.policy))
+        self.assertFalse(integration.policy_changed_between(repo, self.base, self.later))
+
+    def test_policy_change_without_main_movement_still_blocks(self):
+        # Exit 75 needs observed main movement; a digest mismatch at the exact
+        # base stays a blocking authorization failure for every request.
+        for options in ({}, {"source": self.bound}):
+            with self.subTest(options=options):
+                with self.assertRaisesRegex(self.automation.AutomationError,
+                                            "standing grant changed after scheduling") as caught:
+                    self.authorize(self.base, policy_changed=True, **options)
+                self.assertNotIsInstance(caught.exception, self.automation.AutomationMoved)
+
     def test_live_main_fetch_leaves_no_housekeeping_writer_for_strict_cleanup(self):
         # Tiny thresholds would otherwise launch gc/maintenance on every fetch;
         # Trace2 records the child before any detachment, so this has no race.
@@ -852,8 +883,9 @@ class CatchUpPublicationTests(unittest.TestCase):
         )
         for label, options in cases:
             with self.subTest(label=label):
-                with self.assertRaises(integration.StaleMain):
-                    self.authorize(self.later, **options)
+                for live_main in (self.later, self.policy):
+                    with self.assertRaises(integration.StaleMain):
+                        self.authorize(live_main, **options)
         self.assertEqual(self.catch_up_main(self.later, self.bound), integration.STALE_MAIN_EXIT)
         self.assertEqual(self.authorize(self.base, source=self.bound)["head"], self.bound)
 
