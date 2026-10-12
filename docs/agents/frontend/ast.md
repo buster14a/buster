@@ -3832,4 +3832,75 @@ the same way and diagnostic only:
   recording marks in the eager pass.
 - Zen 5 validation stays incomplete (#2761).
 
+### Root specifier fallbacks
+
+This section has its own anchor because other open AST branches append to
+the plan's final paragraph. After [members](#members), the
+[declaration specifier read](#declaration-specifiers-from-the-tree) still
+hands 2,259 root runs back to the machine on the self-host unity input under
+`-fc-ast-pilot` (2,237 `input`, 22 `specifiers`). The census came first. It
+was a throwaway build of base main `f0f84944`, on the same input and flags as
+the [tag definition census](#tag-definition-machine-work). Each fallback ran
+the machine under one no-inline wrapper per caller and shape. The shape was
+read from the run's tokens, and the first match in the table's order wins:
+
+| Caller | Shape | Runs | Ir | Ir per run |
+| --- | --- | ---: | ---: | ---: |
+| file scope | tag reference (`struct S`, plain words beside it) | 1,160 | 6.90 M | 5,946 |
+| file scope | tag definition | 437 | 8.96 M | |
+| file scope | attribute | 342 | 1.22 M | 3,559 |
+| file scope | `__extension__`, `_Atomic`, other words | 22 | 0.17 M | |
+| parameter | tag reference | 132 | 0.70 M | 5,313 |
+| block | tag definition | 62 | 0.95 M | |
+| block | `typeof` | 40 | 0.24 M | |
+| block | tag reference | 42 | 0.22 M | 5,186 |
+| block | other words | 22 | 0.06 M | |
+
+Every tag reference is plain: its other specifiers are words the read already
+takes, with no attribute on the tag. The 19.4 M total splits as follows:
+- **Tag references.** 1,334 runs cost 7.82 M. Inside them, the work a read
+  must keep is the machine's own calls: `c_parse_tag_lookup` (0.67 M),
+  `c_parse_add_type` for a tag seen first (0.27 M),
+  `c_parse_type_identity_prepare` (0.04 M) and
+  `c_parse_apply_trailing_qualifiers` (0.05 M). The rest is the frames and the
+  scans: `c_parse_storage_classes_valid` alone is 2.28 M, and the attribute
+  and alignment skips are 2.13 M. With the declaration read's cost of about
+  550 Ir a run added, about **6 M** is removable. This is an estimate.
+- **Tag definitions.** 499 runs cost 9.91 M, most of it the body, which a
+  root read cannot take. At the tag reference's cost a run, the work outside
+  the body is at most about 3 M (estimate).
+- **Everything else.** Each row is below 1.3 M.
+
+Members' tag references (54 runs) and type-name fallbacks (28 runs) are
+smaller still ([member census](#member-specifier-runs)).
+
+The gate is the [member specifier runs](#member-specifier-runs)' **5 M** of
+Ir. Only tag references can clear it. The candidate reads a root run whose
+`DECL_SPECIFIERS` list is plain words followed by one `struct`, `union` or
+`enum` specifier with only a tag name. It makes the machine's calls in the
+machine's order, and does not apply to members. These budgets are declared
+before its measured runs. They use the same input, flags and four Callgrind
+arms (A to D) on tests-off `-march=x86-64-v3` builds, with main `f0f84944` as
+the base:
+- **Gate (C against B).** The whole compile falls by at least **5 M Ir** on
+  `-fsyntax-only`, with the wider index charged. Otherwise the result is
+  recorded as negative and no code ships.
+- **Correctness.**
+  - 0 model differences over the corpus and the frontend sources: the
+    analysis model field by field and the bindings, with the diagnostics;
+  - a one-off comparison of the same fields on the self-host unity input,
+    also with 0 differences;
+  - in verify mode, every tag reference read from the tree is first read by
+    the machine and rolled back. The two answers must match (type row, its
+    fields, the declarator start and the rows appended), with 0 mismatches.
+    A tree whose tag name is changed must make verify mode report a mismatch;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **Coverage (reported, not gated).** Tag references read, and the runs still
+  handed back by reason, from the `-v` counters.
+- **Default path (D against A).** Within ±0.05% Ir on `-fsyntax-only` and on
+  `-c` (`-g0`).
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete (#2761). The
+  pilot-default switch stays on hold.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
