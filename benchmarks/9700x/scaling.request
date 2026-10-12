@@ -7,3 +7,4 @@
 # compiler_receipt.SCALING_PROFILE names. See README.md in this directory.
 #
 # request: issue #424 scaling-v1, first 9700X run
+# request: issue #53 PR #3856 owner-requested scaling-v1 of the atomic take-index over footprint-bounded TU windows (candidate a1d31929 plus this request line), against the 2026-10-06 acb7f309 tiny/skewed/W+-1 finding
