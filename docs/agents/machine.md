@@ -413,7 +413,13 @@ hosts execute its independent expected-value fixture.
   which no recipe covers. A constant that only such rows and constant-copying
   casts read is `fused_dead`. A `GLOBAL` base folds like a pointer, so its
   element address is not rematerialized. Negative indices keep the computed
-  form. AArch64 selection does not fold `INDEX` indices yet.
+  form. AArch64 selection applies the same rule through
+  `machine_a64_index_constant_offset` and
+  `machine_a64_select_place_address_offset`, emitting `MACHINE_A64_LEA_FRAME`,
+  `MACHINE_A64_LEA_OFFSET` or `MACHINE_A64_MOV_RR`; the `LEA_OFFSET` encoder
+  materializes offsets past `ADD`'s 12-bit immediate. Its classification pass
+  counts folded `INDEX` reads together with copy-cast reads for the same
+  `fused_dead` marking.
 - FAST/QUALITY start a join's or loop header's general block parameters in
   registers. `machine_fast_parameter_contract` gives each non-pinned,
   non-mutable general parameter a caller-saved (or already-saved) register
@@ -951,11 +957,13 @@ hosts execute its independent expected-value fixture.
   declare RDX/X10 scratch clobbers. Darwin TLS descriptor rows have ordinary
   call effects; a following move captures RAX/X0 into an SSA value. Every
   relocation site distinguishes the index, value offset, or descriptor field.
+  AArch64 ELF PIC descriptor rows use the same call/result capture boundary.
   The thread-local model fixture requires zero fallback for admitted desktop
-  targets, allocators, frontend forms and code models, and named refusal with
-  no artifact for effective AArch64 ELF PIC requests (the TLSDESC model does
-  not exist yet; see the position-independent code bullets). Native hosts execute
-  the supported models with separate definitions and live repeated accesses.
+  targets, allocators, frontend forms and code models, including AArch64 ELF
+  PIC descriptors (see the position-independent code bullets). Native hosts
+  execute the supported models with separate definitions and live repeated
+  accesses; `compiler_driver_test_aarch64_pic_tlsdesc` also checks independent
+  shared-library linking and thread-local isolation on native AArch64 Linux.
 - x86-64 i128 bitwise complement reads both frame-backed limbs and emits
   ordinary three-operand XOR64 rows against one all-ones constant. Each limb
   result has one definition; do not use mutable NOT rows for this expansion.
@@ -1203,15 +1211,25 @@ hosts execute its independent expected-value fixture.
   `.eh_frame` function references are `R_AARCH64_PREL32` against `.text`, and
   initialized pointers are `R_AARCH64_ABS64` in `.data`: constants with
   relocations already live in writable data, so no `.data.rel.ro` split exists
-  and none is needed for `ld.lld -shared -z text`. Without `-fPIC` nothing
-  changes (objects are byte-identical). Thread-local access under this model
-  is refused by name -- selection fails with `thread-local access under
-  AArch64 ELF position-independent code (TLSDESC) is not implemented`, which
-  the driver reports as a code-generation refusal and publishes no output --
-  instead of emitting local-exec `TPREL` relocations a shared object cannot
-  hold. TLSDESC itself, Buster's own AArch64 `-shared` writer and hidden-visibility
-  attribute propagation (a hidden definition still uses the GOT form, as on
-  x86-64) remain open. The test hook is
+  and none is needed for `ld.lld -shared -z text`. Without `-fPIC` the reference model is unchanged.
+  Thread-local access under ELF PIC selects `MACHINE_A64_TLS_DESCRIPTOR`,
+  an ordinary conservative MIR call boundary followed by an explicit X0
+  result capture. Its adjacent ADRP X0 / LDR X1 / ADD X0 / BLR X1 sequence
+  publishes the four existing TLSDESC relocations (562/563/564/569); the
+  returned TLS offset is added to TPIDR_EL0 after the call. This follows the
+  [AArch64 System V TLS ABI](https://github.com/ARM-software/abi-aa/blob/main/sysvabi64/sysvabi64.rst).
+  The call boundary preserves live values across resolver register/flag effects
+  and keeps loader memory effects ordered. Independent linkers can retain
+  descriptors in shared objects or relax them in executables; Buster's
+  fixed-address linker uses its existing local-exec relaxation. Non-PIC TLS,
+  Darwin and Windows retain their prior forms. The registered
+  `compiler_driver_test_aarch64_pic_tlsdesc` checks both allocators/frontend
+  forms, four flags and Linux/Android object serialization; native AArch64
+  Linux also links a shared library with an independent host linker and runs
+  a pthread observer for imported, defined, zero-initialized and static TLS.
+  Buster's own AArch64 `-shared` writer and hidden-visibility attribute
+  propagation (a hidden definition still uses the GOT form, as on x86-64)
+  remain open. The test hook is
   `compiler_driver_test_aarch64_pic_outputs`, which reads the relocation kind
   per symbol class from a Buster object; on a native Linux AArch64 host it
   also links the object with `ld.lld -shared -z text`.

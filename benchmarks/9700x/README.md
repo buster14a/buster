@@ -206,7 +206,10 @@ and these jobs follow `authorize`:
   `throughput-corpus-v2`: the default CI corpus under both retained FAST and
   QUALITY modes (12 workload/mode cells, 20 pairs in each of two rounds) on
   the same two binaries (#2761, #3053). Historical four-mode v1 receipts keep
-  their original identity. A head
+  their original identity. A merge base without the FAST/QUALITY retirement
+  (`compiler_receipt.THROUGHPUT_HARNESS_FLOOR`) has a four-mode `--mode all`
+  harness that cannot produce the v2 population, so it is rejected as an
+  unsupported historical harness before any build or lab (#3714). A head
   that moved before measurement is recorded as superseded.
 - `start-pull` (hosted) creates or adopts the exact attempt's queued
   `9700X compiler benchmark (pull request)` check after authorization, then

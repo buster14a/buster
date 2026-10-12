@@ -770,6 +770,9 @@ typedef enum MachineOpcode
     MACHINE_A64_CVT_F16_TO_F64,
     MACHINE_A64_CVT_F32_TO_F16,
     MACHINE_A64_CVT_F64_TO_F16,
+    // ELF general-dynamic TLS: descriptor resolver call returning its address
+    // in X0. Separate MOV_RR captures the canonical result after the call.
+    MACHINE_A64_TLS_DESCRIPTOR,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -1697,6 +1700,10 @@ typedef enum MachineThreadLocalSite
     MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX,
     MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET,
     MACHINE_THREAD_LOCAL_SITE_DARWIN_DESCRIPTOR,
+    MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_PAGE,
+    MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_LOAD,
+    MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_ADD,
+    MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_CALL,
 } MachineThreadLocalSite;
 
 // A relocation site: the function-relative offset of the field to patch

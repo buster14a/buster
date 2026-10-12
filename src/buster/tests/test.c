@@ -25,7 +25,8 @@
 // generated tables and repository source. `ide test --module=a,b` narrows a
 // run to named descriptors (test_module_selection_resolve); library_tests
 // marks the others deselected in its working copy of the table. The opt-in
-// BUSTER_TEST_MODULE_GROUP=primary|rest selects complementary process groups
+// BUSTER_TEST_MODULE_GROUP=primary|rest selects complementary process groups;
+// module:<name> selects one enabled descriptor without taking audit ownership.
 // (test_module_group_resolve), preserving audit ownership and table indices.
 // Its inventory value queries the table without running any registered module.
 // test_native_host_profile records the same binary's usable native features
@@ -1180,8 +1181,7 @@ bool buster_test_module_selection_check(String8 selection)
     return result;
 }
 
-// Match the native parent independently. The frontend dominates the rest
-// group on sanitized lanes; Windows ARM keeps the driver split.
+// Match the native parent's legacy pair ownership independently.
 BUSTER_GLOBAL_LOCAL String8 test_module_group_primary_name(void)
 {
     String8 result = BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 ? S8("compiler_driver_tests") : S8("c_frontend_tests");
@@ -1194,6 +1194,7 @@ typedef enum TestModuleGroup
     TEST_MODULE_GROUP_PRIMARY,
     TEST_MODULE_GROUP_REST,
     TEST_MODULE_GROUP_INVENTORY,
+    TEST_MODULE_GROUP_MODULE,
     TEST_MODULE_GROUP_INVALID,
 } TestModuleGroup;
 
@@ -1204,6 +1205,7 @@ BUSTER_GLOBAL_LOCAL TestModuleGroup test_module_group_resolve(String8 name)
     else if (string_equal(name, S8("primary"))) result = TEST_MODULE_GROUP_PRIMARY;
     else if (string_equal(name, S8("rest"))) result = TEST_MODULE_GROUP_REST;
     else if (string_equal(name, S8("inventory"))) result = TEST_MODULE_GROUP_INVENTORY;
+    else if (string_starts_with_sequence(name, S8("module:")) && name.length > 7) result = TEST_MODULE_GROUP_MODULE;
     return result;
 }
 
@@ -1250,6 +1252,40 @@ BUSTER_GLOBAL_LOCAL u64 test_module_group_apply(TestDescriptor* descriptors, u64
     for (u64 index = 0; index < count; index += 1)
     {
         descriptors[index].deselected = descriptors[index].deselected || !valid || test_module_group_owner(descriptors[index]) != group;
+        result += buster_test_descriptor_runs(descriptors[index]);
+    }
+    return result;
+}
+
+// This private CI selector retains disabled table audits and the full inventory.
+// Explicit --module selection intentionally takes audit ownership; CI must not.
+BUSTER_GLOBAL_LOCAL u64 test_module_group_module_apply(TestDescriptor* descriptors, u64 count, String8 name, bool valid)
+{
+    u64 begin = 0, end = 0;
+    bool range = string_starts_with_sequence(name, S8("range:"));
+    if (range)
+    {
+        String8 text = {name.pointer + 6, name.length - 6};
+        IntegerParsingU64 first = string8_parse_u64_decimal(text);
+        bool parsed = first.status == INTEGER_PARSING_SUCCESS && first.length && first.length < text.length &&
+                      text.pointer[first.length] == ':';
+        if (parsed)
+        {
+            text.pointer += first.length + 1;
+            text.length -= first.length + 1;
+            IntegerParsingU64 last = string8_parse_u64_decimal(text);
+            parsed = last.status == INTEGER_PARSING_SUCCESS && last.length && last.length == text.length &&
+                     first.value < last.value && last.value <= count;
+            begin = first.value;
+            end = last.value;
+        }
+        valid = valid && parsed;
+    }
+    u64 result = 0;
+    for (u64 index = 0; index < count; index += 1)
+    {
+        descriptors[index].deselected = descriptors[index].deselected || !valid ||
+            !(range ? index >= begin && index < end : string_equal(descriptors[index].name, name));
         result += buster_test_descriptor_runs(descriptors[index]);
     }
     return result;
@@ -3780,12 +3816,67 @@ BUSTER_GLOBAL_LOCAL bool test_module_group_self_test(void)
     result = result && test_module_group_resolve(S8("")) == TEST_MODULE_GROUP_NONE &&
              test_module_group_resolve(S8("primary")) == TEST_MODULE_GROUP_PRIMARY &&
              test_module_group_resolve(S8("rest")) == TEST_MODULE_GROUP_REST &&
-             test_module_group_resolve(S8("inventory")) == TEST_MODULE_GROUP_INVENTORY;
+             test_module_group_resolve(S8("inventory")) == TEST_MODULE_GROUP_INVENTORY &&
+             test_module_group_resolve(S8("module:c_ast_tests")) == TEST_MODULE_GROUP_MODULE &&
+             test_module_group_resolve(S8("module:")) == TEST_MODULE_GROUP_INVALID;
     String8 invalid[] = {S8("all"), S8("driver"), S8("frontend"), S8("Primary"), S8("primary,rest"), S8(" primary"), S8("rest ")};
     for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
     {
         result = result && test_module_group_resolve(invalid[index]) == TEST_MODULE_GROUP_INVALID;
     }
+
+    // One-module CI jobs form the same enabled union under both audit policies.
+    // The controls do not add registered modules, fixtures or assertion counts.
+    u64 module_union_count = 0;
+    for (u64 index = 0; index < TEST_ID_COUNT; index += 1)
+    {
+        TestDescriptor module[TEST_ID_COUNT];
+        memcpy(module, test_descriptors, sizeof(module));
+        u64 selected = test_module_group_module_apply(module, TEST_ID_COUNT, test_descriptors[index].name, true);
+        result = result && selected == (u64)buster_test_descriptor_runs(test_descriptors[index]);
+        module_union_count += selected;
+        for (u64 other = 0; other < TEST_ID_COUNT; other += 1)
+        {
+            result = result && buster_test_descriptor_runs(module[other]) ==
+                (other == index && buster_test_descriptor_runs(test_descriptors[other])) &&
+                module[other].table_audit == test_descriptors[other].table_audit &&
+                module[other].function == test_descriptors[other].function;
+        }
+    }
+    result = result && module_union_count == enabled_count;
+    TemporalArena range_temporary = scratch_begin(0, 0);
+    // Every adjacent inventory slice preserves original descriptor identities,
+    // disabled-audit ownership and canonical positions. Bad bounds run nothing.
+    for (u64 begin = 0; begin < TEST_ID_COUNT; begin += 1)
+    {
+        TestDescriptor range[TEST_ID_COUNT];
+        memcpy(range, test_descriptors, sizeof(range));
+        u64 end = begin + 2 < TEST_ID_COUNT ? begin + 2 : TEST_ID_COUNT;
+        String8 name = string_format(range_temporary.arena, S8("range:{u64}:{u64}"), begin, end);
+        u64 selected = test_module_group_module_apply(range, TEST_ID_COUNT, name, true);
+        u64 expected = 0;
+        for (u64 index = 0; index < TEST_ID_COUNT; index += 1)
+        {
+            bool runs = index >= begin && index < end && buster_test_descriptor_runs(test_descriptors[index]);
+            expected += runs;
+            result = result && buster_test_descriptor_runs(range[index]) == runs &&
+                range[index].table_audit == test_descriptors[index].table_audit &&
+                range[index].function == test_descriptors[index].function;
+        }
+        result = result && selected == expected;
+    }
+    String8 bad_ranges[] = {S8("range:0:0"), S8("range:2:1"), S8("range:0:999999"), S8("range:0:2x"),
+        S8("range:-1:2"), S8("range:0:18446744073709551616")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(bad_ranges); index += 1)
+    {
+        TestDescriptor range[TEST_ID_COUNT];
+        memcpy(range, test_descriptors, sizeof(range));
+        result = result && !test_module_group_module_apply(range, TEST_ID_COUNT, bad_ranges[index], true);
+    }
+    scratch_end(range_temporary);
+    TestDescriptor module_missing[TEST_ID_COUNT];
+    memcpy(module_missing, test_descriptors, sizeof(module_missing));
+    result = result && !test_module_group_module_apply(module_missing, TEST_ID_COUNT, S8("unknown_tests"), true);
 
     TestDescriptor original[] = {
         {.name = S8("self_test_first"), .function = &test_timing_self_test_pass},
@@ -4110,7 +4201,16 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     {
         selection_valid = module_group != TEST_MODULE_GROUP_INVALID && !arguments->module_selection.length &&
                           test_module_group_table_valid(test_descriptors, TEST_ID_COUNT);
-        selected_module_count = test_module_group_apply(descriptors, TEST_ID_COUNT, module_group, selection_valid);
+        if (module_group == TEST_MODULE_GROUP_MODULE)
+        {
+            String8 name = {module_group_name.pointer + 7, module_group_name.length - 7};
+            selected_module_count = test_module_group_module_apply(descriptors, TEST_ID_COUNT, name, selection_valid);
+            selection_valid = selection_valid && (string_starts_with_sequence(name, S8("range:")) ? selected_module_count != 0 : selected_module_count == 1);
+        }
+        else
+        {
+            selected_module_count = test_module_group_apply(descriptors, TEST_ID_COUNT, module_group, selection_valid);
+        }
         if (!selection_valid)
         {
             arguments->show(arguments, S8("test: invalid BUSTER_TEST_MODULE_GROUP='{S8}', incompatible --module, or invalid registration table\n"),
@@ -4214,7 +4314,8 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     {
         String8 group = module_group == TEST_MODULE_GROUP_PRIMARY ? S8("primary") :
                         module_group == TEST_MODULE_GROUP_REST ? S8("rest") :
-                        module_group == TEST_MODULE_GROUP_INVENTORY ? S8("inventory") : S8("invalid");
+                        module_group == TEST_MODULE_GROUP_INVENTORY ? S8("inventory") :
+                        module_group == TEST_MODULE_GROUP_MODULE ? S8("module") : S8("invalid");
         String8 status = batch_test_succeeded(result) ? S8("pass") : S8("fail");
         if (module_group == TEST_MODULE_GROUP_INVENTORY && batch_test_succeeded(result))
         {
