@@ -1,0 +1,13 @@
+TEST_TEMPORARY_ROOT_PRESERVED status=failed path=/tmp/buster-tests-1440387-5-34823655426853
+TEST_FIXTURE_WATCHDOG_V1 status=armed deadline_seconds=1800
+TEST_FIXTURE_START_V1 kind=module module=c_frontend_tests fixture=body index=0
+statement expressions form=0 depth=200 tails=20100 scope_levels=1353201 failed at /home/david/Documents/Codex/2026-10-12/solv-2/work/3724-mutation/src/buster/tests/compiler/frontend/c/c_test.c:c_test_statement_expression_work_growth:43622
+statement expressions form=1 depth=200 tails=20100 scope_levels=1353201 failed at /home/david/Documents/Codex/2026-10-12/solv-2/work/3724-mutation/src/buster/tests/compiler/frontend/c/c_test.c:c_test_statement_expression_work_growth:43622
+TEST_ARENA_V1 kind=module module=c_frontend_tests fixture=body index=0 arena_slot=0 start=13240 end=13382 retained_bytes=142 high_water=13382 peak_bytes=142 after=13240 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=c_frontend_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1271502 peak_bytes=1271374 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=c_frontend_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=426232 peak_bytes=426168 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=c_frontend_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+TEST_MODULE_TIMING index=12 module=c_frontend_tests duration_ns=23597781 passed=6 failed=2 assertions=8 status=fail
+[6/8] Unit tests (1 of 63 modules selected)
+[0/1] Module tests
+[0/0] External tests

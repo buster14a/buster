@@ -152,8 +152,8 @@
 //   c_ir_tree_root_conditional                    tree's CONDITIONAL nodes
 //   c_ir_cleanup_*                                __attribute__((cleanup))
 //   c_ir_inline_assembly_*                        GNU inline assembly
-//   c_ir_statement_end, c_ir_statement_end_find   memoized statement extents
-//                                                 for controlled bodies
+//   c_ir_statement_end, c_ir_statement_end_find,  memoized statement extents
+//   c_ir_statement_peels_file                     for controlled bodies
 //   CIrStatementExtents, c_ir_statement_extents_* controlled-body extents read
 //                                                 from the syntax tree under
 //                                                 -fc-ast-pilot (#3102)
@@ -3694,12 +3694,14 @@ struct CIntegerIrBuilder
     // pointer (any builder without a body) answers every range by the scan.
     CIrTokenPrefix* token_prefix;
     bool token_prefix_built;
-    // One past each body `if` statement's whole else-chain, plus one, indexed
-    // by the offset of its `if` token; 0 is unmeasured. c_ir_statement_end
-    // owns it, files every `if` its chain walk completes, and clears the array
-    // the first time it is asked (statement_ends_cleared), so a body without a
-    // nested or chained `if` never touches it. Without it every `else if` and
-    // every brace-less nested `if` re-walked the rest of its chain.
+    // One past each measured body statement, plus one, indexed by the offset
+    // of its first token past its labels; 0 is unmeasured. c_ir_statement_end
+    // owns it: it files every `if` its chain walk completes, with the whole
+    // else-chain, and every loop, `switch` and `do` header a span peeled, and
+    // clears the array the first time it files (statement_ends_cleared), so a
+    // body without a nested statement never touches it. Without it every
+    // `else if`, and every statement of a brace-less nest of `if`s or loops,
+    // re-walked the rest of its chain or nest.
     u32* statement_ends_plus_one;
     bool statement_ends_cleared;
     // The body's extent table from the syntax tree (c_ir_statement_extents),
@@ -44275,6 +44277,48 @@ BUSTER_C_INTERNAL u32 c_ir_statement_labels_end(CPreprocessResult preprocess, u3
     return result;
 }
 
+// The memoized extent of the statement whose first token (past its labels) is
+// `statement`, as filed by c_ir_statement_end_store, or UINT32_MAX when it is
+// unmeasured or does not fit before `end`. A filed extent was measured by a
+// walk that read no token at or past it, so the same walk under any bound at or
+// past it measures the same statement. A shorter bound refuses the entry and
+// walks, which keeps such a query's answer exactly what the walk alone gives.
+BUSTER_C_INTERNAL u32 c_ir_statement_end_find(CIntegerIrBuilder* builder, u32 statement, u32 end)
+{
+    u32 result = UINT32_MAX;
+    if (builder->statement_ends_cleared && statement >= builder->body_token_start && statement - builder->body_token_start < builder->body_token_count)
+    {
+        u32 stored = builder->statement_ends_plus_one[statement - builder->body_token_start] - 1;
+        result = stored <= end ? stored : UINT32_MAX;
+    }
+
+    return result;
+}
+
+BUSTER_C_INTERNAL void c_ir_statement_end_store(CIntegerIrBuilder* builder, u32 statement, u32 statement_end)
+{
+    if (builder->statement_ends_plus_one && statement >= builder->body_token_start && statement - builder->body_token_start < builder->body_token_count)
+    {
+        if (!builder->statement_ends_cleared)
+        {
+            memset(builder->statement_ends_plus_one, 0, sizeof(u32) * (u64)builder->body_token_count);
+            builder->statement_ends_cleared = true;
+        }
+        builder->statement_ends_plus_one[statement - builder->body_token_start] = statement_end + 1;
+    }
+}
+
+// An `if` is filed only when its chain ended strictly before the bound it was
+// measured against: the walk then saw the token past it and found no `else`.
+// At the bound it never looked, and a longer bound might find one.
+BUSTER_C_INTERNAL void c_ir_statement_end_file(CIntegerIrBuilder* builder, u32 if_start, u32 if_end, u32 end)
+{
+    if (if_end < end)
+    {
+        c_ir_statement_end_store(builder, if_start, if_end);
+    }
+}
+
 // One statement's extent, as far as it can be measured without looking at the
 // statement's own substatements. `if` is the one form whose extent depends on
 // a chain of them -- an `else` picks up where the then-substatement ended --
@@ -44306,7 +44350,40 @@ struct CIrStatementSpan
     bool valid;
 };
 
-BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builder, u32 start, u32 end)
+// The headers c_ir_statement_span peeled on its way to the statement it
+// measured: each one's keyword token and the `do` headers peeled before it.
+// Each peeled header is a statement of its own. It ends where the measured
+// statement does, plus the tails of the `do` headers at or after it, so once
+// that end is known c_ir_statement_peels_file files all of them, and a
+// brace-less nest `while (c) while (c) ... x;` is peeled once in total instead
+// of once per enclosing loop (#2676). `starts` and `do_before` are allocated
+// from `arena` at the first peel, with one entry per token of the measured
+// range (`capacity`), since every peel takes at least one: a statement that
+// peels nothing, which is most of them, allocates nothing.
+typedef struct CIrStatementPeels CIrStatementPeels;
+struct CIrStatementPeels
+{
+    Arena* arena;
+    u32* starts;
+    u32* do_before;
+    u32 count;
+    u32 capacity;
+};
+
+BUSTER_C_INTERNAL void c_ir_statement_peels_push(CIrStatementPeels* peels, u32 start, u32 do_before)
+{
+    IR_CONSTRUCTION_RECORD(C_STATEMENT_EXTENT_PEELS, 1);
+    if (!peels->starts)
+    {
+        peels->starts = arena_allocate(peels->arena, u32, peels->capacity);
+        peels->do_before = arena_allocate(peels->arena, u32, peels->capacity);
+    }
+    peels->starts[peels->count] = start;
+    peels->do_before[peels->count] = do_before;
+    peels->count += 1;
+}
+
+BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builder, u32 start, u32 end, CIrStatementPeels* peels)
 {
     CPreprocessResult preprocess = builder->preprocess;
     IR_CONSTRUCTION_RECORD(C_STATEMENT_EXTENT_SPANS, 1);
@@ -44314,6 +44391,7 @@ BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builde
         .end = UINT32_MAX,
         .if_start = UINT32_MAX,
     };
+    peels->count = 0;
     u32 cursor = start;
     bool measured = false;
     while (!measured && cursor < end)
@@ -44323,6 +44401,16 @@ BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builde
         cursor = c_ir_statement_labels_end(preprocess, cursor, end);
         if (cursor >= end)
         {
+            measured = true;
+            continue;
+        }
+        // A statement already measured ends where it was filed, whatever it
+        // holds; the `do` headers peeled before it still owe their tails.
+        u32 known = c_ir_statement_end_find(builder, cursor, end);
+        if (known != UINT32_MAX)
+        {
+            span.end = known;
+            span.valid = true;
             measured = true;
             continue;
         }
@@ -44348,6 +44436,7 @@ BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builde
         }
         if (c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_DO))
         {
+            c_ir_statement_peels_push(peels, cursor, span.pending_do);
             span.pending_do += 1;
             cursor += 1;
             continue;
@@ -44369,6 +44458,7 @@ BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builde
             measured = true;
             continue;
         }
+        c_ir_statement_peels_push(peels, cursor, span.pending_do);
         cursor = header_close + 1;
     }
     u32 parentheses = 0;
@@ -44445,47 +44535,38 @@ BUSTER_C_INTERNAL u32 c_ir_statement_do_tail_end(CPreprocessResult preprocess, u
     return result;
 }
 
-// The memoized extent of the `if` statement whose keyword is `if_start`, as
-// filed by c_ir_statement_end_file, or UINT32_MAX when it is unmeasured or
-// does not fit before `end`. Only an extent that ended strictly before the
-// bound it was measured against is filed: the walk then saw the token past it
-// and found no `else`, and every token it read lies before that extent, so the
-// same walk under any bound at or past it measures the same statement. A
-// shorter bound refuses the entry and walks, which keeps such a query's
-// answer exactly what the walk alone would give.
-BUSTER_C_INTERNAL u32 c_ir_statement_end_find(CIntegerIrBuilder* builder, u32 if_start, u32 end)
+// Files every header a span peeled, given where the statement it measured
+// ends. The header that peeled k `do` headers before it ends past the tails of
+// the `pending_do - k` innermost ones, which the statement writes innermost
+// first, so the walk out from the innermost header consumes them in order.
+// The caller only passes an end no token at or past which was read: a span that
+// ended on its own, or an `if` chain that ended strictly before its bound.
+BUSTER_C_INTERNAL void c_ir_statement_peels_file(CIntegerIrBuilder* builder, CIrStatementPeels const* peels, u32 inner_end, u32 pending_do,
+                                                 u32 end)
 {
-    u32 result = UINT32_MAX;
-    if (builder->statement_ends_cleared && if_start >= builder->body_token_start && if_start - builder->body_token_start < builder->body_token_count)
+    u32 statement_end = inner_end;
+    u32 tails = 0;
+    for (u32 index = peels->count; index > 0 && statement_end != UINT32_MAX; index -= 1)
     {
-        u32 stored = builder->statement_ends_plus_one[if_start - builder->body_token_start] - 1;
-        result = stored <= end ? stored : UINT32_MAX;
-    }
-
-    return result;
-}
-
-BUSTER_C_INTERNAL void c_ir_statement_end_file(CIntegerIrBuilder* builder, u32 if_start, u32 if_end, u32 end)
-{
-    if (builder->statement_ends_plus_one && if_end < end && if_start >= builder->body_token_start &&
-        if_start - builder->body_token_start < builder->body_token_count)
-    {
-        if (!builder->statement_ends_cleared)
+        u32 peel = index - 1;
+        u32 owed = pending_do - peels->do_before[peel];
+        statement_end = c_ir_statement_do_tail_end(builder->preprocess, statement_end, end, owed - tails);
+        tails = owed;
+        if (statement_end != UINT32_MAX)
         {
-            memset(builder->statement_ends_plus_one, 0, sizeof(u32) * (u64)builder->body_token_count);
-            builder->statement_ends_cleared = true;
+            c_ir_statement_end_store(builder, peels->starts[peel], statement_end);
         }
-        builder->statement_ends_plus_one[if_start - builder->body_token_start] = if_end + 1;
     }
 }
 
 // One past the whole statement at `start`. Only `if` needs a stack: its extent
 // is its else-chain's, and each arm is a statement in its own right, so the
 // arms are walked with explicit frames rather than by recursing. Every `if`
-// the walk completes is filed (c_ir_statement_end_file), and an `if` already
-// filed is not walked again, so lowering an `else if` chain or a brace-less
-// nest of `if`s, which asks for each link's extent in turn, walks each link
-// once in total instead of once per enclosing link.
+// the walk completes is filed (c_ir_statement_end_file), and so is every loop,
+// `switch` and `do` header a span peeled (c_ir_statement_peels_file). A
+// statement already filed is not walked again, so lowering an `else if` chain
+// or a brace-less nest of `if`s or loops, which asks for each link's extent in
+// turn, walks each link once in total instead of once per enclosing link.
 BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     typedef struct CIfEndFrame CIfEndFrame;
@@ -44498,18 +44579,32 @@ BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CIntegerIrBuilder* builde
     };
     CPreprocessResult preprocess = builder->preprocess;
     u32 completed = UINT32_MAX;
-    CIrStatementSpan span = start < end ? c_ir_statement_span(builder, start, end) : (CIrStatementSpan){.end = UINT32_MAX, .if_start = UINT32_MAX};
+    // The arm spans of the walk below share the second set of peels.
+    u32 peel_capacity = start < end ? end - start : 1;
+    CIrStatementPeels peels = {
+        .arena = arena,
+        .capacity = peel_capacity,
+    };
+    CIrStatementPeels arm_peels = {
+        .arena = arena,
+        .capacity = peel_capacity,
+    };
+    CIrStatementSpan span =
+        start < end ? c_ir_statement_span(builder, start, end, &peels) : (CIrStatementSpan){.end = UINT32_MAX, .if_start = UINT32_MAX};
     u32 known_if_end = span.valid && span.if_start != UINT32_MAX ? c_ir_statement_end_find(builder, span.if_start, end) : UINT32_MAX;
     if (span.valid && span.if_start == UINT32_MAX)
     {
         completed = c_ir_statement_do_tail_end(preprocess, span.end, end, span.pending_do);
+        c_ir_statement_peels_file(builder, &peels, span.end, span.pending_do, end);
     }
     else if (known_if_end != UINT32_MAX)
     {
         completed = c_ir_statement_do_tail_end(preprocess, known_if_end, end, span.pending_do);
+        c_ir_statement_peels_file(builder, &peels, known_if_end, span.pending_do, end);
     }
     else if (span.valid)
     {
+        u32 outer_if_end = UINT32_MAX;
         CIfEndFrame* frames = arena_allocate(arena, CIfEndFrame, end - start + 1);
         u32 frame_count = 1;
         bool failed = false;
@@ -44556,6 +44651,7 @@ BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CIntegerIrBuilder* builde
                 c_ir_statement_end_file(builder, frame->start, if_end, end);
                 completed = c_ir_statement_do_tail_end(preprocess, if_end, end, frame->pending_do);
                 failed = completed == UINT32_MAX;
+                outer_if_end = frame_count == 1 ? if_end : outer_if_end;
                 frame_count -= 1;
                 if (frame_count && !failed)
                 {
@@ -44566,7 +44662,7 @@ BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CIntegerIrBuilder* builde
             {
                 continue;
             }
-            CIrStatementSpan child = c_ir_statement_span(builder, child_start, end);
+            CIrStatementSpan child = c_ir_statement_span(builder, child_start, end, &arm_peels);
             u32 child_if_end = child.valid && child.if_start != UINT32_MAX ? c_ir_statement_end_find(builder, child.if_start, end) : UINT32_MAX;
             if (!child.valid)
             {
@@ -44581,12 +44677,20 @@ BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CIntegerIrBuilder* builde
             }
             else
             {
-                u32 child_end = c_ir_statement_do_tail_end(preprocess, child.if_start != UINT32_MAX ? child_if_end : child.end, end, child.pending_do);
+                u32 child_inner_end = child.if_start != UINT32_MAX ? child_if_end : child.end;
+                u32 child_end = c_ir_statement_do_tail_end(preprocess, child_inner_end, end, child.pending_do);
                 failed = child_end == UINT32_MAX || child_end <= child_start;
                 frame->child_end = child_end;
+                c_ir_statement_peels_file(builder, &arm_peels, child_inner_end, child.pending_do, end);
             }
         }
         completed = failed ? UINT32_MAX : completed;
+        // The headers peeled before the outermost `if` end with its chain, on
+        // the same condition as the `if` itself is filed.
+        if (!failed && outer_if_end < end)
+        {
+            c_ir_statement_peels_file(builder, &peels, outer_if_end, span.pending_do, end);
+        }
     }
 
     return completed;

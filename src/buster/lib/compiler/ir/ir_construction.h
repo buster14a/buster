@@ -146,6 +146,7 @@
     X(VALIDATION_LABEL_OWNER_PROBES, validation_label_owner_probes) \
     X(VALIDATION_LABEL_SCRATCH_BYTES, validation_label_scratch_bytes) \
     X(C_STATEMENT_EXTENT_SPANS, c_statement_extent_spans) \
+    X(C_STATEMENT_EXTENT_PEELS, c_statement_extent_peels) \
     X(C_DELIMITER_FALLBACK_TOKENS, c_delimiter_fallback_tokens) \
     X(FOLD_BIRTH_SCALAR_ROWS, fold_birth_scalar_rows) \
     X(FOLD_BIRTH_CAST_IDENTITY, fold_birth_cast_identity) \
