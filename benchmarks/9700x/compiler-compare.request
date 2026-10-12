@@ -160,3 +160,6 @@ request: issue #47 PR #3171 resolved shared request history on main ec2e3033de74
 request: issue #47 PR #3171 combined head after #3111 (23f617cd) landed: -O levels select only canonical FAST passes, tiny inlining stays explicit -fcanonical-inline; merged main 2ca6d797; fresh exact-head compiler-compare-v1 O0/default qualification
 request: issue #47 PR #3171 docs-only follow-up (review 5484683484: remove stale positive-level tiny inlining text) on combined head over main 2ca6d797; fresh exact-head compiler-compare-v1 O0/default qualification
 request: issue #47 PR #3171 combined head merged with main 86634390 (driver_fast_test fixture conflict resolved by keeping both); -O selects only canonical FAST passes, tiny inlining explicit; fresh exact-head compiler-compare-v1 O0/default qualification
+
+request: issue #2761 first 9700X compiler-probes run after #3657 landed; request-only head over main e13523e94128; fresh compiler-compare-v1 plus compiler-probes-v1 leg (report-only, A/A) and live proof of #3656 inventory_coverage discharge
+profile: compiler-probes-v1
