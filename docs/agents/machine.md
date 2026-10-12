@@ -264,6 +264,16 @@ hosts execute its independent expected-value fixture.
   output-capacity and unwind failures to structured codegen errors. It never
   invokes direct canonical emission. `-fno-machine-fallback` remains accepted
   for command-line compatibility but cannot make this contract stricter.
+- x86-64 incoming stack aggregates currently expand each eightbyte into two
+  MIR rows and one temporary register. The signature gate limits their combined
+  capture to 65,536 eightbytes (512 KiB), including rounding and conservatively
+  counting register-passed direct aggregates, before building
+  MIR. Larger signatures receive `codegen.unsupported-abi` and no artifact;
+  the bound applies to stack aggregate captures, not indirect Win64 arguments
+  or result pointers. A bounded block-copy lowering is needed to remove it.
+  `machine_test_incoming_aggregate_capacity` checks large and combined
+  parameters, both frontend forms, FAST/QUALITY, Linux/macOS objects and a
+  supported 64 KiB control without executing a large native stack.
 - Native signature and call storage is sized from canonical IR counts. Incoming
   shapes, placements, argument values and normalization rows use arena arrays;
   the existing value-fact walk sizes one reusable call workspace per function.

@@ -131,6 +131,9 @@ BUSTER_F_DECL void c_test_ast_type_verify_set(bool enabled);
 BUSTER_F_DECL void c_test_ast_type_verify_perturb_alignments(bool enabled);
 // The counts since the last take, which resets them.
 BUSTER_F_DECL CTestAstTypeVerify c_test_ast_type_verify_take(void);
+// Turns the declaration specifier read from the tree (c_parse.c) off and back
+// on, per thread, so a test can analyse the same unit with and without it.
+BUSTER_F_DECL void c_test_ast_specifiers_set(bool enabled);
 
 BUSTER_F_DECL CDiagnostic c_test_check_named_call_arities(Arena* arena, CAnalysisResult* analysis, CPreprocessResult preprocess,
                                                         u32 start, u32 end);
