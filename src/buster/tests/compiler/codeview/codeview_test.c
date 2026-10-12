@@ -20,6 +20,110 @@ BUSTER_GLOBAL_LOCAL u32 codeview_test_u32(u8 const* bytes)
     return value;
 }
 
+// C13 without a column table gives a source line one contiguous address
+// range. Distinct columns on that line must not hide a later call from a
+// consumer which disassembles the range containing the first line address.
+BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_line_ranges(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 paths[] = {S8("caller.c"), S8("included.h")};
+    DwarfFunction functions[] = {
+        {.name = S8("caller"), .code_offset = 0, .code_size = 40, .file = 0, .line = 47},
+        {.name = S8("neighbor"), .code_offset = 64, .code_size = 16, .file = 0, .line = 52},
+    };
+    DwarfLineEntry lines[] = {
+        {.code_offset = 0, .file = 0, .line = 47, .column = 1},
+        {.code_offset = 8, .file = 0, .line = 52, .column = 1},
+        {.code_offset = 12, .file = 0, .line = 52, .column = 35},
+        {.code_offset = 16, .file = 0, .line = 52, .column = 69},
+        {.code_offset = 20, .file = 0, .line = 52, .column = 69},
+        {.code_offset = 24, .file = 0, .line = 53, .column = 1},
+        {.code_offset = 28, .file = 0, .line = 52, .column = 1},
+        {.code_offset = 32, .file = 1, .line = 52, .column = 1},
+        {.code_offset = 36, .file = 0, .line = 52, .column = 1},
+        {.code_offset = 64, .file = 0, .line = 52, .column = 1},
+        {.code_offset = 68, .file = 0, .line = 52, .column = 9},
+        {.code_offset = 72, .file = 0, .line = 54, .column = 1},
+    };
+    DwarfLineEntry original_lines[BUSTER_ARRAY_LENGTH(lines)];
+    memcpy(original_lines, lines, sizeof(lines));
+    // Offset/line images specify the projected source ranges independently
+    // of the producer's run loop; file changes retain their own line blocks.
+    u32 expected_offsets[] = {0, 8, 24, 28, 32, 36, 0, 8};
+    u32 expected_lines[] = {47, 52, 53, 52, 52, 52, 52, 54};
+    u32 expected_files[] = {0, 8, 0, 0};
+    u32 expected_counts[] = {4, 1, 1, 2};
+    u16 machines[] = {CODEVIEW_MACHINE_X64, CODEVIEW_MACHINE_ARM64};
+    for (u32 machine_index = 0; machine_index < BUSTER_ARRAY_LENGTH(machines); machine_index += 1)
+    {
+        CodeviewResult built = codeview_build(arguments->arena, (CodeviewInput){
+            .producer = S8("buster"), .file_paths = paths, .functions = functions, .lines = lines,
+            .file_count = BUSTER_ARRAY_LENGTH(paths), .function_count = BUSTER_ARRAY_LENGTH(functions),
+            .line_count = BUSTER_ARRAY_LENGTH(lines), .machine = machines[machine_index],
+        });
+        bool valid = built.valid && built.symbols.length >= 4 &&
+            codeview_test_u32(built.symbols.pointer) == 4;
+        u64 subsection = 4;
+        u32 contributions = 0;
+        u32 blocks = 0;
+        u32 rows = 0;
+        while (valid && subsection + 8 <= built.symbols.length)
+        {
+            u32 kind = codeview_test_u32(built.symbols.pointer + subsection);
+            u32 length = codeview_test_u32(built.symbols.pointer + subsection + 4);
+            u64 payload = subsection + 8;
+            valid = length <= built.symbols.length - payload;
+            if (valid && kind == 0xf2)
+            {
+                valid = length >= 12 && contributions < BUSTER_ARRAY_LENGTH(functions);
+                if (valid)
+                {
+                    // The object producer leaves the paired address/section
+                    // slots neutral; flags 0 explicitly means no columns.
+                    valid = codeview_test_u32(built.symbols.pointer + payload) == 0 &&
+                        codeview_test_u16(built.symbols.pointer + payload + 4) == 0 &&
+                        codeview_test_u16(built.symbols.pointer + payload + 6) == 0 &&
+                        codeview_test_u32(built.symbols.pointer + payload + 8) == functions[contributions].code_size;
+                    contributions += 1;
+                    u64 cursor = payload + 12;
+                    u64 end = payload + length;
+                    while (valid && cursor < end)
+                    {
+                        valid = end - cursor >= 12 && blocks < BUSTER_ARRAY_LENGTH(expected_files);
+                        if (valid)
+                        {
+                            u32 file = codeview_test_u32(built.symbols.pointer + cursor);
+                            u32 count = codeview_test_u32(built.symbols.pointer + cursor + 4);
+                            u32 block_size = codeview_test_u32(built.symbols.pointer + cursor + 8);
+                            valid = file == expected_files[blocks] && count == expected_counts[blocks] &&
+                                block_size == 12 + count * 8 && block_size <= end - cursor;
+                            for (u32 row = 0; valid && row < count; row += 1)
+                            {
+                                valid = rows < BUSTER_ARRAY_LENGTH(expected_offsets);
+                                if (valid)
+                                {
+                                    u64 row_offset = cursor + 12 + (u64)row * 8;
+                                    u32 offset = codeview_test_u32(built.symbols.pointer + row_offset);
+                                    u32 source = codeview_test_u32(built.symbols.pointer + row_offset + 4);
+                                    valid = offset == expected_offsets[rows] && source == (expected_lines[rows] | 0x80000000u);
+                                    rows += 1;
+                                }
+                            }
+                            blocks += 1;
+                            cursor += block_size;
+                        }
+                    }
+                    valid = valid && cursor == end;
+                }
+            }
+            subsection = payload + (((u64)length + 3) & ~UINT64_C(3));
+        }
+        BUSTER_TEST(arguments, valid && contributions == 2 && blocks == 4 && rows == 8);
+        BUSTER_TEST(arguments, !memcmp(lines, original_lines, sizeof(lines)));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_global_linkage(UnitTestArguments* arguments)
 {
     enum {TEST_LDATA32 = 0x110c, TEST_GDATA32 = 0x110d};
@@ -510,7 +614,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_many_location_ranges(UnitTestAr
 // consecutive records that cover all of it, not clamped to its first 64 KiB.
 BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_long_location_range(UnitTestArguments* arguments)
 {
-    enum { TEST_S_DEFRANGE_FRAMEPOINTER_REL = 0x1142, CODE_SIZE = 140000, MAX_RECORDS = 8 };
+    enum { TEST_S_DEFRANGE_REGISTER_REL = 0x1145, TEST_CV_AMD64_RBP = 334, CODE_SIZE = 140000, MAX_RECORDS = 8 };
     UnitTestResult result = {0};
     String8 path = S8("long.c");
     DebugType types[] = {
@@ -557,13 +661,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_long_location_range(UnitTestArg
             u16 record_length = codeview_test_u16(built.symbols.pointer + cursor);
             u16 record_kind = codeview_test_u16(built.symbols.pointer + cursor + 2);
             valid = record_length >= 2 && (u64)record_length + 2 <= payload + length - cursor;
-            if (valid && record_kind == TEST_S_DEFRANGE_FRAMEPOINTER_REL)
+            if (valid && record_kind == TEST_S_DEFRANGE_REGISTER_REL)
             {
-                valid = record_length + 2u >= 16u && record_count < MAX_RECORDS;
+                // Register, flags, base offset, then the address range: every
+                // split record names RBP-8 explicitly rather than an implicit frame.
+                valid = record_length + 2u >= 20u && record_count < MAX_RECORDS &&
+                        codeview_test_u16(built.symbols.pointer + cursor + 4) == TEST_CV_AMD64_RBP &&
+                        codeview_test_u32(built.symbols.pointer + cursor + 8) == (u32)-8;
                 if (valid)
                 {
-                    starts[record_count] = codeview_test_u32(built.symbols.pointer + cursor + 8);
-                    lengths[record_count] = codeview_test_u16(built.symbols.pointer + cursor + 14);
+                    starts[record_count] = codeview_test_u32(built.symbols.pointer + cursor + 12);
+                    lengths[record_count] = codeview_test_u16(built.symbols.pointer + cursor + 18);
                     record_count += 1;
                 }
             }
@@ -965,9 +1073,54 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_bit_fields_and_arrays(UnitTestA
     return result;
 }
 
+// LF_POINTER's six-bit size field must carry the model's pointer bytes;
+// sizes it cannot hold refuse the build instead of being truncated.
+BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_pointer_sizes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 path = S8("pointers.c");
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4, .is_signed = true},
+        {.kind = DEBUG_TYPE_POINTER, .element_type = 0, .size = 8},
+    };
+    DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .valid = true};
+    CodeviewResult built = codeview_build(arguments->arena, (CodeviewInput){.model = &model, .file_paths = &path, .file_count = 1,
+        .machine = CODEVIEW_MACHINE_X64});
+    u32 pointers = 0;
+    u64 cursor = 4;
+    while (built.valid && cursor + 4 <= built.types.length)
+    {
+        u16 length = codeview_test_u16(built.types.pointer + cursor);
+        u16 kind = codeview_test_u16(built.types.pointer + cursor + 2);
+        if (kind == 0x1002 && length >= 10)
+        {
+            u32 attributes = codeview_test_u32(built.types.pointer + cursor + 8);
+            BUSTER_TEST(arguments, (attributes & 0x1f) == 0x0c && ((attributes >> 13) & 0x3f) == 8);
+            pointers += 1;
+        }
+        cursor += 2 + (u64)length;
+    }
+    BUSTER_TEST(arguments, built.valid && pointers == 1);
+    u64 unsupported_sizes[] = {0, 64, UINT64_MAX};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unsupported_sizes); index += 1)
+    {
+        types[1].size = unsupported_sizes[index];
+        CodeviewResult refused = codeview_build(arguments->arena, (CodeviewInput){.model = &model, .file_paths = &path, .file_count = 1,
+            .machine = CODEVIEW_MACHINE_X64});
+        BUSTER_TEST(arguments, !refused.valid);
+    }
+    return result;
+}
+
 UnitTestResult codeview_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codeview_test_large_types(arguments);
+    UnitTestResult pointer_sizes = codeview_test_pointer_sizes(arguments);
+    result.test_count += pointer_sizes.test_count;
+    result.succeeded_test_count += pointer_sizes.succeeded_test_count;
+    UnitTestResult line_ranges = codeview_test_line_ranges(arguments);
+    result.test_count += line_ranges.test_count;
+    result.succeeded_test_count += line_ranges.succeeded_test_count;
     UnitTestResult linkage = codeview_test_global_linkage(arguments);
     result.test_count += linkage.test_count;
     result.succeeded_test_count += linkage.succeeded_test_count;
@@ -1271,6 +1424,7 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     bool found_register = false;
     bool found_frame = false;
     bool found_subfield = false;
+    bool found_frame_subfield = false;
     bool found_inline = false;
     u64 model_symbol_offset = 4;
     while (model_symbol_offset + 8 <= model_built.symbols.length)
@@ -1306,15 +1460,17 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
                 }
                 found_local |= record_kind == CODEVIEW_TEST_S_LOCAL;
                 found_register |= record_kind == CODEVIEW_TEST_S_DEFRANGE_REGISTER;
-                found_frame |= record_kind == CODEVIEW_TEST_S_DEFRANGE_FRAMEPOINTER_REL;
-                found_subfield |= record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD || record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER;
+                found_frame |= record_kind == CODEVIEW_TEST_S_DEFRANGE_REGISTER_REL;
+                found_subfield |= record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD_REGISTER;
+                found_frame_subfield |= record_kind == CODEVIEW_TEST_S_DEFRANGE_SUBFIELD;
                 found_inline |= record_kind == CODEVIEW_TEST_S_INLINESITE;
                 record_offset += 2 + record_length;
             }
         }
         model_symbol_offset = payload + ((subsection_length + 3) & ~3u);
     }
-    BUSTER_TEST(arguments, found_procedure_type && found_local && found_register && found_frame && found_subfield && found_inline);
+    BUSTER_TEST(arguments, found_procedure_type && found_local && found_register && found_frame && found_subfield && found_inline &&
+                               !found_frame_subfield);
 
     DebugVariable global_variable = {
         .name = S8("global_value"),

@@ -5,6 +5,7 @@
 // machine_test_a64_atomic_pair_updates pins pair-update payloads, clobbers,
 // both frontend forms, small/large frame expansion and the direct CAS oracle.
 // machine_test_a64_large_aggregate_copy covers pointer/frame copies beyond imm12.
+// machine_test_x64_narrow_call_results checks ABI-width RAX captures.
 // machine_test_boolean_i128_cast checks Boolean widening and its strict IR contract.
 // machine_test_frame_capacity guards checked placement and capacity diagnostics.
 // machine_test_sparse_local_state compares sparse and row-based local discovery.
@@ -3183,6 +3184,77 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_recreated_edge_sources(UnitTestA
     return result;
 }
 
+// Entry copies must be refused before their byte count expands into millions
+// of MIR rows. No witness below executes or allocates its native stack.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_incoming_aggregate_capacity(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("struct big { char bytes[0x800000]; }; int first(struct big value) { return value.bytes[0]; }"),
+        S8("struct big { char bytes[0x1000000]; }; int first(struct big value) { return value.bytes[0]; }"),
+        S8("struct big { char bytes[0x20000000]; }; int first(struct big value) { return value.bytes[0]; }"),
+        S8("struct big { char bytes[0x7ffffff0]; }; int first(struct big value) { return value.bytes[0]; }"),
+        S8("struct big { char bytes[0x80000000]; }; int first(struct big value) { return value.bytes[0]; }"),
+        // One byte past the rounded 512 KiB combined copy budget.
+        S8("struct big { char bytes[0x80001]; }; int first(struct big value) { return value.bytes[0]; }"),
+        // Each parameter fits on its own; together they exceed the budget.
+        S8("struct big { char bytes[0x40001]; }; int first(struct big a, struct big b) { return a.bytes[0] + b.bytes[0]; }"),
+        // An unused parameter still belongs to the signature.
+        S8("struct big { char bytes[0x800000]; }; int first(struct big value) { return 0; }"),
+    };
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_MACOS};
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+    {
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = systems[system]};
+        for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
+        {
+            for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("incoming-capacity.c"), sources[source], target,
+                    (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                if (BUSTER_REQUIRE(arguments, program && program->module_count == 1))
+                {
+                    IrFunction* function = machine_test_ir_function_find(program->modules, S8("first"));
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        u64 before = temporary.arena->position;
+                        MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                        BUSTER_TEST(arguments, !selected.supported && selected.signature_rejected && selected.failed_opcode == IR_OPCODE_COUNT);
+                        BUSTER_TEST(arguments, selected.function.instruction_count == 0);
+                        BUSTER_TEST(arguments, temporary.arena->position - before < BUSTER_MB(1));
+                        for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                        {
+                            CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, program->modules, target,
+                                (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                            BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_UNSUPPORTED_ABI);
+                            BUSTER_TEST(arguments, generated.failed_phase == CODEGEN_PHASE_MACHINE_SELECTION);
+                            BUSTER_TEST(arguments, generated.code.length == 0);
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+        // Keep ordinary large stack parameters supported.
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        IrProgram* program = machine_test_compile_c(temporary.arena, S8("incoming-supported.c"),
+            S8("struct big { char bytes[0x10000]; }; int first(struct big value) { return value.bytes[0]; }"), target);
+        if (BUSTER_REQUIRE(arguments, program && program->module_count == 1))
+        {
+            IrFunction* function = machine_test_ir_function_find(program->modules, S8("first"));
+            if (BUSTER_REQUIRE(arguments, function != 0))
+            {
+                MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                BUSTER_TEST(arguments, selected.supported && !selected.signature_rejected);
+                BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // Large virtual sizes exercise frame arithmetic without reserving or executing
 // a large native stack. Independent boundary values distinguish u32 storage,
 // x86-64 signed displacements and AArch64's unsigned frame/footer range.
@@ -4139,6 +4211,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_disconnected_dominance(UnitTestA
     }
     return result;
 }
+
+#include <buster/tests/compiler/codegen/x64_narrow_call_result_test_internal.h>
 
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_boolean_i128_cast(UnitTestArguments* arguments)
 {
@@ -8128,13 +8202,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_f80(UnitTestArguments* arguments
                             // Resolve only bounded local PC32 calls/addresses before
                             // copying into executable storage; external/data references
                             // fail the test without executing an unpatched module.
+                            // Mach-O spells a direct call PLT32 (BRANCH), whose
+                            // arithmetic is the same.
                             bool patched = true;
                             for (u32 relocation_index = 0; patched && relocation_index < generated.relocation_count; relocation_index += 1)
                             {
                                 CodegenModuleRelocation* relocation = generated.relocations + relocation_index;
                                 bool found = false;
                                 if (codegen_module_relocation_valid(relocation) && relocation->source == CODEGEN_MODULE_RELOCATION_CODE &&
-                                    relocation->kind == CODEGEN_MODULE_RELOCATION_X86_64_PC32 && !relocation->addend &&
+                                    (relocation->kind == CODEGEN_MODULE_RELOCATION_X86_64_PC32 ||
+                                     relocation->kind == CODEGEN_MODULE_RELOCATION_X86_64_PLT32) && !relocation->addend &&
                                     relocation->offset <= generated.code.length && generated.code.length - relocation->offset >= 4)
                                 {
                                     for (u32 entry = 0; !found && entry < generated.entry_count; entry += 1)
@@ -10405,11 +10482,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_switch_cfg);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_backward_switch_cfg);
     BUSTER_TEST_FIXTURE(arguments, machine_test_disconnected_dominance);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_incoming_aggregate_capacity);
     BUSTER_TEST_FIXTURE(arguments, machine_test_frame_capacity);
     BUSTER_TEST_FIXTURE(arguments, machine_test_frame_storage_reuse);
     BUSTER_TEST_FIXTURE(arguments, machine_test_frame_address_rematerialization);
     BUSTER_TEST_FIXTURE(arguments, machine_test_recreated_edge_sources);
     BUSTER_TEST_FIXTURE(arguments, machine_test_boolean_i128_cast);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_narrow_call_results);
     BUSTER_TEST_FIXTURE(arguments, machine_test_i128_block_parameters);
     BUSTER_TEST_FIXTURE(arguments, machine_test_pointer_block_parameters);
     BUSTER_TEST_FIXTURE(arguments, machine_test_parameter_edge_split);
@@ -11561,6 +11640,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, exact_map.expansion_rows == MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT);
     BUSTER_TEST(arguments, exact_map.expansion_nonexact_rows == exact_map.expansion_rows);
     BUSTER_TEST(arguments, exact_map.dense_encoding_tables == 64);
+    BUSTER_TEST(arguments, exact_map.dense_encoding_ready_tables == 64);
+    BUSTER_TEST(arguments, exact_map.dense_encoding_failed_tables == 0);
     BUSTER_TEST(arguments, exact_map.immediate_patch_tables == 9);
     BUSTER_TEST(arguments, exact_map.memory_base_tables == 8);
     BUSTER_TEST(arguments, exact_map.displacement_patch_tables == 8);
@@ -11576,6 +11657,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // MULH64's mul rcx adds one static row.
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_rows == 1503,
                     string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1503 (rows: {u32})"), exact_map.fixed_template_rows));
+    BUSTER_TEST(arguments, exact_map.fixed_template_pending_rows == 0);
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
     BUSTER_TEST_FIXTURE(arguments, machine_test_gpr_preparation);
@@ -11746,6 +11828,37 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, payloads_ordered);
     BUSTER_TEST(arguments, machine_verify_function(&large).error == MACHINE_VERIFY_NONE);
+
+    // Selection finds a virtual register's row by index on every definition.
+    // Walking the chunk list for it was quadratic in one function's register
+    // count (#3569). Severing the links proves the lookup goes through the
+    // chunk index; a reintroduced walk loses every row past the first chunk.
+    MachineFunctionBuilder lookup_builder = machine_function_builder_begin(arguments->arena);
+    u32 lookup_capacity = lookup_builder.virtual_registers.chunk_capacity;
+    u32 lookup_count = lookup_capacity * 20 + 7;
+    for (u32 index = 0; index < lookup_count; index += 1)
+    {
+        machine_builder_virtual_register(&lookup_builder, (MachineVirtualRegister){
+                                                              .definition_point = MACHINE_POINT_INVALID,
+                                                              .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                              .typed_origin = index,
+                                                          });
+    }
+    BUSTER_TEST(arguments, lookup_builder.virtual_register_chunk_count == 21);
+    for (MachineBuilderChunk* chunk = lookup_builder.virtual_registers.first; chunk;)
+    {
+        MachineBuilderChunk* next = chunk->next;
+        chunk->next = 0;
+        chunk = next;
+    }
+    bool lookup_rows_ordered = true;
+    for (u32 index = 0; index < lookup_count; index += 1)
+    {
+        MachineVirtualRegister const* row = machine_builder_virtual_register_at(&lookup_builder, index);
+        lookup_rows_ordered &= row != 0 && row->typed_origin == index;
+    }
+    BUSTER_TEST(arguments, lookup_rows_ordered);
+    BUSTER_TEST(arguments, machine_builder_virtual_register_at(&lookup_builder, lookup_count) == 0);
 
     // A caller may deliberately finish into a different arena and release
     // the builder arena immediately. That path must copy even a one-chunk

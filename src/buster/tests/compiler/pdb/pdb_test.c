@@ -236,8 +236,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_checksum_records(UnitTestArguments* 
             BUSTER_TEST(arguments, memcmp(module.pointer + 112, original + lines_header, 100) == 0);
         }
     }
-    // Reuse the same record shapes in a second module: its remap must use its
-    // own names offsets without moving any checksum or line-record boundary.
+    // Reuse the same record shapes in a second module: its remap must not move
+    // any checksum or line-record boundary, and since it names the same paths
+    // it points at the first module's /names copies rather than new ones.
     PdbModule modules[2] = {
         {.name = S8("first.obj"), .codeview_symbols = input.codeview_symbols, .code_section = 1, .code_size = 16},
         {.name = S8("second.obj"), .codeview_symbols = input.codeview_symbols, .code_section = 1, .code_offset = 16, .code_size = 16},
@@ -255,7 +256,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_checksum_records(UnitTestArguments* 
             {
                 u32 offset = record_offsets[index];
                 u32 stride = (6 + (u32)digest_sizes[index] + 3) & ~(u32)3;
-                BUSTER_TEST(arguments, pdb_read_u32(second, 12 + offset) == mapped_offsets[index] + 29);
+                BUSTER_TEST(arguments, pdb_read_u32(second, 12 + offset) == mapped_offsets[index]);
                 BUSTER_TEST(arguments, memcmp(second.pointer + 12 + offset + 4,
                                              original + checksum_start + offset + 4, stride - 4) == 0);
             }
@@ -298,6 +299,162 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_checksum_records(UnitTestArguments* 
 
 // Scope links are offsets in the final module symbol stream, including its
 // four-byte signature, not offsets into the input .debug$S subsection layout.
+// Independent restatement of the classic PDB string hash (hashStringV1).
+BUSTER_GLOBAL_LOCAL u32 pdb_test_hash_v1(String8 text)
+{
+    u32 result = 0;
+    u64 index = 0;
+    for (; index + 4 <= text.length; index += 4)
+    {
+        result ^= pdb_read_u32((ByteSlice){.pointer = (u8*)text.pointer, .length = text.length}, index);
+    }
+    if (text.length - index >= 2)
+    {
+        result ^= (u32)((u8)text.pointer[index] | (u8)text.pointer[index + 1] << 8);
+        index += 2;
+    }
+    if (text.length - index == 1)
+    {
+        result ^= (u8)text.pointer[index];
+    }
+    result |= 0x20202020u;
+    result ^= result >> 11;
+    result ^= result >> 16;
+    return result;
+}
+
+// Reads the name of the symbol-records-stream record at `offset`.
+BUSTER_GLOBAL_LOCAL String8 pdb_test_record_name(ByteSlice records, u32 offset)
+{
+    String8 name = {0};
+    u16 length = 0;
+    u16 kind = 0;
+    if ((u64)offset + 4 <= records.length)
+    {
+        memcpy(&length, records.pointer + offset, sizeof(length));
+        memcpy(&kind, records.pointer + offset + 2, sizeof(kind));
+    }
+    // S_PROCREF, S_PUB32 and S_[GL]DATA32 all place their name after 14 bytes.
+    bool named = kind == PDB_TEST_S_PROCREF || kind == PDB_TEST_S_PUB32 || kind == PDB_TEST_S_GDATA32 || kind == PDB_TEST_S_LDATA32;
+    u64 name_offset = named ? 14 : 0;
+    u64 end = (u64)offset + 2 + length;
+    if (name_offset && end <= records.length)
+    {
+        u64 cursor = offset + name_offset;
+        while (cursor < end && records.pointer[cursor])
+        {
+            cursor += 1;
+        }
+        if (cursor < end)
+        {
+            name = (String8){.pointer = (char8*)records.pointer + offset + name_offset, .length = cursor - offset - name_offset};
+        }
+    }
+    return name;
+}
+
+// Re-derives one GSI hash table: every hash record names a record whose
+// hashStringV1 bucket is the bucket the bitmap and bucket offsets place it in.
+BUSTER_GLOBAL_LOCAL bool pdb_test_check_gsi(ByteSlice hash, ByteSlice records, u32* record_count)
+{
+    enum { BUCKETS = 4096, BITMAP_WORDS = (4096 + 32) / 32 };
+    bool valid = hash.length >= 16 && pdb_read_u32(hash, 0) == 0xffffffffu && pdb_read_u32(hash, 4) == 0xf12f091au;
+    u32 hr_size = valid ? pdb_read_u32(hash, 8) : 0;
+    u32 bucket_bytes = valid ? pdb_read_u32(hash, 12) : 0;
+    u32 count = hr_size / 8;
+    valid = valid && !(hr_size % 8) && (u64)16 + hr_size + bucket_bytes == hash.length && bucket_bytes >= BITMAP_WORDS * 4;
+    u64 bitmap = 16 + (u64)hr_size;
+    u64 starts = bitmap + BITMAP_WORDS * 4;
+    u32 present = 0;
+    for (u32 bucket = 0; valid && bucket < BUCKETS; bucket += 1)
+    {
+        if (pdb_read_u32(hash, bitmap + bucket / 32 * 4) & (1u << (bucket % 32)))
+        {
+            valid = starts + (u64)present * 4 + 4 <= hash.length;
+            u32 first = valid ? pdb_read_u32(hash, starts + (u64)present * 4) / 12 : 0;
+            u32 next = count;
+            // The next present bucket's start ends this one.
+            for (u32 later = bucket + 1; valid && later < BUCKETS && next == count; later += 1)
+            {
+                if (pdb_read_u32(hash, bitmap + later / 32 * 4) & (1u << (later % 32)))
+                {
+                    next = pdb_read_u32(hash, starts + (u64)present * 4 + 4) / 12;
+                }
+            }
+            valid = valid && first < next && next <= count;
+            for (u32 index = first; valid && index < next; index += 1)
+            {
+                u32 offset = pdb_read_u32(hash, 16 + (u64)index * 8);
+                String8 name = offset ? pdb_test_record_name(records, offset - 1) : (String8){0};
+                valid = name.length && pdb_read_u32(hash, 20 + (u64)index * 8) == 1 && pdb_test_hash_v1(name) % BUCKETS == bucket;
+            }
+            present += 1;
+        }
+    }
+    valid = valid && starts + (u64)present * 4 == hash.length;
+    *record_count = count;
+    return valid;
+}
+
+// Global and public indexes (#3411): DbgHelp treats a PDB with empty ones as
+// public-only. Check the hash tables, the module references and the address map.
+BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_global_indexes(UnitTestArguments* arguments, PdbResult built)
+{
+    UnitTestResult result = {0};
+    ByteSlice records = pdb_test_stream_bytes(arguments->arena, built.bytes, PDB_TEST_STREAM_SYMBOL_RECORDS);
+    ByteSlice globals = pdb_test_stream_bytes(arguments->arena, built.bytes, PDB_TEST_STREAM_GLOBALS);
+    ByteSlice publics = pdb_test_stream_bytes(arguments->arena, built.bytes, PDB_TEST_STREAM_PUBLICS);
+    ByteSlice module = pdb_test_stream_bytes(arguments->arena, built.bytes, PDB_TEST_STREAM_MODULE);
+    u32 global_count = 0;
+    BUSTER_TEST(arguments, records.length && pdb_test_check_gsi(globals, records, &global_count) && global_count);
+    // Every S_PROCREF names the module-stream offset of a same-named S_GPROC32.
+    u32 references = 0;
+    for (u32 index = 0; index < global_count; index += 1)
+    {
+        u32 offset = pdb_read_u32(globals, 16 + (u64)index * 8) - 1;
+        u16 kind = 0;
+        memcpy(&kind, records.pointer + offset + 2, sizeof(kind));
+        if (kind == PDB_TEST_S_PROCREF)
+        {
+            u32 module_offset = pdb_read_u32(records, (u64)offset + 8);
+            u16 module_index = 0;
+            memcpy(&module_index, records.pointer + offset + 12, sizeof(module_index));
+            u16 target_kind = 0;
+            String8 name = pdb_test_record_name(records, offset);
+            bool target = name.pointer && module_index == 1 && (u64)module_offset + 40 + name.length <= module.length;
+            if (target)
+            {
+                memcpy(&target_kind, module.pointer + module_offset + 2, sizeof(target_kind));
+            }
+            BUSTER_TEST(arguments, target && target_kind == PDB_TEST_S_GPROC32 &&
+                                   !memcmp(module.pointer + module_offset + 39, name.pointer, name.length));
+            references += 1;
+        }
+    }
+    BUSTER_TEST(arguments, references >= 2);
+    // Publics: header, the same hash form, then an address map sorted by
+    // (section, offset) over S_PUB32 records.
+    u32 hash_size = publics.length >= 28 ? pdb_read_u32(publics, 0) : 0;
+    u32 map_size = publics.length >= 28 ? pdb_read_u32(publics, 4) : 0;
+    bool header = publics.length >= 28 && (u64)28 + hash_size + map_size == publics.length && !(map_size % 4);
+    u32 public_count = 0;
+    BUSTER_TEST(arguments, header && pdb_test_check_gsi((ByteSlice){.pointer = publics.pointer + 28, .length = hash_size}, records, &public_count) &&
+                           public_count == map_size / 4 && public_count >= 2);
+    u64 previous = 0;
+    for (u32 index = 0; header && index < map_size / 4; index += 1)
+    {
+        u32 offset = pdb_read_u32(publics, 28 + (u64)hash_size + (u64)index * 4);
+        u16 kind = 0;
+        u16 section = 0;
+        memcpy(&kind, records.pointer + offset + 2, sizeof(kind));
+        memcpy(&section, records.pointer + offset + 12, sizeof(section));
+        u64 key = (u64)section << 32 | pdb_read_u32(records, (u64)offset + 8);
+        BUSTER_TEST(arguments, kind == PDB_TEST_S_PUB32 && key >= previous);
+        previous = key;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_scope_links(UnitTestArguments* arguments, PdbResult built, CodeviewResult codeview)
 {
     UnitTestResult result = {0};
@@ -836,12 +993,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_large_source_count(UnitTestArguments
             ByteSlice module = pdb_test_stream_bytes(arena, built.bytes, stream_index);
             bool valid = module.length == 16 + module_files * checksum_stride;
             BUSTER_TEST(arguments, valid);
+            // Both modules name the same paths, so both point at the one
+            // /names copy of each.
             for (u32 file = 0; file < module_files && valid; file += 1)
             {
-                u32 expected = 1 + (module_index * module_files + file) * 7;
+                u32 expected = 1 + file * 7;
                 valid = pdb_read_u32(module, 12 + (u64)file * checksum_stride) == expected;
             }
             BUSTER_TEST(arguments, valid);
+        }
+        ByteSlice names = pdb_test_stream_bytes(arena, built.bytes, PDB_TEST_STREAM_NAMES);
+        u64 names_buffer = 1 + (u64)module_files * 7;
+        if (BUSTER_REQUIRE(arguments, names.length >= 12 + names_buffer + 8 && pdb_read_u32(names, 8) == names_buffer))
+        {
+            u32 bucket_count = pdb_read_u32(names, 12 + names_buffer);
+            BUSTER_TEST(arguments, names.length == 12 + names_buffer + 4 + (u64)bucket_count * 4 + 4 &&
+                                       pdb_read_u32(names, names.length - 4) == module_files);
         }
     }
     // The total may exceed 16 bits, but one module's ModFileCount may not.
@@ -853,9 +1020,184 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_large_source_count(UnitTestArguments
     return result;
 }
 
+// Bitwise reflected CRC-32, initial state zero and no final complement: an
+// independent restatement of the table-driven hash the PDB writer uses.
+BUSTER_GLOBAL_LOCAL u32 pdb_test_record_crc(u8 const* bytes, u64 length)
+{
+    u32 crc = 0;
+    for (u64 offset = 0; offset < length; offset += 1)
+    {
+        crc ^= bytes[offset];
+        for (u32 bit = 0; bit < 8; bit += 1)
+        {
+            crc = (crc >> 1) ^ ((crc & 1) ? 0xedb88320u : 0);
+        }
+    }
+    return crc;
+}
+
+// Microsoft's DbgHelp shares no code with Buster's PDB readers and faulted with
+// 0xc0000005 on every Buster PDB while those readers passed (#3411). On a
+// Windows host with the SDK debuggers, load the PDB through `dbh info`.
+BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_dbghelp_consumer(UnitTestArguments* arguments, ByteSlice pdb)
+{
+    UnitTestResult result = {0};
+#if BUSTER_WINDOWS
+    String8 dbh = executable_resolve_in_path(arguments->arena, S8("dbh"));
+    String8 kits = os_get_environment_variable(S8("ProgramFiles(x86)"));
+    if (!dbh.length && kits.length)
+    {
+        String8 debugger_arch = BUSTER_CPU_ARCH_AARCH64 ? S8("arm64") : S8("x64");
+        dbh = string_format(arguments->arena, S8("{S8}\\Windows Kits\\10\\Debuggers\\{S8}\\dbh.exe"), kits, debugger_arch);
+    }
+    String8 path = buster_test_temporary_path(arguments->arena, S8("buster-dbghelp"), S8(".pdb"));
+    ProcessSpawnResult spawn = {0};
+    if (dbh.length && BUSTER_REQUIRE(arguments, file_write(path, pdb)))
+    {
+        String8 args[] = {dbh, S8("-v"), path, S8("info")};
+        ProcessSpawnOptions options = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                       .use_process_environment = true, .new_process_group = true};
+        spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(args), (SliceString8){0}, (SliceString8){0}, options);
+    }
+    if (spawn.handle)
+    {
+        ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, UINT64_C(30000000));
+        ByteSlice output = wait.streams[STANDARD_STREAM_OUTPUT];
+        String8 text = {.pointer = (char8*)output.pointer, .length = output.length};
+        bool loaded = wait.result == PROCESS_RESULT_SUCCESS && string_first_sequence(text, S8("error 0x")) == BUSTER_STRING_NO_MATCH &&
+                      string_first_sequence(text, S8("SymPdb")) != BUSTER_STRING_NO_MATCH;
+        arguments->show(arguments, S8("PDB_DBGHELP status={S8} tool={S8}\n"), loaded ? S8("loaded") : S8("failed"), dbh);
+        if (!loaded)
+        {
+            arguments->show(arguments, S8("PDB_DBGHELP output={S8}\n"), string_slice(text, 0, BUSTER_MIN(text.length, 2000)));
+        }
+        BUSTER_TEST(arguments, loaded);
+    }
+    else
+    {
+        arguments->show(arguments, S8("PDB_DBGHELP status=unavailable tool={S8}\n"), dbh);
+    }
+    if (dbh.length)
+    {
+        os_file_delete(path);
+    }
+#else
+    (void)pdb;
+    arguments->show(arguments, S8("PDB_DBGHELP status=unavailable reason=non-windows-host\n"));
+#endif
+    return result;
+}
+
+// DbgHelp faults on a PDB whose TPI stream has no hash stream (#3411), so the
+// stream must name one whose buckets and sparse index offsets a reader can use.
+// A 4096-member struct spans several 8 KiB index-offset intervals.
+BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_tpi_hashes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { MEMBER_COUNT = 4096, BUCKET_COUNT = 0x3ffff, INDEX_INTERVAL = 8192 };
+    // hashStringV1("Node") % 0x3ffff, computed outside Buster.
+    u32 const node_bucket = 49125;
+    DebugTypeField* fields = arena_allocate(arguments->arena, DebugTypeField, MEMBER_COUNT);
+    for (u32 index = 0; index < MEMBER_COUNT; index += 1)
+    {
+        fields[index] = (DebugTypeField){.name = string_format(arguments->arena, S8("hashed_member_with_a_long_name_{u32}"), index),
+            .type = 0, .offset = index * 4};
+    }
+    String8 path = S8("hashes.c");
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4, .is_signed = true},
+        {.kind = DEBUG_TYPE_STRUCT, .name = S8("Node"), .size = MEMBER_COUNT * 4, .fields = fields, .field_count = MEMBER_COUNT},
+        {.kind = DEBUG_TYPE_POINTER, .element_type = 1, .size = 8},
+    };
+    DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .valid = true};
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        CodeviewResult codeview = codeview_build(arguments->arena, (CodeviewInput){.model = &model, .file_paths = &path, .file_count = 1,
+            .machine = architecture ? CODEVIEW_MACHINE_ARM64 : CODEVIEW_MACHINE_X64});
+        PdbSection section = {.name = S8(".text"), .virtual_address = 0x1000, .virtual_size = 16, .raw_size = 16, .characteristics = 0x60000020};
+        PdbModule module = {.name = path, .codeview_symbols = codeview.symbols, .codeview_types = codeview.types, .code_size = 16, .code_section = 1};
+        PdbResult built = pdb_build(arguments->arena, (PdbInput){.sections = &section, .section_count = 1, .modules = &module, .module_count = 1,
+            .code_section = 1, .code_size = 16, .machine = architecture ? 0xaa64 : 0x8664, .age = 1});
+        if (BUSTER_REQUIRE(arguments, codeview.valid && built.valid))
+        {
+            ByteSlice tpi = pdb_test_stream_bytes(arguments->arena, built.bytes, PDB_TEST_STREAM_TPI);
+            u16 hash_stream = UINT16_MAX;
+            if (tpi.length >= PDB_TEST_TPI_HEADER_SIZE)
+            {
+                memcpy(&hash_stream, tpi.pointer + 20, sizeof(hash_stream));
+            }
+            ByteSlice hashes = pdb_test_stream_bytes(arguments->arena, built.bytes, hash_stream);
+            u32 count = tpi.length >= PDB_TEST_TPI_HEADER_SIZE ? pdb_read_u32(tpi, 12) - pdb_read_u32(tpi, 8) : 0;
+            u32 values_offset = tpi.length >= PDB_TEST_TPI_HEADER_SIZE ? pdb_read_u32(tpi, 32) : 0;
+            u32 values_size = tpi.length >= PDB_TEST_TPI_HEADER_SIZE ? pdb_read_u32(tpi, 36) : 0;
+            u32 index_offset = tpi.length >= PDB_TEST_TPI_HEADER_SIZE ? pdb_read_u32(tpi, 40) : 0;
+            u32 index_size = tpi.length >= PDB_TEST_TPI_HEADER_SIZE ? pdb_read_u32(tpi, 44) : 0;
+            bool header = hash_stream != UINT16_MAX && pdb_read_u32(tpi, 24) == 4 && pdb_read_u32(tpi, 28) == BUCKET_COUNT &&
+                          count && values_offset == 0 && values_size == (u64)count * 4 && index_offset == values_size &&
+                          index_size && !(index_size & 7) && (u64)index_offset + index_size <= hashes.length && !pdb_read_u32(tpi, 52);
+            if (BUSTER_REQUIRE(arguments, header))
+            {
+                // Walk the records, checking each stored bucket against the
+                // independent rule and counting 8 KiB boundary crossings.
+                u64 cursor = PDB_TEST_TPI_HEADER_SIZE;
+                u32 record = 0;
+                u32 node_matches = 0;
+                u32 crc_mismatches = 0;
+                u32 crossings = 0;
+                u32 entry = 0;
+                bool offsets_match = true;
+                while (cursor + 4 <= tpi.length && record < count)
+                {
+                    u16 length = 0;
+                    u16 kind = 0;
+                    memcpy(&length, tpi.pointer + cursor, sizeof(length));
+                    memcpy(&kind, tpi.pointer + cursor + 2, sizeof(kind));
+                    u64 size = 2 + (u64)length;
+                    u64 start = cursor - PDB_TEST_TPI_HEADER_SIZE;
+                    u32 bucket = pdb_read_u32(hashes, (u64)record * 4);
+                    bool tag = kind == 0x1505 || kind == 0x1506 || kind == 0x1507;
+                    if (kind == 0x1505 && bucket == node_bucket)
+                    {
+                        node_matches += 1;
+                    }
+                    if (!tag && bucket != pdb_test_record_crc(tpi.pointer + cursor, size) % BUCKET_COUNT)
+                    {
+                        crc_mismatches += 1;
+                    }
+                    // Every record whose span reaches a new interval (and the
+                    // first) owns the next index-offset entry.
+                    if (!record || (start + size) / INDEX_INTERVAL > start / INDEX_INTERVAL)
+                    {
+                        crossings += 1;
+                        offsets_match = offsets_match && (u64)entry * 8 + 8 <= index_size &&
+                                        pdb_read_u32(hashes, index_offset + (u64)entry * 8) == PDB_TEST_TYPE_INDEX_BASE + record &&
+                                        pdb_read_u32(hashes, index_offset + (u64)entry * 8 + 4) == start;
+                        entry += 1;
+                    }
+                    cursor += size;
+                    record += 1;
+                }
+                BUSTER_TEST(arguments, cursor == tpi.length && record == count);
+                BUSTER_TEST(arguments, node_matches == 1 && !crc_mismatches);
+                BUSTER_TEST(arguments, offsets_match && crossings > 2 && index_size == crossings * 8);
+            }
+            if (!architecture)
+            {
+                UnitTestResult consumer = pdb_test_dbghelp_consumer(arguments, built.bytes);
+                result.test_count += consumer.test_count;
+                result.succeeded_test_count += consumer.succeeded_test_count;
+            }
+        }
+    }
+    return result;
+}
+
 UnitTestResult pdb_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = pdb_test_checksum_records(arguments);
+    UnitTestResult hashes = pdb_test_tpi_hashes(arguments);
+    result.test_count += hashes.test_count;
+    result.succeeded_test_count += hashes.succeeded_test_count;
     UnitTestResult source_count = pdb_test_large_source_count(arguments);
     result.test_count += source_count.test_count;
     result.succeeded_test_count += source_count.succeeded_test_count;
@@ -1023,6 +1365,9 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
         PdbResult built = pdb_build(arguments->arena, input);
         if (BUSTER_REQUIRE(arguments, built.valid))
         {
+            UnitTestResult global_indexes = pdb_test_global_indexes(arguments, built);
+            result.test_count += global_indexes.test_count;
+            result.succeeded_test_count += global_indexes.succeeded_test_count;
             UnitTestResult scope_links = pdb_test_scope_links(arguments, built, codeview);
             result.test_count += scope_links.test_count;
             result.succeeded_test_count += scope_links.succeeded_test_count;
@@ -1045,7 +1390,8 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
             u64 directory_base = (u64)directory_block * PDB_TEST_BLOCK_SIZE;
             BUSTER_TEST(arguments, directory_size >= 4);
             u32 stream_count = pdb_read_u32(built.bytes, directory_base);
-            if (BUSTER_REQUIRE(arguments, stream_count == PDB_TEST_STREAM_COUNT))
+            // The module's type records add the TPI hash stream after the fixed set.
+            if (BUSTER_REQUIRE(arguments, stream_count == PDB_TEST_STREAM_COUNT + 1))
             {
                 u64 block_cursor = directory_base + 4 + (u64)stream_count * 4;
                 u32 info_block = 0;
@@ -1116,7 +1462,7 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
                         }
                         found_procedure |= record_kind == PDB_TEST_S_GPROC32;
                         found_local |= record_kind == PDB_TEST_S_LOCAL;
-                        found_frame |= record_kind == PDB_TEST_S_DEFRANGE_FRAMEPOINTER_REL;
+                        found_frame |= record_kind == PDB_TEST_S_DEFRANGE_REGISTER_REL;
                         symbol_offset += (UINT64_C(2) + record_length + UINT64_C(3)) & ~UINT64_C(3);
                     }
                 }
@@ -1316,11 +1662,35 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
                                 BUSTER_TEST(arguments, local_count == 1 && public_count == 1);
                             }
                             BUSTER_TEST(arguments, pointer_to_const_float != PDB_TEST_TYPE_INDEX_BASE + 1);
-                            // PDB's global/public indexes remain empty; neither local
-                            // record is promoted into a cross-module symbol stream.
-                            ByteSlice globals = pdb_test_stream_bytes(arguments->arena, data_merged.bytes, PDB_TEST_STREAM_GLOBALS);
-                            ByteSlice publics = pdb_test_stream_bytes(arguments->arena, data_merged.bytes, PDB_TEST_STREAM_PUBLICS);
-                            BUSTER_TEST(arguments, globals.length == 16 && publics.length == 44);
+                            // The global index copies each module's top-level data record
+                            // with its own merged type; only the global one is public.
+                            ByteSlice records = pdb_test_stream_bytes(arguments->arena, data_merged.bytes, PDB_TEST_STREAM_SYMBOL_RECORDS);
+                            u32 hidden_types[2] = {0};
+                            u32 public_types[2] = {0};
+                            u32 hidden_count = 0;
+                            u32 data_count = 0;
+                            u32 public_records = 0;
+                            for (u64 cursor = 0; cursor + 4 <= records.length;)
+                            {
+                                u16 length = 0;
+                                u16 kind = 0;
+                                memcpy(&length, records.pointer + cursor, sizeof(length));
+                                memcpy(&kind, records.pointer + cursor + 2, sizeof(kind));
+                                String8 name = pdb_test_record_name(records, (u32)cursor);
+                                if (kind == PDB_TEST_S_LDATA32 && string_equal(name, S8("hidden")) && hidden_count < 2)
+                                {
+                                    hidden_types[hidden_count++] = pdb_read_u32(records, cursor + 4);
+                                }
+                                if (kind == PDB_TEST_S_GDATA32 && string_equal(name, S8("public_data")) && data_count < 2)
+                                {
+                                    public_types[data_count++] = pdb_read_u32(records, cursor + 4);
+                                }
+                                public_records += kind == PDB_TEST_S_PUB32 && string_equal(name, S8("public_data"));
+                                cursor += 2 + (u64)length;
+                            }
+                            BUSTER_TEST(arguments, hidden_count == 2 && data_count == 2 && public_records == 2);
+                            BUSTER_TEST(arguments, hidden_types[0] == pointer_to_const_int && hidden_types[1] == pointer_to_const_float &&
+                                                   public_types[0] == pointer_to_const_int && public_types[1] == pointer_to_const_float);
                         }
                     }
 

@@ -220,6 +220,18 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_LD64_LO12,
     OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADD_LO12,
     OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_CALL,
+    // ARM64_RELOC_GOT_LOAD_PAGE21 (5) and ARM64_RELOC_GOT_LOAD_PAGEOFF12 (6):
+    // `adrp Xn` of the page holding the symbol's GOT slot and the 64-bit
+    // `ldr Xt, [Xn, #lo12]` of that slot. Darwin reaches every symbol a
+    // translation unit does not define this way; a direct page pair to a
+    // dylib symbol has no meaning to a platform linker. A linker that binds
+    // the symbol in the same image relaxes the pair to ADRP/ADD of the symbol.
+    OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21,
+    OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12,
+    // IMAGE_REL_ARM64_SECREL_LOW12L: TLS offset bits 0..11 in the scaled imm12
+    // of an unsigned-immediate load or store, which Clang and MSVC emit for the
+    // access that follows SECREL_HIGH12A.
+    OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12L,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
@@ -268,6 +280,9 @@ BUSTER_F_DECL bool object_aarch64_pe_tls_offset_relocate(ObjectRelocationKind ki
 // link.exe and lld-link resolve COFF index loads against this spelling, so
 // the COFF writer, reader and PE linker agree on it for x86-64 and ARM64.
 #define OBJECT_COFF_TLS_INDEX_NAME S8("_tls_index")
+// The COFF section name MSVC and Clang give thread-local data; platform
+// linkers merge it between the CRT's .tls and .tls$ZZZ bounds.
+#define OBJECT_COFF_TLS_SECTION_NAME S8(".tls$")
 
 typedef struct ObjectSection ObjectSection;
 struct ObjectSection
@@ -391,10 +406,22 @@ struct ObjectDebugModule
     u64 types_size;
 };
 
-// `sections` holds one section per ObjectSectionKind, indexed by its kind,
-// and past OBJECT_SECTION_COUNT any sections of their own name: the ones
-// `__attribute__((section))` places and the C-identifier-named ones an ELF
-// object carries (issue 1276). Only ELF objects have those.
+// The most sections a COFF or Mach-O object can number. Regular COFF reserves
+// section numbers 0xff00 and above; a Mach-O symbol's one-byte n_sect counts
+// sections from 1 and spends 0 on NO_SECT.
+enum
+{
+    OBJECT_COFF_MAX_SECTIONS = 65279,
+    OBJECT_MACH_O_MAX_SECTIONS = 255,
+};
+
+// A codegen, reader or link object's `sections` holds one section per
+// ObjectSectionKind, indexed by its kind, and past OBJECT_SECTION_COUNT any
+// sections of their own name: the ones `__attribute__((section))` places and
+// the C-identifier-named ones an ELF object carries (issue 1276). Only ELF
+// objects of those producers have such sections. An assembled object instead
+// holds the sections its source declares, in declaration order, each with its
+// own name and kind, as many as the format can number.
 typedef struct ObjectFile ObjectFile;
 struct ObjectFile
 {
