@@ -2,6 +2,8 @@
 // subtraction-based range checks and the sticky failure state; emit/patch
 // helpers encode little-endian fields. byte_writer_commit is the publication
 // boundary. Format layout, diagnostics and arena ownership stay with callers.
+// byte_slice_read and its typed byte_slice_read_* entries are the matching
+// bounded reader for untrusted input spans.
 
 #include <buster/lib/byte_writer.h>
 #include <string.h>
@@ -96,4 +98,35 @@ bool byte_writer_commit(ByteWriter const* writer, ByteSlice* output)
         *output = (ByteSlice){.pointer = writer->bytes, .length = writer->count};
     }
     return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool byte_slice_read(ByteSlice bytes, u64 offset, void* value, u64 size)
+{
+    bool result = offset <= bytes.length && size <= bytes.length - offset;
+    if (result)
+    {
+        memcpy(value, bytes.pointer + offset, size);
+    }
+
+    return result;
+}
+
+bool byte_slice_read_u16(ByteSlice bytes, u64 offset, u16* value)
+{
+    return byte_slice_read(bytes, offset, value, sizeof(*value));
+}
+
+bool byte_slice_read_u32(ByteSlice bytes, u64 offset, u32* value)
+{
+    return byte_slice_read(bytes, offset, value, sizeof(*value));
+}
+
+bool byte_slice_read_u64(ByteSlice bytes, u64 offset, u64* value)
+{
+    return byte_slice_read(bytes, offset, value, sizeof(*value));
+}
+
+bool byte_slice_read_s64(ByteSlice bytes, u64 offset, s64* value)
+{
+    return byte_slice_read(bytes, offset, value, sizeof(*value));
 }
