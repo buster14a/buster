@@ -14322,99 +14322,6 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             }
         }
 #endif
-        // Live-range splitting: split_phase must take at least one split — a value
-        // register-resident for the first loop only, installed on the
-        // entering edges and stored back at the landing pad — and the
-        // placement must survive the pin verifier, since a degraded
-        // placement reports zero splits. The traffic bound holds the
-        // whole-placement acceptance to its meaning.
-        IrFunction* split_function = machine_test_ir_function_find(machine_module, S8("split_phase"));
-        BUSTER_TEST(arguments, split_function != 0);
-        if (split_function)
-        {
-            MachineSelectResult split_selected = machine_select_canonical_function(arguments->arena, machine_program, split_function, machine_target);
-            BUSTER_TEST(arguments, split_selected.supported);
-            if (split_selected.supported)
-            {
-#if BUSTER_BENCH_ALLOCATIONS
-                MachineQualityCensus census_before = machine_quality_census_snapshot();
-#endif
-                MachineStackPlacement split_quality = machine_quality_placement_build(arguments->arena, &split_selected.function);
-#if BUSTER_BENCH_ALLOCATIONS
-                MachineQualityCensus census_after = machine_quality_census_snapshot();
-                MachineQualityCensus census = {0};
-#define BUSTER_QUALITY_DELTA(name) census.name = census_after.name - census_before.name;
-                BUSTER_QUALITY_CENSUS_FIELDS(BUSTER_QUALITY_DELTA)
-#undef BUSTER_QUALITY_DELTA
-                BUSTER_TEST(arguments, census.functions == 1 && census.prepassed_functions == 1);
-                BUSTER_TEST(arguments, census.global_values == split_selected.function.virtual_register_count);
-                BUSTER_TEST(arguments, census.local_values > 0 && census.local_values <= census.global_values);
-                BUSTER_TEST(arguments, census.local_values_zero_functions + census.local_values_small_functions +
-                                       census.local_values_tiled_functions + census.local_values_large_functions == 1);
-                BUSTER_TEST(arguments, census.candidates > 0 && census.merged_regions > 0);
-                BUSTER_TEST(arguments, census.closure_value_tests == census.global_values * census.merged_regions);
-                BUSTER_TEST(arguments, census.closure_intersections <= census.closure_value_tests);
-                BUSTER_TEST(arguments, census.region_values_zero_regions + census.region_values_small_regions +
-                                       census.region_values_tiled_regions + census.region_values_large_regions == census.merged_regions);
-                BUSTER_TEST(arguments, census.candidate_region_cells == census.candidates * census.merged_regions);
-                BUSTER_TEST(arguments, census.candidate_region_nonzero_cells > 0 &&
-                                       census.candidate_region_nonzero_cells <= census.candidate_region_cells);
-                BUSTER_TEST(arguments, census.candidate_region_clear_bytes == census.candidates * 2 * sizeof(u32));
-                BUSTER_TEST(arguments, census.initial_value_clear_bytes == census.global_values * (sizeof(MachineQualityTraffic) + 2 * sizeof(u32)));
-                BUSTER_TEST(arguments, census.region_table_zero_functions + census.region_table_sparse_functions +
-                                       census.region_table_mixed_functions + census.region_table_dense_functions == 1);
-                BUSTER_TEST(arguments, census.heap_restore_bytes == census.heap_snapshot_bytes * census.attempts);
-                BUSTER_TEST(arguments, census.region_selection_cells == census.selected_regions);
-                BUSTER_TEST(arguments, census.selected_regions <= census.region_selection_passes);
-                BUSTER_TEST(arguments, census.placement_probes <= census.attempts);
-                BUSTER_TEST(arguments, census.accepted_placements == 1);
-                // Reused dirty scratch must give identical counters and ordered
-                // placement output. Compare initialized fields/arrays, not padding.
-                MachineStackPlacement repeated = machine_quality_placement_build(arguments->arena, &split_selected.function);
-                MachineQualityCensus census_repeated = machine_quality_census_snapshot();
-#define BUSTER_QUALITY_REPEAT(name) BUSTER_TEST(arguments, census_repeated.name - census_after.name == census.name);
-                BUSTER_QUALITY_CENSUS_FIELDS(BUSTER_QUALITY_REPEAT)
-#undef BUSTER_QUALITY_REPEAT
-                BUSTER_TEST(arguments, repeated.valid && repeated.edit_count == split_quality.edit_count &&
-                                       repeated.frame_size == split_quality.frame_size && repeated.callee_saved_mask == split_quality.callee_saved_mask &&
-                                       repeated.pinned_register_count == split_quality.pinned_register_count &&
-                                       repeated.split_register_count == split_quality.split_register_count);
-                if (repeated.valid && split_quality.valid && repeated.edit_count == split_quality.edit_count)
-                {
-                    for (u32 edit_index = 0; edit_index < repeated.edit_count; edit_index += 1)
-                    {
-                        MachineEdit left = split_quality.edits[edit_index];
-                        MachineEdit right = repeated.edits[edit_index];
-                        BUSTER_TEST(arguments, left.point == right.point && left.kind == right.kind && left.flags == right.flags &&
-                                               left.subject == right.subject && left.location == right.location);
-                    }
-                    for (u64 slot = 0; slot < (u64)split_selected.function.instruction_count * 4; slot += 1)
-                    {
-                        BUSTER_TEST(arguments, split_quality.operand_registers[slot] == repeated.operand_registers[slot]);
-                    }
-                }
-#endif
-                MachineStackPlacement split_fast = machine_fast_placement_build(arguments->arena, &split_selected.function);
-                BUSTER_TEST(arguments, split_quality.valid && split_fast.valid);
-                BUSTER_TEST_RAW(arguments, split_quality.split_register_count + split_quality.pinned_register_count >= 1,
-                                string_format(arguments->arena, S8("split_phase splits {u32} pins {u32}"), split_quality.split_register_count,
-                                              split_quality.pinned_register_count));
-                // Both allocators vacate a fixed or tied register by copying its
-                // live owner to a free register, so compare every move the
-                // allocator inserts, not only memory traffic. QUALITY accepts a
-                // pinned or split placement only when its frequency-weighted
-                // traffic is strictly lower than the scan's (asserted above
-                // through the split and pin counts), so the raw counts may tie.
-                // Since the scan reuses registers held by dead values (#3783),
-                // FAST reaches QUALITY's raw totals on this fixture.
-                BUSTER_TEST_RAW(arguments, split_quality.reload_count + split_quality.spill_count + split_quality.copy_count <=
-                                               split_fast.reload_count + split_fast.spill_count + split_fast.copy_count,
-                                string_format(arguments->arena,
-                                              S8("split_phase quality reloads {u32} spills {u32} copies {u32}, fast reloads {u32} spills {u32} copies {u32}"),
-                                              split_quality.reload_count, split_quality.spill_count, split_quality.copy_count,
-                                              split_fast.reload_count, split_fast.spill_count, split_fast.copy_count));
-            }
-        }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
         CodegenExecutable reference_executable = codegen_make_executable((CodegenFunction){
             .code = reference_module.code,
@@ -16193,25 +16100,98 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 }
             }
         }
-        // Splitting on the second target: the split machinery is
-        // target-parameterized and split_phase must select and place
-        // cleanly under the AArch64 file. No split can fire here yet —
-        // the AArch64 selector does not promote scalar locals the way
-        // stage 10i taught the x86-64 one, so the loop values stay
-        // frame-resident and QUALITY sees no candidates; when promotion
-        // reaches this selector, this block should tighten to the x86-64
-        // assertion.
-        IrFunction* a64_split_function = machine_test_ir_function_find(machine_a64_module, S8("split_phase"));
-        BUSTER_TEST(arguments, a64_split_function != 0);
-        if (a64_split_function)
+        // Live-range splitting: split_phase must take at least one split — a value
+        // register-resident for the first loop only, installed on the
+        // entering edges and stored back at the landing pad — and the
+        // placement must survive the pin verifier, since a degraded
+        // placement reports zero splits. The traffic bound holds the
+        // whole-placement acceptance to its meaning. The check runs on the
+        // AArch64 file, where the selector now promotes the loop values and
+        // QUALITY takes splits and pins. On x86-64 the margin came from the
+        // shift counts' CL evictions, which FAST moves into registers held by
+        // dead values (#3783): the scan's weighted traffic there fell from 787
+        // to 372, below every pin QUALITY can offer, so QUALITY correctly
+        // keeps the scan's placement and the fixture no longer exercises it.
+        IrFunction* split_function = machine_test_ir_function_find(machine_a64_module, S8("split_phase"));
+        BUSTER_TEST(arguments, split_function != 0);
+        if (split_function)
         {
-            MachineSelectResult a64_split_selected =
-                machine_select_canonical_function(arguments->arena, machine_a64_program, a64_split_function, machine_a64_target);
-            BUSTER_TEST(arguments, a64_split_selected.supported);
-            if (a64_split_selected.supported)
+            MachineSelectResult split_selected = machine_select_canonical_function(arguments->arena, machine_a64_program, split_function, machine_a64_target);
+            BUSTER_TEST(arguments, split_selected.supported);
+            if (split_selected.supported)
             {
-                MachineStackPlacement a64_split_quality = machine_quality_placement_build(arguments->arena, &a64_split_selected.function);
-                BUSTER_TEST(arguments, a64_split_quality.valid);
+#if BUSTER_BENCH_ALLOCATIONS
+                MachineQualityCensus census_before = machine_quality_census_snapshot();
+#endif
+                MachineStackPlacement split_quality = machine_quality_placement_build(arguments->arena, &split_selected.function);
+#if BUSTER_BENCH_ALLOCATIONS
+                MachineQualityCensus census_after = machine_quality_census_snapshot();
+                MachineQualityCensus census = {0};
+#define BUSTER_QUALITY_DELTA(name) census.name = census_after.name - census_before.name;
+                BUSTER_QUALITY_CENSUS_FIELDS(BUSTER_QUALITY_DELTA)
+#undef BUSTER_QUALITY_DELTA
+                BUSTER_TEST(arguments, census.functions == 1 && census.prepassed_functions == 1);
+                BUSTER_TEST(arguments, census.global_values == split_selected.function.virtual_register_count);
+                BUSTER_TEST(arguments, census.local_values > 0 && census.local_values <= census.global_values);
+                BUSTER_TEST(arguments, census.local_values_zero_functions + census.local_values_small_functions +
+                                       census.local_values_tiled_functions + census.local_values_large_functions == 1);
+                BUSTER_TEST(arguments, census.candidates > 0 && census.merged_regions > 0);
+                BUSTER_TEST(arguments, census.closure_value_tests == census.global_values * census.merged_regions);
+                BUSTER_TEST(arguments, census.closure_intersections <= census.closure_value_tests);
+                BUSTER_TEST(arguments, census.region_values_zero_regions + census.region_values_small_regions +
+                                       census.region_values_tiled_regions + census.region_values_large_regions == census.merged_regions);
+                BUSTER_TEST(arguments, census.candidate_region_cells == census.candidates * census.merged_regions);
+                BUSTER_TEST(arguments, census.candidate_region_nonzero_cells > 0 &&
+                                       census.candidate_region_nonzero_cells <= census.candidate_region_cells);
+                BUSTER_TEST(arguments, census.candidate_region_clear_bytes == census.candidates * 2 * sizeof(u32));
+                BUSTER_TEST(arguments, census.initial_value_clear_bytes == census.global_values * (sizeof(MachineQualityTraffic) + 2 * sizeof(u32)));
+                BUSTER_TEST(arguments, census.region_table_zero_functions + census.region_table_sparse_functions +
+                                       census.region_table_mixed_functions + census.region_table_dense_functions == 1);
+                BUSTER_TEST(arguments, census.heap_restore_bytes == census.heap_snapshot_bytes * census.attempts);
+                BUSTER_TEST(arguments, census.region_selection_cells == census.selected_regions);
+                BUSTER_TEST(arguments, census.selected_regions <= census.region_selection_passes);
+                BUSTER_TEST(arguments, census.placement_probes <= census.attempts);
+                BUSTER_TEST(arguments, census.accepted_placements == 1);
+                // Reused dirty scratch must give identical counters and ordered
+                // placement output. Compare initialized fields/arrays, not padding.
+                MachineStackPlacement repeated = machine_quality_placement_build(arguments->arena, &split_selected.function);
+                MachineQualityCensus census_repeated = machine_quality_census_snapshot();
+#define BUSTER_QUALITY_REPEAT(name) BUSTER_TEST(arguments, census_repeated.name - census_after.name == census.name);
+                BUSTER_QUALITY_CENSUS_FIELDS(BUSTER_QUALITY_REPEAT)
+#undef BUSTER_QUALITY_REPEAT
+                BUSTER_TEST(arguments, repeated.valid && repeated.edit_count == split_quality.edit_count &&
+                                       repeated.frame_size == split_quality.frame_size && repeated.callee_saved_mask == split_quality.callee_saved_mask &&
+                                       repeated.pinned_register_count == split_quality.pinned_register_count &&
+                                       repeated.split_register_count == split_quality.split_register_count);
+                if (repeated.valid && split_quality.valid && repeated.edit_count == split_quality.edit_count)
+                {
+                    for (u32 edit_index = 0; edit_index < repeated.edit_count; edit_index += 1)
+                    {
+                        MachineEdit left = split_quality.edits[edit_index];
+                        MachineEdit right = repeated.edits[edit_index];
+                        BUSTER_TEST(arguments, left.point == right.point && left.kind == right.kind && left.flags == right.flags &&
+                                               left.subject == right.subject && left.location == right.location);
+                    }
+                    for (u64 slot = 0; slot < (u64)split_selected.function.instruction_count * 4; slot += 1)
+                    {
+                        BUSTER_TEST(arguments, split_quality.operand_registers[slot] == repeated.operand_registers[slot]);
+                    }
+                }
+#endif
+                MachineStackPlacement split_fast = machine_fast_placement_build(arguments->arena, &split_selected.function);
+                BUSTER_TEST(arguments, split_quality.valid && split_fast.valid);
+                BUSTER_TEST_RAW(arguments, split_quality.split_register_count + split_quality.pinned_register_count >= 1,
+                                string_format(arguments->arena, S8("split_phase splits {u32} pins {u32}"), split_quality.split_register_count,
+                                              split_quality.pinned_register_count));
+                // Both allocators vacate a fixed or tied register by copying its
+                // live owner to a free register, so compare every move the
+                // allocator inserts, not only memory traffic.
+                BUSTER_TEST_RAW(arguments, split_quality.reload_count + split_quality.spill_count + split_quality.copy_count <
+                                               split_fast.reload_count + split_fast.spill_count + split_fast.copy_count,
+                                string_format(arguments->arena,
+                                              S8("split_phase quality reloads {u32} spills {u32} copies {u32}, fast reloads {u32} spills {u32} copies {u32}"),
+                                              split_quality.reload_count, split_quality.spill_count, split_quality.copy_count,
+                                              split_fast.reload_count, split_fast.spill_count, split_fast.copy_count));
             }
         }
         // Direct calls select into fixed-register argument copies plus a
