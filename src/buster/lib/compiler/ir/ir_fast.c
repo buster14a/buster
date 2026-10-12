@@ -262,15 +262,17 @@ BUSTER_GLOBAL_LOCAL void ir_fast_fold_census_late(IrFunction* function, IrInstru
     }
 }
 
-// On FAST entry: clears the per-run marks and counts the birth-foldable,
-// non-cloned rows that reach an admitted function or sit in a skipped one.
+// On FAST entry: counts the birth-foldable, non-cloned rows that reach an
+// admitted function, clearing their per-run marks, or that sit in a skipped
+// one. The skip guard admits budget probes whose rows are not backed, so a
+// skipped function's rows are only read, and only when they exist.
 BUSTER_GLOBAL_LOCAL void ir_fast_fold_census_entry(IrFunction* function, bool admitted)
 {
     u64 birth = 0;
-    for (u32 index = 0; index < function->instruction_count; index += 1)
+    for (u32 index = 0; function->instructions && index < function->instruction_count; index += 1)
     {
         IrInstruction* row = function->instructions + index;
-        row->fold_census &= (u8)~(IR_FOLD_CENSUS_LATE_FOLDED | IR_FOLD_CENSUS_BIRTH_LITERAL);
+        if (admitted) row->fold_census &= (u8)~(IR_FOLD_CENSUS_LATE_FOLDED | IR_FOLD_CENSUS_BIRTH_LITERAL);
         birth += !(row->fold_census & IR_FOLD_CENSUS_INLINED) && (row->fold_census & IR_FOLD_CENSUS_VERDICT) > IR_FOLD_CENSUS_PROBED;
     }
     if (admitted) IR_CONSTRUCTION_RECORD(FOLD_SURVIVAL_REACHED, birth);
