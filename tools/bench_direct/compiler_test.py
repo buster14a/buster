@@ -3936,5 +3936,828 @@ class RealSourceThroughputTest(unittest.TestCase):
             self.assertTrue(any("exited 2" in error for error in record["errors"]), record["errors"])
 
 
+
+def production_profile_evidence(head: str = "a" * 40) -> tuple[dict, dict]:
+    """A complete synthetic production-profile-v1 record and its exported bundle: release A256, pgo-lto B256."""
+    phases = compiler_receipt.PRODUCTION_PROFILE_PHASES
+    ledger = (f"{compiler_receipt.PRODUCTION_PROFILE_LEDGER}\tcomplete=1\tphases={phases}\texpected={phases}\n"
+              "index\tlabel\tkind\tvariant\tstart_us\tduration_us\toutcome\tuser_cpu_us\tsystem_cpu_us\tpeak_memory_bytes\n" +
+              "".join(f"{slot}\t{name}\t{kind}\t{variant}\t{slot}\t1\tpassed\t1\t1\t1\n"
+                      for slot, name, kind, variant in compiler_receipt.PRODUCTION_PROFILE_LEDGER_PHASES))
+    build_summary = (f"status=passed\nsource_revision={head}\nsource_tree={'d' * 40}\nproduction_compiler_sha256={B256}\n"
+                     "debug_sections=absent\ncorrectness=test_all\nbenchmarks=skipped\nphase_ledger=evidence/phases.tsv\n")
+    timed = corpus()
+    bundle = {"build_summary": build_summary, "ledger": ledger, "summary": timed["summary"], "metadata": timed["metadata"]}
+    record = {"requested": True, "request_line": compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE,
+              "profile": copy.deepcopy(compiler_receipt.PRODUCTION_PROFILE_PROFILE), "status": "complete",
+              "build_exit": 0, "exit": 0, "errors": [], "binaries": copy.deepcopy(BINARIES),
+              "cells": compiler_receipt.throughput_real_source_digest(timed["summary"])}
+    return record, bundle
+
+
+class ProductionProfileTest(unittest.TestCase):
+    """#2761: the fixed production-profile-v1 PGO/LTO profile on the pull-compare route."""
+
+    def validate(self, bundle: dict, build_status: object = 0, status: object = 0, binaries: dict = BINARIES,
+                 head: str = "a" * 40) -> list[str]:
+        return compiler_receipt.validate_production_profile(build_status, bundle["build_summary"], bundle["ledger"], head,
+                                                            status, bundle["summary"], bundle["metadata"], binaries)
+
+    def test_profile_is_frozen_report_only_and_times_the_ordinary_corpus(self) -> None:
+        profile = compiler_receipt.PRODUCTION_PROFILE_PROFILE
+        self.assertEqual(profile["name"], "production-profile-v1")
+        self.assertEqual(compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE, "profile: " + profile["name"])
+        self.assertIs(profile["report_only"], True)
+        self.assertEqual(profile["arguments"], [*compiler_receipt.THROUGHPUT_PROFILE["arguments"], "--require-identical-output"])
+        self.assertEqual(profile["compilers"], {"baseline": "release", "candidate": "pgo-lto"})
+        self.assertIn("--no-benchmark", profile["build_arguments"])
+        # The build leg's bound plus the corpus stays inside the unchanged 90-minute compare-pull job.
+        self.assertLessEqual(compiler_compare.PRODUCTION_PROFILE_BUILD_TIMEOUT_SECONDS
+                             + compiler_compare.THROUGHPUT_TIMEOUT_SECONDS, 75 * 60)
+        source = (Path(__file__).resolve().parents[2] / "tools/production_profile.c").read_text(encoding="utf-8")
+        self.assertIn(f'LEDGER_VERSION "{compiler_receipt.PRODUCTION_PROFILE_LEDGER}"', source)
+
+    def test_complete_evidence_validates_and_every_gap_fails(self) -> None:
+        unused_record, bundle = production_profile_evidence()
+        self.assertEqual(self.validate(bundle), [])
+        regressed = dict(bundle, **corpus("regression"))
+        self.assertEqual(self.validate(regressed, status=1), [], "a measured regression is reported, not refused")
+        def change(**fields):
+            return dict(bundle, **fields)
+        def summary_line(key: str, value: str) -> str:
+            return "".join(f"{key}={value}\n" if line.startswith(key + "=") else line + "\n"
+                           for line in bundle["build_summary"].splitlines())
+        ledger_lines = bundle["ledger"].splitlines(keepends=True)
+        cases = {
+            "failed build": (bundle, {"build_status": 2}),
+            "cancelled build": (bundle, {"build_status": None}),
+            "failed corpus": (bundle, {"status": 2}),
+            "cancelled corpus": (bundle, {"status": None}),
+            "missing build summary": (change(build_summary=None), {}),
+            "failed build summary": (change(build_summary=summary_line("status", "failed")), {}),
+            "other revision": (change(build_summary=summary_line("source_revision", "f" * 40)), {}),
+            "benchmarked build": (change(build_summary=summary_line("benchmarks", "complete")), {}),
+            "untested compiler": (change(build_summary=summary_line("correctness", "none")), {}),
+            "debug sections": (change(build_summary=summary_line("debug_sections", "present")), {}),
+            "other production compiler": (change(build_summary=summary_line("production_compiler_sha256", A256)), {}),
+            "repeated key": (change(build_summary=bundle["build_summary"] + "status=passed\n"), {}),
+            "missing ledger": (change(ledger=None), {}),
+            "incomplete ledger": (change(ledger=bundle["ledger"].replace("complete=1", "complete=0")), {}),
+            "partial ledger": (change(ledger="".join(ledger_lines[:-1])), {}),
+            "failed phase": (change(ledger=bundle["ledger"].replace("\tpassed\t", "\tfailed\t", 1)), {}),
+            "duplicate phases": (change(ledger="".join(ledger_lines[:2] + [ledger_lines[2]] * len(ledger_lines[2:]))), {}),
+            "missing training": (change(ledger="".join(line for line in ledger_lines if "\ttrain-lto\t" not in line)
+                                        + ledger_lines[-1]), {}),
+            "substituted phase": (change(ledger=bundle["ledger"].replace("\ttest-production\t", "\tskip-tests\t")), {}),
+            "reordered phases": (change(ledger="".join(ledger_lines[:2] + [ledger_lines[3], ledger_lines[2]] + ledger_lines[4:])), {}),
+            "changed columns": (change(ledger=bundle["ledger"].replace("\tpeak_memory_bytes", "\tpeak")), {}),
+            "missing corpus": (change(summary=None, metadata=None), {}),
+            "partial corpus": (change(summary=dict(bundle["summary"], comparisons=bundle["summary"]["comparisons"][:-1])), {}),
+            "stale release": (bundle, {"binaries": {"baseline": {"sha256": "3" * 64}, "candidate": {"sha256": B256}}}),
+            "same binary": (bundle, {"binaries": {"baseline": {"sha256": B256}, "candidate": {"sha256": B256}}}),
+            "no binaries": (bundle, {"binaries": {}}),
+        }
+        for name, (changed, options) in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(self.validate(changed, **options), name)
+
+    def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
+        record, bundle = production_profile_evidence()
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["production_profile"] = record
+        values = {"expected": dict(EXPECTED, mode="pull"), "authorized": True, "compare_result": "success",
+                  "receipt": pull, "summary": summary(), "policy_value": "",
+                  "throughput": dict(corpus(), production_profile_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        failed = dict(copy.deepcopy(record), status="failed", build_exit=2)
+        stale = copy.deepcopy(record)
+        stale["cells"][0]["wall_seconds"] = [1.0, 0.1]
+        widened = copy.deepcopy(record)
+        widened["profile"]["build_arguments"] = ["--no-benchmark"]
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "partial bundle": {"throughput": dict(corpus(), production_profile_bundle={
+                key: value for key, value in bundle.items() if key != "ledger"})},
+            "failed run": {"receipt": dict(pull, production_profile=failed)},
+            "stale cells": {"receipt": dict(pull, production_profile=stale)},
+            "changed profile": {"receipt": dict(pull, production_profile=widened)},
+            "not a request": {"receipt": dict(pull, production_profile=dict(record, requested=False))},
+            "with real-source": {"receipt": dict(pull, throughput_real_source=real_source_evidence()[0]),
+                                 "throughput": dict(corpus(), production_profile_bundle=bundle,
+                                                    real_source_bundle=real_source_evidence()[1])},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("PGO/LTO production profile (production-profile-v1): complete", report)
+        self.assertIn("| tiny_startup/fast | 1000.0 | 1300.0 | 1.3000 |", report)
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Production Profile Test")
+            fixture_git(repo, "config", "user.email", "production-profile@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            fixture_git(repo, "add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            fixture_git(repo, "commit", "-qm", "seed")
+            line = compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                fixture_git(repo, "commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.production_profile_request_selection(
+                        repo, fixture_git(repo, "rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            fixture_git(repo, "commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.production_profile_request_selection(
+                repo, fixture_git(repo, "rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", production_profile=production_profile_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("production_profile")
+        self.assertIn("no production-profile record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+        self.assertEqual(verify(Api(1, 0), expected, dict(plain, state="superseded"), {}), "")
+
+    def test_compare_leg_records_build_and_corpus_failures(self) -> None:
+        head = "a" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("work", "evidence", "bin", "candidate"):
+                (root / name).mkdir()
+            missing: tuple[str, ...] = ()
+            def leg(run_status) -> dict:
+                receipt_value = {"timings": {}, "production_profile": {"requested": True, "status": "pending"}}
+                with mock.patch.object(compiler_compare, "run", side_effect=run_status) as run, \
+                     mock.patch.object(compiler_compare.shutil, "which", side_effect=lambda tool: None if tool in missing else "/usr/bin/" + tool):
+                    compiler_compare.measure_production_profile(root / "candidate", root / "bin", root / "work",
+                                                                root / "evidence", head, receipt_value)
+                return receipt_value["production_profile"], run
+            record, run = leg(lambda argv, *rest: 0 if argv[0] == "git" else 2)
+            self.assertEqual(run.call_args.args[0][:2], ["./build.sh", "production_profile"])
+            self.assertEqual(run.call_args.args[1], root / "work" / "production-profile-source")
+            self.assertEqual((record["status"], record["build_exit"], record["exit"]), ("failed", 2, None))
+            self.assertTrue(any("build exited 2" in error for error in record["errors"]), record["errors"])
+            def built(argv, cwd, *rest):
+                if argv[:2] == ["./build.sh", "production_profile"]:
+                    output = cwd / "build" / "production-profile"
+                    for tree, content in (("release", b"release"), ("pgo-lto", b"pgo-lto")):
+                        (output / tree / "Release").mkdir(parents=True)
+                        (output / tree / "Release" / "ide").write_bytes(content)
+                    (output / "evidence").mkdir()
+                    unused_record, bundle = production_profile_evidence(head)
+                    (output / "summary.txt").write_text(bundle["build_summary"], encoding="utf-8")
+                    (output / "evidence" / "phases.tsv").write_text(bundle["ledger"], encoding="utf-8")
+                    return 0
+                if argv[0] == "git" and "clone" in argv:
+                    (cwd.parent / "work" / "production-profile-source").mkdir()
+                return 0 if argv[0] == "git" else 3
+            record, run = leg(built)
+            self.assertEqual(run.call_args.args[0][:3], ["./build.sh", "bench_throughput", "run"])
+            self.assertEqual(run.call_args.args[0][-len(compiler_receipt.PRODUCTION_PROFILE_PROFILE["arguments"]):],
+                             compiler_receipt.PRODUCTION_PROFILE_PROFILE["arguments"])
+            self.assertEqual(sorted(record["binaries"]), ["baseline", "candidate"])
+            self.assertFalse((root / "evidence" / "production_profile" / "release").exists())
+            self.assertTrue((root / "evidence" / "production_profile" / "evidence" / "phases.tsv").is_file())
+            self.assertEqual((record["status"], record["build_exit"], record["exit"]), ("failed", 0, 3))
+            self.assertTrue(any("corpus" in error for error in record["errors"]), record["errors"])
+            missing = ("ld.lld",)
+            record, run = leg(built)
+            run.assert_not_called()
+            self.assertEqual((record["status"], record["missing_tools"]), ("failed", ["ld.lld"]))
+            self.assertIn("production profile host lacks ld.lld", record["errors"][0])
+
+
+PROBE_HASHES = {"fast_ra": {"baseline": "3" * 64, "candidate": "4" * 64},
+                "line_mark": {"baseline": "5" * 64, "candidate": "6" * 64}}
+
+
+def probe_line(probe: str, case: dict, value: int) -> str:
+    """One sample line in the exact format each probe prints (real 955ea4b2 output, sizes substituted)."""
+    markers = case["markers"]
+    if probe == "fast_ra":
+        return (f"blocks={markers['blocks']} prepass_ns={value // 3} placement_ns={value - value // 3} total_ns={value} "
+                "prepass_bytes=167960 total_bytes=938140 spills=0 reloads=0 copies=0 edits=0 frame=0\n")
+    return (f"mode=schedule leaves={markers['leaves']} rows={markers['rows']} batch=1 schedule_ns={value} "
+            "retained_bytes=393232 permuted=8185 displacement=18282762 hash=c07477f4bdba3597\n")
+
+
+def probe_invocation(probe: str, case: dict, value: int) -> dict:
+    """One passed invocation as compiler_probes.c records it: every *_ns field but the metric dropped."""
+    fields = dict(token.split("=", 1) for token in probe_line(probe, case, value).split())
+    metric = compiler_receipt.COMPILER_PROBES_PROFILE["probes"][probe]["metric"]
+    return {"exit": 0, "samples": [int(fields[metric])] * compiler_receipt.COMPILER_PROBES_PROFILE["repeats"],
+            "check": {key: text for key, text in fields.items() if not key.endswith("_ns")}}
+
+
+def build_probe_harness(directory: Path) -> Path:
+    """Compile the trusted native harness exactly as compiler_compare does."""
+    harness = directory / "compiler-probes-harness"
+    source = Path(compiler_compare.__file__).resolve().with_name(compiler_receipt.COMPILER_PROBES_HARNESS)
+    subprocess.run(["clang", *compiler_receipt.COMPILER_PROBES_HARNESS_FLAGS, str(source), "-o", str(harness)],
+                   check=True, capture_output=True)
+    return harness
+
+
+def compiler_probes_evidence(base: str = "b" * 40, head: str = "a" * 40) -> tuple[dict, dict]:
+    """A complete synthetic compiler-probes-v1 record and bundle: the head is 10% faster on every case."""
+    profile = compiler_receipt.COMPILER_PROBES_PROFILE
+    cases = []
+    for probe, definition in profile["probes"].items():
+        for case in definition["cases"]:
+            values = {"baseline": 1000, "candidate": 900}
+            cases.append({"probe": probe, "name": case["name"], "arguments": list(case["arguments"]),
+                          "warmups": {role: [probe_invocation(probe, case, values[role])
+                                             for unused in range(profile["warmups"])] for role in values},
+                          "pairs": [dict({"order": ["baseline", "candidate"] if index % 2 == 0 else ["candidate", "baseline"]},
+                                         **{role: probe_invocation(probe, case, values[role]) for role in values})
+                                    for index in range(profile["pairs"])]})
+    binaries = {probe: {role: {"sha256": digest, "size_bytes": 1, "revision": base if role == "baseline" else head}
+                        for role, digest in roles.items()} for probe, roles in PROBE_HASHES.items()}
+    builds = [{"probe": probe, "role": role, "revision": revision, "exit": 0}
+              for probe in profile["probes"] for role, revision in (("baseline", base), ("candidate", head))]
+    summary = {"schema": compiler_receipt.COMPILER_PROBES_SCHEMA, "profile": profile["name"], "base": base,
+               "head": head, "builds": builds, "cases": cases, "status": "complete", "errors": []}
+    summary = json.loads(json.dumps(summary))
+    record = {"requested": True, "request_line": compiler_receipt.COMPILER_PROBES_REQUEST_LINE,
+              "profile": copy.deepcopy(profile), "status": "complete", "exit": 0, "harness_exit": 0, "errors": [],
+              "binaries": copy.deepcopy(binaries), "probe_source_sha256": {probe: "7" * 64 for probe in profile["probes"]},
+              "cells": compiler_receipt.compiler_probes_digest(summary)}
+    return record, {"summary": summary}
+
+
+class CompilerProbesTest(unittest.TestCase):
+    """#2761: the fixed compiler-probes-v1 FAST RA and line-mark profile on the pull-compare route."""
+
+    def validate(self, summary: object, status: object = 0, binaries: dict | None = None, sources: object = None,
+                 base: str = "b" * 40, head: str = "a" * 40) -> list[str]:
+        record = compiler_probes_evidence()[0]
+        return compiler_receipt.validate_compiler_probes(status, summary, base, head,
+                                                         record["binaries"] if binaries is None else binaries,
+                                                         record["probe_source_sha256"] if sources is None else sources)
+
+    def test_profile_is_frozen_report_only_and_uses_the_audited_commands(self) -> None:
+        profile = compiler_receipt.COMPILER_PROBES_PROFILE
+        root = Path(__file__).resolve().parents[2]
+        self.assertEqual(profile["name"], "compiler-probes-v1")
+        self.assertEqual(compiler_receipt.COMPILER_PROBES_REQUEST_LINE, "profile: " + profile["name"])
+        self.assertIs(profile["report_only"], True)
+        self.assertEqual((profile["cpu"], profile["warmups"], profile["pairs"]), (2, 2, 30))
+        for probe, definition in profile["probes"].items():
+            with self.subTest(probe=probe):
+                self.assertTrue((root / definition["source"]).is_file())
+                audit = (root / definition["audit"]).read_text(encoding="utf-8")
+                self.assertIn(definition["source"].split("/")[-1], audit)
+                # Every flag and source comes from the audit's own command; codegen.c is the one
+                # recorded addition, needed by machine.c since #2876.
+                for item in [*definition["compile"], *definition["link"], *definition["sources"]]:
+                    if item != "src/buster/lib/compiler/codegen/codegen.c":
+                        self.assertIn(item.replace("-Isrc", "-I"), audit, item)
+                for case in definition["cases"]:
+                    self.assertEqual(case["arguments"].count(str(profile["repeats"])), 1, case)
+                    self.assertLessEqual(set(case["markers"]), set(definition["check_fields"]), case)
+        self.assertLessEqual(compiler_compare.COMPILER_PROBES_TIMEOUT_SECONDS, 20 * 60)
+
+    def test_complete_evidence_validates_and_every_gap_fails(self) -> None:
+        record, bundle = compiler_probes_evidence()
+        summary = bundle["summary"]
+        self.assertEqual(self.validate(summary), [])
+        results = compiler_receipt.compiler_probes_digest(summary)
+        self.assertEqual(len(results), 12)
+        self.assertTrue(all(row["ratio"] == 0.9 and row["candidate_faster"] == 30 for row in results))
+        same = compiler_probes_evidence(head="b" * 40)[1]["summary"]
+        same_binaries = {probe: {role: {"sha256": "3" * 64, "revision": "b" * 40} for role in ("baseline", "candidate")}
+                         for probe in compiler_receipt.COMPILER_PROBES_PROFILE["probes"]}
+        self.assertEqual(self.validate(same, binaries=same_binaries, head="b" * 40), [], "an A/A run is valid")
+
+        def changed(edit) -> dict:
+            value = copy.deepcopy(summary)
+            edit(value)
+            return value
+
+        def invocation(edit, case: int = 0, pair: int = 3, role: str = "candidate"):
+            return changed(lambda value: edit(value["cases"][case]["pairs"][pair][role]))
+
+        cases = {
+            "failed run": (summary, {"status": 1}),
+            "cancelled run": (summary, {"status": None}),
+            "missing summary": (None, {}),
+            "other schema": (changed(lambda value: value.update(schema="other")), {}),
+            "changed profile": (changed(lambda value: value.update(profile="compiler-probes-v2")), {}),
+            "failed build": (changed(lambda value: value["builds"][3].update(exit=1)), {}),
+            "missing build": (changed(lambda value: value["builds"].pop()), {}),
+            "build from another revision": (changed(lambda value: value["builds"][0].update(revision="c" * 40)), {}),
+            "other base": (summary, {"base": "c" * 40}),
+            "other head": (summary, {"head": "c" * 40}),
+            "failed status": (changed(lambda value: value.update(status="failed")), {}),
+            "reported error": (changed(lambda value: value.update(errors=["line_mark baseline build exited 1"])), {}),
+            "missing source hash": (summary, {"sources": {"line_mark": "7" * 64}}),
+            "malformed source hash": (summary, {"sources": {"fast_ra": "7", "line_mark": "7" * 64}}),
+            "unhashed binary": (summary, {"binaries": dict(record["binaries"], fast_ra={
+                "baseline": {"revision": "b" * 40}, "candidate": record["binaries"]["fast_ra"]["candidate"]})}),
+            "missing binary": (summary, {"binaries": dict(record["binaries"], line_mark={
+                "baseline": record["binaries"]["line_mark"]["baseline"]})}),
+            "binary from another revision": (summary, {"binaries": dict(record["binaries"], fast_ra=dict(
+                record["binaries"]["fast_ra"], candidate={"sha256": "4" * 64, "revision": "c" * 40}))}),
+            "no measured binaries": (summary, {"binaries": {}}),
+            "missing case": (changed(lambda value: value["cases"].pop()), {}),
+            "reordered cases": (changed(lambda value: value["cases"].reverse()), {}),
+            "changed case arguments": (changed(lambda value: value["cases"][0].update(arguments=["256", "1", "chain"])), {}),
+            "missing pair": (changed(lambda value: value["cases"][2]["pairs"].pop()), {}),
+            "pair out of order": (changed(lambda value: value["cases"][2]["pairs"][1].update(
+                order=["baseline", "candidate"])), {}),
+            "failed invocation": (invocation(lambda value: value.update(exit=1)), {}),
+            "timed-out invocation": (invocation(lambda value: value.update(exit=124)), {}),
+            "partial samples": (invocation(lambda value: value["samples"].pop()), {}),
+            "zero sample": (invocation(lambda value: value["samples"].__setitem__(0, 0)), {}),
+            "overflowing pair samples": (invocation(lambda value: value.update(samples=[10 ** 309] * 11)), {}),
+            "overflowing warmup samples": (changed(lambda value: value["cases"][9]["warmups"]["baseline"][1].update(
+                samples=[10 ** 309] * 11)), {}),
+            "sample past the invocation timeout": (invocation(lambda value: value["samples"].__setitem__(
+                5, compiler_receipt.COMPILER_PROBES_SAMPLE_LIMIT_NS + 1)), {}),
+            "float sample": (invocation(lambda value: value["samples"].__setitem__(0, 1.5)), {}),
+            "unparsed self-check": (invocation(lambda value: value.update(check=None)), {}),
+            "other probe size": (invocation(lambda value: value["check"].update(blocks="512")), {}),
+            "self-check reduced to its size": (changed(lambda value: [
+                invocation_value.update(check={"blocks": invocation_value["check"]["blocks"]})
+                for case in value["cases"] if case["probe"] == "fast_ra"
+                for invocation_value in [*case["warmups"]["baseline"], *case["warmups"]["candidate"],
+                                         *(pair[role] for pair in case["pairs"] for role in ("baseline", "candidate"))]]), {}),
+            "missing spill count": (invocation(lambda value: value["check"].pop("spills")), {}),
+            "extra self-check field": (invocation(lambda value: value["check"].update(note="1")), {}),
+            "non-numeric frame": (invocation(lambda value: value["check"].update(frame="-1")), {}),
+            "missing line-mark hash": (invocation(lambda value: value["check"].pop("hash"), case=8), {}),
+            "malformed line-mark hash": (invocation(lambda value: value["check"].update(hash="c07477f4"), case=8), {}),
+            "wrong line-mark mode": (invocation(lambda value: value["check"].update(mode="remap-ordered"), case=8), {}),
+            "wrong line-mark batch": (invocation(lambda value: value["check"].update(batch="999"), case=8), {}),
+            "wrong line-mark rows": (invocation(lambda value: value["check"].update(rows="2048"), case=8), {}),
+            "remapped line-mark everywhere": (changed(lambda value: [
+                invocation_value["check"].update(mode="remap", batch="999")
+                for case in value["cases"] if case["probe"] == "line_mark"
+                for invocation_value in [*case["warmups"]["baseline"], *case["warmups"]["candidate"],
+                                         *(pair[role] for pair in case["pairs"] for role in ("baseline", "candidate"))]]), {}),
+            "changing self-check": (invocation(lambda value: value["check"].update(hash="0100")), {}),
+            "missing warmup": (changed(lambda value: value["cases"][1]["warmups"]["baseline"].pop()), {}),
+            "failed warmup": (changed(lambda value: value["cases"][1]["warmups"]["candidate"][0].update(exit=2)), {}),
+        }
+        for name, (value, options) in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(self.validate(value, **options), name)
+                # Malformed evidence is refused with reasons, never raised.
+                self.assertIsInstance(compiler_receipt.compiler_probes_digest(value), list)
+        self.assertEqual(compiler_receipt.compiler_probes_interval([float(item) for item in range(30)]), (9.0, 20.0))
+
+    def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
+        record, bundle = compiler_probes_evidence()
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["compiler_probes"] = record
+        values = {"expected": dict(EXPECTED, mode="pull"), "authorized": True, "compare_result": "success",
+                  "receipt": pull, "summary": summary(), "policy_value": "",
+                  "throughput": dict(corpus(), compiler_probes_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        stale = copy.deepcopy(record)
+        stale["cells"][0]["ratio"] = 0.5
+        widened = copy.deepcopy(record)
+        widened["profile"]["pairs"] = 5
+        rebound = copy.deepcopy(record)
+        rebound["binaries"]["line_mark"]["candidate"]["revision"] = "c" * 40
+        unsourced = copy.deepcopy(record)
+        unsourced["probe_source_sha256"] = {}
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "empty bundle": {"throughput": dict(corpus(), compiler_probes_bundle={})},
+            "failed run": {"receipt": dict(pull, compiler_probes=dict(record, status="failed", exit=1))},
+            "cancelled run": {"receipt": dict(pull, compiler_probes=dict(record, status="pending", exit=None))},
+            "stale cells": {"receipt": dict(pull, compiler_probes=stale)},
+            "changed profile": {"receipt": dict(pull, compiler_probes=widened)},
+            "binary from another revision": {"receipt": dict(pull, compiler_probes=rebound)},
+            "no source hashes": {"receipt": dict(pull, compiler_probes=unsourced)},
+            "other selector": {"receipt": dict(pull, compiler_probes=dict(record, request_line="profile: other"))},
+            "not a request": {"receipt": dict(pull, compiler_probes=dict(record, requested=False))},
+            "other base": {"expected": dict(EXPECTED, mode="pull", base="c" * 40)},
+            "with the production profile": {"receipt": dict(pull, production_profile=production_profile_evidence()[0])},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("Compiler probes (compiler-probes-v1): complete", report)
+        self.assertIn("| fast_ra/chain-256 | 1.0 | 0.9 | 0.9000 [0.9000, 0.9000] | 30/30 | yes |", report)
+
+    def test_artifact_is_read_and_decided_end_to_end(self) -> None:
+        def decided(record: dict, probes_summary: object, drop: bool = False) -> tuple:
+            pull = receipt()
+            pull["mode"] = "pull"
+            pull["identity"].update(mode="pull")
+            pull["compiler_probes"] = record
+            members = {"receipt.json": json.dumps(pull), "lab/summary.json": json.dumps(summary()),
+                       "throughput/summary.json": json.dumps(corpus()["summary"]),
+                       "throughput/metadata.json": json.dumps(corpus()["metadata"])}
+            if not drop:
+                members["compiler_probes/summary.json"] = json.dumps(probes_summary)
+            got = compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+            return compiler_publish.decide(dict(EXPECTED, mode="pull"), True, "success", got[0], got[1], "",
+                                           got[4], extra_reasons=[got[2]] if got[2] else [])
+
+        record, bundle = compiler_probes_evidence()
+        conclusion, unused_title, reasons = decided(record, bundle["summary"])
+        self.assertEqual((conclusion, reasons), ("success", []))
+
+        def consistent(edit) -> tuple:
+            """A malformed artifact whose receipt cells agree with its own samples."""
+            changed_summary = copy.deepcopy(bundle["summary"])
+            for case in changed_summary["cases"]:
+                for item in [*case["warmups"]["baseline"], *case["warmups"]["candidate"],
+                             *(pair[role] for pair in case["pairs"] for role in ("baseline", "candidate"))]:
+                    edit(case["probe"], item["check"])
+            return dict(record, cells=compiler_receipt.compiler_probes_digest(changed_summary)), changed_summary
+
+        def reduce(probe: str, check: dict) -> None:
+            for key in [key for key in check if key not in ("blocks", "leaves")]:
+                check.pop(key)
+
+        def remap(probe: str, check: dict) -> None:
+            if probe == "line_mark":
+                check.update(mode="remap", batch="999")
+
+        def overflowed(locate) -> tuple:
+            """An artifact with one invocation's samples past any finite float, cells re-derived from it."""
+            changed_summary = copy.deepcopy(bundle["summary"])
+            locate(changed_summary["cases"][4]).update(samples=[10 ** 309] * 11)
+            return dict(record, cells=compiler_receipt.compiler_probes_digest(changed_summary)), changed_summary
+
+        for name, (changed_record, changed_summary, drop) in {
+            "overflowing warmup samples": (*overflowed(lambda case: case["warmups"]["candidate"][0]), False),
+            "overflowing timed pair samples": (*overflowed(lambda case: case["pairs"][7]["baseline"]), False),
+            "self-checks reduced to their size": (*consistent(reduce), False),
+            "remapped line-mark": (*consistent(remap), False),
+            "missing member": (record, None, True),
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = decided(changed_record, changed_summary, drop)
+                self.assertEqual(conclusion, "failure", reasons)
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Compiler Probes Test")
+            fixture_git(repo, "config", "user.email", "compiler-probes@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            fixture_git(repo, "add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            fixture_git(repo, "commit", "-qm", "seed")
+            line = compiler_receipt.COMPILER_PROBES_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                fixture_git(repo, "commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.compiler_probes_request_selection(
+                        repo, fixture_git(repo, "rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            fixture_git(repo, "commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.compiler_probes_request_selection(repo, fixture_git(repo, "rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.COMPILER_PROBES_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", compiler_probes=compiler_probes_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("compiler_probes")
+        self.assertIn("no compiler-probes record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+        self.assertEqual(verify(Api(1, 0), expected, dict(plain, state="superseded"), {}), "")
+
+    def test_native_harness_self_test_and_profile_match_the_frozen_profile(self) -> None:
+        """compiler_probes.c parses, pairs and records invocations itself; its profile is this profile."""
+        with tempfile.TemporaryDirectory() as temporary:
+            harness = build_probe_harness(Path(temporary))
+            result = subprocess.run([str(harness), "--self-test"], capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("COMPILER_PROBES_SELF_TEST PASS failures=0", result.stdout)
+            native = json.loads(subprocess.run([str(harness), "--profile"], capture_output=True, text=True,
+                                               check=True).stdout)
+            profile = compiler_receipt.COMPILER_PROBES_PROFILE
+            self.assertEqual({key: native[key] for key in ("name", "compiler", "cpu", "repeats", "warmups", "pairs")},
+                             {key: profile[key] for key in ("name", "compiler", "cpu", "repeats", "warmups", "pairs")})
+            self.assertEqual(native["invocation_timeout_seconds"], compiler_receipt.COMPILER_PROBES_INVOCATION_TIMEOUT_SECONDS)
+            self.assertEqual(native["probes"], {
+                probe: {"source": definition["source"], "metric": definition["metric"], "compile": definition["compile"],
+                        "sources": definition["sources"], "link": definition["link"],
+                        "cases": [{"name": case["name"], "arguments": case["arguments"]} for case in definition["cases"]]}
+                for probe, definition in profile["probes"].items()})
+            # A leg whose revisions cannot be checked out writes a failed summary the validator refuses.
+            root = Path(temporary)
+            (root / "repository").mkdir()
+            status = subprocess.run([str(harness), str(root / "repository"), "b" * 40, "a" * 40, str(root / "work"),
+                                     str(root / "out")], capture_output=True, check=False).returncode
+            failed = json.loads((root / "out" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual((status, failed["status"], failed["cases"]), (1, "failed", []))
+            self.assertTrue(any("could not be checked out" in error for error in failed["errors"]), failed["errors"])
+            self.assertTrue(compiler_receipt.validate_compiler_probes(status, failed, "b" * 40, "a" * 40, {}, {}))
+
+    def test_compare_leg_hashes_binaries_and_records_failures(self) -> None:
+        record_value, bundle = compiler_probes_evidence()
+        head, base = "a" * 40, "b" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("work", "evidence", "candidate"):
+                (root / name).mkdir()
+            def leg(run_status) -> dict:
+                receipt_value = {"timings": {}, "compiler_probes": {"requested": True, "status": "pending"}}
+                with mock.patch.object(compiler_compare, "run", side_effect=run_status) as run:
+                    compiler_compare.measure_compiler_probes(root / "candidate", root / "work", root / "evidence",
+                                                             base, head, receipt_value)
+                return receipt_value["compiler_probes"], run
+            record, run = leg(lambda *rest: 2)
+            source = str(Path(compiler_compare.__file__).resolve().with_name("compiler_probes.c"))
+            self.assertEqual(run.call_count, 1, "a failed harness build runs nothing")
+            self.assertEqual(run.call_args.args[0][:1] + run.call_args.args[0][-3:],
+                             ["clang", source, "-o", str(root / "work" / "compiler-probes-harness")])
+            self.assertEqual((record["status"], record["harness_exit"], record["exit"], record["binaries"]),
+                             ("failed", 2, 2, {}))
+            self.assertTrue(any("exited 2" in error for error in record["errors"]), record["errors"])
+            def produced(argv, cwd, *rest):
+                if argv[0] == "clang":
+                    return 0
+                output = Path(argv[5])
+                (output / "bin").mkdir(parents=True)
+                sources = Path(argv[4]) / "probe-sources"
+                sources.mkdir(parents=True)
+                for definition in compiler_receipt.COMPILER_PROBES_PROFILE["probes"].values():
+                    (sources / Path(definition["source"]).name).write_bytes(b"probe")
+                for probe in compiler_receipt.COMPILER_PROBES_PROFILE["probes"]:
+                    for role in ("baseline", "candidate"):
+                        (output / "bin" / f"{probe}-{role}").write_bytes(f"{probe}-{role}".encode())
+                (output / "summary.json").write_text(json.dumps(bundle["summary"]), encoding="utf-8")
+                return 0
+            output_root = root / "work" / "compiler-probes"
+            record, run = leg(produced)
+            self.assertFalse((root / "evidence" / "compiler_probes" / "bin").exists())
+            self.assertTrue((root / "evidence" / "compiler_probes" / "summary.json").is_file())
+            self.assertEqual(run.call_args.args[0][:4], [str(root / "work" / "compiler-probes-harness"),
+                                                         str(root / "candidate"), base, head])
+            self.assertEqual(record["binaries"]["fast_ra"]["baseline"],
+                             {"sha256": hashlib.sha256(b"fast_ra-baseline").hexdigest(), "size_bytes": 16, "revision": base})
+            self.assertEqual(record["probe_source_sha256"]["line_mark"], hashlib.sha256(b"probe").hexdigest())
+            # The synthetic summary validates against the hashes compare took itself.
+            self.assertEqual((record["status"], record["errors"]), ("complete", []))
+            self.assertEqual(record["cells"], compiler_receipt.compiler_probes_digest(bundle["summary"]))
+            self.assertTrue(output_root.is_dir())
+
+    def test_inventory_coverage_names_both_probe_rows(self) -> None:
+        """The compiler-probes leg discharges its two inventory rows only on a validated success."""
+        rows = ["tool:fast_ra_scaling.c", "tool:machine_line_mark_scaling.c"]
+        self.assertEqual(list(compiler_receipt.INVENTORY_LEGS["pull"]["compiler-probes"]), rows)
+        pull = receipt()
+        pull.update(mode="pull", compiler_probes=compiler_probes_evidence()[0])
+        def leg(receipt_value: dict, conclusion: str) -> dict:
+            coverage = compiler_receipt.covered_inventory_rows(receipt_value, conclusion, "pull")
+            return next(entry for entry in coverage["legs"] if entry["leg"] == "compiler-probes")
+        self.assertEqual(leg(pull, "success")["status"], "discharged")
+        self.assertTrue(set(rows) <= set(compiler_receipt.covered_inventory_rows(pull, "success", "pull")["discharged"]))
+        failed = dict(pull, compiler_probes=dict(pull["compiler_probes"], status="failed"))
+        self.assertEqual(leg(failed, "failure")["status"], "not discharged: leg failed")
+        plain = dict(pull)
+        plain.pop("compiler_probes")
+        self.assertEqual(leg(plain, "success")["status"], "not discharged: not requested")
+        self.assertFalse(set(rows) & set(compiler_receipt.covered_inventory_rows(plain, "success", "pull")["discharged"]))
+
+
+class InventoryCoverageTest(unittest.TestCase):
+    """#2761: a published attempt names exactly the inventory rows its validated evidence discharged."""
+
+    PULL_ROWS = ["build:bench_throughput", "build:bench_throughput@throughput-real-source", "build:production_profile",
+                 "uarch_lab:compare", "uarch_lab:compare@ast-pilot-acceptance",
+                 "uarch_lab:compare@canonical-inline-self-host"]
+
+    def pull(self, **records) -> dict:
+        result = receipt()
+        result["mode"] = "pull"
+        result["identity"].update(mode="pull", ref="refs/pull/7/head")
+        result["inline_acceptance"] = {"requested": False, "status": "not requested"}
+        result["throughput"] = dict(compiler_receipt.throughput_digest(corpus()["summary"]), exit=0)
+        result.update(records)
+        return result
+
+    def opt_ins(self, status: str = "complete") -> dict:
+        record = {"requested": True, "status": status}
+        return {"inline_acceptance": dict(record), "ast_pilot_acceptance": dict(record),
+                "throughput_real_source": dict(record), "production_profile": dict(record),
+                "scaling_profile": copy.deepcopy(compiler_receipt.SCALING_PROFILE),
+                "scaling": {name: {"status": "valid"} for name in compiler_receipt.SCALING_PROFILE["series"]}}
+
+    def legs(self, coverage: dict) -> dict:
+        return {entry["leg"]: entry["status"] for entry in coverage["legs"]}
+
+    def test_every_mapped_leg_is_recognized_and_names_rows(self) -> None:
+        for mode, legs in compiler_receipt.INVENTORY_LEGS.items():
+            self.assertIn(mode, compiler_receipt.MODES)
+            for leg, rows in legs.items():
+                with self.subTest(mode=mode, leg=leg):
+                    self.assertTrue(rows)
+                    self.assertNotEqual(compiler_receipt.inventory_leg_record(self.pull(), leg)[1], "unknown leg")
+
+    def test_validated_main_attempt_discharges_the_lab_and_corpus_rows(self) -> None:
+        main = dict(receipt(), throughput=dict(compiler_receipt.throughput_digest(corpus()["summary"]), exit=0))
+        coverage = compiler_receipt.covered_inventory_rows(main, "success", "main")
+        self.assertEqual(coverage["schema"], compiler_receipt.INVENTORY_COVERAGE_SCHEMA)
+        self.assertEqual(coverage["route"], "main-compare")
+        self.assertEqual(coverage["discharged"], ["build:bench_throughput@main", "uarch_lab:compare@main"])
+        self.assertEqual(set(self.legs(coverage).values()), {"discharged"})
+
+    def test_validated_pull_attempt_discharges_each_requested_leg_only(self) -> None:
+        coverage = compiler_receipt.covered_inventory_rows(self.pull(**self.opt_ins()), "success", "pull")
+        self.assertEqual(coverage["discharged"], self.PULL_ROWS)
+        self.assertEqual(self.legs(coverage)["analyzer"], "not discharged: not requested")
+        for row in ("build:clang_analyze_benchmark", "tool:clang_analyze_benchmark.c"):
+            self.assertEqual(coverage["rows"][row], "not discharged: not requested")
+        # A default pull request discharges only the lab and the corpus.
+        plain = compiler_receipt.covered_inventory_rows(self.pull(), "success", "pull")
+        self.assertEqual(plain["discharged"], ["build:bench_throughput", "uarch_lab:compare"])
+        for leg in ("scaling", "inline", "ast-pilot", "real-source", "production-profile"):
+            self.assertEqual(self.legs(plain)[leg], "not discharged: not requested")
+
+    def test_mode_is_trusted_not_the_receipts_claim(self) -> None:
+        coverage = compiler_receipt.covered_inventory_rows(self.pull(**self.opt_ins()), "success", "main")
+        self.assertEqual(coverage["discharged"], ["build:bench_throughput@main", "uarch_lab:compare@main"])
+        unknown = compiler_receipt.covered_inventory_rows(self.pull(), "success", "other")
+        self.assertEqual((unknown["route"], unknown["legs"], unknown["discharged"]), ("none", [], []))
+
+    def test_failed_legs_discharge_nothing(self) -> None:
+        failed = self.pull(**dict(self.opt_ins(), production_profile={"requested": True, "status": "failed"}))
+        failed["state"] = "failed"
+        coverage = compiler_receipt.covered_inventory_rows(failed, "failure", "pull")
+        self.assertEqual(coverage["discharged"], [])
+        legs = self.legs(coverage)
+        self.assertEqual(legs["production-profile"], "not discharged: leg failed")
+        self.assertEqual(legs["self-host"], "not discharged: leg failed")
+        self.assertEqual(coverage["rows"]["build:production_profile"], "not discharged: leg failed")
+        # A leg the host recorded complete is still not covered when the publisher refused the attempt.
+        refused = compiler_receipt.covered_inventory_rows(self.pull(**self.opt_ins()), "failure", "pull")
+        self.assertEqual(refused["discharged"], [])
+        self.assertEqual(self.legs(refused)["inline"], "not discharged: evidence refused by the publisher")
+        # Pending, skipped or malformed records are failures, never coverage.
+        for status in ("pending", "skipped", "unknown"):
+            with self.subTest(status=status):
+                record = self.pull(**dict(self.opt_ins(), throughput_real_source={"requested": True, "status": status}))
+                coverage = compiler_receipt.covered_inventory_rows(record, "failure", "pull")
+                self.assertEqual(self.legs(coverage)["real-source"], f"not discharged: leg {status}")
+        broken_corpus = self.pull(throughput=dict(self.pull()["throughput"], exit=2))
+        coverage = compiler_receipt.covered_inventory_rows(broken_corpus, "failure", "pull")
+        self.assertEqual(self.legs(coverage)["corpus"], "not discharged: leg failed")
+        partial_scaling = self.pull(**dict(self.opt_ins(), scaling={"equal": {"status": "valid"}}))
+        coverage = compiler_receipt.covered_inventory_rows(partial_scaling, "failure", "pull")
+        self.assertEqual(self.legs(coverage)["scaling"], "not discharged: leg failed")
+        # A row both scaling and the corpus discharge is not covered while either requested leg is not.
+        self.assertEqual(coverage["rows"]["build:bench_throughput"], "not discharged: evidence refused by the publisher")
+
+    def test_malformed_leg_values_are_not_discharged_and_never_raise(self) -> None:
+        # Valid JSON can hold an object or a list where a string belongs; none may stop publication.
+        for bad in ({}, [], None, 3, "pending"):
+            with self.subTest(value=bad):
+                scaling = {name: {"status": bad} for name in compiler_receipt.SCALING_PROFILE["series"]}
+                record = self.pull(**dict(self.opt_ins(), scaling=scaling, inline_acceptance={"requested": True, "status": bad},
+                                          throughput_real_source={"requested": bad, "status": "complete"}),
+                                   throughput=dict(self.pull()["throughput"], valid=bad, exit=bad), state=bad)
+                for conclusion in ("success", "failure", "neutral"):
+                    coverage = compiler_receipt.covered_inventory_rows(record, conclusion, "pull")
+                    if conclusion != "success":
+                        self.assertEqual(coverage["discharged"], [])
+                self.assertEqual(compiler_receipt.inventory_leg_record(record, "scaling"), (True, "failed"))
+                self.assertEqual(compiler_receipt.inventory_leg_record(record, "corpus"), (True, "failed"))
+                failed = compiler_receipt.covered_inventory_rows(record, "failure", "pull")
+                self.assertEqual(self.legs(failed)["scaling"], "not discharged: leg failed")
+        for bad in ({}, [], 3):
+            with self.subTest(record=bad):
+                coverage = compiler_receipt.covered_inventory_rows(self.pull(production_profile=bad), "failure", "pull")
+                self.assertEqual(self.legs(coverage)["production-profile"],
+                                 "not discharged: no production-profile record (malformed)")
+                coverage = compiler_receipt.covered_inventory_rows(self.pull(scaling_profile={}, scaling=bad), "failure", "pull")
+                self.assertEqual(self.legs(coverage)["scaling"], "not discharged: leg failed")
+
+    def test_missing_legs_discharge_nothing(self) -> None:
+        for conclusion in ("success", "failure"):
+            coverage = compiler_receipt.covered_inventory_rows(None, conclusion, "pull")
+            self.assertEqual(coverage["discharged"], [])
+            self.assertEqual(set(self.legs(coverage).values()), {"not discharged: no readable receipt"})
+            self.assertEqual(set(coverage["rows"]), {row for rows in compiler_receipt.INVENTORY_LEGS["pull"].values()
+                                                     for row in rows})
+        legacy = receipt()
+        legacy.pop("throughput_profile")
+        coverage = compiler_receipt.covered_inventory_rows(legacy, "success", "main")
+        self.assertEqual(coverage["discharged"], ["uarch_lab:compare@main"])
+        self.assertEqual(self.legs(coverage)["corpus"], "not discharged: no corpus record (missing)")
+        malformed = self.pull(production_profile="complete")
+        coverage = compiler_receipt.covered_inventory_rows(malformed, "success", "pull")
+        self.assertEqual(self.legs(coverage)["production-profile"], "not discharged: no production-profile record (malformed)")
+        self.assertNotIn("build:production_profile", coverage["discharged"])
+
+    def test_superseded_receipt_discharges_nothing(self) -> None:
+        coverage = compiler_receipt.covered_inventory_rows(dict(self.pull(**self.opt_ins()), state="superseded"),
+                                                           "neutral", "pull")
+        self.assertEqual(coverage["discharged"], [])
+        self.assertEqual(self.legs(coverage)["self-host"], "not discharged: superseded before measurement")
+        self.assertEqual(self.legs(coverage)["analyzer"], "not discharged: not requested")
+
+    def test_analyzer_only_profile_discharges_only_the_analyzer_rows(self) -> None:
+        coverage = compiler_receipt.covered_inventory_rows(analyzer_receipt(), "success", "pull")
+        self.assertEqual(coverage["discharged"], ["build:clang_analyze_benchmark", "tool:clang_analyze_benchmark.c"])
+        legs = self.legs(coverage)
+        for leg in ("self-host", "corpus", "scaling", "inline", "ast-pilot", "real-source", "production-profile"):
+            self.assertEqual(legs[leg], "not discharged: not requested")
+        for row in ("uarch_lab:compare", "build:bench_throughput"):
+            self.assertEqual(coverage["rows"][row], "not discharged: not requested")
+        # An analyzer receipt cannot discharge a main row.
+        self.assertEqual(compiler_receipt.covered_inventory_rows(analyzer_receipt(), "success", "main")["discharged"], [])
+        failed = compiler_receipt.covered_inventory_rows(analyzer_receipt("failed"), "failure", "pull")
+        self.assertEqual(self.legs(failed)["analyzer"], "not discharged: leg failed")
+
+    def test_coverage_is_report_only_and_rendered(self) -> None:
+        pull = self.pull(**self.opt_ins())
+        before = copy.deepcopy(pull)
+        coverage = compiler_receipt.covered_inventory_rows(pull, "success", "pull")
+        self.assertEqual(pull, before, "the mapping never edits the receipt")
+        report = compiler_receipt.render(dict(pull, inventory_coverage=coverage), summary(), "success", [])
+        self.assertIn("route `pull-compare`): 6 rows discharged", report)
+        self.assertIn("| production-profile | `build:production_profile` | complete | discharged |", report)
+        self.assertIn("| analyzer | `build:clang_analyze_benchmark`, `tool:clang_analyze_benchmark.c` | not requested "
+                      "| not discharged: not requested |", report)
+        analyzer = analyzer_receipt()
+        rendered = compiler_receipt.render(
+            dict(analyzer, inventory_coverage=compiler_receipt.covered_inventory_rows(analyzer, "failure", "pull")),
+            {}, "failure", [])
+        self.assertIn("0 rows discharged", rendered)
+        shown = {"inventory_coverage": coverage}
+        self.assertIn("`build:production_profile`", compiler_publish.inventory_rows(shown))
+        self.assertEqual(compiler_publish.inventory_rows({}), "none")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -65,10 +65,15 @@
 // The test-only compiler_driver_test_setup_order observer checks completed
 // setup against real serial unit boundaries without comparing wall times.
 // archive.c owns indexed archive extraction and its pass-ordered worklist.
+// compiler_driver_archive_read_failure formats archive read refusals with the
+// reader's member attribution.
 // compiler_driver_elf_library_roots and compiler_driver_mach_library_roots
 // share target/sysroot search roots with static-library lookup; explicit -L
 // roots come first. compiler_driver_mach_library_locate resolves Apple dylibs
 // and TAPI stubs to their install names and versions.
+// compiler_driver_consume_linker_verbose removes option-position -v from
+// supported native Linux links; compiler_driver_native_link_report renders
+// the truthful CMake link-line record before compilation/linking can fail.
 // compiler_driver_elf_script_members validates bounded INPUT/GROUP/AS_NEEDED
 // scripts; compiler_driver_elf_requested_libraries expands them with a capped
 // explicit worklist and retains DSO SONAME identities in member order.
@@ -956,7 +961,14 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_codegen_request(CompilerDriver
                           (invocation->target.cpu_arch == CPU_ARCH_X86_64 || invocation->target.cpu_arch == CPU_ARCH_AARCH64);
     if (invocation->error == COMPILER_DRIVER_ERROR_NONE)
     {
-        if (invocation->emit_llvm_bitcode &&
+        if (invocation->target.cpu_arch == CPU_ARCH_I386 && invocation->query == COMPILER_DRIVER_QUERY_NONE &&
+            native_codegen_action)
+        {
+            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation->diagnostic =
+                S8("i386 code generation is not implemented (-m16/-m32 support -E, -dM and -fsyntax-only only; see #3654)");
+        }
+        else if (invocation->emit_llvm_bitcode &&
             (invocation->action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation->action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
              invocation->action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY))
         {
@@ -1021,9 +1033,10 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_request(Arena* aren
 // query cannot hide another linker option or select a non-native pipeline.
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_linker_query(CompilerDriverInvocation* invocation)
 {
-    bool raw_query = invocation->linker_argument_count == 1 && invocation->linker_arguments &&
-                     string_equal(invocation->linker_arguments[0], S8("--version"));
-    bool requested = raw_query || invocation->query == COMPILER_DRIVER_QUERY_LINKER_VERSION;
+    bool raw_query_requested = invocation->linker_argument_count && invocation->linker_arguments &&
+                               string_equal(invocation->linker_arguments[0], S8("--version"));
+    bool raw_query = raw_query_requested && invocation->linker_argument_count == 1;
+    bool requested = raw_query_requested || invocation->query == COMPILER_DRIVER_QUERY_LINKER_VERSION;
     if (invocation->error == COMPILER_DRIVER_ERROR_NONE && requested)
     {
         bool native = invocation->target.cpu_arch == CPU_ARCH_X86_64 || invocation->target.cpu_arch == CPU_ARCH_AARCH64;
@@ -1044,6 +1057,97 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_linker_query(CompilerDriverInv
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_linux_elf_link(CompilerDriverInvocation invocation)
+{
+    bool result = invocation.action == COMPILER_DRIVER_ACTION_LINK && !invocation.has_gpu_target && !invocation.emit_llvm_bitcode &&
+                  invocation.target.os == OPERATING_SYSTEM_LINUX &&
+                  (invocation.target.cpu_arch == CPU_ARCH_X86_64 || invocation.target.cpu_arch == CPU_ARCH_AARCH64);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_linker_argument_takes_operand(String8 argument)
+{
+    bool result = string_equal(argument, S8("-soname")) || string_equal(argument, S8("--soname")) ||
+                  string_equal(argument, S8("-h")) || string_equal(argument, S8("-z")) ||
+                  string_equal(argument, S8("--version-script"));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_consume_linker_verbose(Arena* arena, CompilerDriverInvocation* invocation)
+{
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE && compiler_driver_native_linux_elf_link(*invocation) &&
+        invocation->linker_argument_count && invocation->linker_arguments)
+    {
+        bool operand = false;
+        bool found = false;
+        for (u32 index = 0; index < invocation->linker_argument_count; index += 1)
+        {
+            String8 argument = invocation->linker_arguments[index];
+            if (!operand && string_equal(argument, S8("-v")))
+            {
+                found = true;
+            }
+            operand = !operand && compiler_driver_linker_argument_takes_operand(argument);
+        }
+        if (found)
+        {
+            String8* linker_arguments = arena_allocate(arena, String8, invocation->linker_argument_count);
+            u32 linker_argument_count = 0;
+            operand = false;
+            for (u32 index = 0; index < invocation->linker_argument_count; index += 1)
+            {
+                String8 argument = invocation->linker_arguments[index];
+                if (!operand && string_equal(argument, S8("-v")))
+                {
+                    invocation->linker_verbose = true;
+                }
+                else
+                {
+                    linker_arguments[linker_argument_count++] = argument;
+                }
+                operand = !operand && compiler_driver_linker_argument_takes_operand(argument);
+            }
+            invocation->linker_arguments = linker_arguments;
+            invocation->linker_argument_count = linker_argument_count;
+        }
+    }
+}
+
+// Names must be nonempty independently of the missing-lookup name sentinel.
+// Embedding callers bypass argv parsing, so validate their lists here too.
+BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_names(Arena* arena, CompilerDriverInvocation* invocation)
+{
+    // Count admission precedes all array reads, including a linker query.
+    u64 library_count = (u64)invocation->library_count + invocation->framework_count;
+    u32 library_reserve = invocation->target.os == OPERATING_SYSTEM_WINDOWS ? 8u : invocation->target.os == OPERATING_SYSTEM_LINUX ? COMPILER_DRIVER_ELF_SCRIPT_MEMBERS + 3u : 0u;
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE &&
+        (library_count >= (u64)UINT32_MAX - library_reserve || invocation->library_path_count > UINT32_MAX - 9u))
+    {
+        invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation->diagnostic = S8("native library counts exceed driver limits");
+    }
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE &&
+        ((invocation->library_count && !invocation->libraries) || (invocation->framework_count && !invocation->frameworks)))
+    {
+        compiler_driver_argument_error(arena, invocation, S8("missing dependency name storage after {S8}"),
+                                       invocation->library_count && !invocation->libraries ? S8("-l") : S8("-framework"));
+    }
+    for (u32 index = 0; invocation->error == COMPILER_DRIVER_ERROR_NONE && index < invocation->library_count; index += 1)
+    {
+        if (!invocation->libraries[index].length)
+        {
+            compiler_driver_argument_error(arena, invocation, S8("empty dependency name after {S8}"), S8("-l"));
+        }
+    }
+    for (u32 index = 0; invocation->error == COMPILER_DRIVER_ERROR_NONE && index < invocation->framework_count; index += 1)
+    {
+        if (!invocation->frameworks[index].length)
+        {
+            compiler_driver_argument_error(arena, invocation, S8("empty dependency name after {S8}"), S8("-framework"));
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_request(Arena* arena, CompilerDriverInvocation* invocation)
 {
     if (invocation->error == COMPILER_DRIVER_ERROR_NONE && invocation->macro_prefix_map_count &&
@@ -1056,9 +1160,11 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_request(Arena* arena, Compiler
     {
         compiler_driver_reject_gpu_native_options(arena, invocation, 0, 0);
     }
+    compiler_driver_validate_dependency_names(arena, invocation);
     compiler_driver_validate_codegen_request(invocation, false);
     compiler_driver_validate_dependency_request(arena, invocation);
     compiler_driver_validate_linker_query(invocation);
+    compiler_driver_consume_linker_verbose(arena, invocation);
 }
 
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_request(Arena* arena, CompilerDriverInvocation* invocation)
@@ -1331,7 +1437,12 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_resolve_native_target(Arena* arena, Com
         {
             CompilerDriverFeatureOverride override = feature_overrides[override_index];
             TargetCpuFeature feature = target_cpu_feature_from_string(invocation->target.cpu_arch, override.name);
-            if (feature == TARGET_CPU_FEATURE_NONE && override.option.length)
+            if (feature == TARGET_CPU_FEATURE_X86_MMX && override.option.length &&
+                     invocation->target.cpu_arch == CPU_ARCH_X86_64)
+            {
+                compiler_driver_argument_error(arena, invocation, S8("unsupported option: {S8}"), override.option);
+            }
+            else if (feature == TARGET_CPU_FEATURE_NONE && override.option.length)
             {
                 compiler_driver_argument_error(arena, invocation, S8("unsupported option: {S8}"), override.option);
             }
@@ -1339,12 +1450,16 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_resolve_native_target(Arena* arena, Com
             {
                 compiler_driver_argument_error(arena, invocation, S8("unsupported target feature: {S8}"), override.name);
             }
-            else if (override.option.length && invocation->target.cpu_arch == CPU_ARCH_X86_64)
+            else if (override.option.length && cpu_arch_is_x86(invocation->target.cpu_arch))
             {
                 // The -m<feature> spellings follow GCC: the prerequisites come along
                 // with an enabled feature, and the dependents go with a disabled one.
                 // -mattr stays exact.
-                if (!override.enable && feature == TARGET_CPU_FEATURE_X86_SSE2)
+                if (!override.enable && feature == TARGET_CPU_FEATURE_X86_SSE && invocation->target.cpu_arch == CPU_ARCH_X86_64)
+                {
+                    compiler_driver_argument_error(arena, invocation, S8("unsupported option: {S8} (SSE is part of the x86-64 baseline)"), override.option);
+                }
+                else if (!override.enable && feature == TARGET_CPU_FEATURE_X86_SSE2 && invocation->target.cpu_arch == CPU_ARCH_X86_64)
                 {
                     compiler_driver_argument_error(arena, invocation, S8("unsupported option: {S8} (SSE2 is part of the x86-64 baseline)"), override.option);
                 }
@@ -2012,6 +2127,13 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     CompilerDriverFeatureOverride* feature_overrides = arena_allocate(arena, CompilerDriverFeatureOverride, feature_override_capacity);
     u64 feature_override_count = 0;
     String8 architecture_option = {0};
+    String8 x86_execution_mode_option = {0};
+    String8 x86_regparm_value = {0};
+    String8 x86_preferred_stack_boundary_value = {0};
+    u32 x86_execution_mode = 0;
+    bool x86_execution_mode_seen = false;
+    bool x86_regparm_seen = false;
+    bool x86_preferred_stack_boundary_seen = false;
     bool options_ended = false;
     bool action_seen = false;
     // Whether the code model in force came from -fPIE/-fpie, which is what
@@ -2046,6 +2168,13 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (string_equal(argument, S8("--")))
         {
             options_ended = true;
+            continue;
+        }
+        if (string_equal(argument, S8("-m16")) || string_equal(argument, S8("-m32")))
+        {
+            x86_execution_mode_option = argument;
+            x86_execution_mode = string_equal(argument, S8("-m16")) ? 16 : 32;
+            x86_execution_mode_seen = true;
             continue;
         }
         if (string_starts_with_sequence(argument, S8("-fmacro-prefix-map=")))
@@ -2364,6 +2493,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 break;
             }
             String8 value = arguments.pointer[++argument_index];
+            if (!value.length && (string_equal(argument, S8("-l")) || string_equal(argument, S8("-framework"))))
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("empty dependency name after {S8}"), argument);
+                break;
+            }
             if (string_equal(argument, S8("-o")))
             {
                 invocation.output_path = value;
@@ -2696,6 +2830,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.keep_going = string_equal(argument, S8("-fkeep-going"));
             continue;
         }
+        if (string_equal(argument, S8("-fearly-exit")) || string_equal(argument, S8("-fno-early-exit")))
+        {
+            invocation.early_exit = string_equal(argument, S8("-fearly-exit"));
+            continue;
+        }
         if (string_equal(argument, S8("-fno-frontend-ssa")) || string_equal(argument, S8("-ffrontend-ssa")))
         {
             invocation.disable_direct_ssa = string_equal(argument, S8("-fno-frontend-ssa"));
@@ -2943,6 +3082,19 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             continue;
         }
+        if (string_starts_with_sequence(argument, S8("-mregparm=")))
+        {
+            x86_regparm_value = string_slice(argument, S8("-mregparm=").length, argument.length);
+            x86_regparm_seen = true;
+            continue;
+        }
+        if (string_starts_with_sequence(argument, S8("-mpreferred-stack-boundary=")))
+        {
+            x86_preferred_stack_boundary_value =
+                string_slice(argument, S8("-mpreferred-stack-boundary=").length, argument.length);
+            x86_preferred_stack_boundary_seen = true;
+            continue;
+        }
         // -m<feature> and -mno-<feature> are -mattr=+feature and -mattr=-feature
         // in command-line order with the -mattr items, plus GCC's implied
         // features on x86-64 (applied where the overrides resolve).
@@ -3159,11 +3311,22 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.linker_arguments[invocation.linker_argument_count++] = S8("-export-dynamic");
             continue;
         }
+        if (string_equal(argument, S8("-ffreestanding")))
+        {
+            invocation.freestanding = true;
+            continue;
+        }
+        if (string_equal(argument, S8("-fno-asynchronous-unwind-tables")))
+        {
+            invocation.no_asynchronous_unwind_tables = true;
+            continue;
+        }
         bool compatible_codegen_option =
             string_equal(argument, S8("-pipe")) || string_equal(argument, S8("-pthread")) ||
             string_equal(argument, S8("-fno-pie")) || string_equal(argument, S8("-fno-builtin")) ||
+            string_equal(argument, S8("-fomit-frame-pointer")) ||
             string_equal(argument, S8("-fwrapv")) || string_equal(argument, S8("-fno-strict-overflow")) || string_equal(argument, S8("-fno-strict-aliasing")) || string_equal(argument, S8("-funsigned-char")) ||
-            string_equal(argument, S8("-fsigned-char")) ||
+            string_equal(argument, S8("-fsigned-char")) || string_equal(argument, S8("-fcf-protection=none")) ||
             // Buster emits no stack-protector prologue, so the disabling
             // spelling is already what it does. A libc asks for it on the
             // translation units that run before thread-local storage exists,
@@ -3222,7 +3385,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     compiler_driver_validate_dependency_request(arena, &invocation);
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE)
     {
-        if (invocation.has_gpu_target)
+        if (x86_execution_mode_seen && invocation.has_gpu_target)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for this target"),
+                                           x86_execution_mode_option);
+        }
+        else if (invocation.has_gpu_target)
         {
             compiler_driver_reject_gpu_native_options(arena, &invocation, feature_overrides, feature_override_count);
             if (invocation.error == COMPILER_DRIVER_ERROR_NONE)
@@ -3236,8 +3404,91 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         else
         {
-            compiler_driver_resolve_native_target(arena, &invocation, architecture_option, feature_overrides, feature_override_count);
+            if (x86_execution_mode_seen)
+            {
+                if (!cpu_arch_is_x86(invocation.target.cpu_arch))
+                {
+                    compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for this target"),
+                                                   x86_execution_mode_option);
+                }
+                else
+                {
+                    Target x86_mode_target = invocation.target;
+                    if (x86_mode_target.cpu_model == CPU_MODEL_NATIVE)
+                    {
+                        x86_mode_target.cpu_model = CPU_MODEL_BASELINE;
+                    }
+                    x86_mode_target.cpu_arch = CPU_ARCH_I386;
+                    x86_mode_target.x86_code16 = x86_execution_mode == 16;
+                    if (!target_os_supports_arch(x86_mode_target.cpu_arch, x86_mode_target.os))
+                    {
+                        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+                        invocation.diagnostic = string_format(
+                            arena, S8("unsupported option: {S8} for target {S8}"), x86_execution_mode_option,
+                            target_to_string(arena, invocation.target));
+                    }
+                    else
+                    {
+                        invocation.target = x86_mode_target;
+                    }
+                }
+            }
+            if (invocation.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                compiler_driver_resolve_native_target(arena, &invocation, architecture_option, feature_overrides, feature_override_count);
+            }
+            if (invocation.error == COMPILER_DRIVER_ERROR_NONE && x86_regparm_seen)
+            {
+                IntegerParsingU64 parsed = string8_parse_u64_decimal(x86_regparm_value);
+                if (invocation.target.cpu_arch != CPU_ARCH_I386)
+                {
+                    compiler_driver_argument_error(arena, &invocation, S8("unsupported option: -mregparm={S8} for this target"),
+                                                   x86_regparm_value);
+                }
+                else if (parsed.status != INTEGER_PARSING_SUCCESS || parsed.length != x86_regparm_value.length)
+                {
+                    compiler_driver_argument_error(arena, &invocation, S8("invalid value for -mregparm: {S8}"), x86_regparm_value);
+                }
+                else if (parsed.value > 3)
+                {
+                    compiler_driver_argument_error(arena, &invocation, S8("-mregparm={S8} is not between 0 and 3"), x86_regparm_value);
+                }
+                else
+                {
+                    invocation.target.x86_register_parameter_count = (u8)parsed.value;
+                }
+            }
+            if (invocation.error == COMPILER_DRIVER_ERROR_NONE && x86_preferred_stack_boundary_seen)
+            {
+                IntegerParsingU64 parsed = string8_parse_u64_decimal(x86_preferred_stack_boundary_value);
+                if (invocation.target.cpu_arch != CPU_ARCH_I386)
+                {
+                    compiler_driver_argument_error(arena, &invocation, S8("unsupported option: -mpreferred-stack-boundary={S8} for this target"),
+                                                   x86_preferred_stack_boundary_value);
+                }
+                else if (parsed.status != INTEGER_PARSING_SUCCESS || parsed.length != x86_preferred_stack_boundary_value.length)
+                {
+                    compiler_driver_argument_error(arena, &invocation, S8("invalid value for -mpreferred-stack-boundary: {S8}"),
+                                                   x86_preferred_stack_boundary_value);
+                }
+                else if (parsed.value < 2 || parsed.value > 4)
+                {
+                    compiler_driver_argument_error(arena, &invocation,
+                                                   S8("-mpreferred-stack-boundary={S8} is not between 2 and 4"),
+                                                   x86_preferred_stack_boundary_value);
+                }
+                else
+                {
+                    invocation.target.x86_preferred_stack_boundary = (u8)parsed.value;
+                }
+            }
         }
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.no_asynchronous_unwind_tables &&
+        invocation.target.cpu_arch != CPU_ARCH_I386)
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for this target"),
+                                       S8("-fno-asynchronous-unwind-tables"));
     }
     // No canonical object field carries common-storage intent. Reject only an
     // effective request when this invocation will emit a code-generation artifact;
@@ -3328,6 +3579,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
     }
     compiler_driver_validate_linker_query(&invocation);
+    compiler_driver_consume_linker_verbose(arena, &invocation);
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && !invocation.no_standard_includes && !invocation.has_gpu_target &&
         invocation.target.os != OPERATING_SYSTEM_UEFI && invocation.target.cpu_arch != CPU_ARCH_SPIRV_COMPUTE)
     {
@@ -4025,6 +4277,123 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_elf_library_roots(Arena* arena, Compiler
         roots[root_count++] = S8("/usr/lib");
     }
     return root_count;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_link_argument_safe(char8 byte)
+{
+    bool result = (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') || (byte >= '0' && byte <= '9') ||
+                  byte == '_' || byte == '.' || byte == '/' || byte == '=' || byte == ':' || byte == '+' || byte == ',' ||
+                  byte == '@' || byte == '%' || byte == '-';
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_quote(Arena* arena, String8 argument)
+{
+    bool safe = argument.length != 0;
+    u64 quote_count = 0;
+    for (u64 index = 0; index < argument.length; index += 1)
+    {
+        char8 byte = argument.pointer[index];
+        safe = safe && compiler_driver_native_link_argument_safe(byte);
+        quote_count += byte == '\'';
+    }
+    String8 result = argument;
+    if (!safe)
+    {
+        u64 length = argument.length + quote_count * 3 + 2;
+        char8* pointer = arena_allocate(arena, char8, length);
+        u64 position = 0;
+        pointer[position++] = '\'';
+        for (u64 index = 0; index < argument.length; index += 1)
+        {
+            char8 byte = argument.pointer[index];
+            if (byte == '\'')
+            {
+                pointer[position++] = '\'';
+                pointer[position++] = '\\';
+                pointer[position++] = '\'';
+                pointer[position++] = '\'';
+            }
+            else
+            {
+                pointer[position++] = byte;
+            }
+        }
+        pointer[position++] = '\'';
+        result = (String8){.pointer = pointer, .length = position};
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_report_argument(Arena* arena, String8 prefix, String8 value)
+{
+    String8 argument = string_format(arena, S8("{S8}{S8}"), prefix, value);
+    String8 quoted = compiler_driver_native_link_quote(arena, argument);
+    String8 result = string_format(arena, S8(" {S8}"), quoted);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_shared_library_input(String8 path)
+{
+    bool result = string_ends_with_sequence(path, S8(".so"));
+    for (u64 index = 0; !result && index + 4 <= path.length; index += 1)
+    {
+        result = string_equal(string_slice(path, index, index + 4), S8(".so.")) && index + 4 < path.length;
+    }
+    return result;
+}
+
+String8 compiler_driver_native_link_report(Arena* arena, CompilerDriverInvocation invocation)
+{
+    String8 result = {0};
+    if (compiler_driver_native_linux_elf_link(invocation) && (invocation.verbose || invocation.linker_verbose))
+    {
+        String8* roots = arena_allocate(arena, String8, 8);
+        u32 root_count = compiler_driver_elf_library_roots(arena, invocation, roots);
+        u64 part_capacity = (u64)invocation.library_path_count + root_count + invocation.input_count + invocation.library_count + 4;
+        String8* parts = arena_allocate(arena, String8, part_capacity);
+        u32 part_count = 0;
+        if (invocation.verbose)
+        {
+            String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
+            parts[part_count++] = S8(" buster-native-ld -o ");
+            parts[part_count++] = compiler_driver_native_link_quote(arena, output);
+            for (u32 index = 0; index < invocation.library_path_count; index += 1)
+            {
+                parts[part_count++] = compiler_driver_native_link_report_argument(arena, S8("-L"), invocation.library_paths[index]);
+            }
+            for (u32 index = 0; index < root_count; index += 1)
+            {
+                parts[part_count++] = compiler_driver_native_link_report_argument(arena, S8("-L"), roots[index]);
+            }
+            for (u32 index = 0; index < invocation.input_count; index += 1)
+            {
+                String8 input = invocation.input_paths[index];
+                if (compiler_driver_object_input(input) || compiler_driver_archive_input(input) ||
+                    compiler_driver_native_shared_library_input(input))
+                {
+                    parts[part_count++] = compiler_driver_native_link_report_argument(arena, (String8){0}, input);
+                }
+            }
+            for (u32 index = 0; index < invocation.library_count; index += 1)
+            {
+                String8 library = invocation.libraries[index];
+                if (!string_equal(library, S8("c")))
+                {
+                    parts[part_count++] = compiler_driver_native_link_report_argument(arena, S8("-l"), library);
+                }
+            }
+            parts[part_count++] = S8(" -lc\n");
+        }
+        if (invocation.linker_verbose)
+        {
+            CompilerDriverInvocation query = invocation;
+            query.query = COMPILER_DRIVER_QUERY_LINKER_VERSION;
+            parts[part_count++] = compiler_driver_query_text(arena, &query);
+        }
+        result = string_join_arena(arena, (SliceString8){.pointer = parts, .length = part_count}, false);
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_mach_read_u32_le(ByteSlice bytes, u64 offset, u32* value)
@@ -5907,6 +6276,15 @@ struct CompilerDriverCpuRuntime
     u32 reserved;
 };
 
+// An archive refused while reading its descriptors names the failing member
+// when the reader attributed one, such as an unindexed member whose symbol
+// table cannot be read.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_archive_read_failure(Arena* arena, String8 path, ObjectArchive* archive)
+{
+    return archive->diagnostic.length ? string_format(arena, S8("could not read archive {S8}: {S8}"), path, archive->diagnostic)
+                                      : string_format(arena, S8("could not read archive {S8}: error {u32}"), path, (u32)archive->error);
+}
+
 // Like `-lgcc` at the end of GCC's link line, but narrower: only a remaining
 // strong reference to the target's CPU-feature runtime reads libgcc.a, and
 // only the members defining those names are selected, so every other link and
@@ -5937,7 +6315,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverCpuRuntime compiler_driver_elf_cpu_runtime(Are
         else if (archive.error != OBJECT_ERROR_NONE || archive.object_count > UINT32_MAX - object_count)
         {
             result.symbol = missing;
-            result.diagnostic = string_format(arena, S8("could not read archive {S8}: error {u32}"), path, (u32)archive.error);
+            result.diagnostic = compiler_driver_archive_read_failure(arena, path, &archive);
         }
         else
         {
@@ -6957,6 +7335,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_llvm_data_layout(Target target)
         return S8("e-m:e-p:64:64-p10:8:8-p20:8:8-i64:64-n32:64-S128-ni:1:10:20");
     case CPU_ARCH_BPFEL:
         return S8("e-m:e-p:64:64-i64:64-i128:128-n32:64-S128");
+    case CPU_ARCH_I386:
     case CPU_ARCH_SPIRV_COMPUTE:
     case CPU_ARCH_COUNT:
         break;
@@ -7594,7 +7973,21 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
     {
         metrics->function_symbol_limit = object.symbol_count;
     }
-    compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result, metrics);
+    // Every declared section is its own COFF or Mach-O section, so a file
+    // with more than the format can number is refused here, naming the first
+    // section past the limit, rather than by the writer's capacity check.
+    ObjectFormat format = object_format_for_target(invocation.target);
+    u32 section_limit = format == OBJECT_FORMAT_COFF ? OBJECT_COFF_MAX_SECTIONS : format == OBJECT_FORMAT_MACH_O64 ? OBJECT_MACH_O_MAX_SECTIONS : UINT32_MAX;
+    if (invocation.action == COMPILER_DRIVER_ACTION_OBJECT && unit.section_count > section_limit)
+    {
+        result.error = COMPILER_DRIVER_ERROR_OBJECT;
+        result.diagnostic = string_format(arena, S8("{S8}: section '{S8}' is section {u32} of {u32}; a {S8} object holds at most {u32} sections"), path,
+                                          unit.sections[section_limit].name, section_limit + 1, unit.section_count, object_format_name(format), section_limit);
+    }
+    else
+    {
+        compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result, metrics);
+    }
     return result;
 }
 
@@ -7709,6 +8102,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
                                                     .trigraph_mode = invocation.trigraph_mode,
                                                     .position_independent_level = invocation.position_independent_level,
                                                     .position_independent_executable = invocation.position_independent_executable,
+                                                    .freestanding = invocation.freestanding,
                                                     .macro_operation_count = invocation.macro_operation_count,
                                                     .definition_count = invocation.definition_count,
                                                     .undefinition_count = invocation.undefinition_count,
@@ -7954,6 +8348,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .trigraph_mode = invocation.trigraph_mode,
                                                     .position_independent_level = invocation.position_independent_level,
                                                     .position_independent_executable = invocation.position_independent_executable,
+                                                    .freestanding = invocation.freestanding,
                                                     .macro_operation_count = invocation.macro_operation_count,
                                                     .definition_count = invocation.definition_count,
                                                     .undefinition_count = invocation.undefinition_count,
@@ -8047,6 +8442,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         syntax.ast = &pilot_tree;
         syntax.ast_type_statistics = &result.c_ast.types;
         syntax.ast_statement_statistics = &result.c_ast.statements;
+        syntax.ast_specifier_statistics = &result.c_ast.specifiers;
         syntax.type_interning = true;
     }
     // Nothing lowers a -fsyntax-only unit, so its string literals are counted,
@@ -8090,8 +8486,11 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     .pin_debug_locals = invocation.debug_info &&
                                                                                         (!invocation.pinned_debug_locals_explicit ||
                                                                                          invocation.enable_pinned_debug_locals),
+                                                                    // Lowering reads root conditionals and statement extents
+                                                                    // from the pilot's tree; it is released at `end:`, after lowering.
                                                                     .syntax_tree = pilot_tree_built ? &pilot_tree : 0,
-                                                                    .ast_lower_statistics = pilot_tree_built ? &result.c_ast.lower : 0});
+                                                                    .ast_lower_statistics = pilot_tree_built ? &result.c_ast.lower : 0,
+                                                                    .syntax_tree_extent_statistics = pilot_tree_built ? &result.c_ast.extents : 0});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     result.type_layout = lowered.type_layout;
@@ -9410,6 +9809,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         .warning_policy = invocation.warning_policy,
     };
     CompilerDriverResult result = {.compilation_workers = 1};
+    String8 linker_report = {0};
     CompilerDriverArchiveState archive_state = {0};
     FileMapRead* input_archive_maps = 0;
     FileMapRead* library_archive_maps = 0;
@@ -9490,16 +9890,6 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             goto finish;
         }
     }
-    // Count both explicit entries and the target's defaults before any source
-    // read, fast-path allocation or lookup; export maps also reserve libc.
-    u64 library_count = (u64)invocation.library_count + invocation.framework_count;
-    u32 library_reserve = invocation.target.os == OPERATING_SYSTEM_WINDOWS ? 8u : invocation.target.os == OPERATING_SYSTEM_LINUX ? COMPILER_DRIVER_ELF_SCRIPT_MEMBERS + 3u : 0u;
-    if (library_count >= (u64)UINT32_MAX - library_reserve || invocation.library_path_count > UINT32_MAX - 9u)
-    {
-        result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-        result.diagnostic = S8("native library counts exceed driver limits");
-        goto finish;
-    }
     // The digest covers every structured record, and function sizes are a
     // refinement of a measurement, so neither may be silently empty.
     if ((measure && invocation.suppress_diagnostic_records) || (invocation.collect_function_sizes && !measure))
@@ -9538,6 +9928,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.diagnostic = S8("link operation stream does not cover inputs and libraries in order");
         goto finish;
     }
+    linker_report = compiler_driver_native_link_report(arena, invocation);
     compiler_driver_validate_spirv_invocation(&invocation);
     if (invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {
@@ -9805,7 +10196,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         if (input_archives[input_index].error != OBJECT_ERROR_NONE || input_archives[input_index].object_count > UINT32_MAX - object_capacity)
         {
             compiler_driver_fail_input(&result, inputs, input_index, COMPILER_DRIVER_ERROR_OBJECT, input_archives[input_index].error,
-                                          string_format(arena, S8("could not read archive {S8}: error {u32}"), input_path, (u32)input_archives[input_index].error));
+                                          compiler_driver_archive_read_failure(arena, input_path, &input_archives[input_index]));
             goto finish;
         }
         object_capacity += input_archives[input_index].object_count;
@@ -9837,7 +10228,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             result.error = COMPILER_DRIVER_ERROR_OBJECT;
             result.object_error = archive.error;
-            result.diagnostic = string_format(arena, S8("could not read archive {S8}: error {u32}"), archive_path, (u32)archive.error);
+            result.diagnostic = compiler_driver_archive_read_failure(arena, archive_path, &archive);
             goto finish;
         }
         object_capacity += archive.object_count;
@@ -10165,6 +10556,41 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             result.c_ast.statements.reason = unit.c_ast.statements.reason;
             result.c_ast.statements.fallback_token = unit.c_ast.statements.fallback_token;
+        }
+        result.c_ast.specifiers.lists += unit.c_ast.specifiers.lists;
+        result.c_ast.specifiers.indexed += unit.c_ast.specifiers.indexed;
+        result.c_ast.specifiers.index_reads += unit.c_ast.specifiers.index_reads;
+        result.c_ast.specifiers.primitive_answers += unit.c_ast.specifiers.primitive_answers;
+        result.c_ast.specifiers.typedef_answers += unit.c_ast.specifiers.typedef_answers;
+        result.c_ast.specifiers.fallbacks += unit.c_ast.specifiers.fallbacks;
+        result.c_ast.specifiers.type_name_skips += unit.c_ast.specifiers.type_name_skips;
+        result.c_ast.specifiers.type_name_retries += unit.c_ast.specifiers.type_name_retries;
+        result.c_ast.specifiers.type_name_primitive_answers += unit.c_ast.specifiers.type_name_primitive_answers;
+        result.c_ast.specifiers.type_name_typedef_answers += unit.c_ast.specifiers.type_name_typedef_answers;
+        result.c_ast.specifiers.type_name_fallbacks += unit.c_ast.specifiers.type_name_fallbacks;
+        for (u32 reason = 0; reason < C_AST_SPECIFIER_FALLBACK_COUNT; reason += 1)
+        {
+            result.c_ast.specifiers.fallback_counts[reason] += unit.c_ast.specifiers.fallback_counts[reason];
+            result.c_ast.specifiers.type_name_fallback_counts[reason] += unit.c_ast.specifiers.type_name_fallback_counts[reason];
+        }
+        if (unit.c_ast.specifiers.fallbacks)
+        {
+            result.c_ast.specifiers.reason = unit.c_ast.specifiers.reason;
+            result.c_ast.specifiers.fallback_token = unit.c_ast.specifiers.fallback_token;
+        }
+        result.c_ast.extents.bodies += unit.c_ast.extents.bodies;
+        result.c_ast.extents.entries += unit.c_ast.extents.entries;
+        result.c_ast.extents.entry_declines += unit.c_ast.extents.entry_declines;
+        result.c_ast.extents.answers += unit.c_ast.extents.answers;
+        for (u32 reason = 0; reason < C_AST_EXTENT_FALLBACK_COUNT; reason += 1)
+        {
+            result.c_ast.extents.walked[reason] += unit.c_ast.extents.walked[reason];
+            result.c_ast.extents.body_fallbacks[reason] += unit.c_ast.extents.body_fallbacks[reason];
+        }
+        if (unit.c_ast.extents.reason)
+        {
+            result.c_ast.extents.reason = unit.c_ast.extents.reason;
+            result.c_ast.extents.fallback_token = unit.c_ast.extents.fallback_token;
         }
         result.c_ast.lower.bodies += unit.c_ast.lower.bodies;
         result.c_ast.lower.conditionals += unit.c_ast.lower.conditionals;
@@ -10527,6 +10953,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result.native_link);
     }
 finish:
+    result.linker_report = linker_report;
     result.source_cache = c_source_cache_stats(invocation.source_cache);
     c_source_cache_destroy(owned_source_cache);
     if (archive_state.arena) arena_destroy(archive_state.arena, 1);

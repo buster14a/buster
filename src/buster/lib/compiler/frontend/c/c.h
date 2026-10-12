@@ -667,6 +667,8 @@ struct CPreprocessOptions
     // Preserve expansion boundary whitespace for a subsequent text printer.
     // This does not widen CToken or allocate a sidecar in ordinary compilation.
     bool retain_output_spacing;
+    // The driver accepted -ffreestanding; publishes __STDC_HOSTED__ as zero.
+    bool freestanding;
     // Render the surviving macro table into CPreprocessDetail.macro_dump.
     bool dump_macros;
     // 0: none, 1: -fpic/-fpie, 2: -fPIC/-fPIE.
@@ -1540,6 +1542,108 @@ struct CAstStatementStatistics
     u32 fallback_token;
 };
 
+// Why a declaration's specifier run went to the type machine instead of being
+// read from its DECL_SPECIFIERS node (c_parse_declaration_specifiers_type,
+// GitHub #3102). The run's first token names a word-only list, one whose
+// children are word and name leaves on consecutive tokens; a reason other
+// than INPUT says what that list holds that the tree read leaves to the
+// machine.
+typedef enum CAstSpecifierFallback
+{
+    C_AST_SPECIFIER_FALLBACK_NONE,
+    // No word-only specifier list begins at the run's first token: the list
+    // there holds a tag, typeof, `_Atomic(T)`, `_Alignas`, `_BitInt` or an
+    // attribute, or there is none.
+    C_AST_SPECIFIER_FALLBACK_INPUT,
+    // The word-only list holds a word outside the plain set (restrict,
+    // `_Atomic`, nullability, auto, constexpr, `__extension__`,
+    // `__auto_type`, `__builtin_va_list`, `_Imaginary`, `__float128`), no
+    // type word or name at all, or both. A word or an attribute right after
+    // the list, which the machine's scans would read on into, counts here
+    // too; the tree puts both in the list.
+    C_AST_SPECIFIER_FALLBACK_SPECIFIERS,
+    // The storage-class words repeat or conflict, which the machine
+    // diagnoses.
+    C_AST_SPECIFIER_FALLBACK_STORAGE,
+    // The machine's primitive scan over the list's words interns no row: an
+    // invalid combination, which it diagnoses. The syntax pass rejects those
+    // first, so only a list whose words the tree classified differently
+    // from the scan reaches this.
+    C_AST_SPECIFIER_FALLBACK_PRIMITIVE,
+    // The name is not a typedef in the run's scope, or its type is
+    // restrict-qualified: the machine's other lookups and checks decide.
+    C_AST_SPECIFIER_FALLBACK_TYPEDEF,
+    C_AST_SPECIFIER_FALLBACK_COUNT,
+} CAstSpecifierFallback;
+
+// What the specifier read did over one analysis: the runs it answered from
+// the tree, by base (primitive words or a typedef name), and the runs it left
+// to the machine and why. `lists` counts the tree's specifier lists,
+// `indexed` the word-only ones the index holds, and `index_reads` the list
+// children the index build read, which is at most the tree's node count.
+typedef struct CAstSpecifierStatistics CAstSpecifierStatistics;
+struct CAstSpecifierStatistics
+{
+    u64 lists;
+    u64 indexed;
+    u64 index_reads;
+    u64 primitive_answers;
+    u64 typedef_answers;
+    u64 fallbacks;
+    u64 fallback_counts[C_AST_SPECIFIER_FALLBACK_COUNT];
+    // Type-name runs (c_parse_type_name_specifiers: `sizeof` and `_Alignof`
+    // operands, compound literals and the other type names the validators
+    // read): the runs skipped because no specifier list begins at their first
+    // token, those of them a `typeof` aggregate definition sent back to the
+    // machine, the runs read from the tree by base, and the runs left to the
+    // machine by reason.
+    u64 type_name_skips;
+    u64 type_name_retries;
+    u64 type_name_primitive_answers;
+    u64 type_name_typedef_answers;
+    u64 type_name_fallbacks;
+    u64 type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_COUNT];
+    // The last fallback: its reason, and the run's first token.
+    CAstSpecifierFallback reason;
+    u32 fallback_token;
+};
+
+// Why lowering's token walker, not the tree's extent table
+// (c_ir_statement_extents in c_gen.c, GitHub #3102), answered a controlled
+// body range query.
+typedef enum CAstExtentFallback
+{
+    C_AST_EXTENT_FALLBACK_NONE,
+    // The body has no table: no tree, no function definition whose body is
+    // this one, a body whose delimiters do not nest, or a table that does
+    // not fit its arena.
+    C_AST_EXTENT_FALLBACK_INPUT,
+    // A token the grammar puts next to a statement's anchor (the `(` after a
+    // header keyword, the `else` before an else-branch, the `goto` before a
+    // label) is not that token; the whole body goes to the walker.
+    C_AST_EXTENT_FALLBACK_ANCHOR,
+    // The query is not an entry, or its bound is shorter than the entry.
+    C_AST_EXTENT_FALLBACK_SHAPE,
+    C_AST_EXTENT_FALLBACK_COUNT,
+} CAstExtentFallback;
+
+// What the extent table did over one lowering: tables built (one per body
+// that asks), entries, queries answered, queries the walker answered by
+// reason (`walked`), and bodies whose table was refused (`body_fallbacks`).
+typedef struct CAstExtentStatistics CAstExtentStatistics;
+struct CAstExtentStatistics
+{
+    u64 bodies;
+    u64 entries;
+    u64 entry_declines;
+    u64 answers;
+    u64 walked[C_AST_EXTENT_FALLBACK_COUNT];
+    u64 body_fallbacks[C_AST_EXTENT_FALLBACK_COUNT];
+    // The last body fallback: its reason, and the `{` of the body.
+    CAstExtentFallback reason;
+    u32 fallback_token;
+};
+
 // What lowering read from the tree (GitHub #3102) over one lowering: the
 // top-level function bodies whose conditional nodes it indexed, the nodes, and
 // how each root-conditional query inside an indexed body ended. An answer is
@@ -1582,6 +1686,9 @@ struct CParserResult
     // Optional: receives the body binder's statement-plan counts, added to
     // what it already holds. The plan runs whenever `ast` is set.
     CAstStatementStatistics* ast_statement_statistics;
+    // Optional: receives the declaration specifier read's counts, added to
+    // what it already holds. The read runs whenever `ast` is set.
+    CAstSpecifierStatistics* ast_specifier_statistics;
     u32 declaration_count;
     u32 diagnostic_count;
     u32 declaration_capacity;
@@ -2019,6 +2126,8 @@ struct CIRLowerOptions
     CAst const* syntax_tree;
     // Optional: receives the counts, added to what it already holds.
     CAstLowerStatistics* ast_lower_statistics;
+    // Optional: receives the extent table's counts, added to what it holds.
+    CAstExtentStatistics* syntax_tree_extent_statistics;
 };
 
 typedef struct CIRDirectSsaStatistics CIRDirectSsaStatistics;
@@ -2215,6 +2324,10 @@ BUSTER_F_DECL CParserResult c_parse_ast_from_tree(Arena* arena, CPreprocessResul
 BUSTER_F_DECL String8 c_parser_tree_fallback_name(CParserTreeFallback reason);
 // The CAstStatementFallback in lower case without its prefix ("none", "input", "tokens").
 BUSTER_F_DECL String8 c_ast_statement_fallback_name(CAstStatementFallback reason);
+// The CAstSpecifierFallback in lower case without its prefix ("none", "input", ...).
+BUSTER_F_DECL String8 c_ast_specifier_fallback_name(CAstSpecifierFallback reason);
+// The CAstExtentFallback in lower case without its prefix ("none", "input", "anchor", "shape").
+BUSTER_F_DECL String8 c_ast_extent_fallback_name(CAstExtentFallback reason);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 // Complete syntax and semantic analysis without constructing canonical IR.
 BUSTER_F_DECL CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax);

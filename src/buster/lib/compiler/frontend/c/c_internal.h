@@ -1558,6 +1558,24 @@ struct CTypeParseMachine
     CAstStatementStatistics* ast_statement_statistics;
     u32* ast_statement_bodies;
     u32 ast_statement_body_count;
+    // The declaration specifier read (c_parse_declaration_specifiers_type)
+    // reads the same tree: `ast_specifier_starts` holds the first token of
+    // every DECL_SPECIFIERS node, ascending, and `ast_specifier_nodes` the
+    // node at the same position, built once before the declarations are
+    // typed (count in `ast_specifier_count`, null without a tree), with the
+    // position of the last lookup in `ast_specifier_cursor`;
+    // `ast_specifier_statistics` the optional counts.
+    CAstSpecifierStatistics* ast_specifier_statistics;
+    u32* ast_specifier_starts;
+    u32* ast_specifier_nodes;
+    u32 ast_specifier_count;
+    u32 ast_specifier_cursor;
+    // Beside it, one bit per token for the first token of every
+    // DECL_SPECIFIERS node, word-only or not, over `ast_specifier_first_limit`
+    // tokens: a type-name run whose first token has no bit begins no type
+    // name (c_parse_type_name_specifiers).
+    u64* ast_specifier_firsts;
+    u32 ast_specifier_first_limit;
     CAstTypeBodyIndex* ast_bodies;
     CAstTypeBody* ast_types;
     CParseExpressionQuery* expression_queries;
@@ -1586,6 +1604,9 @@ struct CTypeParseMachine
     u64 phase_released_bytes;
     u64 phase_releases;
     CTypeLayoutCache layout_cache;
+    // Owns a grown member-search workspace; the initial buffers stay in the
+    // analysis machine arena. Released by semantic teardown, never a query rewind.
+    Arena* promoted_member_arena;
     CParsePromotedMemberWork* promoted_member_work;
     u32* promoted_member_visited;
     u32 promoted_member_capacity;
@@ -1741,6 +1762,10 @@ BUSTER_C_EXTERN String8 c_parse_scalar_conversion_message(Target target, CTypeKi
 // Whether [start, end) has the shape of a place, the constraint the machine's
 // `&` checks.
 BUSTER_C_EXTERN bool c_parse_expression_place_shape(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end);
+// Whether [start, end) is a place `++` or `--` may modify, given its type and
+// whether it is a nonplace projection: the machine's checked update rule.
+BUSTER_C_EXTERN bool c_parse_update_operand_modifiable(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CTypeId type,
+                                                       bool nonplace_projection);
 // The binding strength the machine's operator scan gives a token: 1 for the
 // comma, 2 for the assignment family, then 4 (`||`) to 13 (`*`); 0 for none.
 BUSTER_C_EXTERN u32 c_parse_expression_operator_precedence(CToken token);
@@ -1751,6 +1776,12 @@ BUSTER_C_EXTERN bool c_parse_type_identity_sites_absent(CParseResult* result, u3
 // Whether c_parse_pending_enum_member could answer a single identifier: an
 // enumerator list still being parsed.
 BUSTER_C_EXTERN bool c_parse_pending_enum_possible(CParseResult const* result);
+
+// The last token of the statement at `node` by the statement plan's anchor
+// rules (c_parse.c), or UINT32_MAX when no rule states it. `lasts` memoizes
+// answers per node - `begin`, zeroed by the caller; `limit` is the body's `}`.
+// Lowering's extent table (c_gen.c) reads the same rules.
+BUSTER_C_EXTERN u32 c_parse_plan_statement_last(CAst const* ast, CPreprocessResult const* preprocess, u32* lasts, u32 begin, u32 node, u32 limit);
 
 // A tree answer held for verify mode; defined below for tests builds.
 typedef struct CAstTypePending CAstTypePending;

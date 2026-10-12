@@ -2036,6 +2036,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             }
         }
     }
+    // -fearly-exit forks here, before the first lane_run starts the gang;
+    // from now on this is the child, and the parent reports its status at
+    // os_early_exit_release below (#3686).
+    if (!query && invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.early_exit)
+    {
+        (void)os_early_exit_arm();
+    }
     // The metrics clock starts after argument parsing: reading it earlier
     // would cost every compile a clock read to learn the option was absent.
     // Per-input offsets and wall_ns share this origin.
@@ -2049,6 +2056,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     invocation.omit_spelled_bytes = !invocation.verbose && !invocation.source_metrics_path.length;
     CompilerDriverResult compile = query ? (CompilerDriverResult){0} : compiler_driver_execute_invocation(arena, invocation);
     ProcessResult result = PROCESS_RESULT_SUCCESS;
+    if (compile.linker_report.length)
+    {
+        string_print(S8("{S8}"), compile.linker_report);
+    }
     if (compile.warning.length)
     {
         compiler_print_diagnostic(S8("{S8}"), compile.warning);
@@ -2169,6 +2180,31 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          tree.statements.fallbacks,
                          c_ast_statement_fallback_name(tree.statements.fallbacks ? tree.statements.reason : C_AST_STATEMENT_FALLBACK_NONE),
                          tree.statements.fallbacks ? tree.statements.fallback_token : UINT32_MAX);
+            // Counts: the declaration specifier runs read from the tree, and the runs left to the type machine, by reason.
+            CAstSpecifierStatistics specifiers = tree.specifiers;
+            string_print(S8("C_AST_SPECIFIERS lists={u64} indexed={u64} index_reads={u64} primitive_answers={u64} typedef_answers={u64} fallbacks={u64} input={u64} specifiers={u64} "
+                            "storage={u64} primitive={u64} typedef={u64} reason={S8} fallback_token={u32}\n"),
+                         specifiers.lists, specifiers.indexed, specifiers.index_reads, specifiers.primitive_answers, specifiers.typedef_answers, specifiers.fallbacks,
+                         specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_INPUT], specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_SPECIFIERS],
+                         specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_STORAGE], specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_PRIMITIVE],
+                         specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_TYPEDEF],
+                         c_ast_specifier_fallback_name(specifiers.fallbacks ? specifiers.reason : C_AST_SPECIFIER_FALLBACK_NONE),
+                         specifiers.fallbacks ? specifiers.fallback_token : UINT32_MAX);
+            // Counts: the extent table lowering read controlled body ranges from, and the queries its token walker answered.
+            string_print(S8("C_AST_EXTENTS bodies={u64} entries={u64} entry_declines={u64} answers={u64} walked_input={u64} walked_anchor={u64} "
+                            "walked_shape={u64} refused_input={u64} refused_anchor={u64} reason={S8} fallback_token={u32}\n"),
+                         tree.extents.bodies, tree.extents.entries, tree.extents.entry_declines, tree.extents.answers,
+                         tree.extents.walked[C_AST_EXTENT_FALLBACK_INPUT], tree.extents.walked[C_AST_EXTENT_FALLBACK_ANCHOR],
+                         tree.extents.walked[C_AST_EXTENT_FALLBACK_SHAPE], tree.extents.body_fallbacks[C_AST_EXTENT_FALLBACK_INPUT],
+                         tree.extents.body_fallbacks[C_AST_EXTENT_FALLBACK_ANCHOR], c_ast_extent_fallback_name(tree.extents.reason),
+                         tree.extents.reason ? tree.extents.fallback_token : UINT32_MAX);
+            // Counts: the type-name runs skipped as no type name or read from the tree, and the runs left to the type machine, by reason.
+            string_print(S8("C_AST_TYPE_NAMES skips={u64} retries={u64} primitive_answers={u64} typedef_answers={u64} fallbacks={u64} input={u64} specifiers={u64} "
+                            "storage={u64} primitive={u64} typedef={u64}\n"),
+                         specifiers.type_name_skips, specifiers.type_name_retries, specifiers.type_name_primitive_answers, specifiers.type_name_typedef_answers,
+                         specifiers.type_name_fallbacks, specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_INPUT],
+                         specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_SPECIFIERS], specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_STORAGE],
+                         specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_PRIMITIVE], specifiers.type_name_fallback_counts[C_AST_SPECIFIER_FALLBACK_TYPEDEF]);
             // Counts: lowering's root-conditional queries inside indexed bodies, by how each ended.
             string_print(S8("C_AST_LOWER bodies={u64} conditionals={u64} steps={u64} answers={u64} negatives={u64} fallbacks={u64}\n"),
                          tree.lower.bodies, tree.lower.conditionals, tree.lower.steps, tree.lower.answers, tree.lower.negatives, tree.lower.fallbacks);
@@ -2308,6 +2344,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             result = PROCESS_RESULT_FAILED;
         }
     }
+    // Every artifact and report is out: an armed parent exits now, and the
+    // translation-unit arena's teardown below (and exit_mmap after it) runs
+    // in the background.
+    os_early_exit_release((u8)result);
     arena_destroy(arena, 1);
     return result;
 }

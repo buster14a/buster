@@ -131,6 +131,24 @@ BUSTER_F_DECL void c_test_ast_type_verify_set(bool enabled);
 BUSTER_F_DECL void c_test_ast_type_verify_perturb_alignments(bool enabled);
 // The counts since the last take, which resets them.
 BUSTER_F_DECL CTestAstTypeVerify c_test_ast_type_verify_take(void);
+// Turns the declaration specifier read from the tree (c_parse.c) off and back
+// on, per thread, so a test can analyse the same unit with and without it.
+BUSTER_F_DECL void c_test_ast_specifiers_set(bool enabled);
+// Verify mode for the type-name runs skipped as no type name
+// (c_parse_type_name_specifiers under -fc-ast-pilot): the machine's attempt
+// also runs on every skipped run, and the counts record the runs it checked
+// and those where it answered, kept a type row or reported a diagnostic. Per
+// thread; the take resets the counts.
+typedef struct CTestAstTypeNameVerify CTestAstTypeNameVerify;
+struct CTestAstTypeNameVerify
+{
+    u64 checked;
+    u64 answered;
+    u64 appended;
+    u64 diagnosed;
+};
+BUSTER_F_DECL void c_test_ast_type_names_verify_set(bool enabled);
+BUSTER_F_DECL CTestAstTypeNameVerify c_test_ast_type_names_verify_take(void);
 
 BUSTER_F_DECL CDiagnostic c_test_check_named_call_arities(Arena* arena, CAnalysisResult* analysis, CPreprocessResult preprocess,
                                                         u32 start, u32 end);
@@ -183,6 +201,9 @@ struct CTestQualifiedShare
     u32 alignments_added;
 };
 BUSTER_F_DECL CTestQualifiedShare c_test_qualified_share(CParseResult* result, CTypeId base);
+
+// Cast-proof token visits and logical-position probes on the calling thread.
+BUSTER_F_DECL u64 c_test_logical_label_type_work(void);
 
 // Direct member alignment queries must leave the published model, including
 // spare rows and the type-map input counts/pointers, byte-for-byte unchanged.
@@ -286,6 +307,23 @@ enum
     C_TEST_WORD_CLASS_QUALIFIERS_AGREE = 1 << 9,
 };
 BUSTER_F_DECL u32 c_test_parse_word_classes(CPreprocessResult preprocess, CToken token);
+
+// A real member search around a failed private workspace replacement:
+// retain the old owner on failure, recover on retry, and release via teardown.
+typedef struct CTestPromotedMemberWorkspace CTestPromotedMemberWorkspace;
+struct CTestPromotedMemberWorkspace
+{
+    CTypeId member_type;
+    bool initial_search;
+    bool failed_growth;
+    bool fault_consumed;
+    bool workspace_preserved;
+    bool structured_error;
+    bool recovered;
+    bool replacement;
+    bool released;
+};
+BUSTER_F_DECL CTestPromotedMemberWorkspace c_test_promoted_member_workspace(CParseResult* result, CTypeId root, String8 name);
 
 typedef struct CTestTypeConstantQuery CTestTypeConstantQuery;
 struct CTestTypeConstantQuery

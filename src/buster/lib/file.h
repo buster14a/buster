@@ -56,7 +56,7 @@ BUSTER_F_DECL bool file_write(String8 path, ByteSlice content);
 
 // Atomic publication for complete in-memory artifacts. The destination is
 // inspected without following its final link, then an exclusively-created file
-// in the same directory is written, flushed, closed, and atomically renamed.
+// in the same directory is written, closed, and atomically renamed.
 // Every result other than FILE_PUBLISH_PUBLISHED leaves an existing destination
 // byte-identical and a missing destination absent. Handled failures remove the
 // staging file; cleanup_error reports a failed close/delete without replacing
@@ -73,9 +73,9 @@ BUSTER_F_DECL bool file_write(String8 path, ByteSlice content);
 // sets all execute bits; PRIVATE and explicit modes set the requested bits.
 // Ownership, ACLs, extended attributes, timestamps, Windows attributes/streams,
 // and multi-file transactionality are not preserved.
-// Flushing the staging file catches delayed write failures before publication;
-// the containing directory is not flushed, so power-loss durability is not
-// promised. Staging names are recognizable after an uncatchable process exit.
+// Neither the staging file nor the containing directory is flushed (#2621),
+// so power-loss durability is not promised. Staging names are recognizable
+// after an uncatchable process exit.
 typedef enum FilePublishStatus
 {
     FILE_PUBLISH_FAILED,

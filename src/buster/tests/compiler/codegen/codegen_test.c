@@ -3814,6 +3814,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_switch_key_images(Unit
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codegen_test_ebpf_symbols(arguments);
+    TargetParseResult i386_target = target_parse_triple(S8("i386-unknown-linux-gnu"));
+    BUSTER_TEST(arguments, i386_target.error == TARGET_PARSE_ERROR_NONE);
+    CPreprocessResult i386_tokens = c_preprocess(arguments->arena, S8("int i386_codegen_probe(void) { return 1; }\n"),
+                                                 (CPreprocessOptions){.source_path = S8("i386-codegen-probe.c"),
+                                                                      .target = i386_target.target,
+                                                                      .data_layout = target_data_layout(i386_target.target)});
+    CParserResult i386_syntax = c_parse_ast(arguments->arena, i386_tokens);
+    CIRLowerResult i386_lowered = c_analyze(arguments->arena, S8("i386-codegen-probe.c"), i386_tokens, i386_syntax,
+                                             i386_target.target);
+    BUSTER_TEST(arguments, i386_tokens.diagnostic_count == 0 && i386_syntax.diagnostic_count == 0 &&
+                               i386_lowered.diagnostic_count == 0 && i386_lowered.program != 0);
+    if (i386_lowered.program)
+    {
+        CodegenModule i386_refusal = codegen_generate_canonical_module(arguments->arena, i386_lowered.program,
+                                                                        i386_lowered.program->modules, i386_target.target,
+                                                                        (CodegenModuleOptions){0});
+        BUSTER_TEST(arguments, i386_refusal.error == CODEGEN_ERROR_UNSUPPORTED_TARGET &&
+                                   string_equal(i386_refusal.failure_reason, S8("i386 code generation is not implemented")));
+    }
     UnitTestResult arm64_tls = codegen_test_arm64_windows_tls_offsets(arguments);
     result.succeeded_test_count += arm64_tls.succeeded_test_count;
     result.test_count += arm64_tls.test_count;
