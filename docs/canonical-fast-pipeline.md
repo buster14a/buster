@@ -36,13 +36,17 @@ The last `-O` option selects the level. Unsupported spellings, including
 | `-O3` | Same bounded recipe; no replay, reordering or larger budget | FAST |
 | `-Os`, `-Oz`, `-Ofast` | Level-2 aliases, with the same bounded recipe | FAST |
 
+No level selects the opt-in `cse` experiment described in
+[opt-in block-local CSE](#opt-in-block-local-cse-3011).
+
 These aliases do not promise a size-specific recipe or relaxed floating-point
 semantics. Positive levels deliberately share the accepted local optimizer;
 they do not claim Clang/GCC-equivalent optimization effort. Extra transforms
 need their own implementation and evidence before enablement.
 
-Explicit `-fcanonical-fast` / `-fno-canonical-fast` override all pass bits;
-per-pass controls override only their named bit. For each bit the last explicit
+Explicit `-fcanonical-fast` / `-fno-canonical-fast` override all pass bits:
+the first selects the four-pass recipe and the second nothing, and both clear
+`cse`. Per-pass controls override only their named bit. For each bit the last explicit
 control wins, independently of whether it precedes or follows `-O`. An explicit
 `-fregister-allocator=fast|quality` is likewise independent of `-O`; the last
 allocator option wins. Timing requests never enable a pass.
@@ -78,6 +82,7 @@ on each lowered function in this order:
 | Local promotion / frontend SSA | Existing frontend construction and `ir_promote_function`; the existing `-fno-frontend-ssa` and `-fno-canonical-local-promotion` controls remain independent. |
 | `fold` | One forward scan; path-compressed value replacements; integer constants up to 64 bits, integer identities, same-type pure casts, integer truncation/extension. No floating-point folding, division/remainder folding, branch deletion or iterative global propagation. Operand decoding and arithmetic are the shared `ir_integer_*` semantics (`ir_integer.c`); a row whose kernel result carries a shift-count, division or unsupported fault is left for run time. |
 | `address` | One scan collapses `&*pointer` and `*&place` only when type, category, alignment and all value qualifier facts agree. Shared selector address facts in #44 own deeper offset/index analysis. |
+| `cse` (opt-in) | Block-local value numbering; see [opt-in block-local CSE](#opt-in-block-local-cse-3011). Runs only when `-fcanonical-fast-cse` selects it. |
 | `dce` | Count surviving instruction and edge-argument uses; queue unused pure definitions, decrement their operands transitively. Each row enters the queue at most once. No CSR use index. |
 | `parameters` | Remove a block parameter when all resolved non-self incoming values agree. Up to four full sweeps; remaining nontrivial/cyclic parameters stay valid. No edge order or CFG topology change. |
 | Compact | One `ir_rewrite_compact` map shared with local promotion updates values, instruction links, operands, parameters/incomings, source ranges, extras and builder-local maps. Shared input operand slices are copied once into a single new pool. |
@@ -146,7 +151,7 @@ build/Release/ide cc source.c -O0 -fcanonical-fast-fold -o output
 build/Release/ide cc source.c -fcanonical-fast -ftime-canonical-fast -v -o output
 ```
 
-All four names accept `-fcanonical-fast-NAME` and
+All five names accept `-fcanonical-fast-NAME` and
 `-fno-canonical-fast-NAME`. `-fno-canonical-fast` clears the whole selection.
 Timing selection does not enable transformations. Per-pass `IR_FAST_PASS` records
 report the enable/timing bits, nanoseconds, row/operand/incoming visits and
@@ -194,13 +199,117 @@ inconclusive hosted result cannot enable the default. Self-hosting fixed point,
 all pass subsets, native mode matrix and non-native consumers remain correctness
 gates independently of performance acceptance.
 
+## Opt-in block-local CSE (#3011)
+
+`ir_fast_cse` is an experiment, outside every optimization level and outside
+`IR_FAST_ALL`. It walks each block's linked instruction chain once, after
+`fold`/`address` and before `dce`, and keys two row shapes:
+
+- `BINARY` add, subtract, multiply, and, or, xor whose result and both resolved
+  operands share one unsigned integer type of 1..64 bits. Add, multiply and
+  the bitwise operations order their operands; subtract does not.
+- Nonnegative single-limb `CONSTANT_INTEGER` rows of such a type, keyed by
+  their immediate bits.
+
+The key is the operation, canonical type and resolved operand roots (or
+immediate bits); a match compares the whole key, then requires the same
+category, alignment and read-only/volatile facts as the folding replacement.
+Signed, Boolean, enum, wider, pointer, floating, place, volatile and atomic
+values, loads, calls, division/remainder, shifts and SIMD are never keyed.
+`ir_instruction_is_pure` is not consulted as a CSE certificate.
+
+A hit records a replacement in the shared map and marks the row removed; the
+existing single compaction deletes it. Nothing moves between blocks: only an
+earlier row of the same block can be a representative. One 256-slot table of
+compact integer entries serves the whole module preparation. Each block takes
+a new generation tag instead of clearing it, and a wrapped counter clears the
+table and restarts at generation 1. A block admits at most 192 entries and a
+lookup probes at most eight slots. A full table or exhausted probe sequence
+declines insertion and leaves the row unchanged. A replacement only joins
+equal values, so an operand replaced by a block walked later leaves earlier
+hits sound; that block's entries have already expired. The table adds a constant 7 KiB to
+scratch, recorded as `table_bytes`, not to the per-function bound.
+
+`-fcanonical-fast-cse -v` prints an `IR_FAST_CSE` record. It reports blocks,
+candidates, hits, commuted, constant and window hits, probes, collisions,
+metadata and saturation declines, initialized table bytes and the largest
+block candidate count. A window hit is a hit at most eight candidates after
+its matched entry's recorded ordinal. The two strategies record that ordinal
+differently. A table entry keeps the representative's first occurrence. A
+window slot is refreshed by every matching occurrence, so its distance runs
+from the previous occurrence, and the representative can be older; for ten
+repeats of one key, the last hit has distance 1. Neither count bounds a
+representative's age or live range.
+
+`-fcanonical-fast-cse-strategy=window` replaces the table lookup with the
+issue's linear arm. Each candidate is compared, newest first, with the
+previous eight keyed candidates of its block, kept in a ring in the table's
+first slots. Every candidate, hit or miss, then takes the oldest slot. After a
+hit the slot records the representative, so repeated hits age the window
+like any other row. The arm never saturates; `probes` counts its comparisons. `=table` (the default) restores the hash table. The strategy
+changes nothing unless `cse` is selected.
+
+### Three-arm census (diagnostic, not performance evidence)
+
+These historical results were measured at `c29b794b`, before the merge of
+main. They come from a hosted 4-vCPU container, using a Clang-built Release
+`ide` with the default four passes, alone or plus `cse` in either strategy.
+The self-host input is `ide.c` with tests off and `-g -march=native`, using
+`-ftime-canonical-fast -v`. Each arm ran 7 times, interleaved; the table
+shows medians and the wall range.
+
+| Self-host arm | Wall s (min-max) | Peak RSS KiB | `cse` ms | Compact ms | Hits (constant) | Probes | Rows after FAST | `.text` bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| No CSE | 6.050 (5.689-7.470) | 846,064 | 0 | 56.8 | - | - | 1,810,089 | 28,401,706 |
+| Linear window (8) | 5.961 (5.586-6.679) | 844,200 | 20.7 | 55.7 | 90,459 (90,424) | 451,184 | 1,721,599 | 28,148,631 |
+| Table (256 slots) | 6.005 (5.716-6.404) | 844,552 | 20.6 | 57.3 | 94,824 (94,787) | 277,792 | 1,717,421 | 28,149,050 |
+
+| Smaller workload | Candidates | Table hits | Window hits | Arithmetic hits | Table saturation declines |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `tests/basic_c_operations.c` | 506 | 98 | 85 | 0 | 0 |
+| `tests/c_abi_cfuncs.c` | 1,224 | 116 | 90 | 0 | 1 |
+| `tests/basic_c_machine_alias.c` | 645 | 3 | 3 | 0 | 42 |
+
+Both arms remove about 5% of canonical rows after FAST and 0.9% of `.text` on
+self-host. A compiler built with either arm recompiles itself with the same
+arm to byte-identical output. What the data show:
+
+- **Arithmetic arm as framed:** after frontend SSA and folding, repeated
+  unsigned arithmetic in one block almost never survives. Self-host has 37
+  arithmetic hits under the table and 35 under the window; the other
+  workloads have none.
+- **Constants:** almost every hit is a repeated constant.
+- **Window versus table:** the window catches 95% of the table's self-host
+  hits and 78-100% elsewhere, with no table-sizing or saturation state, but
+  makes 1.6x the probes. Both arms report about the same pass time.
+- **Compile time and memory:** hosted wall-time differences are inside the
+  run-to-run range. Peak RSS falls by about 1.5-1.9 MiB in both arms. Neither
+  effect is established here.
+
+So this census answers the recurrence question and makes the cost comparison
+diagnostically. It does not complete #3011's first gate, which needs the
+matched Zen 5 A/A and A/B comparison (#2761). Because hits concentrate in
+constants, a construction-time constant cache (#3010) remains a cheaper
+candidate that neither arm measures. The pass stays opt-in. Adopting either
+arm, or that alternative, also needs allocation, spill and runtime data.
+
 ## Tests
 
 `ir_fast_test.c` checks all 16 subsets structurally, transitive dead work,
 retained calls/memory effects, existing trivial parameters, repeat preparation,
 classification exclusions and budget refusal before value-storage access.
+`ir_fast_cse_tests` runs each case under both strategies and checks the
+window boundary for distinct rows and for repeated hits. The cases cover
+commuted and ordered pairs, duplicate operands, block boundaries, excluded
+signed, load, division and shift rows, and roots resolved by folding. Other
+tests cover constants, table saturation and collisions, metadata declines,
+volatile rows and generation rollover.
 `driver_fast_test.c` executes the fixed-result C fixture for all 16 subsets in
-FAST/QUALITY with zero fallback on desktop hosts. Android/iOS retain all 32
+FAST/QUALITY with zero fallback on desktop hosts, plus the full recipe with
+`cse`. The native-retirement census freezes every tracked file under `tests/`,
+so the executable CSE control is source that `driver_fast_test.c` writes to a
+temporary file. It runs natively under both allocators and must report exactly
+three commuted arithmetic hits and one constant hit. Android/iOS retain all 32
 native object-generation checks; their application process cannot launch
 generated executables. The registered native-level regression checks all
 accepted spellings, explicit override ordering, invalid levels, all four
@@ -247,8 +356,27 @@ information; the debug model does not gain inline call-stack records.
 Positive decimal limits are configurable through
 `-fcanonical-inline-max-callee=N` (default 16 canonical instructions),
 `-fcanonical-inline-function-growth=N` (default 2048 copied rows per caller),
-`-fcanonical-inline-module-growth=N` (default 4096 copied rows per module), and
+`-fcanonical-inline-module-growth=N` (default: the larger of 4096 copied rows
+and 1/32 of the module's lowered canonical instruction rows), and
 `-fcanonical-inline-call-sites=N` (default 64 sites per caller).
+The fixed 4096-row module default stopped optional expansion of the unity
+self-host source after 243 sites, because callers are visited in module
+order; per-caller limits refused only 54 further sites once the module limit
+was raised (#48). An explicit module limit is absolute.
+A caller keeps its optional splices only when their planned row growth,
+shifted left by `IR_INLINE_CALLER_GROWTH_SHIFT` (5), reaches its instruction
+rows; otherwise every optional site in it stays a call. The first splice
+relocates the caller's exactly sized tables and the arena keeps the old copy,
+so one tiny site in a large caller costs more memory than it saves. On the
+unity self-host source with `-fcanonical-inline`, shifts 2 through 6 kept 801,
+1643, 2639, 3462 and 3739 of 3984 optional sites for +5, +11, +25, +42 and
++52 MB of peak RSS over tiny-off (unbounded: +80 MB). Generated stage-2
+self-host instructions under cachegrind fell 0.47%, 1.00% and 1.32% at shifts 3,
+4 and 5 (unbounded: 1.31%), so 5 keeps the measured benefit at about half the
+memory. Diagnostic only; 9700X qualification is separate. Mandatory sites are never
+dropped. `-fcanonical-inline-caller-growth-shift=N` and
+`IrInlineOptions.caller_growth_shift` override the shift (a zero API field
+selects the default, 32 or more keeps every planned site).
 The caller default is twice the 64-site times 16-row tiny-body budget. This leaves
 headroom for larger mandatory checked-arithmetic expansions; the module, work
 and storage guards still independently bound expansion.
@@ -259,8 +387,7 @@ planning and splicing share one module-wide work and retained-storage budget.
 Optional selection, like FAST, bounds work and retained storage per caller:
 splicing into a caller copies its exactly sized tables, so module-wide byte or
 work totals let the first few large callers starve every later one. Optional
-expansion across the module stays bounded by the module row-growth limit, which
-is the binding limit for the production unity source at default budgets.
+expansion across the module stays bounded by the module row-growth limit.
 The mandatory graph captures
 call sites in one bounded scan rather than
 rescanning every instruction to build reverse edges. Planning storage includes
@@ -276,7 +403,13 @@ caller-wide widening per site. Other repeated splice work stays charged per site
 counts rather than unrelated instruction/value payload counts; call membership
 checks stop when they reach the call. Growing table storage is charged from the caller's actual
 capacities through projected appends, including geometric growth floors and
-alignment. Callee payloads and clone maps remain charged per splice.
+alignment; that charge is an upper bound, because before a caller's first splice
+`ir_inline_cfg_reserve_tables` grows its block, instruction, value and extra
+tables once to the planned final counts instead of doubling them. Relocating a
+touched caller's exactly sized frontend tables still retains the old copy in the
+arena: on the unity self-host source, tiny inlining touches 809 callers whose
+tables total 65.5 MB, which is most of its peak-RSS cost (#48). Callee payloads
+and clone maps remain charged per splice.
 Tiny bodies are screened before payload scans. Mandatory expansion is still
 subject to resource guards,
 including bounded planning work and retained cloning storage. Expansion checks
@@ -284,10 +417,17 @@ strict canonical validity per function, never by a module-wide scan: each
 candidate's caller and callee once before they are read, and each spliced caller
 again after its last splice (an output failure reports the `inlining output`
 boundary). A mandatory call whose caller or callee is a legacy producer-certified
-shape that fails that check is diagnosed; an optional one stays a call. Rewritten
-callers pass the same check, so a module the input scan already proved stays proven
-and the FAST input guard described above still checks all functions on a
-producer-certified default compile. The verbose
+shape that fails that check is diagnosed; an optional one stays a call. When FAST
+is selected, a caller whose splices were all optional skips that output check:
+it is listed in `inline_unchecked_callers` and proven by the validation that
+follows anyway (the promotion output check of a checked build, else the FAST
+input guard's per-function check). A listed caller that fails reports the
+`inlining output` boundary instead of a FAST decline; a shared-scope failure is
+attributed to it only if its own rows also fail, and failures outside the list
+keep their legacy decline. This removed 0.87 G of 3.4 G inliner instructions
+from an uncapped tiny self-host compile under cachegrind (#48). Any other
+rewritten caller is checked at once, so the FAST input guard still checks all
+functions on a producer-certified default compile. The verbose
 `IR_INLINE` record reports candidates, accepted/mandatory calls, copied rows,
 growth, rejection categories and visits. These counts are diagnostics, not a
 performance result. Mandatory budget refusals additionally report the first

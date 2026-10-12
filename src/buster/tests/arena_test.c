@@ -966,6 +966,39 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
         }
     }
 
+    // Trimming an over-reserved tail marks only what the caller wrote as
+    // dirty: a zeroed allocation over the released range clears the written
+    // prefix and trusts the never-written rest. The test fill writes the
+    // whole range, so it extends the dirty mark to the old cursor.
+    {
+        Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = 1}});
+        BUSTER_TEST(arguments, arena != 0);
+        if (arena)
+        {
+            u64 mark = arena->position;
+            u8* bytes = arena_allocate(arena, u8, 4096);
+            memset(bytes, 0x11, 100);
+            u64 end = arena->position;
+            u64 released = arena_release_unwritten_tail(arena, mark + 50, mark + 100);
+            BUSTER_TEST(arguments, released == end - mark - 50);
+            BUSTER_TEST(arguments, arena->position == mark + 50 && arena_dirty_position(arena) == mark + 100);
+            u8* zeroed = arena_allocate_zeroed(arena, u8, 4046);
+            bool zero = zeroed == bytes + 50;
+            for (u64 index = 0; index < 4046; index += 1)
+            {
+                zero &= zeroed[index] == 0;
+            }
+            BUSTER_TEST(arguments, zero && bytes[49] == 0x11);
+            u64 again = arena->position;
+            arena_allocate(arena, u8, 256);
+            arena_test_fill_releases(true);
+            arena_release_unwritten_tail(arena, again, again);
+            arena_test_fill_releases(false);
+            BUSTER_TEST(arguments, arena->position == again && arena_dirty_position(arena) >= again + 256);
+            BUSTER_TEST(arguments, arena_destroy(arena, 1));
+        }
+    }
+
     // arena_retire returns what lies past its retained prefix and parks the
     // mapping: the next creation of the same shape on this thread gets it
     // back with only that prefix still committed.

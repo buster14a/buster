@@ -1260,7 +1260,9 @@ fallback reasons. Two things differ:
 Everything else in the body stays with the machine: the segment frames and
 their checkpoints, alignment frames, declarators, bit-field widths and layout
 attributes, and every member run that is not a plain list (a nested tag,
-`typeof`, `_Atomic`, an attribute). Those runs get the scalar frame, counted
+`typeof`, `_Atomic`, an attribute). The
+[census of that remainder](#tag-definition-machine-work) found no shape a
+tree read could take above the gate. Those runs get the scalar frame, counted
 under their `CAstSpecifierFallback`. Plain casts, typed by a scalar frame
 inside a parenthesized expression leaf, stay with the machine: the
 [census](#member-specifier-runs) put them below the gate.
@@ -1717,7 +1719,7 @@ differential tests pass.
 |---|---|---|---|
 | `c_parse_ast_run`, `c_parser_parse_function_body`, `c_parser_parse_declaration_expression` | declaration split, declarator name, body range, static-assert ranges | `DECLARATION`, `FUNCTION_DEFINITION`, `INIT_DECLARATOR`, `STATIC_ASSERT` | Retired under `-fc-ast-pilot` by the [declaration split](#declaration-split-from-the-tree). The walker stays the default path and the per-unit fallback. |
 | `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, plain segments bound in one pass, and each block declarator's `,`, `=` and plain initializer. The token loop stays the engine, the default path and the per-body fallback; the type machine still reads specifiers and declarators from tokens (next row), and the switch and control-statement validators keep `c_parse_statement_end`, whose calls cost about 1 M instructions on the self-host. |
-| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)), and so do the validators' plain type names; their runs where no type name begins are skipped ([type names](#type-names)). So do members' plain runs inside tag definitions ([members](#members)). The rest of a tag definition (segment frames, alignment, declarators, layout attributes), tags, `typeof`, attributes, type names typed in machine frames (casts, below the gate) and every declarator derivation stay with the machine. |
+| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)), and so do the validators' plain type names; their runs where no type name begins are skipped ([type names](#type-names)). So do members' plain runs inside tag definitions ([members](#members)). The rest of a tag definition (segment frames, alignment, declarators, layout attributes; [below the gate](#tag-definition-machine-work)), tags, `typeof`, attributes, type names typed in machine frames (casts, below the gate) and every declarator derivation stay with the machine. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Controlled-body extents (`c_ir_controlled_body_range`, and through it `c_ir_statement_end*` and `c_ir_statement_labels_end`) are read under `-fc-ast-pilot` from the [extent table](#statement-extents-in-lowering). The walkers stay the default path and the per-body and per-query fallback. `c_ir_lower_body_advance`'s first-token classification and the switch label scan stay on tokens: by census neither pays for a tree read ([keyword gate](#statement-keyword-gate-in-lowerings-classification)), and the classification skips its typedef probe for statement keywords instead. |
 | `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | `c_ir_root_conditional` is read under `-fc-ast-pilot` ([lowering from the tree](#lowering-from-the-tree)); the rest is not migrated. The evaluator's walk is designed in [Expression lowering from the tree](#expression-lowering-from-the-tree). Without the tree, `c_ir_root_conditional` refuses a body range that holds no `?` by a per-body prefix count (#3467). |
@@ -3457,6 +3459,91 @@ diagnostic only. The candidate passes every hosted budget and ships:
   The assignment site in the same validator, which pairs a checked typing
   with the same wrapper, is left as a lead.
 
+### Initializer walk
+
+This section has its own anchor because other open AST branches append to
+the plan's final paragraph. After [#3624](https://github.com/buster14a/buster/pull/3624)
+[reused each element's checked type](#initializer-value-typing), the walk in
+`c_parse_infer_initializer_array_count_core` was left unclaimed at about
+550 M Ir. Designators (`c_parse_initializer_designator`, about 216 M) are a
+separate claim and are not touched here.
+
+A census came first. It used Callgrind caller/callee and per-line self costs
+on main `b71dfc89` (tests-off `-march=x86-64-v3` Release, unity self-host
+input), plus a throwaway counting build that was not committed. It splits the
+rest of the walk, which costs the same on `-fsyntax-only` and on `-c`:
+- **The core's own instructions, 262.2 M.** About 31.5 M of them is the
+  brace-only `c_parse_matching_delimiter` scan, inlined at the list's outer
+  braces and at each brace-enclosed element (166,362 elements,
+  2,661,886 tokens).
+- **Element ends, 95.8 M** (`c_parse_initializer_value_end`, 1,135,463
+  calls, 4,300,283 tokens). Brace-enclosed aggregate elements account for
+  2,828,248 of those tokens, but they never read the end: that branch uses
+  the matching `}`. Scalar elements scan 1,430,619 tokens, and brace-elided
+  aggregate elements scan 41,416.
+- **Repeat walks.** 579 shape validations walk again, with their element
+  checks, the 1,197,089 tokens that array-bound inference walked first. The
+  two walks run at different times and do different checks, so merging them
+  is a design change and not part of this slice. The elided elements'
+  own re-walk is 637 tokens, which is under the floor.
+- **Designator call overhead.** 29.5 M of the core's own instructions are at
+  the `c_parse_initializer_designator` call: its arguments and the zeroed
+  result. They go with the designator claim.
+
+The candidate is an exact cut on the default path, with no tree:
+- the brace-enclosed element takes its `}` before, and instead of, its end
+  scan;
+- that `}`, and the list's own, come from `c_parse_type_delimiter_close`:
+  the unit's pair table when its delimiters nest, and the same-kind scan
+  otherwise, as [#3667](https://github.com/buster14a/buster/pull/3667) does
+  for tag bodies;
+- the end scan tests each token against one punctuator set before it looks
+  at which delimiter it is.
+
+Debug and sanitized builds (`BUSTER_REFERENCE_CHECKS`) recompute the scans
+the candidate skips, and check that they agree.
+
+These budgets were declared before the measured runs. The base is main
+`b71dfc89`. The input is the base checkout's unity self-host source, compiled
+with `-target x86_64-unknown-linux -march=znver5 -g0`, on `-fsyntax-only` and
+on `-c`. The four Callgrind arms (`--cache-sim=no --branch-sim=no`) are
+counted on tests-off `-march=x86-64-v3` Release builds, with the driver built
+by Clang (no TCC on the host):
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The budgets:
+- **Correctness:**
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms;
+  - the same exit status and no diagnostics on `-fsyntax-only` in every arm;
+  - the reference checks pass in Debug runs of the C frontend, AST and
+    driver tests;
+  - Release `test_all` passes, and `test_self_host` keeps its fixed point.
+- **The floor (D against A, and C against B).** Each endpoint, `-fsyntax-only`
+  and `-c` (`-g0`), must run at least 1 M fewer instructions, and more than
+  the 0.05% rebuild noise fewer. If either endpoint misses, the result is
+  recorded as negative and the code does not ship.
+- **Each part.** Each of the three parts must remove at least 1 M Ir on both
+  endpoints, judged from the Callgrind line and callee costs of D against A.
+  A part that does not is dropped and recorded.
+- **Reported, not gated:** the inclusive and own Ir of the core, and the
+  calls and Ir of `c_parse_initializer_value_end`.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761).
+
+The initializer walk's census is
+[`2026-10-12T134729Z`](../../performance-audits/2026-10-12T134729Z.md),
+diagnostic only. Every budget passes, and the candidate ships:
+- `-fsyntax-only` falls by 90.5 M Ir on the default path (−0.839%) and by
+  90.4 M under the pilot (−1.005%). `-c` falls by 90.3 M (−0.354%).
+- The parts: the skipped end scans −59.5 M, the pair table −26.7 M with its
+  helper charged, and the set test −4.4 M (−3.7 M on `-c`).
+- Objects are byte-identical across the four arms at `-g0` and `-g`.
+- Still open: designators, the 579 shape validations that re-walk an inferred
+  list, and the scalar end scans.
+
 ### Root-conditional `?` refusal without the tree
 
 For the tree-free negative test in `c_ir_root_conditional` (a per-body prefix
@@ -3567,6 +3654,54 @@ the same way and diagnostic only:
 - About 14 M remains, spread over the scan, the per-mark binding loads and the
   query-time checks.
 - Zen 5 validation stays incomplete (#2761).
+
+### Tag definition machine work
+
+This covers the rest of a tag definition after [members](#members): the
+aggregate segment frames and their checkpoints, the alignment frames, member
+declarators and layout attributes. These rules were declared before any
+candidate. They keep the [member specifier runs](#member-specifier-runs)
+gate: a shape is built only if it removes at least **5 M Ir** on the
+self-host unity input. Two things are charged against it:
+- **What any read could remove.** This is an oracle's drop: a throwaway build
+  that skips the machine's work on the members the shape covers, with
+  byte-identical objects.
+- **What the read must spend to be exact.** This is the measured cost of the
+  tree test that admits those members.
+
+A shape that clears the gate would take the member read's budgets:
+- 0 model differences;
+- a verify mode with a mutation check;
+- byte-identical `-g0` and `-g` objects across the four arms;
+- C − B of at least the gate;
+- D − A within ±0.05%.
+
+The census is
+[`2026-10-12T175251Z`](../../performance-audits/2026-10-12T175251Z.md), a
+throwaway build of base main `4ed35b59` under `-fc-ast-pilot`, hosted and
+diagnostic only:
+- **Frame costs.** Inside tag definitions, the 9,868 segment frames cost
+  18.35 M Ir, 4.21 M of it the member read, which stays. The alignment frames
+  cost 1.90 M and the 1,300 range frames 1.74 M.
+- **Plain members.** 98.2% of segments are plain: only words, `*`, `[...]` and
+  `,`, with no decoration word. On them, every decoration scan finds nothing:
+  - the attribute skips;
+  - the alignment frame;
+  - the layout and vector scans;
+  - the `_Static_assert` test.
+- **The oracle.** Skipping those scans removes **7.71 M** with identical
+  objects. Split by the rows above, no row reaches 2.5 M.
+- **The tree test.** An exact test walks the member's nodes and checks its
+  names and words. It answers 97.7% of members and costs 3.32 M; #3812's
+  member read gets 0.18 M cheaper.
+- **Net:** 4.57 M, **below the gate**. A lean test without the specifier
+  list's checks costs 2.44 M, but it is not exact. A `__extension__` word, or
+  a typedef named `aligned`, changes what the machine does.
+
+No code was written. #3812's inlined branch already uses +0.046% of the
+default path's ±0.05% band in the same frame step. The segment frames,
+alignment frames, declarators and layout attributes stay with the machine.
+Zen 5 validation stays incomplete (#2761).
 
 ### Statement-keyword gate in lowering's classification
 

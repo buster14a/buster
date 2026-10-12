@@ -258,6 +258,13 @@ shrinkage/foreign rows, missing jobs, native-step evidence, pagination and
 rerun rules. The existing coverage tests retain real executable/hash/re-probe
 controls.
 
+The workflow-step replay keeps its 30-second subprocess deadline. On a timeout,
+it reports the step and exit-control identity, bounded captured stdout/stderr
+(4,096 characters each), and the existing process-owner log's last 4,096 bytes
+when available, then re-raises the original timeout. These diagnostics also
+cover helper qualification before any suite starts; they do not establish the
+timeout's cause or change the workflow's budgets, suites, or cleanup.
+
 ## Performance qualification — required before closing #333
 
 Implementation and synthetic tests do **not** establish a speedup. Require at
