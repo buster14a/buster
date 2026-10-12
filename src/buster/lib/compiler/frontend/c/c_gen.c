@@ -62613,18 +62613,18 @@ struct CIrRowStreams
 
 BUSTER_GLOBAL_LOCAL void c_ir_row_streams_trim(CIrRowStreams* streams, IrFunction* function)
 {
-    if (function->blocks == streams->blocks + streams->block_cursor)
+    if (streams->blocks && function->blocks == streams->blocks + streams->block_cursor)
     {
         streams->block_cursor += function->block_count;
         function->block_capacity = function->block_count;
     }
-    if (function->instructions == streams->instructions + streams->instruction_cursor &&
+    if (streams->instructions && function->instructions == streams->instructions + streams->instruction_cursor &&
         function->instruction_canonical_sources == streams->sources + streams->instruction_cursor)
     {
         streams->instruction_cursor += function->instruction_count;
         function->instruction_capacity = function->instruction_count;
     }
-    if (function->values == streams->values + streams->value_cursor)
+    if (streams->values && function->values == streams->values + streams->value_cursor)
     {
         streams->value_cursor += function->value_count;
         function->value_capacity = function->value_count;
@@ -65485,11 +65485,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             row_streams.block_slots += blocks;
         }
     }
-    row_streams.blocks = arena_allocate(arena, IrBlock, row_streams.block_slots);
-    row_streams.instructions = (IrInstruction*)arena_allocate_bytes(
-        arena, arena_array_size(sizeof(IrInstruction), row_streams.instruction_slots), C_IR_ROW_STREAM_ALIGNMENT);
-    row_streams.sources = arena_allocate(arena, IrSourceRange, row_streams.instruction_slots);
-    row_streams.values = arena_allocate(arena, IrValue, row_streams.instruction_slots);
+    // #1307 9700X experiment (do not merge): the streams stay unallocated and
+    // every function reserves its own interleaved arrays as before #1331.
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
@@ -65696,18 +65693,15 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         function->block_capacity = (u32)block_capacity;
         function->instruction_capacity = (u32)lowering_capacity;
         function->value_capacity = (u32)lowering_capacity;
-        BUSTER_CHECK(function->block_capacity <= row_streams.block_slots - row_streams.block_cursor &&
-                     function->instruction_capacity <= row_streams.instruction_slots - row_streams.instruction_cursor &&
-                     function->value_capacity <= row_streams.instruction_slots - row_streams.value_cursor);
-        function->blocks = row_streams.blocks + row_streams.block_cursor;
-        function->instructions = row_streams.instructions + row_streams.instruction_cursor;
+        function->blocks = arena_allocate(arena, IrBlock, function->block_capacity);
+        function->instructions = arena_allocate(arena, IrInstruction, function->instruction_capacity);
         // Sized with the instructions, because ir_function_add_instruction
         // stores a canonical source only into an array that already exists:
         // preallocating the instructions without this one silently dropped
         // every range lowering built, and with it every line row below the
         // function's own.
-        function->instruction_canonical_sources = row_streams.sources + row_streams.instruction_cursor;
-        function->values = row_streams.values + row_streams.value_cursor;
+        function->instruction_canonical_sources = arena_allocate(arena, IrSourceRange, function->instruction_capacity);
+        function->values = arena_allocate(arena, IrValue, function->value_capacity);
         IR_CONSTRUCTION_RECORD(FUNCTION_STARTS, 1);
         IR_CONSTRUCTION_RECORD(BODY_TOKENS, declaration.body_token_count);
         IR_CONSTRUCTION_RECORD(PARAMETERS, signatures[declaration_index].parameter_count);
