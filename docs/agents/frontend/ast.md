@@ -3563,3 +3563,53 @@ the same way and diagnostic only:
 - Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
+
+### Settling the name checks, second cut
+
+This section has its own anchor because other open AST branches append to
+the plan's final paragraph. After [the first cut](#settling-the-name-checks),
+a census of main `4ed35b59` under `-fc-ast-pilot`, on the same stage-2 input,
+attributed `c_ast_types_lookups_settled`'s 24.35 M inclusive Ir line by line
+from one Callgrind run (no census wrappers):
+- 132,669 calls, 6,047 settlements, 126,249 marks, one table build;
+- 6.5 M of query-time checks, about 49 Ir a call. 2.1 M of it is the
+  prologue and epilogue: every call saves and restores five callee-saved
+  registers and a frame that only the settlement loop needs;
+- 5.5 M in the flag scan, about 21 Ir per eight-byte group. Each group
+  recomputes its width and tests for a tail;
+- 8.1 M in the per-mark checks, including the binding loads and the 11,474
+  file-scope lookups;
+- 2.3 M in the table build, and 1.7 M of spills spread over the loops.
+
+The floor for a code change is 1 M Ir removable. Two items clear it:
+- the query path pays the settlement's frame on every call, though only
+  6,047 of 132,669 calls settle;
+- the scan pays per-group bookkeeping that a whole-word loop with one tail
+  does not.
+
+The candidate keeps every rule. It moves the settlement into its own
+out-of-line function, so the query path needs no saved registers, and scans
+whole flag words with the tail assembled once. These budgets are declared
+before its measured runs. They use the same stage-2 input, flags and four
+Callgrind arms (A to D) on tests-off `-march=x86-64-v3` builds, with main
+`4ed35b59` as the base:
+- **Correctness.** No answer changes:
+  - no verify mismatch over the corpus, with the existing
+    `c_ast_test_type_lookups` probes;
+  - the typer's `-v` counters on the self-host, `lookups_settled` and
+    `lookups_walked` included, are identical in B and C;
+  - identical diagnostics with and without the flag;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **The settlement's own cost (C against B).** The inclusive instructions of
+  `c_ast_types_lookups_settled` and the new settlement function, plus any
+  increase in `c_ast_types_answer`'s and `c_ast_types_type_body`'s own
+  instructions, fall by at least 12%, and the whole compile falls by at least
+  2 M Ir. Otherwise the result is recorded as negative and the code does not
+  ship.
+- **Default path (D against A).** Within ±0.05% Ir on `-fsyntax-only` and on
+  `-c` (`-g0`).
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete (#2761) and
+  the hook stays opt-in.
+
+Results are recorded in a performance audit (`tools/new_audit.py`), not here.
