@@ -3329,6 +3329,17 @@ The budgets:
 - **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
   requested, so Zen 5 validation stays incomplete (#2761).
 
+The initializer walk's census is
+[`2026-10-12T134729Z`](../../performance-audits/2026-10-12T134729Z.md),
+diagnostic only. Every budget passes, and the candidate ships:
+- `-fsyntax-only` falls by 90.5 M Ir on the default path (−0.839%) and by
+  90.4 M under the pilot (−1.005%). `-c` falls by 90.3 M (−0.354%).
+- The parts: the skipped end scans −59.5 M, the pair table −26.7 M with its
+  helper charged, and the set test −4.4 M (−3.7 M on `-c`).
+- Objects are byte-identical across the four arms at `-g0` and `-g`.
+- Still open: designators, the 579 shape validations that re-walk an inferred
+  list, and the scalar end scans.
+
 ### Root-conditional `?` refusal without the tree
 
 For the tree-free negative test in `c_ir_root_conditional` (a per-body prefix
