@@ -53,7 +53,9 @@
 // is the one way back into a closed block, retraction and SSA memory
 // restoration use the checked ir_block_* primitives, and
 // c_ir_finish_construction rejects a function with a refused row or an open
-// block.
+// block. Under the opt-in -fcanonical-intern-constants, c_ir_emit_integer_value_at
+// reuses a constant built earlier in the current block (CIrConstantIntern),
+// re-proving the cached row against retraction and truncation on every hit.
 // c_ir_string_object shares typed static storage between literal operands and
 // runtime places; c_ir_static_compound_literal_object guards the new general
 // compound-address materialization entry while retaining legacy shortcuts.
@@ -1074,6 +1076,33 @@ struct CIrArrayTypeSlot
     IrTypeId element;
     IrTypeId id;
     bool used;
+};
+
+// Opt-in construction-time constant interning (#3011, c_ir_emit_integer_value_at).
+// One direct-mapped table serves a whole lowering; each function builder takes
+// a fresh generation, so no entry crosses a function and none is cleared.
+// An entry is only a hint: a lookup re-proves that its value is still defined
+// by its row, that the row is still the same constant and that it lies in the
+// builder's current block, because retraction and truncation free rows and
+// reuse their ids.
+#define C_IR_CONSTANT_INTERN_SLOTS 64u
+typedef struct CIrConstantInternEntry CIrConstantInternEntry;
+struct CIrConstantInternEntry
+{
+    u64 bits;
+    u32 type;
+    u32 value;
+    u32 row;
+    u32 block;
+    u32 generation;
+    bool negative;
+};
+typedef struct CIrConstantIntern CIrConstantIntern;
+struct CIrConstantIntern
+{
+    CIrConstantInternEntry entries[C_IR_CONSTANT_INTERN_SLOTS];
+    CIRConstantInternStatistics* statistics;
+    u32 generation;
 };
 
 typedef struct CIrPointerTypeCache CIrPointerTypeCache;
@@ -3614,6 +3643,10 @@ struct CIntegerIrBuilder
     // (c_ir_initializer_slot_table); shared by the constant builder and
     // every function builder of one lowering, null in the test hooks.
     CIrInitializerSlotCache* slot_cache;
+    // Opt-in constant interning shared by every function builder of one
+    // lowering, and this function's generation in it; null when off.
+    CIrConstantIntern* constant_intern;
+    u32 constant_intern_generation;
     // The interned symbol of every IrField name a member access has compared
     // (c_ir_field_symbols); shared like slot_cache, null in the test hooks.
     CIrFieldSymbolCache* field_symbols;
@@ -5989,6 +6022,9 @@ BUSTER_C_INTERNAL IrInstructionId c_ir_append_instruction(CIntegerIrBuilder* bui
         builder->previous_instruction = builder->last_instruction;
         builder->previous_instruction_known = true;
         builder->last_instruction = id;
+#if BUSTER_BENCH_ALLOCATIONS
+        ir_construction_fold_census(builder->program, builder->function, id);
+#endif
     }
     return id;
 }
@@ -12267,11 +12303,9 @@ BUSTER_C_INTERNAL bool c_ir_emit_parameter(CIntegerIrBuilder* builder, CToken na
 BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_at(CIntegerIrBuilder* builder, u64 value, bool is_negative, IrSourceRange instruction_source,
                                                        IrTypeId type)
 {
-    IrValueId result = c_ir_add_result(builder, type);
-    u64* immediate = arena_allocate(builder->arena, u64, 1);
-    immediate[0] = value;
+    u64 bits = value;
     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_CONSTANT_INTEGER, type);
-    instruction.immediates = immediate;
+    instruction.immediates = &bits;
     instruction.immediate_count = 1;
     instruction.immediate_is_negative = is_negative;
     // A spelling outside the type's range -- a bit-field clear mask built as
@@ -12282,11 +12316,53 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_at(CIntegerIrBuilder* builde
     u32 width = ir_integer_type_width(ir_type_from_id(&builder->program->types, type));
     if (width && !ir_integer_constant_canonical(&instruction, width))
     {
-        immediate[0] = ir_integer_from_magnitude((IrInteger){.low = value}, is_negative, width).low;
+        bits = ir_integer_from_magnitude((IrInteger){.low = value}, is_negative, width).low;
         instruction.immediate_is_negative = false;
     }
-    instruction.result = result;
-    c_ir_append_instruction(builder, instruction, instruction_source);
+    IrValueId result = IR_VALUE_ID_INVALID;
+    CIrConstantIntern* intern = builder->constant_intern;
+    CIrConstantInternEntry* entry = 0;
+    if (intern)
+    {
+        u64 key = bits ^ ((u64)type.value << 32) ^ (u64)instruction.immediate_is_negative;
+        key *= 0x9E3779B97F4A7C15ull;
+        entry = intern->entries + (u32)(key >> 58);
+        intern->statistics->lookups += 1;
+        IrFunction* function = builder->function;
+        bool keyed = entry->generation == builder->constant_intern_generation && entry->block == builder->current_block.value &&
+                     entry->type == type.value && entry->bits == bits && entry->negative == instruction.immediate_is_negative;
+        IrInstruction const* row = keyed && entry->row < function->instruction_count ? function->instructions + entry->row : 0;
+        if (row && entry->value < function->value_count && function->values[entry->value].definition.value == entry->row &&
+            row->result.value == entry->value && row->opcode == IR_OPCODE_CONSTANT_INTEGER && row->canonical_type.value == type.value &&
+            row->immediate_count == 1 && row->immediates[0] == bits && row->immediate_is_negative == instruction.immediate_is_negative)
+        {
+            result = (IrValueId){.value = entry->value};
+            intern->statistics->hits += 1;
+        }
+        else
+        {
+            intern->statistics->stale += keyed;
+        }
+    }
+    if (result.value == IR_ID_UNDERLYING_INVALID)
+    {
+        result = c_ir_add_result(builder, type);
+        u64* immediate = arena_allocate(builder->arena, u64, 1);
+        immediate[0] = bits;
+        instruction.immediates = immediate;
+        instruction.result = result;
+        c_ir_append_instruction(builder, instruction, instruction_source);
+        if (entry && result.value < builder->function->value_count)
+        {
+            u32 row = builder->function->values[result.value].definition.value;
+            if (row < builder->function->instruction_count)
+            {
+                *entry = (CIrConstantInternEntry){.bits = bits, .type = type.value, .value = result.value, .row = row,
+                    .block = builder->current_block.value, .generation = builder->constant_intern_generation,
+                    .negative = instruction.immediate_is_negative};
+            }
+        }
+    }
     return result;
 }
 
@@ -18456,6 +18532,10 @@ struct CIrLowerFrame
             u32 end;
             u32 task_count;
             u32 task_capacity;
+            // The assignment's RHS remains in the comma-free range that
+            // was scanned before its place was lowered.
+            u32 comma_free_start;
+            u32 comma_free_end;
             u32 pending_assignment;
             CConditionalOperator pending_operation;
             IrBlockId pending_true_block;
@@ -40508,6 +40588,14 @@ BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
 
 // The scan behind c_ir_root_conditional: find the root `?:` of [start, end)
 // after peeling redundant parentheses.
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_assignment_lower_work;
+u64 c_test_assignment_lower_work(void)
+{
+    return c_assignment_lower_work;
+}
+#endif
+
 BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question,
                                                     u32* colon, u32* expression_end)
 {
@@ -40524,9 +40612,11 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u3
     }
     u32 found_question = UINT32_MAX;
     u32 nested_questions = 0;
-    bool root_assignment = false;
     for (u32 index = start; index < end; index += 1)
     {
+#if BUSTER_INCLUDE_TESTS
+        c_assignment_lower_work += 1;
+#endif
         u32 punctuator = builder->preprocess.tokens[index].punctuator;
         CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
         if (scan == C_IR_GROUP_SCAN_SKIPPED)
@@ -40543,15 +40633,6 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u3
         }
         if (punctuator == C_PUNCTUATOR_QUESTION)
         {
-            // `lhs = condition ? true_value : false_value` has a
-            // conditional operator in the assignment's right operand, not
-            // at the root of the expression.  Treating it as a root
-            // conditional loses the assignment completion (the Lua
-            // luaV_fastgeti macro relies on this exact precedence).
-            if (root_assignment)
-            {
-                return false;
-            }
             if (found_question == UINT32_MAX)
             {
                 found_question = index;
@@ -40583,7 +40664,12 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u3
         }
         else if (found_question == UINT32_MAX && c_ir_assignment_operator(builder->preprocess.tokens[index]))
         {
-            root_assignment = true;
+            // `lhs = condition ? true_value : false_value` has a
+            // conditional operator in the assignment's right operand, not
+            // at the root of the expression.  Treating it as a root
+            // conditional loses the assignment completion (the Lua
+            // luaV_fastgeti macro relies on this exact precedence).
+            break;
         }
     }
     return false;
@@ -42433,6 +42519,8 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             return;
         }
         frame->as.expression.start = assignment + 1;
+        frame->as.expression.comma_free_start = assignment + 1;
+        frame->as.expression.comma_free_end = frame->as.expression.end;
         frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
     }
     else
@@ -42916,8 +43004,12 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         // `f(g(h(...)))` quadratic.
         u32 last_comma = UINT32_MAX;
         u32 comma_conditionals = 0;
-        for (u32 index = start; index < end; index += 1)
+        bool comma_free = frame->as.expression.comma_free_end == end && start >= frame->as.expression.comma_free_start;
+        for (u32 index = start; !comma_free && index < end; index += 1)
         {
+#if BUSTER_INCLUDE_TESTS
+            c_assignment_lower_work += 1;
+#endif
             CToken token = builder->preprocess.tokens[index];
             CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
             if (scan == C_IR_GROUP_SCAN_UNCLOSED)
@@ -42965,6 +43057,9 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         CConditionalOperator assignment_operation = C_CONDITIONAL_OPERATOR_COUNT;
         for (u32 index = start; index < end && assignment == end; index += 1)
         {
+#if BUSTER_INCLUDE_TESTS
+            c_assignment_lower_work += 1;
+#endif
             CToken token = builder->preprocess.tokens[index];
             CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
             if (scan == C_IR_GROUP_SCAN_UNCLOSED)
@@ -63345,6 +63440,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     CIrInitializerSlotCache slot_cache = {
         .arena = arena,
     };
+    CIrConstantIntern constant_intern = {.statistics = &result.constant_interning};
     CIrFieldSymbolCache field_symbols = {
         .arena = arena,
         .symbols = preprocess.symbols,
@@ -65767,6 +65863,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             .location_cursor = {.memo_offset = UINT32_MAX},
             .arena = arena,
             .slot_cache = &slot_cache,
+            .constant_intern = options.intern_block_constants ? &constant_intern : 0,
+            .constant_intern_generation = options.intern_block_constants ? ++constant_intern.generation : 0,
             .field_symbols = &field_symbols,
             .over_aligned_array_name = &over_aligned_array_name,
             .scratch_arena = lowering_arena,

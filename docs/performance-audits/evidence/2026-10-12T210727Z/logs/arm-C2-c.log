@@ -1,0 +1,12 @@
+==5120== Callgrind, a call-graph generating cache profiler
+==5120== Copyright (C) 2002-2017, and GNU GPL'd, by Josef Weidendorfer et al.
+==5120== Using Valgrind-3.22.0 and LibVEX; rerun with -h for copyright info
+==5120== Command: /tmp/claude-0/-home-user-buster/da6de460-0b83-5c94-a74c-ffa150b86945/scratchpad/cg/ide-cand2 cc -Isrc -Ibuild/v3/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -target x86_64-unknown-linux -march=znver5 -g0 -c -o /tmp/claude-0/-home-user-buster/da6de460-0b83-5c94-a74c-ffa150b86945/scratchpad/cg/arm-C2.o -fc-ast-pilot src/buster/apps/ide/ide.c
+==5120== 
+==5120== For interactive control, run 'callgrind_control -h'.
+==5120== 
+==5120== Events    : Ir
+==5120== Collected : 23207049160
+==5120== 
+==5120== I   refs:      23,207,049,160
+exit=0

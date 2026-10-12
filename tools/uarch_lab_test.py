@@ -2316,5 +2316,37 @@ class AstPilotPairTest(unittest.TestCase):
                       "--output", os.path.join(temporary, "out"), "--ast-pilot-pair", "link"])
 
 
+
+class ConstantReusePairTest(unittest.TestCase):
+    def test_fixed_cell_gives_only_candidate_the_cell_flag_on_the_g0_object_compile(self):
+        for cell, flag in lab.CONSTANT_REUSE_CELLS.items():
+            with tempfile.TemporaryDirectory() as temporary, self.subTest(cell=cell):
+                root = os.path.abspath(temporary)
+                ide = os.path.join(root, "ide")
+                open(ide, "wb").close()
+                arguments = type("Args", (), {"baseline": ide, "candidate": ide, "perf": "perf", "repo_root": root,
+                                             "sudo": False, "fresh_copy": True, "constant_reuse_pair": cell})()
+                labs = lab.compare_labs(arguments, root, 2, [])
+                self.assertEqual((labs["a"].extra, labs["b"].extra), ([], [flag]))
+                for key in ("a", "b"):
+                    self.assertEqual(labs[key].compile, lab.AST_PILOT_COMPILE + ["-c"])
+                    self.assertIn("-g0", labs[key].compile)
+                    self.assertEqual((labs[key].writes_output, labs[key].transcripts), (True, True))
+                    self.assertEqual(labs[key].meta["config"]["constant_reuse_cell"], cell)
+                    self.assertNotIn("ast_pilot_cell", labs[key].meta["config"])
+                self.assertIn("-o", labs["b"].workload("OUT"))
+
+    def test_fixed_cell_rejects_request_flags_other_pairs_and_profile_steps(self):
+        for extra in (["--", "-O3"], ["--canonical-inline-pair"], ["--ast-pilot-pair", "object"],
+                      ["--profile-steps", "topdown"]):
+            with tempfile.TemporaryDirectory() as temporary, self.subTest(extra=extra):
+                with self.assertRaises(SystemExit) as raised:
+                    lab.main(["compare", "--baseline", "a", "--candidate", "b", "--cpu", "-1",
+                              "--output", os.path.join(temporary, "out"), "--constant-reuse-pair", "intern", *extra])
+                self.assertIn("accepts no", str(raised.exception.code))
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(SystemExit):
+            lab.main(["compare", "--baseline", "a", "--candidate", "b", "--cpu", "-1",
+                      "--output", os.path.join(temporary, "out"), "--constant-reuse-pair", "table"])
+
 if __name__ == "__main__":
     unittest.main()
