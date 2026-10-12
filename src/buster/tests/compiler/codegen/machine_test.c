@@ -497,6 +497,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_pointer_vector_chunk(Un
     u32 const starts[] = {0, 1, 15, 16, 17};
     u32 const frame_bases[] = {0, 0x30};
     bool matches = true;
+    String8 failure = S8("pointer vector chunk matches the metadata MOVUPS");
     for (u32 case_index = 0; case_index < 2u * BUSTER_ARRAY_LENGTH(frame_bases); case_index += 1)
     {
         u32 frame_base = frame_bases[case_index >> 1];
@@ -509,13 +510,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_pointer_vector_chunk(Un
                 for (u32 start_index = 0; start_index < BUSTER_ARRAY_LENGTH(starts); start_index += 1)
                 {
                     u32 start = starts[start_index];
+                    bool case_matches = true;
                     u8 reference[64];
                     memset(reference, 0xa5, sizeof(reference));
                     MachineEncodeResult oracle = machine_x64_test_emit_pointer_vector_chunk(reference, sizeof(reference), start, frame_base, load, base, offset, true);
                     u32 length = oracle.byte_count - start;
-                    if (offset <= INT32_MAX)
+                    // An RBP base is rebased by the frame offset, which can push
+                    // the largest offset past the disp32 field.
+                    if (offset <= INT32_MAX && (base != 5 || frame_base == 0))
                     {
-                        matches &= oracle.valid && length >= 3 && length <= 9;
+                        case_matches &= oracle.valid && length >= 3 && length <= 9;
                     }
                     for (u32 available = 0; available <= 17; available += 1)
                     {
@@ -525,19 +529,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_pointer_vector_chunk(Un
                         memset(reference, 0xa5, sizeof(reference));
                         MachineEncodeResult prepared = machine_x64_test_emit_pointer_vector_chunk(bytes, capacity, start, frame_base, load, base, offset, false);
                         oracle = machine_x64_test_emit_pointer_vector_chunk(reference, capacity, start, frame_base, load, base, offset, true);
-                        matches &= prepared.valid == oracle.valid && prepared.byte_count == oracle.byte_count;
-                        matches &= memcmp(bytes, reference, prepared.byte_count) == 0;
+                        case_matches &= prepared.valid == oracle.valid && prepared.byte_count == oracle.byte_count;
+                        case_matches &= memcmp(bytes, reference, prepared.byte_count) == 0;
                         for (u32 index = 0; index < sizeof(bytes); index += 1)
                         {
                             bool untouched = index < start || index >= capacity || !prepared.valid;
-                            matches &= !untouched || bytes[index] == 0xa5;
+                            case_matches &= !untouched || bytes[index] == 0xa5;
                         }
                     }
+                    if (!case_matches && matches)
+                    {
+                        failure = string_format(arguments->arena, S8("case {u32} base {u32} offset {u32} start {u32}"), case_index, base, offset,
+                                                start);
+                    }
+                    matches &= case_matches;
                 }
             }
         }
     }
-    BUSTER_TEST(arguments, matches);
+    BUSTER_TEST_RAW(arguments, matches, failure);
     // movups xmm0, [rax]; movups [r12 + 0x10], xmm0; movups xmm0, [rbp + 0x1000].
     static u8 const load_rax[] = {0x0f, 0x10, 0x00};
     static u8 const store_r12[] = {0x41, 0x0f, 0x11, 0x44, 0x24, 0x10};
