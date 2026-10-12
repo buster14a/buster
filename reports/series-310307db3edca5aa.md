@@ -2,7 +2,7 @@
 
 [Trusted main](index.md) · [All series](all.md) · [JSON](recent.jsonl) · [CSV](recent.csv)
 
-Policy hosted-ci-cohort-v1; refresh 2026-10-12T09:48:12Z. Cohort fields and missing values:
+Policy hosted-ci-cohort-v1; refresh 2026-10-12T19:49:33Z. Cohort fields and missing values:
 
 | Field | Value |
 |---|---|
@@ -57,8 +57,6 @@ These are descriptive CI signals, not independent significance tests or paired e
 
 | Started | Outcome / population | Elapsed s | Source evidence |
 |---|---|---:|---|
-| 2026-10-12T02:20:28Z | skipped / skipped / physical-execution | unavailable | [job 114636795752](https://github.com/buster14a/buster/actions/runs/38195384612/job/114636795752) / [attempt 1](https://github.com/buster14a/buster/actions/runs/38195384612/attempts/1) / tested source unavailable |
-| 2026-10-12T02:20:51Z | skipped / skipped / physical-execution | unavailable | [job 114636872374](https://github.com/buster14a/buster/actions/runs/38195422760/job/114636872374) / [attempt 1](https://github.com/buster14a/buster/actions/runs/38195422760/attempts/1) / tested source unavailable |
-| 2026-10-12T02:21:09Z | skipped / skipped / physical-execution | unavailable | [job 114636931948](https://github.com/buster14a/buster/actions/runs/38195442134/job/114636931948) / [attempt 1](https://github.com/buster14a/buster/actions/runs/38195442134/attempts/1) / tested source unavailable |
 | 2026-10-12T02:21:54Z | skipped / skipped / physical-execution | unavailable | [job 114637081839](https://github.com/buster14a/buster/actions/runs/38195491374/job/114637081839) / [attempt 1](https://github.com/buster14a/buster/actions/runs/38195491374/attempts/1) / tested source unavailable |
 | 2026-10-12T02:23:59Z | skipped / skipped / physical-execution | unavailable | [job 114637488373](https://github.com/buster14a/buster/actions/runs/38195625875/job/114637488373) / [attempt 1](https://github.com/buster14a/buster/actions/runs/38195625875/attempts/1) / tested source unavailable |
+| 2026-10-12T19:48:05Z | skipped / skipped / physical-execution | unavailable | [job 114980430101](https://github.com/buster14a/buster/actions/runs/38300029721/job/114980430101) / [attempt 1](https://github.com/buster14a/buster/actions/runs/38300029721/attempts/1) / tested source unavailable |

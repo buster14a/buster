@@ -48,17 +48,17 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | macOS AArch64 sanitized-release / unavailable-dynamic-or-reusable-matrix | macOS / Apple M1 &#40;Virtual&#41; | merge&#95;group / gh-readonly-queue/main/pr-3478-9caba7ad67d112c33eb2362d0884e2639f675065 | 1 | 1 | [series](series-96ac8d4025294057.md) |
 | CI complete / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | merge&#95;group / gh-readonly-queue/main/pr-3478-9caba7ad67d112c33eb2362d0884e2639f675065 | 1 | 1 | [series](series-bae4cd2224a24c8d.md) |
 | recover / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | workflow&#95;run / main | 1 | 1 | [series](series-44b87bd0c872af2e.md) |
-| watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 42 | 42 | [series](series-a5c935d7b52c9992.md) |
-| watch-merge-group /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 101 | [series](series-913f439ad1b303c4.md) |
-| watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | workflow&#95;run / main | 10 | 10 | [series](series-a5c500ec04fb6ce0.md) |
-| Exact merge-tree preflight / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 4 | 4 | [series](series-949519260b5e186d.md) |
-| No-code plan /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 10 | [series](series-310307db3edca5aa.md) |
+| watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 48 | 48 | [series](series-a5c935d7b52c9992.md) |
+| watch-merge-group /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 109 | [series](series-913f439ad1b303c4.md) |
+| watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | workflow&#95;run / main | 11 | 11 | [series](series-a5c500ec04fb6ce0.md) |
+| Exact merge-tree preflight / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 5 | 5 | [series](series-949519260b5e186d.md) |
+| No-code plan /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 11 | [series](series-310307db3edca5aa.md) |
 | No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | pull&#95;request / claude/zealous-lamport-96goyg | 0 | 1 | [series](series-e989209efe54b1ab.md) |
 | Preflight regression tests / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | pull&#95;request / claude/zealous-lamport-96goyg | 1 | 1 | [series](series-68faea1d88b1f468.md) |
-| recover /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 14 | [series](series-e37dd0b70ac27893.md) |
+| recover /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 15 | [series](series-e37dd0b70ac27893.md) |
 | Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | workflow&#95;run / main | 2 | 2 | [series](series-b03e6ecfcddd0037.md) |
-| watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | workflow&#95;run / main | 8 | 8 | [series](series-846967fae60c89e0.md) |
-| report /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 4 | [series](series-b8f3ac1473919e5b.md) |
+| watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | workflow&#95;run / main | 9 | 9 | [series](series-846967fae60c89e0.md) |
+| report /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 5 | [series](series-b8f3ac1473919e5b.md) |
 | No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | pull&#95;request / claude/wizardly-newton-1dz1d9 | 0 | 2 | [series](series-71ee8bf78153fd52.md) |
 | Preflight regression tests / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | pull&#95;request / claude/wizardly-newton-1dz1d9 | 1 | 1 | [series](series-7aa87928061c6eb1.md) |
 | Exact merge-tree preflight / non-matrix | Ubuntu 24.04.5 LTS / Intel&#40;R&#41; Xeon&#40;R&#41; 6973P-C | workflow&#95;run / main | 1 | 1 | [series](series-2e0b046dfdf5a046.md) |
@@ -88,17 +88,17 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | pull&#95;request / claude/exciting-mendel-gvousz | 0 | 1 | [series](series-20a16576a3228a8f.md) |
 | Pages validation and artifact /  | unknown OS / unknown CPU | pull&#95;request / claude/exciting-mendel-gvousz | 0 | 1 | [series](series-7c29e3e35cf05356.md) |
 | Deploy GitHub Pages /  | unknown OS / unknown CPU | pull&#95;request / claude/exciting-mendel-gvousz | 0 | 1 | [series](series-75c55bfcb3f43ccd.md) |
-| Windows AArch64 checks / unavailable-dynamic-or-reusable-matrix | Windows 10 Enterprise / Cobalt 100 | pull&#95;request / claude/eloquent-bell-ioiaeh | 1 | 2 | [series](series-6e1d57f98c6b9bd3.md) |
-| CI complete / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | pull&#95;request / claude/eloquent-bell-ioiaeh | 1 | 2 | [series](series-e3a807242d95f15b.md) |
-| No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | pull&#95;request / claude/3107-expand-no-code-prose-allowlist | 0 | 1 | [series](series-75f3d36ede1c2eed.md) |
-| Main CI reuse decision /  | unknown OS / unknown CPU | pull&#95;request / claude/3107-expand-no-code-prose-allowlist | 0 | 1 | [series](series-f62f05b97d380e26.md) |
-| Clang analyzer shards / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | pull&#95;request / claude/3107-expand-no-code-prose-allowlist | 1 | 1 | [series](series-23f3fc47295fc5e5.md) |
-| UEFI firmware boot / non-matrix | Ubuntu 26.04.1 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | pull&#95;request / claude/3107-expand-no-code-prose-allowlist | 1 | 1 | [series](series-54055a25ee767ea9.md) |
-| Workflow lint / non-matrix | Ubuntu 26.04.1 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | pull&#95;request / claude/3107-expand-no-code-prose-allowlist | 1 | 1 | [series](series-829239a9ebebdf8f.md) |
-| Windows x86-64 native / {"name":"Windows x86-64 native","platform":"windows","runner":"windows-2025","os":"windows","arch":"x86&#95;64","vs&#95;arch":"amd64","vs&#95;component":"Microsoft.VisualStudio.Component.VC.Tools.x86.x64","clang&#95;arch":"x86&#95;64"} | Windows Server 2025 Datacenter / AMD EPYC 7763 64-Core Processor | pull&#95;request / claude/3107-expand-no-code-prose-allowlist | 1 | 1 | [series](series-43c4ca402ff84a65.md) |
-| Android x86-64 / {"name":"Android x86-64","runner":"ubuntu-26.04","os":"android","arch":"x86&#95;64"} | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | pull&#95;request / claude/3107-expand-no-code-prose-allowlist | 1 | 1 | [series](series-8d4d720eec00ab62.md) |
-| iOS AArch64 / {"name":"iOS AArch64","runner":"macos-26","os":"ios","arch":"aarch64"} | macOS / Apple M1 &#40;Virtual&#41; | pull&#95;request / claude/3107-expand-no-code-prose-allowlist | 1 | 1 | [series](series-9a832517a1fec7a8.md) |
-| Linux AArch64 native / {"name":"Linux AArch64 native","runner":"ubuntu-26.04-arm","platform":"unix","os":"linux","arch":"aarch64"} | Ubuntu 26.04.1 LTS / 0xd49 | pull&#95;request / claude/3107-expand-no-code-prose-allowlist | 1 | 1 | [series](series-750c6e10521c3870.md) |
-| Linux x86-64 native / {"name":"Linux x86-64 native","runner":"ubuntu-26.04","platform":"unix","os":"linux","arch":"x86&#95;64"} | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | pull&#95;request / claude/3107-expand-no-code-prose-allowlist | 1 | 1 | [series](series-a1d4d39656f92bba.md) |
-| macOS AArch64 native / {"name":"macOS AArch64 native","runner":"macos-26","platform":"unix","os":"macos","arch":"aarch64"} | macOS / Apple M1 &#40;Virtual&#41; | pull&#95;request / claude/3107-expand-no-code-prose-allowlist | 1 | 1 | [series](series-e90301a333ebe490.md) |
-| Windows AArch64 native / {"name":"Windows AArch64 native","platform":"windows","runner":"windows-11-arm","os":"windows","arch":"aarch64","vs&#95;arch":"arm64","vs&#95;component":"Microsoft.VisualStudio.Component.VC.Tools.ARM64","clang&#95;arch":"aarch64"} | Windows 10 Enterprise / Cobalt 100 | pull&#95;request / claude/3107-expand-no-code-prose-allowlist | 1 | 1 | [series](series-d1344a004ee6a469.md) |
+| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 30 | 30 | [series](series-20369cc20c6b6e85.md) |
+| Collect terminal Actions executions / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 0 | 9 | [series](series-b56548f49e022eb1.md) |
+| Report required job step changes / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 6 | 6 | [series](series-dfba54a0e1caaff7.md) |
+| Native CI history controls /  | unknown OS / unknown CPU | schedule / main | 0 | 14 | [series](series-e460ad260f8a45e8.md) |
+| Authentic desktop architecture execution joins /  | unknown OS / unknown CPU | schedule / main | 0 | 14 | [series](series-f666f9001ca74394.md) |
+| Publish advisory CI history / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | schedule / main | 2 | 2 | [series](series-8169e4dc42526fed.md) |
+| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V74 80-Core Processor | workflow&#95;run / main | 6 | 6 | [series](series-0571bc9f9540bac0.md) |
+| No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | pull&#95;request / claude/wizardly-newton-1dz1d9 | 0 | 1 | [series](series-ee8dd394ad8f8493.md) |
+| Main CI reuse decision /  | unknown OS / unknown CPU | pull&#95;request / claude/wizardly-newton-1dz1d9 | 0 | 1 | [series](series-a68509af8b0f68cc.md) |
+| Workflow lint / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | pull&#95;request / claude/wizardly-newton-1dz1d9 | 1 | 1 | [series](series-e0b54834ad97f3da.md) |
+| UEFI firmware boot / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | pull&#95;request / claude/wizardly-newton-1dz1d9 | 1 | 1 | [series](series-435824efdcccedfe.md) |
+| Clang analyzer shards / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | pull&#95;request / claude/wizardly-newton-1dz1d9 | 1 | 1 | [series](series-284bc96ab9365f4b.md) |
+| iOS AArch64 / {"name":"iOS AArch64","runner":"macos-26","os":"ios","arch":"aarch64"} | macOS / Apple M1 &#40;Virtual&#41; | pull&#95;request / claude/wizardly-newton-1dz1d9 | 1 | 1 | [series](series-c8691e99518fec05.md) |
+| Android x86-64 / {"name":"Android x86-64","runner":"ubuntu-26.04","os":"android","arch":"x86&#95;64"} | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | pull&#95;request / claude/wizardly-newton-1dz1d9 | 1 | 1 | [series](series-b784152d4b0d0fb3.md) |
