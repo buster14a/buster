@@ -2800,6 +2800,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.keep_going = string_equal(argument, S8("-fkeep-going"));
             continue;
         }
+        if (string_equal(argument, S8("-fearly-exit")) || string_equal(argument, S8("-fno-early-exit")))
+        {
+            invocation.early_exit = string_equal(argument, S8("-fearly-exit"));
+            continue;
+        }
         if (string_equal(argument, S8("-fno-frontend-ssa")) || string_equal(argument, S8("-ffrontend-ssa")))
         {
             invocation.disable_direct_ssa = string_equal(argument, S8("-fno-frontend-ssa"));

@@ -2036,6 +2036,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             }
         }
     }
+    // -fearly-exit forks here, before the first lane_run starts the gang;
+    // from now on this is the child, and the parent reports its status at
+    // os_early_exit_release below (#3686).
+    if (!query && invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.early_exit)
+    {
+        (void)os_early_exit_arm();
+    }
     // The metrics clock starts after argument parsing: reading it earlier
     // would cost every compile a clock read to learn the option was absent.
     // Per-input offsets and wall_ns share this origin.
@@ -2330,6 +2337,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             result = PROCESS_RESULT_FAILED;
         }
     }
+    // Every artifact and report is out: an armed parent exits now, and the
+    // translation-unit arena's teardown below (and exit_mmap after it) runs
+    // in the background.
+    os_early_exit_release((u8)result);
     arena_destroy(arena, 1);
     return result;
 }

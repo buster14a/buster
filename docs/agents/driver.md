@@ -43,6 +43,57 @@ flush (#2621) saved 7-8 ms of wall per object on a btrfs desktop. No caller
 needs durability today; one that does should flush explicitly with
 `os_file_flush` rather than make every artifact pay for it.
 
+Buster does not overwrite outputs in place as mold and wild do; #3687 records
+the measured gain and the downsides. Preallocating the staging file with
+`fallocate(2)` is measured but not adopted: it awaits qualified Zen 5 evidence
+(#3685).
+
+`-fearly-exit` (API field `early_exit`; off by default, and `-fno-early-exit`
+restores the default) is mold and wild's fork trick (#3686). It lives in
+`run_c_compiler` and `os_early_exit_*` in `src/buster/lib/os.c`.
+
+- **Arming.** After argument parsing, and before the first `lane_run` starts
+  the gang, `ide cc` forks. The parent only waits on a pipe. Arming is
+  skipped on Windows, Android and iOS, and when a tracked thread already
+  exists (`os_is_only_live_thread` does not see untracked threads; desktop
+  `ide cc` starts none before this point). It is also skipped when the
+  status pipe cannot be created through `os_process_spawn_pipe_create`
+  (close-on-exec, both ends moved above fd 2), or when `fork` fails. The
+  compile then simply runs in-process. Because the status pipe never lands
+  on fds 0-2, a process started with standard streams closed cannot write
+  compiler output into it.
+- **Release.** Once every artifact and report is out, the child calls
+  `os_early_exit_release`. It points its standard streams at `/dev/null`,
+  so a build system's pipes reach EOF, and sends its status. The parent
+  `_exit`s with that status, or with the child's own status if the child
+  died before reporting.
+- **Background work.** Destroying the 32 GiB translation-unit arena, then
+  `exit_mmap`, then the release of each output that publication replaced
+  then run in the background. While armed, `file_publish_slices_checked`
+  holds a read-only reference to a replaced destination across the
+  `rename(2)` and hands it to `os_early_exit_defer_close`, so the old
+  inode's blocks are freed after the report rather than inside the rename.
+  Atomic publication is unchanged.
+
+The costs are why it stays opt-in:
+
+- `time(1)`, `getrusage(RUSAGE_CHILDREN)` and `-fmetrics-out` wrappers that
+  measure the process see only the parent (about 5 MB RSS and no CPU time).
+- A debugger follows the parent.
+- A `make -j` or cgroup budget frees the job slot while the child still
+  holds its memory.
+- A failure after the release cannot change the exit status, and any later
+  child output is discarded.
+
+Do not use it for benchmarks, profiling, debugging or memory budgeting. The
+`compiler_driver_test_early_exit` regression checks byte-identical objects
+against the default path, a replaced output, `-E` output through the caller's
+pipe, and failure propagation. On desktop POSIX, it also runs both modes with
+fds 0-1 and 0-2 closed, with and without `-v`, and compares raw exit statuses
+and artifacts. It forces the setup-failure fallback through the test-build seam
+`BUSTER_TEST_EARLY_EXIT_PIPE_FAILURE=1`. That seam fails the pipe's
+configuration step and validates that the failure happened.
+
 Opt-in machine-readable records remain on stdout: `CODEGEN_VERIFY`,
 `CODEGEN_FALLBACK*`, `CODEGEN`, `IR_*`, `TARGET`, `GPU`, and the `-v` source
 statistics. The differential runner reads `CODEGEN_VERIFY` there and compares

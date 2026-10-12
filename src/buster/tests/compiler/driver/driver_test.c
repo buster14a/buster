@@ -1789,6 +1789,126 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_diagnostic_streams(UnitT
     return result;
 }
 
+#if !BUSTER_ANDROID && !BUSTER_IOS && !defined(_WIN32)
+// Runs `ide cc <cc_arguments>` under /bin/sh with `prelude` applied first (a
+// redirection closing standard streams, optionally a descriptor limit), so the
+// compiler starts with those streams closed. Returns the raw waitpid status
+// word, so distinct exit codes stay distinct, or UINT64_MAX when the shell
+// could not be run or timed out.
+BUSTER_GLOBAL_LOCAL u64 compiler_driver_test_early_exit_closed_run(UnitTestArguments* arguments, String8 prelude,
+                                                                            SliceString8 cc_arguments)
+{
+    String8 command[16];
+    u32 count = 0;
+    command[count++] = S8("/bin/sh");
+    command[count++] = S8("-c");
+    command[count++] = string_format(arguments->arena, S8("{S8}; exec \"$@\""), prelude);
+    command[count++] = S8("sh");
+    command[count++] = program_state->input.arguments.pointer[0];
+    command[count++] = S8("cc");
+    for (u64 index = 0; index < cc_arguments.length && count < BUSTER_ARRAY_LENGTH(command); index += 1)
+    {
+        command[count++] = cc_arguments.pointer[index];
+    }
+    ProcessSpawnOptions capture = {.capture = (u64)1 << STANDARD_STREAM_ERROR, .use_process_environment = 1};
+    ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0}, capture);
+    u64 status = UINT64_MAX;
+    if (spawned.handle != 0)
+    {
+        ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, spawned, 30000000);
+        status = waited.timed_out ? UINT64_MAX : waited.platform_status;
+    }
+    return status;
+}
+#endif
+
+// -fearly-exit (#3686): the forked parent's status, streams and artifacts
+// match the default path's, including a replaced object and a failure.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_early_exit(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    Arena* arena = arguments->arena;
+    String8 source_path = buster_test_temporary_path(arena, S8("early-exit"), S8(".c"));
+    String8 early_path = buster_test_temporary_path(arena, S8("early-exit-armed"), S8(".o"));
+    String8 default_path = buster_test_temporary_path(arena, S8("early-exit-default"), S8(".o"));
+    String8 source = S8("int early_exit_value = 7;\nint early_exit_read(void) { return early_exit_value; }\n");
+    bool source_written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    if (BUSTER_REQUIRE(arguments, source_written))
+    {
+        String8 output = {0};
+        String8 error = {0};
+        String8 reference[] = {S8("-fno-early-exit"), S8("-c"), source_path, S8("-o"), default_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(reference), &output, &error));
+        ByteSlice expected = file_read(arena, default_path, (FileReadOptions){0});
+        // The second run replaces the first run's object while armed, so the
+        // deferred close of the replaced destination is exercised too.
+        for (u32 run = 0; run < 2; run += 1)
+        {
+            String8 compile[] = {S8("-fearly-exit"), S8("-c"), source_path, S8("-o"), early_path};
+            BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile), &output, &error));
+            BUSTER_TEST(arguments, output.length == 0 && error.length == 0);
+            ByteSlice armed = file_read(arena, early_path, (FileReadOptions){0});
+            BUSTER_TEST(arguments, expected.length != 0 && armed.length == expected.length &&
+                                       memory_compare(armed.pointer, expected.pointer, expected.length));
+        }
+        // Output written before the release reaches the caller's pipe.
+        String8 preprocess[] = {S8("-fearly-exit"), S8("-E"), source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(preprocess), &output, &error));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("early_exit_value = 7")));
+        // A failure is reported through the parent's status and stderr, and
+        // the existing object is left as it was.
+        BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("#error early-exit-failure\n"))));
+        String8 failing[] = {S8("-fearly-exit"), S8("-c"), source_path, S8("-o"), early_path};
+        BUSTER_TEST(arguments, !compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(failing), &output, &error));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(error, S8("early-exit-failure")));
+        ByteSlice kept = file_read(arena, early_path, (FileReadOptions){0});
+        BUSTER_TEST(arguments, kept.length == expected.length && memory_compare(kept.pointer, expected.pointer, expected.length));
+#if !defined(_WIN32)
+        // Closed standard streams: the status pipe must never land on fds
+        // 0-2, where -v output would reach the parent as a status byte. The
+        // last prelude also makes the pipe setup fail through the test-build
+        // seam (BUSTER_TEST_EARLY_EXIT_PIPE_FAILURE), which must fall back to
+        // an in-process compile. Every case must give the default path's
+        // status and artifact.
+        BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        String8 preludes[] = {S8("exec 0<&- 1>&-"), S8("exec 0<&- 1>&- 2>&-"),
+                              S8("exec 0<&- 1>&-; BUSTER_TEST_EARLY_EXIT_PIPE_FAILURE=1; export BUSTER_TEST_EARLY_EXIT_PIPE_FAILURE")};
+        u32 prelude_count = (u32)BUSTER_ARRAY_LENGTH(preludes);
+        String8 modes[] = {S8("-fno-early-exit"), S8("-fearly-exit")};
+        for (u32 prelude = 0; prelude < prelude_count; prelude += 1)
+        {
+            for (u32 verbose = 0; verbose < 2; verbose += 1)
+            {
+                u64 statuses[2];
+                ByteSlice objects[2];
+                for (u32 mode = 0; mode < 2; mode += 1)
+                {
+                    String8 object_path = mode ? early_path : default_path;
+                    (void)os_file_delete(object_path);
+                    String8 compile[] = {modes[mode], S8("-march=native"), verbose ? S8("-v") : S8("-w"), S8("-c"), source_path, S8("-o"), object_path};
+                    statuses[mode] = compiler_driver_test_early_exit_closed_run(arguments, preludes[prelude], (SliceString8)BUSTER_ARRAY_TO_SLICE(compile));
+                    objects[mode] = file_read(arena, object_path, (FileReadOptions){0});
+                }
+                BUSTER_TEST(arguments, statuses[0] != UINT64_MAX && statuses[0] == statuses[1]);
+                BUSTER_TEST(arguments, objects[0].length == objects[1].length &&
+                                           (objects[0].length == 0 || memory_compare(objects[0].pointer, objects[1].pointer, objects[0].length)));
+                // Without -v nothing is written to the closed streams, so the
+                // compile itself must succeed in both modes.
+                BUSTER_TEST(arguments, verbose || (statuses[1] == 0 && objects[1].length == expected.length));
+            }
+        }
+#endif
+    }
+    if (source_written) { BUSTER_TEST(arguments, os_file_delete(source_path)); }
+    (void)os_file_delete(early_path);
+    (void)os_file_delete(default_path);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // #1574: -Werror, -Werror=<group>, -Wno-error[=<group>] and -Wno-<group>
 // over the warnings the driver publishes. GCC and Clang agree on every row
 // except the ones marked as Clang-only (everything) or slice-3b placeholders
@@ -34163,6 +34283,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_reservation_failure);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_diagnostic_streams);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_early_exit);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_warning_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_gcc_spellings);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_default_cpu_model);
