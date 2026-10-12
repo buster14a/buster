@@ -2049,6 +2049,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     invocation.omit_spelled_bytes = !invocation.verbose && !invocation.source_metrics_path.length;
     CompilerDriverResult compile = query ? (CompilerDriverResult){0} : compiler_driver_execute_invocation(arena, invocation);
     ProcessResult result = PROCESS_RESULT_SUCCESS;
+    if (compile.linker_report.length)
+    {
+        string_print(S8("{S8}"), compile.linker_report);
+    }
     if (compile.warning.length)
     {
         compiler_print_diagnostic(S8("{S8}"), compile.warning);

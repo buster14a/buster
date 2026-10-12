@@ -3,6 +3,7 @@
 #include <buster/lib/compiler/driver/driver.h>
 
 BUSTER_F_DECL bool compiler_driver_language_is_native(CompilerDriverLanguage language);
+BUSTER_F_DECL String8 compiler_driver_native_link_report(Arena* arena, CompilerDriverInvocation invocation);
 typedef struct CompilerDriverDependencyQuoteResult CompilerDriverDependencyQuoteResult;
 struct CompilerDriverDependencyQuoteResult
 {
