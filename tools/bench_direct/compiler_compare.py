@@ -179,6 +179,8 @@ EVIDENCE_TOTAL_LIMIT = EVIDENCE_SEALED_LIMITS[0] - EVIDENCE_CONTROL_RESERVE[0]
 EVIDENCE_FILE_COUNT = EVIDENCE_SEALED_LIMITS[1] - EVIDENCE_CONTROL_RESERVE[1]
 # Sealed attempts' optional members, exported after every leg's required ones (export_deferred_optional).
 EVIDENCE_DEFERRED_OPTIONAL: list[dict] = []
+# Set by main for a sealed attempt: every export_tree defers its optional members, opt-in legs included.
+EVIDENCE_DEFER_ALL = False
 # (bundle path, reason code) of every omission in this attempt, for evidence-omissions.json.
 EVIDENCE_OMISSION_LEDGER: list[tuple[str, str]] = []
 OMISSIONS_SHOWN = 50
@@ -754,7 +756,10 @@ def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, 
     aggregate budget, one that grows while being read, or one that cannot be read is omitted and listed.
     Every required member is copied before any optional one, and a directory is created only as the
     ancestor of an admitted file. With defer_optional (a sealed attempt, #2918) no optional member is
-    copied now: export_deferred_optional adds them after every leg's required members. The tree is staged
+    copied now: export_deferred_optional adds them after every leg's required members. EVIDENCE_DEFER_ALL
+    applies the same to every export of a sealed attempt, so an opt-in leg exported before the ordinary lab
+    and corpus never spends their budget on optional data; each leg still validates only required members,
+    which are exported at once. The tree is staged
     beside its destination and moved into place afterwards. Returns (problems, omissions); an omitted or
     absent required member is a problem, so the export is incomplete rather than quietly successful. Each
     omission also reaches EVIDENCE_OMISSION_LEDGER with its fixed reason code. The source is never modified.
@@ -781,6 +786,7 @@ def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, 
         created: set[str] = set()
         admit_evidence_leaves([leaf for leaf in leaves if leaf[0] in required], staging, created, usage, present,
                               omissions, codes)
+        defer_optional = defer_optional or EVIDENCE_DEFER_ALL
         if not defer_optional:
             admit_evidence_leaves([leaf for leaf in leaves if leaf[0] not in required], staging, created, usage, present,
                                   omissions, codes)
@@ -2525,7 +2531,7 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
 
 
 def main(argv: list[str] | None = None) -> int:
-    global OWNED_PHASE_CONTEXT
+    global OWNED_PHASE_CONTEXT, EVIDENCE_DEFER_ALL
     arguments = parse(argv)
     started = time.monotonic()
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -2568,6 +2574,7 @@ def main(argv: list[str] | None = None) -> int:
         not analyzer_requested and arguments.closure_policy == "legacy-rebuild"
     EVIDENCE_OMISSION_LEDGER.clear()
     EVIDENCE_DEFERRED_OPTIONAL.clear()
+    EVIDENCE_DEFER_ALL = arguments.evidence_seal
     receipt = {"schema": RECEIPT_SCHEMA, "mode": arguments.mode, "state": "failed", "reasons": [], "identity": identity,
                "profile": ANALYZER_PROFILE_BY_LINE[analyzer_request_line] if analyzer_requested else selected_profile,
                "throughput_profile": THROUGHPUT_PROFILE if not analyzer_requested else None,
@@ -2694,6 +2701,7 @@ def main(argv: list[str] | None = None) -> int:
     receipt.pop("phase", None)
     if EVIDENCE_DEFERRED_OPTIONAL and aborted is None:
         export_deferred_optional(evidence, receipt.setdefault("evidence_omissions", {}))
+    EVIDENCE_DEFER_ALL = False
     if not receipt.get("evidence_omissions"):
         receipt.pop("evidence_omissions", None)
     if arguments.evidence_seal and receipt["state"] == "measured" and aborted is None:

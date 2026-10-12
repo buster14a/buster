@@ -13,7 +13,9 @@ sealing. That excludes the owned, analyzer and snapshot routes. For such an
 attempt:
 
 - It exports the lab and corpus with this inventory as required.
-- `export_tree` exports only required members while each leg runs, and creates
+- In such an attempt every `export_tree` call, including those of the opt-in
+  legs that run before the lab, exports only required members while its leg
+  runs, and creates
   a directory only as the ancestor of an exported file. Empty or unexported
   optional subtrees therefore never use the entry budget.
 - Once every leg's required members are in place, `export_deferred_optional`

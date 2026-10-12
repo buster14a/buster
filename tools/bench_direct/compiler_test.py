@@ -2784,6 +2784,41 @@ class ExportTest(unittest.TestCase):
         self.assertEqual(compiler_compare.EVIDENCE_OMISSION_LEDGER, [("lab/" + path, "byte-budget") for path in dropped])
         self.assertEqual(compiler_compare.EVIDENCE_DEFERRED_OPTIONAL, [])
 
+    def test_an_earlier_opt_in_export_defers_its_optional_data_in_a_sealed_attempt(self) -> None:
+        # The ast-pilot and inline legs call export_tree without defer_optional before the ordinary lab and
+        # corpus; a sealed attempt's EVIDENCE_DEFER_ALL must still keep their optional data for last (#2918).
+        opt_in = self.root / "ast_pilot"
+        opt_in.mkdir()
+        (opt_in / "acceptance.json").write_text("{}")
+        for index in range(6):
+            (opt_in / f"diagnostic-{index}.log").write_bytes(b"d" * 10)
+        corpus = self.root / "corpus"
+        corpus.mkdir()
+        (corpus / "summary.json").write_bytes(b"{}" + b" " * 38)
+        outcomes = {}
+        for sealed in (False, True):
+            shutil.rmtree(self.evidence)
+            self.evidence.mkdir()
+            compiler_compare.EVIDENCE_OMISSION_LEDGER.clear()
+            compiler_compare.EVIDENCE_DEFERRED_OPTIONAL.clear()
+            with mock.patch.object(compiler_compare, "EVIDENCE_TOTAL_LIMIT", 70), \
+                    mock.patch.object(compiler_compare, "EVIDENCE_DEFER_ALL", sealed):
+                opt_problems, _ = compiler_compare.export_tree(opt_in, self.evidence / "ast_pilot_acceptance", self.evidence,
+                                                               ("*.exe",), ("acceptance.json",))
+                lab_problems, _ = compiler_compare.export_tree(self.source, self.evidence / "lab", self.evidence, ("*.exe",),
+                                                               ("summary.json",), defer_optional=sealed)
+                corpus_problems, _ = compiler_compare.export_tree(corpus, self.evidence / "throughput", self.evidence,
+                                                                  ("*.exe",), ("summary.json",), defer_optional=sealed)
+                receipt_omissions: dict = {}
+                compiler_compare.export_deferred_optional(self.evidence, receipt_omissions)
+            outcomes[sealed] = (opt_problems, lab_problems, corpus_problems)
+        # Eager: six 10-byte diagnostics (plus 2+5 lab bytes) leave no room for the 40-byte corpus summary.
+        self.assertEqual(len(outcomes[False][2]), 1)
+        self.assertEqual(outcomes[True], ([], [], []))
+        self.assertTrue((self.evidence / "throughput" / "summary.json").is_file())
+        self.assertTrue((self.evidence / "ast_pilot_acceptance" / "diagnostic-0.log").is_file())
+        self.assertIn("ast_pilot_acceptance", receipt_omissions)
+
     def test_every_omission_reaches_the_ledger_with_its_fixed_code(self) -> None:
         (self.source / "big.txt").write_bytes(b"x" * 100)
         (self.source / "link.txt").symlink_to(self.source / "raw.txt")
@@ -2938,6 +2973,21 @@ class HarnessTest(unittest.TestCase):
         # Optional members join after every leg's required ones, before the seal.
         self.assertTrue((evidence / "throughput" / "artifacts" / "tiny_startup-fast-0.log").is_file())
         self.assertEqual(compiler_compare.EVIDENCE_DEFERRED_OPTIONAL, [])
+        self.assertFalse(compiler_compare.EVIDENCE_DEFER_ALL)
+
+    def test_a_sealed_attempt_defers_every_export_including_opt_in_legs(self) -> None:
+        seen = []
+        real = compiler_compare.export_tree
+
+        def spy(*arguments, **options):
+            seen.append((arguments[1].relative_to(self.root / "evidence").as_posix(), compiler_compare.EVIDENCE_DEFER_ALL))
+            return real(*arguments, **options)
+
+        stand_in = (sys.executable, "-c", "raise SystemExit(1)")
+        with mock.patch.object(compiler_compare, "export_tree", spy):
+            self.run_sealed(stand_in)
+        self.assertEqual(seen, [("lab", True), ("throughput", True)])
+        self.assertFalse(compiler_compare.EVIDENCE_DEFER_ALL)
 
     def test_a_refused_seal_fails_the_attempt(self) -> None:
         script = "print('COMPILER_EVIDENCE_INCOMPLETE reason=required raw evidence is missing: x'); raise SystemExit(1)"
