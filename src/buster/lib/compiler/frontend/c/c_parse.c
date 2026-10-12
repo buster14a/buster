@@ -164,6 +164,7 @@
 //   c_switch_prefix_overlaps,                    switch label overlap: radix sort plus
 //   c_switch_first_overlapping_label              sweep, shared with c_gen.c lowering
 //   c_parse_validate_one_switch                  per-switch label and range validation
+//   c_parse_validate_bit_field_addresses         unary address member constraints
 //   c_parse_validate_lowering_constraints        source validation before canonical IR
 //   c_parse_ast, c_analyze_semantics, c_parse     model-building stage entry points
 //   c_parse_ast_from_tree, c_parser_tree_*       the declaration split read from
@@ -38597,6 +38598,89 @@ BUSTER_C_INTERNAL void c_parse_validate_members(CTypeParseMachine* machine, Aren
     c_parse_validate_member_names(machine, arena, result, preprocess);
 }
 
+// Address constraints apply even to unevaluated and unselected operands.
+// Reuse semantic member lookup, including promoted members, before constant
+// folding can erase the address expression. Only '&' sites query an operand.
+BUSTER_C_INTERNAL void c_parse_validate_bit_field_addresses(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess)
+{
+    u32 end = (u32)preprocess.token_count;
+    for (u32 index = 0; index + 1 < end; index += 1)
+    {
+        if (!c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_AMPERSAND)) continue;
+        CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, index);
+        bool unary = !index || !c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]);
+        if (index && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER)
+        {
+            String8 before = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]);
+            unary = string_equal(before, S8("return")) || string_equal(before, S8("case")) || string_equal(before, S8("sizeof")) ||
+                    c_parse_alignof_word(before) || string_equal(before, S8("else")) || string_equal(before, S8("do"));
+        }
+        if (index && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            u32 open = c_parse_matching_opener_indexed(result, preprocess, index - 1, 0);
+            if (open < index - 1)
+            {
+                String8 before = open ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[open - 1]) : (String8){0};
+                bool control = string_equal(before, S8("if")) || string_equal(before, S8("while")) ||
+                               string_equal(before, S8("for")) || string_equal(before, S8("switch"));
+                bool size = string_equal(before, S8("sizeof")) || c_parse_alignof_word(before);
+                unary = control || (!size && c_parse_type_name_stop(result, preprocess, scope, open + 1, index - 1) == index - 1);
+            }
+        }
+        if (index && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            u32 open = c_parse_matching_opener_indexed(result, preprocess, index - 1, 0);
+            // A compound literal can be the left binary operand; a completed
+            // block instead starts a new expression statement.
+            unary = true;
+            if (open && c_token_is_punctuator(&preprocess.tokens[open - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            {
+                u32 type_open = c_parse_matching_opener_indexed(result, preprocess, open - 1, 0);
+                unary = type_open >= open - 1 || c_parse_type_name_stop(result, preprocess, scope, type_open + 1, open - 1) != open - 1;
+            }
+        }
+        if (unary)
+        {
+            u64 mark = machine->scratch_arena->position;
+            u32 operand_start = index + 1;
+            u32 operand_end = c_parse_update_prefix_operand_end(result, preprocess, operand_start, end);
+            bool selected = true;
+            while (selected && operand_start < operand_end)
+            {
+                selected = false;
+                if (c_token_is_punctuator(&preprocess.tokens[operand_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                    c_parse_matching_delimiter_indexed(result, preprocess, operand_start) == operand_end - 1)
+                {
+                    operand_start += 1;
+                    operand_end -= 1;
+                    selected = true;
+                }
+                else if (preprocess.tokens[operand_start].kind == C_TOKEN_IDENTIFIER &&
+                         string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[operand_start]), S8("_Generic")))
+                {
+                    u32 first = 0;
+                    u32 limit = 0;
+                    u32 consumed = 0;
+                    selected = c_parse_generic_selection_range(machine, machine->scratch_arena, preprocess, result, scope,
+                        operand_start, operand_end, &first, &limit, &consumed) && consumed == operand_end && first > operand_start;
+                    if (selected)
+                    {
+                        operand_start = first;
+                        operand_end = limit;
+                    }
+                }
+            }
+            u32 width = c_parse_expression_bit_field_width(machine->scratch_arena, preprocess, result, scope, operand_start, operand_end);
+            if (width)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[index]),
+                                   C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("cannot take address of bit-field"));
+            }
+            arena_set_position(machine->scratch_arena, mark);
+        }
+    }
+}
+
 // C17 6.5.3.2p1: the operand of unary '&' is not declared `register`. An
 // operand-ending token before the '&' makes it the binary operator, and '->',
 // '[' or '(' after the name address a pointee or a call result instead.
@@ -42540,6 +42624,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         // Ahead of the gate, so neither the static-initializer folder nor the
         // variably-modified and alignment checks see a file-scope `({`.
         c_parse_validate_file_scope_statement_expressions(&result, preprocess);
+        if (!result.diagnostic_count) c_parse_validate_bit_field_addresses(&machine, &result, preprocess);
         if (!result.diagnostic_count)
         {
             c_parse_validate_lowering_constraints(&machine, arena, &result, preprocess);
