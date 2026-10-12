@@ -54916,6 +54916,140 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_nested_join_simplify(UnitTe
     return result;
 }
 
+// A read after N nested loops that each declare their own variable walked
+// back through every inner header, which placed a trivial parameter there
+// for every enclosing loop variable: N^2 parameters, refused past ~2000
+// levels, with the simplification user lists growing along each chain into
+// N^3 publication time (#3723). A header whose loop never writes a local now
+// forwards that read to the loop's entry, so the count stays linear.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_nested_loop_parameters(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 depth = 2000;
+    String8 shapes[][3] = {
+        {S8("int tall(int x){"), S8("for(int i=0;i<x;i++)"), S8("x--;return x;}")},
+        {S8("int tall(int x){"), S8("{int i=x;while(i--)"), S8("x--;")},
+    };
+    String8 closers[] = {S8(""), S8("}")};
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(shapes); shape += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        u64 capacity = (u64)depth * 32 + 256;
+        char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+        u64 length = 0;
+        c_test_append_source(bytes, capacity, &length, shapes[shape][0]);
+        for (u32 level = 0; level < depth; level += 1)
+        {
+            c_test_append_source(bytes, capacity, &length, shapes[shape][1]);
+        }
+        c_test_append_source(bytes, capacity, &length, shapes[shape][2]);
+        for (u32 level = 0; level < depth; level += 1)
+        {
+            c_test_append_source(bytes, capacity, &length, closers[shape]);
+        }
+        if (shape)
+        {
+            c_test_append_source(bytes, capacity, &length, S8("return x;}"));
+        }
+        CPreprocessResult tokens = c_preprocess(temporary.arena, (String8){bytes, length}, (CPreprocessOptions){0});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
+        CIRLowerResult direct = c_lower_to_ir(temporary.arena, S8("nested-loops.c"), tokens, parse, target_native);
+        BUSTER_TEST(arguments, direct.program && !direct.diagnostic_count);
+        // One parameter per header for `x`, which the innermost body writes,
+        // and one for each loop's own variable.
+        BUSTER_TEST_RAW(arguments, direct.direct_ssa.parameters_created <= (u64)depth * 4 + 16,
+                        string_format(temporary.arena, S8("shape {u32}: {u64} parameters at depth {u32}"), shape,
+                                      (u64)direct.direct_ssa.parameters_created, depth));
+        if (direct.program && !direct.diagnostic_count)
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(direct.program, direct.program->modules).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// The loop-header shortcut of #3723 holds only for a loop entered through its
+// header. Each function here also enters a loop past it -- a goto into the
+// body, a case label inside a do-while, a goto back before the loop -- with a
+// local the loop never writes holding a different value on that path. The
+// volatile copy keeps every local in memory and is the reference.
+BUSTER_GLOBAL_LOCAL String8 c_test_loop_entry_source = S8(
+    "#define GOTO_INTO(T) { T a = 1; T s = 0; T k; T pass = 0;\\\n"
+    "    for (k = 0; k < n; k++) { s += a; inside: s += a * 10; }\\\n"
+    "    if (!pass) { pass = 1; a = 7; k = 0; goto inside; }\\\n"
+    "    return s; }\n"
+    "#define DUFF(T) { T a = 3; T s = 0; T i = 0;\\\n"
+    "    switch (n & 3) { case 0: a = 100; do { s += a; case 3: s += a * 2; case 2: s += a * 3; case 1: s += a * 5; i++; } while (i < 3); }\\\n"
+    "    return s; }\n"
+    "#define NESTED(T) { T s = 0; T x = n;\\\n"
+    "    for (T i = 0; i < 3; i++) for (T j = i; j < 4; j++) for (T k = j; k < 5; k++) { s += i * 100 + j * 10 + k + x; if (k == 3) x--; }\\\n"
+    "    return s; }\n"
+    "#define BACK(T) { T a = 0; T s = 0; T m = n;\\\n"
+    "    top: a += 2;\\\n"
+    "    do { s += a; if (s < 40) goto top; } while (--m > 0);\\\n"
+    "    while (m < 4) { T b = a; while (b > 0) { s += b; b -= 3; } m++; if (m == 2) continue; s += m; }\\\n"
+    "    return s; }\n"
+    "static int goto_into(int n) GOTO_INTO(int)\n"
+    "static int goto_into_reference(int n) GOTO_INTO(volatile int)\n"
+    "static int duff(int n) DUFF(int)\n"
+    "static int duff_reference(int n) DUFF(volatile int)\n"
+    "static int nested(int n) NESTED(int)\n"
+    "static int nested_reference(int n) NESTED(volatile int)\n"
+    "static int back(int n) BACK(int)\n"
+    "static int back_reference(int n) BACK(volatile int)\n"
+    "int main(void) {\n"
+    "    int failed = 0;\n"
+    "    for (volatile int n = 0; n < 10; n++) {\n"
+    "        failed |= goto_into(n) != goto_into_reference(n);\n"
+    "        failed |= (duff(n) != duff_reference(n)) << 1;\n"
+    "        failed |= (nested(n) != nested_reference(n)) << 2;\n"
+    "        failed |= (back(n) != back_reference(n)) << 3;\n"
+    "    }\n"
+    "    return failed;\n"
+    "}\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_loop_entry_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("loop-entry-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_loop_entry_source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_unique_path(temporary.arena, S8("loop-entry-runtime-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), modes[mode], S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                            string_format(temporary.arena, S8("loop entry {S8}: {S8}"), modes[mode], compiled.diagnostic));
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                    string_format(temporary.arena, S8("loop entry runtime {S8}: status={u32} timed_out={u32}"), modes[mode],
+                                                  execution.platform_status, (u32)execution.timed_out));
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // Entry initializer provenance must consume old rows before dense copies can
 // replace them. Two named owners share one initializer root; compaction must
 // keep its first identity and bind the later initializer to its own result.
@@ -55079,29 +55213,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_declaration_definition(Unit
         String8 source;
         // 1: the shortcut must create fewer provisional parameters; 0: it
         // must not apply; -1: it applies where the walk would only have
-        // forwarded through single-predecessor blocks, so the count may tie.
+        // forwarded through single-predecessor blocks or past the header of
+        // a loop that never writes the local (#3723), so the count may tie.
         s32 fewer;
     } cases[] = {
-        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}return r;}"), 1},
-        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}done:return r;}"), 1},
-        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}switch(c){default:r+=1;}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}return r;}"),-1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}done:return r;}"),-1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=x;else r-=y;n-=1;}}switch(c){default:r+=1;}return r;}"),-1},
         {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){if(n&1)r+=({int z=x;l:z;});else r-=y;n-=1;}}return r;}"), 1},
         // Jumps whose source and target both lie in the scope after the
         // initializer keep the shortcut; a jump past the initializer does not.
         {S8("int test(int*p,int n){int r=0;while(n-->0){int op=*p++;int k=op*2;switch(op){case 1:r+=k;break;case 2:r-=k;break;default:r^=k;}r+=op;}return r;}"), -1},
         {S8("int test(int c,int n){int r=0;if(c){int x=n*3;again:r+=x;if(--n>0)goto again;r+=x;}return r;}"), -1},
         {S8("int test(int k,int n){int r=0;switch(k){case 0:{int x=n*3;case 1:while(n>0){r+=x;n-=1;}}}return r;}"), 0},
-        {S8("int test(int k,int n){int r=0;if(k){int x=n*3;switch(k){case 1:while(n>0){r+=x;n-=1;}}}return r;}"), 1},
+        {S8("int test(int k,int n){int r=0;if(k){int x=n*3;switch(k){case 1:while(n>0){r+=x;n-=1;}}}return r;}"),-1},
         {S8("int test(int c,int n){int r=0;if(c)goto in;{int x=n*3;in:while(n>0){r+=x;n-=1;}}return r;}"), 0},
         {S8("int test(int k,int n){int r=0;switch(k){int x=n*3;case 1:while(n>0){r+=x;n-=1;}}return r;}"), 0},
         {S8("int test(int c,int n){int r=0;while(n-->0){r+=({if(c)goto l;int z=n*3;l:while(c-->0)r+=z;z;});}return r;}"), 0},
-        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){{r+=x;break;}r-=y;}}return r;}"), 1},
-        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){r+=(int){x};r+=c?x:y;n-=1;}}return r;}"), 1},
-        {S8("int test(int c,int n){int r=0;if(c){int y;int x=y;while(n>0){r+=x;n-=1;}}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){{r+=x;break;}r-=y;}}return r;}"),-1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=n*3;int y=n+c;while(n>0){r+=(int){x};r+=c?x:y;n-=1;}}return r;}"),-1},
+        {S8("int test(int c,int n){int r=0;if(c){int y;int x=y;while(n>0){r+=x;n-=1;}}return r;}"),-1},
         {S8("int test(int c,int n){int r=0;if(c){int x=n*3;while(n>0){r+=x;if(r>9)x=1;n-=1;}}return r;}"), 0},
         // Initializers that branch store in a later block than the declaration.
         {S8("int test(int c,int n){int r=0;if(c){int x=c>1?n*3:n;int y=n&&c;int z=n||c;while(n>0){r+=x+y-z;n-=1;}}return r;}"), 1},
-        {S8("int test(int c,int n){int r=0;if(c){int x=c>1?(n?n*3:n):c;while(n>0){r+=x;n-=1;}}return r;}"), 1},
+        {S8("int test(int c,int n){int r=0;if(c){int x=c>1?(n?n*3:n):c;while(n>0){r+=x;n-=1;}}return r;}"),-1},
         {S8("int test(int c,int n){int r=0;if(c){int x=c>1?x:n;while(n>0){r+=x;n-=1;}}return r;}"), 0},
         {S8("int test(int c,int n){int r=0;if(c){int x;if(n)x=n*3;while(n>0){r+=x;n-=1;}}return r;}"), 0},
     };
@@ -63546,6 +63681,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_declaration_definition);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_join_simplify);
+    C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_loop_parameters);
+    C_TEST_FIXTURE(arguments, c_test_direct_ssa_loop_entry_runtime);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
     C_TEST_FIXTURE(arguments, c_test_duplicate_parameter_names);
     C_TEST_FIXTURE(arguments, c_test_dynamic_object_size);

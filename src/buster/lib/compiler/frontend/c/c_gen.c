@@ -17,7 +17,9 @@
 // their first allocation; c_ir_ssa_grow_slots, c_ir_ssa_parameter and the
 // c_ir_ssa_finish_cfg / c_ir_ssa_finish_reserve_publish steps of c_ir_ssa_finish
 // check the direct-SSA rows whose size only the body decides (c_ir_ssa_refuse
-// records the refusal). The remaining phase/state graph is in
+// records the refusal); c_ir_ssa_finish_loops, which lets reads pass loop
+// headers from the loops c_ir_ssa_loop_record noted, drops its shortcut
+// rather than refusing. The remaining phase/state graph is in
 // docs/agents/compiler-phase-state.md.
 // By default lowering has no syntax tree: it re-walks token ranges directly,
 // resolving identifiers through the parse result's scopes and answering
@@ -6441,6 +6443,26 @@ struct CIrSsaEvent
     bool named_load;
 };
 
+// A loop statement the body lowering recorded for c_ir_ssa_finish_loops: its
+// header, the other blocks created when the statement split, and the window
+// of block IDs created while its condition, body and increment lowered. A
+// window still UINT32_MAX was never opened or closed.
+typedef struct CIrSsaLoop CIrSsaLoop;
+struct CIrSsaLoop
+{
+    u32 header;
+    u32 members[2];
+    u32 window_begin;
+    u32 window_end;
+    // Finish facts: the enclosing loop, the predecessors of the header from
+    // outside the loop, and whether every other loop block is entered only
+    // from inside the loop.
+    u32 parent;
+    u32 entry;
+    u32 entry_count;
+    bool closed;
+};
+
 struct CIrDirectSsa
 {
     CIrSsaSlot* slots;
@@ -6464,6 +6486,15 @@ struct CIrDirectSsa
     u32 slot_capacity;
     u32 read_count;
     u32 read_capacity;
+    CIrSsaLoop* loops;
+    u32 loop_count;
+    u32 loop_capacity;
+    // Set by c_ir_ssa_finish_loops: per block, the loop plus one whose header
+    // a read may pass straight to its entry; per local, the blocks that write
+    // it, ascending (local_definition_offsets has local_count + 1 rows).
+    u32* loop_headers;
+    u32* local_definition_offsets;
+    u32* local_definition_blocks;
     // Set by c_ir_ssa_refuse once a scratch carve was refused. Finish stops
     // its walks on it and keeps the refusal's own diagnostic.
     bool scratch_exhausted;
@@ -6597,6 +6628,61 @@ BUSTER_C_INTERNAL void c_ir_ssa_refuse(CIntegerIrBuilder* builder, String8 messa
     }
     builder->failure_message = message;
     builder->lower_machine.failed = true;
+}
+
+// Record a loop statement as it splits, returning its index plus one for the
+// tasks that open and close its block window, or zero when there is nothing
+// to record into. The record only enables a finish shortcut, so a refused
+// growth drops it silently rather than failing the function.
+BUSTER_C_INTERNAL u32 c_ir_ssa_loop_record(CIntegerIrBuilder* builder, IrBlockId header, IrBlockId first_member, IrBlockId second_member)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    u32 result = 0;
+    bool fits = ssa != 0;
+    if (fits && ssa->loop_count == ssa->loop_capacity)
+    {
+        u64 capacity = ssa->loop_capacity ? (u64)ssa->loop_capacity * 2 : 16;
+        u64 position = builder->scratch_arena->position;
+        fits = capacity <= UINT32_MAX &&
+               c_ir_arena_reservation_advance(builder->scratch_arena->reserved_size, &position, sizeof(CIrSsaLoop), capacity, BUSTER_ALIGN_OF(CIrSsaLoop));
+        if (fits)
+        {
+            CIrSsaLoop* loops = arena_allocate(builder->scratch_arena, CIrSsaLoop, capacity);
+            if (ssa->loop_count)
+            {
+                memcpy(loops, ssa->loops, sizeof(*loops) * ssa->loop_count);
+            }
+            ssa->loops = loops;
+            ssa->loop_capacity = (u32)capacity;
+        }
+    }
+    if (fits)
+    {
+        ssa->loops[ssa->loop_count++] = (CIrSsaLoop){
+            .header = header.value, .members = {first_member.value, second_member.value},
+            .window_begin = UINT32_MAX, .window_end = UINT32_MAX,
+        };
+        result = ssa->loop_count;
+    }
+    return result;
+}
+
+// The window opens once the loop's own blocks exist and before its condition
+// lowers, and closes when the task after the loop starts.
+BUSTER_C_INTERNAL void c_ir_ssa_loop_open(CIntegerIrBuilder* builder, u32 loop_plus_one)
+{
+    if (loop_plus_one && builder->direct_ssa && loop_plus_one <= builder->direct_ssa->loop_count)
+    {
+        builder->direct_ssa->loops[loop_plus_one - 1].window_begin = builder->function->block_count;
+    }
+}
+
+BUSTER_C_INTERNAL void c_ir_ssa_loop_close(CIntegerIrBuilder* builder, u32 loop_plus_one)
+{
+    if (loop_plus_one && builder->direct_ssa && loop_plus_one <= builder->direct_ssa->loop_count)
+    {
+        builder->direct_ssa->loops[loop_plus_one - 1].window_end = builder->function->block_count;
+    }
 }
 
 BUSTER_C_INTERNAL bool c_ir_ssa_grow_slots(CIntegerIrBuilder* builder)
@@ -6746,6 +6832,56 @@ BUSTER_C_INTERNAL IrValueId c_ir_ssa_parameter(CIntegerIrBuilder* builder, u32 b
     return slot->value;
 }
 
+// Whether `block` is among the ascending definition blocks [begin, end), or,
+// with `window`, whether one lies in [block, window_end).
+BUSTER_C_INTERNAL bool c_ir_ssa_definition_in(u32 const* blocks, u32 begin, u32 end, u32 block, u32 window_end, bool window)
+{
+    u32 last = end;
+    while (begin < end)
+    {
+        u32 middle = begin + (end - begin) / 2;
+        if (blocks[middle] < block)
+        {
+            begin = middle + 1;
+        }
+        else
+        {
+            end = middle;
+        }
+    }
+    return begin < last && (window ? blocks[begin] < window_end : blocks[begin] == block);
+}
+
+// The block a read of `local` at `block` takes its value from without a
+// parameter: the only predecessor, or the entry of a closed loop whose header
+// `block` is when no block of that loop writes `local` (#3723). Without that
+// second case a read after N nested loops placed a trivial parameter at every
+// inner header for every enclosing loop variable: N^2 parameters.
+BUSTER_C_INTERNAL u32 c_ir_ssa_forward_block(CIrDirectSsa* ssa, u32 block, u32 local)
+{
+    u32 result = UINT32_MAX;
+    if (ssa->predecessor_offsets[block + 1] - ssa->predecessor_offsets[block] == 1)
+    {
+        result = ssa->predecessors[ssa->predecessor_offsets[block]];
+    }
+    else if (ssa->loop_headers && ssa->loop_headers[block])
+    {
+        CIrSsaLoop* loop = ssa->loops + ssa->loop_headers[block] - 1;
+        u32 const* blocks = ssa->local_definition_blocks;
+        u32 begin = ssa->local_definition_offsets[local];
+        u32 end = ssa->local_definition_offsets[local + 1];
+        bool writes = c_ir_ssa_definition_in(blocks, begin, end, loop->window_begin, loop->window_end, true) ||
+                      c_ir_ssa_definition_in(blocks, begin, end, loop->header, 0, false) ||
+                      c_ir_ssa_definition_in(blocks, begin, end, loop->members[0], 0, false) ||
+                      c_ir_ssa_definition_in(blocks, begin, end, loop->members[1], 0, false);
+        if (!writes)
+        {
+            result = loop->entry;
+        }
+    }
+    return result;
+}
+
 // Once predecessor discovery is complete, forward through single-predecessor
 // blocks instead of allocating a parameter at every intervening block. Cache
 // the answer on the traversed path. A stamped cycle still creates one pending
@@ -6766,17 +6902,17 @@ BUSTER_C_INTERNAL IrValueId c_ir_ssa_current(CIntegerIrBuilder* builder, u32 blo
             memset(ssa->read_stamps, 0, sizeof(u32) * builder->function->block_count);
             ssa->read_stamp = 1;
         }
-        while (!refused && value.value == IR_ID_UNDERLYING_INVALID &&
-               ssa->predecessor_offsets[block + 1] - ssa->predecessor_offsets[block] == 1 &&
-               ssa->read_stamps[block] != ssa->read_stamp)
+        u32 forward = c_ir_ssa_forward_block(ssa, block, local);
+        while (forward != UINT32_MAX && ssa->read_stamps[block] != ssa->read_stamp)
         {
             ssa->read_stamps[block] = ssa->read_stamp;
             ssa->read_blocks[path_count++] = block;
             IR_CONSTRUCTION_RECORD(SSA_FORWARD_STEPS, 1);
-            block = ssa->predecessors[ssa->predecessor_offsets[block]];
+            block = forward;
             slot = c_ir_ssa_slot(builder, block, local);
             value = slot->value;
             refused = slot == &ssa->failed_slot;
+            forward = !refused && value.value == IR_ID_UNDERLYING_INVALID ? c_ir_ssa_forward_block(ssa, block, local) : UINT32_MAX;
         }
     }
     if (!refused && value.value == IR_ID_UNDERLYING_INVALID)
@@ -7347,6 +7483,205 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_cfg(CIntegerIrBuilder* builder, u8** memo
     return fits;
 }
 
+BUSTER_C_INTERNAL bool c_ir_ssa_loop_contains(CIrSsaLoop const* loop, u32 block)
+{
+    return (block >= loop->window_begin && block < loop->window_end) || block == loop->header || block == loop->members[0] ||
+           block == loop->members[1];
+}
+
+// Finish step one and a half: decide which recorded loops a read may pass
+// straight through (c_ir_ssa_forward_block). A loop's blocks are its header,
+// the other blocks its statement created and every block created inside its
+// window; loops nest, so each block has one innermost loop, and a block in a
+// loop is in every loop around it. A loop qualifies when its header has one
+// predecessor from outside and every other loop block is entered only from
+// inside: then every path to a back edge starts at the header, and a local no
+// loop block writes keeps the entry's value there. Labels, case labels, goto
+// and computed jumps into a loop fail that check rather than needing their
+// own rules. One pass over the edges; each walks outward only past loops the
+// edge enters. Then the blocks writing each local, ascending, from the
+// events. Like the shortcut itself, a refused carve or an inconsistent record
+// leaves every read on the general walk instead of failing the function.
+BUSTER_C_INTERNAL void c_ir_ssa_finish_loops(CIntegerIrBuilder* builder)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    IrFunction* function = builder->function;
+    u32 block_count = function->block_count;
+    u32 loop_count = ssa->loop_count;
+    u32 local_count = ssa->local_count;
+    u32 definition_count = 0;
+    for (u32 index = 0; index < ssa->event_count; index += 1)
+    {
+        definition_count += ssa->events[index].opcode != IR_OPCODE_LOAD;
+    }
+    u64 reserved_size = builder->scratch_arena->reserved_size;
+    u64 position = builder->scratch_arena->position;
+    bool fits = loop_count != 0 &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)local_count + 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), definition_count ? definition_count : 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), loop_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)block_count + 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), definition_count ? definition_count : 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), local_count ? local_count : 1, BUSTER_ALIGN_OF(u32));
+    if (fits)
+    {
+        u32* headers = arena_allocate(builder->scratch_arena, u32, block_count);
+        u32* definition_offsets = arena_allocate(builder->scratch_arena, u32, (u64)local_count + 1);
+        u32* definition_blocks = arena_allocate(builder->scratch_arena, u32, definition_count ? definition_count : 1);
+        TemporalArena temporary = arena_begin_temporal(builder->scratch_arena);
+        u32* innermost = arena_allocate(builder->scratch_arena, u32, block_count);
+        u32* stack = arena_allocate(builder->scratch_arena, u32, loop_count);
+        u32* block_offsets = arena_allocate(builder->scratch_arena, u32, (u64)block_count + 1);
+        u32* by_block = arena_allocate(builder->scratch_arena, u32, definition_count ? definition_count : 1);
+        u32* cursor = arena_allocate(builder->scratch_arena, u32, local_count ? local_count : 1);
+        memset(headers, 0, sizeof(*headers) * block_count);
+        // A usable record has both window ends and its blocks; windows open in
+        // record order. Anything else keeps the loop out of the nest.
+        bool consistent = true;
+        u32 previous_begin = 0;
+        for (u32 index = 0; index < loop_count; index += 1)
+        {
+            CIrSsaLoop* loop = ssa->loops + index;
+            bool usable = loop->window_begin <= loop->window_end && loop->window_end <= block_count && loop->header < block_count &&
+                          loop->members[0] < block_count && loop->members[1] < block_count;
+            consistent = consistent && (!usable || loop->window_begin >= previous_begin);
+            previous_begin = usable ? loop->window_begin : previous_begin;
+            loop->closed = usable;
+            loop->parent = UINT32_MAX;
+            loop->entry = UINT32_MAX;
+            loop->entry_count = 0;
+        }
+        // Sweep the windows in block order to find each block's innermost
+        // window; windows must nest.
+        u32 depth = 0;
+        u32 next = 0;
+        for (u32 block = 0; block < block_count && consistent; block += 1)
+        {
+            while (depth && ssa->loops[stack[depth - 1]].window_end <= block)
+            {
+                depth -= 1;
+            }
+            while (next < loop_count && consistent && (!ssa->loops[next].closed || ssa->loops[next].window_begin <= block))
+            {
+                CIrSsaLoop* loop = ssa->loops + next;
+                if (loop->closed && loop->window_end > loop->window_begin)
+                {
+                    consistent = !depth || loop->window_end <= ssa->loops[stack[depth - 1]].window_end;
+                    stack[depth++] = next;
+                }
+                next += 1;
+            }
+            innermost[block] = depth ? stack[depth - 1] : UINT32_MAX;
+        }
+        // A loop's own blocks were created directly inside its parent's
+        // window, and its window lies inside that one too; then a block in a
+        // loop is in every enclosing loop. Parents first, from the windows
+        // alone, then each loop claims its own blocks.
+        for (u32 index = 0; index < loop_count && consistent; index += 1)
+        {
+            CIrSsaLoop* loop = ssa->loops + index;
+            if (loop->closed)
+            {
+                u32 parent = innermost[loop->header];
+                CIrSsaLoop* outer = parent != UINT32_MAX ? ssa->loops + parent : 0;
+                consistent = innermost[loop->members[0]] == parent && innermost[loop->members[1]] == parent &&
+                             (!outer || (loop->window_begin >= outer->window_begin && loop->window_end <= outer->window_end));
+                loop->parent = parent;
+            }
+        }
+        for (u32 index = 0; index < loop_count && consistent; index += 1)
+        {
+            CIrSsaLoop* loop = ssa->loops + index;
+            if (loop->closed)
+            {
+                innermost[loop->header] = index;
+                innermost[loop->members[0]] = index;
+                innermost[loop->members[1]] = index;
+            }
+        }
+        for (u32 block = 0; block < block_count && consistent; block += 1)
+        {
+            for (u32 edge = ssa->predecessor_offsets[block]; edge < ssa->predecessor_offsets[block + 1]; edge += 1)
+            {
+                u32 predecessor = ssa->predecessors[edge];
+                u32 loop_index = innermost[block];
+                while (loop_index != UINT32_MAX && !c_ir_ssa_loop_contains(ssa->loops + loop_index, predecessor))
+                {
+                    CIrSsaLoop* loop = ssa->loops + loop_index;
+                    if (block == loop->header)
+                    {
+                        loop->entry = predecessor;
+                        loop->entry_count += 1;
+                    }
+                    else
+                    {
+                        loop->closed = false;
+                    }
+                    loop_index = loop->parent;
+                }
+            }
+        }
+        for (u32 index = 0; index < loop_count && consistent; index += 1)
+        {
+            CIrSsaLoop* loop = ssa->loops + index;
+            if (loop->closed && loop->entry_count == 1)
+            {
+                headers[loop->header] = index + 1;
+            }
+        }
+        // Writes per local in block order: bucket by block, then deal the
+        // buckets out to the locals in ascending block order.
+        memset(block_offsets, 0, sizeof(*block_offsets) * ((u64)block_count + 1));
+        memset(definition_offsets, 0, sizeof(*definition_offsets) * ((u64)local_count + 1));
+        for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
+        {
+            CIrSsaEvent* event = ssa->events + index;
+            consistent = event->block.value < block_count && event->local < local_count;
+            if (consistent && event->opcode != IR_OPCODE_LOAD)
+            {
+                block_offsets[event->block.value + 1] += 1;
+                definition_offsets[event->local + 1] += 1;
+            }
+        }
+        for (u32 block = 0; block < block_count; block += 1)
+        {
+            block_offsets[block + 1] += block_offsets[block];
+        }
+        for (u32 local = 0; local < local_count; local += 1)
+        {
+            definition_offsets[local + 1] += definition_offsets[local];
+            cursor[local] = definition_offsets[local];
+        }
+        for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
+        {
+            CIrSsaEvent* event = ssa->events + index;
+            if (event->opcode != IR_OPCODE_LOAD)
+            {
+                by_block[block_offsets[event->block.value]++] = index;
+            }
+        }
+        // The fill advanced each bucket's start to the next bucket's.
+        u32 begin = 0;
+        for (u32 block = 0; block < block_count && consistent; block += 1)
+        {
+            for (u32 row = begin; row < block_offsets[block]; row += 1)
+            {
+                definition_blocks[cursor[ssa->events[by_block[row]].local]++] = block;
+            }
+            begin = block_offsets[block];
+        }
+        scratch_end(temporary);
+        if (consistent)
+        {
+            ssa->loop_headers = headers;
+            ssa->local_definition_offsets = definition_offsets;
+            ssa->local_definition_blocks = definition_blocks;
+        }
+    }
+}
+
 // Revoke the declaration shortcut of every local whose scope a jump can enter
 // past its initializer: a recorded jump target lies in the scope after the
 // declarator starts, and a jump to it starts before the declarator ends (that
@@ -7500,13 +7835,15 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_parameters(CIntegerIrBuilder* builder, u8
             pending->forwarded = ssa->events[initializer].value;
             continue;
         }
-        if (offsets[pending->block + 1] - offsets[pending->block] == 1)
+        u32 forward = c_ir_ssa_forward_block(ssa, pending->block, pending->local);
+        if (forward != UINT32_MAX)
         {
             // Forward an initially unresolved read through a completed
-            // single-predecessor block without allocating an incoming row.
+            // single-predecessor block, or a loop header the loop never
+            // writes this local in, without allocating an incoming row.
             // Do not substitute yet: an eventual memory owner must retain
             // its load identities before any alias path compression.
-            pending->forwarded = c_ir_ssa_current(builder, predecessors[offsets[pending->block]], pending->local);
+            pending->forwarded = c_ir_ssa_current(builder, forward, pending->local);
             continue;
         }
         for (u32 index = offsets[pending->block]; index < offsets[pending->block + 1] && !ssa->scratch_exhausted; index += 1)
@@ -7542,14 +7879,16 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_reserve_publish(CIntegerIrBuilder* builde
     u64 count = function->value_count;
     u64 reserved_size = builder->scratch_arena->reserved_size;
     u64 position = builder->scratch_arena->position;
-    // Simplification files one user row per incoming row, plus the one row a
-    // closed forwarded cycle gains before it starts.
+    // Simplification files one user row per incoming row, plus the row per
+    // predecessor a closed forwarded cycle gains before it starts.
     u64 user_rows = 0;
     for (u32 block = 0; block < function->block_count; block += 1)
     {
+        u32* offsets = builder->direct_ssa ? builder->direct_ssa->predecessor_offsets : 0;
+        u32 predecessor_count = offsets ? offsets[block + 1] - offsets[block] : 1;
         for (IrBlockParameter* parameter = function->blocks[block].first_parameter; parameter; parameter = parameter->next)
         {
-            user_rows += (u64)parameter->incoming_count + 1;
+            user_rows += (u64)parameter->incoming_count + BUSTER_MAX(predecessor_count, 1);
         }
     }
     bool fits = c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
@@ -7749,29 +8088,54 @@ BUSTER_C_INTERNAL void c_ir_ssa_simplify_parameters(CIntegerIrBuilder* builder, 
             replacements[value] = same;
             // Every parameter reading this one now reads `same`. The full
             // sweep reaches a later position in this sweep, an earlier one
-            // in the next. Move the rows to `same` for its own replacement.
-            for (u32 user = user_first[value]; user != UINT32_MAX; user = users[user].next)
+            // in the next. Move the rows to `same` for its own replacement,
+            // minus those that can never requeue again: a replaced reader
+            // stays replaced, and `same` now reads itself. Carrying them
+            // would grow each list along a chain of trivial loop-header
+            // parameters, making N nested loops cost N^3 (#3723).
+            u32 kept_first = UINT32_MAX;
+            u32 kept_last = UINT32_MAX;
+            u32 user = user_first[value];
+            while (user != UINT32_MAX)
             {
+                u32 next = users[user].next;
                 u32 reader = users[user].parameter;
-                if (!queued[reader] && replacements[reader] == reader)
+                if (replacements[reader] == reader)
                 {
-                    queued[reader] = 1;
-                    u64 due = position[reader] > here ? sweep : sweep + 1;
-                    c_ir_ssa_retry_push(heap, &heap_count, due << 32 | position[reader]);
+                    if (!queued[reader])
+                    {
+                        queued[reader] = 1;
+                        u64 due = position[reader] > here ? sweep : sweep + 1;
+                        c_ir_ssa_retry_push(heap, &heap_count, due << 32 | position[reader]);
+                    }
+                    if (reader != same)
+                    {
+                        users[user].next = UINT32_MAX;
+                        if (kept_first == UINT32_MAX)
+                        {
+                            kept_first = user;
+                        }
+                        else
+                        {
+                            users[kept_last].next = user;
+                        }
+                        kept_last = user;
+                    }
                 }
+                user = next;
             }
-            if (user_first[value] != UINT32_MAX)
+            user_first[value] = UINT32_MAX;
+            if (kept_first != UINT32_MAX)
             {
                 if (user_first[same] == UINT32_MAX)
                 {
-                    user_first[same] = user_first[value];
+                    user_first[same] = kept_first;
                 }
                 else
                 {
-                    users[user_last[same]].next = user_first[value];
+                    users[user_last[same]].next = kept_first;
                 }
-                user_last[same] = user_last[value];
-                user_first[value] = UINT32_MAX;
+                user_last[same] = kept_last;
             }
         }
     }
@@ -7853,13 +8217,24 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_publish(CIntegerIrBuilder* builder, u8* m
             }
             else
             {
-                // Keep one representative of an otherwise closed cycle.
-                // Dead-cycle pruning decides whether it is observable.
-                IrIncoming* incoming = arena_allocate(builder->arena, IrIncoming, 1);
-                *incoming = (IrIncoming){.predecessor = {.value = predecessors[offsets[pending->block]]}, .value = {.value = root}};
+                // Keep one representative of an otherwise closed cycle,
+                // reading itself on every edge: a loop header forwarded to
+                // its entry has more than one. Dead-cycle pruning decides
+                // whether it is observable.
+                u32 first = offsets[pending->block];
+                u32 incoming_count = offsets[pending->block + 1] - first;
+                IrIncoming* incoming = arena_allocate(builder->arena, IrIncoming, incoming_count);
+                for (u32 index = 0; index < incoming_count; index += 1)
+                {
+                    incoming[index] = (IrIncoming){
+                        .next = index + 1 < incoming_count ? incoming + index + 1 : 0,
+                        .predecessor = {.value = predecessors[first + index]},
+                        .value = {.value = root},
+                    };
+                }
                 pending->parameter->first_incoming = incoming;
-                pending->parameter->last_incoming = incoming;
-                pending->parameter->incoming_count = 1;
+                pending->parameter->last_incoming = incoming + incoming_count - 1;
+                pending->parameter->incoming_count = incoming_count;
             }
         }
     }
@@ -8145,6 +8520,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
         valid = c_ir_ssa_finish_cfg(builder, &memory);
         if (valid)
         {
+            c_ir_ssa_finish_loops(builder);
             c_ir_ssa_finish_parameters(builder, memory);
             valid = !ssa->scratch_exhausted && c_ir_ssa_finish_reserve_publish(builder);
         }
@@ -42407,6 +42783,10 @@ struct CIrBodyTask
     CScopeId continue_scope;
     u32 break_token;
     u32 continue_token;
+    // A loop record plus one (c_ir_ssa_loop_record) whose block window this
+    // task opens when it starts, or closes: the task after the loop.
+    u32 ssa_loop_open;
+    u32 ssa_loop_close;
     bool allow_trailing_expression;
     bool restore_before_continuation;
     // A loop body: when a variably modified declaration inside it takes a
@@ -47964,6 +48344,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             {
                 return false;
             }
+            c_ir_ssa_loop_open(builder, task.ssa_loop_open);
+            c_ir_ssa_loop_close(builder, task.ssa_loop_close);
             if (task.kind == C_IR_BODY_TASK_CONDITION)
             {
                 state->task_count = task_count;
@@ -48543,6 +48925,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     return false;
                 }
+                u32 loop = c_ir_ssa_loop_record(builder, body_block, condition_block, condition_block);
+                c_ir_ssa_loop_open(builder, loop);
                 tasks[task_count++] = (CIrBodyTask){
                     .start = condition_close + 2,
                     .end = task.end,
@@ -48550,6 +48934,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .continuation = task.continuation,
                     .break_block = task.break_block,
                     .continue_block = task.continue_block,
+                    .ssa_loop_close = loop,
                 };
                 c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
                 tasks[task_count++] = (CIrBodyTask){
@@ -48638,6 +49023,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     return false;
                 }
+                // The window opens with the condition task, after the
+                // initializer has lowered into the blocks that enter the loop.
+                u32 loop = c_ir_ssa_loop_record(builder, condition_block, body_block, increment_block);
                 tasks[task_count++] = (CIrBodyTask){
                     .start = after_body,
                     .end = task.end,
@@ -48645,6 +49033,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .continuation = task.continuation,
                     .break_block = task.break_block,
                     .continue_block = task.continue_block,
+                    .ssa_loop_close = loop,
                 };
                 c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
                 if (increment_block.value != condition_block.value)
@@ -48677,6 +49066,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .block = condition_block,
                     .true_block = body_block,
                     .false_block = exit_block,
+                    .ssa_loop_open = loop,
                 };
                 if (index + 2 < separators[0])
                 {
@@ -48728,6 +49118,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     return false;
                 }
+                u32 loop = c_ir_ssa_loop_record(builder, condition_block, body_block, body_block);
+                c_ir_ssa_loop_open(builder, loop);
                 IrSourceRange condition_source = c_ir_token_source_range(builder, first);
                 tasks[task_count++] = (CIrBodyTask){
                     .start = after_body,
@@ -48736,6 +49128,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .continuation = task.continuation,
                     .break_block = task.break_block,
                     .continue_block = task.continue_block,
+                    .ssa_loop_close = loop,
                 };
                 c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
                 tasks[task_count++] = (CIrBodyTask){
@@ -62057,7 +62450,11 @@ BUSTER_C_INTERNAL bool c_ir_function_scratch_tail_reservation(u64* position, u64
                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaSlot), rows * 2, BUSTER_ALIGN_OF(CIrSsaSlot)) &&
                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaParameter), lowering_capacity, BUSTER_ALIGN_OF(CIrSsaParameter)) &&
                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(u32), lowering_capacity * 24, BUSTER_ALIGN_OF(u32)) &&
-               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(void*), lowering_capacity * 2, BUSTER_ALIGN_OF(void*));
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(void*), lowering_capacity * 2, BUSTER_ALIGN_OF(void*)) &&
+               // Loop records (one per loop keyword, doubling) and the
+               // per-block, per-local and per-write rows c_ir_ssa_finish_loops carves.
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaLoop), body_capacity * 2, BUSTER_ALIGN_OF(CIrSsaLoop)) &&
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(u32), lowering_capacity * 8, BUSTER_ALIGN_OF(u32));
     }
     return fits;
 }
