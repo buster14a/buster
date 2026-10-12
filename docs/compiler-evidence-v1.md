@@ -117,7 +117,7 @@ A required member may never be omitted.
 | Bound | Value |
 |---|---|
 | Retained bytes | 48 MiB in total |
-| Retained entries | 4096 |
+| Retained entries | 4096 directories and files, control files included |
 | Control reserve | 6 MiB and 3 entries kept for the control files when the producer exports (#2918 producer step) |
 | Member size | 8 MiB for a `.json` member, 32 MiB for any other member |
 | Manifest | 4 MiB |
@@ -132,12 +132,17 @@ must not contain any of the following:
 
 An entry whose name starts with `.` is not retained, and no manifest row
 names it: `actions/upload-artifact` drops hidden files, including the
-producer's scratch marker.
+producer's scratch marker. The `machine-specifications/` subtree is not
+walked, because the publisher validates it separately.
+
+Every other directory and file is retained. Control files count too. Each
+retained entry counts against the entry bound and must pass the path rules.
 
 The walk refuses:
 
 - symlinks and any other non-regular file
-- paths that collide after case folding
+- any two retained names, a directory, control file or `machine-specifications`
+  included, that collide after case folding
 
 ## Native interface
 
@@ -155,7 +160,12 @@ The walk refuses:
 - either control file already exists
 - a required member is missing
 - the plan, availability records or omissions document is malformed
+- the manifest, the seal and a receipt at its 1 MiB bound would not fit the
+  byte and entry bounds; this is checked before anything is written
 - the retained set changes while sealing
+
+Once either control file is written, any later failure removes both, so a
+failed seal never leaves a completion marker behind.
 
 It prints `COMPILER_EVIDENCE_SEALED` or
 `COMPILER_EVIDENCE_INCOMPLETE reason=…`.

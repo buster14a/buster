@@ -292,6 +292,70 @@ BUSTER_GLOBAL_LOCAL bool compiler_evidence_self_test(Arena* arena)
         problem = (String8){0};
         compiler_evidence_expect(&test, sealed && compiler_evidence_try_verify(&test, bundle, ordinary, &problem), S8("hidden:dropped-by-upload"), problem);
 
+        // A failed final pass or an exhausted aggregate bound leaves no completion marker behind.
+        bundle = compiler_evidence_fixture(&test, S8("10"), compiler_evidence_valid_omissions());
+        compiler_evidence_seal_fault = S8("lab/report.md");
+        problem = (String8){0};
+        sealed = compiler_evidence_try_seal(&test, bundle, ordinary, &problem);
+        compiler_evidence_seal_fault = (String8){0};
+        String8 seal_path = string_duplicate_arena(arena, path_join(arena, bundle, S8(COMPILER_EVIDENCE_SEAL)), true);
+        String8 manifest_path = string_duplicate_arena(arena, path_join(arena, bundle, S8(COMPILER_EVIDENCE_MANIFEST)), true);
+        struct stat unused = {0};
+        compiler_evidence_expect(&test, !sealed && lstat((char*)seal_path.pointer, &unused) != 0 &&
+            lstat((char*)manifest_path.pointer, &unused) != 0, S8("seal:final-pass-failure-unpublished"), problem);
+        problem = (String8){0};
+        compiler_evidence_expect(&test, compiler_evidence_try_seal(&test, bundle, ordinary, &problem), S8("seal:retry-after-failure"), problem);
+        bundle = compiler_evidence_fixture(&test, S8("10"), compiler_evidence_valid_omissions());
+        // Members within 48 MiB fit alone but not with the manifest, seal and 1 MiB receipt bound.
+        u64 used = 0;
+        for (u64 index = 0; index < 2; index += 1)
+        {
+            u64 size = (COMPILER_EVIDENCE_TOTAL_LIMIT - (512ull << 10)) / 2;
+            String8 filler = {.pointer = arena_allocate(arena, char8, size), .length = size};
+            memset(filler.pointer, 'x', size);
+            used += compiler_evidence_put(arena, bundle, string_format(arena, S8("lab/filler-{u64}.bin"), index), filler) ? size : 0;
+        }
+        problem = (String8){0};
+        seal_path = string_duplicate_arena(arena, path_join(arena, bundle, S8(COMPILER_EVIDENCE_SEAL)), true);
+        manifest_path = string_duplicate_arena(arena, path_join(arena, bundle, S8(COMPILER_EVIDENCE_MANIFEST)), true);
+        sealed = compiler_evidence_try_seal(&test, bundle, ordinary, &problem);
+        compiler_evidence_expect(&test, used && !sealed && string_first_sequence(problem, S8("would exceed")) != BUSTER_STRING_NO_MATCH &&
+            lstat((char*)seal_path.pointer, &unused) != 0 && lstat((char*)manifest_path.pointer, &unused) != 0,
+            S8("seal:aggregate-bound-before-publication"), problem);
+        remove_path_recursive(arena, bundle);
+
+        // Directories count against the entry bound and take part in path and alias checks, control files too.
+        bundle = compiler_evidence_fixture(&test, S8("10"), compiler_evidence_valid_omissions());
+        // 65 branches of 64 empty directories: no listing is large, but the namespace exceeds 4096 entries.
+        bool nested = true;
+        for (u64 index = 0; nested && index < 65 * 64; index += 1)
+        {
+            String8 empty = path_join(arena, bundle, string_format(arena, S8("lab/empty/{u64}/{u64}"), index / 64, index % 64));
+            make_directory_recursive(arena, empty);
+            struct stat made = {0};
+            nested = lstat((char*)string_duplicate_arena(arena, empty, true).pointer, &made) == 0 && S_ISDIR(made.st_mode);
+        }
+        problem = (String8){0};
+        compiler_evidence_expect(&test, nested && !compiler_evidence_try_seal(&test, bundle, ordinary, &problem) &&
+            string_first_sequence(problem, S8("entr")) != BUSTER_STRING_NO_MATCH, S8("refuse:empty-directory-entries"), problem);
+        remove_path_recursive(arena, bundle);
+        bundle = compiler_evidence_fixture(&test, S8("10"), compiler_evidence_valid_omissions());
+        String8 tabbed_directory = string_duplicate_arena(arena, path_join(arena, bundle, S8("lab/bad\tdirectory")), true);
+        problem = (String8){0};
+        compiler_evidence_expect(&test, mkdir((char*)tabbed_directory.pointer, 0700) == 0 && !compiler_evidence_try_seal(&test, bundle, ordinary, &problem),
+            S8("refuse:empty-directory-path"), problem);
+        String8 control_aliases[] = {S8("Receipt.json"), S8("EVIDENCE-SEAL.txt"), S8("Machine-Specifications/report.json")};
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(control_aliases); index += 1)
+        {
+            bundle = compiler_evidence_fixture(&test, S8("10"), compiler_evidence_valid_omissions());
+            bool written = compiler_evidence_put(arena, bundle, control_aliases[index], S8("{}"));
+            if (index == 1) { written = written && compiler_evidence_put(arena, bundle, S8(COMPILER_EVIDENCE_SEAL), S8("x\n")); }
+            problem = (String8){0};
+            bool refused = index == 1 ? !compiler_evidence_try_verify(&test, bundle, ordinary, &problem) :
+                !compiler_evidence_try_seal(&test, bundle, ordinary, &problem);
+            compiler_evidence_expect(&test, written && refused, string_format(arena, S8("refuse:control-alias-{u64}"), index), problem);
+        }
+
         // Non-regular entries and case-folded aliases refuse the bundle.
         bundle = compiler_evidence_fixture(&test, S8("10"), compiler_evidence_valid_omissions());
         String8 link = string_duplicate_arena(arena, path_join(arena, bundle, S8("lab/link.txt")), true);

@@ -112,6 +112,8 @@ struct CompilerEvidenceBundle
     u64 count;
     u64 entries;
     u64 bytes;
+    u64 receipt_bytes;
+    bool receipt;
 };
 
 BUSTER_GLOBAL_LOCAL String8 compiler_evidence_join(Arena* arena, String8List list)
@@ -270,12 +272,21 @@ BUSTER_GLOBAL_LOCAL void compiler_evidence_sort(String8* paths, u64 count)
 
 // Bounded, nofollow walk of every retained regular file. A symlink, FIFO or
 // other entry type refuses the whole bundle; directories carry no bytes.
+// The whole retained namespace: every non-hidden directory and file, control
+// files included, is counted against the entry bound, path-validated and
+// alias-checked. Only machine-specifications/, appended after the producer and
+// validated by the publisher's own machine record, is not walked; its name
+// still takes part in alias detection.
 BUSTER_GLOBAL_LOCAL bool compiler_evidence_collect(Arena* arena, String8 bundle, CompilerEvidenceBundle* output, String8* problem)
 {
     String8* paths = arena_allocate(arena, String8, COMPILER_EVIDENCE_ENTRY_LIMIT);
+    String8* names = arena_allocate(arena, String8, COMPILER_EVIDENCE_ENTRY_LIMIT + 1);
     u64 count = 0;
+    u64 named = 0;
     u64 entries = 0;
     u64 bytes = 0;
+    u64 receipt_bytes = 0;
+    bool receipt = false;
     String8List pending = {0};
     string8_list_push(arena, &pending, S8(""));
     bool success = true;
@@ -285,59 +296,70 @@ BUSTER_GLOBAL_LOCAL bool compiler_evidence_collect(Arena* arena, String8 bundle,
         MuslDirectoryEntry* listed = 0;
         u64 listed_count = 0;
         success = compiler_closure_list(arena, directory, COMPILER_EVIDENCE_ENTRY_LIMIT - entries + 1, &listed, &listed_count);
-        if (!success) { compiler_evidence_refuse(problem, S8("bundle has a symlink, special file or unreadable directory")); }
+        // The listing cap is the remaining entry bound, so an oversized namespace also refuses here.
+        if (!success) { compiler_evidence_refuse(problem, S8("bundle has a symlink, special file, unreadable directory or more retained entries than its bound")); }
         for (u64 index = 0; success && index < listed_count; index += 1)
         {
             String8 relative = node->string.length ? path_join(arena, node->string, listed[index].name) : listed[index].name;
             // Hidden entries are not retained: actions/upload-artifact drops them (the
             // producer's scratch marker is one), so no manifest row may name them.
             bool hidden = listed[index].name.length && listed[index].name.pointer[0] == '.';
-            if (!hidden && listed[index].is_directory)
+            bool machine = listed[index].is_directory && string_equal(relative, S8(COMPILER_EVIDENCE_MACHINE));
+            if (!hidden)
+            {
+                entries += !machine;
+                success = entries <= COMPILER_EVIDENCE_ENTRY_LIMIT && compiler_evidence_path_valid(relative);
+                if (success) { names[named++] = relative; }
+            }
+            if (!hidden && success && listed[index].is_directory && !machine)
             {
                 string8_list_push(arena, &pending, relative);
             }
-            else if (!hidden)
+            else if (!hidden && success && !listed[index].is_directory)
             {
                 String8 terminated = string_duplicate_arena(arena, path_join(arena, bundle, relative), true);
                 struct stat status = {0};
-                entries += 1;
-                success = entries <= COMPILER_EVIDENCE_ENTRY_LIMIT && compiler_evidence_path_valid(relative) &&
-                    lstat((char*)terminated.pointer, &status) == 0 && S_ISREG(status.st_mode) && status.st_size >= 0 &&
+                success = lstat((char*)terminated.pointer, &status) == 0 && S_ISREG(status.st_mode) && status.st_size >= 0 &&
                     (u64)status.st_size <= COMPILER_EVIDENCE_TOTAL_LIMIT - bytes;
                 if (success)
                 {
                     bytes += (u64)status.st_size;
+                    if (string_equal(relative, S8(COMPILER_EVIDENCE_RECEIPT)))
+                    {
+                        receipt = true;
+                        receipt_bytes = (u64)status.st_size;
+                    }
                     if (!compiler_evidence_control(relative)) { paths[count++] = relative; }
                 }
-                else
-                {
-                    compiler_evidence_refuse(problem, string_format(arena, S8("retained file count, byte budget or path identity refused: {S8}"), relative));
-                }
+            }
+            if (!success)
+            {
+                compiler_evidence_refuse(problem, string_format(arena, S8("retained entry count, byte budget or path identity refused: {S8}"), relative));
             }
         }
     }
     if (success)
     {
         compiler_evidence_sort(paths, count);
-        // Case-folded aliases refuse even on a case-sensitive filesystem.
-        String8* folded = arena_allocate(arena, String8, count ? count : 1);
-        for (u64 index = 0; index < count; index += 1)
+        // Case-folded aliases refuse across the whole namespace, even on a case-sensitive filesystem.
+        for (u64 index = 0; index < named; index += 1)
         {
-            folded[index] = string_duplicate_arena(arena, paths[index], false);
-            for (u64 byte = 0; byte < folded[index].length; byte += 1)
+            names[index] = string_duplicate_arena(arena, names[index], false);
+            for (u64 byte = 0; byte < names[index].length; byte += 1)
             {
-                char8 c = folded[index].pointer[byte];
-                if (c >= 'A' && c <= 'Z') { folded[index].pointer[byte] = (char8)(c - 'A' + 'a'); }
+                char8 c = names[index].pointer[byte];
+                if (c >= 'A' && c <= 'Z') { names[index].pointer[byte] = (char8)(c - 'A' + 'a'); }
             }
         }
-        compiler_evidence_sort(folded, count);
-        for (u64 index = 1; success && index < count; index += 1)
+        compiler_evidence_sort(names, named);
+        for (u64 index = 1; success && index < named; index += 1)
         {
-            success = !string_equal(folded[index - 1], folded[index]);
+            success = !string_equal(names[index - 1], names[index]);
         }
         if (!success) { compiler_evidence_refuse(problem, S8("retained paths alias after case folding")); }
     }
-    *output = (CompilerEvidenceBundle){.paths = paths, .count = success ? count : 0, .entries = entries, .bytes = bytes};
+    *output = (CompilerEvidenceBundle){.paths = paths, .count = success ? count : 0, .entries = entries, .bytes = bytes,
+        .receipt_bytes = receipt_bytes, .receipt = receipt};
     return success;
 }
 
@@ -522,7 +544,8 @@ BUSTER_GLOBAL_LOCAL u64 compiler_evidence_member_limit(String8 path)
 
 // The canonical manifest of the retained bytes: identity header, counts, then
 // one role/bytes/sha256/path row per non-control file in bytewise path order.
-BUSTER_GLOBAL_LOCAL String8 compiler_evidence_manifest(Arena* arena, String8 bundle, String8 header, String8* problem)
+BUSTER_GLOBAL_LOCAL String8 compiler_evidence_manifest(Arena* arena, String8 bundle, String8 header, CompilerEvidenceBundle* totals,
+    String8* problem)
 {
     CompilerEvidenceBundle files = {0};
     CompilerEvidenceFacts facts = {0};
@@ -575,6 +598,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_evidence_manifest(Arena* arena, String8 bun
             result = (String8){0};
         }
     }
+    *totals = files;
     return result;
 }
 
@@ -617,23 +641,44 @@ BUSTER_GLOBAL_LOCAL String8 compiler_evidence_identity_file(Arena* arena, String
 
 // Write the manifest, then the seal last. Any existing control file refuses:
 // a bundle is sealed once, from its final retained bytes.
+// Self-test seam: a bundle-relative member rewritten after the seal is published
+// and before the final pass, standing in for a concurrent change.
+BUSTER_GLOBAL_LOCAL String8 compiler_evidence_seal_fault;
+
+// The seal is the published completion marker. Before anything is written, the
+// manifest, the seal and a receipt at its bound must fit the retained bounds the
+// verifier enforces; any later failure removes both control files again.
 BUSTER_GLOBAL_LOCAL bool compiler_evidence_seal(Arena* arena, String8 bundle, String8 identity_path, String8* problem)
 {
-    String8 manifest_path = path_join(arena, bundle, S8(COMPILER_EVIDENCE_MANIFEST));
-    String8 seal_path = path_join(arena, bundle, S8(COMPILER_EVIDENCE_SEAL));
+    String8 manifest_path = string_duplicate_arena(arena, path_join(arena, bundle, S8(COMPILER_EVIDENCE_MANIFEST)), true);
+    String8 seal_path = string_duplicate_arena(arena, path_join(arena, bundle, S8(COMPILER_EVIDENCE_SEAL)), true);
     struct stat status = {0};
-    bool fresh = lstat((char*)string_duplicate_arena(arena, manifest_path, true).pointer, &status) != 0 &&
-        lstat((char*)string_duplicate_arena(arena, seal_path, true).pointer, &status) != 0;
+    bool fresh = lstat((char*)manifest_path.pointer, &status) != 0 && lstat((char*)seal_path.pointer, &status) != 0;
     if (!fresh) { compiler_evidence_refuse(problem, S8("bundle already carries a manifest or seal")); }
     String8 header = fresh ? compiler_evidence_identity_file(arena, identity_path, problem) : (String8){0};
-    String8 manifest = header.length ? compiler_evidence_manifest(arena, bundle, header, problem) : (String8){0};
-    bool success = manifest.length && production_profile_write(manifest_path, manifest);
-    String8 seal = success ? compiler_evidence_seal_text(arena, manifest) : (String8){0};
-    success = success && production_profile_write(seal_path, seal);
-    // The seal is the published completion marker: refuse if the retained set changed while sealing.
-    String8 again = success ? compiler_evidence_manifest(arena, bundle, header, problem) : (String8){0};
+    CompilerEvidenceBundle totals = {0};
+    String8 manifest = header.length ? compiler_evidence_manifest(arena, bundle, header, &totals, problem) : (String8){0};
+    String8 seal = manifest.length ? compiler_evidence_seal_text(arena, manifest) : (String8){0};
+    u64 controls = manifest.length + seal.length + COMPILER_EVIDENCE_RECEIPT_LIMIT;
+    bool fits = seal.length && totals.receipt_bytes <= COMPILER_EVIDENCE_RECEIPT_LIMIT &&
+        totals.bytes - totals.receipt_bytes <= COMPILER_EVIDENCE_TOTAL_LIMIT - controls &&
+        totals.entries + 2 + !totals.receipt <= COMPILER_EVIDENCE_ENTRY_LIMIT;
+    if (seal.length && !fits) { compiler_evidence_refuse(problem, S8("manifest, seal and receipt would exceed the retained byte or entry bound")); }
+    bool success = fits && production_profile_write(manifest_path, manifest) && production_profile_write(seal_path, seal);
+    if (success && compiler_evidence_seal_fault.length)
+    {
+        production_profile_write(path_join(arena, bundle, compiler_evidence_seal_fault), S8("changed during sealing\n"));
+    }
+    // Refuse if the retained set changed while sealing.
+    CompilerEvidenceBundle again_totals = {0};
+    String8 again = success ? compiler_evidence_manifest(arena, bundle, header, &again_totals, problem) : (String8){0};
     success = success && string_equal(again, manifest);
-    if (!success) { compiler_evidence_refuse(problem, S8("bundle changed or could not be written while sealing")); }
+    if (fits && !success)
+    {
+        unlink((char*)seal_path.pointer);
+        unlink((char*)manifest_path.pointer);
+        compiler_evidence_refuse(problem, S8("bundle changed or could not be written while sealing"));
+    }
     return success;
 }
 
@@ -647,7 +692,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_evidence_verify(Arena* arena, String8 bundle, 
     if (header.length && !seal.length) { compiler_evidence_refuse(problem, S8("bundle has no bounded manifest and seal")); }
     String8 receipt = seal.length ? compiler_closure_read(arena, path_join(arena, bundle, S8(COMPILER_EVIDENCE_RECEIPT)), COMPILER_EVIDENCE_RECEIPT_LIMIT) : (String8){0};
     if (seal.length && !receipt.length) { compiler_evidence_refuse(problem, S8("final receipt is missing or exceeds its 1 MiB bound")); }
-    String8 expected = receipt.length ? compiler_evidence_manifest(arena, bundle, header, problem) : (String8){0};
+    CompilerEvidenceBundle totals = {0};
+    String8 expected = receipt.length ? compiler_evidence_manifest(arena, bundle, header, &totals, problem) : (String8){0};
     bool success = expected.length && string_equal(expected, retained);
     if (expected.length && !success) { compiler_evidence_refuse(problem, S8("retained bytes, roles or identity do not reproduce the sealed manifest")); }
     success = success && string_equal(seal, compiler_evidence_seal_text(arena, retained));
