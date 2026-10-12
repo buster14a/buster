@@ -165,8 +165,15 @@ regressions and 19 inconclusive cases; that does not establish equivalence.
 and subsequent check/integration state. This documentation follow-up does not
 change implementation sources.
 
-No local build/test/timing was run. Baseline/candidate byte comparison,
-cold-cache experiments and complete phase-duration profiling remain unrun.
-Qualified-host performance acceptance is explicitly pending and unavailable in
-this session. CI timestamps alone are not linker timings. Results and actionable
-findings belong on #1915 / its PR.
+The implementation session ran no local build, test or timing. The matched
+baseline/candidate replay was run later, in a hosted container, as
+[audit 2026-10-12T121724Z](performance-audits/2026-10-12T121724Z.md). It
+compared the #2247 merge with its first parent on frozen, hashed inputs, with
+T from 512 to 32,768 sites. All 24 object, `-fno-plt` and archive links in
+ET_EXEC and PIE form were byte-identical between the two revisions and ran
+correctly. Paired median process latency at T=32,768 fell from 2,690 ms to
+37 ms (ET_EXEC) and from 1,822 ms to 33 ms (PIE). A no-TLS control moved by
+less than the host's noise. Cold-cache experiments, same-source rebuild
+controls and complete phase-duration profiling remain unrun. Qualified-host
+performance acceptance is still pending. CI timestamps alone are not linker
+timings. Results and actionable findings belong on #1915 / its PR.
