@@ -1965,10 +1965,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_path_inputs(UnitTestA
                             for (u32 language = 0; language < BUSTER_ARRAY_LENGTH(languages); language += 1)
                             {
                                 TemporalArena cell = arena_begin_temporal(arena);
-                                String8 compile[] = {S8("-target"), targets[target], S8("-nostdinc"), S8("-g0"), allocators[allocator],
+                                String8 language_compile[] = {S8("-target"), targets[target], S8("-nostdinc"), S8("-g0"), allocators[allocator],
                                                      S8("-x"), languages[language], S8("-c"), payload, S8("-o"), object};
                                 CompilerDriverInvocation single = compiler_driver_parse_arguments(arena,
-                                    (SliceString8)BUSTER_ARRAY_TO_SLICE(compile));
+                                    (SliceString8)BUSTER_ARRAY_TO_SLICE(language_compile));
                                 CompilerDriverResult source_result = compiler_driver_execute_invocation(arena, single);
                                 BUSTER_TEST_RAW(arguments, source_result.error == COMPILER_DRIVER_ERROR_NONE, source_result.diagnostic);
                                 // Legacy API language and parsed positional snapshots agree.
@@ -1980,11 +1980,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_path_inputs(UnitTestA
                                 String8 mixed[] = {S8("-target"), targets[target], S8("--sysroot"), root, S8("-nostdinc"), S8("-g0"),
                                                    allocators[allocator], S8("-v"), S8("-x"), languages[language], payload,
                                                    S8("-x"), S8("cpp-output"), other, S8("-x"), S8("none"), library, S8("-o"), output};
-                                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena,
+                                CompilerDriverInvocation mixed_invocation = compiler_driver_parse_arguments(arena,
                                     (SliceString8)BUSTER_ARRAY_TO_SLICE(mixed));
-                                invocation.compile_jobs = 2;
-                                invocation.keep_going = true;
-                                CompilerDriverResult linked = compiler_driver_execute_invocation(arena, invocation);
+                                mixed_invocation.compile_jobs = 2;
+                                mixed_invocation.keep_going = true;
+                                CompilerDriverResult linked = compiler_driver_execute_invocation(arena, mixed_invocation);
                                 BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
                                 if (linked.error == COMPILER_DRIVER_ERROR_NONE)
                                 {
