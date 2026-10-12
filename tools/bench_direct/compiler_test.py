@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -2704,8 +2705,7 @@ class ExportTest(unittest.TestCase):
     def test_many_small_files_hit_the_aggregate_budget_before_copying(self) -> None:
         for index in range(20):
             (self.source / f"part{index:02}.txt").write_bytes(b"y" * 10)
-        with mock.patch.object(compiler_compare, "EVIDENCE_TOTAL_LIMIT", 100), \
-                mock.patch.object(compiler_compare, "EVIDENCE_REQUIRED_HEADROOM", (0, 0)):
+        with mock.patch.object(compiler_compare, "EVIDENCE_TOTAL_LIMIT", 100):
             problems, omissions = self.export()
         self.assertEqual(problems, [])
         total = sum(path.stat().st_size for path in (self.evidence / "lab").rglob("*") if path.is_file())
@@ -2713,8 +2713,7 @@ class ExportTest(unittest.TestCase):
         self.assertTrue(omissions)
         self.assertTrue(all("budget" in item["reason"] for item in omissions))
         # The lab directory itself is one of the four entries (#2918 counts directories too).
-        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_COUNT", 4), \
-                mock.patch.object(compiler_compare, "EVIDENCE_REQUIRED_HEADROOM", (0, 0)):
+        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_COUNT", 4):
             self.export()
         self.assertEqual(len(self.exported()), 3)
 
@@ -2727,8 +2726,7 @@ class ExportTest(unittest.TestCase):
         (self.source / "inputs" / "tiny.c").write_text("int main;")
         compiler_compare.EVIDENCE_OMISSION_LEDGER.clear()
         # Seven entries: lab/, artifacts/ and inputs/, then two required and two optional files.
-        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_COUNT", 7), \
-                mock.patch.object(compiler_compare, "EVIDENCE_REQUIRED_HEADROOM", (0, 0)):
+        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_COUNT", 7):
             problems, omissions = self.export(required=("summary.json", "inputs/tiny.c"))
         self.assertEqual(problems, [])
         self.assertEqual(self.exported(), ["artifacts/run-0.log", "artifacts/run-1.log", "inputs/tiny.c", "summary.json"])
@@ -2736,13 +2734,55 @@ class ExportTest(unittest.TestCase):
         self.assertEqual([item["path"] for item in omissions], dropped)
         self.assertEqual(compiler_compare.EVIDENCE_OMISSION_LEDGER, [("lab/" + path, "file-budget") for path in dropped])
 
-    def test_optional_members_leave_headroom_for_later_required_members(self) -> None:
-        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_COUNT", 4), \
-                mock.patch.object(compiler_compare, "EVIDENCE_REQUIRED_HEADROOM", (0, 2)):
+    def test_empty_optional_directories_never_starve_a_required_member(self) -> None:
+        for index in range(300):
+            (self.source / "empty" / f"{index:03}" / "deeper").mkdir(parents=True)
+        with mock.patch.object(compiler_compare, "EVIDENCE_FILE_COUNT", 2):
             problems, omissions = self.export()
         self.assertEqual(problems, [])
         self.assertEqual(self.exported(), ["summary.json"])
+        self.assertFalse((self.evidence / "lab" / "empty").exists())
         self.assertEqual(omissions, [{"path": "raw.txt", "reason": "evidence file-count budget exhausted"}])
+
+    def test_sealed_optional_members_wait_for_every_later_required_member(self) -> None:
+        # A later leg's required member must not be starved by an earlier leg's optional data (#2918).
+        for index in range(6):
+            (self.source / f"optional-{index}.log").write_bytes(b"o" * 10)
+        corpus = self.root / "corpus"
+        corpus.mkdir()
+        (corpus / "summary.json").write_bytes(b"{}" + b" " * 38)
+        compiler_compare.EVIDENCE_OMISSION_LEDGER.clear()
+        compiler_compare.EVIDENCE_DEFERRED_OPTIONAL.clear()
+        receipt_omissions: dict = {}
+        with mock.patch.object(compiler_compare, "EVIDENCE_TOTAL_LIMIT", 85):
+            lab_problems, _ = self.export()
+            exported_before = self.exported()
+            corpus_problems, _ = compiler_compare.export_tree(corpus, self.evidence / "throughput", self.evidence,
+                                                              ("*.exe",), ("summary.json",))
+        self.assertEqual((lab_problems, exported_before), ([], ["optional-0.log", "optional-1.log", "optional-2.log",
+                                                                 "optional-3.log", "optional-4.log", "optional-5.log",
+                                                                 "raw.txt", "summary.json"]))
+        self.assertEqual(len(corpus_problems), 1)  # the eager export starves the later required member
+        shutil.rmtree(self.evidence / "lab")
+        shutil.rmtree(self.evidence / "throughput")
+        compiler_compare.EVIDENCE_OMISSION_LEDGER.clear()
+        with mock.patch.object(compiler_compare, "EVIDENCE_TOTAL_LIMIT", 85):
+            lab_problems, _ = compiler_compare.export_tree(self.source, self.evidence / "lab", self.evidence, ("*.exe",),
+                                                           ("summary.json",), defer_optional=True)
+            self.assertEqual(self.exported(), ["summary.json"])
+            corpus_problems, _ = compiler_compare.export_tree(corpus, self.evidence / "throughput", self.evidence,
+                                                              ("*.exe",), ("summary.json",), defer_optional=True)
+            compiler_compare.export_deferred_optional(self.evidence, receipt_omissions)
+        self.assertEqual((lab_problems, corpus_problems), ([], []))
+        self.assertTrue((self.evidence / "throughput" / "summary.json").is_file())
+        # 2 + 40 required bytes leave 43: four optional logs, then raw.txt; the last two logs do not fit.
+        self.assertEqual(self.exported(), ["optional-0.log", "optional-1.log", "optional-2.log", "optional-3.log", "raw.txt",
+                                           "summary.json"])
+        dropped = ["optional-4.log", "optional-5.log"]
+        self.assertEqual(receipt_omissions, {"lab": {"count": 2, "shown": [
+            {"path": path, "reason": "evidence byte budget exhausted"} for path in dropped]}})
+        self.assertEqual(compiler_compare.EVIDENCE_OMISSION_LEDGER, [("lab/" + path, "byte-budget") for path in dropped])
+        self.assertEqual(compiler_compare.EVIDENCE_DEFERRED_OPTIONAL, [])
 
     def test_every_omission_reaches_the_ledger_with_its_fixed_code(self) -> None:
         (self.source / "big.txt").write_bytes(b"x" * 100)
@@ -2895,6 +2935,9 @@ class HarnessTest(unittest.TestCase):
                          ("2", "92", self.head, compiler_receipt.THROUGHPUT_PROFILE["name"], self.base))
         self.assertTrue((evidence / "lab" / "pairs" / "0010-a.csv").is_file())
         self.assertTrue((evidence / "throughput" / "inputs" / "tiny_startup.c").is_file())
+        # Optional members join after every leg's required ones, before the seal.
+        self.assertTrue((evidence / "throughput" / "artifacts" / "tiny_startup-fast-0.log").is_file())
+        self.assertEqual(compiler_compare.EVIDENCE_DEFERRED_OPTIONAL, [])
 
     def test_a_refused_seal_fails_the_attempt(self) -> None:
         script = "print('COMPILER_EVIDENCE_INCOMPLETE reason=required raw evidence is missing: x'); raise SystemExit(1)"
@@ -3380,8 +3423,8 @@ class HarnessTest(unittest.TestCase):
         """
         real = compiler_compare.export_tree
 
-        def export(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple) -> tuple:
-            outcome = real(source, destination, evidence, ignore, required)
+        def export(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple, **options) -> tuple:
+            outcome = real(source, destination, evidence, ignore, required, **options)
             key = destination.relative_to(evidence).as_posix()
             if key in tamper:
                 tamper[key](destination)
@@ -3473,8 +3516,8 @@ class HarnessTest(unittest.TestCase):
         for label, action, expected in (("hash", metadata_hash, "compiler"),
                                         ("invalid", invalid_summary, "exported evidence scaling/cores/scaling.json unreadable"),
                                         ("status", altered_status, "scaling")):
-            def export(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple) -> tuple:
-                outcome = real(source, destination, evidence, ignore, required)
+            def export(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple, **options) -> tuple:
+                outcome = real(source, destination, evidence, ignore, required, **options)
                 if destination.relative_to(evidence).as_posix() == "scaling/cores":
                     action(destination)
                 return outcome

@@ -13,9 +13,13 @@ sealing. That excludes the owned, analyzer and snapshot routes. For such an
 attempt:
 
 - It exports the lab and corpus with this inventory as required.
-- `export_tree` copies required members of a whole tree before optional ones.
-  An optional member must also leave 4 MiB and 32 entries for later trees'
-  required members.
+- `export_tree` exports only required members while each leg runs, and creates
+  a directory only as the ancestor of an exported file. Empty or unexported
+  optional subtrees therefore never use the entry budget.
+- Once every leg's required members are in place, `export_deferred_optional`
+  adds the optional members within what is left. It takes the trees in export
+  order, and each tree's members in bytewise path order. An earlier leg's
+  optional data can never starve a later leg's required members.
 - The exports stop 6 MiB and 3 entries short of the sealed bounds, so the
   control files always fit. Entries count directories as well as files, as
   the verifier does.
@@ -39,8 +43,11 @@ seal, fails the attempt.
      hosted authorization produced; the receipt's identity is not used.
   3. A refusal fails the check.
   4. A verified bundle must match the receipt's `evidence_bundle`.
-- **Publication-only recovery:** it notes a sealed bundle without
-  re-verifying it.
+- **Publication-only recovery:** it verifies the same way. The request attempt
+  comes from the original bench run's own run-name
+  (`9700X request <run>.<attempt> head <sha>`), and that run must be the
+  authenticated request run. A run-name that names another request run, or no
+  run-name at all, cannot name a sealed bundle, so the bundle is refused.
 
 `publish-pull` bootstraps the driver with the pinned TinyCC, as
 `publish-compiler` does.

@@ -1662,6 +1662,10 @@ def commit_report(shown: dict, summary: object, conclusion: str, title: str, not
     return text
 
 
+# The bench workflow's run-name: "9700X request <request run>.<request attempt> head <sha>".
+REQUEST_TITLE = re.compile(r"9700X request ([1-9][0-9]*)\.([1-9][0-9]*) head ([0-9a-f]{40})")
+
+
 def recovered_identity(api: Api, repository: str, run_id: str, attempt: str) -> tuple[dict, str, str, list[str]]:
     """(expected, authorize result, compare result, problems) of a past main attempt from GitHub's records.
 
@@ -1689,6 +1693,11 @@ def recovered_identity(api: Api, repository: str, run_id: str, attempt: str) -> 
     head = heads[0] if len(heads) == 1 else ""
     expected = {"mode": "main", "repository": repository, "ref": "refs/heads/main", "head": head,
                 "trusted_revision": run.get("head_sha", ""), "run_id": run_id, "run_attempt": attempt}
+    # The workflow's own run-name records the request run and attempt that started it; sealed
+    # raw evidence (#2918) is verified under that original request attempt.
+    title = REQUEST_TITLE.fullmatch(run.get("display_title", "")) if isinstance(run.get("display_title"), str) else None
+    if title and title.group(3) == head:
+        expected["titled_request"] = (title.group(1), title.group(2))
     if not head:
         problems.append(f"expected one evidence artifact of attempt {attempt}, found {len(heads)}")
     return expected, result["authorize"], result["compare"], problems
@@ -5604,6 +5613,7 @@ def main() -> int:
         workflow_revision = ""
         if recover:
             expected, authorize_result, compare_result, problems = recovered_identity(api, repository, run_id, attempt)
+            titled = expected.pop("titled_request", None)
             head = expected["head"]
             authorized = authorize_result == "success" and not problems
             # The original run's own workflow revision, before the Main route rebinds trusted_revision.
@@ -5616,7 +5626,7 @@ def main() -> int:
                         "run_id": run_id, "run_attempt": attempt}
             if mode == "main":
                 expected.update(first_parent=get("BQ_FIRST_PARENT"), range=get("BQ_RANGE"))
-            compare_result, problems = get("BQ_COMPARE_RESULT"), []
+            compare_result, problems, titled = get("BQ_COMPARE_RESULT"), [], None
             authorized = get("BQ_AUTHORIZE_RESULT") == "success" and get("BQ_AUTHORIZED_ATTEMPT") == attempt
         notes.extend(problems)
         receipt = summary = None
@@ -5665,14 +5675,13 @@ def main() -> int:
                 authorized = not problems
             owned = route is not None and route["main_owned"]
             if isinstance(receipt, dict) and not owned and receipt.get("profile") == PROFILE:
-                if recover:
-                    if "sealed_files" in throughput:
-                        notes.append("raw evidence: sealed, not re-verified by publication-only recovery")
-                else:
-                    evidence_bundle = verify_evidence_bundle(throughput, expected, expected_corpus,
-                                                             get("BQ_REQUEST_ATTEMPT"))
-                    if evidence_bundle_note(evidence_bundle):
-                        notes.append(evidence_bundle_note(evidence_bundle))
+                # Recovery verifies under the original request attempt its own run-name records; one
+                # that names another request run, or none, cannot name a sealed bundle and refuses it.
+                request_attempt = get("BQ_REQUEST_ATTEMPT") if not recover else \
+                    titled[1] if titled and titled[0] == expected.get("request_run_id") else ""
+                evidence_bundle = verify_evidence_bundle(throughput, expected, expected_corpus, request_attempt)
+                if evidence_bundle_note(evidence_bundle):
+                    notes.append(evidence_bundle_note(evidence_bundle))
             if isinstance(receipt, dict):
                 require = not recover or machine_record_required(api, workflow_revision)
                 machine_problems, machine_facts = machine_record(throughput.get("machine"), receipt, mode, run_id,

@@ -177,8 +177,8 @@ EVIDENCE_SEALED_LIMITS = (ARTIFACT_LIMIT * 3 // 4, 4096)
 EVIDENCE_CONTROL_RESERVE = (6 * 1024 * 1024, 3)
 EVIDENCE_TOTAL_LIMIT = EVIDENCE_SEALED_LIMITS[0] - EVIDENCE_CONTROL_RESERVE[0]
 EVIDENCE_FILE_COUNT = EVIDENCE_SEALED_LIMITS[1] - EVIDENCE_CONTROL_RESERVE[1]
-# An optional member also leaves this (bytes, files) for later trees' required members.
-EVIDENCE_REQUIRED_HEADROOM = (4 * 1024 * 1024, 32)
+# Sealed attempts' optional members, exported after every leg's required ones (export_deferred_optional).
+EVIDENCE_DEFERRED_OPTIONAL: list[dict] = []
 # (bundle path, reason code) of every omission in this attempt, for evidence-omissions.json.
 EVIDENCE_OMISSION_LEDGER: list[tuple[str, str]] = []
 OMISSIONS_SHOWN = 50
@@ -659,18 +659,105 @@ def evidence_usage(evidence: Path) -> tuple[int, int]:
     return total, count
 
 
-def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple) -> tuple[list[str], list]:
-    """Copy a measurement tree into the evidence under byte/file limits enforced before and during copying.
+def copy_evidence_member(path: str, target: Path, limit: int, room: int) -> tuple[int, str, str]:
+    """(bytes copied, reason, code): one regular file copied without following links, within its limits.
+
+    room is the aggregate budget left; a file over its limit or one that grows past either bound while
+    being read is not copied, and any partial target is removed.
+    """
+    copied, reason, code = 0, "", ""
+    try:
+        status = os.lstat(path)
+        if not stat.S_ISREG(status.st_mode):
+            reason, code = "not a regular file", "excluded-type"
+        elif status.st_size > limit:
+            reason, code = f"{status.st_size} bytes exceeds the {limit} byte file limit", "member-limit"
+        elif status.st_size > room:
+            reason, code = "evidence byte budget exhausted", "byte-budget"
+        else:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(descriptor, "rb") as reader, target.open("xb") as writer:
+                for block in iter(lambda: reader.read(1 << 20), b""):
+                    copied += len(block)
+                    if copied > limit or copied > room:
+                        reason, code = "grew past its limit while being copied", "changed-during-copy"
+                        break
+                    writer.write(block)
+            if reason:
+                target.unlink()
+    except OSError as error:
+        reason, code = f"copy failed: {error}", "read-error"
+        if target.is_file() and not target.is_symlink():
+            target.unlink()
+    return (0 if reason else copied), reason, code
+
+
+def evidence_leaves(source: Path, ignore: tuple) -> tuple[list[tuple[str, str]], list[dict]]:
+    """(relative path, source path) of every non-ignored leaf below source, and the symlinked directories skipped."""
+    leaves: list[tuple[str, str]] = []
+    skipped: list[dict] = []
+    for directory, names, found in os.walk(source, followlinks=False):
+        relative = Path(directory).relative_to(source)
+        kept = []
+        for name in sorted(names):
+            if any(fnmatch.fnmatch(name, pattern) for pattern in ignore):
+                continue
+            if os.path.islink(os.path.join(directory, name)):
+                skipped.append({"path": (relative / name).as_posix(), "reason": "symlink is not followed"})
+                continue
+            kept.append(name)
+        names[:] = kept
+        leaves.extend(((relative / name).as_posix(), os.path.join(directory, name)) for name in found
+                      if not any(fnmatch.fnmatch(name, pattern) for pattern in ignore))
+    return sorted(leaves, key=lambda leaf: leaf[0].encode()), skipped
+
+
+def admit_evidence_leaves(leaves: list[tuple[str, str]], root: Path, created: set[str], usage: list[int],
+                          present: set[str], omissions: list, codes: list[str]) -> None:
+    """Copy leaves under root in order, charging each file and its not yet created ancestor directories.
+
+    usage is [bytes, entries] of the whole evidence directory; a directory is created only for an admitted
+    file, so empty or unadmitted optional subtrees never consume the entry budget (#2918).
+    """
+    for shown, path in leaves:
+        parts = shown.split("/")
+        parents = [ancestor for ancestor in ("/".join(parts[:depth]) for depth in range(1, len(parts)))
+                   if ancestor not in created]
+        limit = EVIDENCE_MEMBER_LIMIT if shown.endswith(".json") else EVIDENCE_FILE_LIMIT
+        copied, reason, code = 0, "", ""
+        if usage[1] + 1 + len(parents) > EVIDENCE_FILE_COUNT:
+            reason, code = "evidence file-count budget exhausted", "file-budget"
+        else:
+            try:
+                for parent in parents:
+                    (root / parent).mkdir(exist_ok=True)
+                    created.add(parent)
+                    usage[1] += 1
+                copied, reason, code = copy_evidence_member(path, root / shown, limit, EVIDENCE_TOTAL_LIMIT - usage[0])
+            except OSError as error:
+                reason, code = f"copy failed: {error}", "read-error"
+        if reason:
+            omissions.append({"path": shown, "reason": reason})
+            codes.append(code)
+        else:
+            usage[0] += copied
+            usage[1] += 1
+            present.add(shown)
+
+
+def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple,
+                defer_optional: bool = False) -> tuple[list[str], list]:
+    """Copy a measurement tree into the evidence under byte/entry limits enforced before and during copying.
 
     Only regular files are admitted: symlinks and other types are never followed or copied. A file over
     its limit (EVIDENCE_MEMBER_LIMIT for JSON, else EVIDENCE_FILE_LIMIT), one that would exceed the
     aggregate budget, one that grows while being read, or one that cannot be read is omitted and listed.
-    Required members of the whole tree are copied before any optional one, and an optional one must leave
-    EVIDENCE_REQUIRED_HEADROOM for later trees' required members, so an exhausted budget never starves
-    them (#2918). The tree is staged beside its destination and moved into place afterwards. Returns
-    (problems, omissions); an omitted or absent required member is a problem, so the export is incomplete
-    rather than quietly successful. Each omission also reaches EVIDENCE_OMISSION_LEDGER with its fixed
-    reason code. The source is never modified.
+    Every required member is copied before any optional one, and a directory is created only as the
+    ancestor of an admitted file. With defer_optional (a sealed attempt, #2918) no optional member is
+    copied now: export_deferred_optional adds them after every leg's required members. The tree is staged
+    beside its destination and moved into place afterwards. Returns (problems, omissions); an omitted or
+    absent required member is a problem, so the export is incomplete rather than quietly successful. Each
+    omission also reaches EVIDENCE_OMISSION_LEDGER with its fixed reason code. The source is never modified.
     """
     problems: list[str] = []
     omissions: list = []
@@ -687,63 +774,16 @@ def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, 
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
     try:
-        leaves: list[tuple[str, str]] = []
-        for directory, names, found in os.walk(source, followlinks=False):
-            relative = Path(directory).relative_to(source)
-            kept = []
-            for name in sorted(names):
-                shown = (relative / name).as_posix()
-                if any(fnmatch.fnmatch(name, pattern) for pattern in ignore):
-                    continue
-                if os.path.islink(os.path.join(directory, name)):
-                    omissions.append({"path": shown, "reason": "symlink is not followed"})
-                    codes.append("excluded-type")
-                    continue
-                kept.append(name)
-                files += 1
-                (staging / relative / name).mkdir(parents=True, exist_ok=True)
-            names[:] = kept
-            leaves.extend(((relative / name).as_posix(), os.path.join(directory, name)) for name in found
-                          if not any(fnmatch.fnmatch(name, pattern) for pattern in ignore))
-        # Required members first across the whole tree, then the rest in bytewise path order.
-        for shown, path in sorted(leaves, key=lambda leaf: (leaf[0] not in required, leaf[0].encode())):
-            reason = code = ""
-            optional = shown not in required
-            limit = EVIDENCE_MEMBER_LIMIT if shown.endswith(".json") else EVIDENCE_FILE_LIMIT
-            byte_budget = EVIDENCE_TOTAL_LIMIT - (EVIDENCE_REQUIRED_HEADROOM[0] if optional else 0)
-            file_budget = EVIDENCE_FILE_COUNT - (EVIDENCE_REQUIRED_HEADROOM[1] if optional else 0)
-            try:
-                status = os.lstat(path)
-                if not stat.S_ISREG(status.st_mode):
-                    reason, code = "not a regular file", "excluded-type"
-                elif status.st_size > limit:
-                    reason, code = f"{status.st_size} bytes exceeds the {limit} byte file limit", "member-limit"
-                elif used + status.st_size > byte_budget:
-                    reason, code = "evidence byte budget exhausted", "byte-budget"
-                elif files + 1 > file_budget:
-                    reason, code = "evidence file-count budget exhausted", "file-budget"
-                else:
-                    target = staging / shown
-                    copied = 0
-                    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-                    with os.fdopen(descriptor, "rb") as reader, target.open("wb") as writer:
-                        for block in iter(lambda: reader.read(1 << 20), b""):
-                            copied += len(block)
-                            if copied > limit or used + copied > byte_budget:
-                                reason, code = "grew past its limit while being copied", "changed-during-copy"
-                                break
-                            writer.write(block)
-                    if reason:
-                        target.unlink()
-                    else:
-                        used += copied
-                        files += 1
-                        present.add(shown)
-            except OSError as error:
-                reason, code = f"copy failed: {error}", "read-error"
-            if reason:
-                omissions.append({"path": shown, "reason": reason})
-                codes.append(code)
+        leaves, skipped = evidence_leaves(source, ignore)
+        omissions.extend(skipped)
+        codes.extend("excluded-type" for _ in skipped)
+        usage = [used, files]
+        created: set[str] = set()
+        admit_evidence_leaves([leaf for leaf in leaves if leaf[0] in required], staging, created, usage, present,
+                              omissions, codes)
+        if not defer_optional:
+            admit_evidence_leaves([leaf for leaf in leaves if leaf[0] not in required], staging, created, usage, present,
+                                  omissions, codes)
         for member in required:
             if member not in present:
                 why = next((item["reason"] for item in omissions if item["path"] == member), "absent from the source")
@@ -752,15 +792,45 @@ def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, 
         if destination.exists():
             shutil.rmtree(destination)
         os.replace(staging, destination)
+        if defer_optional:
+            EVIDENCE_DEFERRED_OPTIONAL.append({"source": source, "destination": destination, "ignore": ignore,
+                                               "required": required, "created": created})
     except OSError as error:
         problems.append(f"evidence export of {destination.name} failed: {error}")
         shutil.rmtree(staging, ignore_errors=True)
+    record_evidence_omissions(destination, evidence, omissions, codes)
+    return problems, omissions
+
+
+def record_evidence_omissions(destination: Path, evidence: Path, omissions: list, codes: list[str]) -> None:
     try:
         prefix = destination.relative_to(evidence).as_posix() + "/"
     except ValueError:
         prefix = destination.name + "/"
     EVIDENCE_OMISSION_LEDGER.extend((prefix + item["path"], code) for item, code in zip(omissions, codes))
-    return problems, omissions
+
+
+def export_deferred_optional(evidence: Path, receipt_omissions: dict) -> None:
+    """Add sealed attempts' optional members once every leg's required members are retained (#2918).
+
+    Trees are visited in export order and each tree's optional leaves in bytewise path order, within what
+    is left of the export budget; omissions join the ledger and the receipt section of their tree.
+    """
+    used, files = evidence_usage(evidence)
+    usage = [used, files]
+    for record in EVIDENCE_DEFERRED_OPTIONAL:
+        omissions: list = []
+        codes: list[str] = []
+        leaves, _ = evidence_leaves(record["source"], record["ignore"])
+        admit_evidence_leaves([leaf for leaf in leaves if leaf[0] not in record["required"]], record["destination"],
+                              record["created"], usage, set(), omissions, codes)
+        record_evidence_omissions(record["destination"], evidence, omissions, codes)
+        if omissions:
+            name = record["destination"].relative_to(evidence).as_posix()
+            earlier = receipt_omissions.get(name, {"count": 0, "shown": []})
+            receipt_omissions[name] = {"count": earlier["count"] + len(omissions),
+                                       "shown": (earlier["shown"] + omissions)[:OMISSIONS_SHOWN]}
+    EVIDENCE_DEFERRED_OPTIONAL.clear()
 
 
 def read_exported_json(path: Path) -> tuple[object, str]:
@@ -830,7 +900,7 @@ def collect_evidence(lab: Path, evidence: Path, omissions: dict, sealed: bool = 
     problems: list[str] = []
     if lab.is_dir():
         required = lab_evidence_required(lab) if sealed else LAB_REQUIRED
-        problems, found = export_tree(lab, evidence / "lab", evidence, EVIDENCE_IGNORE, required)
+        problems, found = export_tree(lab, evidence / "lab", evidence, EVIDENCE_IGNORE, required, defer_optional=sealed)
         note_omissions(omissions, "lab", found)
     return problems
 
@@ -857,7 +927,8 @@ def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, 
         reasons = []
         if output.is_dir():
             required = evidence_corpus_required(THROUGHPUT_PROFILE) if sealed else THROUGHPUT_REQUIRED
-            problems, found = export_tree(output, evidence / "throughput", evidence, EVIDENCE_IGNORE, required)
+            problems, found = export_tree(output, evidence / "throughput", evidence, EVIDENCE_IGNORE, required,
+                                          defer_optional=sealed)
             reasons.extend(problems)
             note_omissions(omissions, "throughput", found)
         # Classify the exact exported bytes the hosted publisher will read.
@@ -2496,6 +2567,7 @@ def main(argv: list[str] | None = None) -> int:
     arguments.evidence_seal = getattr(arguments, "request_attempt", None) is not None and not early_owned and \
         not analyzer_requested and arguments.closure_policy == "legacy-rebuild"
     EVIDENCE_OMISSION_LEDGER.clear()
+    EVIDENCE_DEFERRED_OPTIONAL.clear()
     receipt = {"schema": RECEIPT_SCHEMA, "mode": arguments.mode, "state": "failed", "reasons": [], "identity": identity,
                "profile": ANALYZER_PROFILE_BY_LINE[analyzer_request_line] if analyzer_requested else selected_profile,
                "throughput_profile": THROUGHPUT_PROFILE if not analyzer_requested else None,
@@ -2620,6 +2692,8 @@ def main(argv: list[str] | None = None) -> int:
     receipt["timings"]["total_seconds"] = round(time.monotonic() - started, 3)
     receipt["timings"]["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     receipt.pop("phase", None)
+    if EVIDENCE_DEFERRED_OPTIONAL and aborted is None:
+        export_deferred_optional(evidence, receipt.setdefault("evidence_omissions", {}))
     if not receipt.get("evidence_omissions"):
         receipt.pop("evidence_omissions", None)
     if arguments.evidence_seal and receipt["state"] == "measured" and aborted is None:
