@@ -105,6 +105,7 @@ class WindowsFixtureTree:
         kernel.GetSystemTimePreciseAsFileTime.argtypes = (ctypes.POINTER(wintypes.FILETIME),)
         kernel.GetSystemTimePreciseAsFileTime.restype = None
         self.handles = []
+        self.rejected = []
         self.parent_created = self.creation_time(parent_handle)
         cut = wintypes.FILETIME()
         kernel.GetSystemTimePreciseAsFileTime(ctypes.byref(cut))
@@ -122,27 +123,22 @@ class WindowsFixtureTree:
                 present = kernel.Process32NextW(snapshot, ctypes.byref(entry))
             if ctypes.get_last_error() != 18:  # ERROR_NO_MORE_FILES.
                 raise ctypes.WinError(ctypes.get_last_error())
-            owned = {pid}
-            pending = set(parents) - owned
-            while pending:
-                children = {child for child in pending if parents[child] in owned}
-                if not children:
-                    break
-                owned.update(children)
-                pending.difference_update(children)
-            for child in sorted(owned - {pid}):
+            def open_child(child):
                 # Query creation identity as well as waiting. A numeric snapshot
                 # PID can be reused before OpenProcess acquires a native handle.
+                identity = None
                 handle = kernel.OpenProcess(0x101000, False, child)  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION.
                 if handle:
                     try:
-                        created = self.creation_time(handle)
+                        identity = (handle, self.creation_time(handle))
                     except BaseException:
                         kernel.CloseHandle(handle)
                         raise
-                    self.retain_handle(child, handle, created)
                 elif ctypes.get_last_error() != 87:  # ERROR_INVALID_PARAMETER: exited PID.
                     raise ctypes.WinError(ctypes.get_last_error())
+                return identity
+
+            self.admit_descendants(pid, parents, open_child)
         except BaseException:
             self.close()
             raise
@@ -161,14 +157,40 @@ class WindowsFixtureTree:
             raise ctypes.WinError(ctypes.get_last_error())
         return (created.dwHighDateTime << 32) | created.dwLowDateTime
 
-    def retain_handle(self, pid, handle, created):
+    def admit_descendants(self, pid, parents, open_child):
+        # Windows keeps a dead parent's PID in th32ParentProcessID, so a link
+        # proves descent only when the child is no older than that parent (#3690).
+        children = {}
+        for child, parent in parents.items():
+            children.setdefault(parent, []).append(child)
+        visited = {pid}
+        frontier = [(pid, self.parent_created)]
+        while frontier:
+            parent, parent_created = frontier.pop()
+            for child in sorted(children.get(parent, ())):
+                if child not in visited:
+                    visited.add(child)
+                    identity = open_child(child)
+                    if identity is not None:
+                        handle, created = identity
+                        if self.retain_handle(child, handle, created, parent_created):
+                            frontier.append((child, created))
+
+    def retain_handle(self, pid, handle, created, parent_created=None):
         # Controlled fixtures publish readiness after spawning their descendants.
-        # Reject a replacement created after snapshot admission, or a stale parent
-        # PID from before our retained direct owner existed. Never wait on either.
-        if created < self.parent_created or created > self.snapshot_started:
-            self.kernel.CloseHandle(handle)
-            raise RuntimeError("bootstrap descendant identity changed during capture: " + str(pid))
-        self.handles.append((pid, handle))
+        # A process older than its recorded parent, or created after the
+        # snapshot, is a reused-PID identity rather than a descendant: never
+        # wait on it, and do not admit anything through it.
+        if parent_created is None:
+            parent_created = self.parent_created
+        retained = parent_created <= created <= self.snapshot_started
+        if retained:
+            self.handles.append((pid, handle))
+        else:
+            self.rejected.append({"pid": pid, "created": created, "parent_created": parent_created})
+            if not self.kernel.CloseHandle(handle):
+                raise RuntimeError("bootstrap rejected descendant handle closure failed: " + str(pid))
+        return retained
 
     def wait_until(self, deadline):
         pending = []

@@ -343,20 +343,53 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(tree.handles, [])
 
 
-    def test_windows_capture_refuses_reused_and_stale_parent_identities(self):
+    def unwalked_tree(self):
         tree = scheduler.WindowsFixtureTree.__new__(scheduler.WindowsFixtureTree)
         tree.kernel = mock.Mock()
         tree.handles = []
+        tree.rejected = []
         tree.parent_created = 100
         tree.snapshot_started = 200
+        return tree
+
+    def test_windows_capture_refuses_reused_and_stale_parent_identities(self):
+        tree = self.unwalked_tree()
         for created in (99, 201):
             with self.subTest(created=created):
-                with self.assertRaisesRegex(RuntimeError, "identity changed"):
-                    tree.retain_handle(23, "replacement-handle", created)
+                self.assertFalse(tree.retain_handle(23, "replacement-handle", created))
                 self.assertEqual(tree.handles, [])
-        self.assertEqual(tree.kernel.CloseHandle.call_count, 2)
-        tree.retain_handle(24, "original-handle", 150)
+        self.assertEqual(tree.kernel.CloseHandle.call_args_list,
+                         [mock.call("replacement-handle")] * 2)
+        self.assertEqual([row["created"] for row in tree.rejected], [99, 201])
+        self.assertTrue(tree.retain_handle(24, "original-handle", 150))
         self.assertEqual(tree.handles, [(24, "original-handle")])
+
+    def test_windows_rejected_handle_close_failure_is_not_ignored(self):
+        tree = self.unwalked_tree()
+        tree.kernel.CloseHandle.return_value = False
+        with self.assertRaisesRegex(RuntimeError, "rejected descendant handle closure failed: 23"):
+            tree.retain_handle(23, "replacement-handle", 99)
+        self.assertEqual(tree.handles, [])
+
+    def test_windows_walk_checks_each_edge_against_its_own_parent(self):
+        # 30 is an older unrelated process whose dead parent's PID now names
+        # the fixture (#3690); neither it nor its children are descendants.
+        tree = self.unwalked_tree()
+        parents = {1: 0, 23: 1, 24: 23, 25: 23, 26: 24, 27: 24, 30: 1, 31: 30, 40: 9, 23 + 1000: 40}
+        created = {23: 110, 24: 120, 26: 130, 27: 115, 30: 50, 31: 150, 40: 10, 1023: 160}
+        opened = []
+
+        def open_child(child):
+            opened.append(child)
+            return None if child == 25 else ("handle-%d" % child, created[child])
+
+        tree.admit_descendants(1, parents, open_child)
+        self.assertEqual(sorted(tree.handles), [(23, "handle-23"), (24, "handle-24"), (26, "handle-26")])
+        self.assertEqual(sorted((row["pid"], row["parent_created"]) for row in tree.rejected),
+                         [(27, 120), (30, 100)])
+        self.assertEqual(sorted(opened), [23, 24, 25, 26, 27, 30])
+        self.assertEqual(sorted(call.args[0] for call in tree.kernel.CloseHandle.call_args_list),
+                         ["handle-27", "handle-30"])
 
     def test_windows_handle_close_failure_is_not_ignored(self):
         tree = scheduler.WindowsFixtureTree.__new__(scheduler.WindowsFixtureTree)
