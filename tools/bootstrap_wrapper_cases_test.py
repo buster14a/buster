@@ -96,9 +96,11 @@ class SchedulerTests(unittest.TestCase):
 
         summary, output = self.run_control([Control("test_launch")])
         self.assertFalse(summary["success"])
-        self.assertEqual(summary["owned_children"], 1)
+        # Windows first owns the native launcher, whose certificate then
+        # reports the missing payload; POSIX Popen rejects it immediately.
+        self.assertEqual(summary["owned_children"], 2 if os.name == "nt" else 1)
         self.assertEqual(summary["unreaped_children"], 0)
-        self.assertIn("FileNotFoundError", output)
+        self.assertIn("native launch did not certify completion" if os.name == "nt" else "FileNotFoundError", output)
 
     def test_cancellation_cleans_tree_before_fixture_removal(self):
         self.check_cancellation_tree()
@@ -290,10 +292,14 @@ class SchedulerTests(unittest.TestCase):
         events = []
         record = record or {"complete": True, "waited": [24, 123], "foreign": [], "pending": [], "failed": []}
 
-        def drain(name, deadline):
-            events.append(("drain", name, deadline))
+        # Preserve the failure inventory as cancellation moves into the native
+        # owner, which acknowledges even before job creation or assignment.
+        def certificate():
+            events.append(("certificate",))
             if drain_error is not None:
                 raise drain_error
+            if record.get("absent") or launcher_status:
+                raise RuntimeError("native owner did not certify cancellation")
             return record
 
         child = scheduler.CaseProcess.__new__(scheduler.CaseProcess)
@@ -303,20 +309,27 @@ class SchedulerTests(unittest.TestCase):
         child.descendant_waited_pids = []
         child.job_drain = None
         child.job_name = "job-marker"
+        child.launch_status_path = mock.Mock(name="terminal-path")
+        child.launch_status_path.name = "terminal.json"
+        child.launch_status_path.with_name.return_value.touch.side_effect = lambda **_kwargs: events.append(("cancel",))
         child.cleaned = False
         child.process = mock.Mock(pid=123, returncode=None)
         child.process.poll.return_value = None
 
-        def direct_cleanup(_child):
-            events.append(("direct",))
-            _child.process.returncode = launcher_status
-            if direct_error is not None:
+        waits = 0
+        def wait(timeout):
+            nonlocal waits
+            waits += 1
+            events.append(("wait", timeout))
+            child.process.returncode = launcher_status
+            child.process.poll.return_value = launcher_status
+            if direct_error is not None and waits % 2 == 0:
                 raise direct_error
-            _child.cleaned = True
+            return launcher_status
+        child.process.wait.side_effect = wait
 
         with mock.patch.object(scheduler.os, "name", "nt"), \
-             mock.patch.object(scheduler, "drain_job", drain), \
-             mock.patch.object(scheduler.bootstrap.WrapperProcess, "cleanup", direct_cleanup), \
+             mock.patch.object(child, "launch_status", side_effect=certificate), \
              mock.patch.object(scheduler.time, "monotonic", return_value=100):
             expected_error = drain_error or direct_error
             failed = expected_error is not None or record.get("absent") or launcher_status
@@ -333,13 +346,13 @@ class SchedulerTests(unittest.TestCase):
                 child.cleanup()
                 events.append(("fixture",))
                 child.cleanup()  # Already cleaned; nothing is drained twice.
-        deadline = 100 + scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS
-        succeeded = not failed
-        # A cleaned owner only repeats the frozen direct-child reap, never a drain.
-        self.assertEqual(events, [("drain", "job-marker", deadline), ("direct",), ("fixture",)] +
-                         ([("direct",)] if succeeded else []))
-        self.assertEqual(child.descendant_waited_pids, [24, 123] if succeeded else
-                         ([] if drain_error or record.get("absent") else [24, 123]))
+        sequence = [("cancel",), ("wait", scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS),
+                    ("certificate",), ("wait", scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS), ("fixture",)]
+        if not failed:
+            sequence.extend([("wait", scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS),
+                             ("certificate",), ("wait", scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS)])
+        self.assertEqual(events, sequence)
+        self.assertFalse(child.process.kill.called)
 
     def drain_with(self, *fixture, budget=0.2):
         # Run the real caller against a deliberately broken native drain.
@@ -371,6 +384,78 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(json.loads(result.stdout), {"selftest": True, "member": True, "outsider_member": False,
                                                      "outsider_alive": True, "member_waited": True})
+
+    def test_native_launch_sidecar_rejects_missing_malformed_and_late_evidence(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            child = scheduler.CaseProcess.__new__(scheduler.CaseProcess)
+            child.launch_status_path = Path(directory) / "terminal.json"
+            child.runtime_deadline_ns = 10_000_000_000
+            child.launch_terminal_record = None
+            child.process = mock.Mock(returncode=0)
+            valid = {"complete": True, "runtime_timed_out": False, "cancelled": False, "root_returncode": 17,
+                     "root_pid": 123, "runtime_deadline_ns": child.runtime_deadline_ns,
+                     "root_finished_ns": 9_000_000_000, "cleanup_started_ns": 9_000_000_000,
+                     "cleanup_finished_ns": 9_500_000_000}
+            with self.assertRaisesRegex(RuntimeError, "missing or malformed"):
+                child.launch_status()
+            for malformed in ("{partial", json.dumps(valid) + "\n" + json.dumps(valid)):
+                child.launch_status_path.write_text(malformed)
+                with self.assertRaisesRegex(RuntimeError, "missing or malformed"):
+                    child.launch_status()
+            for changes in ({"complete": False}, {"runtime_deadline_ns": 1}, {"root_pid": True},
+                            {"cleanup_finished_ns": 20_000_000_000}, {"root_finished_ns": 11_000_000_000}):
+                with self.subTest(changes=changes):
+                    child.launch_status_path.write_text(json.dumps(valid | changes))
+                    with self.assertRaises(RuntimeError):
+                        child.launch_status()
+            child.launch_status_path.write_text(json.dumps(valid))
+            child.require_terminal_observation = True
+            child.terminal_deadline_ns = 20_000_000_000
+            with mock.patch.object(scheduler.time, "monotonic_ns", return_value=20_000_000_001):
+                with self.assertRaisesRegex(RuntimeError, "observed after its deadline"):
+                    child.launch_status()
+            child.require_terminal_observation = False
+            child.process.returncode = scheduler.LAUNCH_DRAIN_FAILED_EXIT
+            with self.assertRaisesRegex(RuntimeError, "disagrees with its exit"):
+                child.launch_status()
+
+    def test_native_broker_status_is_distinct_from_payload_status(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            child = scheduler.CaseProcess.__new__(scheduler.CaseProcess)
+            child.launch_status_path = Path(directory) / "terminal.json"
+            child.runtime_deadline_ns = 10_000_000_000
+            child.process = mock.Mock(returncode=0, pid=456, args=["native-owner"])
+            child.job_name = "native-job"
+            child.started = child.runtime_deadline_ns / 1_000_000_000 - scheduler.bootstrap.WRAPPER_TIMEOUT_SECONDS
+            child.test_id = self.id()
+            child.cleanup_seconds = 0
+            child.job_drain = None
+            valid = {"complete": True, "runtime_timed_out": False, "cancelled": False, "root_returncode": 17,
+                     "root_pid": 123, "runtime_deadline_ns": child.runtime_deadline_ns,
+                     "root_finished_ns": 9_000_000_000, "cleanup_started_ns": 9_000_000_000,
+                     "cleanup_finished_ns": 9_500_000_000}
+            for status in (124, 125):
+                with self.subTest(payload=status):
+                    child.launch_terminal_record = None
+                    child.launch_status_path.write_text(json.dumps(valid | {"root_returncode": status}))
+                    broker_result = subprocess.CompletedProcess(["native-owner"], 0, "stdout", "stderr")
+                    with mock.patch.object(scheduler.bootstrap.WrapperProcess, "finish", return_value=broker_result), \
+                         mock.patch.object(scheduler.time, "monotonic_ns", return_value=9_500_000_000), \
+                         contextlib.redirect_stdout(io.StringIO()):
+                        result = child.finish()
+                    self.assertEqual((result.returncode, result.stdout, result.stderr), (status, "stdout", "stderr"))
+            child.launch_terminal_record = None
+            child.process.returncode = scheduler.LAUNCH_RUNTIME_TIMEOUT_EXIT
+            child.launch_status_path.write_text(json.dumps(valid | {
+                "runtime_timed_out": True, "root_finished_ns": 0,
+                "cleanup_started_ns": 10_000_000_000, "cleanup_finished_ns": 10_100_000_000}))
+            with mock.patch.object(scheduler.bootstrap.WrapperProcess, "finish", return_value=broker_result), \
+                 mock.patch.object(scheduler.time, "monotonic_ns", return_value=10_100_000_000), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(AssertionError, "bootstrap child timed out"):
+                    child.finish()
 
     def test_cleanup_error_cannot_be_a_success(self):
         cleanup = scheduler.CaseProcess.cleanup
