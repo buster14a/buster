@@ -35488,14 +35488,15 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                             {
                                 u32 argument_end = c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA) ? argument : close;
                                 CTypeId argument_type = C_TYPE_ID_INVALID;
-                                c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, scope,
+                                u32 types_before = result->type_count;
+                                bool argument_typed = c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, scope,
                                     argument_start, argument_end, &argument_type, diagnostic);
                                 if (parameter_index < value.parameter_count)
                                 {
                                     CTypeId parameter = result->parameters[value.parameter_start + parameter_index].type;
                                     String8 conversion_message = {0};
-                                    if (c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, parameter, argument_start, argument_end,
-                                                                             true, &conversion_message))
+                                    if (c_parse_incompatible_checked_value(machine, result, preprocess, scope, parameter, argument_typed, argument_type,
+                                                                           types_before, argument_start, argument_end, &conversion_message))
                                     {
                                         c_parse_lowering_constraint_consider(diagnostic,
                                             conversion_message.length ? conversion_message : S8("argument is incompatible with the parameter type"),
