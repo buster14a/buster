@@ -24,6 +24,8 @@ PAUSE specimen. `compiler_driver_test_gcc_pause_listing` assembles it through
 the public driver at the baseline target, covering both the maximum-skip
 directive and the `rep nop` spelling reported on
 [#3732](https://github.com/buster14a/buster/issues/3732#issuecomment-6122548068).
+The test embeds the byte-identical listing so mobile runners do not need a
+repository checkout at runtime; the adjacent files retain its provenance.
 GNU as places PAUSE at byte 16, the volatile load at byte 18 and RET at byte 24;
 the regression checks the same instruction bytes, offsets and branch
 displacements with Buster's existing single-byte NOP padding. Both listings
