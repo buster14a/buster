@@ -3451,6 +3451,60 @@ diagnostic only. The candidate passes every hosted budget and ships:
   The assignment site in the same validator, which pairs a checked typing
   with the same wrapper, is left as a lead.
 
+### Assignment value typing
+
+This section has its own anchor, because other open AST branches append to
+the plan's final paragraph. [Call-argument value typing](#call-argument-value-typing)
+left the assignment site in `c_parse_validate_const_assignments` as a lead.
+A simple or compound assignment types its value with
+`c_parse_checked_expression_type`. Unless the assignment conversion message
+already refused it, `c_parse_incompatible_aggregate_value` then types the same
+range again, unchecked, before the aggregate and scalar conversion check.
+
+A census of main `4ed35b59` (a throwaway build that routes the site through
+noinline wrappers, exploratory, not reused as an arm) on the unity self-host
+at `-fsyntax-only` gives the size of the lead:
+- The site makes 46,529 unchecked queries. They cost 8.27 M Ir inclusive,
+  about 178 Ir each, under both default flags and `-fc-ast-pilot`.
+- Under #3806's rule, 45,303 of them could reuse the checked type on the
+  default path and 46,301 under the pilot. The rest follow a typing that
+  appended a type row or did not succeed.
+- The removable ceiling is therefore about 8 M (0.07%), plus whatever setup
+  Clang inlined around the call. The conversion check stays.
+
+The candidate routes the site through `c_parse_incompatible_checked_value`,
+which gains a `simple_value_conversion` argument so a compound assignment
+keeps its scalar conversion rule. The type is reused only when the checked
+typing succeeded and appended no type row; otherwise the range is typed
+again. Reference-check builds (`BUSTER_REFERENCE_CHECKS`) also run the base's
+re-typing and require the same verdict and message. The change is on the
+token path, so it applies to the default path and to `-fc-ast-pilot`.
+
+These budgets were declared before the measured runs. The base is main
+`4ed35b59`. The input, flags and arms are the call-argument slice's: four
+Callgrind arms (`--cache-sim=no --branch-sim=no`) on tests-off
+`-march=x86-64-v3` Release builds whose driver is built by Clang (no TCC on
+the host). A is the base with default flags, B the base with `-fc-ast-pilot`,
+C the candidate with `-fc-ast-pilot`, and D the candidate with default flags.
+- **Correctness:**
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms;
+  - the same exit status and no diagnostics on `-fsyntax-only` in every arm;
+  - the reference check passes in a Debug run of the C frontend and AST
+    tests;
+  - `test_all` passes, and `test_self_host` keeps its fixed point.
+- **The floor, `-fsyntax-only` (D against A, and C against B).** The whole
+  compile must run at least 5 M fewer instructions, and more than the 0.05%
+  rebuild noise fewer. Each arm reports its calls to
+  `c_parse_expression_type_query`; the candidate should make about 45,000
+  fewer.
+- **`-c` (D against A, `-g0`).** The validation runs before lowering, so the
+  compile must also fall by at least 5 M. It may in no case grow by more
+  than the 0.05% noise.
+- **Below the floor.** The audit records a negative result, and no code
+  ships.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761).
+
 ### Root-conditional `?` refusal without the tree
 
 For the tree-free negative test in `c_ir_root_conditional` (a per-body prefix
