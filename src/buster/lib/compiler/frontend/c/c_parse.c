@@ -10102,7 +10102,8 @@ BUSTER_C_INTERNAL bool c_parse_constant_truth(CParseConstant value);
 // constant query, never a nested walk: c_parse_type_identity_prepare settles
 // the later-starting (inner) choices first, so a choice in the condition is
 // already a recorded selection by the time this one evaluates it. A condition
-// that is not an integer constant, or a wrong arity, records nothing.
+// that is not an integer constant (a pointer or floating constant included),
+// or a wrong arity, records nothing.
 BUSTER_C_INTERNAL bool c_parse_choose_expr_builtin(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                    CParseResult* result, CScopeId scope, u32 start, u32 end)
 {
@@ -10113,7 +10114,10 @@ BUSTER_C_INTERNAL bool c_parse_choose_expr_builtin(CTypeParseMachine* machine, A
                  c_parse_identity_separator(result, preprocess, second + 1, close, C_PUNCTUATOR_COMMA) == close;
     CParseConstant condition = valid ? c_parse_typed_constant(machine, arena, preprocess, result, scope, start + 2, first)
                                      : (CParseConstant){.type = C_TYPE_ID_INVALID};
-    valid = valid && condition.valid && !condition.is_float && !condition.imaginary;
+    // GNU requires an integer constant condition: the evaluator also answers
+    // a pointer constant such as `(void*)1`, which must select nothing.
+    valid = valid && condition.valid && !condition.is_float && !condition.imaginary &&
+            c_parse_expression_integer_kind(c_parse_expression_value_kind(result, condition.type));
     if (valid)
     {
         bool selected = c_parse_constant_truth(condition);

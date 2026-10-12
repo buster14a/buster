@@ -44088,13 +44088,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArgument
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult tokens = c_preprocess(temporary.arena, S8(
             "#define SAME(e, T) _Static_assert(sizeof(e) == sizeof(T) && _Generic(e, T: 1, default: 0), #e)\n"
+            "enum { CHOICE_ON = 1 };\n"
             "int nested_choice(int i, long l) {\n"
             "    SAME(__builtin_choose_expr(__builtin_choose_expr(1, 0, 1), i, (char)l), char);\n"
+            "    SAME(__builtin_choose_expr(CHOICE_ON, i, l), int);\n"
             "    _Static_assert(__builtin_choose_expr(__builtin_choose_expr(0, 0, 1), 5, l) == 5, \"nested constant\");\n"
             "    return 0;\n"
             "}\n"), (CPreprocessOptions){0});
         CParseResult parsed = c_parse(temporary.arena, tokens);
         BUSTER_TEST(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count);
+        c_test_scratch_end(temporary);
+    }
+    // GNU requires an integer constant condition. A pointer constant selects
+    // nothing, so the operand has no type and the assertion is rejected.
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, S8(
+            "int pointer_choice(void) {\n"
+            "    _Static_assert(sizeof(__builtin_choose_expr((void*)1, 1, 2L)) == sizeof(int), \"pointer condition\");\n"
+            "    return 0;\n"
+            "}\n"), (CPreprocessOptions){0});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && parsed.diagnostic_count);
         c_test_scratch_end(temporary);
     }
     // A choose_expr condition holding a sizeof of the previous level reaches
