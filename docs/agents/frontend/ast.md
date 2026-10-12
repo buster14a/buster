@@ -1746,7 +1746,8 @@ node id reaches the IR, and the tree is not written.
 - 79 to 100% of the root-token predicates (`c_ir_has_root_comma`,
   `_assignment`, `_question` and `_control_operator`), and 36% of
   `c_ir_call_argument_separator`'s ranges;
-- every evaluator core, expression, logical and condition frame;
+- every evaluator core, expression and logical frame, and every in-body
+  condition frame (52,607 of 52,629; the other 22 lie outside a body);
 - 44% of `c_ir_group_type_name`'s groups as an exact "no type name": the
   group's interior is one expression node.
 
