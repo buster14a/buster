@@ -97,7 +97,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_publication_span_tests(UnitTestArguments* 
 }
 
 // Lowers `source` through the ordinary frontend SSA path and runs promotion
-// with no optional pass, leaving the single function ready for FAST.
+// with no optional pass. Callers that read `functions` define one function;
+// a declared callee is allowed when only module statistics are read.
 BUSTER_GLOBAL_LOCAL IrProgram* ir_fast_cse_lower(UnitTestArguments* arguments, String8 source)
 {
     IrProgram* program = 0;
@@ -108,7 +109,7 @@ BUSTER_GLOBAL_LOCAL IrProgram* ir_fast_cse_lower(UnitTestArguments* arguments, S
     {
         CIRLowerResult lowered = c_lower_to_ir_with_options(arguments->arena, S8("fast-cse.c"), preprocess, analysis, target_native,
                                                             (CIRLowerOptions){0});
-        if (lowered.program && !lowered.diagnostic_count && lowered.program->modules->function_count == 1)
+        if (lowered.program && !lowered.diagnostic_count && lowered.program->modules->function_count)
         {
             lowered.program->fast_passes = 0;
             if (ir_prepare_canonical_module(lowered.program, lowered.program->modules, false).error == IR_VALIDATION_NONE) program = lowered.program;
@@ -230,6 +231,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_cse_tests(UnitTestArguments* argument
             IrFastCseStatistics census = program->modules->fast.cse;
             if (census.hits != (u64)((run & 1) && (run >> 1) ? 0 : 1)) arguments->show(arguments, S8("CSE window run {u32}: hits={u64} candidates={u64}\n"), run, census.hits, census.candidates);
             BUSTER_TEST(arguments, census.hits == (u64)((run & 1) && (run >> 1) ? 0 : 1) && !census.saturation_declines);
+        }
+        scratch_end(temporary);
+    }
+    // Hits age the window too: in A, B x k, A (call arguments, so nothing
+    // else between them is keyed) the window keeps A behind seven repeated
+    // B hits but not behind eight. The table keeps A either way.
+    for (u32 run = 0; run < 4; run += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        u32 repeats = IR_FAST_CSE_WINDOW - 1 + (run >> 1);
+        String8 source = S8("unsigned sink(unsigned,...);unsigned test(unsigned a,unsigned b,unsigned c,unsigned d){return sink(a+b");
+        for (u32 index = 0; index < repeats; index += 1) source = string_format(arguments->arena, S8("{S8},c*d"), source);
+        source = string_format(arguments->arena, S8("{S8},a+b);}"), source);
+        IrProgram* program = ir_fast_cse_lower(arguments, source);
+        if (BUSTER_REQUIRE(arguments, program != 0))
+        {
+            program->fast_passes = cse;
+            program->fast_cse_window = run & 1;
+            BUSTER_TEST(arguments, ir_prepare_canonical_module(program, program->modules, false).error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(program, program->modules).error == IR_VALIDATION_NONE);
+            IrFastCseStatistics census = program->modules->fast.cse;
+            u64 expected = repeats - 1 + ((run & 1) && (run >> 1) ? 0 : 1);
+            if (census.hits != expected) arguments->show(arguments, S8("CSE repeated-hit run {u32}: hits={u64} candidates={u64}\n"), run, census.hits, census.candidates);
+            BUSTER_TEST(arguments, census.hits == expected && census.candidates == repeats + 2);
         }
         scratch_end(temporary);
     }

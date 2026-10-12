@@ -348,8 +348,9 @@ BUSTER_GLOBAL_LOCAL void ir_fast_dce(IrProgram* program, IrFunction* function, u
 // sound and its entry has already expired. A full table or exhausted probe
 // sequence declines insertion; it never changes a result. The census's
 // linear arm (IrProgram.fast_cse_window) instead compares each candidate
-// with the block's last IR_FAST_CSE_WINDOW keyed rows in a ring held in the
-// table's first slots; its entries count candidates, so it never saturates.
+// with the block's previous IR_FAST_CSE_WINDOW keyed candidates, held in a
+// ring in the table's first slots. Every candidate takes the next slot,
+// recording its representative after a hit, so the arm never saturates.
 typedef struct IrFastCseEntry IrFastCseEntry;
 struct IrFastCseEntry
 {
@@ -481,16 +482,18 @@ BUSTER_GLOBAL_LOCAL void ir_fast_cse(IrProgram* program, IrFunction* function, u
                 IrFastCseEntry* empty = 0;
                 if (window)
                 {
-                    // Linear arm: compare against the most recent keyed rows
-                    // of this block, newest first, then overwrite the oldest.
-                    u32 live = BUSTER_MIN(entries, IR_FAST_CSE_WINDOW);
+                    // Linear arm: compare against the block's previous
+                    // IR_FAST_CSE_WINDOW keyed candidates, newest first. Every
+                    // candidate, hit or miss, then takes the oldest slot.
+                    u32 previous = ordinal - 1;
+                    u32 live = BUSTER_MIN(previous, IR_FAST_CSE_WINDOW);
                     for (u32 offset = 1; !match && offset <= live; offset += 1)
                     {
-                        IrFastCseEntry* entry = table + ((entries - offset) % IR_FAST_CSE_WINDOW);
+                        IrFastCseEntry* entry = table + ((previous - offset) % IR_FAST_CSE_WINDOW);
                         census->probes += 1;
                         if (entry->operation == operation && entry->type == type && entry->left == left && entry->right == right) match = entry;
                     }
-                    empty = table + (entries % IR_FAST_CSE_WINDOW);
+                    empty = table + (previous % IR_FAST_CSE_WINDOW);
                 }
                 else
                 {
@@ -505,6 +508,9 @@ BUSTER_GLOBAL_LOCAL void ir_fast_cse(IrProgram* program, IrFunction* function, u
                         else census->collisions += 1;
                     }
                 }
+                // The window's slot for this candidate keeps the value it now
+                // stands for: the representative after a hit, itself otherwise.
+                u32 representative = row->result.value;
                 if (match)
                 {
                     IrValue a = function->values[row->result.value];
@@ -512,6 +518,7 @@ BUSTER_GLOBAL_LOCAL void ir_fast_cse(IrProgram* program, IrFunction* function, u
                     if (a.alignment == b.alignment && a.category == b.category && a.is_read_only == b.is_read_only &&
                         a.points_to_read_only == b.points_to_read_only && a.is_volatile == b.is_volatile)
                     {
+                        representative = match->value;
                         replacements[row->result.value] = match->value;
                         removed[index] = 1;
                         statistics->changes += 1;
@@ -522,13 +529,18 @@ BUSTER_GLOBAL_LOCAL void ir_fast_cse(IrProgram* program, IrFunction* function, u
                     }
                     else census->metadata_declines += 1;
                 }
-                else if (empty && (window || entries < limit))
+                if (window)
                 {
-                    *empty = (IrFastCseEntry){.left = left, .right = right, .type = type, .value = row->result.value, .ordinal = ordinal,
+                    *empty = (IrFastCseEntry){.left = left, .right = right, .type = type, .value = representative, .ordinal = ordinal,
+                        .generation = generation, .operation = operation};
+                }
+                else if (!match && empty && entries < limit)
+                {
+                    *empty = (IrFastCseEntry){.left = left, .right = right, .type = type, .value = representative, .ordinal = ordinal,
                         .generation = generation, .operation = operation};
                     entries += 1;
                 }
-                else census->saturation_declines += 1;
+                else if (!match) census->saturation_declines += 1;
             }
         }
         census->max_block_candidates = BUSTER_MAX(census->max_block_candidates, ordinal);

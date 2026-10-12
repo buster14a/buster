@@ -223,10 +223,11 @@ block candidate count. A window hit's representative is at most eight
 candidates earlier.
 
 `-fcanonical-fast-cse-strategy=window` replaces the table lookup with the
-issue's linear arm: each candidate is compared, newest first, with the last
-eight keyed rows of its block, kept in a ring in the table's first slots. A
-miss overwrites the oldest entry, so the arm never saturates; `probes` counts
-its comparisons. `=table` (the default) restores the hash table. The strategy
+issue's linear arm. Each candidate is compared, newest first, with the
+previous eight keyed candidates of its block, kept in a ring in the table's
+first slots. Every candidate, hit or miss, then takes the oldest slot. After a
+hit the slot records the representative, so repeated hits age the window
+like any other row. The arm never saturates; `probes` counts its comparisons. `=table` (the default) restores the hash table. The strategy
 changes nothing unless `cse` is selected.
 
 ### Three-arm census (diagnostic, not performance evidence)
@@ -239,29 +240,30 @@ shows medians and the wall range.
 
 | Self-host arm | Wall s (min-max) | Peak RSS KiB | `cse` ms | Compact ms | Hits (constant) | Probes | Rows after FAST | `.text` bytes |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| No CSE | 5.714 (5.511-6.050) | 846,104 | 0 | 54.6 | - | - | 1,810,042 | 28,401,354 |
-| Linear window (8) | 5.699 (5.370-5.901) | 844,680 | 21.7 | 57.4 | 92,986 (92,949) | 426,585 | 1,718,976 | 28,150,371 |
-| Table (256 slots) | 5.826 (5.363-6.054) | 844,264 | 21.7 | 59.3 | 94,824 (94,787) | 277,788 | 1,717,374 | 28,148,682 |
+| No CSE | 6.050 (5.689-7.470) | 846,064 | 0 | 56.8 | - | - | 1,810,089 | 28,401,706 |
+| Linear window (8) | 5.961 (5.586-6.679) | 844,200 | 20.7 | 55.7 | 90,459 (90,424) | 451,184 | 1,721,599 | 28,148,631 |
+| Table (256 slots) | 6.005 (5.716-6.404) | 844,552 | 20.6 | 57.3 | 94,824 (94,787) | 277,792 | 1,717,421 | 28,149,050 |
 
 | Smaller workload | Candidates | Table hits | Window hits | Arithmetic hits | Table saturation declines |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `tests/basic_c_operations.c` | 506 | 98 | 86 | 0 | 0 |
-| `tests/c_abi_cfuncs.c` | 1,224 | 116 | 96 | 0 | 1 |
+| `tests/basic_c_operations.c` | 506 | 98 | 85 | 0 | 0 |
+| `tests/c_abi_cfuncs.c` | 1,224 | 116 | 90 | 0 | 1 |
 | `tests/basic_c_machine_alias.c` | 645 | 3 | 3 | 0 | 42 |
 
 Both arms remove about 5% of canonical rows after FAST and 0.9% of `.text` on
-self-host. A compiler built with table CSE recompiles itself with CSE to
-byte-identical output. What the data show:
+self-host. A compiler built with either arm recompiles itself with the same
+arm to byte-identical output. What the data show:
 
 - **Arithmetic arm as framed:** after frontend SSA and folding, repeated
   unsigned arithmetic in one block almost never survives. Self-host has 37
-  arithmetic hits under both arms; the other workloads have none.
+  arithmetic hits under the table and 35 under the window; the other
+  workloads have none.
 - **Constants:** almost every hit is a repeated constant.
-- **Window versus table:** the window catches 98% of the table's self-host
-  hits and 82-100% elsewhere, with no table-sizing or saturation state, but
-  makes 1.5x the probes. Both arms report about the same pass time.
+- **Window versus table:** the window catches 95% of the table's self-host
+  hits and 78-100% elsewhere, with no table-sizing or saturation state, but
+  makes 1.6x the probes. Both arms report about the same pass time.
 - **Compile time and memory:** hosted wall-time differences are inside the
-  run-to-run range. Peak RSS falls by about 1.5 MiB in both arms. Neither
+  run-to-run range. Peak RSS falls by about 1.5-1.9 MiB in both arms. Neither
   effect is established here.
 
 So this census answers the recurrence question and makes the cost comparison
@@ -276,11 +278,12 @@ arm, or that alternative, also needs allocation, spill and runtime data.
 `ir_fast_test.c` checks all 16 subsets structurally, transitive dead work,
 retained calls/memory effects, existing trivial parameters, repeat preparation,
 classification exclusions and budget refusal before value-storage access.
-`ir_fast_cse_tests` runs each case under both strategies, checks the window
-boundary, and covers commuted and ordered pairs, duplicate operands,
-block boundaries, excluded signed, load, division and shift rows, and roots
-resolved by folding. It also covers constants, table saturation and
-collisions, metadata declines, volatile rows and generation rollover.
+`ir_fast_cse_tests` runs each case under both strategies and checks the
+window boundary for distinct rows and for repeated hits. The cases cover
+commuted and ordered pairs, duplicate operands, block boundaries, excluded
+signed, load, division and shift rows, and roots resolved by folding. Other
+tests cover constants, table saturation and collisions, metadata declines,
+volatile rows and generation rollover.
 `driver_fast_test.c` executes the fixed-result C fixture for all 16 subsets in
 FAST/QUALITY with zero fallback on desktop hosts, plus the full recipe with
 `cse`. The native-retirement census freezes every tracked file under `tests/`,
