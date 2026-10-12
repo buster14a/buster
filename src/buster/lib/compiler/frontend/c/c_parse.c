@@ -11999,12 +11999,19 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
 
 BUSTER_C_INTERNAL u32 c_parse_initializer_value_end(CPreprocessResult preprocess, u32 start, u32 limit)
 {
+    // Most of an element's tokens are none of the seven punctuators below;
+    // one set test passes them without the ladder (#3102).
+    u64 stops = C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_PARENTHESIS) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_PARENTHESIS) |
+        C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_BRACKET) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_BRACKET) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_BRACE) |
+        C_PUNCTUATOR_BIT(C_PUNCTUATOR_RIGHT_BRACE) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_COMMA);
     u32 parentheses = 0;
     u32 brackets = 0;
     u32 braces = 0;
     for (u32 index = start; index < limit; index += 1)
     {
         CToken token = preprocess.tokens[index];
+        if (!c_punctuator_in_set(token.punctuator, stops))
+            continue;
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
             parentheses += 1;
         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
@@ -12128,6 +12135,30 @@ BUSTER_C_INTERNAL bool c_parse_initializer_string_element_compatible(CPreprocess
 BUSTER_C_INTERNAL bool c_parse_initializer_expression_constraint(CTypeParseMachine* machine, CParseResult* result,
     CPreprocessResult preprocess, CScopeId scope, CTypeId destination, u32 start, u32 end, CParseInitializerDiagnostic* diagnostic);
 
+// The `}` that closes the brace at open, or end. The unit's pair table answers
+// when its delimiters nest, as c_parse_type_delimiter_close does for tag
+// bodies; otherwise the brace-only scan keeps its clipped answer. Reference
+// builds run the scan behind every table answer.
+BUSTER_C_INTERNAL u32 c_parse_initializer_brace_close(CParseResult* result, CPreprocessResult preprocess, u32 open, u32 end)
+{
+    c_parse_position_index_ensure(result, preprocess);
+    CTokenPositionIndex const* positions = result->position_index;
+    u32 close;
+    if (positions && positions->built && !positions->delimiter_mismatch_count)
+    {
+        close = open < preprocess.token_count ? positions->matching_delimiters_plus_one[open] - 1 : UINT32_MAX;
+        close = close < end ? close : end;
+#if BUSTER_REFERENCE_CHECKS
+        BUSTER_CHECK(close == c_parse_matching_delimiter(preprocess, open, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE));
+#endif
+    }
+    else
+    {
+        close = c_parse_matching_delimiter(preprocess, open, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+    }
+    return close;
+}
+
 BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMachine* machine, Arena* result_arena, Arena* temporary_arena,
                                                                     CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
                                                                     CTypeId element_type, u32 start, u32 end, u64* count_out,
@@ -12152,7 +12183,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
     }
     if (end <= start + 1 || !c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE) ||
         !c_token_is_punctuator(&preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE) ||
-        c_parse_matching_delimiter(preprocess, start, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) != end - 1)
+        c_parse_initializer_brace_close(result, preprocess, start, end) != end - 1)
     {
         return false;
     }
@@ -12336,14 +12367,14 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
         }
         CType* value_type = result->types + designator.value_type.value;
         bool aggregate = value_type->kind == C_TYPE_ARRAY || value_type->kind == C_TYPE_VECTOR || value_type->kind == C_TYPE_STRUCT || value_type->kind == C_TYPE_UNION;
-        u32 value_end = c_parse_initializer_value_end(preprocess, designator.value_start, frame->limit);
-        if (value_end <= designator.value_start)
-        {
-            return false;
-        }
+        // A braced aggregate element ends at its `}`; its end scan could only
+        // refuse a value that starts at a comma, which `{` is not (#3102).
         if (aggregate && c_token_is_punctuator(&preprocess.tokens[designator.value_start], C_PUNCTUATOR_LEFT_BRACE))
         {
-            u32 close = c_parse_matching_delimiter(preprocess, designator.value_start, frame->limit, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+#if BUSTER_REFERENCE_CHECKS
+            BUSTER_CHECK(c_parse_initializer_value_end(preprocess, designator.value_start, frame->limit) > designator.value_start);
+#endif
+            u32 close = c_parse_initializer_brace_close(result, preprocess, designator.value_start, frame->limit);
             if (close >= frame->limit || frame_count >= capacity)
             {
                 return false;
@@ -12370,6 +12401,11 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
                 .limit = close,
             };
             continue;
+        }
+        u32 value_end = c_parse_initializer_value_end(preprocess, designator.value_start, frame->limit);
+        if (value_end <= designator.value_start)
+        {
+            return false;
         }
         // Only an aggregate subobject asks whether its value is a string.
         bool string_value = aggregate && c_ir_tokens_are_string_literals(preprocess, designator.value_start, value_end);
