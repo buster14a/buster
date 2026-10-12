@@ -942,6 +942,31 @@ source and encoder paths did for this snapshot; they do not supply an
 independent architectural oracle for every form. The broader #2931 issue
 remains open for unrelated encoding defects and further proof.
 
+X86 source forms also include baseline `pause`, `prefetcht0`/`prefetcht1`/
+`prefetcht2`/`prefetchnta`, `clflush`, and 32/64-bit `movnti` stores. PAUSE is
+an unconditional REP-NOP hint; prefetch and cache-flush rows map to the existing
+SSE/SSE2 baseline. ADX and PCLMUL metadata aliases use `adx` and `pclmul`.
+`rdtscp` is independently enableable with `-mattr=+rdtscp` or `-mrdtscp`, is
+included by modern AMD/Intel model profiles, and is detected from extended
+CPUID EDX bit 27 for `-march=native`. Its absence is a named feature refusal.
+
+AT&T `cvtsi2sd{l,q}`, `cvtsi2ss{l,q}` and `crc32{b,w,l,q}` suffixes describe
+the integer source, independently of the XMM/CRC accumulator width. CRC32 word
+sources use the 66 prefix with a 32-bit accumulator; qword sources require a
+64-bit accumulator. Register-controlled `bextr` selects BMI1's VEX form; an
+immediate control still selects the separately gated TBM XOP form. `-mbmi`
+and `-mattr=+bmi` alias `bmi1`. `kmovw` accepts mask/GPR32 and mask/memory16
+transfers, and `vpcompressd` accepts a masked memory destination with a dword
+element, including AT&T `(%rax){%k2}`. Zeroing a memory destination is refused.
+
+`assembly_test_x86_common_source_forms` checks GNU as 2.47 bytes in both
+dialects, public assembly units, baseline feature refusals, Zen 4/Skylake
+AVX-512 profiles and malformed neighbours. The driver's
+`compiler_driver_test_pause_conversion_round_trip` reassembles FAST/QUALITY
+Buster listings with byte-identical text and captured pristine GCC 16.2.1
+`-O2 -S` scalar conversions. These bounded witnesses do not claim every
+metadata form or arbitrary external listing is source-complete (#2931).
+
 On Mach-O, `.section SEGMENT,SECTION[,TYPE[,ATTRIBUTES]]` and
 `.pushsection` accept the pairs Buster's listing writer represents:
 `__TEXT,__text,regular,pure_instructions`, `__TEXT,__const`,
