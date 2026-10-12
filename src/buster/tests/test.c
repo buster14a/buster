@@ -55,6 +55,7 @@
 
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/frontend/c/c.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/aarch64_exact_bridge.h>
 #include <buster/lib/compiler/assembly/aarch64_control_semantics.h>
@@ -416,7 +417,7 @@ BUSTER_GLOBAL_LOCAL Arena* test_arena_observed(ThreadContext* context, Arena* ar
 TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* arena, String8 name, bool module)
 {
     TestArenaScope result = {.name = name, .index = module ? 0 : arguments->memory_fixture_index++, .module = module,
-                            .timing = arguments->fixture_timing_report};
+                            .timing = arguments->fixture_timing_report, .preprocess_mark = c_test_preprocess_unit_mark()};
     ThreadContext* context = thread_context_selected();
     if (arguments->memory_report)
     {
@@ -497,6 +498,9 @@ void buster_test_arena_end(UnitTestArguments* arguments, TestArenaScope scope, b
     }
     if (rewind)
     {
+        // Nothing reads a unit the scope preprocessed once the scope closes:
+        // its result lived in the rewound arena or a scratch the scope ended.
+        c_test_release_preprocess_arenas_since(scope.preprocess_mark);
         arena_set_position(scope.marks[0].arena, scope.marks[0].start);
     }
     for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(scope.marks); slot += 1)

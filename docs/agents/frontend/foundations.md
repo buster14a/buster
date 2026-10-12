@@ -1814,7 +1814,13 @@ A direct, unqualified enum definition immediately following `(` in a
 function-body expression is published by that same lexical walk, including
 expression statements, return operands, casts and block static assertions.
 Its constants belong to the current block and become visible at their own
-declaration points; the enum braces do not create a child block. Ordinary
+declaration points; the enum braces do not create a child block. The walk
+recognizes the definition with `c_parse_type_definition_at`, so an enum with a
+fixed underlying type (`enum : char { ... }`) is published there too, and a
+later operand of the same full expression reads it (C11 6.2.1p7, #3895):
+`if (sizeof(enum : char { Q = 2 }) != 1 || Q != 2)`. A controlling expression
+holding such a definition opens the statement scope through
+`c_parse_controlling_expression_defines_tag` like any other. Ordinary
 enum declarations still take the local-declaration path so their declarators
 are retained. Publication skips an already published member and diagnoses a
 same-scope ordinary-name collision instead of appending a second entity.
