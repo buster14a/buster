@@ -45,9 +45,9 @@ Python/venv, coreutils, the independent `x86_64-linux-gnu-gcc` guest compiler,
 socat for I/O command tests, xorriso/xorrisofs for CD-ROM fixtures,
 and the development files for GLib, pixman and zlib. Upstream
 Python scripts are used unchanged; the Buster harness adds no Python.
-The workflow records package versions, compiler identities and test-tool hashes/notices.
+The retained historical census records package versions, compiler identities and test-tool hashes/notices.
 Missing socat or xorrisofs produces upstream skips of applicable tests; the hosted
-cell provisions both before either variant runs. Architecture-inapplicable tests,
+cell provisioned both before either variant ran. Architecture-inapplicable tests,
 disabled optional crypto backends and unavailable host kernel facilities retain
 their actual upstream skip reasons. QEMU's bundled
 Meson wheel is its normal offline bootstrap when the installed Meson is too old;
@@ -63,8 +63,8 @@ Checkout these dependencies at the revisions already named in QEMU's wrap files:
 | `subprojects/berkeley-softfloat-3` | `b64af41c3276f97f0e181920400ee056b9c88037` | BSD-3-Clause |
 | `subprojects/berkeley-testfloat-3` | `e7af9751d9f9fd3b47911f51a5cfd08af256a9ab` | BSD-3-Clause |
 
-No source is vendored into Buster. The hosted workflow checks out the unchanged
-GitHub mirrors. Because Meson does not apply wrap packagefiles to an already fetched directory,
+No source is vendored into Buster. The historical hosted census checked out the
+unchanged GitHub mirrors. Because Meson does not apply wrap packagefiles to an already fetched directory,
 the native action copies QEMU's unchanged `meson.build` and `meson_options.txt`
 into the two Berkeley projects after pristine input admission. These are the
 upstream wrap's build descriptions, not C source patches. Commands are retained;
@@ -82,7 +82,12 @@ With the trusted Release compiler built, run on authorized cloud infrastructure:
 
 The action refuses a wrong pin, tracked edits, extra untracked/ignored input,
 hidden index flags and sparse checkout. Immutable Git probes disable replacement
-objects and compare the index to the immutable HEAD tree. A native control
+objects and compare the index to the immutable HEAD tree. Raw no-filter blob
+hashes independently compare regular-file checkout bytes to that index, in
+bounded batches. File type and executable mode are checked without following
+links; symlink targets are compared to their immutable blob. Native controls
+reject equal-size/restored-mtime edits even when Git's stat cache reports clean,
+as well as executable-mode and regular-file/symlink substitutions. A native control
 creates a replacement ref with a clean-looking altered checkout and requires
 rejection before any compiler runs. Each dependency is verified separately;
 the three known dependency directories are the only root ignored-directory
@@ -113,12 +118,20 @@ Timeouts/truncation remain failures. Do not raise these budgets without measurin
 the reason. The summary reports stage outcomes; detailed upstream test
 denominators, individual skips and failures remain in the upstream test logs.
 
-The [dedicated workflow](../../../.github/workflows/qemu-compatibility.yml)
-runs only on explicit pushes to `codex/3185-qemu-tcg-census` or manual dispatch.
-It does not add the emulator campaign to ordinary PR, merge-group or main CI.
-Each run retains refusal controls, self-host results, commands, stdout/stderr,
-child statuses, configure/Meson logs and test inventories. It uploads diagnostic
-text, not upstream emulator binaries or firmware.
+Ordinary external-project execution belongs exclusively to the main-push OS
+jobs in [external-project CI](../../external-project-ci.md). The earlier
+branch/manual QEMU workflow is removed under #3501. This census is not yet
+assigned to the shared owner: its source/dependency/firmware intake and full
+candidate qualification remain incomplete under #3185. Add a pinned recipe
+and assignment to the shared Linux job when ready; do not restore a per-project
+workflow or dispatch route. The native refusal self-test uses only synthetic
+Git fixtures and runs in the existing TCC bootstrap job.
+
+Historical run [38137123079](https://github.com/buster14a/buster/actions/runs/38137123079)
+at `0abe1ac3216de3dd3bbdbc8111ae6d614f87dc83` retains the independent reference
+census and genuine candidate configure failure. It does not validate newer
+source. Diagnostic retention includes commands, stdout/stderr, child statuses,
+configure/Meson logs and test inventories; no emulator or firmware binaries.
 
 ## License intake and unqualified gates
 

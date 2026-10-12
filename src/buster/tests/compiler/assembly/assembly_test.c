@@ -389,8 +389,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_legacy_layout(UnitTestArguments
     UnitTestResult result = {0};
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
     target.cpu_features_explicit = true;
-    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
-        TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2}, 3);
+    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE,
+        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2}, 4);
 
     // Independent GNU as 2.47 / Clang 22.1.8 oracle: docs/x86-64-source-legacy-oracle.s.
     u8 const expected[] = {
@@ -533,9 +533,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_evex_layout(UnitTestArguments* 
     UnitTestResult result = {0};
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
     target.cpu_features_explicit = true;
-    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
-        TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F,
-        TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW, TARGET_CPU_FEATURE_X86_AVX512DQ}, 7);
+    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE,
+        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2,
+        TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW,
+        TARGET_CPU_FEATURE_X86_AVX512DQ}, 8);
 
     // Independent GNU as 2.47 / Clang 22.1.8 oracle: docs/x86-64-source-evex-oracle.s.
     u8 const expected[] = {
@@ -638,8 +639,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_apx_layout(UnitTestArguments* a
     UnitTestResult result = {0};
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
     target.cpu_features_explicit = true;
-    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
-        TARGET_CPU_FEATURE_X86_APX, TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF}, 3);
+    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE,
+        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_APX, TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF}, 4);
 
     // Independent GNU as 2.47 / Clang 22.1.8 oracle: docs/x86-64-source-apx-oracle.s.
     u8 const expected[] = {
@@ -2569,6 +2570,45 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbol_interning(UnitTestA
     return result;
 }
 
+// Sections are bounded by the statement count, not a fixed table: 100
+// sections each take a `.` relocation against their own private base symbol,
+// a second `.` in the same section reuses it, and returning to an earlier
+// section by name selects the same section.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_many_sections(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    u32 section_count = 100;
+    u64 capacity = 64 + (u64)section_count * 64;
+    char8* text = arena_allocate(arguments->arena, char8, capacity);
+    u64 length = 0;
+    for (u32 index = 0; index < section_count; index += 1)
+    {
+        String8 line = string_format(arguments->arena, S8(".section .rodata.s{u32},\"a\"\n.quad .\n.quad .\n"), index);
+        memcpy(text + length, line.pointer, line.length);
+        length += line.length;
+    }
+    String8 tail = S8(".section .rodata.s0,\"a\"\n.byte 1\n");
+    memcpy(text + length, tail.pointer, tail.length);
+    length += tail.length;
+    AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, (String8){.pointer = text, .length = length}, (AssemblyEncodeOptions){.target = target});
+    BUSTER_TEST(arguments, unit.diagnostic_count == 0 && unit.section_count == section_count && unit.symbol_count == section_count &&
+                               unit.relocation_count == section_count * 2);
+    if (!unit.diagnostic_count && unit.section_count == section_count && unit.symbol_count == section_count && unit.relocation_count == section_count * 2)
+    {
+        BUSTER_TEST(arguments, unit.sections[0].data.length == 17 && unit.sections[1].data.length == 16);
+        for (u32 index = 0; index < unit.relocation_count; index += 1)
+        {
+            AssemblyUnitRelocation relocation = unit.relocations[index];
+            u32 section = index / 2;
+            BUSTER_TEST(arguments, relocation.section == section && relocation.offset == (index % 2) * 8 && relocation.addend == (s64)((index % 2) * 8) &&
+                                   relocation.symbol < unit.symbol_count && unit.symbols[relocation.symbol].section == section &&
+                                   string_equal(unit.symbols[relocation.symbol].name, unit.sections[section].name));
+        }
+    }
+    return result;
+}
+
 // Independently specified relocation algebra: GNU as and llvm-mc produce
 // PC32/PREL32 with addend 5 at offset 8, PC64/PREL64 with addend -7 at 16,
 // and section-base absolute addresses for each separate `.` field. The
@@ -2708,6 +2748,119 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbol_binding(UnitTestArg
     return result;
 }
 
+// #3593: emitted Darwin section metadata and TLVP source forms, with
+// format/instruction refusals before an object can be published.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_macho_listing_forms(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_IOS},
+    };
+    static const struct
+    {
+        String8 directive;
+        AssemblyUnitSectionKind kind;
+    } sections[] = {
+        {S8_INITIALIZER("__TEXT,__text,regular,pure_instructions"), ASSEMBLY_UNIT_SECTION_TEXT},
+        {S8_INITIALIZER("__TEXT,__const"), ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA},
+        {S8_INITIALIZER("__DATA,__data"), ASSEMBLY_UNIT_SECTION_DATA},
+        {S8_INITIALIZER("__DATA,__bss,zerofill"), ASSEMBLY_UNIT_SECTION_ZERO},
+        {S8_INITIALIZER("__DATA,__thread_data"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA},
+        {S8_INITIALIZER("__DATA,__thread_bss"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO},
+        {S8_INITIALIZER("__DATA,__mod_init_func,mod_init_funcs"), ASSEMBLY_UNIT_SECTION_INIT_ARRAY},
+        {S8_INITIALIZER("__DATA,__mod_term_func,mod_term_funcs"), ASSEMBLY_UNIT_SECTION_FINI_ARRAY},
+        {S8_INITIALIZER("__TEXT,__eh_frame,coalesced,no_toc+strip_static_syms+live_support"), ASSEMBLY_UNIT_SECTION_UNWIND},
+        {S8_INITIALIZER("__DWARF,__debug_info,regular,debug"), ASSEMBLY_UNIT_SECTION_DEBUG_INFO},
+        {S8_INITIALIZER("__DWARF,__debug_str_offs"), ASSEMBLY_UNIT_SECTION_DEBUG_STR_OFFSETS},
+    };
+    String8 invalid[] = {
+        S8(".section __TEXT,__unknown,regular\n"),
+        S8(".section __DATA,__text,regular,pure_instructions\n"),
+        S8(".section __TEXT,__text,zerofill\n"),
+        S8(".pushsection __TEXT,__text,regular,no_dead_strip\n"),
+        S8(".section __TEXT,__text,regular,pure_instructions,4\n"),
+        S8(".section __DWARF,__debug_unknown\n"),
+        S8(".text\nadd x0, x0, _tv@TLVPPAGEOFF\n"),
+        S8(".text\nldr w0, [x0, _tv@TLVPPAGEOFF]\n"),
+        S8(".text\nstr x0, [x0, _tv@TLVPPAGEOFF]\n"),
+        S8(".text\nldr q0, [x0, _tv@TLVPPAGEOFF]\n"),
+        S8(".text\nldr x0, [x0, _tv@TLVPPAGEOFF]!\n"),
+        S8(".text\nadrp x0, _tv@TLVPPAGEOFF\n"),
+        S8(".text\nldr x0, [x0, _tv@TLVPPAGE]\n"),
+        S8(".text\nadrp x0, 3@TLVPPAGE\n"),
+        S8(".text\nadrp x0, _tv@TLVPPAGE+8\n"),
+        S8(".text\nadrp x0, _tv@TLVPPAGE-8\n"),
+        S8(".text\nldr x0, [x0, _tv@TLVPPAGEOFF+8]\n"),
+        S8(".text\nldr x0, [x0, _tv@TLVPPAGEOFF-8]\n"),
+        S8(".text\nadrp x0, _ext@GOTPAGE+8\n"),
+        S8(".text\nldr x0, [x0, _ext@GOTPAGEOFF-8]\n"),
+        S8(".text\nadd x0, x0, _ext@GOTPAGEOFF\n"),
+        S8(".text\nldr w0, [x0, _ext@GOTPAGEOFF]\n"),
+        S8(".text\nstr x0, [x0, _ext@GOTPAGEOFF]\n"),
+        S8(".text\nldr xzr, [x0, _ext@GOTPAGEOFF]\n"),
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sections); index += 1)
+        {
+            String8 source = string_format(arguments->arena, S8(".section {S8}\n.zero 8\n"), sections[index].directive);
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST_RAW(arguments, unit.diagnostic_count == 0 && unit.section_count == 1, source);
+            if (!unit.diagnostic_count && unit.section_count == 1)
+            {
+                BUSTER_TEST(arguments, unit.sections[0].kind == sections[index].kind);
+            }
+        }
+        String8 source = S8(".section __TEXT,__text,regular,pure_instructions\n.globl _f\n_f:\n"
+                            "adrp x0, _tv@TLVPPAGE\nldr x0, [x0, _tv@TLVPPAGEOFF]\n"
+                            "adrp x1, _etv@TLVPPAGE\nldr x1, [x1, _etv@TLVPPAGEOFF]\n"
+                            "adrp x2, _ext@GOTPAGE\nldr x2, [x2, _ext@GOTPAGEOFF]\nret\n");
+        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = targets[target]});
+        BUSTER_TEST(arguments, !unit.diagnostic_count && unit.relocation_count == 6 && unit.section_count == 1);
+        if (!unit.diagnostic_count && unit.relocation_count == 6 && unit.section_count == 1)
+        {
+            u32 words[] = {UINT32_C(0x90000000), UINT32_C(0xf9400000), UINT32_C(0x90000001), UINT32_C(0xf9400021), UINT32_C(0x90000002), UINT32_C(0xf9400042), UINT32_C(0xd65f03c0)};
+            BUSTER_TEST(arguments, unit.sections[0].data.length == sizeof(words) && !memcmp(unit.sections[0].data.pointer, words, sizeof(words)));
+            for (u32 index = 0; index < 6; index += 1)
+            {
+                AssemblyUnitRelocation relocation = unit.relocations[index];
+                AssemblyRelocationKind kind = index < 4
+                    ? (index & 1 ? ASSEMBLY_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 : ASSEMBLY_RELOCATION_AARCH64_MACH_TLVP_PAGE21)
+                    : (index & 1 ? ASSEMBLY_RELOCATION_AARCH64_MACH_GOT_PAGEOFF12 : ASSEMBLY_RELOCATION_AARCH64_MACH_GOT_PAGE21);
+                BUSTER_TEST(arguments, relocation.kind == kind &&
+                    relocation.offset == 4 * index && relocation.addend == 0 && relocation.symbol < unit.symbol_count &&
+                    string_equal(unit.symbols[relocation.symbol].name, index < 2 ? S8("_tv") : index < 4 ? S8("_etv") : S8("_ext")));
+            }
+        }
+        AssemblyUnitResult reopened = assembly_unit_encode(arguments->arena,
+            S8(".text\nret\n.pushsection __DATA,__data\n.quad 0\n.popsection\n"
+               ".section __TEXT,__text,regular,pure_instructions\nret\n"),
+            (AssemblyEncodeOptions){.target = targets[target]});
+        BUSTER_TEST(arguments, !reopened.diagnostic_count && reopened.section_count == 2 && reopened.sections[0].data.length == 8);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+        {
+            AssemblyUnitResult rejected = assembly_unit_encode(arguments->arena, invalid[index], (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST_RAW(arguments, rejected.diagnostic_count != 0, invalid[index]);
+            if (rejected.diagnostic_count)
+            {
+                BUSTER_TEST(arguments, rejected.diagnostics[0].line == (index < 6 ? 1u : 2u) && rejected.diagnostics[0].message.length != 0);
+            }
+        }
+    }
+    Target non_mach[] = {
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WINDOWS},
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(non_mach); target += 1)
+    {
+        AssemblyUnitResult rejected = assembly_unit_encode(arguments->arena, S8(".text\nadrp x0, _tv@TLVPPAGE\n"),
+            (AssemblyEncodeOptions){.target = non_mach[target]});
+        BUSTER_TEST(arguments, rejected.diagnostic_count != 0);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_bare_sections(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2735,6 +2888,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_bare_sections(UnitTestArgu
         {S8_INITIALIZER(".fini_array"), ASSEMBLY_UNIT_SECTION_FINI_ARRAY},
         {S8_INITIALIZER(".tdata"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA},
         {S8_INITIALIZER(".tbss"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO},
+        {S8_INITIALIZER(".tls$"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA},
         {S8_INITIALIZER(".debug_info"), ASSEMBLY_UNIT_SECTION_DEBUG_INFO},
         {S8_INITIALIZER(".debug_abbrev"), ASSEMBLY_UNIT_SECTION_DEBUG_ABBREV},
         {S8_INITIALIZER(".debug_line"), ASSEMBLY_UNIT_SECTION_DEBUG_LINE},
@@ -2766,7 +2920,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_bare_sections(UnitTestArgu
         String8 rejected[] = {
             S8(".section .textual_rodata\n"), S8(".section .initdata\n"), S8(".section .datafile\n"),
             S8(".section .rodatafile\n"), S8(".section .bssfile\n"), S8(".section .init_arrayx\n"),
-            S8(".section .fini_arrays\n"), S8(".section .debug_info_extra\n"), S8(".section .tdatax\n"), S8(".section .mysec\n"),
+            S8(".section .fini_arrays\n"), S8(".section .debug_info_extra\n"), S8(".section .tdatax\n"), S8(".section .tls$x\n"), S8(".section .mysec\n"),
         };
         for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rejected); row += 1)
         {
@@ -3001,6 +3155,113 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_alignment(UnitTestArgument
     return result;
 }
 
+typedef struct AssemblyTestUnitStatementMeasurement AssemblyTestUnitStatementMeasurement;
+struct AssemblyTestUnitStatementMeasurement
+{
+    u64 arena_growth;
+    u64 section_byte_length;
+    u32 relocation_count;
+    u32 symbol_count;
+    u32 diagnostic_count;
+    bool arena_created;
+    bool arena_destroyed;
+};
+
+BUSTER_GLOBAL_LOCAL AssemblyTestUnitStatementMeasurement assembly_test_unit_statement_measure(
+    Arena* source_arena, u32 statement_count, bool calls, bool blank_lines)
+{
+    AssemblyTestUnitStatementMeasurement measurement = {0};
+    u64 source_capacity = 6 + (u64)statement_count * 16;
+    char8* source_pointer = arena_allocate(source_arena, char8, source_capacity);
+    memcpy(source_pointer, ".text\n", 6);
+    u64 source_length = 6;
+    for (u32 index = 0; index < statement_count; index += 1)
+    {
+        if (blank_lines)
+        {
+            source_pointer[source_length++] = '\n';
+        }
+        else if (calls)
+        {
+            static char8 const prefix[] = "call ext_";
+            memcpy(source_pointer + source_length, prefix, sizeof(prefix) - 1);
+            source_length += sizeof(prefix) - 1;
+            char8 digits[10];
+            u32 digit_count = 0;
+            u32 value = index;
+            do
+            {
+                digits[digit_count++] = (char8)('0' + value % 10);
+                value /= 10;
+            } while (value);
+            while (digit_count)
+            {
+                source_pointer[source_length++] = digits[--digit_count];
+            }
+            source_pointer[source_length++] = '\n';
+        }
+        else
+        {
+            memcpy(source_pointer + source_length, "nop\n", 4);
+            source_length += 4;
+        }
+    }
+    Arena* arena = arena_create((ArenaCreation){
+        .reserved_size = BUSTER_MB(32),
+        .initial_size = BUSTER_MB(1),
+        .flags = {.no_pool = true},
+    });
+    if (arena)
+    {
+        measurement.arena_created = true;
+        u64 start = arena->position;
+        AssemblyUnitResult unit = assembly_unit_encode(
+            arena, (String8){.pointer = source_pointer, .length = source_length},
+            (AssemblyEncodeOptions){.target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE,
+                                               .os = OPERATING_SYSTEM_LINUX}});
+        measurement.arena_growth = arena->position - start;
+        measurement.section_byte_length = unit.section_count ? unit.sections[0].data.length : 0;
+        measurement.relocation_count = unit.relocation_count;
+        measurement.symbol_count = unit.symbol_count;
+        measurement.diagnostic_count = unit.diagnostic_count;
+        measurement.arena_destroyed = arena_destroy(arena, 1);
+    }
+    return measurement;
+}
+
+// Guards #1919: per-statement assembly_encode results live in scratch; only bytes,
+// new symbol names, and the first diagnostic are retained.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_statement_retention(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { ASSEMBLY_TEST_UNIT_STATEMENT_COUNT = 4096 };
+    AssemblyTestUnitStatementMeasurement blank =
+        assembly_test_unit_statement_measure(arguments->arena, ASSEMBLY_TEST_UNIT_STATEMENT_COUNT, false, true);
+    AssemblyTestUnitStatementMeasurement nop =
+        assembly_test_unit_statement_measure(arguments->arena, ASSEMBLY_TEST_UNIT_STATEMENT_COUNT, false, false);
+    AssemblyTestUnitStatementMeasurement call =
+        assembly_test_unit_statement_measure(arguments->arena, ASSEMBLY_TEST_UNIT_STATEMENT_COUNT, true, false);
+    BUSTER_TEST(arguments, blank.arena_created && blank.arena_destroyed && nop.arena_created && nop.arena_destroyed &&
+                               call.arena_created && call.arena_destroyed);
+    BUSTER_TEST(arguments, blank.diagnostic_count == 0 && blank.section_byte_length == 0 &&
+                               nop.diagnostic_count == 0 && nop.section_byte_length == ASSEMBLY_TEST_UNIT_STATEMENT_COUNT &&
+                               nop.relocation_count == 0);
+    BUSTER_TEST(arguments, call.diagnostic_count == 0 &&
+                               call.section_byte_length == (u64)ASSEMBLY_TEST_UNIT_STATEMENT_COUNT * 5 &&
+                               call.relocation_count == ASSEMBLY_TEST_UNIT_STATEMENT_COUNT &&
+                               call.symbol_count == ASSEMBLY_TEST_UNIT_STATEMENT_COUNT);
+    bool growth_exceeds_blank = nop.arena_growth >= blank.arena_growth && call.arena_growth >= blank.arena_growth;
+    BUSTER_TEST(arguments, growth_exceeds_blank);
+    if (growth_exceeds_blank)
+    {
+        u64 nop_per_statement = (nop.arena_growth - blank.arena_growth) / ASSEMBLY_TEST_UNIT_STATEMENT_COUNT;
+        u64 call_per_statement = (call.arena_growth - blank.arena_growth) / ASSEMBLY_TEST_UNIT_STATEMENT_COUNT;
+        BUSTER_TEST(arguments, nop_per_statement <= 32);
+        BUSTER_TEST(arguments, call_per_statement <= 64);
+    }
+    return result;
+}
+
 // Data directives follow the target: AArch64 `.align N` is 2^N and `.word`
 // is 32 bits. Bytes, offsets and alignment are llvm-mc 18.1.3 output (GNU as
 // 2.42 agrees on x86-64); out-of-range constants are refused, as llvm-mc does.
@@ -3115,6 +3376,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_att_port_suffixes(UnitTestArgum
         {{S8("in eax,255\n"), S8("inl $255,%eax\n")}, 2, {0xe5, 0xff}},
         {{S8("out 255,eax\n"), S8("outl %eax,$255\n")}, 2, {0xe7, 0xff}},
         {{S8("OUT DX,AL\n"), S8("OUTB %al,%dx\n")}, 1, {0xee}},
+        // GNU objdump prints the port as `(%dx)` and GNU as accepts it.
+        {{S8("in al,dx\n"), S8("in (%dx),%al\n")}, 1, {0xec}},
+        {{S8("out dx,al\n"), S8("out %al,(%dx)\n")}, 1, {0xee}},
+        {{S8("in al,dx\n"), S8("inb (%dx),%al\n")}, 1, {0xec}},
+        {{S8("out dx,al\n"), S8("outb %al,(%dx)\n")}, 1, {0xee}},
+        {{S8("in ax,dx\n"), S8("inw (%dx),%ax\n")}, 2, {0x66, 0xed}},
+        {{S8("out dx,ax\n"), S8("outw %ax,(%dx)\n")}, 2, {0x66, 0xef}},
+        {{S8("in eax,dx\n"), S8("in ( %dx ),%eax\n")}, 1, {0xed}},
+        {{S8("out dx,eax\n"), S8("outl %eax,(%dx)\n")}, 1, {0xef}},
     };
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX, .cpu_model = CPU_MODEL_BASELINE};
     // Architectural fixed opcodes, including the 66 prefix for 16-bit data.
@@ -3149,6 +3419,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_att_port_suffixes(UnitTestArgum
         S8("inb (%rdx),%al\n"), S8("outb %al,(%rdx)\n"),
         S8("inb $256,%al\n"), S8("outb %al,$256\n"),
         S8("inq %dx,%rax\n"), S8("outq %rax,%dx\n"),
+        S8("in (%edx),%al\n"), S8("out %al,(%edx)\n"),
+        S8("in 0(%dx),%al\n"), S8("in %ds:(%dx),%al\n"),
+        S8("in (%dx,%dx),%al\n"), S8("in ((%dx)),%al\n"),
+        S8("inb (%dx),%ax\n"), S8("in (%dl),%al\n"),
+        S8("mov (%dx),%al\n"),
     };
     for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(invalid_sources); row += 1)
     {
@@ -3194,6 +3469,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_x64_breakpoint_and_fp_environme
         {{S8("ldmxcsr dword ptr [rdi+4]\n"), S8("ldmxcsr 4(%rdi)\n")}, 4, {0x0f, 0xae, 0x57, 0x04}},
         {{S8("stmxcsr dword ptr [rbp-4]\n"), S8("stmxcsr -4(%rbp)\n")}, 4, {0x0f, 0xae, 0x5d, 0xfc}},
         {{S8("ldmxcsr dword ptr [r10+rax*4+12]\n"), S8("ldmxcsr 12(%r10,%rax,4)\n")}, 6, {0x41, 0x0f, 0xae, 0x54, 0x82, 0x0c}},
+        // GNU as infers MXCSR's only m32 width for an unsized Intel operand.
+        {{S8("ldmxcsr [rax]\n"), S8("ldmxcsr (%rax)\n")}, 3, {0x0f, 0xae, 0x10}},
+        {{S8("stmxcsr [rax]\n"), S8("stmxcsr (%rax)\n")}, 3, {0x0f, 0xae, 0x18}},
+        {{S8("ldmxcsr [rdi+4]\n"), S8("ldmxcsr 4(%rdi)\n")}, 4, {0x0f, 0xae, 0x57, 0x04}},
+        {{S8("stmxcsr [rbp-4]\n"), S8("stmxcsr -4(%rbp)\n")}, 4, {0x0f, 0xae, 0x5d, 0xfc}},
+        {{S8("ldmxcsr [r10+rax*4+12]\n"), S8("ldmxcsr 12(%r10,%rax,4)\n")}, 6, {0x41, 0x0f, 0xae, 0x54, 0x82, 0x0c}},
     };
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX, .cpu_model = CPU_MODEL_BASELINE};
     for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
@@ -3229,6 +3510,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_x64_breakpoint_and_fp_environme
         AssemblyEncodeResult rejected = assembly_encode(arguments->arena, invalid_sources[row],
             (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
         BUSTER_TEST_RAW(arguments, rejected.diagnostic_count != 0 && !rejected.bytes.length, invalid_sources[row]);
+    }
+    // An explicit Intel width other than MXCSR's m32 stays rejected.
+    String8 invalid_intel_sources[] = {
+        S8("ldmxcsr qword ptr [rax]\n"), S8("stmxcsr word ptr [rax]\n"), S8("ldmxcsr byte ptr [rax]\n"),
+        S8("ldmxcsr eax\n"), S8("stmxcsr\n"),
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(invalid_intel_sources); row += 1)
+    {
+        AssemblyEncodeResult rejected = assembly_encode(arguments->arena, invalid_intel_sources[row],
+            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST_RAW(arguments, rejected.diagnostic_count != 0 && !rejected.bytes.length, invalid_intel_sources[row]);
     }
     return result;
 }
@@ -4151,7 +4443,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_statements(UnitTestArgumen
         AssemblyUnitResult labels = assembly_unit_encode(arguments->arena,
             S8(".text\n1: nop; loop 1b; jmp 1f; 1: nop; loop 1b; ret\n"),
             (AssemblyEncodeOptions){.target = target});
-        u8 const label_bytes[] = {0x90, 0xe2, 0xfd, 0xe9, 0, 0, 0, 0, 0x90, 0xe2, 0xfd, 0xc3};
+        u8 const label_bytes[] = {0x90, 0xe2, 0xfd, 0xeb, 0, 0x90, 0xe2, 0xfd, 0xc3};
         BUSTER_TEST(arguments, !labels.diagnostic_count && !labels.symbol_count && !labels.relocation_count &&
             labels.section_count == 1 && assembly_test_bytes_equal(labels.sections[0].data, label_bytes, sizeof(label_bytes)));
         AssemblyUnitResult diagnostic = assembly_unit_encode(arguments->arena, S8(".text\nnop; bogus\n"),
@@ -4719,15 +5011,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_current_address_branches(U
     String8 const x86_sources[] = {S8(".text\nnop\njmp .\nret\n"), S8(".text\nnop\ncall .\nret\n"),
                                    S8(".text\nnop\njmp .+5\nret\n")};
     u8 const x86_expected[][8] = {
-        {0x90, 0xe9, 0xfb, 0xff, 0xff, 0xff, 0xc3, 0},
+        {0x90, 0xeb, 0xfe, 0xc3, 0, 0, 0, 0},
         {0x90, 0xe8, 0xfb, 0xff, 0xff, 0xff, 0xc3, 0},
-        {0x90, 0xe9, 0x00, 0x00, 0x00, 0x00, 0xc3, 0},
+        {0x90, 0xeb, 0x03, 0xc3, 0, 0, 0, 0},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(x86_sources); index += 1)
     {
         AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, x86_sources[index], (AssemblyEncodeOptions){.target = x86_64});
         BUSTER_TEST_RAW(arguments, !unit.diagnostic_count && !unit.relocation_count && !unit.symbol_count && unit.section_count == 1 &&
-            assembly_test_bytes_equal(unit.sections[0].data, x86_expected[index], 7), x86_sources[index]);
+            assembly_test_bytes_equal(unit.sections[0].data, x86_expected[index], index == 1 ? 7 : 4), x86_sources[index]);
     }
     return result;
 }
@@ -4914,6 +5206,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbolic_page_relocations(
         {S8("add w1, w2, :lo12:object"), 0x11000041, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12, 0, S8("object")},
         {S8("ldr x1, [x0, #:lo12:object]"), 0xf9400001, ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12, 0, S8("object")},
         {S8("add x0, x0, :LO12:object"), 0x91000000, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12, 0, S8("object")},
+        // ELF GOT slot addressing (#3192): llvm-mc's words and kinds.
+        {S8("adrp x0, :got:sym"), 0x90000000, ASSEMBLY_RELOCATION_AARCH64_GOT_PAGE21, 0, S8("sym")},
+        {S8("ldr x0, [x0, :got_lo12:sym]"), 0xf9400000, ASSEMBLY_RELOCATION_AARCH64_GOT_LD64_LO12, 0, S8("sym")},
+        {S8("ldr x1, [x2, #:got_lo12:sym]"), 0xf9400041, ASSEMBLY_RELOCATION_AARCH64_GOT_LD64_LO12, 0, S8("sym")},
+        {S8("ldr x3, [x4, :GOT_LO12:sym]"), 0xf9400083, ASSEMBLY_RELOCATION_AARCH64_GOT_LD64_LO12, 0, S8("sym")},
     };
     String8 source = S8(".text\n");
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
@@ -4975,8 +5272,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbolic_page_relocations(
         S8("adrp x0, :lo12:sym"), S8("sub x0, x0, :lo12:sym"), S8("adds x0, x0, :lo12:sym"), S8("mov x0, :lo12:sym"),
         S8("add x0, x0, :lo12:sym, lsl #12"), S8("add x0, :lo12:sym, x0"), S8("ldr x0, [x1, :lo12:sym]!"), S8("ldr x0, [x1], :lo12:sym"),
         S8("ldur x0, [x1, :lo12:sym]"), S8("ldp x0, x1, [x2, :lo12:sym]"), S8("add x0, x0, :lo12:"),
-        S8("ldr x0, [x1, :got_lo12:sym]"), S8("adrp x0, :got:sym"), S8("add x0, x0, sym@PAGEOFF"), S8("adrp x0, sym@PAGE"),
+        S8("add x0, x0, sym@PAGEOFF"), S8("adrp x0, sym@PAGE"),
         S8("add x0, x0, :lo12:a, :lo12:b"), S8("ldr x0, [x1, :lo12:a+:lo12:b]"), S8("ldr x0, [:lo12:sym]"),
+        // GOT modifiers take a bare symbol on exactly their two instructions
+        // and carry no addend (#3192). llvm-mc accepts `d0`, `xzr` and the
+        // addend forms; the object relocation has no field for them, so the
+        // unit refuses them up front.
+        S8("adrp x0, :got:sym+8"), S8("adrp x0, :got:sym-8"), S8("ldr x0, [x1, :got_lo12:sym+8]"),
+        S8("ldr w0, [x1, :got_lo12:sym]"), S8("ldr d0, [x1, :got_lo12:sym]"), S8("ldr q0, [x1, :got_lo12:sym]"),
+        S8("ldrb w0, [x1, :got_lo12:sym]"), S8("str x0, [x1, :got_lo12:sym]"), S8("add x0, x0, :got_lo12:sym"),
+        S8("add x0, x0, :got:sym"), S8("ldr x0, [x1, :got:sym]"), S8("adrp x0, :got_lo12:sym"),
+        S8("ldr x0, [x1, :got_lo12:sym]!"), S8("ldr x0, [x1], :got_lo12:sym"), S8("ldr xzr, [x1, :got_lo12:sym]"),
+        S8("adrp x0, :got:5"), S8("ldr x0, [x1, :got_lo12:5]"), S8("ldr x0, [x1, :got_lo12:]"),
+        S8("ldur x0, [x1, :got_lo12:sym]"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
     {
@@ -4987,11 +5295,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbolic_page_relocations(
     String8 const macho_refused[] = {
         S8("add x0, x0, :lo12:sym"), S8("adrp x0, sym@PAGEOFF"), S8("add x0, x0, sym@PAGE"), S8("ldr x0, [x1, sym@PAGE]"),
         S8("sub x0, x0, sym@PAGEOFF"), S8("ldr x0, [x1, sym@PAGEOFF]!"),
+        S8("adrp x0, :got:sym"), S8("ldr x0, [x1, :got_lo12:sym]"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(macho_refused); index += 1)
     {
         String8 line = string_format(arguments->arena, S8(".text\n{S8}\n"), macho_refused[index]);
         AssemblyUnitResult unit_refused = assembly_unit_encode(arguments->arena, line, (AssemblyEncodeOptions){.target = macho});
+        BUSTER_TEST_RAW(arguments, unit_refused.diagnostic_count != 0, line);
+    }
+    String8 const coff_refused[] = {
+        S8("adrp x0, :got:sym"), S8("ldr x0, [x1, :got_lo12:sym]"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(coff_refused); index += 1)
+    {
+        String8 line = string_format(arguments->arena, S8(".text\n{S8}\n"), coff_refused[index]);
+        AssemblyUnitResult unit_refused = assembly_unit_encode(arguments->arena, line, (AssemblyEncodeOptions){.target = coff});
         BUSTER_TEST_RAW(arguments, unit_refused.diagnostic_count != 0, line);
     }
     return result;
@@ -5366,11 +5684,14 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_data_widths);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_quoted_instruction_symbols);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_bare_sections);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_macho_listing_forms);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_section_stack);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_section_flags_and_types);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_location_counter);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_interning);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_many_sections);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbol_binding);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_statement_retention);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_statements);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_control_labels);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_current_address_branches);
@@ -6122,9 +6443,10 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target ace_target = x86_target;
     ace_target.cpu_model = CPU_MODEL_BASELINE;
     ace_target.cpu_features_explicit = true;
-    ace_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
+    ace_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE,
+                                                                                         TARGET_CPU_FEATURE_X86_SSE2,
                                                                                          TARGET_CPU_FEATURE_X86_ACE_1},
-                                                              2);
+                                                              3);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(ace_target));
     AssemblyEncodeResult ace_intel = assembly_encode(arguments->arena, S8("bsrmovf zmm0, zmm0\n"),
                                                       (AssemblyEncodeOptions){.target = ace_target,
@@ -6217,9 +6539,10 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, ace_wrong_width.diagnostic_count == 1 &&
                                ace_wrong_width.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     Target amx_tile_only_target = ace_target;
-    amx_tile_only_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
+    amx_tile_only_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE,
+                                                                                                  TARGET_CPU_FEATURE_X86_SSE2,
                                                                                                   TARGET_CPU_FEATURE_X86_AMX_TILE},
-                                                                       2);
+                                                                       3);
     AssemblyEncodeResult ace_without_feature = assembly_encode(
         arguments->arena, S8("bsrmovf zmm0, zmm1\n"),
         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
@@ -6244,9 +6567,9 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     scalar_feature_target.cpu_model = CPU_MODEL_BASELINE;
     scalar_feature_target.cpu_features_explicit = true;
     scalar_feature_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_F16C,
-        TARGET_CPU_FEATURE_X86_FMA, TARGET_CPU_FEATURE_X86_SSE4_2, TARGET_CPU_FEATURE_X86_BMI2,
-        TARGET_CPU_FEATURE_X86_RDRAND}, 7);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX,
+        TARGET_CPU_FEATURE_X86_F16C, TARGET_CPU_FEATURE_X86_FMA, TARGET_CPU_FEATURE_X86_SSE4_2,
+        TARGET_CPU_FEATURE_X86_BMI2, TARGET_CPU_FEATURE_X86_RDRAND}, 8);
     AssemblyEncodeResult f16c_without_feature = assembly_encode(
         arguments->arena, S8("vcvtph2ps xmm0, xmm1\n"),
         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
@@ -6288,7 +6611,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     sha_target.cpu_model = CPU_MODEL_BASELINE;
     sha_target.cpu_features_explicit = true;
     sha_target.cpu_features = target_cpu_features_from_array(
-        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_SHA}, 2);
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_SHA}, 3);
     AssemblyEncodeResult sha1msg1_intel = assembly_encode(
         arguments->arena, S8("sha1msg1 xmm0, xmm1\n"),
         (AssemblyEncodeOptions){.target = sha_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
@@ -6336,7 +6659,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     legacy_xmm_target.cpu_model = CPU_MODEL_BASELINE;
     legacy_xmm_target.cpu_features_explicit = true;
     legacy_xmm_target.cpu_features = target_cpu_features_from_array(
-        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2}, 1);
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2}, 2);
     AssemblyEncodeResult legacy_xmm_movups_intel = assembly_encode(
         arguments->arena, S8("movups xmm15, xmmword ptr [r15+16]\n"),
         (AssemblyEncodeOptions){.target = legacy_xmm_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
@@ -6421,19 +6744,21 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target sse4a_target = x86_target;
     sse4a_target.cpu_model = CPU_MODEL_AMD_AMD_FAMILY_10;
     sse4a_target.cpu_features_explicit = true;
-    sse4a_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
+    sse4a_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE,
+                                                                                          TARGET_CPU_FEATURE_X86_SSE2,
                                                                                           TARGET_CPU_FEATURE_X86_SSE3,
                                                                                           TARGET_CPU_FEATURE_X86_SSE4A},
-                                                               3);
+                                                               4);
     Target virtualization_target = x86_target;
     virtualization_target.cpu_model = CPU_MODEL_BASELINE;
     virtualization_target.cpu_features_explicit = true;
     virtualization_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_SVM, TARGET_CPU_FEATURE_X86_VMX}, 3);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2,
+        TARGET_CPU_FEATURE_X86_SVM, TARGET_CPU_FEATURE_X86_VMX}, 4);
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("svm")) == TARGET_CPU_FEATURE_X86_SVM);
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_X86_64, S8("vmx")) == TARGET_CPU_FEATURE_X86_VMX);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(virtualization_target));
-    BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, virtualization_target), S8("sse2,svm,vmx"));
+    BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, virtualization_target), S8("sse,sse2,svm,vmx"));
     AssemblyEncodeResult x86 = assembly_encode(arguments->arena, S8("start:\n nop\n call external\n jmp start\n ret\n"),
                                                 (AssemblyEncodeOptions){
                                                     .target = x86_target,
@@ -6551,10 +6876,11 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target mask_target = x86_target;
     mask_target.cpu_features_explicit = true;
     mask_target.cpu_features = target_cpu_features_from_array(
-        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX,
-                                  TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512VL,
-                                  TARGET_CPU_FEATURE_X86_AVX512BW, TARGET_CPU_FEATURE_X86_AVX512DQ},
-        6);
+        (TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2,
+                                  TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX512F,
+                                  TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW,
+                                  TARGET_CPU_FEATURE_X86_AVX512DQ},
+        7);
     String8 mask_intel_source = S8("kmovw k1, k2\n"
                                    "kmovd k3, k4\n"
                                    "kmovq k5, k6\n"
@@ -7876,7 +8202,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target x86_sse3_target = x86_target;
     x86_sse3_target.cpu_features_explicit = true;
     x86_sse3_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_SSE3}, 2);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_SSE3}, 3);
     u8 expected_x86_x87_compare_integer[] = {
         0xd8, 0xd3, 0xd8, 0xdc, 0xd8, 0x10, 0x41, 0xdc, 0x19,
         0xde, 0xd9, 0xdd, 0xe5, 0xdd, 0xee, 0xda, 0xe9,
@@ -8127,7 +8453,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target x86_avx_target = x86_target;
     x86_avx_target.cpu_features_explicit = true;
     x86_avx_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX}, 2);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX}, 3);
     u8 expected_x86_avx[] = {
         0xc5, 0xfc, 0x28, 0xc1,
         0xc4, 0x01, 0x7c, 0x10, 0x44, 0x4c, 0x20,
@@ -8321,8 +8647,8 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     x86_bit_atomic_target.cpu_model = CPU_MODEL_BASELINE;
     x86_bit_atomic_target.cpu_features_explicit = true;
     x86_bit_atomic_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_POPCNT, TARGET_CPU_FEATURE_X86_LZCNT,
-        TARGET_CPU_FEATURE_X86_BMI1, TARGET_CPU_FEATURE_X86_CX16}, 5);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_POPCNT,
+        TARGET_CPU_FEATURE_X86_LZCNT, TARGET_CPU_FEATURE_X86_BMI1, TARGET_CPU_FEATURE_X86_CX16}, 6);
     u8 expected_x86_bit_atomic[] = {
         0x66, 0x0f, 0xbc, 0xc1,
         0x0f, 0xbd, 0xc2,
@@ -12522,11 +12848,11 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target advanced_target = x86_target;
     advanced_target.cpu_features_explicit = true;
     advanced_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX,
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX,
         TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512VL,
         TARGET_CPU_FEATURE_X86_AVX512BW, TARGET_CPU_FEATURE_X86_AVX512DQ,
         TARGET_CPU_FEATURE_X86_APX, TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF, TARGET_CPU_FEATURE_X86_AMX_TILE,
-        TARGET_CPU_FEATURE_X86_AMX_BF16, TARGET_CPU_FEATURE_X86_AMX_INT8}, 11);
+        TARGET_CPU_FEATURE_X86_AMX_BF16, TARGET_CPU_FEATURE_X86_AMX_INT8}, 12);
     AssemblyEncodeResult advanced_evex = assembly_encode(
         arguments->arena,
         S8("vaddps zmm0 {k1}{z}, zmm2, zmm3\n"
@@ -13811,7 +14137,8 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target avx10_1_target = x86_target;
     avx10_1_target.cpu_features_explicit = true;
     avx10_1_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX10_1}, 3);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2,
+        TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX10_1}, 4);
     AssemblyEncodeResult avx10_1 = assembly_encode(arguments->arena, S8("vmovdqa32 ymm0, ymm1\nvmovdqa32 zmm0, zmm1\n"),
                                                      (AssemblyEncodeOptions){.target = avx10_1_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
     u8 expected_avx10_1[] = {0x62, 0xf1, 0x7d, 0x28, 0x6f, 0xc1};
@@ -13828,8 +14155,9 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target avx10_aux_target = x86_target;
     avx10_aux_target.cpu_features_explicit = true;
     avx10_aux_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX10_2,
-        TARGET_CPU_FEATURE_X86_AVX10_V1_AUX, TARGET_CPU_FEATURE_X86_AVX10_512}, 5);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX,
+        TARGET_CPU_FEATURE_X86_AVX10_2, TARGET_CPU_FEATURE_X86_AVX10_V1_AUX,
+        TARGET_CPU_FEATURE_X86_AVX10_512}, 6);
     String8 avx10_aux_intel_source =
         S8("vcvtbf42hf8 xmm0, qword ptr [rax]\n"
            "vcvtbf42hf8 ymm0, xmmword ptr [rax]\n"
@@ -14111,8 +14439,8 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target avx10_vxor_target = x86_target;
     avx10_vxor_target.cpu_features_explicit = true;
     avx10_vxor_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX,
-        TARGET_CPU_FEATURE_X86_AVX10_1, TARGET_CPU_FEATURE_X86_AVX10_512}, 4);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2,
+        TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX10_1, TARGET_CPU_FEATURE_X86_AVX10_512}, 5);
     AssemblyEncodeResult avx10_vxor = assembly_encode(
         arguments->arena, S8("vxorps zmm0, zmm1, dword ptr [rax]{1to16}\n"),
         (AssemblyEncodeOptions){.target = avx10_vxor_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
@@ -14284,9 +14612,9 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     Target amd_target = x86_target;
     amd_target.cpu_features_explicit = true;
     amd_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_XOP,
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_XOP,
         TARGET_CPU_FEATURE_X86_FMA4, TARGET_CPU_FEATURE_X86_TBM, TARGET_CPU_FEATURE_X86_LWP,
-        TARGET_CPU_FEATURE_X86_3DNOW, TARGET_CPU_FEATURE_X86_3DNOWA}, 8);
+        TARGET_CPU_FEATURE_X86_3DNOW, TARGET_CPU_FEATURE_X86_3DNOWA}, 9);
     String8 amd_intel_source =
         S8("vfrczps xmm1, xmm2\n"
            "vfrczps xmm8, xmm9\n"
@@ -15852,7 +16180,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         public_invlpgb_target.cpu_model = CPU_MODEL_BASELINE;
         public_invlpgb_target.cpu_features_explicit = true;
         public_invlpgb_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-            TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_INVLPGB}, 2);
+            TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_INVLPGB}, 3);
         String8 public_invlpgb_intel_source = S8("invlpgb\naddr32 invlpgb\n");
         AssemblyEncodeResult public_invlpgb_intel = assembly_encode(
             arguments->arena, public_invlpgb_intel_source,
@@ -15917,7 +16245,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         public_monitor_target.cpu_model = CPU_MODEL_BASELINE;
         public_monitor_target.cpu_features_explicit = true;
         public_monitor_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-            TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_MONITOR}, 2);
+            TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_MONITOR}, 3);
         AssemblyEncodeResult public_monitor_intel = assembly_encode(
             arguments->arena, S8("monitor\naddr32 monitor\n"),
             (AssemblyEncodeOptions){.target = public_monitor_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
@@ -15962,7 +16290,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         public_wbnoinvd_target.cpu_model = CPU_MODEL_BASELINE;
         public_wbnoinvd_target.cpu_features_explicit = true;
         public_wbnoinvd_target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-            TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_WBNOINVD}, 2);
+            TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_WBNOINVD}, 3);
         AssemblyEncodeResult public_wbnoinvd = assembly_encode(
             arguments->arena, S8("wbnoinvd\n"),
             (AssemblyEncodeOptions){.target = public_wbnoinvd_target, .syntax = ASSEMBLY_SYNTAX_INTEL});

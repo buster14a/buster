@@ -174,7 +174,10 @@ harness leg, so its Linux comparison and census jobs no longer wait for a macOS
 runner. `throughput-harness-macos.yml` runs that leg weekly, on demand, and for
 ready pull requests that change an input in the textual include closure of
 `build.c` and `tools/throughput/{tests,shared}.c` (checked by
-`tools/github_ci_time_test.py`). `native-retirement-materializer.yml` merge
+`tools/github_ci_time_test.py`). Its informative `timing` job holds a macOS
+runner only on the weekly schedule and on dispatch, never for a pull request
+([native hosted timing](agents/benchmarking.md#native-hosted-timing)).
+`native-retirement-materializer.yml` merge
 groups keep only the Linux leg: the check is optional and gates nothing there.
 Pull requests that change the materializer, main pushes and manual runs still
 run macOS.

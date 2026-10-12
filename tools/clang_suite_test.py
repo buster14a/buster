@@ -3,7 +3,8 @@
 
 ClangSuiteTests checks the complete Git ledger independently and reserves the
 external checkout serially while applying reversible cleanliness/hash controls.
-DRIVER and CHECKOUT are required; IDE/CLANG enable the five-fixture smoke gates.
+DRIVER and CHECKOUT are required; IDE/CLANG enable the five-fixture smoke gates
+and the Driver slice controls (its reference run needs Clang 23.1.2).
 RESULTS retains evidence when supplied. This file does not build compilers.
 """
 
@@ -39,6 +40,17 @@ STRICT_CASES = {
     "macro-paste-empty": ("macro_paste_empty.c", "e9b50f0e8e87334e3d2276f786f03d603c6aebfe", 4),
 }
 CASE_NAMES = (*CASE_CHECKS, *STRICT_CASES)
+# name -> (Driver fixture, blob, ((Buster expectation, owning issue), ...) per RUN)
+DRIVER_CASES = {
+    "preprocess-multiple": ("preprocess-multiple.c", "9f87d3d74fd3d1dc438d98c2a4db9f24bf1780df", (("pass", 0),)),
+    "std-trigraph-override": ("std-trigraph-override.c", "e4b83ffcf823d9444d59e11a7cd5646bba9eded0", (("pass", 0), ("pass", 0))),
+    "nostdlibinc": ("nostdlibinc.c", "5b6fab6a870b0be5c68bc1510c83053abea90292", (("refusal", 3421),)),
+    "redundant-args": ("redundant-args.c", "7d00699c446dfb7e62148423f8c28dcd7d0f065e", (("refusal", 3421),)),
+    "working-directory-and-abs": ("working-directory-and-abs.c", "6738c776d40cf772a2bedd2fd0139238627b870b", (("pass", 0),)),
+    "print-target-triple": ("print-target-triple.c", "3b15f44d4d9c45107ee3719149e9558d08fcf59e", (("pass", 0),)),
+    "dumpmachine": ("dumpmachine.c", "41dda5590eb8297bbc40ac7f87f4ca6061e81a74", (("check-mismatch", 3421), ("check-mismatch", 3421), ("refusal", 3421))),
+    "mg": ("mg.c", "b7458a08698d311aa996d3229dc55e18975eef09", (("refusal", 2293),)),
+}
 
 
 class ClangSuiteTests(unittest.TestCase):
@@ -127,6 +139,7 @@ class ClangSuiteTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout.decode(errors="replace"))
         self.assertIn(b"CLANG_SUITE_SELF_TEST status=pass", result.stdout)
         self.assertRegex(result.stdout, rb"CLANG_SUITE_SMOKE_SELF_TEST cases=[1-9][0-9]* status=pass")
+        self.assertRegex(result.stdout, rb"CLANG_SUITE_DRIVER_SELF_TEST cases=[1-9][0-9]* status=pass")
 
     def test_complete_inventory_and_repeatability(self):
         independent = self.git_run("ls-tree", "-r", "-z", "--full-tree", UPSTREAM_COMMIT, "--", *SOURCE_ROOTS).stdout
@@ -400,6 +413,57 @@ stringified_empty_pair: STRINGIFY(VARIADIC_PAIR(A,));
         self.assertEqual(self.receipt(output)["status"], "fail")
         self.assert_clean_source()
 
+
+    def driver_receipt(self, output, case, run, compiler):
+        line = (output / f"{case}.run{run}.{compiler}.receipt").read_text(encoding="utf-8")
+        self.assertTrue(line.startswith("CLANG_SUITE_DRIVER_RUN version=1 ") and line.endswith("\n"))
+        return dict(field.split("=", 1) for field in line.split()[1:])
+
+    def test_driver_slice(self):
+        self.require_smoke()
+        version = subprocess.run([str(self.clang), "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30).stdout
+        if b"clang version 23.1.2" not in version:
+            self.skipTest("Driver reference unrun: BUSTER_CLANG_SUITE_CLANG is not Clang 23.1.2")
+        output = self.evidence / "driver-success"
+        result = self.invoke("--driver", self.checkout, output, self.ide, self.clang)
+        self.assertEqual(result.returncode, 0, result.stdout.decode(errors="replace"))
+        self.assertIn(b"selected_cases=8 selected_runs=11 attempted_runs=11 clang_passed=11 buster_passed=5 buster_expected_fail=6 "
+                      b"buster_unexpected_pass=0 buster_failed=0 status=pass", (output / "driver-summary.txt").read_bytes())
+        for case, (filename, blob, runs) in DRIVER_CASES.items():
+            source = (self.checkout / "clang/test/Driver" / filename).read_bytes()
+            self.assertEqual(hashlib.sha1(b"blob " + str(len(source)).encode("ascii") + b"\0" + source).hexdigest(), blob)
+            self.assertEqual(len(re.findall(rb"^// RUN:.*[^\\]$", source, re.MULTILINE)), len(runs))
+            for run, (expectation, issue) in enumerate(runs, 1):
+                reference = self.driver_receipt(output, case, run, "clang")
+                buster = self.driver_receipt(output, case, run, "buster")
+                self.assertEqual((reference["verdict"], reference["process_status"]), ("pass", "success"))
+                self.assertEqual((buster["expectation"], buster["issue"]), (expectation, str(issue)))
+                self.assertEqual(buster["verdict"], "pass" if expectation == "pass" else "expected-fail")
+                argv = (output / f"{case}.run{run}.buster.argv").read_text(encoding="utf-8").splitlines()
+                self.assertEqual(argv[:2], [str(self.ide), "cc"])
+                self.assertFalse(any("%s" in argument or "%S" in argument for argument in argv))
+                if expectation == "refusal":
+                    self.assertIn(b"error: unsupported ", (output / f"{case}.run{run}.buster.stderr").read_bytes())
+        self.assertEqual((output / "preprocess-multiple.run1.buster.stdout").read_bytes().count(b"X"), 2)
+        fields = self.receipt(output)
+        self.assertEqual((fields["driver_requested"], fields["checkout_status_clean"], fields["status"]), ("1", "1", "pass"))
+        self.assert_clean_source()
+
+    def test_driver_unexpected_pass_fails(self):
+        self.require_smoke()
+        fake = self.evidence / "driver-always-succeeds"
+        fake.write_text("#!/bin/sh\nprintf 'x86_64-unknown-linux-gnu\\n'\n", encoding="ascii")
+        fake.chmod(0o755)
+        output = self.evidence / "driver-unexpected-pass"
+        result = self.invoke("--driver", self.checkout, output, fake, self.clang)
+        self.assertEqual(result.returncode, 1, result.stdout.decode(errors="replace"))
+        for case, run in (("nostdlibinc", 1), ("redundant-args", 1), ("dumpmachine", 1)):
+            self.assertEqual(self.driver_receipt(output, case, run, "buster")["verdict"], "unexpected-pass")
+        self.assertEqual(self.driver_receipt(output, "preprocess-multiple", 1, "buster")["verdict"], "fail")
+        self.assertEqual(self.driver_receipt(output, "mg", 1, "buster")["verdict"], "fail")
+        self.assertRegex((output / "driver-summary.txt").read_bytes(), rb"buster_unexpected_pass=[1-9][0-9]* .*status=fail")
+        self.assertEqual(self.receipt(output)["status"], "fail")
+        self.assert_clean_source()
 
 if __name__ == "__main__":
     unittest.main()

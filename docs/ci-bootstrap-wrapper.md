@@ -83,6 +83,25 @@ owner limit, complete inventory after timeout, launch failure, cleanup failure
 and original deadline accounting. Hosted Windows execution remains the verdict
 on startup latency; the scheduler alone is not a measured speedup.
 
+The helper's filesystem operations use the already loaded .NET file APIs,
+resolving literal paths through PowerShell's session provider paths so relative
+inputs follow the caller's PowerShell location even when the process cwd differs.
+VsWhere directories and non-FileSystem providers fail before the vendor shell
+runs. GITHUB_ENV paths are resolved at the existing post-vendor append point;
+appends use explicit UTF8 without a BOM and platform newlines. The fake dev-shell
+launch log uses the same direct file append instead of loading a cmdlet module.
+The vendor's real developer-shell script, host/target arguments, compiler probes,
+exceptions and separate PowerShell owners are unchanged.
+
+`VS_PROBE_TRACE` retains launch UTC milliseconds, script/helper/fixture stage
+rows and completion. PowerShell stages use UTC milliseconds; CMD fixtures label
+their local `%TIME%` stamps explicitly. These clocks are diagnostic; deadlines
+remain monotonic and launch-relative. The optional
+`BUSTER_VS_PROBE_COLD_TEST_PATH=1` control stamps a real cold `Test-Path` call
+before helper entry, isolating its cost without retrying or restarting a clock.
+Controls cover literal bracket filenames, differing PowerShell/process locations,
+provider/directory rejection, UTF8 export bytes and all original failure cases.
+
 ## Bounded independent cases (#2034)
 
 Windows admits two independent behavior cases through one persistent worker
@@ -113,8 +132,20 @@ fixture removal.
 
 The scheduler adds a cancellation registry. Registration and cancellation share
 a lock, and each child's cleanup is serialized against normal collection. Windows
-uses the original system `taskkill /T /F`; Unix uses isolated process groups.
-Direct children retain the ten-second cleanup deadline. Workers finish before
+captures native descendant process handles before the original system
+`taskkill /T /F`, then waits for those processes to signal termination before
+fixture removal. A successful termination request alone is insufficient: a
+descendant can still hold its inherited current-directory handle while exiting
+(#2985). All descendant waits share the original ten-second cleanup deadline;
+expired/failed waits and snapshot failures remain errors, and later cleanup
+cannot relabel that owner as clean. Snapshot capture adds no PID signal targets. Native creation times must fall
+between the retained parent's creation and the pre-snapshot UTC cutoff; a PID
+replacement acquired after snapshot admission or a stale parent ID fails capture
+without waiting on that handle. These are stable, readiness-published fixture
+trees; they do not admit new descendant spawning during cleanup. Clock/identity
+ambiguity fails the owner instead of authorizing a numeric-PID wait.
+Unix uses isolated process groups. Direct children retain the ten-second cleanup
+deadline. Workers finish before
 module state is restored; the registry releases native handles between runs.
 These are controlled fixture trees, not containment for detached programs.
 

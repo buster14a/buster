@@ -1,5 +1,5 @@
 /* Opt-in #3185 QEMU host compatibility census, included by build.c.
- * qemu_git_verify / qemu_inputs_verify own immutable input admission.
+ * qemu_git_verify / qemu_worktree_verify / qemu_inputs_verify own immutable input admission.
  * qemu_self_test owns refusal controls; qemu_compat_main drives unmodified
  * configure/Ninja and records independent reference/candidate stage outcomes.
  * This is a blocker census, not guest or performance qualification.
@@ -25,6 +25,107 @@ BUSTER_GLOBAL_LOCAL bool qemu_status_allowed(String8 text, String8 expected)
                 (generated && (string_equal(line, S8("?? meson.build")) || string_equal(line, S8("?? meson_options.txt"))));
         offset = end + 1;
     }
+    return valid;
+}
+
+#define BUSTER_QEMU_HASH_BATCH 128
+
+BUSTER_GLOBAL_LOCAL bool qemu_hash_batch(Arena* arena, String8 source, String8* arguments, String8* hashes, u64 count, bool* stopped)
+{
+    RaddebuggerCommandResult result = raddebugger_command(arena, (SliceString8){.pointer = arguments, .length = count + 5},
+                                                        source, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
+    bool valid = raddebugger_command_ok(result);
+    u64 offset = 0;
+    for (u64 index = 0; valid && index < count; index += 1)
+    {
+        u64 end = offset;
+        while (end < result.output.length && result.output.pointer[end] != '\n') { end += 1; }
+        valid = end < result.output.length && string_equal(string_slice(result.output, offset, end), hashes[index]);
+        offset = end + 1;
+    }
+    valid = valid && offset == result.output.length;
+    return valid;
+}
+
+// Hash raw checkout bytes in bounded batches; Git's stat cache and filters
+// cannot substitute the index blob for a file the compiler will read.
+BUSTER_GLOBAL_LOCAL bool qemu_worktree_verify(Arena* arena, String8 git, String8 source, String8 index, bool* stopped)
+{
+    bool valid = false;
+#if BUSTER_LINUX
+    String8 arguments[BUSTER_QEMU_HASH_BATCH + 5] = {git, S8("--no-replace-objects"), S8("hash-object"), S8("--no-filters"), S8("--")};
+    String8 hashes[BUSTER_QEMU_HASH_BATCH];
+    u64 count = 0;
+    valid = true;
+    for (u64 offset = 0; valid && offset < index.length;)
+    {
+        u64 end = offset;
+        while (end < index.length && index.pointer[end]) { end += 1; }
+        String8 entry = string_slice(index, offset, end);
+        u64 tab = 0;
+        while (tab < entry.length && entry.pointer[tab] != '\t') { tab += 1; }
+        // SHA-1 repositories, stage zero, and a nonempty NUL-delimited path.
+        valid = end < index.length && tab == 51 && entry.length > tab + 1 &&
+                entry.pointer[49] == ' ' && entry.pointer[50] == '0';
+        if (valid)
+        {
+            String8 mode = string_slice(entry, 2, 8);
+            String8 hash = string_slice(entry, 9, 49);
+            String8 relative = string_slice(entry, tab + 1, entry.length);
+            String8 path = path_join(arena, source, relative);
+            path = string_duplicate_arena(arena, path, true);
+            if (!string_equal(mode, S8("160000")))
+            {
+                struct stat stats;
+                valid = lstat((char const*)path.pointer, &stats) == 0;
+                if (valid && string_equal(mode, S8("120000")))
+                {
+                    valid = S_ISLNK(stats.st_mode) && stats.st_size >= 0 && stats.st_size <= BUSTER_KB(64);
+                    if (valid)
+                    {
+                        u64 parent_end = path.length;
+                        while (parent_end && path.pointer[parent_end - 1] != '/') { parent_end -= 1; }
+                        String8 parent = string_slice(path, 0, parent_end ? parent_end - 1 : 0);
+                        valid = string_equal(os_path_absolute(arena, parent, true), parent);
+                        char8* target = arena_allocate(arena, char8, (u64)stats.st_size + 1);
+                        ssize_t length = readlink((char const*)path.pointer, (char*)target, (size_t)stats.st_size + 1);
+                        String8 blob_args[] = {git, S8("--no-replace-objects"), S8("cat-file"), S8("blob"), hash};
+                        RaddebuggerCommandResult blob = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(blob_args),
+                                                                          source, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
+                        valid = valid && length == stats.st_size && raddebugger_command_ok(blob) &&
+                                string_equal((String8){.pointer = target, .length = length < 0 ? 0 : (u64)length}, blob.output);
+                    }
+                }
+                else if (valid)
+                {
+                    bool executable = string_equal(mode, S8("100755"));
+                    valid = (executable || string_equal(mode, S8("100644"))) && S_ISREG(stats.st_mode) &&
+                            ((stats.st_mode & S_IXUSR) != 0) == executable &&
+                            string_equal(os_path_absolute(arena, path, true), path);
+                    if (valid)
+                    {
+                        arguments[count + 5] = relative;
+                        hashes[count] = hash;
+                        count += 1;
+                        if (count == BUSTER_QEMU_HASH_BATCH)
+                        {
+                            valid = qemu_hash_batch(arena, source, arguments, hashes, count, stopped);
+                            count = 0;
+                        }
+                    }
+                }
+            }
+        }
+        offset = end + 1;
+    }
+    if (valid && count) { valid = qemu_hash_batch(arena, source, arguments, hashes, count, stopped); }
+#else
+    (void)arena;
+    (void)git;
+    (void)source;
+    (void)index;
+    (void)stopped;
+#endif
     return valid;
 }
 
@@ -69,6 +170,7 @@ BUSTER_GLOBAL_LOCAL bool qemu_git_verify(Arena* arena, String8 git, String8 sour
                      (string_equal(expected, S8(BUSTER_QEMU_COMMIT)) && string_equal(mode, S8("160000"))));
             offset = end + 1;
         }
+        if (valid) { valid = qemu_worktree_verify(arena, git, source, index.output, stopped); }
     }
     if (valid)
     {
@@ -134,6 +236,62 @@ BUSTER_GLOBAL_LOCAL bool qemu_packagefiles_prepare(Arena* arena, String8 source,
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL bool qemu_worktree_self_test(Arena* arena, String8 git, String8 directory, String8 fixture, String8 expected, bool* stopped)
+{
+    bool passed = false;
+#if BUSTER_LINUX
+    String8 trust[] = {git, S8("config"), S8("core.trustctime"), S8("false")};
+    String8 minimal[] = {git, S8("config"), S8("core.checkStat"), S8("minimal")};
+    String8 filemode[] = {git, S8("config"), S8("core.filemode"), S8("false")};
+    String8 refresh[] = {git, S8("update-index"), S8("--refresh")};
+    bool setup = raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(trust), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped)) &&
+                 raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(minimal), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped)) &&
+                 raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(filemode), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped)) &&
+                 raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(refresh), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped));
+    struct stat original;
+    setup = setup && lstat((char const*)fixture.pointer, &original) == 0;
+    bool same_stat_rejected = false;
+    if (setup)
+    {
+        struct timespec times[] = {original.st_atim, original.st_mtim};
+        int descriptor = open((char const*)fixture.pointer, O_WRONLY);
+        bool changed = descriptor >= 0 && write(descriptor, "modified\n", 9) == 9;
+        if (descriptor >= 0) { changed = close(descriptor) == 0 && changed; }
+        changed = changed && utimensat(AT_FDCWD, (char const*)fixture.pointer, times, 0) == 0;
+        String8 status_args[] = {git, S8("status"), S8("--porcelain")};
+        RaddebuggerCommandResult status = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_args), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
+        same_stat_rejected = changed && raddebugger_command_ok(status) && !status.output.length &&
+                             !qemu_git_verify(arena, git, directory, expected, stopped);
+    }
+    bool restored = file_write(fixture, BUSTER_SLICE_TO_BYTE_SLICE(S8("original\n"))) &&
+                    qemu_git_verify(arena, git, directory, expected, stopped);
+    bool mode_rejected = restored && chmod((char const*)fixture.pointer, 0755) == 0 &&
+                         !qemu_git_verify(arena, git, directory, expected, stopped);
+    bool mode_restored = chmod((char const*)fixture.pointer, 0644) == 0 &&
+                         qemu_git_verify(arena, git, directory, expected, stopped);
+    String8 index_args[] = {git, S8("ls-files"), S8("-v"), S8("--stage"), S8("-z")};
+    RaddebuggerCommandResult index = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(index_args), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, stopped);
+    String8 target = path_join(arena, directory, S8("link-target"));
+    bool type_rejected = file_write(target, BUSTER_SLICE_TO_BYTE_SLICE(S8("original\n"))) &&
+                         os_file_delete(fixture) && symlink("link-target", (char const*)fixture.pointer) == 0 &&
+                         raddebugger_command_ok(index) && !qemu_worktree_verify(arena, git, directory, index.output, stopped);
+    bool type_restored = os_file_delete(fixture) && os_file_delete(target) &&
+                         file_write(fixture, BUSTER_SLICE_TO_BYTE_SLICE(S8("original\n"))) &&
+                         qemu_git_verify(arena, git, directory, expected, stopped);
+    passed = setup && same_stat_rejected && restored && mode_rejected && mode_restored && type_rejected && type_restored;
+    string_print(S8("QEMU_WORKTREE_SELF_TEST same_stat={u32} mode={u32} type={u32} restored={u32} compiler_invocations=0 status={S8}\n"),
+                 (u32)same_stat_rejected, (u32)mode_rejected, (u32)type_rejected, (u32)type_restored, passed ? S8("pass") : S8("fail"));
+#else
+    (void)arena;
+    (void)git;
+    (void)directory;
+    (void)fixture;
+    (void)expected;
+    (void)stopped;
+#endif
+    return passed;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult qemu_self_test(Arena* arena)
 {
     bool stopped = false;
@@ -151,7 +309,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult qemu_self_test(Arena* arena)
         bool files_written = file_write(fixture, BUSTER_SLICE_TO_BYTE_SLICE(S8("original\n"))) &&
                              file_write(path_join(arena, directory, S8(".gitignore")), BUSTER_SLICE_TO_BYTE_SLICE(S8("ignored.txt\n")));
         String8 initialize[] = {git, S8("init"), S8("--quiet")};
-        String8 add[] = {git, S8("add"), S8("fixture.txt"), S8(".gitignore")};
+#if BUSTER_LINUX
+        // An old mtime avoids Git's racy-index fallback in the stat-cache control.
+        struct timespec fixture_times[] = {{1000000000, 0}, {1000000000, 0}};
+        files_written = files_written && utimensat(AT_FDCWD, (char const*)fixture.pointer, fixture_times, 0) == 0;
+        String8 executable_fixture = path_join(arena, directory, S8("executable.txt"));
+        String8 link_fixture = path_join(arena, directory, S8("fixture-link"));
+        files_written = files_written && file_write(executable_fixture, BUSTER_SLICE_TO_BYTE_SLICE(S8("original\n"))) &&
+                        chmod((char const*)executable_fixture.pointer, 0755) == 0 &&
+                        symlink("fixture.txt", (char const*)link_fixture.pointer) == 0;
+#endif
+        String8 add[] = {git, S8("add"), S8("fixture.txt"), S8(".gitignore"), S8("executable.txt"), S8("fixture-link")};
         String8 commit[] = {git, S8("-c"), S8("user.name=Buster Harness"), S8("-c"), S8("user.email=harness@example.invalid"),
                             S8("-c"), S8("commit.gpgsign=false"), S8("-c"), S8("core.hooksPath=/dev/null"), S8("commit"), S8("--quiet"), S8("-m"), S8("isolated provenance fixture")};
         passed = files_written && raddebugger_command_ok(raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(initialize), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped)) &&
@@ -163,6 +331,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult qemu_self_test(Arena* arena)
             RaddebuggerCommandResult head = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), directory, (String8){0}, RADDEBUGGER_ENVIRONMENT_GIT, &stopped);
             String8 fixture_commit = compat_trim_ascii_space(head.output);
             bool pristine = raddebugger_command_ok(head) && qemu_git_verify(arena, git, directory, fixture_commit, &stopped);
+            bool worktree = pristine && qemu_worktree_self_test(arena, git, directory, fixture, fixture_commit, &stopped);
             bool wrong_revision = !qemu_git_verify(arena, git, directory, S8(BUSTER_QEMU_COMMIT), &stopped);
             bool dirty = file_write(fixture, BUSTER_SLICE_TO_BYTE_SLICE(S8("changed\n"))) && !qemu_git_verify(arena, git, directory, fixture_commit, &stopped);
             bool restored = file_write(fixture, BUSTER_SLICE_TO_BYTE_SLICE(S8("original\n")));
@@ -202,7 +371,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult qemu_self_test(Arena* arena)
             ByteSlice altered_bytes = file_read(arena, fixture, (FileReadOptions){.map_required = 0});
             bool replacement_rejected = replacement_setup && raddebugger_command_ok(shadow) && !shadow.output.length &&
                 string_equal(BYTE_SLICE_TO_STRING(8, altered_bytes), S8("replaced\n")) && !qemu_git_verify(arena, git, directory, fixture_commit, &stopped);
-            passed = replacement_rejected && exceptions && pristine && wrong_revision && dirty && restored && untracked_rejected && untracked_removed && ignored_rejected && ignored_removed &&
+            passed = worktree && replacement_rejected && exceptions && pristine && wrong_revision && dirty && restored && untracked_rejected && untracked_removed && ignored_rejected && ignored_removed &&
                      assume_rejected && normal_restored && skip_rejected;
             string_print(S8("QEMU_SELF_TEST pristine={u32} wrong_revision={u32} dirty={u32} untracked={u32} ignored={u32} "
                             "assume_unchanged={u32} skip_worktree={u32} replacement={u32} compiler_invocations=0 status={S8}\n"),

@@ -435,6 +435,9 @@ BUSTER_F_DECL OsError os_file_delete_checked(String8 path);
 // rather than followed, so the walk cannot escape the tree it was given.
 // Returns whether the tree is gone; a missing `path` counts as success.
 BUSTER_F_DECL bool os_directory_delete(String8 path);
+// Lists the entry names directly inside `path`, unordered, without "." and
+// "..". A missing or unreadable directory yields no names.
+BUSTER_F_DECL String8* os_directory_entry_names(Arena* arena, String8 path, u32* count);
 
 // Replacement publication: inspect the destination, stage beside it, rename
 // the staging file over it.
@@ -482,6 +485,31 @@ BUSTER_F_DECL OsError os_file_replace(String8 path, String8 destination);
 // fchmod restricted to the 0777 permission bits.
 BUSTER_F_DECL OsError os_file_set_permissions(OsFileDescriptor* file_descriptor, u32 permissions);
 #endif
+// Opt-in early exit, mold/wild's fork trick (#3686). os_early_exit_arm forks
+// while the process is still single-threaded: the parent blocks until the
+// child calls os_early_exit_release and then _exits with the status it was
+// sent, or, if the child dies first, with the child's own status. The child
+// returns true and carries on with the work. Arming fails (false, nothing
+// forked) on Windows, Android and iOS, once any tracked thread exists, or when
+// the status pipe cannot be created above the standard streams or fork fails;
+// the caller then simply continues in-process. os_is_only_live_thread does
+// not see untracked threads, so a caller must also have started none.
+//
+// The trade-offs are why it is never the default: time(1), getrusage and
+// per-process counters see only the parent; a debugger follows the parent;
+// the child's memory outlives the job slot the parent frees; and nothing that
+// fails after the release can change the exit status. Release points the
+// standard streams at /dev/null first, so later child output is discarded.
+#define OS_EARLY_EXIT_DEFERRED_LIMIT (64)
+BUSTER_F_DECL bool os_early_exit_arm(void);
+BUSTER_F_DECL bool os_early_exit_armed(void);
+// Hands a descriptor to be closed after the release, so the final close of a
+// replaced output (which frees its blocks) leaves the reported path. False,
+// and the caller keeps ownership, when not armed or past the limit.
+BUSTER_F_DECL bool os_early_exit_defer_close(OsFileDescriptor* file_descriptor);
+// Reports `exit_code` to the waiting parent, then closes deferred descriptors.
+// Does nothing when not armed.
+BUSTER_F_DECL void os_early_exit_release(u8 exit_code);
 BUSTER_F_DECL OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OsFileAccess access, OsFileCreateMode create_mode,
                                               OsFileShareFlags share_flags);
 BUSTER_F_DECL OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OsFileAccess access, OsFileCreateMode create_mode,

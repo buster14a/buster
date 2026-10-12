@@ -12,7 +12,7 @@ enum
     CODEGEN_TEST_CODEVIEW_S_LOCAL = 0x113e,
     CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD = 0x1140,
     CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER = 0x1141,
-    CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL = 0x1142,
+    CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL = 0x1145,
     CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER = 0x1143,
 };
 
@@ -905,6 +905,39 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_x64_has_stack_alignment(ByteSlice code, u6
     return found_mask && found_application;
 }
 
+// Machine scratch for one function is planned from its IR counts (#3413).
+// An ordinary function keeps the thread scratch. One whose bound outgrows
+// any thread scratch arena, including one an outer caller has filled,
+// runs on private reservations installed as the thread's scratch arenas, so
+// a pass's nested scratch grows with it, and the originals come back at the
+// end. A bound past the limit is refused before any pass runs.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_scratch_plan(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CodegenTestMachineScratch small = codegen_test_machine_scratch(arguments->arena, 1000, 800, 40, 0);
+    BUSTER_TEST(arguments, small.fits && !small.replaced && small.restored);
+    BUSTER_TEST(arguments, small.bound < BUSTER_MB(8));
+    // 200,000 rows bound about 513 MB, past the 256 MiB thread scratch.
+    CodegenTestMachineScratch large = codegen_test_machine_scratch(arguments->arena, 200000, 200000, 1, 0);
+    BUSTER_TEST(arguments, large.fits && large.replaced && large.restored);
+    BUSTER_TEST(arguments, large.bound > BUSTER_MB(400) && large.scratch_reserved >= large.bound);
+    BUSTER_TEST(arguments, large.nested_distinct && large.nested_reserved >= large.bound);
+    // Many blocks over many values: the liveness planes dominate the bound.
+    CodegenTestMachineScratch planes = codegen_test_machine_scratch(arguments->arena, 40000, 50000, 2000, 0);
+    BUSTER_TEST(arguments, planes.fits && planes.replaced && planes.restored);
+    BUSTER_TEST(arguments, planes.bound > (u64)2000 * (2 * 50000 / 64) * sizeof(u64) * 16 && planes.bound < BUSTER_MB(600));
+    // The same small function while the other thread arena holds live outer
+    // allocations up to its last 32 KiB: a nested pass could land there, so
+    // the plan must replace both arenas rather than trust the free one.
+    CodegenTestMachineScratch occupied = codegen_test_machine_scratch(arguments->arena, 1000, 800, 40, BUSTER_KB(32));
+    BUSTER_TEST(arguments, occupied.bound == small.bound && occupied.fits && occupied.replaced && occupied.restored);
+    BUSTER_TEST(arguments, occupied.nested_distinct && occupied.nested_reserved >= occupied.bound);
+    CodegenTestMachineScratch refused = codegen_test_machine_scratch(arguments->arena, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0);
+    BUSTER_TEST(arguments, !refused.fits && !refused.replaced && refused.restored);
+    BUSTER_TEST(arguments, refused.bound == UINT64_MAX);
+    return result;
+}
+
 // Exercise executable-image construction under sanitizers without invoking
 // uninstrumented generated code. An absent constant pool is {NULL, 0}.
 BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_executable_data_copy(UnitTestArguments* arguments)
@@ -1052,23 +1085,32 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_codeview_location_mask(ByteSlice bytes, s32
                 mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_LOCAL ? CODEGEN_TEST_CONSUMER_LOCAL : 0;
                 local_count += record_kind == CODEGEN_TEST_CODEVIEW_S_LOCAL;
                 mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER ? CODEGEN_TEST_CONSUMER_REGISTER : 0;
-                mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL ? CODEGEN_TEST_CONSUMER_FRAME : 0;
-                if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL && record_length >= 6)
+                // REGISTER_REL: base register, flags (bit 0 spilledUdtMember,
+                // bits 4..15 offset in parent), then the base-relative offset.
+                u16 relative_flags = 0;
+                s32 frame = 0;
+                if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL && record_length >= 10)
                 {
-                    s32 frame = 0;
-                    memcpy(&frame, bytes.pointer + record + 4, 4);
-                    *found_frame_value |= frame == expected_frame;
+                    memcpy(&relative_flags, bytes.pointer + record + 6, 2);
+                    memcpy(&frame, bytes.pointer + record + 8, 4);
                 }
-                mask |= (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
-                         record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER) ? CODEGEN_TEST_CONSUMER_PIECE : 0;
+                bool frame_member = record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL && (relative_flags & 1u);
+                bool whole_frame = record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL && !relative_flags;
+                mask |= whole_frame ? CODEGEN_TEST_CONSUMER_FRAME : 0;
+                *found_frame_value |= whole_frame && frame == expected_frame;
+                mask |= (frame_member || record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER) ? CODEGEN_TEST_CONSUMER_PIECE : 0;
                 mask |= record_kind == 0x1107 ? CODEGEN_TEST_CONSUMER_CONSTANT : 0; // S_CONSTANT
                 u32 range_start = UINT32_MAX;
                 u16 range_length = 0;
-                if ((record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER ||
-                     record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL) && record_length >= 14)
+                if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER && record_length >= 14)
                 {
                     memcpy(&range_start, bytes.pointer + record + 8, 4);
                     memcpy(&range_length, bytes.pointer + record + 14, 2);
+                }
+                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER_REL && record_length >= 18)
+                {
+                    memcpy(&range_start, bytes.pointer + record + 12, 4);
+                    memcpy(&range_length, bytes.pointer + record + 18, 2);
                 }
                 else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER && record_length >= 18)
                 {
@@ -1086,11 +1128,10 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_codeview_location_mask(ByteSlice bytes, s32
                     defrange_count += 1;
                     exact_mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER && range_start == 0 && range_length == 10
                                       ? CODEGEN_TEST_CONSUMER_REGISTER : 0;
-                    exact_mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL && range_start == 10 && range_length == 10
-                                      ? CODEGEN_TEST_CONSUMER_FRAME : 0;
-                    exact_piece_count += (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
-                                          record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER) &&
-                                         range_start == 20 && range_length == 10;
+                    exact_mask |= whole_frame && range_start == 10 && range_length == 10 ? CODEGEN_TEST_CONSUMER_FRAME : 0;
+                    // The two frame-resident pieces: bytes 0..8 at +32 and 8..12 at +16.
+                    exact_piece_count += frame_member && range_start == 20 && range_length == 10 &&
+                                         ((relative_flags >> 4 == 0 && frame == 32) || (relative_flags >> 4 == 8 && frame == 16));
                     found_unavailable_range |= range_start == 30 && range_length == 10;
                 }
                 record += 2 + record_length;
@@ -3295,15 +3336,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_aarch64_symbol_addresses(UnitTes
             BUSTER_TEST(arguments, generated.statistics.fallback_reason_counts[CODEGEN_FALLBACK_TARGET_EXCLUDED] == 0);
             u32 pages = 0;
             u32 lows = 0;
+            u32 got_pages = 0;
+            u32 got_lows = 0;
             u32 absolutes = 0;
             u32 calls = 0;
             for (u32 index = 0; generated.error == CODEGEN_ERROR_NONE && index < generated.relocation_count; index += 1)
             {
                 CodegenModuleRelocation* relocation = generated.relocations + index;
-                bool high = relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21;
-                bool low = relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12;
-                pages += high;
-                lows += low;
+                // Darwin reaches the two undefined symbols through their GOT
+                // slots (#1454) and the two definitions through a page pair.
+                bool got_high = relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21;
+                bool got_low = relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12;
+                bool high = relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21 || got_high;
+                bool low = relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12 || got_low;
+                pages += high && !got_high;
+                lows += low && !got_low;
+                got_pages += got_high;
+                got_lows += got_low;
                 absolutes += relocation->kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64;
                 calls += relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_CALL26;
                 if (high || low)
@@ -3315,21 +3364,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_aarch64_symbol_addresses(UnitTes
                         u32 word = 0;
                         memcpy(&word, generated.code.pointer + relocation->offset, sizeof(word));
                         // Independent instruction masks require zero relocation
-                        // immediates and one destination/base register in ADD.
+                        // immediates and one destination/base register in the
+                        // ADD, or in the 64-bit LDR of a GOT slot.
+                        u32 low_opcode = got_low ? UINT32_C(0xf9400000) : UINT32_C(0x91000000);
                         BUSTER_TEST(arguments, high ? (word & UINT32_C(0xffffffe0)) == UINT32_C(0x90000000)
-                                                     : (word & UINT32_C(0xfffffc00)) == UINT32_C(0x91000000) &&
+                                                     : (word & UINT32_C(0xfffffc00)) == low_opcode &&
                                                        (word & 31u) == ((word >> 5) & 31u));
                     }
                     if (high)
                     {
                         CodegenModuleRelocation* next = index + 1 < generated.relocation_count ? relocation + 1 : 0;
-                        BUSTER_TEST(arguments, next && next->kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12 &&
+                        CodegenModuleRelocationKind next_kind = got_high ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12
+                                                                         : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12;
+                        BUSTER_TEST(arguments, next && next->kind == next_kind && !next->addend && !relocation->addend &&
                             next->symbol.value == relocation->symbol.value && next->offset == relocation->offset + 4);
                     }
                 }
             }
             BUSTER_TEST(arguments, calls == 1);
-            BUSTER_TEST(arguments, darwin ? pages == 4 && lows == 4 && absolutes == 0 : pages == 0 && lows == 0 && absolutes == 4);
+            BUSTER_TEST(arguments, darwin ? pages == 2 && lows == 2 && got_pages == 2 && got_lows == 2 && absolutes == 0
+                                          : pages == 0 && lows == 0 && got_pages == 0 && got_lows == 0 && absolutes == 4);
             if (generated.error == CODEGEN_ERROR_NONE)
             {
                 ObjectFile object = object_from_canonical_codegen_module(temporary.arena, lowered.program, &generated, target);
@@ -3759,6 +3813,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_switch_key_images(Unit
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codegen_test_ebpf_symbols(arguments);
+    TargetParseResult i386_target = target_parse_triple(S8("i386-unknown-linux-gnu"));
+    BUSTER_TEST(arguments, i386_target.error == TARGET_PARSE_ERROR_NONE);
+    CPreprocessResult i386_tokens = c_preprocess(arguments->arena, S8("int i386_codegen_probe(void) { return 1; }\n"),
+                                                 (CPreprocessOptions){.source_path = S8("i386-codegen-probe.c"),
+                                                                      .target = i386_target.target,
+                                                                      .data_layout = target_data_layout(i386_target.target)});
+    CParserResult i386_syntax = c_parse_ast(arguments->arena, i386_tokens);
+    CIRLowerResult i386_lowered = c_analyze(arguments->arena, S8("i386-codegen-probe.c"), i386_tokens, i386_syntax,
+                                             i386_target.target);
+    BUSTER_TEST(arguments, i386_tokens.diagnostic_count == 0 && i386_syntax.diagnostic_count == 0 &&
+                               i386_lowered.diagnostic_count == 0 && i386_lowered.program != 0);
+    if (i386_lowered.program)
+    {
+        CodegenModule i386_refusal = codegen_generate_canonical_module(arguments->arena, i386_lowered.program,
+                                                                        i386_lowered.program->modules, i386_target.target,
+                                                                        (CodegenModuleOptions){0});
+        BUSTER_TEST(arguments, i386_refusal.error == CODEGEN_ERROR_UNSUPPORTED_TARGET &&
+                                   string_equal(i386_refusal.failure_reason, S8("i386 code generation is not implemented")));
+    }
     UnitTestResult arm64_tls = codegen_test_arm64_windows_tls_offsets(arguments);
     result.succeeded_test_count += arm64_tls.succeeded_test_count;
     result.test_count += arm64_tls.test_count;
@@ -3794,6 +3867,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_seed_capacity);
     BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_block_local_storage);
     BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_first_scratch_storage);
+    BUSTER_TEST_FIXTURE(arguments, codegen_test_machine_scratch_plan);
     UnitTestResult ebpf_scalars = codegen_test_ebpf_scalars(arguments);
     result.succeeded_test_count += ebpf_scalars.succeeded_test_count;
     result.test_count += ebpf_scalars.test_count;
@@ -3818,6 +3892,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     UnitTestResult kernel_regressions = codegen_test_ebpf_kernel_regressions(arguments);
     result.succeeded_test_count += kernel_regressions.succeeded_test_count;
     result.test_count += kernel_regressions.test_count;
+    BUSTER_TEST_FIXTURE(arguments, codegen_test_ebpf_rejections);
     UnitTestResult verification = codegen_test_verify_invariants(arguments);
     result.succeeded_test_count += verification.succeeded_test_count;
     result.test_count += verification.test_count;

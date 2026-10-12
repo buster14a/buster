@@ -217,7 +217,7 @@ def validate_groups(lines, inventory, expected, provenance, inventory_primary):
     require(primary_module in {"c_frontend_tests", "compiler_driver_tests"} and primary_module in inventory and
             primary_module in expected, "Unsupported/missing primary module anchor")
     require(primary_module == inventory_primary, "Plan primary module differs from independent inventory")
-    expected_primary = "c_frontend_tests" if provenance["platform"] == "windows" and provenance["architecture"] == "x86_64" else "compiler_driver_tests"
+    expected_primary = "compiler_driver_tests" if provenance["platform"] == "windows" and provenance["architecture"] == "aarch64" else "c_frontend_tests"
     require(primary_module == expected_primary, "Plan primary module differs from platform policy")
     require(number(plan, "workers") == provenance["cpu_budget"] and number(plan, "groups") == 2, "Parent plan CPU/group mismatch")
     group_workers = number(plan, "group_workers")

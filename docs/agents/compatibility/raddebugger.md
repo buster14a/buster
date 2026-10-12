@@ -10,7 +10,7 @@ that the graphical debugger builds or that debugging works.
 
 ## CI scheduling
 
-[The compatibility workflow](../../../.github/workflows/raddebugger-compatibility.yml)
+[The compatibility workflow](../../../.github/workflows/external-projects.yml)
 runs only on pushes to `main` and checks out the exact triggering `github.sha`
 (#3086). PRs, merge groups, other branches and manual dispatch do not start it.
 Each main push retains its own run during merge bursts. The hosted runner,
@@ -144,10 +144,10 @@ The hosted workflow invokes that same action through its immutable bootstrap
 driver, from the Buster repository root:
 
 ```sh
-"$RUNNER_TEMP/raddebugger-driver" test_raddebugger --config Release "$GITHUB_WORKSPACE/external/raddebugger"
+.ci-tools/build external_projects rad
 ```
 
-The GitHub-hosted `RAD Debugger compatibility` workflow installs the upstream
+The GitHub-hosted `External projects after merge` workflow installs the upstream
 platform development libraries, builds the trusted compiler, runs its self-host
 fixed point and input controls, and retains the compatibility artifacts even
 when an application compilation fails.
@@ -229,3 +229,8 @@ Honor that owner's integration boundary; the RAD Debugger harness must not
 remove the hold, rewrite the owned branch, or change retirement authority.
 Keep current validation and handoff details on the owning issue/PR rather
 than maintaining live progress in this guide.
+
+Routine main-push scheduling is owned by the shared [external-project CI](../../external-project-ci.md),
+with one Linux job and its distinct RAD compiler directory. The shared 360-minute
+outer cap preserves every RAD child deadline, pristine/reference control and
+exact-main event identity; it is not a performance acceptance budget.

@@ -97,6 +97,11 @@ jobs:
           set -euo pipefail
           python3 tools/check_action_pins.py
           python3 -B tools/ci_workflow_policy_test.py
+          clang -std=c11 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char tools/external_project_policy.c -o "$RUNNER_TEMP/external-project-policy"
+          "$RUNNER_TEMP/external-project-policy"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/external-project-driver"
+          "$RUNNER_TEMP/external-project-driver" external_projects --self-test
+          python3 -B tools/ci_apt_retry_test.py -v
           python3 -B tools/native_retirement_performance_declaration_test.py -v
           python3 -B tools/ci_unit_tests_measure_test.py -v
           python3 -B tools/ci_unit_tests_campaign_test.py -v
@@ -137,6 +142,8 @@ jobs:
           python3 tools/new_audit.py --check
           python3 -B tools/check_markdown_links.py --self-test
           python3 -B tools/check_markdown_links.py
+          python3 -B tools/backend_capabilities_test.py
+          python3 -B tools/backend_capabilities.py --check
       - name: Verify generated vendor builtin sources
         shell: bash
         run: |
@@ -249,6 +256,11 @@ jobs:
           set -euo pipefail
           python3 tools/check_action_pins.py
           python3 -B tools/ci_workflow_policy_test.py
+          clang -std=c11 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char tools/external_project_policy.c -o "$RUNNER_TEMP/external-project-policy"
+          "$RUNNER_TEMP/external-project-policy"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/external-project-driver"
+          "$RUNNER_TEMP/external-project-driver" external_projects --self-test
+          python3 -B tools/ci_apt_retry_test.py -v
           python3 -B tools/native_retirement_performance_declaration_test.py -v
           python3 -B tools/ci_unit_tests_measure_test.py -v
           python3 -B tools/ci_unit_tests_campaign_test.py -v
@@ -289,6 +301,8 @@ jobs:
           python3 tools/new_audit.py --check
           python3 -B tools/check_markdown_links.py --self-test
           python3 -B tools/check_markdown_links.py
+          python3 -B tools/backend_capabilities_test.py
+          python3 -B tools/backend_capabilities.py --check
       - name: Verify generated vendor builtin sources
         shell: bash
         run: |
@@ -608,6 +622,7 @@ jobs:
             tools/github_ci_time_test.py=ci-queue-timing-test.log
             tools/ci_checks_resources_test.py=checks-resource-observer-test.log
             tools/ci_checks_resources_workflow_test.py=checks-resource-workflow-test.log
+            tools/ci_ebpf_kernel_oracle_test.py=ebpf-kernel-oracle-test.log
           )
           if [[ '${{ matrix.os }}' == macos ]]; then
             suites+=(tools/ci_runner_resources_test.py=runner-resources-test.log)
@@ -860,6 +875,44 @@ jobs:
         run: |
           set -euo pipefail
           "${BUSTER_CI_RESOURCES_PYTHON:-$BUSTER_CI_PYTHON}" tools/ci_checks_resources.py stop --session "$RUNNER_TEMP/buster-ci/runner-resources"
+
+      - name: Report backend capability evidence (Linux, macOS)
+        id: backend_capability_report_unix
+        if: ${{ always() && steps.combinations_unix.outcome != 'skipped' && steps.checkout.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/buster-ci/backend-capabilities-report.md"
+          GITHUB_STEP_SUMMARY="$report" "$BUSTER_CI_PYTHON" tools/backend_capabilities.py --ci-report "$RUNNER_TEMP/buster-ci/combinations.log"
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload backend capability evidence report (Linux, macOS)
+        if: ${{ always() && steps.backend_capability_report_unix.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-capability-evidence-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/buster-ci/backend-capabilities-report.md
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Report backend capability evidence (Windows)
+        id: backend_capability_report_windows
+        if: ${{ always() && steps.combinations_windows.outcome != 'skipped' && steps.checkout.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/buster-ci/backend-capabilities-report.md"
+          GITHUB_STEP_SUMMARY="$report" "$BUSTER_CI_PYTHON" tools/backend_capabilities.py --ci-report "$RUNNER_TEMP/buster-ci/combinations.log"
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload backend capability evidence report (Windows)
+        if: ${{ always() && steps.backend_capability_report_windows.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-capability-evidence-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/buster-ci/backend-capabilities-report.md
+          if-no-files-found: error
+          retention-days: 7
 
       # Postprocess only: build.c still owns every configure, probe and build.
       # Keep raw diagnostics outside build/ so failed attempts survive cleanup.
@@ -1212,14 +1265,34 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run             --root "$BUSTER_CI_OBSERVATION_ROOT" --phase differential_producer_check --sequence 70 --             "$driver" build --config Release -t ide
           "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase differential_corpus --sequence 80 -- "$driver" test_differential --ide build/Release/ide --out "$RUNNER_TEMP/buster-ci/differential" --sanitize-oracle --jobs 4
 
+      # #1625: the eBPF kernel verifier/JIT oracle needs CAP_BPF, plus
+      # CAP_PERFMON for pointer comparisons. Only a copy of ide gets them, so
+      # the rest of the native suite keeps running unprivileged.
+      - name: eBPF kernel verifier/JIT oracle
+        id: ebpf_kernel
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.os == 'linux' && matrix.arch == 'x86_64' && steps.llvm.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          exec > >(tee "$RUNNER_TEMP/buster-ci/ebpf-kernel.log") 2>&1
+          driver="$RUNNER_TEMP/buster-build"
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase ebpf_kernel_producer_check --sequence 82 -- "$driver" build --config Release -t ide
+          oracle_ide="$RUNNER_TEMP/ebpf-kernel-ide/ide"
+          mkdir -p "${oracle_ide%/*}"
+          cp build/Release/ide "$oracle_ide"
+          sudo setcap cap_bpf,cap_perfmon+ep "$oracle_ide"
+          getcap "$oracle_ide"
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase ebpf_kernel_oracle --sequence 84 -- "$BUSTER_CI_PYTHON" tools/ci_ebpf_kernel_oracle.py --ide "$oracle_ide" --log-directory "$RUNNER_TEMP/buster-ci" --metamorphic-output "$RUNNER_TEMP/ebpf-kernel-metamorphic"
+
       - name: Native result and reproduction
         if: ${{ always() && steps.checkout.outcome == 'success' }}
         shell: bash
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          # Unix equivalent: BUSTER_CI_REQUIRED: modes differential
-          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference' || 'modes differential' }}
+          # Unix equivalent: BUSTER_CI_REQUIRED: modes differential (plus ebpf_kernel on Linux x86-64)
+          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference' || matrix.os == 'linux' && matrix.arch == 'x86_64' && 'modes differential ebpf_kernel' || 'modes differential' }}
           BUSTER_CI_REPRO: See docs/windows-ci-coverage.md and docs/ci-suite-partition.md for the matching native commands and coverage contract.
         # Unix equivalent: run: python3 tools/ci_summary.py
         run: if command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_summary.py; else python3 tools/ci_summary.py; fi
@@ -1233,7 +1306,7 @@ jobs:
         shell: bash
         env:
           BUSTER_CI_NATIVE_PLATFORM: ${{ matrix.platform }}
-          BUSTER_CI_NATIVE_COMPLETE: ${{ matrix.platform == 'windows' && steps.modes_windows.outcome == 'success' && steps.msvc_reference.outcome == 'success' && '1' || matrix.platform == 'unix' && steps.modes.outcome == 'success' && steps.differential.outcome == 'success' && '1' || '0' }}
+          BUSTER_CI_NATIVE_COMPLETE: ${{ matrix.platform == 'windows' && steps.modes_windows.outcome == 'success' && steps.msvc_reference.outcome == 'success' && '1' || matrix.platform == 'unix' && steps.modes.outcome == 'success' && steps.differential.outcome == 'success' && (matrix.os != 'linux' || matrix.arch != 'x86_64' || steps.ebpf_kernel.outcome == 'success') && '1' || '0' }}
         run: python_command=$BUSTER_CI_PYTHON; test -n "$python_command" || python_command=python3; "$python_command" tools/ci_native_observation.py package --root "$BUSTER_CI_OBSERVATION_ROOT" --python "$python_command" --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload" --platform "$BUSTER_CI_NATIVE_PLATFORM" --expect-complete "$BUSTER_CI_NATIVE_COMPLETE"
 
       - name: Retain native logs
@@ -1254,8 +1327,8 @@ jobs:
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          # Unix equivalent: BUSTER_CI_REQUIRED: modes differential pack
-          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference pack' || 'modes differential pack' }}
+          # Unix equivalent: BUSTER_CI_REQUIRED: modes differential pack (plus ebpf_kernel on Linux x86-64)
+          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference pack' || matrix.os == 'linux' && matrix.arch == 'x86_64' && 'modes differential ebpf_kernel pack' || 'modes differential pack' }}
           BUSTER_CI_REPRO: See docs/windows-ci-coverage.md and docs/ci-suite-partition.md for native evidence packaging and fallback.
         # Unix equivalent: run: python3 tools/ci_summary.py
         run: if command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_summary.py; else python3 tools/ci_summary.py; fi
@@ -1374,6 +1447,17 @@ jobs:
             --package "$BUSTER_ANDROID_SYSTEM_IMAGE"
           printf '%s\n' "$ANDROID_HOME/emulator" "$ANDROID_HOME/platform-tools" >>"$GITHUB_PATH"
 
+      - name: Bootstrap the build driver (Android runtime order)
+        if: ${{ matrix.os == 'android' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Hosted jobs build build.c only with Clang (the documented CI
+          # bootstrap exception); android/runtime_order.sh uses this driver to
+          # generate and build its host ide.
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
+            build.c -o "$RUNNER_TEMP/buster-android-build-driver"
+
       - name: Test (Android)
         id: android
         if: ${{ matrix.os == 'android' }}
@@ -1386,6 +1470,8 @@ jobs:
           BUSTER_ANDROID_EMULATOR_HEADLESS: "1"
           BUSTER_ANDROID_EMULATOR_LOG: ${{ runner.temp }}/buster-ci/android-emulator.log
           BUSTER_ANDROID_EMULATOR_STARTED_MARKER: ${{ runner.temp }}/buster-ci/android-emulator.started
+          BUSTER_ANDROID_RUNTIME_ORDER: "1"
+          BUSTER_ANDROID_HOST_DRIVER: ${{ runner.temp }}/buster-android-build-driver
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"

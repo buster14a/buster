@@ -123,16 +123,19 @@ BUSTER_GLOBAL_LOCAL String8 compiler_sampling_controller_read(Arena* arena, Stri
     struct stat before = {0}, after = {0};
     bool valid = descriptor >= 0 && fstat(descriptor, &before) == 0 && S_ISREG(before.st_mode) &&
         before.st_size >= 0 && (u64)before.st_size <= limit && limit <= BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT;
-    char8* bytes = valid ? arena_allocate(arena, char8, limit + 1) : 0;
+    // Size the buffer from the observed file, not the limit: one packet export
+    // reads ~100 bounded files and limit-sized buffers exhaust the arena.
+    u64 capacity = valid ? (u64)before.st_size + 1 : 0;
+    char8* bytes = valid ? arena_allocate(arena, char8, capacity) : 0;
     u64 used = 0;
     bool eof = false;
     while (valid && !eof)
     {
-        ssize_t count = read(descriptor, bytes + used, limit + 1 - used);
+        ssize_t count = read(descriptor, bytes + used, capacity - used);
         if (count > 0)
         {
             used += (u64)count;
-            valid = used <= limit;
+            valid = used < capacity;
         }
         else if (!count) eof = true;
         else valid = errno == EINTR;
@@ -542,6 +545,16 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_binary(Arena* arena, Strin
     return result;
 }
 
+// A failed corpus phase clears success but its partial objects are still
+// uploaded, so prune unconditionally and keep the original failure.
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_prune_corpus(CompilerSamplingController* controller)
+{
+    bool result = compiler_sampling_prune_compiled(controller->arena,
+        path_join(controller->arena, controller->evidence, S8("throughput/artifacts")), false);
+    controller->success = controller->success && result;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_prepared(CompilerSamplingController* controller, CompilerSamplingFreeze freeze)
 {
     String8 prepared = compiler_sampling_controller_read(controller->arena,
@@ -590,7 +603,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_export(CompilerSamplingCon
         {
             String8 bytes = compiler_sampling_controller_read(controller->arena,
                 path_join(controller->arena, controller->prepared, name), BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT);
-            bool retained = compiler_sampling_controller_path_safe(name) && bytes.length &&
+            // Quiet children (git checkout/reset/clean) leave empty logs; the
+            // reader still requires each bounded stream, so keep empty files.
+            bool retained = compiler_sampling_controller_path_safe(name) && bytes.pointer &&
                 file_write(path_join(controller->arena, output, name), BUSTER_SLICE_TO_BYTE_SLICE(bytes));
             result = retained && result;
         }
@@ -857,6 +872,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_controller_execute(Arena* ar
             SliceString8 corpus_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(corpus);
             compiler_sampling_controller_phase(&controller, S8("full-default-corpus"), corpus_arguments,
                 admitted.reservation_seconds * 1000000ull);
+            compiler_sampling_controller_prune_corpus(&controller);
             CompilerSamplingVerification after = controller.success ? compiler_sampling_closure_verify(arena, controller.packet, evidence, 99, true, controller.deadline) : (CompilerSamplingVerification){0};
             controller.success = controller.success && after.valid && compiler_sampling_controller_prepared(&controller, freeze);
             controller.cleanup_failed = controller.cleanup_failed || after.cleanup_failed;
@@ -914,6 +930,24 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_self_test(Arena* arena)
     result = result && owned;
     if (owned)
     {
+        // A packet export reads ~100 bounded files; reads must not reserve the
+        // 8 MiB limit each, and empty child logs must stay distinguishable from
+        // unreadable ones.
+        Arena* bounded = arena_create((ArenaCreation){0});
+        String8 small = path_join(arena, directory, S8("bounded.txt"));
+        String8 empty = path_join(arena, directory, S8("empty.stdout"));
+        bool reads = bounded && file_write(small, BUSTER_SLICE_TO_BYTE_SLICE(S8("x\n"))) &&
+            file_write(empty, (ByteSlice){0});
+        for (u64 i = 0; reads && i < 64; i += 1)
+        {
+            String8 text = compiler_sampling_controller_read(bounded, small, BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT);
+            String8 none = compiler_sampling_controller_read(bounded, empty, BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT);
+            reads = string_equal(text, S8("x\n")) && none.pointer && !none.length;
+        }
+        reads = reads && !compiler_sampling_controller_read(bounded, path_join(arena, directory, S8("missing")),
+            BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT).pointer;
+        if (bounded) arena_destroy(bounded, 1);
+        result = result && reads;
         CompilerSamplingController fixture = {.arena = arena, .evidence = directory,
             .started = os_now_microseconds(), .deadline = os_now_microseconds() + 5000000ull, .success = true};
         string8_list_push(arena, &fixture.phases, S8("stage\tphase\twall_us\texit_status\ttimed_out\tcleanup_failed\tcancelled\tstate\n"));
@@ -933,6 +967,22 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_self_test(Arena* arena)
         bool timeout = !compiler_sampling_controller_phase(&fixture, S8("real-manager-timeout"),
             (SliceString8)BUSTER_ARRAY_TO_SLICE(timed), 20000ull);
         result = result && timeout && !fixture.cleanup_failed && !fixture.success;
+        // A failed corpus that already emitted objects must still export only
+        // its raw records, and its failure must survive the prune.
+        fixture.success = true;
+        fixture.deadline = os_now_microseconds() + 5000000ull;
+        String8 artifacts = path_join(arena, directory, S8("throughput/artifacts"));
+        String8 partial = string_format(arena,
+            S8("mkdir -p '{S8}' && printf o > '{S8}/x.o' && printf e > '{S8}/x.exe' && printf l > '{S8}/x.log' && exit 7"),
+            artifacts, artifacts, artifacts, artifacts);
+        String8 failed_corpus[] = {S8("/bin/sh"), S8("-c"), partial};
+        bool partial_failed = !compiler_sampling_controller_phase(&fixture, S8("failed-corpus-with-outputs"),
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(failed_corpus), 2000000ull);
+        bool pruned = compiler_sampling_controller_prune_corpus(&fixture);
+        result = result && partial_failed && pruned && !fixture.success &&
+            generate_path_kind(arena, path_join(arena, artifacts, S8("x.o"))) == GENERATE_PATH_MISSING &&
+            generate_path_kind(arena, path_join(arena, artifacts, S8("x.exe"))) == GENERATE_PATH_MISSING &&
+            generate_path_kind(arena, path_join(arena, artifacts, S8("x.log"))) != GENERATE_PATH_MISSING;
         String8 binary_directory = path_join(arena, directory, S8("bin"));
         OsDirectoryCreateResult bin = os_make_directory_exclusive(binary_directory);
         String8 names[] = {S8("ide-base"), S8("ide-cand"), S8("ide-cand2")};

@@ -897,6 +897,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_contents(UnitTestArguments*
         BUSTER_TEST(arguments, file_test_bytes_are(arena, artifact, new_content));
         BUSTER_TEST(arguments, file_test_entries_are(arena, directory, artifact_only, 1, 0));
 
+        // A sliced publication over a longer destination must leave exactly
+        // the new bytes, with no old tail.
+        {
+            u64 large_length = BUSTER_KB(320);
+            u8* large = arena_allocate(arena, u8, large_length);
+            for (u64 index = 0; index < large_length; index += 1)
+            {
+                large[index] = (u8)(index * 131u + 7u);
+            }
+            BUSTER_TEST(arguments, file_publish(artifact, (ByteSlice){large, large_length}));
+            ByteSlice slices[] = {{large, 4097}, {large + 4097, BUSTER_KB(100)}, {large + 4097 + BUSTER_KB(100), 3}};
+            u64 sliced_length = 4097 + BUSTER_KB(100) + 3;
+            BUSTER_TEST(arguments, file_publish_slices(artifact, slices, BUSTER_ARRAY_LENGTH(slices)));
+            BUSTER_TEST(arguments, file_test_bytes_are(arena, artifact, (ByteSlice){large, sliced_length}));
+            BUSTER_TEST(arguments, file_test_entries_are(arena, directory, artifact_only, 1, 0));
+            // The link checks below expect the earlier contents.
+            BUSTER_TEST(arguments, file_publish(artifact, new_content));
+        }
+
         // Missing parents fail without creating an alternate path.
         String8 unreachable = file_test_child(arena, directory, S8("missing/artifact.bin"));
         FilePublishResult no_parent = file_publish_checked(
