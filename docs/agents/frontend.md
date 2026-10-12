@@ -626,7 +626,8 @@ and eager equal-lane `__builtin_convertvector` validation in unused wrappers.
 Ordinary storage-half objects, members, parameters and function results receive
 a named semantic refusal; reached scalar casts, bit-casts and vector
 conversions receive a named canonical-lowering refusal. The lowering budget
-skips known `sizeof`, `_Alignof` and `typeof` operands; its `_Generic`
+skips known `sizeof`, `_Alignof` and `typeof` operands, and lowering sizes
+such an operand from the C type layout (see [calls](frontend/calls.md)); its `_Generic`
 evaluation-context handling is not complete. No scalar arithmetic, promotion,
 or ABI support is implied. `c_test_vendor_storage_half_admission` covers this bounded
 slice in both frontend forms.

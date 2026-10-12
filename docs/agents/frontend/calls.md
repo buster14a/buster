@@ -145,9 +145,13 @@ in both frontend forms.
   `strlen`, `assume_aligned`, `frame_address`/`return_address`,
   `__builtin_complex`, GNU vector arithmetic, C23 `true`/`false`/`nullptr`,
   `__func__` and `*` on a function designator. A storage-only `__fp16` type
-  has no IR type, so `sizeof(__fp16)` is diagnosed where the scan folded 4.
-  `c_test_untyped_operand_diagnostics` runs the leaves natively and requires
-  the diagnostics.
+  has no IR type, so when the IR mapping is missing for a `sizeof`/`_Alignof`
+  operand whose type is `__fp16` or an array or GNU vector of it,
+  `c_semantic_storage_half_operand_layout` answers from the C type layout
+  (Clang's 2, and the vector's own size); the scan once folded 4. Only these
+  unevaluated operands are answered; an evaluated `__fp16` value keeps its
+  canonical-lowering refusal. `c_test_untyped_operand_diagnostics` runs the
+  leaves and the `__fp16` sizes natively and requires the evaluated refusals.
 - **Every conditional converts to its own common type before its consumer.**
   The selection worklist types immediate children in postorder, retaining only
   the type at each question token. Flattened control flow shares a result place

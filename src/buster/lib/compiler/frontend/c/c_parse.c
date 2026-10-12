@@ -133,7 +133,9 @@
 //   c_parse_prototype_parameter_count_record
 //   c_parse_type_identity_prepare,                retained C identity answers
 //   c_parse_type_identity_settle
-//   c_parse_validate_cleanup_attribute            __attribute__((cleanup))
+//   c_semantic_storage_half_operand_layout        __fp16 sizeof/_Alignof for
+//                                                 lowering (no IR type)
+//   c_parse_validate_cleanup_attribute           __attribute__((cleanup))
 //   c_parse_name_symbol .. c_parse_lookup_*       symbol interning, scopes,
 //                                                 entity lookup
 //   c_parse_scope_cursor_lookup                   post-binding lookups of the
@@ -9499,6 +9501,62 @@ BUSTER_C_SHARED bool c_semantic_type_identity_query(Arena* scratch, CPreprocessR
     }
     bool valid = cached && cached->token_end <= end;
     if (valid) *answer = *cached;
+    return valid;
+}
+
+// Storage-only __fp16 has no canonical IR type, so lowering cannot size a
+// sizeof/_Alignof operand whose type is __fp16 or is built from __fp16
+// elements by arrays and GNU vectors. The operand is unevaluated, and the C
+// type layout already knows the answer (Clang: 2 for __fp16, the vector's
+// byte size for a vector). Any other type answers false and keeps lowering's
+// own diagnostic. Scratch machine storage as in c_semantic_type_identity_query;
+// the result is restored afterwards, as a speculative checkpoint is, so the
+// probe leaves no rows (lowering indexes its type map by type_count), no live
+// interning entries and no diagnostics behind.
+BUSTER_C_SHARED bool c_semantic_storage_half_operand_layout(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+                                                            u32 start, u32 end, bool type_name, u64* size_out, u32* alignment_out)
+{
+    bool valid = start < end && end <= preprocess.token_count;
+    if (valid)
+    {
+        u64 mark = scratch->position;
+        CParseResult checkpoint = *result;
+        u32 capacity = end - start + 64;
+        CTypeParseMachine machine = {
+            .frames = arena_allocate(scratch, CTypeParseFrame, capacity),
+            .frame_checkpoints = arena_allocate(scratch, CParseResult, capacity),
+            .mutations = arena_allocate(scratch, CTypeMutation, capacity),
+            .expression_tasks = arena_allocate(scratch, CParseExpressionTypeTask, capacity),
+            .scratch_arena = scratch,
+            .frame_capacity = capacity, .mutation_capacity = capacity, .expression_task_capacity = capacity,
+        };
+        CTypeId type = C_TYPE_ID_INVALID;
+        if (type_name)
+        {
+            u32 index = start;
+            type = c_parse_type_name_specifiers(&machine, result, preprocess, scope, start, end, &index);
+            if (type.value != C_ID_UNDERLYING_INVALID)
+            {
+                type = c_parse_pointer_chain(result, preprocess, type, &index, end);
+                type = c_parse_array_suffixes(result, preprocess, type, &index, end);
+            }
+            valid = type.value != C_ID_UNDERLYING_INVALID && index == end;
+        }
+        else
+        {
+            valid = c_parse_expression_type_query(&machine, scratch, preprocess, result, scope, start, end, &type);
+        }
+        CTypeId element = type;
+        while (valid && element.value < result->type_count &&
+               (result->types[element.value].kind == C_TYPE_ARRAY || result->types[element.value].kind == C_TYPE_VECTOR))
+        {
+            element = result->types[element.value].element_type;
+        }
+        valid = valid && element.value < result->type_count && result->types[element.value].kind == C_TYPE_FP16_STORAGE &&
+                c_parse_type_layout(&machine, scratch, preprocess, result, type, size_out, alignment_out);
+        *result = checkpoint;
+        arena_set_position(scratch, mark);
+    }
     return valid;
 }
 

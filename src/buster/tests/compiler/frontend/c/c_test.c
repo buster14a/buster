@@ -22746,10 +22746,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_storage_half_admission(UnitTest
         "static inline float unused_half(unsigned short bits) { return (float)__builtin_bit_cast(__fp16, bits); }\n"
         "_Static_assert(sizeof(__builtin_bit_cast(__fp16, (unsigned short)0)) == 2, \"storage width\");\n"
         "_Static_assert(_Generic(__builtin_bit_cast(__fp16, (unsigned short)0), _Float16: 0, default: 1), \"distinct scalar type\");\n"
-        // sizeof of a storage-only __fp16 type has no IR answer, so lowering
-        // diagnoses it (c_test_untyped_operand_diagnostics); a typed result
-        // still passes the vendor budget's unevaluated-operand skip.
-        "int live(unsigned short bits) { (void)bits; (void)sizeof(__builtin_convertvector((__v4fp16_test){0}, __v4sf_test)); (void)__builtin_convertvector((__v4sf_test){8, 0, 0, 0}, __v4sf_test); return 7; }\n"
+        // Unevaluated __fp16 operands pass the vendor budget's skip; their
+        // sizes come from the C layout (c_semantic_storage_half_operand_layout).
+        "int live(unsigned short bits) { (void)sizeof(__builtin_bit_cast(__fp16, bits)); (void)sizeof(__builtin_convertvector((__v4fp16_test){0}, __v4sf_test)); (void)sizeof(__typeof__((__fp16)1)); (void)__builtin_convertvector((__v4sf_test){(float)sizeof(__v4fp16_test), 0, 0, 0}, __v4sf_test); return 7; }\n"
         "int live_vla_bound(unsigned int bits) { return sizeof(int[__builtin_ia32_lzcnt_u32(bits)]); }\n");
     Target targets[] = {
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
@@ -44332,9 +44331,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArgument
 // first program covers the shapes that still reached that scan in the test
 // corpus and now have strict-walk leaves of their own; it checks sizeof
 // results and conditional values at run time against what GCC and Clang
-// answer. The second part lowers operands the IR cannot type at all and
-// requires a diagnostic: the scan folded `sizeof(__fp16)` to 4 and the size
-// of a four-lane __fp16 vector to 4, where Clang answers 2 and 8.
+// answer, including the storage-only __fp16 operands the scan folded to 4
+// (`sizeof(__fp16)`, a four-lane __fp16 vector), where Clang answers 2 and 8:
+// their unevaluated size comes from the C layout. The second part requires a
+// diagnostic for __fp16 values that are evaluated, which have no IR type.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -44342,6 +44342,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestAr
     String8 source = S8(
         "typedef unsigned long long U64;\n"
         "typedef int v4i __attribute__((vector_size(16)));\n"
+        "typedef __fp16 v4h __attribute__((__vector_size__(8)));\n"
+        "typedef float v4f __attribute__((__vector_size__(16)));\n"
         "static int g(void) { return 3; }\n"
         "static int call(int (*p)(void)) { return sizeof(*(*p)) == 1 ? (*(*(*p)))() : 0; }\n"
         "static long double va(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n);\n"
@@ -44365,6 +44367,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestAr
         "    if (va(1, 2.0) != 2 || va(2, (long double)4) != 4) return 11;\n"
         "    v4i w = c ? v + v : v * v;\n"
         "    long e = c ? __builtin_expect(l, 1) : 0;\n"
+        "    unsigned short bits = (unsigned short)(0x3c00 + c);\n"
+        "    if (sizeof(__fp16) != 2 || sizeof(__typeof__((__fp16)1)) != 2 || sizeof(v4h) != 8) return 13;\n"
+        "    if (sizeof(__builtin_bit_cast(__fp16, bits)) != 2 || sizeof(const __fp16) != 2 || sizeof(v4h[2]) != 16) return 14;\n"
+        "    if (_Alignof(__fp16) != 2 || _Alignof(v4h) != 8 || __alignof__(__builtin_bit_cast(__fp16, bits)) != 2) return 15;\n"
+        "    if (__builtin_convertvector((v4f){(float)sizeof(v4h), 0, 0, 0}, v4f)[0] != 8) return 16;\n"
         "    return w[3] != 8 || e != 6 ? 12 : 0;\n"
         "}\n");
     String8 path = buster_test_temporary_path(arguments->arena, S8("untyped-operands"), S8(".c"));
@@ -44402,18 +44409,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestAr
         "typedef __fp16 v4h __attribute__((__vector_size__(8)));\n"
         "typedef float v4f __attribute__((__vector_size__(16)));\n");
     String8 rejected[] = {
-        S8("int f(void) { return sizeof(__fp16); }\n"),
-        S8("int f(void) { return sizeof(v4h); }\n"),
-        S8("int f(void) { return sizeof(__typeof__((__fp16)1)); }\n"),
-        S8("float f(void) { return __builtin_convertvector((v4f){(float)sizeof(v4h), 0, 0, 0}, v4f)[0]; }\n"),
-        S8("int f(unsigned short bits) { return sizeof(__builtin_bit_cast(__fp16, bits)); }\n"),
+        S8("float f(void) { return (float)sizeof(__fp16) + (float)(__fp16)1; }\n"),
+        S8("float f(unsigned short bits) { return (float)sizeof(__builtin_bit_cast(__fp16, bits)) + (float)__builtin_bit_cast(__fp16, bits); }\n"),
+        S8("float f(void) { return __builtin_convertvector((v4h){0}, v4f)[0] + (float)sizeof(v4h); }\n"),
     };
     String8 messages[] = {
-        S8("the operand's type has no canonical IR representation"),
-        S8("the operand's type has no canonical IR representation"),
-        S8("the operand's type has no canonical IR representation"),
-        S8("the operand's type has no canonical IR representation"),
+        S8("__fp16 cast expression has no canonical implementation"),
         S8("__builtin_bit_cast destination __fp16 has no canonical implementation"),
+        S8("__fp16 vector conversion has no canonical implementation"),
     };
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
@@ -44424,10 +44427,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestAr
             String8 text = string_format(temporary.arena, S8("{S8}{S8}"), header, rejected[index]);
             CPreprocessResult tokens = c_preprocess(temporary.arena, text,
                 (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
-            CParseResult parsed = c_parse(temporary.arena, tokens);
-            if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count))
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult model = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && model.analysis_complete &&
+                                              !model.diagnostic_count))
             {
-                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("untyped-operand.c"), tokens, parsed, target,
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("untyped-operand.c"), tokens, model, target,
                     (CIRLowerOptions){.disable_direct_ssa = form != 0});
                 BUSTER_TEST_RAW(arguments, lowered.diagnostic_count && !lowered.canonical_ir_certified,
                     string_format(temporary.arena, S8("untyped operand {u32} form={u32} lowered without a diagnostic"), index, form));
