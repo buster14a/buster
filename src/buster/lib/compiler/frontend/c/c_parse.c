@@ -7117,7 +7117,9 @@ BUSTER_C_SHARED CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPrep
                     c_semantic_integer_count_parameter_kind(builtin, name) != C_TYPE_INVALID)
                 {
                     CMathLibmShape libm = builtin == C_SYMBOL_BUILTIN_MATH ? c_semantic_math_libm_shape(name) : (CMathLibmShape){0};
-                    CTypeKind kind = libm.arity ? libm.result_kind : builtin != C_SYMBOL_BUILTIN_MATH || string_starts_with_sequence(name, S8("__builtin_signbit")) || string_starts_with_sequence(name, S8("__builtin_is")) || string_equal(name, S8("__builtin_fpclassify"))
+                    CMathSpecialValue special = builtin == C_SYMBOL_BUILTIN_MATH ? c_semantic_math_special_value(c_ir_math_builtin_link_name(name))
+                                                                                 : (CMathSpecialValue){0};
+                    CTypeKind kind = libm.arity ? libm.result_kind : special.special ? special.kind : builtin != C_SYMBOL_BUILTIN_MATH || string_starts_with_sequence(name, S8("__builtin_signbit")) || string_starts_with_sequence(name, S8("__builtin_is")) || string_equal(name, S8("__builtin_fpclassify"))
                                          ? C_TYPE_INT : name.length && name.pointer[name.length - 1] == 'f' && !string_equal(name, S8("__builtin_inf"))
                                          ? C_TYPE_FLOAT : name.length && c_semantic_math_link_is_long_double(string_starts_with_sequence(name, S8("__builtin_")) ? string_slice(name, 10, name.length) : name)
                                          ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
@@ -33327,20 +33329,24 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
     }
     else if (first.kind == C_TOKEN_IDENTIFIER && c_ir_math_builtin_link_name(spelling).length)
     {
-        String8 math = c_ir_math_builtin_link_name(spelling);
-        bool nan = string_equal(math, S8("nan")) || string_equal(math, S8("nanf"));
-        bool infinity = string_equal(math, S8("inff")) || string_equal(math, S8("huge_val"));
+        CMathSpecialValue special = c_semantic_math_special_value(c_ir_math_builtin_link_name(spelling));
+        bool nan = special.special == C_MATH_SPECIAL_QUIET_NAN;
         u32 close = start + 1 < end ? c_parse_matching_delimiter_indexed(result, preprocess, start + 1) : UINT32_MAX;
         String8 payload = start + 2 < end ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[start + 2]) : (String8){0};
-        value.valid = close + 1 == end && (nan ? close == start + 3 && string_equal(payload, S8("\"\"")) : infinity && close == start + 2);
+        value.valid = close + 1 == end && (nan ? close == start + 3 && string_equal(payload, S8("\"\""))
+                                               : special.special == C_MATH_SPECIAL_INFINITY && close == start + 2);
         if (value.valid)
         {
-            u64 bits = infinity ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7ff8000000000000);
-            memcpy(&value.floating, &bits, sizeof(bits));
+            // The special value is encoded in the target's own format, so a
+            // long double one carries its x87 or binary128 image.
+            value.type = c_parse_expression_scalar_type(result, special.kind);
+            IrType scalar = c_parse_constant_scalar_type(result, preprocess.target, value.type);
+            CIrConstantValue folded = c_ir_constant_math_special(&scalar, special.special);
+            value.floating = folded.floating;
+            value.integer = folded.integer;
+            value.integer_high = folded.integer_high;
             value.is_float = true;
-            bool single = string_equal(math, S8("nanf")) || string_equal(math, S8("inff"));
-            value.float_width = single ? 32 : 64;
-            value.type = c_parse_expression_scalar_type(result, single ? C_TYPE_FLOAT : C_TYPE_DOUBLE);
+            value.float_width = (u8)scalar.bit_width;
         }
     }
     else if (first.kind == C_TOKEN_IDENTIFIER && (string_equal(spelling, S8("sizeof")) || c_parse_alignof_word(spelling)))
@@ -36470,9 +36476,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_static_scalar(CTy
             }
             else if (!keyword)
             {
-                String8 math = c_ir_math_builtin_link_name(name);
-                numeric = string_equal(math, S8("nan")) || string_equal(math, S8("nanf")) ||
-                          string_equal(math, S8("inff")) || string_equal(math, S8("huge_val"));
+                numeric = c_semantic_math_special_value(c_ir_math_builtin_link_name(name)).special != C_MATH_SPECIAL_NONE;
                 unknown = !numeric && !string_starts_with_sequence(name, S8("__builtin_")) && !string_equal(name, S8("_Generic"));
                 if (numeric && cursor + 1 < end)
                 {
@@ -38975,8 +38979,7 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
         bool member = index && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
                                 c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
         bool infinity = kind == C_SYMBOL_BUILTIN_MATH &&
-            (string_equal(name, S8("__builtin_inf")) || string_equal(name, S8("__builtin_inff")) ||
-             string_equal(name, S8("__builtin_huge_val")));
+            c_semantic_math_special_value(c_ir_math_builtin_link_name(name)).special == C_MATH_SPECIAL_INFINITY;
         if (member || (kind != C_SYMBOL_BUILTIN_VENDOR_TARGET && kind != C_SYMBOL_BUILTIN_VENDOR_GENERIC &&
                        kind != C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT && !infinity) ||
             !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
