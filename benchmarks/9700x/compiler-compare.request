@@ -165,3 +165,5 @@ request: issue #2761 first 9700X compiler-probes run after #3657 landed; request
 profile: compiler-probes-v1
 request: issue #2761 first 9700X frontend-selector run after #3661 landed; request-only head over main afe67cbeb; fresh compiler-compare-v1 plus frontend-selector-v1 leg (report-only, A/A)
 profile: frontend-selector-v1
+request: issue #2761 first 9700X production-profile run after lld was installed on benchpress (supersedes #3703, whose attempt 1 failed on missing ld.lld); request-only head over main afe67cbeb; fresh compiler-compare-v1 plus production-profile-v1 leg (report-only, Release vs PGO+LTO)
+profile: production-profile-v1
