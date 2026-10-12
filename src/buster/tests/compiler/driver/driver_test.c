@@ -1868,11 +1868,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_early_exit(UnitTestArgum
         // 0-2, where -v output would reach the parent as a status byte. The
         // last prelude also exhausts descriptors so the pipe cannot move
         // above fd 2, which must fall back to an in-process compile. Every
-        // case must give the default path's status and artifact.
+        // case must give the default path's status and artifact. Sanitizer
+        // runtimes cannot start within three descriptors (both modes spin to
+        // the deadline there), so that prelude runs in plain builds only.
         BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source)));
         String8 preludes[] = {S8("exec 0<&- 1>&-"), S8("exec 0<&- 1>&- 2>&-"), S8("exec 0<&- 1>&-; ulimit -n 3")};
+        u32 prelude_count = BUSTER_SANITIZE ? 2u : (u32)BUSTER_ARRAY_LENGTH(preludes);
         String8 modes[] = {S8("-fno-early-exit"), S8("-fearly-exit")};
-        for (u32 prelude = 0; prelude < BUSTER_ARRAY_LENGTH(preludes); prelude += 1)
+        for (u32 prelude = 0; prelude < prelude_count; prelude += 1)
         {
             for (u32 verbose = 0; verbose < 2; verbose += 1)
             {
@@ -1888,7 +1891,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_early_exit(UnitTestArgum
                 }
                 BUSTER_TEST(arguments, statuses[0] != UINT64_MAX && statuses[0] == statuses[1]);
                 BUSTER_TEST(arguments, objects[0].length == objects[1].length &&
-                                           memory_compare(objects[0].pointer, objects[1].pointer, objects[0].length));
+                                           (objects[0].length == 0 || memory_compare(objects[0].pointer, objects[1].pointer, objects[0].length)));
                 // Without -v nothing is written to the closed streams, so the
                 // compile itself must succeed in both modes.
                 BUSTER_TEST(arguments, verbose || prelude == 2 || (statuses[1] == 0 && objects[1].length == expected.length));
