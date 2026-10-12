@@ -10878,7 +10878,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_enum_runtime(UnitTestArgume
         "static int shadow(void){int inner=0;{(void)sizeof(enum{Q=2});inner=Q;}return inner!=2||Q!=1;}"
         "static int declaration(void){enum{E=2}object=E;return object!=2;}"
         "static int tagged(void){(void)sizeof(enum Tag{E=2});enum Tag object=E;return object!=2;}"
-        "int main(void){return statement()||returning()||assertion()||cast()||literal()||order()||sequence()||shadow()||declaration()||tagged();}");
+        // A later operand of the same full expression sees the enumerators,
+        // with or without a fixed underlying type (C11 6.2.1p7).
+        "static int header(void){if(sizeof(enum{E=2})!=sizeof(int)||E!=2)return 1;return 0;}"
+        "static int fixed(void){volatile int c=1;if(sizeof(enum:char{E=2})!=1||E!=2)return 1;return c-1;}"
+        "static int fixed_cast(void){if((enum:char{E=2})0!=0||E!=2)return 1;return 0;}"
+        "static int fixed_operand(void){return (int)sizeof(enum Fixed:short{E=2})+E!=4;}"
+        "static int fixed_statement(void){(void)sizeof(enum:char{E=2});return E!=2;}"
+        "static int fixed_scope(void){int v=0;if(sizeof(enum:char{Q=8}))v=Q;return v!=8||Q!=1;}"
+        "int main(void){return statement()||returning()||assertion()||cast()||literal()||order()||sequence()||shadow()||declaration()||tagged()||"
+        "header()||fixed()||fixed_cast()||fixed_operand()||fixed_statement()||fixed_scope();}");
     String8 source = buster_test_temporary_path(arguments->arena, S8("expression-enum-runtime"), S8(".c"));
     String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
@@ -11282,6 +11291,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_scope(UnitTestArgumen
         S8("enum{A=100};int main(void){int n=(int)sizeof(enum E:short{A=1});return n-2+A-1;}"),
         S8("enum{A=100};int main(void){int n=(int)sizeof(const struct S{enum{A=3}e;char c[A];});return n-8+A-3;}"),
         S8("enum{A=100};int main(void){long n=__builtin_offsetof(struct{enum{A=3}e;char c[A];char d;},d);return (int)n-7+A-3;}"),
+        // Later operands of the same full expression see them as well.
+        S8("enum{A=100};int main(void){if(sizeof(enum:char{A=1})!=1||A!=1)return 1;return A-100;}"),
+        S8("enum{A=100};int main(void){if((enum:char{A=1})0!=0||A!=1)return 1;return A-100;}"),
+        S8("enum{A=100};int main(void){return (int)sizeof(enum E:short{A=1})+A-3;}"),
+        S8("int main(void){(void)sizeof(enum:char{A=1});return A-1;}"),
     };
     String8 rejected[] = {
         S8("int main(void){int x=E+(enum{E=2})E;return x;}"),
@@ -11296,6 +11310,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_scope(UnitTestArgumen
         S8("int main(void){{int x=(int)sizeof(struct{enum{A=3}e;});(void)x;}return A;}"),
         S8("int main(void){int x=A+(int)sizeof(struct{enum{A=3}e;});return x;}"),
         S8("enum{A=100};int main(void){int n=(int)sizeof(const enum{A=1});enum{A=2};return n;}"),
+        S8("int main(void){if(A!=1||sizeof(enum:char{A=1})!=1)return 1;return 0;}"),
+        S8("int main(void){if(sizeof(enum:char{A=1})!=1)return 1;return A;}"),
+        S8("int main(void){return (int)sizeof(enum:char{A=1})+(int)sizeof(enum:char{A=2});}"),
         // Attributes between the keyword and the body are refused, never read
         // with an outer enumerator of the same name.
         S8("enum{A=100};int main(void){int n=(int)sizeof(enum __attribute__((packed)){A=1});return A-1;}"),
@@ -11307,7 +11324,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_scope(UnitTestArgumen
         C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
         C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION,
         C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
-        C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+        C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_REDEFINITION,
+        C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
     };
     Target targets[] = {target_native, target_native, target_native};
     targets[0].cpu_arch = CPU_ARCH_X86_64;

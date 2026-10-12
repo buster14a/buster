@@ -27583,16 +27583,35 @@ BUSTER_C_INTERNAL CParsePendingTypeofDeclaration* c_parse_pending_typeof_grow(Ar
 // Whether the controlling expression [start, end) defines a tag. A definition
 // is the only thing such an expression declares, and each one has a body, so
 // a header without a `{` -- nearly all of them -- costs one shape compare a
-// token and nothing else.
-BUSTER_C_INTERNAL bool c_parse_controlling_expression_defines_tag(CTokenShape const* token_shapes, CPreprocessResult preprocess, u32 start, u32 end)
+// token and nothing else. A `{` not directly after `enum`, `struct` or
+// `union` and an optional tag may still open an enum with a fixed underlying
+// type (`enum : char {`): the walk back to its keyword stops at the previous
+// brace or `;`, which no underlying type name holds.
+BUSTER_C_INTERNAL bool c_parse_controlling_expression_defines_tag(CParseResult* result, CTokenShape const* token_shapes, CPreprocessResult preprocess,
+                                                                  u32 start, u32 end)
 {
     bool defines = false;
     for (u32 index = start; index < end && !defines; index += 1)
     {
         u32 close = 0;
-        defines = c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, index)) == C_PUNCTUATOR_LEFT_BRACE &&
-                  ((index > start && c_parse_aggregate_definition_at(preprocess, index - 1, end, &close)) ||
-                   (index > start + 1 && c_parse_aggregate_definition_at(preprocess, index - 2, end, &close)));
+        bool brace = c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, index)) == C_PUNCTUATOR_LEFT_BRACE;
+        defines = brace && ((index > start && c_parse_aggregate_definition_at(preprocess, index - 1, end, &close)) ||
+                            (index > start + 1 && c_parse_aggregate_definition_at(preprocess, index - 2, end, &close)));
+        if (brace && !defines)
+        {
+            u32 keyword = index;
+            bool stopped = false;
+            while (keyword > start && !stopped)
+            {
+                keyword -= 1;
+                CPunctuator punctuator = c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, keyword));
+                stopped = punctuator == C_PUNCTUATOR_LEFT_BRACE || punctuator == C_PUNCTUATOR_RIGHT_BRACE || punctuator == C_PUNCTUATOR_SEMICOLON ||
+                          c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[keyword], C_SYMBOL_WELL_KNOWN_ENUM);
+            }
+            u32 open = 0;
+            defines = stopped && c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[keyword], C_SYMBOL_WELL_KNOWN_ENUM) &&
+                      c_parse_type_definition_at(result, preprocess, keyword, end, &open, &close) && open == index;
+        }
     }
     return defines;
 }
@@ -29033,7 +29052,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_parse_bind_block_walk(CTypeParseMachine
             index + 1 < body_end && c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, index + 1)) == C_PUNCTUATOR_LEFT_PARENTHESIS)
         {
             u32 header_close = c_parse_matching_delimiter(preprocess, index + 1, body_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            u32 statement_end = header_close < body_end && c_parse_controlling_expression_defines_tag(token_shapes, preprocess, index + 2, header_close)
+            u32 statement_end = header_close < body_end && c_parse_controlling_expression_defines_tag(result, token_shapes, preprocess, index + 2, header_close)
                                     ? c_parse_statement_end(preprocess, c_parse_statement_delimiters(result), index, body_end, statement_suffix, body_token_count + 1, 0)
                                     : UINT32_MAX;
             if (statement_end != UINT32_MAX)
@@ -29070,14 +29089,17 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_parse_bind_block_walk(CTypeParseMachine
         // A direct enum type name in an ordinary body expression has the same
         // declaration point and publishes in the current block. Its preceding
         // `(` distinguishes it from an ordinary declaration with a declarator.
+        // An enum with a fixed underlying type (`enum : char {`) is the same
+        // definition, so its enumerators are in scope for later operands of
+        // the same full expression too (C11 6.2.1p7).
+        u32 aggregate_open = 0;
         u32 aggregate_close = 0;
         bool enumeration = shape == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_ENUM);
         bool expression_enum = enumeration && index && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
         if (shape == C_TOKEN_IDENTIFIER && (index < scope_header_end[scope_count - 1] || expression_enum || (!statement_start && !enumeration)) &&
-            c_parse_aggregate_definition_at(preprocess, index, body_end, &aggregate_close))
+            c_parse_type_definition_at(result, preprocess, index, body_end, &aggregate_open, &aggregate_close))
         {
             CScopeId statement_scope = scope_stack[scope_count - 1];
-            u32 aggregate_open = preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER ? index + 2 : index + 1;
             if (!c_parse_aggregate_definition_registered(result, aggregate_open))
             {
                 u32 enum_member_start = result->enum_member_count;
