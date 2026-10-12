@@ -1347,6 +1347,15 @@ and overlapping target-specific metadata are refused. `compiler_driver_test_mach
 architecture selection, search order, versions, fallback, refusal and archive
 interaction on every host without running the cross-linked image.
 
+Dependency names passed through `-l NAME` or `-framework NAME` must be
+nonempty. An explicitly empty operand is a `driver.argument` error naming the
+option before any source is read or output is published; response files and
+embedding invocations follow the same rule. A missing operand retains its
+separate `missing argument after OPTION` diagnostic. Empty `-I`/`-L` path
+policy is independent. `compiler_driver_test_empty_dependency_names` covers
+macOS/iOS, single/multiple inputs, an empty request followed by a missing name,
+argv/response/API calls, and preservation of existing output.
+
 `-framework NAME` searches every explicit `-F` root in order, then
 `<sysroot>/System/Library/Frameworks`, or `/System/Library/Frameworks` when
 no sysroot is supplied. Within each root it probes `NAME.framework/NAME.tbd`
@@ -1793,10 +1802,50 @@ are refused. A SONAME operand named `--version` retains its ordinary meaning.
 The identity makes no GNU ld/LLD compatibility or invented version claim.
 Buster currently links in process and has no external-linker selector.
 
+For a native Linux x86-64 or AArch64 ELF link, raw linker `-v` from
+`-Wl,-v` or `-Xlinker -v` requests the native linker's identity while allowing
+the link to continue. It is consumed only in option position; operands to
+`-soname`, `--soname`, `-h`, `-z` or `--version-script` are preserved. Other targets and output
+modes continue to reject it. With driver `-v`, the driver also prints a
+` buster-native-ld` link-report line containing the output, explicit and
+target/sysroot library search roots in lookup order, command-line object,
+archive and shared-library inputs, and requested libraries. This is a report
+label for Buster's in-process link, not an executable name or linker choice;
+it does not claim GNU ld or LLD identity. CMake's
+`CMakeDetermineCompilerABI` / `CMakeParseImplicitLinkInfo` consume this
+link-line shape to discover Linux multiarch implicit library directories.
+
 Meson versions without a Buster linker detection/class implementation still
 reject this truthful identity. Native query support alone does not qualify
 Meson/QEMU configuration: upstream recognition and tests against unmodified
 Meson are required under [#3475](https://github.com/buster14a/buster/issues/3475).
+
+### Standalone CMake ABI discovery reduction
+
+`tools/cmake_abi_discovery/CMakeLists.txt` is a standalone reduction, not a CI
+test. Compare its `discovery.txt` output with Clang and Buster in separate
+build directories. For Clang:
+
+```sh
+cmake -S tools/cmake_abi_discovery -B out-clang -DCMAKE_C_COMPILER=clang
+cmake --build out-clang
+cat out-clang/discovery.txt
+```
+
+With CMake 3.29 or newer, point CMake directly at `ide` and make `cc` the
+compiler argument:
+
+```sh
+cmake -S tools/cmake_abi_discovery -B out-buster \
+  -DCMAKE_C_COMPILER=/path/to/ide -DCMAKE_C_COMPILER_ARG1=cc
+cmake --build out-buster
+cat out-buster/discovery.txt
+```
+
+For older CMake, use a wrapper whose contents are `exec /path/to/ide cc "$@"`,
+then configure with `-DCMAKE_C_COMPILER=/path/to/wrapper`. Compare pointer
+size, library architecture, implicit directories, linker identity, and the
+paths found for z and X11.
 
 ## Pass-through options
 

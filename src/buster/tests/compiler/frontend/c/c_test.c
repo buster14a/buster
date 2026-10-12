@@ -39061,6 +39061,201 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_type_prediction(UnitTestAr
     return result;
 }
 
+// First-party GNU17/GNU23 witnesses: typeof's operand is not the outer
+// cast's type-word grammar. Conjunction and sizeof/alignof neighbors still
+// resolve the next name as an ordinary identifier, even when it is a label.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_label_address(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("int main(void) { void* p = (__typeof__((void*)0))&&done; done: return p != &&done; }"),
+        S8(
+        "int main(void) { int a=1,b=0;"
+        " void *p=(__typeof__((void*)0))&&done;"
+        " void *q=(__typeof(void*))&&done;"
+        " void *r=(typeof((void*)0))&&done;"
+        " void *s=(__typeof__((a && b,(void*)0)))&&done;"
+        "done: if (p!=&&done || q!=&&done || r!=&&done || s!=&&done) return 1; return 0; }"),
+        S8("int main(void) { void *p=(__typeof__((void*)0))&&done; int same=(p==&&done); done: return same!=1; }"),
+        S8("int main(void) { done: return (__typeof__((void*)0))&&done != &&done; }"),
+    };
+    typedef struct CTypeofLabelEscapeCase CTypeofLabelEscapeCase;
+    struct CTypeofLabelEscapeCase
+    {
+        String8 source;
+        String8 message;
+    };
+    CTypeofLabelEscapeCase escapes[] = {
+        {S8("void *f(void) { return (__typeof__((void*)0))&&done; done: return 0; }"),
+         S8("a label address may not escape through a function return")},
+        {S8("void take(void*); void f(void) { take((__typeof__((void*)0))&&done); done: ; }"),
+         S8("a label address may not escape through a function call")},
+        {S8("void *saved; int f(void) { saved=(__typeof__((void*)0))&&done; done: return 0; }"),
+         S8("a label address may not be stored in static storage")},
+        {S8("void *f(void) { void *p=&&done; return p==&&done ? p : 0; done: return 0; }"),
+         S8("a label address may not escape through a function return")},
+        {S8("void *f(void) { void *p=&&done; return (p!=&&done,p); done: return 0; }"),
+         S8("a label address may not escape through a function return")},
+    };
+    String8 invalid[] = {
+        S8("int main(void) { return (1) && done; done: return 0; }"),
+        S8("int main(void) { return sizeof(__typeof__((void*)0)) && done; done: return 0; }"),
+        S8("int main(void) { return _Alignof(__typeof__((void*)0)) && done; done: return 0; }"),
+        S8("int main(void) { void *p=(__typeof__((void*)unknown))&&done; done: return p!=&&done; }"),
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    // The scoped cast proof also supports callers without a position index.
+    // Its typeof operand contains an ordinary conjunction before the label.
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena,
+            S8("int main(void) { int a=1,b=0; void *p=(__typeof__((a && b,(void*)0)))&&done; done: return p!=&&done; }"),
+            (CPreprocessOptions){.target = target_native, .dialect = dialects[dialect]});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count);
+        CScopeId scope = C_SCOPE_ID_INVALID;
+        u32 body_start = UINT32_MAX;
+        for (u32 index = 0; index < parsed.declaration_count; index += 1)
+        {
+            CDeclaration* declaration = parsed.declarations + index;
+            if (declaration->kind == C_DECLARATION_FUNCTION && string_equal(declaration->name, S8("main")))
+            {
+                scope = declaration->scope;
+                body_start = declaration->body_start;
+            }
+        }
+        CParseResult scalar = parsed;
+        scalar.position_index = NULL;
+        bool expected[] = {false, true, true};
+        u32 conjunction = 0;
+        if (BUSTER_REQUIRE(arguments, body_start != UINT32_MAX))
+        {
+            for (u32 index = body_start; index < tokens.token_count; index += 1)
+            {
+                if (tokens.tokens[index].kind == C_TOKEN_PUNCTUATOR &&
+                    tokens.tokens[index].punctuator == C_PUNCTUATOR_AMPERSAND_AMPERSAND)
+                {
+                    if (BUSTER_REQUIRE(arguments, conjunction < BUSTER_ARRAY_LENGTH(expected)))
+                    {
+                        BUSTER_TEST(arguments, c_parse_label_address_prefix_with_typedef(&parsed, &tokens, scope, body_start, index) == expected[conjunction]);
+                        BUSTER_TEST(arguments, c_parse_label_address_prefix_with_typedef(&scalar, &tokens, scope, body_start, index) == expected[conjunction]);
+                    }
+                    conjunction += 1;
+                }
+            }
+            BUSTER_TEST(arguments, conjunction == BUSTER_ARRAY_LENGTH(expected));
+        }
+        scratch_end(temporary);
+    }
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        String8 source = sources[source_index];
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                    (CPreprocessOptions){.target = targets[target_index], .dialect = dialects[dialect]});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !semantic.diagnostic_count, source);
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("typeof-label.c"), tokens, semantic, targets[target_index],
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    if (BUSTER_REQUIRE(arguments, !lowered.diagnostic_count && lowered.program && lowered.program->module_count == 1))
+                    {
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    }
+                }
+                scratch_end(temporary);
+            }
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, invalid[index],
+                    (CPreprocessOptions){.target = target_native, .dialect = dialects[dialect]});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                bool undeclared = false;
+                for (u32 row = 0; row < semantic.diagnostic_count; row += 1)
+                {
+                    undeclared |= string_first_sequence(semantic.diagnostics[row].message, S8("use of undeclared identifier")) != BUSTER_STRING_NO_MATCH;
+                }
+                BUSTER_TEST_RAW(arguments, undeclared, invalid[index]);
+                scratch_end(temporary);
+            }
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(escapes); index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, escapes[index].source,
+                    (CPreprocessOptions){.target = target_native, .dialect = dialects[dialect]});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                bool found = false;
+                for (u32 row = 0; row < semantic.diagnostic_count; row += 1)
+                {
+                    found |= string_first_sequence(semantic.diagnostics[row].message, escapes[index].message) != BUSTER_STRING_NO_MATCH;
+                }
+                BUSTER_TEST_RAW(arguments, found, escapes[index].source);
+                scratch_end(temporary);
+            }
+        }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+        String8 path = buster_test_temporary_path(arguments->arena, S8("typeof-label"), S8(".c"));
+        if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 standards[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+            String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+            for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(standards); dialect += 1)
+            {
+                for (u32 pilot = 0; pilot < 2; pilot += 1)
+                {
+                    for (u32 form = 0; form < 2; form += 1)
+                    {
+                        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+                        {
+                            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                            String8 output = buster_test_temporary_unique_path(temporary.arena, S8("typeof-label-run"), S8(".exe"));
+                            String8 command[] = {S8("-fc-ast-pilot"), S8("-nostdinc"), standards[dialect], modes[mode], S8("-fverify-codegen"),
+                                form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-o"), output, path};
+                            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                                (SliceString8){command + !pilot, BUSTER_ARRAY_LENGTH(command) - !pilot});
+                            invocation.reject_machine_fallback = true;
+                            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                            {
+                                String8 run[] = {output};
+                                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                    (ProcessSpawnOptions){.use_process_environment = true});
+                                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                                {
+                                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                                    BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                                }
+                            }
+                            scratch_end(temporary);
+                        }
+                    }
+                }
+            }
+        }
+#endif
+    }
+    return result;
+}
+
 // A `typeof` operand that opens with a cast to a `typeof` type and goes on
 // with an operator that may also be binary: `(typeof (object)) + 1` is a cast
 // of `+1`, not a sum whose left operand is a type name.  The operator scan
@@ -63408,6 +63603,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_typeof_conditional_type);
     C_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
     C_TEST_FIXTURE(arguments, c_test_typeof_invalid_operand_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_typeof_label_address);
     C_TEST_FIXTURE(arguments, c_test_typeof_malformed_operand_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_typeof_statement_expression_declarations);
     C_TEST_FIXTURE(arguments, c_test_u64_initializer_slots);
