@@ -1526,6 +1526,27 @@ The object writer already carries that requirement into the section metadata
 (GitHub #225).
 
 Every hosted ELF link reads the shared libraries' own dynamic symbol tables.
+Undefined ELF `STT_NOTYPE` references carry explicit `undefined_untyped`
+provenance in `ObjectSymbol`; TLS identity is independent. A typed reference
+wins over an untyped one in either object order. Both ELF object writers keep
+untyped assembly references `STT_NOTYPE`, even when a call relocation proves
+their callable use. Before any Linux or Android image writer, the selected
+library definition's `st_type` classifies an import: `STT_FUNC` and
+`STT_GNU_IFUNC` are functions, and `STT_OBJECT` remains data even without a
+storage-table entry. An untyped address reference with no usable definition,
+or a definition of unknown type, fails with its symbol and input named;
+it cannot become a guessed copy relocation. Call-only references retain
+their relocation-proven function kind when target exports are unavailable.
+An absent weak reference still follows the existing zero-resolution rule.
+
+Android reads `libc.so` and explicitly requested libraries through the same
+export reader. Its roots use `x86_64-linux-android` or
+`aarch64-linux-android` under the supplied sysroot, plus its generic
+`lib64`, `usr/lib64`, `lib` and `usr/lib` roots and explicit `-L` paths.
+Native Android also searches `/system/lib64`; cross Android links never
+search host GNU libc roots. Supply an API-specific NDK library directory
+with `-L` when needed. Missing target exports retain the refusal above.
+
 `compiler_driver_elf_library_exports` looks `libc.so.6` and each requested
 library up where the loader would — the `-L` paths, then the sysroot or host
 `lib`/`usr/lib` roots, multiarch first; without a sysroot also the Debian

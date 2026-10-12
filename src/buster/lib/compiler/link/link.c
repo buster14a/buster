@@ -99,7 +99,7 @@
 // import is data at all is a fact about its definition: GCC, Clang and GNU as
 // leave every undefined symbol STT_NOTYPE, so before writer selection
 // link_elf_classify_untyped_imports imports an untyped reference that a library
-// defines, but publishes as no object, as a function -- a copy slot for a
+// defines according to its ELF type -- a copy slot for a
 // function copies its code into .bss and interposes it (GitHub #1242).
 //
 // A third rule crosses every ELF writer: an undefined weak symbol is worth
@@ -2268,6 +2268,7 @@ BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, O
 {
     *destination = *source;
     destination->name = link_string_copy(arena, source->name);
+    destination->undefined_untyped = source->section == OBJECT_SECTION_UNDEFINED && source->undefined_untyped;
     destination->comdat = 0;
     if (source->section != OBJECT_SECTION_UNDEFINED)
     {
@@ -3090,10 +3091,11 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_impl(Arena* arena, Arena* set_
                 // or STT_OBJECT one -- outranks an untyped one whichever input
                 // arrives first; otherwise another toolchain's STT_NOTYPE
                 // reference, read as data, decides what a declaration knows.
-                if (!destination_defined && !source_defined && destination_thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN &&
-                    source_thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN)
+                if (!destination_defined && !source_defined && destination->undefined_untyped &&
+                    (!source->undefined_untyped || source->kind == OBJECT_SYMBOL_FUNCTION))
                 {
                     destination->kind = source->kind;
+                    destination->undefined_untyped = source->undefined_untyped;
                 }
                 if (source_replaces)
                 {
@@ -3668,16 +3670,18 @@ BUSTER_GLOBAL_LOCAL bool link_elf_relocation_is_relaxed_tls_get_addr(LinkElfTlsI
 }
 
 // Every reference must be a call relaxed for a TLS definition in this image.
+// With defined_tls_only=false the same exact companion sites prove a call
+// before import classification, including loader-resolved shared-image calls.
 // A general-dynamic import keeps its loader-resolved call and retains the
 // `__tls_get_addr` import.
-BUSTER_GLOBAL_LOCAL bool link_elf_symbol_only_relaxed_tls_get_addr(LinkElfTlsIndex* index, ObjectFile* object, u32 symbol_index)
+BUSTER_GLOBAL_LOCAL bool link_elf_symbol_only_relaxed_tls_get_addr(LinkElfTlsIndex* index, ObjectFile* object, u32 symbol_index, bool defined_tls_only)
 {
     ObjectSymbol* symbol = object->symbols + symbol_index;
     bool result = string_equal(symbol->name, S8("__tls_get_addr"));
     for (u32 row = 0; result && row < object->relocation_count; row += 1)
     {
         ObjectRelocation* relocation = object->relocations + row;
-        result = relocation->symbol != symbol_index || link_elf_relocation_is_relaxed_tls_get_addr(index, relocation, symbol, true);
+        result = relocation->symbol != symbol_index || link_elf_relocation_is_relaxed_tls_get_addr(index, relocation, symbol, defined_tls_only);
     }
     return result;
 }
@@ -4950,6 +4954,7 @@ enum
     ELF_DYNAMIC_SIZE = 16,
     ELF_PLT_ENTRY_SIZE = 16,
     ELF_GOT_RESERVED_COUNT = 3,
+    ELF_SYMBOL_TYPE_OBJECT = 1,
     ELF_SYMBOL_TYPE_FUNCTION = 2,
     ELF_SYMBOL_TYPE_GNU_IFUNC = 10,
     ELF_SYMBOL_VISIBILITY_DEFAULT = 0,
@@ -6687,7 +6692,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     {
         import_indices[symbol_index] = UINT32_MAX;
         ObjectSymbol* symbol = &object->symbols[symbol_index];
-        if (!link_elf_symbol_needs_dynamic_import(exports, symbol) || link_elf_symbol_only_relaxed_tls_get_addr(&tls_index, object, symbol_index))
+        if (!link_elf_symbol_needs_dynamic_import(exports, symbol) || link_elf_symbol_only_relaxed_tls_get_addr(&tls_index, object, symbol_index, true))
         {
             continue;
         }
@@ -16134,42 +16139,94 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_elf_without_unused_got_marker(Arena* a
     return result;
 }
 
-// GCC, Clang and GNU as leave every undefined symbol STT_NOTYPE, so an
-// external reference states nothing about what it names. object_read_elf64
-// records such a reference as data unless a PLT or branch relocation proves a
-// call, and marks it untyped by leaving its thread-local state unknown, which
-// Buster's own objects never do. A reference that only takes an address -- a
-// table of `malloc` and `free` hooks, `strlen` handed to another unit --
-// therefore arrives here as a data import, and the writers would reserve a
-// copy slot for a library function: the loader copies code bytes into .bss and
-// the executable exports the copy under the function's name, interposing the
-// library's own definition for every caller, libc's included.
-//
-// A reference resolves to its definition, and the export index holds every
-// definition: an untyped import that some library defines, but that no library
-// publishes as an object with storage, is not data. Only a complete index is
-// evidence -- a library that was not read defines whatever it defines -- so an
-// incomplete link keeps the classification it had.
-BUSTER_GLOBAL_LOCAL ObjectFile link_elf_classify_untyped_imports(Arena* arena, LinkElfIndex* exports, ObjectFile* object)
+// Untyped references carry no data/function claim. Use the providing library's
+// st_type, including IFUNC, rather than absence from the optional storage table.
+// An incomplete export census may still supply an actual definition. Without
+// one, a call relocation proves callable use; an address alone proves nothing
+// and must never silently become a copy relocation (GitHub #1242).
+BUSTER_GLOBAL_LOCAL LinkObjectResult link_elf_classify_untyped_imports(Arena* arena, LinkElfIndex* exports, ObjectFile* object)
 {
-    ObjectFile result = *object;
+    LinkObjectResult result = {.object = *object};
     bool copied = false;
-    for (u32 index = 0; exports->exports_complete && index < object->symbol_count; index += 1)
+    bool tls_built = false;
+    LinkElfTlsIndex tls_index = {0};
+    for (u32 index = 0; result.error == LINK_ERROR_NONE && index < object->symbol_count; index += 1)
     {
         ObjectSymbol* symbol = object->symbols + index;
-        if (symbol->section == OBJECT_SECTION_UNDEFINED && symbol->global && symbol->kind == OBJECT_SYMBOL_DATA &&
-            symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN)
+        if (symbol->section == OBJECT_SECTION_UNDEFINED && symbol->global &&
+            !link_elf_symbol_resolves_to_zero(exports, symbol, true))
         {
             LinkElfName* name = link_elf_name(exports, symbol->name, false);
-            if (name && name->version && name->data == UINT32_MAX)
+            NativeDynamicVersionedSymbol* definition = name && name->version && name->version->has_default ? name->version : 0;
+            ObjectSymbol resolved = *symbol;
+            if (symbol->undefined_untyped && symbol->kind == OBJECT_SYMBOL_DATA && string_equal(symbol->name, S8("__tls_get_addr")))
+            {
+                if (!tls_built)
+                {
+                    tls_built = true;
+                    if (!link_elf_tls_index_build(exports->arena, object, &tls_index)) result.error = LINK_ERROR_INVALID_INPUT;
+                }
+                // A recognized TLS companion is a call even with -fno-plt.
+                // The writer may subsequently relax it out of the image.
+                if (result.error == LINK_ERROR_NONE && link_elf_symbol_only_relaxed_tls_get_addr(&tls_index, object, index, false))
+                {
+                    resolved.kind = OBJECT_SYMBOL_FUNCTION;
+                }
+            }
+            if (definition && (definition->elf_type == ELF_SYMBOL_TYPE_FUNCTION || definition->elf_type == ELF_SYMBOL_TYPE_GNU_IFUNC))
+            {
+                if (symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES)
+                {
+                    result.error = LINK_ERROR_TLS_SYMBOL_MISMATCH;
+                }
+                else
+                {
+                    resolved.kind = OBJECT_SYMBOL_FUNCTION;
+                    resolved.thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO;
+                    resolved.undefined_untyped = false;
+                }
+            }
+            else if (definition && definition->elf_type == ELF_SYMBOL_TYPE_OBJECT)
+            {
+                if (symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES)
+                {
+                    result.error = LINK_ERROR_TLS_SYMBOL_MISMATCH;
+                }
+                else if (!symbol->undefined_untyped && symbol->kind == OBJECT_SYMBOL_FUNCTION)
+                {
+                    result.error = LINK_ERROR_RELOCATION;
+                }
+                else
+                {
+                    resolved.kind = OBJECT_SYMBOL_DATA;
+                    resolved.thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO;
+                    resolved.undefined_untyped = false;
+                }
+            }
+            else if (symbol->undefined_untyped && definition)
+            {
+                // TLS and STT_NOTYPE definitions cannot turn an ordinary address
+                // reference into storage in the executable. Refuse explicitly.
+                result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+            }
+            else if (symbol->undefined_untyped && resolved.kind != OBJECT_SYMBOL_FUNCTION)
+            {
+                result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+            }
+            if (result.error != LINK_ERROR_NONE)
+            {
+                result.symbol = link_string_copy(arena, symbol->name);
+            }
+            else if (resolved.kind != symbol->kind || resolved.thread_local_state != symbol->thread_local_state ||
+                     resolved.undefined_untyped != symbol->undefined_untyped)
             {
                 if (!copied)
                 {
-                    result.symbols = arena_allocate(arena, ObjectSymbol, object->symbol_count);
-                    memcpy(result.symbols, object->symbols, sizeof(*object->symbols) * object->symbol_count);
+                    result.object.symbols = arena_allocate(arena, ObjectSymbol, object->symbol_count);
+                    memcpy(result.object.symbols, object->symbols, sizeof(*object->symbols) * object->symbol_count);
                     copied = true;
                 }
-                result.symbols[index].kind = OBJECT_SYMBOL_FUNCTION;
+                result.object.symbols[index] = resolved;
             }
         }
     }
@@ -16605,10 +16662,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
         {
             normalized = link_elf_without_unused_got_marker(arena, object, options);
         }
+        if (normalized.error == LINK_ERROR_NONE)
+        {
+            normalized = link_elf_classify_untyped_imports(arena, exports, &normalized.object);
+        }
         result.error = normalized.error;
+        result.symbol = normalized.symbol;
         if (result.error == LINK_ERROR_NONE)
         {
-            normalized.object = link_elf_classify_untyped_imports(arena, exports, &normalized.object);
             object = &normalized.object;
             bool dynamic_image = link_elf_runtime_path(temporary, options).path.length || script.name.length || options.dynamic_library_count || object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ||
                                  object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
@@ -16642,6 +16703,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
             }
         }
     }
+
     else if (options.image_kind != NATIVE_IMAGE_EXECUTABLE)
     {
         // Only the x86-64 Linux writer above places a position-independent

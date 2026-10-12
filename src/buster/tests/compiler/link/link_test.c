@@ -6703,6 +6703,101 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_eh_frame_sort(UnitTestArguments
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_import_definition_types(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u8 types[] = {2, 10, 1, 0, 2};
+    for (u32 platform = 0; platform < 4; platform += 1)
+    {
+        Target target = {.cpu_arch = platform & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64,
+                         .os = platform & 2 ? OPERATING_SYSTEM_ANDROID : OPERATING_SYSTEM_LINUX};
+        u8 x86_code[] = {0x31, 0xc0, 0xc3};
+        u32 arm_code[] = {UINT32_C(0x52800000), UINT32_C(0xd65f03c0)};
+        ByteSlice code = target.cpu_arch == CPU_ARCH_X86_64 ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_code)
+                                                          : (ByteSlice){.pointer = (u8*)arm_code, .length = sizeof(arm_code)};
+        for (u32 type = 0; type < BUSTER_ARRAY_LENGTH(types); type += 1)
+        {
+            ObjectSymbol symbols[] = {
+                {.name = S8("main"), .size = code.length, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+                {.name = S8("provider"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true, .undefined_untyped = type != 4,
+                 .thread_local_state = type == 4 ? OBJECT_SYMBOL_THREAD_LOCAL_NO : OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN},
+            };
+            ObjectRelocation relocation = {.section = OBJECT_SECTION_DATA, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+            ObjectFile object = link_test_object_make(arguments->arena, target, code, symbols, BUSTER_ARRAY_LENGTH(symbols), &relocation, 1);
+            u64 pointer = 0;
+            object.sections[OBJECT_SECTION_DATA].data = (ByteSlice){.pointer = (u8*)&pointer, .length = sizeof(pointer)};
+            object.sections[OBJECT_SECTION_DATA].virtual_size = sizeof(pointer);
+            NativeDynamicVersionedSymbol providers[] = {
+                {.name = S8("provider"), .has_default = true, .elf_type = types[type]},
+                {.name = S8("exit"), .has_default = true, .elf_type = 2},
+                {.name = S8("__cxa_atexit"), .has_default = true, .elf_type = 2},
+                {.name = S8("atexit"), .has_default = true, .elf_type = 2},
+            };
+            NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &object, (NativeExecutableLinkOptions){
+                .entry_symbol = S8("main"), .runtime_exports_known = type != 4,
+                .runtime_versioned_symbols = providers, .runtime_versioned_symbol_count = BUSTER_ARRAY_LENGTH(providers),
+            });
+            if (linked.error != LINK_ERROR_NONE && types[type] != 0) arguments->show(arguments, S8("definition type platform={u32} type={u32}: {S8} {S8}\n"), platform, (u32)types[type], link_error_name(linked.error), linked.symbol);
+            if (types[type] == 0)
+            {
+                BUSTER_TEST(arguments, linked.error == LINK_ERROR_UNSUPPORTED_FEATURE);
+                BUSTER_STRING_TEST(arguments, linked.symbol, S8("provider"));
+            }
+            else
+            {
+                BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
+                if (linked.error == LINK_ERROR_NONE)
+                {
+                    u16 section = UINT16_MAX;
+                    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(linked.executable, S8("provider"), 0, 0, &section));
+                    // FUNC/IFUNC imports must remain undefined, never executable-owned
+                    // copy slots. An OBJECT remains data even without a storage entry.
+                    BUSTER_TEST(arguments, types[type] == 1 && target.os == OPERATING_SYSTEM_LINUX ? section != 0 : section == 0);
+                    u32 copies = 0;
+                    String8 tables[] = {S8(".rela.dyn"), S8(".rela.plt")};
+                    for (u32 table = 0; table < BUSTER_ARRAY_LENGTH(tables); table += 1)
+                    {
+                        u64 header = 0;
+                        if (link_test_elf_section_find(linked.executable, tables[table], 0, &header))
+                        {
+                            u64 begin = link_read_u64(linked.executable.pointer, header + 24);
+                            u64 size = link_read_u64(linked.executable.pointer, header + 32);
+                            for (u64 row = 0; row + 24 <= size; row += 24)
+                            {
+                                u32 kind = (u32)link_read_u64(linked.executable.pointer, begin + row + 8);
+                                copies += kind == (target.cpu_arch == CPU_ARCH_X86_64 ? 5u : 1024u);
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, copies == (types[type] == 1 && target.os == OPERATING_SYSTEM_LINUX ? 1u : 0u));
+                }
+            }
+        }
+    }
+    // TLS encoding and symbol-type provenance are independent. Typed DATA with
+    // unknown TLS must outrank NOTYPE even when that reference proves a call.
+    for (u32 order = 0; order < 2; order += 1)
+    {
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+        ObjectSymbol typed = {.name = S8("merged"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true};
+        ObjectSymbol untyped = typed;
+        untyped.kind = OBJECT_SYMBOL_FUNCTION;
+        untyped.undefined_untyped = true;
+        untyped.thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO;
+        ObjectFile objects[] = {
+            link_test_object_make(arguments->arena, target, (ByteSlice){0}, order ? &typed : &untyped, 1, 0, 0),
+            link_test_object_make(arguments->arena, target, (ByteSlice){0}, order ? &untyped : &typed, 1, 0, 0),
+        };
+        LinkObjectResult merged = link_objects(arguments->arena, objects, 2, (LinkOptions){.allow_undefined_symbols = true});
+        BUSTER_TEST(arguments, merged.error == LINK_ERROR_NONE && merged.object.symbol_count == 1);
+        if (merged.error == LINK_ERROR_NONE && merged.object.symbol_count == 1)
+        {
+            BUSTER_TEST(arguments, merged.object.symbols[0].kind == OBJECT_SYMBOL_DATA && !merged.object.symbols[0].undefined_untyped);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_function_addresses(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7603,6 +7698,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     result.succeeded_test_count += initializer_array_symbol.succeeded_test_count;
     result.test_count += initializer_array_symbol.test_count;
     BUSTER_TEST_FIXTURE(arguments, link_test_elf_eh_frame_sort);
+    BUSTER_TEST_FIXTURE(arguments, link_test_elf_import_definition_types);
     BUSTER_TEST_FIXTURE(arguments, link_test_elf_function_addresses);
     BUSTER_TEST_FIXTURE(arguments, link_test_elf_weak_unwind);
     UnitTestResult merged_symbol_table = link_test_elf_merged_symbol_table(arguments);
