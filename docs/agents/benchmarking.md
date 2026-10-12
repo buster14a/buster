@@ -534,7 +534,10 @@ captures (#2741).
   either a 9700X route with the consumer that checks its evidence, or an
   explicit `NOT VALIDATED` with a resolution and a `claim_route`: the existing
   9700X route a claim about it must use instead, or `none` for a visible gap
-  with no Zen 5 route yet. A tool that includes `<buster/...>` headers cannot
+  with no Zen 5 route yet. Native macOS and Windows timing is the one
+  exception: it is `native-informative` on route `hosted-native`, counted
+  separately, never covered and never Zen 5 evidence (see
+  [Native hosted timing](#native-hosted-timing)). A tool that includes `<buster/...>` headers cannot
   claim the direct-workload route, because each workload is compiled alone
   against system headers. `tools/bench_direct/performance_inventory_test.py`
   (part of the required benchmark policy check) discovers entry points from
@@ -559,6 +562,28 @@ captures (#2741).
   model, prints it in its report, and on any other host compiles and runs
   nothing and fails. The inventory test also refuses a `covered` row whose
   evidence consumer never checks the observed host against `APPROVED_HOST`.
+  Each published `9700X compiler benchmark` check, for both main and pull
+  requests, names the inventory rows that its attempt discharged
+  (`compiler_receipt.covered_inventory_rows`, in the check summary, in its
+  JSON as `inventory_coverage`, and in the main commit report). The mapping
+  `compiler_receipt.INVENTORY_LEGS` ties each receipt leg to its rows. On
+  main, the self-host lab discharges `uarch_lab:compare@main` and the corpus
+  discharges `build:bench_throughput@main`. On a pull request, the lab
+  discharges `uarch_lab:compare`, and the corpus and scaling discharge
+  `build:bench_throughput`. Each opt-in profile discharges its own
+  `PROFILE_ROWS` row (`compiler-probes-v1` discharges both of its probe rows),
+  and the analyzer discharges its two analyzer rows.
+  A leg discharges its rows only when the attempt concluded `success`. Every
+  other leg is listed as not discharged, with the reason: it was not
+  requested, left no record, failed, was pending or skipped, was superseded,
+  or the publisher refused its evidence. A row named by several legs is
+  discharged only when every requested leg discharged. Rows the check does
+  not name still need their own evidence. This is report-only and changes no
+  conclusion. The inventory test fails when a `covered` `main-compare` or
+  `pull-compare` row can't be reached from any leg of its mode, or when a leg
+  names a row that isn't covered on that route. So renaming or deleting a row
+  or a leg cannot silently drop coverage, and a `native-informative` or
+  `NOT VALIDATED` row can never be discharged by a compare check.
 - **The dedicated Ryzen 7 9700X is not a general GitHub Actions executor.**
   The queued benchmark service, its dispatch workflow and the earlier
   `.github/workflows/zen5-audit.yml` are removed (#2708). The only workflow
@@ -734,6 +759,97 @@ captures (#2741).
   same process. Confirm the extracted return addresses too — each one must
   disassemble to the instruction immediately after a `call` to the callee the
   callchain names (`objdump -d --start-address=... --stop-address=...`).
+
+## Native hosted timing
+
+**These results are not Zen 5 evidence.** They never satisfy, replace or
+support a performance-validation claim, and they never fail a check. Zen 5
+measurements do not establish macOS or Windows performance, and the approved
+9700X cannot run either platform. The maintainer's decision on #2761
+(2026-10-11) is that native timing runs on the standard GitHub-hosted runners,
+is informative only, and stays visible through a warning and a tracking issue.
+
+The two rows in
+[`docs/performance-validation-v1.json`](../performance-validation-v1.json) are
+`native-informative` on route `hosted-native`:
+
+| Row | Measuring job | Comparison | Runs |
+|---|---|---|---|
+| `workflow:throughput-harness-macos.yml` | `timing` on `macos-26` | The existing `bench_throughput_ci` guard: two predeclared 20-pair rounds per case, with a case confirmed only when it crosses the margin in both rounds | Weekly schedule (main against its first-parent commit from 7 days earlier) and dispatch (optional `baseline`). Never on a pull request, so the scarce macOS runner is not held for every harness change |
+| `workflow:issue-708-benchmark.yml` | `benchmark` on `windows-2025` | Each of three trials times the baseline and candidate `test_all_combinations_ci` matrix on one VM. A trial crosses when the candidate exceeds the baseline by the guard's wall-time margins (15% and 2 ms); a majority of trials crossing is a regression, a minority is inconclusive | Dispatch with `baseline` and `candidate`; the `bench/708-baseline` pull-request route keeps its existing defaults |
+
+On macOS, `bench_throughput_ci` omits `--cpu auto`, because macOS has no CPU
+affinity API. The macOS samples are therefore unpinned.
+
+`tools/bench_direct/native_timing.c` reads each workflow's existing output. It
+is native C on the existing `ci_metrics` JSON parser and `gh` transport, and it
+is compiled in each job the way `lifecycle.c` is. A read-only `report` job on
+`ubuntu-26.04` downloads the measuring job's artifact and runs it with
+`--annotate`. For macOS this means the `macos-26` job only measures and
+uploads, and the verdict, warning and any failure appear in `report`.
+
+The report gives, in its step summary, the cell (case or trial), the
+candidate/baseline ratio, both commits and the run link. No new statistic is
+involved: the macOS ratio is the geometric mean of the two rounds' median
+paired ratios, as in the guard's `summary.md`, computed as
+`sqrt(r0) * sqrt(r1)` so large finite ratios cannot overflow. A number that is
+not representable as a finite double (a huge integer, an overflowing exponent)
+or a derived ratio that is not finite and positive is malformed evidence. On
+Windows the results are read whether PowerShell wrote them as UTF-16LE or
+UTF-8; any non-ASCII byte is refused.
+
+| Outcome | Check | Visibility |
+|---|---|---|
+| Regression | Passes | `::warning::` annotation, step-summary line, tracking issue (trusted runs only) |
+| Inconclusive | Passes | `::warning::` annotation and step-summary line; no issue |
+| No regression | Passes | Step-summary line |
+| Build failure, crash, failed or missing arm, malformed, partial or inconsistent samples, or any guard exit other than 0 or 1 consistent with its counted regressions | **Fails** (exit 2) | `::error::` annotation |
+
+### Alert path
+
+Each platform has one open tracking issue, titled
+`Native hosted timing regression: macOS (throughput-harness-macos.yml)` or
+`Native hosted timing regression: Windows (issue-708-benchmark.yml)`. It is
+authored by `github-actions[bot]` and carries the marker
+`<!-- native-hosted-timing platform=... -->`. The first regression opens it.
+Each later regression adds a comment with the run, commit, cells and ratios.
+Close the issue once the regression is explained or fixed; the next regression
+opens a new one.
+
+Only a separate `alert` job holds `issues: write`, alongside `contents: read`
+and `actions: read`. It runs only when all of these hold:
+
+- the measured verdict is `regression`;
+- the repository is `buster14a/buster`;
+- the ref is `refs/heads/main`;
+- the event is the macOS schedule or dispatch, or a Windows dispatch;
+- `demonstrate_regression` is not set.
+
+It checks out the trusted `main` revision and downloads only its own run's
+artifact. It then re-derives the verdict from the raw evidence before
+publishing. The measuring jobs, which compile and run both revisions, stay
+read-only. A pull-request run, including the Windows `bench/708-baseline` route,
+never files or updates an issue.
+
+The `demonstrate_regression` dispatch input exercises the warning path without
+a real regression. On Windows it doubles the candidate durations before the
+rule is applied. On macOS it confirms the case with the highest wall-time
+ratio. The report is labelled a demonstration, and the alert job never runs.
+
+`performance_inventory_test.py` accepts `native-informative` only for a macOS
+or Windows workflow row whose `job` runs on one literal GitHub-hosted `macos-*`
+or `windows-*` label matching its `platform`. A Linux, matrix-selected or
+self-hosted timing job cannot use the status to avoid the 9700X rule. The test
+also requires that:
+
+- a read-only job reports through `native_timing.c` with `--annotate`;
+- no step continues on error;
+- one separate main-gated job compiles the tool and publishes through it;
+- the row's `alert` links a heading in this guide.
+
+`native_timing --self-test`, which runs in the benchmark policy check, covers
+the analysis, the malformed and extreme-number refusals, the demonstration path
+and the issue publisher against synthetic `gh` responses.
 
 ## Benchmarking a compiler change (A/B)
 
@@ -936,9 +1052,11 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    - any corpus evidence the ordinary corpus validator refuses.
 
    The receipt's observed host must be the Ryzen 7 9700X, as for every
-   comparison. The host needs `llvm-profdata`, `llvm-readobj` and Clang's
-   profile runtime (`libclang_rt.profile`); a missing one fails the build
-   leg with its log.
+   comparison. The host needs `clang`, `ld.lld` (the LTO lanes link with
+   `-fuse-ld=lld`), `llvm-profdata`, `llvm-readobj` and Clang's profile
+   runtime (`libclang_rt.profile`). A missing tool on `PATH` fails the leg
+   before the build starts and the receipt names it; a missing runtime fails
+   the build leg with its log.
 
    Cost: on a hosted 4-vCPU 2.8 GHz Xeon with three build lanes (diagnostic,
    not Zen 5), `production_profile --no-benchmark` passed all 23 phases in
@@ -948,6 +1066,91 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    own 40-minute timeout and the corpus run the ordinary 30-minute one, so
    the leg fits inside the unchanged 90-minute `compare-pull` job next to the
    roughly 14-minute ordinary comparison. No job timeout changed.
+
+   **Issue #2761 opt-in compiler probes.** The same route accepts one fresh
+   exact line `profile: compiler-probes-v1`, selected by the same
+   every-parent freshness rule. It is the Zen 5 route for a targeted
+   register-allocator or scheduler claim, next to the end-to-end self-host.
+   It cannot be combined with an analyzer, real-source, ast-pilot or
+   production profile; one long opt-in leg per job keeps the budget provable.
+   `tools/fast_ra_scaling.c` (the real FAST prepass and prepassed placement on
+   empty-value chain and fanout CFGs) and `tools/machine_line_mark_scaling.c`
+   (`machine_schedule_function` with one line mark per instruction) include
+   compiler internals, so they cannot be direct workloads. After the corpus
+   leg, `measure_compiler_probes` compiles the native harness
+   `tools/bench_direct/compiler_probes.c` from the trusted checkout. It uses
+   only libc, because that checkout holds only `tools/`, so no candidate
+   header reaches it. It then runs the harness, which does the following:
+   - It makes two shared clones of the candidate checkout, at the merge base
+     and at the head. The base checkout and its closure checks stay untouched.
+   - It copies the head's probe sources outside both clones, as the audits do,
+     and builds each probe once against each clone's own `src/` with clang.
+     The commands are those in
+     [2026-09-07T222944Z](../performance-audits/2026-09-07T222944Z.md) and
+     [2026-09-18T224655Z](../performance-audits/2026-09-18T224655Z.md)
+     (line-mark: schedule mode only, `BUSTER_LINE_MARK_HELPER_BENCH=0`). The
+     one addition is `codegen.c` in the FAST probe's source list: since #2876
+     `machine.c` calls its `codegen_a64_windows_save_area_size`, and the
+     audit's command no longer links without it.
+   - Its cases are fixed: FAST chain and fanout at 256, 1024, 4096 and 16384
+     blocks, and line-mark schedule at 1024, 4096, 16384 and 65536 leaves.
+     Each invocation takes 11 timed samples after its own untimed warmup.
+   - Per case and binary there are two warmup invocations, then 30 pairs on
+     CPU 2. Even pairs run the base first and odd pairs the head first. Every
+     pair runs: there is no early stop, rerun or trimming.
+   - The statistic is the median of each invocation's samples (`total_ns` or
+     `schedule_ns`), the head/base ratio per pair, and per case the median
+     ratio with a distribution-free 95% order-statistic interval. It is
+     report-only.
+
+   The probes' `key=value` lines are their structured output; nothing was
+   added to them. Every non-`_ns` field is the self-check, and the profile's
+   `check_fields` fix it exactly: for FAST, `blocks`, `prepass_bytes`,
+   `total_bytes`, `spills`, `reloads`, `copies`, `edits` and `frame`; for
+   line-mark, `mode`, `leaves`, `rows`, `batch`, `retained_bytes`, `permuted`,
+   `displacement` and a 16-digit hex `hash`. Each case's `markers` must match
+   too: its size, and for line-mark `mode=schedule`, `rows` = 2 x leaves + 1
+   and `batch=1`. The self-check must be identical across every invocation of
+   one binary. Whether the base and the head agree is reported, not required,
+   since an allocator or scheduler change may change it legitimately.
+
+   `compiler_publish.py` re-validates the receipt's `compiler_probes` record
+   against `compiler_probes/summary.json` (`validate_compiler_probes`), which
+   keeps every raw sample. It refuses:
+   - an exit other than 0, a failed status or any recorded error;
+   - a profile, base or head other than the frozen profile and the compared
+     revisions;
+   - a build list other than one passed build per probe and revision, or a
+     missing probe binary or source hash. `compiler_compare` hashes the binaries
+     and the copied probe sources itself; the harness reports no hashes;
+   - a missing, extra or reordered case, or changed case arguments;
+   - fewer than two warmups or 30 pairs, or a pair out of the fixed order;
+   - an invocation that failed, timed out or has partial samples, or a sample
+     that is not an integer from 1 ns to the 60-second invocation timeout
+     (checked before any median or ratio arithmetic), a self-check field that
+     is missing, extra or malformed, a workload marker other than the case's,
+     or a self-check that changes.
+
+   The harness states no statistics; every one is re-derived from the raw
+   samples. Its `--self-test` checks output parsing, pair alternation, JSON
+   escaping and a whole fake case, and runs in the benchmark policy job.
+   `compiler_test.py` checks that its `--profile` output equals
+   `COMPILER_PROBES_PROFILE`, so the native and Python copies cannot drift.
+
+   Missing, partial, failed or cancelled evidence therefore fails the check.
+   The binaries are not exported. Their hashes differ even in an A/A run,
+   because `-g` records each clone's path.
+
+   Cost: on a hosted 4-vCPU 2.8 GHz Xeon (diagnostic, not Zen 5), a real A/A
+   run of the whole leg through `measure_compiler_probes` at `8fa1ca80` took
+   241 s, including the harness build. The two clones and four probe builds
+   take about 3 minutes (each probe build 35 to 38 s), and the 12 cases about
+   40 s. Every case's interval contained 1.0. The leg has its
+   own 20-minute timeout, so it fits inside the unchanged 90-minute
+   `compare-pull` job next to the roughly 14-minute ordinary comparison. No
+   job timeout changed. A head whose probe no longer compiles against the
+   merge base (for example after an allocator API change) fails the leg with
+   its build log; land the probe change first.
 
    **Issue #2761 opt-in frontend and selector probes.** The same route
    accepts one fresh exact line `profile: frontend-selector-v1`, selected by
@@ -1012,7 +1215,8 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    fresh exact line `profile: wild-linker-v1`, selected by the same
    every-parent freshness rule. It is the Zen 5 route for
    `tool:wild_linker_bench.c` (#2645). It cannot be combined with an analyzer,
-   real-source, ast-pilot, production or frontend-selector profile.
+   real-source, ast-pilot, production, compiler-probes or frontend-selector
+   profile.
    `measure_wild_linker` runs it after the corpus leg:
    - **Linkers.** It finds the host's installed Wild with `command -v wild`
      and never downloads a linker. The comparator is the audit's, mold

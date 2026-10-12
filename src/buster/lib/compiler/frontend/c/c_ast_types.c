@@ -70,20 +70,24 @@
 // lookup in its own scope (c_ast_types_lookups_agree). No memo exists at file
 // scope; an answer leaves only the machine state.
 //
-// The eager pass. c_ast_types_type_body is one forward loop over the body's
-// node interval in index order. Children precede parents in a postorder tree, so
-// each node's operand types are known when the node is reached. For every
-// expression node it computes the token span [first, end) (the investigation's
-// span rules, validated over 1.75 M nodes: a node's span starts at its
-// leftmost operand or operator and ends at its last token, widened over any
-// balanced parentheses that wrap an operand, which the tree does not record),
-// links the node into a per-start-token chain, and computes a type and flags.
+// The eager pass. c_ast_types_type_body walks the body's node interval in
+// index order. Children precede parents in a postorder tree, so each node's
+// operand types are known when the node is reached. For every expression node
+// it computes the token span [first, end) (the investigation's span rules,
+// validated over 1.75 M nodes: a node's span starts at its leftmost operand or
+// operator and ends at its last token, widened over any balanced parentheses
+// that wrap an operand, which the tree does not record), links the node into a
+// per-start-token chain, and computes a type and flags. One loop does this for
+// the single-token leaves, whose span is their token and whose rules read no
+// other node, and lists every other expression node; a second loop takes that
+// list in index order (c_ast_types_type_body has the ordering argument).
 // A node is accepted only when every operand the machine types for it is, so
 // by induction an accepted node's whole machine run appends nothing. It is
 // checked-safe when its operands are and its own checked-mode rule raises no
-// constraint. The pass keeps no state between nodes beyond these arrays and a
-// small memo of member lookups (c_ast_types_member_lookup), which is exact
-// because nothing the lookup reads changes during the pass.
+// constraint. The pass keeps no state between nodes beyond these arrays and
+// small memos of member lookups and usual arithmetic conversions
+// (c_ast_types_member_lookup, c_ast_types_arithmetic), which are exact
+// because nothing either reads changes during the pass.
 //
 // The query. c_parse_expression_type_query reads the per-body memo first and
 // asks this file only on a miss, before the literal fast path and the machine
@@ -223,7 +227,8 @@
 //   c_ast_types_probe_fails,                      bit-field widths of operands
 //   c_ast_types_operand_width
 //   c_ast_types_type_body, c_ast_types_type_node the eager pass and its rules
-//   c_ast_types_member_lookup                    the pass's member memo
+//   c_ast_types_member_lookup,                   the pass's memos (CAstTypeMemos)
+//   c_ast_types_arithmetic
 //   c_ast_types_builtin_call                     void builtins, failing calls
 //   c_ast_types_binary, c_ast_types_unary,       stage-2 operator rules
 //   c_ast_types_update, c_ast_types_conditional
@@ -302,6 +307,23 @@ struct CAstTypeMemberMemo
 // bits of its hash.
 #define C_AST_TYPE_MEMBER_MEMO_COUNT 64
 BUSTER_CT_CHECK(C_AST_TYPE_MEMBER_MEMO_COUNT == 64);
+// One remembered usual arithmetic conversion: c_parse_expression_arithmetic_type
+// of the rows `left` and `right` with bit-field widths `widths` (left in the
+// low byte) answered `type`. `left` is 0 for an empty entry and the row + 1
+// otherwise.
+typedef struct CAstTypeArithmeticMemo CAstTypeArithmeticMemo;
+struct CAstTypeArithmeticMemo
+{
+    u32 left;
+    u32 right;
+    u32 widths;
+    CTypeId type;
+};
+
+// Entries in a pass's arithmetic memo; c_ast_types_arithmetic takes the top
+// six bits of its hash.
+#define C_AST_TYPE_ARITHMETIC_MEMO_COUNT 64
+BUSTER_CT_CHECK(C_AST_TYPE_ARITHMETIC_MEMO_COUNT == 64);
 // c_ast_types_type_body fills the entity array with all-ones bytes.
 BUSTER_CT_CHECK(C_AST_TYPE_NONE == UINT32_MAX);
 
@@ -356,6 +378,16 @@ enum
     C_AST_TYPE_LOOKUP_OTHER_LIMIT = 16,
 };
 
+// The memos of one eager pass: c_parse_member_type's answers
+// (c_ast_types_member_lookup) and c_parse_expression_arithmetic_type's
+// (c_ast_types_arithmetic).
+typedef struct CAstTypeMemos CAstTypeMemos;
+struct CAstTypeMemos
+{
+    CAstTypeMemberMemo members[C_AST_TYPE_MEMBER_MEMO_COUNT];
+    CAstTypeArithmeticMemo arithmetic[C_AST_TYPE_ARITHMETIC_MEMO_COUNT];
+};
+
 // One typed function body, or one file-scope object's initializer. Arrays are
 // indexed by node - begin.
 struct CAstTypeBody
@@ -377,6 +409,9 @@ struct CAstTypeBody
     // for none; start_head holds the newest, which is the outermost.
     u32* link;
     u32* start_head;
+    // Scratch for one eager pass: the relative indices of the spanned nodes
+    // of class C_AST_TYPE_CLASS_SPANNED, ascending.
+    u32* interior;
     u8* flags;
     // A member node's bit-field width (0 for an ordinary member); read only
     // for MEMBER and MEMBER_ARROW nodes.
@@ -408,26 +443,49 @@ struct CAstTypeBody
     // the file scope.
     u32 others[C_AST_TYPE_LOOKUP_OTHER_LIMIT];
     CAstTypeStatistics local_statistics;
-    // c_parse_member_type's answers during one eager pass
-    // (c_ast_types_member_lookup), cleared when the pass starts.
-    CAstTypeMemberMemo members[C_AST_TYPE_MEMBER_MEMO_COUNT];
+    // The eager pass's memos, cleared when it starts. They are reserved
+    // beside the per-node arrays rather than held here, so creating a region
+    // does not clear them too.
+    CAstTypeMemos* memos;
 };
 
-// The kinds the eager pass types, as one load per node: the expression kinds
-// (IDENTIFIER through COMMA, without _Generic's associations) and
-// INITIALIZER_LIST.
+// How the eager pass treats a node kind, as one load per node. The typed
+// kinds are the expression kinds (IDENTIFIER through COMMA, without _Generic's
+// associations) and INITIALIZER_LIST. The single-token leaves among them span
+// exactly their token, so they skip c_ast_types_span, and the three leaves
+// that have a rule go to it directly; every other typed kind takes the span
+// rules and c_ast_types_type_node. The table has a row for every u8 kind, so
+// the load needs no bounds check.
+typedef enum CAstTypeClass
+{
+    C_AST_TYPE_CLASS_UNTYPED,
+    C_AST_TYPE_CLASS_IDENTIFIER,
+    C_AST_TYPE_CLASS_NUMBER,
+    C_AST_TYPE_CLASS_CHARACTER,
+    // BOOLEAN_CONSTANT and NULLPTR: spanned and chained, never accepted.
+    C_AST_TYPE_CLASS_TOKEN,
+    C_AST_TYPE_CLASS_SPANNED,
+} CAstTypeClass;
 #define C_AST_TYPES_EXPRESSION_KIND(kind)                                                                                                      \
     (((kind) >= C_AST_IDENTIFIER && (kind) <= C_AST_COMMA && (kind) != C_AST_GENERIC_ASSOCIATION && (kind) != C_AST_GENERIC_DEFAULT) ||        \
      (kind) == C_AST_INITIALIZER_LIST)
-#define C_AST_TYPES_EXPRESSION_ENTRY(name, contract, a, b) (u8)C_AST_TYPES_EXPRESSION_KIND(C_AST_##name),
-BUSTER_GLOBAL_LOCAL u8 const c_ast_types_expression_kinds[C_AST_KIND_COUNT] = {C_AST_KIND_LIST(C_AST_TYPES_EXPRESSION_ENTRY)};
-#undef C_AST_TYPES_EXPRESSION_ENTRY
+#define C_AST_TYPES_CLASS(kind)                                                                                                                \
+    ((kind) == C_AST_IDENTIFIER                                    ? C_AST_TYPE_CLASS_IDENTIFIER                                              \
+     : (kind) == C_AST_NUMBER                                      ? C_AST_TYPE_CLASS_NUMBER                                                  \
+     : (kind) == C_AST_CHARACTER                                   ? C_AST_TYPE_CLASS_CHARACTER                                               \
+     : (kind) == C_AST_BOOLEAN_CONSTANT || (kind) == C_AST_NULLPTR ? C_AST_TYPE_CLASS_TOKEN                                                   \
+     : C_AST_TYPES_EXPRESSION_KIND(kind)                           ? C_AST_TYPE_CLASS_SPANNED                                                 \
+                                                                   : C_AST_TYPE_CLASS_UNTYPED)
+#define C_AST_TYPES_CLASS_ENTRY(name, contract, a, b) (u8)C_AST_TYPES_CLASS(C_AST_##name),
+BUSTER_GLOBAL_LOCAL u8 const c_ast_types_kind_classes[UINT8_MAX + 1] = {C_AST_KIND_LIST(C_AST_TYPES_CLASS_ENTRY)};
+#undef C_AST_TYPES_CLASS_ENTRY
+#undef C_AST_TYPES_CLASS
 #undef C_AST_TYPES_EXPRESSION_KIND
-
-BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_expression_kind(u32 kind)
-{
-    return kind < C_AST_KIND_COUNT && c_ast_types_expression_kinds[kind];
-}
+// The single-token leaves are expression kinds, so c_ast_types_span gives
+// each of them [token, token + 1).
+BUSTER_CT_CHECK(C_AST_IDENTIFIER < C_AST_COMMA && C_AST_NUMBER > C_AST_IDENTIFIER && C_AST_NUMBER < C_AST_COMMA &&
+                C_AST_CHARACTER > C_AST_IDENTIFIER && C_AST_CHARACTER < C_AST_COMMA && C_AST_BOOLEAN_CONSTANT > C_AST_IDENTIFIER &&
+                C_AST_BOOLEAN_CONSTANT < C_AST_COMMA && C_AST_NULLPTR > C_AST_IDENTIFIER && C_AST_NULLPTR < C_AST_COMMA);
 
 // The first child of an interior node: the oldest subtree tiling its interval.
 BUSTER_GLOBAL_LOCAL u32 c_ast_types_first_child(CAst const* ast, u32 node)
@@ -1010,16 +1068,24 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_identifier(CAstTypeBody* body, CPreprocessR
 
 // A number or character literal, typed by the leaf the machine's literal path
 // uses (c_parse_expression_leaf_without_cast), so the rule exists once. With
-// every scalar row published the leaf only reads the row it returns.
+// every scalar row published the leaf only reads the row it returns. An
+// integer literal whose kind the syntax pass cached for this data model is
+// the leaf's first answer, the published row of that kind, read here from
+// the same fact without the leaf's call.
 BUSTER_GLOBAL_LOCAL void c_ast_types_literal(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess, u32 node, u32 relative,
                                              CTokenKind token_kind)
 {
     u32 token = body->ast->tokens[node];
     if (body->scalars_published && token < body->token_total && body->tokens[token].kind == token_kind)
     {
-        CTypeId type = c_parse_expression_leaf_without_cast(machine->scratch_arena, *preprocess, body->result, (CScopeId){.value = C_ID_UNDERLYING_INVALID},
-                                                            token, token + 1);
-        if (type.value < body->result->type_count)
+        CParseResult* result = body->result;
+        CTypeKind kind = C_TYPE_INVALID;
+        CNumberFact fact = token_kind == C_TOKEN_PREPROCESSING_NUMBER ? c_number_fact(result->number_facts, body->tokens, token) : (CNumberFact){0};
+        bool cached = !(fact.flags & C_NUMBER_FACT_FLOATING) && c_number_fact_kind(result->number_facts, fact, body->target, &kind);
+        CTypeId type = cached ? (kind != C_TYPE_INVALID ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID)
+                              : c_parse_expression_leaf_without_cast(machine->scratch_arena, *preprocess, result,
+                                                                     (CScopeId){.value = C_ID_UNDERLYING_INVALID}, token, token + 1);
+        if (type.value < result->type_count)
         {
             c_ast_types_accept(body, relative, type, C_AST_TYPE_FLAG_SAFE);
         }
@@ -1040,7 +1106,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_member_lookup(CAstTypeBody* body, CTypeP
     CParseResult* result = body->result;
     CToken name = preprocess->tokens[token];
     u64 key = ((u64)aggregate.value << 32) | name.symbol;
-    CAstTypeMemberMemo* entry = body->members + ((key * UINT64_C(0x9E3779B97F4A7C15)) >> 58);
+    CAstTypeMemberMemo* entry = body->memos->members + ((key * UINT64_C(0x9E3779B97F4A7C15)) >> 58);
     bool remembered = name.symbol && entry->aggregate == aggregate.value + 1 && entry->symbol == name.symbol;
     CTypeId type = remembered ? entry->type : C_TYPE_ID_INVALID;
     u32 width = remembered ? entry->width : 0;
@@ -1256,6 +1322,31 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_pointer_like_kind(CTypeKind k
     return kind == C_TYPE_POINTER || kind == C_TYPE_ARRAY || kind == C_TYPE_FUNCTION;
 }
 
+// c_parse_expression_arithmetic_type for two operand rows and their bit-field
+// widths (each at most UINT8_MAX). Within one eager pass it depends only on
+// the four: it reads the rows' kinds and returns a published scalar row, the
+// pass appends no row, and the target is fixed. A repeated question is
+// answered from the pass's memo.
+BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_arithmetic(CAstTypeBody* body, CTypeId left, CTypeId right, u32 left_width, u32 right_width)
+{
+    u32 widths = left_width | (right_width << 8);
+    u64 key = ((u64)left.value << 32) ^ ((u64)right.value << 16) ^ widths;
+    CAstTypeArithmeticMemo* entry = body->memos->arithmetic + ((key * UINT64_C(0x9E3779B97F4A7C15)) >> 58);
+    bool remembered = entry->left == left.value + 1 && entry->right == right.value && entry->widths == widths;
+    CTypeId type = remembered ? entry->type : C_TYPE_ID_INVALID;
+    if (!remembered)
+    {
+        type = c_parse_expression_arithmetic_type(body->result, body->target, left, right, left_width, right_width);
+        *entry = (CAstTypeArithmeticMemo){
+            .left = left.value + 1,
+            .right = right.value,
+            .widths = widths,
+            .type = type,
+        };
+    }
+    return type;
+}
+
 // Whether an operand is spelled as the literal `0`, which
 // c_parse_range_is_null_pointer_constant accepts for its int row.
 BUSTER_GLOBAL_LOCAL bool c_ast_types_zero_literal(CAstTypeBody const* body, CPreprocessResult const* preprocess, u32 node)
@@ -1280,48 +1371,56 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_binary_safe(CAstTypeBody const* body, CPrep
     CType const* right_type = result->types + right.value;
     CTypeKind left_kind = left_type->kind;
     CTypeKind right_kind = right_type->kind;
-    bool logical = kind == C_AST_LOGICAL_AND || kind == C_AST_LOGICAL_OR;
-    bool equality = kind == C_AST_EQUAL || kind == C_AST_NOT_EQUAL;
-    bool compare = logical || equality || (kind >= C_AST_LESS && kind <= C_AST_GREATER_EQUAL);
-    bool add = kind == C_AST_ADD;
-    bool subtract = kind == C_AST_SUBTRACT;
-    bool aggregate = c_ast_types_aggregate_kind(left_kind) || c_ast_types_aggregate_kind(right_kind);
-    bool void_operand = left_kind == C_TYPE_VOID || right_kind == C_TYPE_VOID;
-    bool null_operand = left_kind == C_TYPE_NULLPTR || right_kind == C_TYPE_NULLPTR;
-    bool complex = c_type_kind_is_complex(left_kind) || c_type_kind_is_complex(right_kind);
-    bool complex_operator = add || subtract || kind == C_AST_MULTIPLY || kind == C_AST_DIVIDE || equality || logical;
-    bool null_valid = !null_operand || logical;
-    if (null_operand && equality)
-    {
-        CTypeKind other = left_kind == C_TYPE_NULLPTR ? right_kind : left_kind;
-        null_valid = other == C_TYPE_POINTER || other == C_TYPE_ARRAY || other == C_TYPE_NULLPTR;
-    }
-    bool integer_operator = kind == C_AST_SHIFT_LEFT || kind == C_AST_SHIFT_RIGHT || kind == C_AST_REMAINDER || kind == C_AST_BIT_AND ||
-                            kind == C_AST_BIT_OR || kind == C_AST_BIT_XOR;
-    bool vector = left_kind == C_TYPE_VECTOR || right_kind == C_TYPE_VECTOR;
+    // Two integer operands pass every operator's rule: neither is an
+    // aggregate, void, nullptr, complex, vector or pointer.
     bool integers = c_parse_expression_integer_kind(left_kind) && c_parse_expression_integer_kind(right_kind);
-    bool left_pointer = c_ast_types_pointer_like_kind(left_kind);
-    bool right_pointer = c_ast_types_pointer_like_kind(right_kind);
-    bool pointer_valid = !(left_pointer || right_pointer) || compare ||
-                         (add && ((left_pointer && c_parse_expression_integer_kind(right_kind)) ||
-                                  (right_pointer && c_parse_expression_integer_kind(left_kind)))) ||
-                         (subtract && left_pointer && (right_pointer || c_parse_expression_integer_kind(right_kind)));
-    if (compare && !logical && left_pointer != right_pointer)
+    bool safe = integers;
+    if (!integers)
     {
-        u32 other_node = left_pointer ? right_node : left_node;
-        CTypeKind other = left_pointer ? right_kind : left_kind;
-        pointer_valid = other == C_TYPE_NULLPTR || (other == C_TYPE_INT && c_ast_types_zero_literal(body, preprocess, other_node));
+        bool logical = kind == C_AST_LOGICAL_AND || kind == C_AST_LOGICAL_OR;
+        bool equality = kind == C_AST_EQUAL || kind == C_AST_NOT_EQUAL;
+        bool compare = logical || equality || (kind >= C_AST_LESS && kind <= C_AST_GREATER_EQUAL);
+        bool add = kind == C_AST_ADD;
+        bool subtract = kind == C_AST_SUBTRACT;
+        bool aggregate = c_ast_types_aggregate_kind(left_kind) || c_ast_types_aggregate_kind(right_kind);
+        bool void_operand = left_kind == C_TYPE_VOID || right_kind == C_TYPE_VOID;
+        bool null_operand = left_kind == C_TYPE_NULLPTR || right_kind == C_TYPE_NULLPTR;
+        bool complex = c_type_kind_is_complex(left_kind) || c_type_kind_is_complex(right_kind);
+        bool complex_operator = add || subtract || kind == C_AST_MULTIPLY || kind == C_AST_DIVIDE || equality || logical;
+        bool null_valid = !null_operand || logical;
+        if (null_operand && equality)
+        {
+            CTypeKind other = left_kind == C_TYPE_NULLPTR ? right_kind : left_kind;
+            null_valid = other == C_TYPE_POINTER || other == C_TYPE_ARRAY || other == C_TYPE_NULLPTR;
+        }
+        bool integer_operator = kind == C_AST_SHIFT_LEFT || kind == C_AST_SHIFT_RIGHT || kind == C_AST_REMAINDER || kind == C_AST_BIT_AND ||
+                                kind == C_AST_BIT_OR || kind == C_AST_BIT_XOR;
+        bool vector = left_kind == C_TYPE_VECTOR || right_kind == C_TYPE_VECTOR;
+        bool left_pointer = c_ast_types_pointer_like_kind(left_kind);
+        bool right_pointer = c_ast_types_pointer_like_kind(right_kind);
+        bool pointer_valid = !(left_pointer || right_pointer) || compare ||
+                             (add && ((left_pointer && c_parse_expression_integer_kind(right_kind)) ||
+                                      (right_pointer && c_parse_expression_integer_kind(left_kind)))) ||
+                             (subtract && left_pointer && (right_pointer || c_parse_expression_integer_kind(right_kind)));
+        if (compare && !logical && left_pointer != right_pointer)
+        {
+            u32 other_node = left_pointer ? right_node : left_node;
+            CTypeKind other = left_pointer ? right_kind : left_kind;
+            pointer_valid = other == C_TYPE_NULLPTR || (other == C_TYPE_INT && c_ast_types_zero_literal(body, preprocess, other_node));
+        }
+        if (left_pointer && right_pointer && subtract)
+        {
+            u32 left_element = left_type->element_type.value < result->type_count
+                                   ? c_ast_types_unqualified_row(result, left_type->element_type) : C_AST_TYPE_NONE;
+            u32 right_element = right_type->element_type.value < result->type_count
+                                    ? c_ast_types_unqualified_row(result, right_type->element_type) : C_AST_TYPE_NONE;
+            pointer_valid = left_element != C_AST_TYPE_NONE && left_element == right_element;
+        }
+        bool invalid = aggregate || void_operand || !null_valid || !pointer_valid || (!vector && integer_operator && !integers);
+        bool invalid_or_complex = invalid || (complex && !complex_operator);
+        safe = !invalid_or_complex;
     }
-    if (left_pointer && right_pointer && subtract)
-    {
-        u32 left_element = left_type->element_type.value < result->type_count
-                               ? c_ast_types_unqualified_row(result, left_type->element_type) : C_AST_TYPE_NONE;
-        u32 right_element = right_type->element_type.value < result->type_count
-                                ? c_ast_types_unqualified_row(result, right_type->element_type) : C_AST_TYPE_NONE;
-        pointer_valid = left_element != C_AST_TYPE_NONE && left_element == right_element;
-    }
-    bool invalid = aggregate || void_operand || !null_valid || !pointer_valid || (!vector && integer_operator && !integers);
-    return !invalid && !(complex && !complex_operator);
+    return safe;
 }
 
 // The binary operators the machine splits a range at (its ARITHMETIC, SHIFT
@@ -1377,7 +1476,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_binary(CAstTypeBody* body, CPreprocessResul
             u32 left_width = c_ast_types_operand_width(body, left_node);
             u32 right_width = c_ast_types_operand_width(body, right_node);
             type = left_width != C_AST_TYPE_NONE && right_width != C_AST_TYPE_NONE
-                       ? c_parse_expression_arithmetic_type(result, body->target, left, right, left_width, right_width)
+                       ? c_ast_types_arithmetic(body, left, right, left_width, right_width)
                        : C_TYPE_ID_INVALID;
         }
         if (type.value < result->type_count)
@@ -1590,8 +1689,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_conditional(CAstTypeBody* body, u32 node, u
             u32 left_width = c_ast_types_operand_width(body, then_node);
             u32 right_width = c_ast_types_operand_width(body, else_node);
             type = left_width != C_AST_TYPE_NONE && right_width != C_AST_TYPE_NONE
-                       ? c_parse_expression_arithmetic_type(result, body->target, (CTypeId){.value = left}, (CTypeId){.value = right}, left_width,
-                                                            right_width)
+                       ? c_ast_types_arithmetic(body, (CTypeId){.value = left}, (CTypeId){.value = right}, left_width, right_width)
                        : C_TYPE_ID_INVALID;
         }
     }
@@ -1835,26 +1933,13 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_size_query(CAstTypeBody* body, CPreprocessR
     }
 }
 
+// The rule of a node of class C_AST_TYPE_CLASS_SPANNED; the eager pass runs
+// the single-token leaves' rules itself.
 BUSTER_GLOBAL_LOCAL void c_ast_types_type_node(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess, u32 node, u32 relative)
 {
     u32 kind = body->ast->kinds[node];
     switch (kind)
     {
-    case C_AST_IDENTIFIER:
-    {
-        c_ast_types_identifier(body, preprocess, node, relative);
-    }
-    break;
-    case C_AST_NUMBER:
-    {
-        c_ast_types_literal(body, machine, preprocess, node, relative, C_TOKEN_PREPROCESSING_NUMBER);
-    }
-    break;
-    case C_AST_CHARACTER:
-    {
-        c_ast_types_literal(body, machine, preprocess, node, relative, C_TOKEN_CHARACTER_LITERAL);
-    }
-    break;
     case C_AST_STRING:
     {
         body->flags[relative] = (u8)(body->ast->data[node] == 1 ? C_AST_TYPE_FLAG_STRING : 0);
@@ -1950,42 +2035,101 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_node(CAstTypeBody* body, CTypeParseMac
     }
 }
 
-// The eager pass: one forward loop, children before parents.
+// The eager pass, in two loops over the region in index order. The first
+// stores every node's span: a single-token leaf's is its token, it joins its
+// start chain and is typed there (its rule reads no other node), and every
+// other expression node is listed. The second takes the list in index order,
+// computes each node's span from its operands' and runs its rule, so children
+// still come before parents. The chains end as one loop leaves them: a node
+// that starts at a leaf's token contains the leaf, so it follows the leaf in
+// index order and is linked after it either way. Keeping the operator rules
+// out of the first loop keeps both loops' working values in registers; the
+// rules write through the body, so the loops hold the arrays and bounds they
+// touch for every node in locals.
 BUSTER_GLOBAL_LOCAL void c_ast_types_type_body(CAstTypeBody* body, CTypeParseMachine* machine, CPreprocessResult const* preprocess)
 {
-    CAst const* ast = body->ast;
+    u8 const* kinds = body->ast->kinds;
+    u32 const* tokens = body->ast->tokens;
+    u32* first_column = body->first;
+    u32* end_column = body->end;
+    u32* link = body->link;
+    u32* start_head = body->start_head;
+    u32* interior = body->interior;
+    u8 const* flags = body->flags;
+    u32 begin = body->begin;
+    u32 last = body->node;
+    u32 token_start = body->token_start;
+    u32 token_end = body->token_end;
     u32 visited = 0;
     u32 accepted = 0;
+    u32 interior_count = 0;
     // Every node starts unaccepted, and a member node without a width. A
     // node's type is read only once it is accepted (c_ast_types_accept writes
     // both), and its link only through a chain it was linked into, so neither
-    // is cleared. The span is stored for every node, before the node's rule
-    // reads it: an operand of another kind has none.
-    u64 count = (u64)body->node - body->begin + 1;
+    // is cleared. The span is stored for every node, before any rule reads
+    // it: an operand of another kind has none.
+    u64 count = (u64)last - begin + 1;
     memset(body->flags, 0, sizeof(*body->flags) * count);
     memset(body->widths, 0, sizeof(*body->widths) * count);
     if (body->entities)
     {
         memset(body->entities, 0xff, sizeof(*body->entities) * count);
     }
-    memset(body->members, 0, sizeof(body->members));
-    for (u32 node = body->begin; node <= body->node; node += 1)
+    memset(body->memos->members, 0, sizeof(body->memos->members));
+    memset(body->memos->arithmetic, 0, sizeof(body->memos->arithmetic));
+    for (u32 node = begin; node <= last; node += 1)
     {
-        u32 relative = node - body->begin;
-        bool expression = c_ast_types_expression_kind(ast->kinds[node]);
-        u32 first = C_AST_TYPE_NONE;
-        u32 end = C_AST_TYPE_NONE;
-        bool spanned = expression && c_ast_types_span(body, node, relative, &first, &end) && first >= body->token_start && end <= body->token_end;
-        body->first[relative] = spanned ? first : C_AST_TYPE_NONE;
-        body->end[relative] = spanned ? end : C_AST_TYPE_NONE;
-        visited += expression;
+        u32 relative = node - begin;
+        CAstTypeClass class = (CAstTypeClass)c_ast_types_kind_classes[kinds[node]];
+        // c_ast_types_span's single-token rule. token_end is at most the
+        // unit's token count, so this also bounds the token.
+        u32 token = tokens[node];
+        bool spanned = class != C_AST_TYPE_CLASS_UNTYPED && class != C_AST_TYPE_CLASS_SPANNED && token >= token_start && token < token_end;
+        visited += class != C_AST_TYPE_CLASS_UNTYPED;
+        first_column[relative] = spanned ? token : C_AST_TYPE_NONE;
+        end_column[relative] = spanned ? token + 1 : C_AST_TYPE_NONE;
         if (spanned)
         {
-            body->link[relative] = body->start_head[first - body->token_start];
-            body->start_head[first - body->token_start] = relative + 1;
-            c_ast_types_type_node(body, machine, preprocess, node, relative);
-            accepted += (body->flags[relative] & C_AST_TYPE_FLAG_ACCEPTED) != 0;
+            link[relative] = start_head[token - token_start];
+            start_head[token - token_start] = relative + 1;
+            if (class == C_AST_TYPE_CLASS_IDENTIFIER)
+            {
+                c_ast_types_identifier(body, preprocess, node, relative);
+            }
+            else if (class == C_AST_TYPE_CLASS_NUMBER)
+            {
+                c_ast_types_literal(body, machine, preprocess, node, relative, C_TOKEN_PREPROCESSING_NUMBER);
+            }
+            else if (class == C_AST_TYPE_CLASS_CHARACTER)
+            {
+                c_ast_types_literal(body, machine, preprocess, node, relative, C_TOKEN_CHARACTER_LITERAL);
+            }
         }
+        else if (class == C_AST_TYPE_CLASS_SPANNED)
+        {
+            interior[interior_count] = relative;
+            interior_count += 1;
+        }
+    }
+    for (u32 index = 0; index < interior_count; index += 1)
+    {
+        u32 relative = interior[index];
+        u32 node = begin + relative;
+        u32 first = C_AST_TYPE_NONE;
+        u32 end = C_AST_TYPE_NONE;
+        bool spanned = c_ast_types_span(body, node, relative, &first, &end) && first >= token_start && end <= token_end;
+        first_column[relative] = spanned ? first : C_AST_TYPE_NONE;
+        end_column[relative] = spanned ? end : C_AST_TYPE_NONE;
+        if (spanned)
+        {
+            link[relative] = start_head[first - token_start];
+            start_head[first - token_start] = relative + 1;
+            c_ast_types_type_node(body, machine, preprocess, node, relative);
+        }
+    }
+    for (u64 relative = 0; relative < count; relative += 1)
+    {
+        accepted += (flags[relative] & C_AST_TYPE_FLAG_ACCEPTED) != 0;
     }
     body->statistics->nodes_typed += visited;
     body->statistics->nodes_accepted += accepted;
@@ -2027,9 +2171,11 @@ BUSTER_GLOBAL_LOCAL CAstTypeBody* c_ast_types_region_create(CTypeParseMachine* m
     u32* entities = initializer ? C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count) : 0;
     u32* link = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
     u32* start_head = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, token_count);
+    u32* interior = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
     u8* flags = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u8, count);
     u8* widths = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u8, count);
-    bool reserved = body && types && first && end && (entities || !initializer) && link && start_head && flags && widths;
+    CAstTypeMemos* memos = C_PARSE_BODY_SCRATCH_ARRAY(scratch, CAstTypeMemos, 1);
+    bool reserved = body && types && first && end && (entities || !initializer) && link && start_head && interior && flags && widths && memos;
     if (reserved)
     {
         *body = (CAstTypeBody){
@@ -2043,8 +2189,10 @@ BUSTER_GLOBAL_LOCAL CAstTypeBody* c_ast_types_region_create(CTypeParseMachine* m
             .entities = entities,
             .link = link,
             .start_head = start_head,
+            .interior = interior,
             .flags = flags,
             .widths = widths,
+            .memos = memos,
             .target = preprocess->target,
             .scope = scope,
             .begin = c_ast_subtree_begin(ast, node),
