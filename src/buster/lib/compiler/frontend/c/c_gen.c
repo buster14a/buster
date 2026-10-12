@@ -17,7 +17,9 @@
 // their first allocation; c_ir_ssa_grow_slots, c_ir_ssa_parameter and the
 // c_ir_ssa_finish_cfg / c_ir_ssa_finish_reserve_publish steps of c_ir_ssa_finish
 // check the direct-SSA rows whose size only the body decides (c_ir_ssa_refuse
-// records the refusal). The remaining phase/state graph is in
+// records the refusal); c_ir_ssa_finish_loops, which lets reads pass loop
+// headers from the loops c_ir_ssa_loop_record noted, drops its shortcut
+// rather than refusing. The remaining phase/state graph is in
 // docs/agents/compiler-phase-state.md.
 // By default lowering has no syntax tree: it re-walks token ranges directly,
 // resolving identifiers through the parse result's scopes and answering
@@ -31,6 +33,9 @@
 // their list: c_ir_prepared_control_expression_find, _contains and
 // _contains_range, kept current by _begin, _end and _rollback (a typeof
 // replay).
+// Without a tree, c_ir_root_conditional refuses a body range that holds no
+// `?` through the per-body prefix count c_ir_question_prefix_build, before
+// its scan.
 // c_ir_parameter_value_type and c_ir_emit_parameter keep callable values
 // separate from the declared qualification of parameter objects.
 // c_ir_windows_va_start_cursor_place bridges an addressed Windows CRT cursor
@@ -2810,12 +2815,11 @@ BUSTER_C_SHARED String8 c_ir_math_builtin_link_name(String8 name)
         {S8("__builtin_fmaxf"), S8("fmaxf")},   {S8("__builtin_fmax"), S8("fmax")},   {S8("__builtin_fmaxl"), S8("fmaxl")},
         {S8("__builtin_fminf"), S8("fminf")},   {S8("__builtin_fmin"), S8("fmin")},   {S8("__builtin_fminl"), S8("fminl")},
         {S8("__builtin_powif"), S8("powif")},   {S8("__builtin_powi"), S8("powi")},   {S8("__builtin_powil"), S8("powil")},
-        {S8("__builtin_nanf"), S8("nanf")},     {S8("__builtin_nan"), S8("nan")},
+        {S8("__builtin_nanf"), S8("nanf")},     {S8("__builtin_nan"), S8("nan")},     {S8("__builtin_nanl"), S8("nanl")},
         {S8("__builtin_signbit"), S8("signbit")}, {S8("__builtin_signbitf"), S8("signbitf")},
         {S8("__builtin_signbitl"), S8("signbitl")},
-        {S8("__builtin_inff"), S8("inff")},
-        {S8("__builtin_inf"), S8("huge_val")},
-        {S8("__builtin_huge_val"), S8("huge_val")},
+        {S8("__builtin_inff"), S8("inff")},     {S8("__builtin_inf"), S8("huge_val")}, {S8("__builtin_infl"), S8("infl")},
+        {S8("__builtin_huge_valf"), S8("inff")}, {S8("__builtin_huge_val"), S8("huge_val")}, {S8("__builtin_huge_vall"), S8("infl")},
         {S8("__builtin_isnanf"), S8("isnanf")}, {S8("__builtin_isnan"), S8("isnan")},
         {S8("__builtin_isinf_sign"), S8("isinf_sign")},
         {S8("__builtin_isinf"), S8("isinf")},   {S8("__builtin_isinff"), S8("isinff")},
@@ -3655,6 +3659,12 @@ struct CIntegerIrBuilder
     CIrGroupFactsEntry* group_facts_stack;
     bool group_facts_exact;
     bool group_facts_built;
+    // question_prefix[o]: how many body tokens before offset o spell `?`
+    // (body_token_count + 1 entries), filled by c_ir_question_prefix_build
+    // the first time c_ir_range_may_hold_question asks. A null pointer (any
+    // builder without a body) answers every range by the scan.
+    u32* question_prefix;
+    bool question_prefix_built;
     // One past each body `if` statement's whole else-chain, plus one, indexed
     // by the offset of its `if` token; 0 is unmeasured. c_ir_statement_end
     // owns it, files every `if` its chain walk completes, and clears the array
@@ -6441,6 +6451,26 @@ struct CIrSsaEvent
     bool named_load;
 };
 
+// A loop statement the body lowering recorded for c_ir_ssa_finish_loops: its
+// header, the other blocks created when the statement split, and the window
+// of block IDs created while its condition, body and increment lowered. A
+// window still UINT32_MAX was never opened or closed.
+typedef struct CIrSsaLoop CIrSsaLoop;
+struct CIrSsaLoop
+{
+    u32 header;
+    u32 members[2];
+    u32 window_begin;
+    u32 window_end;
+    // Finish facts: the enclosing loop, the predecessors of the header from
+    // outside the loop, and whether every other loop block is entered only
+    // from inside the loop.
+    u32 parent;
+    u32 entry;
+    u32 entry_count;
+    bool closed;
+};
+
 struct CIrDirectSsa
 {
     CIrSsaSlot* slots;
@@ -6464,6 +6494,15 @@ struct CIrDirectSsa
     u32 slot_capacity;
     u32 read_count;
     u32 read_capacity;
+    CIrSsaLoop* loops;
+    u32 loop_count;
+    u32 loop_capacity;
+    // Set by c_ir_ssa_finish_loops: per block, the loop plus one whose header
+    // a read may pass straight to its entry; per local, the blocks that write
+    // it, ascending (local_definition_offsets has local_count + 1 rows).
+    u32* loop_headers;
+    u32* local_definition_offsets;
+    u32* local_definition_blocks;
     // Set by c_ir_ssa_refuse once a scratch carve was refused. Finish stops
     // its walks on it and keeps the refusal's own diagnostic.
     bool scratch_exhausted;
@@ -6597,6 +6636,61 @@ BUSTER_C_INTERNAL void c_ir_ssa_refuse(CIntegerIrBuilder* builder, String8 messa
     }
     builder->failure_message = message;
     builder->lower_machine.failed = true;
+}
+
+// Record a loop statement as it splits, returning its index plus one for the
+// tasks that open and close its block window, or zero when there is nothing
+// to record into. The record only enables a finish shortcut, so a refused
+// growth drops it silently rather than failing the function.
+BUSTER_C_INTERNAL u32 c_ir_ssa_loop_record(CIntegerIrBuilder* builder, IrBlockId header, IrBlockId first_member, IrBlockId second_member)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    u32 result = 0;
+    bool fits = ssa != 0;
+    if (fits && ssa->loop_count == ssa->loop_capacity)
+    {
+        u64 capacity = ssa->loop_capacity ? (u64)ssa->loop_capacity * 2 : 16;
+        u64 position = builder->scratch_arena->position;
+        fits = capacity <= UINT32_MAX &&
+               c_ir_arena_reservation_advance(builder->scratch_arena->reserved_size, &position, sizeof(CIrSsaLoop), capacity, BUSTER_ALIGN_OF(CIrSsaLoop));
+        if (fits)
+        {
+            CIrSsaLoop* loops = arena_allocate(builder->scratch_arena, CIrSsaLoop, capacity);
+            if (ssa->loop_count)
+            {
+                memcpy(loops, ssa->loops, sizeof(*loops) * ssa->loop_count);
+            }
+            ssa->loops = loops;
+            ssa->loop_capacity = (u32)capacity;
+        }
+    }
+    if (fits)
+    {
+        ssa->loops[ssa->loop_count++] = (CIrSsaLoop){
+            .header = header.value, .members = {first_member.value, second_member.value},
+            .window_begin = UINT32_MAX, .window_end = UINT32_MAX,
+        };
+        result = ssa->loop_count;
+    }
+    return result;
+}
+
+// The window opens once the loop's own blocks exist and before its condition
+// lowers, and closes when the task after the loop starts.
+BUSTER_C_INTERNAL void c_ir_ssa_loop_open(CIntegerIrBuilder* builder, u32 loop_plus_one)
+{
+    if (loop_plus_one && builder->direct_ssa && loop_plus_one <= builder->direct_ssa->loop_count)
+    {
+        builder->direct_ssa->loops[loop_plus_one - 1].window_begin = builder->function->block_count;
+    }
+}
+
+BUSTER_C_INTERNAL void c_ir_ssa_loop_close(CIntegerIrBuilder* builder, u32 loop_plus_one)
+{
+    if (loop_plus_one && builder->direct_ssa && loop_plus_one <= builder->direct_ssa->loop_count)
+    {
+        builder->direct_ssa->loops[loop_plus_one - 1].window_end = builder->function->block_count;
+    }
 }
 
 BUSTER_C_INTERNAL bool c_ir_ssa_grow_slots(CIntegerIrBuilder* builder)
@@ -6746,6 +6840,56 @@ BUSTER_C_INTERNAL IrValueId c_ir_ssa_parameter(CIntegerIrBuilder* builder, u32 b
     return slot->value;
 }
 
+// Whether `block` is among the ascending definition blocks [begin, end), or,
+// with `window`, whether one lies in [block, window_end).
+BUSTER_C_INTERNAL bool c_ir_ssa_definition_in(u32 const* blocks, u32 begin, u32 end, u32 block, u32 window_end, bool window)
+{
+    u32 last = end;
+    while (begin < end)
+    {
+        u32 middle = begin + (end - begin) / 2;
+        if (blocks[middle] < block)
+        {
+            begin = middle + 1;
+        }
+        else
+        {
+            end = middle;
+        }
+    }
+    return begin < last && (window ? blocks[begin] < window_end : blocks[begin] == block);
+}
+
+// The block a read of `local` at `block` takes its value from without a
+// parameter: the only predecessor, or the entry of a closed loop whose header
+// `block` is when no block of that loop writes `local` (#3723). Without that
+// second case a read after N nested loops placed a trivial parameter at every
+// inner header for every enclosing loop variable: N^2 parameters.
+BUSTER_C_INTERNAL u32 c_ir_ssa_forward_block(CIrDirectSsa* ssa, u32 block, u32 local)
+{
+    u32 result = UINT32_MAX;
+    if (ssa->predecessor_offsets[block + 1] - ssa->predecessor_offsets[block] == 1)
+    {
+        result = ssa->predecessors[ssa->predecessor_offsets[block]];
+    }
+    else if (ssa->loop_headers && ssa->loop_headers[block])
+    {
+        CIrSsaLoop* loop = ssa->loops + ssa->loop_headers[block] - 1;
+        u32 const* blocks = ssa->local_definition_blocks;
+        u32 begin = ssa->local_definition_offsets[local];
+        u32 end = ssa->local_definition_offsets[local + 1];
+        bool writes = c_ir_ssa_definition_in(blocks, begin, end, loop->window_begin, loop->window_end, true) ||
+                      c_ir_ssa_definition_in(blocks, begin, end, loop->header, 0, false) ||
+                      c_ir_ssa_definition_in(blocks, begin, end, loop->members[0], 0, false) ||
+                      c_ir_ssa_definition_in(blocks, begin, end, loop->members[1], 0, false);
+        if (!writes)
+        {
+            result = loop->entry;
+        }
+    }
+    return result;
+}
+
 // Once predecessor discovery is complete, forward through single-predecessor
 // blocks instead of allocating a parameter at every intervening block. Cache
 // the answer on the traversed path. A stamped cycle still creates one pending
@@ -6766,17 +6910,17 @@ BUSTER_C_INTERNAL IrValueId c_ir_ssa_current(CIntegerIrBuilder* builder, u32 blo
             memset(ssa->read_stamps, 0, sizeof(u32) * builder->function->block_count);
             ssa->read_stamp = 1;
         }
-        while (!refused && value.value == IR_ID_UNDERLYING_INVALID &&
-               ssa->predecessor_offsets[block + 1] - ssa->predecessor_offsets[block] == 1 &&
-               ssa->read_stamps[block] != ssa->read_stamp)
+        u32 forward = c_ir_ssa_forward_block(ssa, block, local);
+        while (forward != UINT32_MAX && ssa->read_stamps[block] != ssa->read_stamp)
         {
             ssa->read_stamps[block] = ssa->read_stamp;
             ssa->read_blocks[path_count++] = block;
             IR_CONSTRUCTION_RECORD(SSA_FORWARD_STEPS, 1);
-            block = ssa->predecessors[ssa->predecessor_offsets[block]];
+            block = forward;
             slot = c_ir_ssa_slot(builder, block, local);
             value = slot->value;
             refused = slot == &ssa->failed_slot;
+            forward = !refused && value.value == IR_ID_UNDERLYING_INVALID ? c_ir_ssa_forward_block(ssa, block, local) : UINT32_MAX;
         }
     }
     if (!refused && value.value == IR_ID_UNDERLYING_INVALID)
@@ -7347,6 +7491,205 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_cfg(CIntegerIrBuilder* builder, u8** memo
     return fits;
 }
 
+BUSTER_C_INTERNAL bool c_ir_ssa_loop_contains(CIrSsaLoop const* loop, u32 block)
+{
+    return (block >= loop->window_begin && block < loop->window_end) || block == loop->header || block == loop->members[0] ||
+           block == loop->members[1];
+}
+
+// Finish step one and a half: decide which recorded loops a read may pass
+// straight through (c_ir_ssa_forward_block). A loop's blocks are its header,
+// the other blocks its statement created and every block created inside its
+// window; loops nest, so each block has one innermost loop, and a block in a
+// loop is in every loop around it. A loop qualifies when its header has one
+// predecessor from outside and every other loop block is entered only from
+// inside: then every path to a back edge starts at the header, and a local no
+// loop block writes keeps the entry's value there. Labels, case labels, goto
+// and computed jumps into a loop fail that check rather than needing their
+// own rules. One pass over the edges; each walks outward only past loops the
+// edge enters. Then the blocks writing each local, ascending, from the
+// events. Like the shortcut itself, a refused carve or an inconsistent record
+// leaves every read on the general walk instead of failing the function.
+BUSTER_C_INTERNAL void c_ir_ssa_finish_loops(CIntegerIrBuilder* builder)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    IrFunction* function = builder->function;
+    u32 block_count = function->block_count;
+    u32 loop_count = ssa->loop_count;
+    u32 local_count = ssa->local_count;
+    u32 definition_count = 0;
+    for (u32 index = 0; index < ssa->event_count; index += 1)
+    {
+        definition_count += ssa->events[index].opcode != IR_OPCODE_LOAD;
+    }
+    u64 reserved_size = builder->scratch_arena->reserved_size;
+    u64 position = builder->scratch_arena->position;
+    bool fits = loop_count != 0 &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)local_count + 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), definition_count ? definition_count : 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), block_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), loop_count, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)block_count + 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), definition_count ? definition_count : 1, BUSTER_ALIGN_OF(u32)) &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), local_count ? local_count : 1, BUSTER_ALIGN_OF(u32));
+    if (fits)
+    {
+        u32* headers = arena_allocate(builder->scratch_arena, u32, block_count);
+        u32* definition_offsets = arena_allocate(builder->scratch_arena, u32, (u64)local_count + 1);
+        u32* definition_blocks = arena_allocate(builder->scratch_arena, u32, definition_count ? definition_count : 1);
+        TemporalArena temporary = arena_begin_temporal(builder->scratch_arena);
+        u32* innermost = arena_allocate(builder->scratch_arena, u32, block_count);
+        u32* stack = arena_allocate(builder->scratch_arena, u32, loop_count);
+        u32* block_offsets = arena_allocate(builder->scratch_arena, u32, (u64)block_count + 1);
+        u32* by_block = arena_allocate(builder->scratch_arena, u32, definition_count ? definition_count : 1);
+        u32* cursor = arena_allocate(builder->scratch_arena, u32, local_count ? local_count : 1);
+        memset(headers, 0, sizeof(*headers) * block_count);
+        // A usable record has both window ends and its blocks; windows open in
+        // record order. Anything else keeps the loop out of the nest.
+        bool consistent = true;
+        u32 previous_begin = 0;
+        for (u32 index = 0; index < loop_count; index += 1)
+        {
+            CIrSsaLoop* loop = ssa->loops + index;
+            bool usable = loop->window_begin <= loop->window_end && loop->window_end <= block_count && loop->header < block_count &&
+                          loop->members[0] < block_count && loop->members[1] < block_count;
+            consistent = consistent && (!usable || loop->window_begin >= previous_begin);
+            previous_begin = usable ? loop->window_begin : previous_begin;
+            loop->closed = usable;
+            loop->parent = UINT32_MAX;
+            loop->entry = UINT32_MAX;
+            loop->entry_count = 0;
+        }
+        // Sweep the windows in block order to find each block's innermost
+        // window; windows must nest.
+        u32 depth = 0;
+        u32 next = 0;
+        for (u32 block = 0; block < block_count && consistent; block += 1)
+        {
+            while (depth && ssa->loops[stack[depth - 1]].window_end <= block)
+            {
+                depth -= 1;
+            }
+            while (next < loop_count && consistent && (!ssa->loops[next].closed || ssa->loops[next].window_begin <= block))
+            {
+                CIrSsaLoop* loop = ssa->loops + next;
+                if (loop->closed && loop->window_end > loop->window_begin)
+                {
+                    consistent = !depth || loop->window_end <= ssa->loops[stack[depth - 1]].window_end;
+                    stack[depth++] = next;
+                }
+                next += 1;
+            }
+            innermost[block] = depth ? stack[depth - 1] : UINT32_MAX;
+        }
+        // A loop's own blocks were created directly inside its parent's
+        // window, and its window lies inside that one too; then a block in a
+        // loop is in every enclosing loop. Parents first, from the windows
+        // alone, then each loop claims its own blocks.
+        for (u32 index = 0; index < loop_count && consistent; index += 1)
+        {
+            CIrSsaLoop* loop = ssa->loops + index;
+            if (loop->closed)
+            {
+                u32 parent = innermost[loop->header];
+                CIrSsaLoop* outer = parent != UINT32_MAX ? ssa->loops + parent : 0;
+                consistent = innermost[loop->members[0]] == parent && innermost[loop->members[1]] == parent &&
+                             (!outer || (loop->window_begin >= outer->window_begin && loop->window_end <= outer->window_end));
+                loop->parent = parent;
+            }
+        }
+        for (u32 index = 0; index < loop_count && consistent; index += 1)
+        {
+            CIrSsaLoop* loop = ssa->loops + index;
+            if (loop->closed)
+            {
+                innermost[loop->header] = index;
+                innermost[loop->members[0]] = index;
+                innermost[loop->members[1]] = index;
+            }
+        }
+        for (u32 block = 0; block < block_count && consistent; block += 1)
+        {
+            for (u32 edge = ssa->predecessor_offsets[block]; edge < ssa->predecessor_offsets[block + 1]; edge += 1)
+            {
+                u32 predecessor = ssa->predecessors[edge];
+                u32 loop_index = innermost[block];
+                while (loop_index != UINT32_MAX && !c_ir_ssa_loop_contains(ssa->loops + loop_index, predecessor))
+                {
+                    CIrSsaLoop* loop = ssa->loops + loop_index;
+                    if (block == loop->header)
+                    {
+                        loop->entry = predecessor;
+                        loop->entry_count += 1;
+                    }
+                    else
+                    {
+                        loop->closed = false;
+                    }
+                    loop_index = loop->parent;
+                }
+            }
+        }
+        for (u32 index = 0; index < loop_count && consistent; index += 1)
+        {
+            CIrSsaLoop* loop = ssa->loops + index;
+            if (loop->closed && loop->entry_count == 1)
+            {
+                headers[loop->header] = index + 1;
+            }
+        }
+        // Writes per local in block order: bucket by block, then deal the
+        // buckets out to the locals in ascending block order.
+        memset(block_offsets, 0, sizeof(*block_offsets) * ((u64)block_count + 1));
+        memset(definition_offsets, 0, sizeof(*definition_offsets) * ((u64)local_count + 1));
+        for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
+        {
+            CIrSsaEvent* event = ssa->events + index;
+            consistent = event->block.value < block_count && event->local < local_count;
+            if (consistent && event->opcode != IR_OPCODE_LOAD)
+            {
+                block_offsets[event->block.value + 1] += 1;
+                definition_offsets[event->local + 1] += 1;
+            }
+        }
+        for (u32 block = 0; block < block_count; block += 1)
+        {
+            block_offsets[block + 1] += block_offsets[block];
+        }
+        for (u32 local = 0; local < local_count; local += 1)
+        {
+            definition_offsets[local + 1] += definition_offsets[local];
+            cursor[local] = definition_offsets[local];
+        }
+        for (u32 index = 0; index < ssa->event_count && consistent; index += 1)
+        {
+            CIrSsaEvent* event = ssa->events + index;
+            if (event->opcode != IR_OPCODE_LOAD)
+            {
+                by_block[block_offsets[event->block.value]++] = index;
+            }
+        }
+        // The fill advanced each bucket's start to the next bucket's.
+        u32 begin = 0;
+        for (u32 block = 0; block < block_count && consistent; block += 1)
+        {
+            for (u32 row = begin; row < block_offsets[block]; row += 1)
+            {
+                definition_blocks[cursor[ssa->events[by_block[row]].local]++] = block;
+            }
+            begin = block_offsets[block];
+        }
+        scratch_end(temporary);
+        if (consistent)
+        {
+            ssa->loop_headers = headers;
+            ssa->local_definition_offsets = definition_offsets;
+            ssa->local_definition_blocks = definition_blocks;
+        }
+    }
+}
+
 // Revoke the declaration shortcut of every local whose scope a jump can enter
 // past its initializer: a recorded jump target lies in the scope after the
 // declarator starts, and a jump to it starts before the declarator ends (that
@@ -7500,13 +7843,15 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_parameters(CIntegerIrBuilder* builder, u8
             pending->forwarded = ssa->events[initializer].value;
             continue;
         }
-        if (offsets[pending->block + 1] - offsets[pending->block] == 1)
+        u32 forward = c_ir_ssa_forward_block(ssa, pending->block, pending->local);
+        if (forward != UINT32_MAX)
         {
             // Forward an initially unresolved read through a completed
-            // single-predecessor block without allocating an incoming row.
+            // single-predecessor block, or a loop header the loop never
+            // writes this local in, without allocating an incoming row.
             // Do not substitute yet: an eventual memory owner must retain
             // its load identities before any alias path compression.
-            pending->forwarded = c_ir_ssa_current(builder, predecessors[offsets[pending->block]], pending->local);
+            pending->forwarded = c_ir_ssa_current(builder, forward, pending->local);
             continue;
         }
         for (u32 index = offsets[pending->block]; index < offsets[pending->block + 1] && !ssa->scratch_exhausted; index += 1)
@@ -7542,14 +7887,16 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_reserve_publish(CIntegerIrBuilder* builde
     u64 count = function->value_count;
     u64 reserved_size = builder->scratch_arena->reserved_size;
     u64 position = builder->scratch_arena->position;
-    // Simplification files one user row per incoming row, plus the one row a
-    // closed forwarded cycle gains before it starts.
+    // Simplification files one user row per incoming row, plus the row per
+    // predecessor a closed forwarded cycle gains before it starts.
     u64 user_rows = 0;
     for (u32 block = 0; block < function->block_count; block += 1)
     {
+        u32* offsets = builder->direct_ssa ? builder->direct_ssa->predecessor_offsets : 0;
+        u32 predecessor_count = offsets ? offsets[block + 1] - offsets[block] : 1;
         for (IrBlockParameter* parameter = function->blocks[block].first_parameter; parameter; parameter = parameter->next)
         {
-            user_rows += (u64)parameter->incoming_count + 1;
+            user_rows += (u64)parameter->incoming_count + BUSTER_MAX(predecessor_count, 1);
         }
     }
     bool fits = c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
@@ -7749,29 +8096,54 @@ BUSTER_C_INTERNAL void c_ir_ssa_simplify_parameters(CIntegerIrBuilder* builder, 
             replacements[value] = same;
             // Every parameter reading this one now reads `same`. The full
             // sweep reaches a later position in this sweep, an earlier one
-            // in the next. Move the rows to `same` for its own replacement.
-            for (u32 user = user_first[value]; user != UINT32_MAX; user = users[user].next)
+            // in the next. Move the rows to `same` for its own replacement,
+            // minus those that can never requeue again: a replaced reader
+            // stays replaced, and `same` now reads itself. Carrying them
+            // would grow each list along a chain of trivial loop-header
+            // parameters, making N nested loops cost N^3 (#3723).
+            u32 kept_first = UINT32_MAX;
+            u32 kept_last = UINT32_MAX;
+            u32 user = user_first[value];
+            while (user != UINT32_MAX)
             {
+                u32 next = users[user].next;
                 u32 reader = users[user].parameter;
-                if (!queued[reader] && replacements[reader] == reader)
+                if (replacements[reader] == reader)
                 {
-                    queued[reader] = 1;
-                    u64 due = position[reader] > here ? sweep : sweep + 1;
-                    c_ir_ssa_retry_push(heap, &heap_count, due << 32 | position[reader]);
+                    if (!queued[reader])
+                    {
+                        queued[reader] = 1;
+                        u64 due = position[reader] > here ? sweep : sweep + 1;
+                        c_ir_ssa_retry_push(heap, &heap_count, due << 32 | position[reader]);
+                    }
+                    if (reader != same)
+                    {
+                        users[user].next = UINT32_MAX;
+                        if (kept_first == UINT32_MAX)
+                        {
+                            kept_first = user;
+                        }
+                        else
+                        {
+                            users[kept_last].next = user;
+                        }
+                        kept_last = user;
+                    }
                 }
+                user = next;
             }
-            if (user_first[value] != UINT32_MAX)
+            user_first[value] = UINT32_MAX;
+            if (kept_first != UINT32_MAX)
             {
                 if (user_first[same] == UINT32_MAX)
                 {
-                    user_first[same] = user_first[value];
+                    user_first[same] = kept_first;
                 }
                 else
                 {
-                    users[user_last[same]].next = user_first[value];
+                    users[user_last[same]].next = kept_first;
                 }
-                user_last[same] = user_last[value];
-                user_first[value] = UINT32_MAX;
+                user_last[same] = kept_last;
             }
         }
     }
@@ -7853,13 +8225,24 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_publish(CIntegerIrBuilder* builder, u8* m
             }
             else
             {
-                // Keep one representative of an otherwise closed cycle.
-                // Dead-cycle pruning decides whether it is observable.
-                IrIncoming* incoming = arena_allocate(builder->arena, IrIncoming, 1);
-                *incoming = (IrIncoming){.predecessor = {.value = predecessors[offsets[pending->block]]}, .value = {.value = root}};
+                // Keep one representative of an otherwise closed cycle,
+                // reading itself on every edge: a loop header forwarded to
+                // its entry has more than one. Dead-cycle pruning decides
+                // whether it is observable.
+                u32 first = offsets[pending->block];
+                u32 incoming_count = offsets[pending->block + 1] - first;
+                IrIncoming* incoming = arena_allocate(builder->arena, IrIncoming, incoming_count);
+                for (u32 index = 0; index < incoming_count; index += 1)
+                {
+                    incoming[index] = (IrIncoming){
+                        .next = index + 1 < incoming_count ? incoming + index + 1 : 0,
+                        .predecessor = {.value = predecessors[first + index]},
+                        .value = {.value = root},
+                    };
+                }
                 pending->parameter->first_incoming = incoming;
-                pending->parameter->last_incoming = incoming;
-                pending->parameter->incoming_count = 1;
+                pending->parameter->last_incoming = incoming + incoming_count - 1;
+                pending->parameter->incoming_count = incoming_count;
             }
         }
     }
@@ -8145,6 +8528,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
         valid = c_ir_ssa_finish_cfg(builder, &memory);
         if (valid)
         {
+            c_ir_ssa_finish_loops(builder);
             c_ir_ssa_finish_parameters(builder, memory);
             valid = !ssa->scratch_exhausted && c_ir_ssa_finish_reserve_publish(builder);
         }
@@ -14437,9 +14821,9 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_builtin(CIrExt80Fold* fold, CIrExt80Value
     if (token->kind == C_TOKEN_IDENTIFIER && fold->cursor + 1 < fold->limit &&
         c_token_is_punctuator(&fold->preprocess.tokens[fold->cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
-        String8 link_name = c_ir_math_builtin_link_name(c_token_spelling(fold->preprocess.spelling_base, *token));
-        bool quiet_nan = string_equal(link_name, S8("nan")) || string_equal(link_name, S8("nanf"));
-        bool infinity = string_equal(link_name, S8("inff")) || string_equal(link_name, S8("huge_val"));
+        CMathSpecialValue special = c_semantic_math_special_value(c_ir_math_builtin_link_name(c_token_spelling(fold->preprocess.spelling_base, *token)));
+        bool quiet_nan = special.special == C_MATH_SPECIAL_QUIET_NAN;
+        bool infinity = special.special == C_MATH_SPECIAL_INFINITY;
         if (quiet_nan || infinity)
         {
             u32 open = fold->cursor + 1;
@@ -14455,7 +14839,8 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_builtin(CIrExt80Fold* fold, CIrExt80Value
                 bool empty_payload = payload.length == 2 && payload.pointer[0] == '"' && payload.pointer[1] == '"';
                 if (quiet_nan ? empty_payload : close == open + 1)
                 {
-                    u8 rank = string_equal(link_name, S8("nanf")) || string_equal(link_name, S8("inff")) ? C_IR_EXT80_RANK_FLOAT : C_IR_EXT80_RANK_DOUBLE;
+                    u8 rank = special.kind == C_TYPE_FLOAT ? C_IR_EXT80_RANK_FLOAT
+                              : special.kind == C_TYPE_LONG_DOUBLE ? C_IR_EXT80_RANK_LONG_DOUBLE : C_IR_EXT80_RANK_DOUBLE;
                     *value_out = infinity ? c_ir_ext80_value_infinity(false, rank) : c_ir_ext80_value_default_nan(rank);
                     fold->cursor = close + 1;
                     folded = true;
@@ -21244,51 +21629,44 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_power_integer(CIntegerIrBuilder* bui
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CToken token, String8 link_name, IrValueId* arguments, u32 argument_count)
 {
-    // `__builtin_huge_val()` is a constant-valued compiler intrinsic.  Keep
-    // it in the math-builtin path so hosted headers can use the spelling
-    // without declaring a runtime symbol, but emit the IEEE positive
-    // infinity directly in canonical IR.
-    if (string_equal(link_name, S8("huge_val")))
+    // The infinity (`__builtin_inf*`, `__builtin_huge_val*`) and NaN
+    // (`__builtin_nan*`) constructors are constant-valued compiler
+    // intrinsics.  Hosted headers spell HUGE_VAL*, INFINITY and NAN with them
+    // before any runtime library declaration exists, so emit the positive
+    // infinity or default quiet NaN directly in the result type's own format
+    // and never import an `inf*`/`nan*` symbol.
+    CMathSpecialValue special = c_semantic_math_special_value(link_name);
+    if (special.special != C_MATH_SPECIAL_NONE)
     {
-        if (argument_count != 0)
-        {
-            return IR_VALUE_ID_INVALID;
-        }
+        bool nan = special.special == C_MATH_SPECIAL_QUIET_NAN;
+        IrTypeId value_type = c_ir_builder_scalar_type(builder, special.kind);
+        IrType const* type = ir_type_from_id(&builder->program->types, value_type);
         IrSourceRange source = c_ir_token_source_range(builder, token);
-        return c_ir_emit_builtin_float_bits(builder, builder->f64_type, UINT64_C(0x7ff0000000000000), source, S8("HUGE_VAL"));
-    }
-    // `__builtin_inff()` is the single-precision counterpart used by the
-    // hosted <math.h> INFINITY macro.  It is a constant-valued intrinsic, so
-    // do not require a runtime `inff` declaration or linker symbol.
-    if (string_equal(link_name, S8("inff")))
-    {
-        if (argument_count != 0)
+        IrValueId result = IR_VALUE_ID_INVALID;
+        if (argument_count == (nan ? 1u : 0u) && type && type->kind == IR_TYPE_FLOAT)
         {
-            return IR_VALUE_ID_INVALID;
+            CIrConstantValue constant = c_ir_constant_math_special(type, special.special);
+            String8 literal = nan ? S8("NAN") : special.kind == C_TYPE_FLOAT ? S8("INFF") : special.kind == C_TYPE_LONG_DOUBLE ? S8("HUGE_VALL") : S8("HUGE_VAL");
+            if (type->bit_width == 80)
+            {
+                result = c_ir_emit_f80_constant_bits(builder, source, literal, constant.integer, (u16)constant.integer_high);
+            }
+            else if (type->bit_width == 128)
+            {
+                result = c_ir_emit_f128_constant_bits(builder, source, literal, constant.integer, constant.integer_high);
+            }
+            else if (type->bit_width == 32)
+            {
+                result = c_ir_emit_builtin_float_bits(builder, value_type, nan ? UINT64_C(0x7fc00000) : UINT64_C(0x7f800000), source, literal);
+            }
+            else
+            {
+                u64 bits = 0;
+                memcpy(&bits, &constant.floating, sizeof(bits));
+                result = c_ir_emit_builtin_float_bits(builder, value_type, bits, source, literal);
+            }
         }
-        IrSourceRange source = c_ir_token_source_range(builder, token);
-        return c_ir_emit_builtin_float_bits(builder, builder->f32_type, UINT64_C(0x7f800000), source, S8("INFF"));
-    }
-    // The builtin NaN constructors are compile-time values.  Do not create
-    // an imported `nan*` symbol: hosted headers use these names before a
-    // runtime library declaration exists, and the quiet IEEE payload is
-    // target-independent for the f32/f64 types represented by canonical IR.
-    if (string_equal(link_name, S8("nanf")) || string_equal(link_name, S8("nan")))
-    {
-        if (argument_count != 1)
-        {
-            return IR_VALUE_ID_INVALID;
-        }
-        IrTypeId value_type = string_equal(link_name, S8("nanf")) ? builder->f32_type : builder->f64_type;
-        IrType* type = ir_type_from_id(&builder->program->types, value_type);
-        if (!type || type->kind != IR_TYPE_FLOAT)
-        {
-            return IR_VALUE_ID_INVALID;
-        }
-        IrSourceRange source = c_ir_token_source_range(builder, token);
-        return c_ir_emit_builtin_float_bits(builder, value_type, type->bit_width == 32 ? UINT64_C(0x7fc00000)
-                                                                                       : UINT64_C(0x7ff8000000000000),
-                                            source, S8("NAN"));
+        return result;
     }
     if (string_equal(link_name, S8("fabsf")) || string_equal(link_name, S8("fabs")))
     {
@@ -37450,14 +37828,65 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u3
 BUSTER_C_INTERNAL bool c_ir_tree_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
                                                     u32* expression_end);
 
+// Count the body's `?` tokens once, as a prefix over body offsets. The test
+// is the scan's own (the punctuator field alone), so a range the count calls
+// empty is one the scan would find no `?` in.
+BUSTER_C_INTERNAL void c_ir_question_prefix_build(CIntegerIrBuilder* builder)
+{
+    u32* prefix = builder->question_prefix;
+    CToken const* tokens = builder->preprocess.tokens + builder->body_token_start;
+    u32 count = 0;
+    for (u32 offset = 0; offset < builder->body_token_count; offset += 1)
+    {
+        prefix[offset] = count;
+        count += tokens[offset].punctuator == C_PUNCTUATOR_QUESTION;
+    }
+    prefix[builder->body_token_count] = count;
+    builder->question_prefix_built = true;
+}
+
+// Whether [start, end) may hold a `?`. Only a range inside the body is
+// answered by the prefix count; any other range may.
+BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_range_may_hold_question(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool result = true;
+    u32 body_start = builder->body_token_start;
+    if (builder->question_prefix && start >= body_start && end >= start && end - body_start <= builder->body_token_count)
+    {
+        if (!builder->question_prefix_built)
+        {
+            c_ir_question_prefix_build(builder);
+        }
+        result = builder->question_prefix[end - body_start] != builder->question_prefix[start - body_start];
+    }
+    return result;
+}
+
 // Whether [start, end) is a `?:` at the root, and its tokens: from the syntax
 // tree when lowering has one for this body (c_ir_tree_root_conditional), else
-// by the token scan. Inline, so the default path calls the scan directly.
+// by the token scan. Without a tree, a body range that holds no `?` is refused
+// in O(1) first: the scan can only answer true at a `?` inside the range, and
+// 93% of the self-host's calls hold none (#3102, #3467). Inline, so the
+// refusal costs no call frame and the scan stays out of line.
 BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question,
                                                              u32* colon, u32* expression_end)
 {
-    bool result = builder->tree_conditionals ? c_ir_tree_root_conditional(builder, start, end, expression_start, question, colon, expression_end)
-                                             : c_ir_root_conditional_scan(builder, start, end, expression_start, question, colon, expression_end);
+    bool result = false;
+    if (builder->tree_conditionals)
+    {
+        result = c_ir_tree_root_conditional(builder, start, end, expression_start, question, colon, expression_end);
+    }
+    else if (c_ir_range_may_hold_question(builder, start, end))
+    {
+        result = c_ir_root_conditional_scan(builder, start, end, expression_start, question, colon, expression_end);
+    }
+#if BUSTER_REFERENCE_CHECKS
+    else
+    {
+        u32 reference[4];
+        BUSTER_CHECK(!c_ir_root_conditional_scan(builder, start, end, &reference[0], &reference[1], &reference[2], &reference[3]));
+    }
+#endif
     return result;
 }
 
@@ -39527,8 +39956,10 @@ BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
     c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
 }
 
-BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
-                                                    u32* expression_end)
+// The scan behind c_ir_root_conditional: find the root `?:` of [start, end)
+// after peeling redundant parentheses.
+BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question,
+                                                    u32* colon, u32* expression_end)
 {
     while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
            !c_ir_group_is_statement_expression(builder, start, end))
@@ -42407,6 +42838,10 @@ struct CIrBodyTask
     CScopeId continue_scope;
     u32 break_token;
     u32 continue_token;
+    // A loop record plus one (c_ir_ssa_loop_record) whose block window this
+    // task opens when it starts, or closes: the task after the loop.
+    u32 ssa_loop_open;
+    u32 ssa_loop_close;
     bool allow_trailing_expression;
     bool restore_before_continuation;
     // A loop body: when a variably modified declaration inside it takes a
@@ -47964,6 +48399,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             {
                 return false;
             }
+            c_ir_ssa_loop_open(builder, task.ssa_loop_open);
+            c_ir_ssa_loop_close(builder, task.ssa_loop_close);
             if (task.kind == C_IR_BODY_TASK_CONDITION)
             {
                 state->task_count = task_count;
@@ -48543,6 +48980,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     return false;
                 }
+                u32 loop = c_ir_ssa_loop_record(builder, body_block, condition_block, condition_block);
+                c_ir_ssa_loop_open(builder, loop);
                 tasks[task_count++] = (CIrBodyTask){
                     .start = condition_close + 2,
                     .end = task.end,
@@ -48550,6 +48989,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .continuation = task.continuation,
                     .break_block = task.break_block,
                     .continue_block = task.continue_block,
+                    .ssa_loop_close = loop,
                 };
                 c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
                 tasks[task_count++] = (CIrBodyTask){
@@ -48638,6 +49078,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     return false;
                 }
+                // The window opens with the condition task, after the
+                // initializer has lowered into the blocks that enter the loop.
+                u32 loop = c_ir_ssa_loop_record(builder, condition_block, body_block, increment_block);
                 tasks[task_count++] = (CIrBodyTask){
                     .start = after_body,
                     .end = task.end,
@@ -48645,6 +49088,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .continuation = task.continuation,
                     .break_block = task.break_block,
                     .continue_block = task.continue_block,
+                    .ssa_loop_close = loop,
                 };
                 c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
                 if (increment_block.value != condition_block.value)
@@ -48677,6 +49121,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .block = condition_block,
                     .true_block = body_block,
                     .false_block = exit_block,
+                    .ssa_loop_open = loop,
                 };
                 if (index + 2 < separators[0])
                 {
@@ -48728,6 +49173,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 {
                     return false;
                 }
+                u32 loop = c_ir_ssa_loop_record(builder, condition_block, body_block, body_block);
+                c_ir_ssa_loop_open(builder, loop);
                 IrSourceRange condition_source = c_ir_token_source_range(builder, first);
                 tasks[task_count++] = (CIrBodyTask){
                     .start = after_body,
@@ -48736,6 +49183,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     .continuation = task.continuation,
                     .break_block = task.break_block,
                     .continue_block = task.continue_block,
+                    .ssa_loop_close = loop,
                 };
                 c_ir_body_task_inherit_scope(&tasks[task_count - 1], task);
                 tasks[task_count++] = (CIrBodyTask){
@@ -57292,6 +57740,13 @@ BUSTER_C_INTERNAL CIrConstantValue c_ir_constant_float_special(IrType const* typ
     return result;
 }
 
+// The positive infinity or default quiet NaN a special-float math builtin
+// names, encoded in `type`'s own format.
+BUSTER_C_SHARED CIrConstantValue c_ir_constant_math_special(IrType const* type, CMathSpecial special)
+{
+    return c_ir_constant_float_special(type, false, special == C_MATH_SPECIAL_QUIET_NAN ? C_IR_FLOAT_NAN : C_IR_FLOAT_INFINITY);
+}
+
 // Round a rational once to binary128's 113 significant bits.  Division needs
 // two quotient limbs, not a host __float128 or an intervening x87/f64 value.
 BUSTER_C_INTERNAL u8 c_ir_ieee128_from_rational(CIrExt80Big const* numerator, CIrExt80Big const* denominator, s32 binary_exponent,
@@ -59822,9 +60277,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
             // the emitter that already knows the bits.
             if (token.kind == C_TOKEN_IDENTIFIER && index + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
-                String8 math_link_name = c_ir_math_builtin_link_name(c_token_spelling(builder->preprocess.spelling_base, token));
-                bool quiet_nan = string_equal(math_link_name, S8("nan")) || string_equal(math_link_name, S8("nanf"));
-                bool infinity = string_equal(math_link_name, S8("inff")) || string_equal(math_link_name, S8("huge_val"));
+                CMathSpecialValue special = c_semantic_math_special_value(c_ir_math_builtin_link_name(c_token_spelling(builder->preprocess.spelling_base, token)));
+                bool quiet_nan = special.special == C_MATH_SPECIAL_QUIET_NAN;
+                bool infinity = special.special == C_MATH_SPECIAL_INFINITY;
                 if (quiet_nan || infinity)
                 {
                     u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
@@ -59843,29 +60298,12 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                     {
                         return false;
                     }
-                    bool single = string_equal(math_link_name, S8("nanf")) || string_equal(math_link_name, S8("inff"));
-                    f64 floating = 0.0;
-                    if (single)
-                    {
-                        f32 narrowed = 0.0f;
-                        u32 bits = infinity ? UINT32_C(0x7f800000) : UINT32_C(0x7fc00000);
-                        memcpy(&narrowed, &bits, sizeof(narrowed));
-                        floating = (f64)narrowed;
-                    }
-                    else
-                    {
-                        u64 bits = infinity ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7ff8000000000000);
-                        memcpy(&floating, &bits, sizeof(floating));
-                    }
-                    if (value_count >= capacity)
+                    IrType const* special_type = ir_type_from_id(&builder->program->types, c_ir_builder_scalar_type(builder, special.kind));
+                    if (value_count >= capacity || !special_type || special_type->kind != IR_TYPE_FLOAT)
                     {
                         return false;
                     }
-                    values[value_count++] = (CIrConstantValue){
-                        .type = single ? builder->f32_type : builder->f64_type,
-                        .floating = floating,
-                        .kind = C_IR_CONSTANT_FLOAT,
-                    };
+                    values[value_count++] = c_ir_constant_math_special(special_type, special.special);
                     expect_operand = false;
                     index = close;
                     continue;
@@ -62057,7 +62495,11 @@ BUSTER_C_INTERNAL bool c_ir_function_scratch_tail_reservation(u64* position, u64
                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaSlot), rows * 2, BUSTER_ALIGN_OF(CIrSsaSlot)) &&
                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaParameter), lowering_capacity, BUSTER_ALIGN_OF(CIrSsaParameter)) &&
                c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(u32), lowering_capacity * 24, BUSTER_ALIGN_OF(u32)) &&
-               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(void*), lowering_capacity * 2, BUSTER_ALIGN_OF(void*));
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(void*), lowering_capacity * 2, BUSTER_ALIGN_OF(void*)) &&
+               // Loop records (one per loop keyword, doubling) and the
+               // per-block, per-local and per-write rows c_ir_ssa_finish_loops carves.
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(CIrSsaLoop), body_capacity * 2, BUSTER_ALIGN_OF(CIrSsaLoop)) &&
+               c_ir_arena_reservation_advance(ARENA_MAX_RESERVATION, position, sizeof(u32), lowering_capacity * 8, BUSTER_ALIGN_OF(u32));
     }
     return fits;
 }
@@ -64704,6 +65146,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         // Match the builder initializer's carve order before allocating its
         // first array. Capacity failure is a source diagnostic, never a bump
         // allocator assertion after reserving only part of the builder.
+#if BUSTER_REFERENCE_CHECKS
+        Arena* carve_arena = lowering_arena;
+#endif
         bool scratch_fits =
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrLowerFrame), lower_frame_capacity, BUSTER_ALIGN_OF(CIrLowerFrame)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIntegerIrLocal), local_array_capacity, BUSTER_ALIGN_OF(CIntegerIrLocal)) &&
@@ -64732,7 +65177,11 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u8), body_array_capacity, BUSTER_ALIGN_OF(u8)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrGroupFactsEntry), prepared_control_expression_capacity + 1,
                                           BUSTER_ALIGN_OF(CIrGroupFactsEntry)) &&
+            c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity + 1, BUSTER_ALIGN_OF(u32)) &&
             c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), body_array_capacity, BUSTER_ALIGN_OF(u32));
+#if BUSTER_REFERENCE_CHECKS
+        u64 carve_end = position;
+#endif
         if (scratch_fits && lowering_capacity <= UINT32_MAX && local_capacity <= UINT32_MAX && local_slot_capacity <= UINT32_MAX &&
             prepared_call_capacity <= UINT32_MAX && prepared_control_expression_capacity <= UINT32_MAX && lower_frame_capacity <= UINT32_MAX &&
             !function_reservation_limit)
@@ -64910,7 +65359,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                  prepared_control_expression_capacity ? prepared_control_expression_capacity : 1);
         builder.group_facts = arena_allocate(lowering_temporary.arena, u8, body_array_capacity);
         builder.group_facts_stack = arena_allocate(lowering_temporary.arena, CIrGroupFactsEntry, prepared_control_expression_capacity + 1);
+        builder.question_prefix = arena_allocate(lowering_temporary.arena, u32, body_array_capacity + 1);
         builder.statement_ends_plus_one = arena_allocate(lowering_temporary.arena, u32, body_array_capacity);
+#if BUSTER_REFERENCE_CHECKS
+        // The carve above must end exactly where the preflight's carve list
+        // said it would, or an explicit budget could approve a body whose
+        // scratch then overflows it (#3467). A grown arena starts elsewhere.
+        BUSTER_CHECK(lowering_temporary.arena != carve_arena || lowering_temporary.arena->position == carve_end);
+#endif
         memset(builder.prepared_control_open_slots, 0, sizeof(u32) * control_token_array_capacity);
         memset(builder.prepared_control_emitted_marks, 0, sizeof(u32) * control_token_array_capacity);
         memset(builder.local_entity_slots, 0xff, sizeof(*builder.local_entity_slots) * (u64)local_slot_capacity);

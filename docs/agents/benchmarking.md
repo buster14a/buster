@@ -473,6 +473,9 @@ captures (#2741).
   perf record -F 999 -g --call-graph fp -o "$session_root/release.data" -- ./build/Release/ide bench
   ```
 
+  For test-generated image lifetime during captures, see
+  [profiling image retention](testing.md#profiling-image-retention).
+
   The ordinary local default includes tests, which enables
   `BUSTER_IR_TRANSFORM_CHECKS` in Release. Keep tests-on, sanitized,
   instrumented and explicit transform-verification builds identified as
@@ -521,7 +524,14 @@ captures (#2741).
   routes below cover the stage-1 self-host compile and, as profile
   `throughput-corpus-v2`, the default `bench_throughput` corpus under both
   retained FAST and QUALITY modes on the same
-  two binaries; the publisher re-checks the corpus's own summary and metadata
+  two binaries. A base revision whose history lacks
+  `compiler_receipt.THROUGHPUT_HARNESS_FLOOR` still runs the retired none and
+  mir-stack modes under `--mode all`. On the pull route hosted authorization
+  turns it away before dispatch with an explicit unsupported check, and the
+  non-owned host routes re-derive that refusal before any build or lab
+  (#3714). Only the named `throughput-corpus-historical-v1` recipe measures
+  such a base: the pinned `afe67cbe` harness on the v2 arguments and
+  population, discharging its own inventory row. The publisher re-checks the corpus's own summary and metadata
   and binds its compiler hashes to the measured binaries. A corpus exit 1
   (confirmed regression) with a complete exported report is a measured,
   report-only result on both the main and pull-request routes, so a regressing
@@ -1211,6 +1221,131 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    `compare-pull` job next to the roughly 14-minute ordinary comparison. No
    job timeout changed.
 
+   **Issue #2761 opt-in host Wild linker leg.** The same route accepts one
+   fresh exact line `profile: wild-linker-v1`, selected by the same
+   every-parent freshness rule. It is the Zen 5 route for
+   `tool:wild_linker_bench.c` (#2645). It cannot be combined with an analyzer,
+   real-source, ast-pilot, production, compiler-probes or frontend-selector
+   profile.
+   `measure_wild_linker` runs it after the corpus leg:
+   - **Linkers.** It finds the host's installed Wild with `command -v wild`
+     and never downloads a linker. The comparator is the audit's, mold
+     (`command -v mold`). Only when mold is not installed at all does it
+     fall back to the host's default `ld`, which must report a GNU ld
+     version. The check then states the substitution. Wild must report its
+     own identity, `Wild <version> (compatible with GNU linkers)`, which is
+     what `Args::linker_identity` prints at wild `e9a9b0cb`. `<version>` is
+     any form `wild/build.rs` writes: a release version, a merge-base hash,
+     `<release> <hash>-modified`, or `<release> non-git-build`, which is what
+     a distribution package such as the 9700X host's reports. Each linker's
+     `command -v` path, resolved path, first `--version` line and SHA-256
+     (before and after the leg) go into the receipt. A missing Wild, a
+     missing comparator, a silent `--version`, or a `mold` that is not
+     mold fails the leg with that reason. A `mold` that is not mold never
+     falls back.
+   - **Inputs.** It links the head's own `ide` objects, not a frozen
+     external set. In an isolated shared clone of the head,
+     `./build.sh generate --cc clang --linker DEFAULT --no-include-tests
+     --no-fuzz --no-sanitize --no-lto` with debug information and frame
+     pointers configures the audit's `build-wild-unity` and
+     `build-wild-separate` trees. It then builds Release unity, Debug
+     (always non-unity) and Release separate. The reasons: no input has to
+     be stored or fetched onto the host, the evidence belongs to the revision
+     under review, and a Buster change that alters what the linkers see is
+     measured. Every object and archive is hashed before timing and must be
+     unchanged at the end. The receipt records each manifest's hash. The
+     input steps share one 20-minute deadline.
+   - **Harness.** The trusted revision's `tools/wild_linker_acceptance.c
+     --link-only` (built with `clang -std=c11 -O2 -Wall -Wextra -Werror
+     -Wpedantic`) reuses `wild_linker_bench.c`'s process capture, `wait4`
+     timing, seeded order and paired bootstrap. It runs under
+     `taskset -c 2,3,4,5`, four distinct physical cores, so the
+     default-thread cells are not reduced to one CPU. For each of the
+     audit's direct cells (`ide-debug`, `ide-unity-release`,
+     `ide-separate-release`), it takes the last `ninja -t commands ide`
+     step, drops any linker selection, and has Clang print the direct Wild
+     argv (`-###`). It appends `--no-gc-sections` and the fixed benchmark
+     build ID `0x2645…`. Wild adds `--no-fork --icf=none`. The comparator
+     replaces only the executable and adds its own equivalents: mold the
+     same two options, GNU ld none, because it neither forks nor folds code.
+   - **Sampling.** Frozen before the run. Per cell, there are 2 warmups and
+     then 21 seeded (2645) randomized AB/BA pairs at default threads, and
+     again with `--threads=1` (GNU ld is single-threaded and adds nothing).
+     `ide-debug` also has 9 A/A pairs per linker. There is no adaptive
+     stopping: any failed link stops the harness without a ranking. Each
+     linker's output is then linked again and must be byte-identical, and
+     must compile a probe.
+
+   `compiler_publish.py` re-validates the receipt's `wild_linker` record
+   against the evidence under `wild_linker/` (`validate_wild_linker`). It
+   refuses:
+   - a harness or input-build exit other than 0;
+   - an observed CPU other than the Ryzen 7 9700X, or a harness affinity
+     other than CPUs 2-5;
+   - a Wild whose `--version` is not Wild's own identity, a Wild output
+     whose `.comment` does not carry that same identity, or a comparator
+     output that does. Wild writes the identity into every executable it
+     links by default, so another linker installed as `wild` is refused
+     even when it imitates the version line. `compiler_compare` reads each
+     saved output's `.comment` itself, and only after checking that its
+     hash is the one the harness recorded;
+   - a linker without an absolute path, a version or a SHA-256, a linker
+     whose hash changed during the leg, an unsupported comparator kind, an
+     unrecorded or false substitution, or Wild and comparator being the same
+     executable;
+   - an input manifest that differs from the receipt's hash;
+   - a population that is not exactly the eight comparisons in the seeded
+     order. The generator is replayed in Python, each with every warmup and
+     pair linked successfully;
+   - a cell whose retained Wild argv (`<cell>-argv.txt`) is not exactly
+     Clang's form, one double-quoted word per argument drawn from
+     `[A-Za-z0-9_./+=,:@%-]`, or does not start with the recorded Wild,
+     write `<config>/ide`, follow the frozen Clang link grammar, and take
+     every relative object
+     and archive from that cell's hashed input manifest. System startup
+     objects must come from `/usr` or `/lib`, and nothing else may come from
+     the build root. The grammar (`WILD_ARGV_FLAGS`, `WILD_ARGV_OPERANDS`)
+     admits only Clang's own flags, `-z`/`-m`/`-dynamic-linker`/`-o` with
+     admitted operands, `-L` system directories, plain `-l` names, and
+     object or archive operands. It refuses response files (`@file`, which
+     Wild expands recursively), linker scripts, plugins and any other option
+     that would read an input the manifest does not hash. Each relative
+     operand, each manifest path and the build root must already be canonical,
+     with no `..`, `.` or empty component, and must lie inside the cell's
+     tree, so a traversal cannot hide behind a matching raw string;
+   - a timed, validated or repeated link command that is not exactly the
+     command rebuilt from that argv's admitted tokens and the frozen options.
+     No other input, linker or shell text can run, even in a packet that
+     rewrites its argv and commands together;
+   - a failed byte-identity, probe or manifest check;
+   - a summary median, paired ratio or bootstrap interval that the raw
+     samples do not give. The report's cells are re-derived from `raw.csv`;
+   - a frozen profile, identity record or cell digest that changed.
+
+   Every timing is report-only.
+
+   Cost: on a hosted 4-vCPU 2.3 GHz Xeon (diagnostic, not Zen 5), the input
+   steps took 281 s and the harness 24 s. That run used an `ld.lld`
+   stand-in named `wild`, because Wild is not installed there, and GNU ld
+   as the substituted comparator. The evidence was 3.4 MB. The input
+   deadline (20 minutes) and the harness timeout (15 minutes) together
+   keep the leg inside the unchanged 90-minute `compare-pull` job next to the
+   roughly 14-minute ordinary comparison. No job timeout changed.
+
+   Licenses. Each one is verified for the version named here. A host
+   linker of another version records its own version string, and its
+   license is unverified until it is checked against that version's
+   source.
+   - **Wild 0.10.0:** `MIT OR Apache-2.0`
+     ([Cargo.toml at `e9a9b0cb`](https://github.com/wild-linker/wild/blob/e9a9b0cb6fd63a23cc7b93aafc931aadd5746be6/Cargo.toml)).
+   - **mold 2.42.1:** `MIT`
+     ([LICENSE at `9b376bc6`](https://github.com/rui314/mold/blob/9b376bc6a9899d4a16b41777de1f013989459fbc/LICENSE)).
+   - **GNU ld 2.42 (substitution only):** `GPL-3.0-or-later`
+     ([`ld/ldmain.c` header at tag `binutils-2_42`](https://sourceware.org/git/?p=binutils-gdb.git;a=blob;f=ld/ldmain.c;hb=refs/tags/binutils-2_42)).
+
+   Buster invokes all three as external executables. None is vendored,
+   linked into Buster or redistributed.
+
    **Without perf (#2768).** Before the first timed run the lab runs
    `perf stat -- true` once (`probe_counters`). If perf is missing, exits
    nonzero (for example under a strict `perf_event_paranoid`), or writes no
@@ -1225,6 +1360,15 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    cannot pass for a neutral result. A cloud container therefore yields a
    usable, diagnostic wall-time A/B; Zen 5 evidence still needs the 9700X
    routes below.
+
+   **Probe orphans (#3709).** The `perf stat -- true` probes
+   (`probe_counters`, the `wrapper_rss_bytes` run in `probe_workload`, and the
+   top-down dry runs) make the lab a child subreaper for that one command.
+   After perf is reaped, the lab kills the rest of the probe's process group
+   and reaps any orphan it left. Each one is named as `orphan reaped:
+   pid=N stat=[...]` in `commands.log` and in the probe's log. Workload runs
+   never do this, so an outer supervisor still adopts, and charges, anything
+   the compiler or its wrapper leaves behind.
 
    Both binaries are probed for `-fsource-metrics`/`-fmetrics-out` before
    either is warmed up. Compare enables `-fmetrics-out` in both variants'

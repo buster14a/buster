@@ -265,6 +265,29 @@ generated-file edits are rejected for every class. See
 
 ## Merge-conflict preflight
 
+The unprivileged regression job uses the pinned checkout action's blob-filtered,
+non-cone sparse checkout (#3768), retaining the default shallow candidate merge
+ref. Its complete materialized input set is `.github/`, `tools/`,
+`src/buster/lib/base.h`, `docs/agents/workflow.md` and
+`docs/merge-queue-admission.md`. The native inventory includes
+`tools/ci_metrics_json.h` and `base.h`; their remaining includes are system
+headers. Python imports stay under `tools/`, workflow-policy tests inspect
+`.github/` and the two documents, and Git fixtures create their own temporary
+repositories. Keep entire tool/workflow directories so their modules and new
+policy suites are available; extend this closure in the same change if a test
+starts reading another repository input. Do not use cone mode here: ancestor
+siblings include unrelated large documentation blobs.
+
+The outer regression job remains capped at two minutes. Native compilation and
+both self-tests (including GCC ASan/UBSan) share a one-minute step cap; all five
+Python suites share a separate one-minute step cap. These are ceilings, not
+reserved time: setup, source reporting, network checkout and finalization still
+consume the outer budget. Failures, cancellation and exceeded deadlines remain
+non-successful. The original #3768 run passed its assertions but was cancelled
+after a roughly 131-second fetch; the specific cancellation initiator remains
+unconfirmed. Reducing unrelated blobs addresses the observed checkout work
+without increasing either test or job budgets.
+
 The `merge-conflict-preflight` status is a cheap read-only answer for one exact
 triple: current `main`, candidate head and merge base. Its description embeds
 the full main and head SHAs, plus a trailing `q=queued` when the trusted job

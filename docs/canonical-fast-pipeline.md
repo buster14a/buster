@@ -94,10 +94,24 @@ certificate. Mutating a prepared module requires clearing the relevant
 preparation markers and revoking the caller's input certificate. Repeated
 untrusted preparation still validates. Published CFG/address facts must be
 invalidated before mutation and rebuilt after these transforms (#38/#44).
-Producer-certified modules that do not yet satisfy the stricter canonical
-validator skip optional FAST as a unit and increment `validation_skips`.
-Optional transformation must never turn an otherwise accepted legacy source
-shape into a new diagnostic.
+For producer-certified input, a strict function validation failure declines
+optional FAST only for that function (#1602). Every pass reads and rewrites
+only its admitted function; invalid shared globals, aliases or initializers
+still decline the whole module. `validation_skips` counts declined lowered
+functions. Declined bodies remain unchanged by FAST and are excluded from its
+output check; the shared scope and every admitted body are still checked.
+Uncertified input must pass the full strict validator before any transform.
+Optional transformation never turns an accepted legacy shape into a diagnostic.
+
+`IrFastStatistics.declines` retains every declining function and its first
+strict error, block and instruction, in function order. `ide cc -v` prints
+one `IR_FAST_DECLINE source=... function=... scope=function|module error=...`
+record per declined body, with numeric `IrValidationError` values and invalid
+IDs for unavailable locations. Multi-input records retain source order and
+own their names after per-unit arenas are released. Ordinary valid input
+allocates no decline records; a previously validated module needs no new scan.
+The [pinned decline census](canonical-fast-decline-census.md) records the
+observed source shapes, compile failures and follow-up owners for #1602.
 
 When preparation has already run that validator over the module in exactly
 its current state -- the promotion-output scan of a Debug/test/sanitizer/
@@ -296,14 +310,15 @@ again after its last splice (an output failure reports the `inlining output`
 boundary). A mandatory call whose caller or callee is a legacy producer-certified
 shape that fails that check is diagnosed; an optional one stays a call. When FAST
 is selected, a caller whose splices were all optional skips that output check:
-it is listed in `inline_unchecked_callers` and proven by the module-wide scan
-that follows anyway (the promotion output check of a checked build, else the FAST
-input guard). If that scan fails, each listed caller is validated and the first
-failure reports the `inlining output` boundary; a failure only outside the list
-keeps the legacy FAST validation skip. This removed 0.87 G of 3.4 G inliner
-instructions from an uncapped tiny self-host compile under cachegrind (#48). Any
-other rewritten caller is checked at once, so the FAST input guard still pays the
-only module-wide scan on a producer-certified default compile. The verbose
+it is listed in `inline_unchecked_callers` and proven by the validation that
+follows anyway (the promotion output check of a checked build, else the FAST
+input guard's per-function check). A listed caller that fails reports the
+`inlining output` boundary instead of a FAST decline; a shared-scope failure is
+attributed to it only if its own rows also fail, and failures outside the list
+keep their legacy decline. This removed 0.87 G of 3.4 G inliner instructions
+from an uncapped tiny self-host compile under cachegrind (#48). Any other
+rewritten caller is checked at once, so the FAST input guard still checks all
+functions on a producer-certified default compile. The verbose
 `IR_INLINE` record reports candidates, accepted/mandatory calls, copied rows,
 growth, rejection categories and visits. These counts are diagnostics, not a
 performance result. Mandatory budget refusals additionally report the first

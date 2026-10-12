@@ -1,7 +1,7 @@
 // Included by x86_64_metadata_test.c. Frozen GNU as 2.44 forced-EVEX
 // byte oracles pin APX opcode-selecting prefixes and both source-register fields.
 // Extended registers force these APX forms in source selection; low ADX controls
-// pin the previously colliding ADCX/ADOX pair. Cover W0/W1 and VVVV above/below 16.
+// select shorter legacy encodings; exact APX checks retain the colliding pair. Cover W0/W1 and VVVV above/below 16.
 // Existing NDD, NF, SCC, SETZU and architectural-mask tests remain independent
 // controls: variable-width NDD metadata prefix tokens must not override width.
 BUSTER_GLOBAL_LOCAL UnitTestResult x86_64_metadata_apx_prefix_tests(UnitTestArguments* arguments)
@@ -43,8 +43,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult x86_64_metadata_apx_prefix_tests(UnitTestArgu
         {S8("blsr %r8, %r19\n"), 6, {0x62, 0xd2, 0xe4, 0x00, 0xf3, 0xc8}},
         {S8("blsmsk %r8, %r19\n"), 6, {0x62, 0xd2, 0xe4, 0x00, 0xf3, 0xd0}},
         {S8("rorx $7,%r8,%r19\n"), 7, {0x62, 0xc3, 0xff, 0x08, 0xf0, 0xd8, 0x07}},
-        {S8("adcx %eax, %ecx\n"), 6, {0x62, 0xf4, 0x7d, 0x08, 0x66, 0xc8}},
-        {S8("adox %eax, %ecx\n"), 6, {0x62, 0xf4, 0x7e, 0x08, 0x66, 0xc8}},
+        {S8("adcx %eax, %ecx\n"), 5, {0x66, 0x0f, 0x38, 0xf6, 0xc8}},
+        {S8("adox %eax, %ecx\n"), 5, {0xf3, 0x0f, 0x38, 0xf6, 0xc8}},
         {S8("adcx %r16d, %r17d\n"), 6, {0x62, 0xec, 0x7d, 0x08, 0x66, 0xc8}},
         {S8("adox %r16d, %r17d\n"), 6, {0x62, 0xec, 0x7e, 0x08, 0x66, 0xc8}},
         {S8("andn %r16d, %r17d, %r18d\n"), 6, {0x62, 0xea, 0x74, 0x00, 0xf2, 0xd0}},
@@ -90,5 +90,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult x86_64_metadata_apx_prefix_tests(UnitTestArgu
             arguments->show(arguments, S8("X86_APX_PREFIX_REGRESSION case={u32} input={S8}"), index, fixture->source);
         }
     }
+    BusterX86MetadataPhysicalOperand low_adx_operands[] = {
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 1, 32),
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 32),
+    };
+    String8 wildcard[] = {S8("*")};
+    u8 adcx_bytes[] = {0x62, 0xf4, 0x7d, 0x08, 0x66, 0xc8};
+    u8 adox_bytes[] = {0x62, 0xf4, 0x7e, 0x08, 0x66, 0xc8};
+    BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("ADCX"), 539, low_adx_operands, 2,
+        (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard), adcx_bytes, BUSTER_ARRAY_LENGTH(adcx_bytes)));
+    BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("ADOX"), 635, low_adx_operands, 2,
+        (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard), adox_bytes, BUSTER_ARRAY_LENGTH(adox_bytes)));
     return result;
 }

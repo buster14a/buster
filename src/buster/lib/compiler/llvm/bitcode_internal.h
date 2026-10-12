@@ -6,4 +6,14 @@
 // Private access to the production CST_CODE_INTEGER signed-rotation operand.
 // Tests supply widths 1 through 64; no module or arena allocation is needed.
 BUSTER_F_DECL u64 llvm_bitcode_test_integer_operand(u64 bits, u32 width);
+
+// Batch the production section interner without serialization. Probes count
+// every inspected hash slot, including the terminating empty/matching slot.
+typedef struct LlvmBitcodeTestSections LlvmBitcodeTestSections;
+struct LlvmBitcodeTestSections
+{
+    u32 name_count;
+    u64 probes;
+};
+BUSTER_F_DECL LlvmBitcodeTestSections llvm_bitcode_test_section_ids(Arena* arena, IrSymbol** symbols, bool const* declarations, u32 count, u32* ids);
 #endif

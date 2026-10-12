@@ -520,7 +520,7 @@ u32 ir_inline_module_growth_limit(u32 max_module_growth, u64 module_rows)
 // its own strict output check and be listed in module->inline_unchecked_callers
 // instead. Preparation passes it only when the FAST input guard will scan the
 // whole module anyway, and attributes any failure of a listed caller to this
-// pass (ir_inline_check_unchecked_callers).
+// pass (the FAST input guard in ir_prepare_canonical_module).
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrModule* module, bool defer_optional_output)
 {
     IrValidationResult result = (IrValidationResult){.error = IR_VALIDATION_NONE, .boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT};
@@ -1456,16 +1456,3 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
     return result;
 }
 
-// The deferred output check: the first listed caller that fails the strict
-// validator is an inlining-output error. Run only after a module-wide scan
-// failed, so legacy shapes elsewhere keep their FAST validation skip.
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_check_unchecked_callers(IrProgram* program, IrModule* module)
-{
-    IrValidationResult result = ir_validation_ok();
-    for (u32 index = 0; index < module->inline_unchecked_count && result.error == IR_VALIDATION_NONE; index += 1)
-    {
-        result = ir_validate_canonical_function(program, module->functions + module->inline_unchecked_callers[index]);
-    }
-    result.boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT;
-    return result;
-}

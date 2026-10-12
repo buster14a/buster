@@ -36,6 +36,30 @@ pooled reuse retains the link's dirty watermark and zeroed allocation clears it.
 The registered `arena_tests` cover every shorter payload length, both lifetime
 endings, and an exact-fit two-entry pool whose non-null link needs clearing.
 
+Linux arena huge-page advice is opt-in. Set `BUSTER_ARENA_HUGE_PAGES=1`
+before launching an application to enable advice for arenas created after
+startup environment parsing. Unset, empty, `0`, and other values disable
+Buster's advice; the environment parser's own arena always uses the ordinary
+host policy. Startup resolves this once before workers run, with no environment
+lookup in the allocation path. Other platforms accept the setting but their
+OS advice wrapper is a no-op.
+
+`ArenaFlags.huge_pages` overrides the startup default with
+`ARENA_HUGE_PAGES_ENABLED` or `ARENA_HUGE_PAGES_DISABLED`; zero
+(`ARENA_HUGE_PAGES_DEFAULT`) inherits it. Enabled reservations larger than
+2 MiB receive best-effort `MADV_HUGEPAGE` above each arena slice's first
+2 MiB. Pool hits must match both size and resolved policy. Kernel refusal
+does not fail allocation. Disabled means no Buster advice: it does not request
+`MADV_NOHUGEPAGE` or suppress a host's existing `always` policy.
+
+This option can increase peak RSS through sparse touches and can cause
+synchronous compaction stalls, including under `always`. The historical
+[#1585 experiment](https://github.com/buster14a/buster/issues/1585) measured
+1.76 times peak RSS; it does not qualify this candidate's performance.
+The registered `arena_tests` exercise exact startup values, both overrides,
+the 2 MiB boundary, multi-arena ranges, refusal, and pool isolation.
+No speedup or latency guarantee is made.
+
 Numeric, time and base definitions remain alongside these modules in
 [src/buster/lib](../../src/buster/lib/); the table is an entry-point index, not
 an inventory of every helper or a blanket support claim.

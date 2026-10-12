@@ -107,6 +107,12 @@ DIRECT_AUTHORIZE_IF = "    if: ${{ " + " && ".join(DIRECT_TERMS) + " }}"
 DIRECT_RUN_IF = "    if: ${{ " + " && ".join((*DIRECT_TERMS, ATTEMPT_BINDING, REQUEST_BINDING, "needs.authorize.outputs.workloads == 'true'")) + " }}"
 # The pull-request compiler comparison (#2769) shares the direct gate.
 PULL_RUN_IF = "    if: ${{ " + " && ".join((*DIRECT_TERMS, ATTEMPT_BINDING, REQUEST_BINDING, "needs.authorize.outputs.compare == 'true'")) + " }}"
+# The host is dispatched only for an admitted or named historical corpus harness (#3714);
+# the check writer and publisher still run so an unsupported base gets its explicit check.
+PULL_COMPARE_IF = PULL_RUN_IF.replace(
+    "needs.authorize.outputs.compare == 'true' }}",
+    "needs.authorize.outputs.compare == 'true' && (needs.authorize.outputs.harness_admission == 'admitted' || "
+    "needs.authorize.outputs.harness_admission == 'historical') }}")
 PULL_PUBLISH_IF = "    if: ${{ " + " && ".join(("always()", *DIRECT_TERMS, "needs.authorize.outputs.compare == 'true'")) + " }}"
 DIRECT_TRIGGER = (
     "on:",
@@ -499,6 +505,9 @@ PULL_RUN_SCRIPT = [line.replace("--mode main", "--mode pull")
                    .replace("--pull-head \"$BQ_PULL_HEAD\"", "--pull-head \"$BQ_HEAD_COMMIT\"")
                    .replace(" \"$BQ_PULL_HEAD\" \"$BQ_TRUSTED_REVISION\"", " \"$BQ_TRUSTED_REVISION\"")
                    for line in COMPILER_RUN_SCRIPT]
+PULL_RUN_SCRIPT[5:5] = ["          [[ \"$BQ_HARNESS_ADMISSION\" =~ ^(admitted|historical)$ ]]"]
+PULL_RUN_SCRIPT[-1] += " \\"
+PULL_RUN_SCRIPT.append("            --harness-admission \"$BQ_HARNESS_ADMISSION\"")
 # A main measurement in progress is never cancelled; pull requests coalesce.
 DIRECT_CONCURRENCY = (
     "concurrency:",
@@ -507,12 +516,13 @@ DIRECT_CONCURRENCY = (
 )
 PULL_RUN_LINES = (
     "    needs: authorize",
-    PULL_RUN_IF,
+    PULL_COMPARE_IF,
     "    runs-on:",
     "      group: buster-9700x-service-dispatch",
     "      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]",
     "      BQ_BASE_COMMIT: ${{ needs.authorize.outputs.merge_base }}",
     "      BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}",
+    "      BQ_HARNESS_ADMISSION: ${{ needs.authorize.outputs.harness_admission }}",
 )
 PULL_CHECKOUTS = (
     COMPILER_CHECKOUTS[0],
@@ -534,7 +544,8 @@ PULL_PUBLISH_BLOCKS = (
     ("          GH_TOKEN: ${{ github.token }}", "          BQ_MODE: pull"),
     ("          BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}",
      "          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}",
-     "          BQ_COMPARE_RESULT: ${{ needs.compare-pull.result }}"),
+     "          BQ_COMPARE_RESULT: ${{ needs.compare-pull.result }}",
+     "          BQ_HARNESS_ADMISSION: ${{ needs.authorize.outputs.harness_admission }}"),
     ("        run: python3 -B tools/bench_direct/compiler_publish.py",),
 )
 COMPILER_PUBLISH_BLOCKS = (
@@ -1319,7 +1330,7 @@ def check_compiler_path(errors: list[str]) -> None:
     for line in PULL_RUN_LINES:
         if line not in compare_pull:
             errors.append(f"pull compare job is missing exact line: {line.strip()}")
-    if [line for line in compare_pull if line.startswith("    if:")] != [PULL_RUN_IF]:
+    if [line for line in compare_pull if line.startswith("    if:")] != [PULL_COMPARE_IF]:
         errors.append("pull compare job is missing its exact condition")
     for marker in ("GH_TOKEN", "github.token", "curl ", "api.github.com", "permissions:", "sudo",
                    "environment:", "buster-bench", "secrets.", "--sudo", "--profile-steps"):

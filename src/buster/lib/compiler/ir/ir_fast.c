@@ -7,6 +7,7 @@
 // publishes the final canonical CFG after all selected transformations.
 // ir_validate_promotion_output leaves out of the promotion-output check any
 // function whose certified input already failed the strict validator.
+// ir_validate_fast_output likewise excludes only bodies FAST left untouched.
 #include <buster/lib/time.h>
 
 String8 ir_fast_pass_name(IrFastPass pass)
@@ -518,6 +519,22 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_promotion_output(IrProgram* p
     return result;
 }
 
+// Only declined functions are excluded: the shared scope and every admitted
+// function must still satisfy the strict output oracle after a FAST rewrite.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_fast_output(IrProgram* program, IrModule* module, u8 const* declined)
+{
+    IrValidationResult result = ir_validate_canonical_scope(program, module);
+    for (u32 index = 0; result.error == IR_VALIDATION_NONE && index < module->function_count; index += 1)
+    {
+        IrFunction* function = module->functions + index;
+        if (function->state == IR_FUNCTION_LOWERED && !declined[index])
+        {
+            result = ir_validate_canonical_function(program, function);
+        }
+    }
+    return result;
+}
+
 IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool input_certified)
 {
     IrValidationResult result = ir_validation_ok();
@@ -625,50 +642,94 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
         if (result.error == IR_VALIDATION_NONE && program->fast_passes && !module->fast_complete)
         {
             module->fast = (IrFastStatistics){0};
-            // A producer certificate is sufficient for the ordinary backend,
-            // but some legacy accepted shapes do not yet satisfy the stricter
-            // canonical validator. Optional rewrites decline those modules as
-            // a unit: this keeps explicit/default FAST safe without turning an
-            // existing accepted source into a diagnostic.
-            bool fast_input_valid = true;
+            // A producer certificate preserves legacy acceptance, but optional
+            // FAST needs strict validity. Check shared state once, then each
+            // lowered body immediately before its function-local transforms.
+            // Reuse a prior whole-module proof without any extra validation.
+            TemporalArena scratch = scratch_begin(&program->arena, 1);
+            IrValidationResult scope = ir_validation_ok();
             if (!validated)
             {
                 IR_CONSTRUCTION_RECORD(PREPARATION_FAST_INPUT_VALIDATIONS, 1);
-                IrValidationResult fast_input = ir_validate_canonical_module(program, module);
-                fast_input_valid = fast_input.error == IR_VALIDATION_NONE;
-                // A failed scan declines FAST for a legacy shape, but a
-                // deferred inlined caller that fails is this pass's output
-                // error, never a silent skip.
-                if (!fast_input_valid && module->inline_unchecked_count)
+                scope = ir_validate_canonical_scope(program, module);
+            }
+            bool check_output = !input_certified || BUSTER_IR_TRANSFORM_CHECKS;
+            u8* declined = 0;
+            IrFastDecline* declines = 0;
+            // Callers whose optional splices skipped their own output check
+            // (ir_inline_module) are proven here by the same per-function input
+            // validation; one that fails is an inlining-output error, never a
+            // decline. Other failures keep their legacy decline.
+            u8* unchecked = 0;
+            if (!validated && module->inline_unchecked_count)
+            {
+                unchecked = arena_allocate_zeroed(scratch.arena, u8, module->function_count);
+                for (u32 listed = 0; listed < module->inline_unchecked_count; listed += 1)
                 {
-                    result = ir_inline_check_unchecked_callers(program, module);
+                    unchecked[module->inline_unchecked_callers[listed]] = 1;
                 }
             }
             module->inline_unchecked_count = 0;
-            if (result.error == IR_VALIDATION_NONE && !fast_input_valid)
+            for (u32 index = 0; index < module->function_count && result.error == IR_VALIDATION_NONE; index += 1)
             {
-                module->fast.validation_skips = 1;
-            }
-            else if (result.error == IR_VALIDATION_NONE)
-            {
-                for (u32 index = 0; index < module->function_count; index += 1)
+                IrFunction* function = module->functions + index;
+                if (function->state == IR_FUNCTION_LOWERED)
                 {
-                    IrFunction* function = module->functions + index;
-                    if (function->state == IR_FUNCTION_LOWERED)
+                    IrValidationResult input = scope;
+                    if (!validated && input.error == IR_VALIDATION_NONE)
+                    {
+                        input = ir_validate_canonical_function(program, function);
+                    }
+                    if (input.error != IR_VALIDATION_NONE && unchecked && unchecked[index])
+                    {
+                        // A shared-scope failure says nothing about the
+                        // splice, so attribute only the caller's own rows.
+                        IrValidationResult own = scope.error == IR_VALIDATION_NONE
+                                                     ? input
+                                                     : ir_validate_canonical_function(program, function);
+                        if (own.error != IR_VALIDATION_NONE)
+                        {
+                            result = own;
+                            result.boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT;
+                        }
+                    }
+                    if (result.error == IR_VALIDATION_NONE && input.error != IR_VALIDATION_NONE)
+                    {
+                        if (!declines)
+                        {
+                            declines = arena_allocate(scratch.arena, IrFastDecline, module->function_count);
+                            if (check_output)
+                            {
+                                declined = arena_allocate(scratch.arena, u8, module->function_count);
+                                memset(declined, 0, module->function_count);
+                            }
+                        }
+                        input.boundary = IR_VALIDATION_BOUNDARY_CANONICAL_INPUT;
+                        declines[module->fast.decline_count++] = (IrFastDecline){.validation = input, .function_name = function->name};
+                        if (declined) declined[index] = 1;
+                        module->fast.validation_skips += 1;
+                    }
+                    else if (result.error == IR_VALIDATION_NONE)
                     {
                         IR_CONSTRUCTION_RECORD(PREPARATION_FAST_FUNCTIONS, 1);
                         ir_fast_function(program, function, &module->fast);
                     }
                 }
-                u64 changes = 0;
-                for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1) changes += module->fast.passes[pass].changes;
-                if (changes && (!input_certified || BUSTER_IR_TRANSFORM_CHECKS))
-                {
-                    IR_CONSTRUCTION_RECORD(PREPARATION_FAST_OUTPUT_VALIDATIONS, 1);
-                    result = ir_validate_canonical_module(program, module);
-                    result.boundary = IR_VALIDATION_BOUNDARY_FAST_OUTPUT;
-                }
             }
+            u64 changes = 0;
+            for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1) changes += module->fast.passes[pass].changes;
+            if (result.error == IR_VALIDATION_NONE && changes && check_output)
+            {
+                IR_CONSTRUCTION_RECORD(PREPARATION_FAST_OUTPUT_VALIDATIONS, 1);
+                result = declined ? ir_validate_fast_output(program, module, declined) : ir_validate_canonical_module(program, module);
+                result.boundary = IR_VALIDATION_BOUNDARY_FAST_OUTPUT;
+            }
+            if (module->fast.decline_count)
+            {
+                module->fast.declines = arena_allocate(program->arena, IrFastDecline, module->fast.decline_count);
+                memcpy(module->fast.declines, declines, sizeof(*declines) * module->fast.decline_count);
+            }
+            scratch_end(scratch);
             module->fast_complete = result.error == IR_VALIDATION_NONE;
         }
         for (u32 index = 0; index < module->function_count && result.error == IR_VALIDATION_NONE; index += 1)

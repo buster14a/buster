@@ -11,6 +11,8 @@
 // modules and llvm_bitcode_test_consumers keeps independent Clang execution.
 // llvm_bitcode_test_weak_records checks canonical binding/visibility records;
 // llvm_bitcode_test_weak_consumers checks ELF bindings and linked behavior.
+// llvm_bitcode_test_section_index pins ordered section IDs and scaling work;
+// the weak-record fixture also checks mixed global/function section operands.
 // Scalar ABI coverage: llvm_bitcode_test_scalar_abi_wire pins target attributes;
 // llvm_bitcode_test_scalar_abi_runtime exchanges original C with independent compilers.
 // llvm_bitcode_test_lifecycle checks canonical registrations and independently
@@ -3675,6 +3677,7 @@ struct LlvmBitcodeTestBinding
 {
     u32 linkage;
     u32 visibility;
+    u32 section[2];
     bool declaration;
 };
 
@@ -3685,6 +3688,8 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_bindings(ByteSlice bytes, LlvmBitcode
     LlvmBitcodeTestReader reader = {.bytes = bytes, .bit = 32};
     u32 code_width = 2;
     u32 counts[2] = {0};
+    u32 section_count = 0;
+    String8 sections[] = {S8(".data.z"), S8(".data.a"), S8(".text.z"), S8(".text.f")};
     bool in_module = false;
     bool saw_module = false;
     while (!reader.failed && reader.bit < bytes.length * 8)
@@ -3730,7 +3735,23 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_bindings(ByteSlice bytes, LlvmBitcode
                     operands[index] = operand;
                 }
             }
-            if (record == 7 || record == 8)
+            if (record == 5)
+            {
+                if (section_count >= BUSTER_ARRAY_LENGTH(sections) || counts[0] || counts[1])
+                {
+                    reader.failed = true;
+                }
+                else
+                {
+                    String8 name = sections[section_count++];
+                    reader.failed |= count != name.length;
+                    for (u64 index = 0; index < count && index < name.length && index < BUSTER_ARRAY_LENGTH(operands); index += 1)
+                    {
+                        reader.failed |= operands[index] != (u8)name.pointer[index];
+                    }
+                }
+            }
+            else if (record == 7 || record == 8)
             {
                 u32 kind = record == 7 ? 0 : 1;
                 u32 index = counts[kind]++;
@@ -3743,6 +3764,7 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_bindings(ByteSlice bytes, LlvmBitcode
                     bool declaration = kind == 0 ? operands[2] == 0 : operands[2] != 0;
                     reader.failed |= operands[3] != expected[index].linkage ||
                                      operands[kind == 0 ? 6 : 7] != expected[index].visibility ||
+                                     operands[kind == 0 ? 5 : 6] != expected[index].section[kind] ||
                                      declaration != expected[index].declaration;
                 }
             }
@@ -3752,7 +3774,8 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_bindings(ByteSlice bytes, LlvmBitcode
             reader.failed = true;
         }
     }
-    return !reader.failed && saw_module && !in_module && counts[0] == expected_count && counts[1] == expected_count;
+    return !reader.failed && saw_module && !in_module && counts[0] == expected_count && counts[1] == expected_count &&
+           section_count == BUSTER_ARRAY_LENGTH(sections);
 }
 
 #if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
@@ -3836,8 +3859,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArgume
     // LLVM 23.1.2 getEncodedLinkage: weak=16 (legacy 1 implies COMDAT),
     // extern_weak=7, internal=3, external=0; visibility is a separate operand.
     LlvmBitcodeTestBinding expected[binding_count] = {
-        {.linkage = 16}, {.linkage = 0}, {.linkage = 3},
-        {.linkage = 16, .visibility = 1}, {.linkage = 7, .declaration = true},
+        {.linkage = 16, .section = {1, 3}}, {.linkage = 0}, {.linkage = 3, .section = {2, 4}},
+        {.linkage = 16, .visibility = 1, .section = {1, 3}}, {.linkage = 7, .declaration = true},
         {.linkage = 0, .declaration = true}, {.linkage = 7, .visibility = 1, .declaration = true},
     };
     String8 data_names[binding_count] = {S8("weak_data"), S8("strong_data"), S8("local_data"), S8("hidden_weak_data"),
@@ -3875,6 +3898,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArgume
                            .linkage = index == 2 ? IR_LINKAGE_INTERNAL : expected[index].declaration ? IR_LINKAGE_IMPORT : IR_LINKAGE_EXTERNAL,
                            .is_definition = !expected[index].declaration, .is_weak = index != 1 && index != 5,
                            .is_hidden = index == 2 || index == 3 || index == 6};
+        String8 data_sections[] = {S8(".data.z"), {0}, S8(".data.a"), S8(".data.z"),
+                                   S8(".ignored.data"), S8(".ignored.data"), S8(".ignored.data")};
+        String8 function_sections[] = {S8(".text.z"), {0}, S8(".text.f"), S8(".text.z"),
+                                       S8(".ignored.function"), S8(".ignored.function"), S8(".ignored.function")};
+        symbol.section_name = data_sections[index];
         symbols[index] = symbol;
         if (!expected[index].declaration)
         {
@@ -3886,6 +3914,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArgume
         symbol.link_name = function_names[index];
         symbol.type.value = 2;
         symbol.kind = IR_SYMBOL_FUNCTION;
+        symbol.section_name = function_sections[index];
         symbols[binding_count + index] = symbol;
         functions[index] = (IrFunction){.name = symbol.name, .symbol = symbol.id, .canonical_type = {.value = 2}, .id = {.value = index},
                                        .state = expected[index].declaration ? IR_FUNCTION_DECLARATION : IR_FUNCTION_LOWERED};
@@ -4451,6 +4480,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_relocated_globals(UnitTestA
     LlvmBitcodeArtifact global_tls = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
     BUSTER_TEST(arguments, global_tls.error.code == LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER && !global_tls.bytes.length);
 
+    return result;
+}
+
+// First-seen IDs depend on content, never storage or lexical order. The
+// generated common-prefix family counts real hash probes at N through 16N.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_section_index(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    char8 repeated[] = ".data.z";
+    IrSymbol mixed[] = {
+        {.section_name = S8(".data.z")}, {.section_name = S8(".data.a")},
+        {.section_name = {.pointer = repeated, .length = sizeof(repeated) - 1}},
+        {0}, {.section_name = S8(".ignored.declaration")},
+        {.section_name = S8(".text.f")}, {.section_name = S8(".data.a")},
+    };
+    IrSymbol* symbols[] = {mixed, mixed + 1, mixed + 2, mixed + 3, mixed + 4, 0, mixed + 5, mixed + 6};
+    bool declarations[] = {false, false, false, false, true, false, false, true};
+    u32 expected[] = {1, 2, 1, 0, 0, 0, 3, 0};
+    u32 ids[BUSTER_ARRAY_LENGTH(symbols)];
+    LlvmBitcodeTestSections indexed = llvm_bitcode_test_section_ids(arena, symbols, declarations, BUSTER_ARRAY_LENGTH(symbols), ids);
+    BUSTER_TEST(arguments, indexed.name_count == 3 && !memcmp(ids, expected, sizeof(expected)));
+    bool absent[BUSTER_ARRAY_LENGTH(symbols)];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(absent); index += 1) absent[index] = true;
+    indexed = llvm_bitcode_test_section_ids(arena, symbols, absent, BUSTER_ARRAY_LENGTH(symbols), ids);
+    BUSTER_TEST(arguments, indexed.name_count == 0 && indexed.probes == 0);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(ids); index += 1) BUSTER_TEST(arguments, ids[index] == 0);
+
+    for (u32 shape = 0; shape < 2; shape += 1)
+    {
+        u64 initial_probes = 0;
+        for (u32 count = 1000; count <= 16000; count *= 2)
+        {
+            TemporalArena temporary = scratch_begin(&arena, 1);
+            Arena* scratch = temporary.arena;
+            IrSymbol* rows = arena_allocate(scratch, IrSymbol, count);
+            IrSymbol** pointers = arena_allocate(scratch, IrSymbol*, count);
+            bool* declared = arena_allocate(scratch, bool, count);
+            u32* actual = arena_allocate(scratch, u32, count);
+            char8* names = arena_allocate(scratch, char8, (u64)count * 14);
+            memset(declared, 0, (size_t)count * sizeof(*declared));
+            for (u32 index = 0; index < count; index += 1)
+            {
+                char8* name = names + (u64)index * 14;
+                memcpy(name, ".data.s0000000", 14);
+                u32 number = shape ? index : 0;
+                for (u32 digit = 0; digit < 7; digit += 1)
+                {
+                    name[13 - digit] = (char8)('0' + number % 10);
+                    number /= 10;
+                }
+                rows[index] = (IrSymbol){.section_name = {.pointer = name, .length = 14}};
+                pointers[index] = rows + index;
+            }
+            LlvmBitcodeTestSections measured = llvm_bitcode_test_section_ids(scratch, pointers, declared, count, actual);
+            BUSTER_TEST(arguments, measured.name_count == (shape ? count : 1));
+            BUSTER_TEST(arguments, measured.probes >= count && measured.probes <= (u64)count * 4);
+            for (u32 index = 0; index < count; index += 1) BUSTER_TEST(arguments, actual[index] == (shape ? index + 1 : 1));
+            if (count == 1000) initial_probes = measured.probes;
+            if (count == 16000) BUSTER_TEST(arguments, measured.probes <= initial_probes * 24);
+            arguments->show(arguments, S8("LLVM_SECTION_INDEX shape={u32} names={u32} probes={u64}\n"), shape, count, measured.probes);
+            scratch_end(temporary);
+        }
+    }
     return result;
 }
 
@@ -5314,6 +5407,7 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     UnitTestResult constant_handoff = llvm_bitcode_test_constant_handoff(arguments);
     result.test_count += constant_handoff.test_count;
     result.succeeded_test_count += constant_handoff.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_section_index);
     UnitTestResult indexed_lookups = llvm_bitcode_test_indexed_lookups(arguments);
     result.test_count += indexed_lookups.test_count;
     result.succeeded_test_count += indexed_lookups.succeeded_test_count;
