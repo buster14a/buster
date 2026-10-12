@@ -671,15 +671,49 @@ BUSTER_GLOBAL_LOCAL int tree_selftest(void)
     bool inside = false;
     bool outside = true;
     valid = valid && tree_member(child[0].hProcess, job, &inside) && tree_member(child[1].hProcess, job, &outside);
+    bool terminated = false;
+    bool member_handles_closed = false;
+    DWORD termination_error = 0;
+    DWORD member_wait = WAIT_FAILED;
+    DWORD member_wait_error = 0;
     if (valid)
     {
-        TerminateJobObject(job, TREE_EXIT_TERMINATED);
-        tree_drain(job, GetTickCount64() + 10000);
+        u64 deadline = GetTickCount64() + 10000;
+        terminated = TerminateJobObject(job, TREE_EXIT_TERMINATED) != 0;
+        termination_error = terminated ? 0 : GetLastError();
+        // Termination requests and job accounting are not a retained-handle
+        // wait. Certify the owned member under the same original deadline.
+        u64 now = GetTickCount64();
+        member_wait = WaitForSingleObject(child[0].hProcess, now < deadline ? (DWORD)(deadline - now) : 0);
+        member_wait_error = member_wait == WAIT_FAILED ? GetLastError() : 0;
+        if (member_wait == WAIT_OBJECT_0)
+        {
+            // Release the already-signaled member's references before the
+            // independent empty-job check; keep the outsider handle alive.
+            bool thread_closed = CloseHandle(child[0].hThread) != 0;
+            bool process_closed = CloseHandle(child[0].hProcess) != 0;
+            if (thread_closed) child[0].hThread = 0;
+            if (process_closed) child[0].hProcess = 0;
+            member_handles_closed = thread_closed && process_closed;
+        }
+        tree_drain(job, deadline);
     }
     bool outsider_alive = valid && WaitForSingleObject(child[1].hProcess, 0) == WAIT_TIMEOUT;
     // A terminated member can leave the job's PID list before the drain lists
     // it, so certify termination through the retained handle and an empty job.
-    bool member_waited = valid && tree_result.complete && WaitForSingleObject(child[0].hProcess, 0) == WAIT_OBJECT_0;
+    bool member_waited = valid && terminated && member_wait == WAIT_OBJECT_0 && member_handles_closed && tree_result.complete;
+    if (!member_waited)
+    {
+        fprintf(stderr, "windows_process_tree selftest: terminated=%u termination_error=%lu member_wait=%lu member_wait_error=%lu handles_closed=%u drain_complete=%u failed=%u pending=%u\n",
+                (unsigned)terminated, (unsigned long)termination_error, (unsigned long)member_wait,
+                (unsigned long)member_wait_error, (unsigned)member_handles_closed, (unsigned)tree_result.complete,
+                tree_result.failed_count, tree_result.pending_count);
+        for (u32 i = 0; i < tree_result.failed_count; i += 1)
+        {
+            fprintf(stderr, "windows_process_tree selftest: drain_failure pid=%u code=%u\n",
+                    tree_result.failed[i], tree_result.failed_code[i]);
+        }
+    }
     printf("{\"selftest\":%s,\"member\":%s,\"outsider_member\":%s,\"outsider_alive\":%s,\"member_waited\":%s}\n",
            valid ? "true" : "false", inside ? "true" : "false", outside ? "true" : "false",
            outsider_alive ? "true" : "false", member_waited ? "true" : "false");
@@ -691,8 +725,8 @@ BUSTER_GLOBAL_LOCAL int tree_selftest(void)
             TerminateProcess(child[i].hProcess, TREE_EXIT_TERMINATED);
             WaitForSingleObject(child[i].hProcess, 10000);
             CloseHandle(child[i].hProcess);
-            CloseHandle(child[i].hThread);
         }
+        if (child[i].hThread) CloseHandle(child[i].hThread);
     }
     if (job)
     {
