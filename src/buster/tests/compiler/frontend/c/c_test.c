@@ -44211,6 +44211,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_semantic_handoff(UnitTestArgume
                         seen.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_PREDICTION][C_TEST_SIZEOF_HANDOFF_AGREE];
             BUSTER_TEST_RAW(arguments, seen.first_count == 0 && agree >= BUSTER_ARRAY_LENGTH(validation_kinds),
                             string_format(temporary.arena, S8("sizeof handoff: {u32} disagreements, {u64} agreeing answers"), seen.first_count, agree));
+            // TEMPORARY MEASUREMENT PRINT
+            string_print_error(string_format(temporary.arena, S8("HANDOFF-FIXTURE resolver {u64} {u64} {u64} {u64} prediction {u64} {u64} {u64} {u64}\n"),
+                seen.outcomes[0][0], seen.outcomes[0][1], seen.outcomes[0][2], seen.outcomes[0][3], seen.outcomes[1][0], seen.outcomes[1][1], seen.outcomes[1][2], seen.outcomes[1][3]));
             for (u32 index = 0; index < seen.first_count; index += 1)
             {
                 CTestSizeofHandoffMismatch mismatch = seen.first[index];
