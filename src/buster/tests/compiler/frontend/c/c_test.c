@@ -44564,6 +44564,103 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArgument
     return result;
 }
 
+// The parser's semantic expression typer answers the builtins that have no
+// function entity with the result lowering's strict operand walk gives them
+// (GitHub #2531): `__builtin_expect` is long; object_size, strlen and offsetof
+// are size_t; assume_aligned, frame/return_address and alloca are void *; a
+// library-shaped builtin follows its prototype; and an atomic builtin is void,
+// _Bool, or the unqualified non-atomic type of the object its first argument
+// points to. `__typeof__` of one of these failed with "use of undeclared
+// identifier" on the declared variable, and `_Static_assert` over its sizeof
+// was rejected by semantic-only analysis and lowering alike. Each target
+// preprocesses, analyses and lowers with its own data layout, so size_t and
+// long agree on LLP64.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_result_types(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "typedef __SIZE_TYPE__ size_t;\n"
+        "#define SAME(e, T) _Static_assert(__builtin_types_compatible_p(__typeof__(e), T) && sizeof(e) == sizeof(T), #e)\n"
+        "#define VOID(e) _Static_assert(__builtin_types_compatible_p(__typeof__(e), void), #e)\n"
+        "struct S { int a; long x; };\n"
+        "int builtin_results(int i, long l, short h, void *p, char *s, _Atomic long al, volatile const unsigned char vc, int c) {\n"
+        "    int a[4] = {0};\n"
+        "    SAME(__builtin_expect(i, 1), long);\n"
+        "    SAME(__builtin_expect(l, 1) + (char)l, long);\n"
+        "    SAME(__builtin_constant_p(l), int);\n"
+        "    SAME(__builtin_choose_expr(1, i, l), int);\n"
+        "    SAME(__builtin_object_size(p, 0), size_t);\n"
+        "    SAME(__builtin_strlen(\"ab\"), size_t);\n"
+        "    SAME(__builtin_offsetof(struct S, x), size_t);\n"
+        "    SAME(__builtin_assume_aligned(p, 16), void *);\n"
+        "    SAME(__builtin_frame_address(0), void *);\n"
+        "    SAME(__builtin_return_address(0), void *);\n"
+        "    SAME(__builtin_alloca(4), void *);\n"
+        "    SAME(__builtin_memcpy(p, p, 1), void *);\n"
+        "    SAME(__builtin_memcmp(p, p, 1), int);\n"
+        "    SAME(__builtin_strchr(s, 'a'), char *);\n"
+        "    SAME(__atomic_load_n(&l, 0), long);\n"
+        "    SAME(__atomic_load_n(&vc, 0), unsigned char);\n"
+        "    SAME(__c11_atomic_load(&al, 0), long);\n"
+        "    SAME(__atomic_fetch_add(&i, 1, 0), int);\n"
+        "    SAME(__atomic_add_fetch(&h, 1, 0) + 0, int);\n"
+        "    SAME(__atomic_exchange_n(a, 1, 0), int);\n"
+        "    SAME(__atomic_compare_exchange_n(&l, &l, 1, 0, 5, 5), _Bool);\n"
+        "    SAME(__sync_fetch_and_add(&l, 1), long);\n"
+        "    SAME(__sync_bool_compare_and_swap(&l, 1, 2), _Bool);\n"
+        "    SAME(__sync_val_compare_and_swap(&i, 1, 2), int);\n"
+        "    VOID(__atomic_store_n(&l, 1, 5));\n"
+        "    VOID(__atomic_thread_fence(5));\n"
+        "    VOID(__atomic_load(&l, &l, 5));\n"
+        "    __typeof__(__builtin_expect(l, 1)) expected = __builtin_expect(l, 1);\n"
+        "    __typeof__(__atomic_load_n(&vc, 0)) loaded = __atomic_load_n(&vc, 0);\n"
+        "    __typeof__(__sync_val_compare_and_swap(&i, 1, 2)) swapped = 0;\n"
+        "    __typeof__(__builtin_strlen(\"ab\")) length = __builtin_strlen(\"ab\");\n"
+        "    loaded = 1;\n"
+        "    return c ? (int)(expected + loaded + swapped + length) : 0;\n"
+        "}\n");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            bool analysed = !preprocess.diagnostic_count && !syntax.diagnostic_count && !semantic.diagnostic_count && semantic.analysis_complete;
+            BUSTER_TEST_RAW(arguments, analysed, string_format(temporary.arena,
+                S8("builtin result types semantic-only target={u32} form={u32}: {S8}"), target_index, form,
+                semantic.diagnostic_count ? semantic.diagnostics[0].message : S8("none")));
+            CParseResult parsed = c_parse(temporary.arena, preprocess);
+            bool parsed_ok = !parsed.diagnostic_count;
+            BUSTER_TEST_RAW(arguments, parsed_ok, string_format(temporary.arena,
+                S8("builtin result types parser target={u32} form={u32}: {S8}"), target_index, form,
+                parsed.diagnostic_count ? parsed.diagnostics[0].message : S8("none")));
+            if (parsed_ok)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("builtin-result-types.c"), preprocess, parsed, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0, string_format(temporary.arena,
+                    S8("builtin result types IR target={u32} form={u32}: {S8}"), target_index, form,
+                    lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+                if (lowered.diagnostic_count == 0 && BUSTER_REQUIRE(arguments, lowered.program))
+                {
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // The lowering's expression typer no longer falls back to the widest
 // identifier or literal in the range, defaulting to int (GitHub #2531). The
 // first program covers the shapes that still reached that scan in the test
@@ -65056,6 +65153,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_tall_expression_types);
     C_TEST_FIXTURE(arguments, c_test_builtin_operand_types);
     C_TEST_FIXTURE(arguments, c_test_untyped_operand_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_builtin_result_types);
     C_TEST_FIXTURE(arguments, c_test_nested_offsetof_pointer_prediction);
     C_TEST_FIXTURE(arguments, c_test_nonvoid_falloff);
     C_TEST_FIXTURE(arguments, c_test_noreturn_call_expression_statements);

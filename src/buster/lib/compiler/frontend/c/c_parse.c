@@ -7096,6 +7096,13 @@ BUSTER_C_SHARED CTypeId c_semantic_vendor_builtin_type(CParseResult* result, Tar
     return type;
 }
 
+// size_t: what sizeof, offsetof and the size-answering builtins produce.
+BUSTER_C_INTERNAL CTypeKind c_parse_size_type_kind(Target target)
+{
+    return target.cpu_arch == CPU_ARCH_I386 ? C_TYPE_UNSIGNED_INT
+           : target_uses_llp64_data_model(target) ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG;
+}
+
 BUSTER_C_SHARED CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPreprocessResult preprocess,
                                                                  CParseResult* result, CScopeId scope, u32 start, u32 end)
 {
@@ -7222,9 +7229,7 @@ BUSTER_C_SHARED CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPrep
         if ((string_equal(c_token_spelling(preprocess.spelling_base, first), S8("sizeof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("_Alignof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("alignof"))) &&
             start + 1 < end)
         {
-            CTypeKind size_type = preprocess.target.cpu_arch == CPU_ARCH_I386 ? C_TYPE_UNSIGNED_INT :
-                                  target_uses_llp64_data_model(preprocess.target) ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG;
-            return c_parse_expression_scalar_type(result, size_type);
+            return c_parse_expression_scalar_type(result, c_parse_size_type_kind(preprocess.target));
         }
         if (c_preprocess_dialect_is_c23(preprocess.dialect) && (string_equal(c_token_spelling(preprocess.spelling_base, first), S8("true")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("false"))) &&
             end == start + 1)
@@ -7280,6 +7285,33 @@ BUSTER_C_SHARED CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPrep
                 if (builtin == C_SYMBOL_BUILTIN_OVERFLOW)
                 {
                     return c_parse_expression_scalar_type(result, C_TYPE_BOOL);
+                }
+                // These builtins have no function entity either; their results
+                // follow the GCC prototypes, as lowering's strict operand walk
+                // (c_ir_sizeof_operand_identifier_type_attempt) answers them.
+                // __builtin_expect is `long (long, long)` even though lowering
+                // passes its first operand through unchanged.
+                CIrLibraryValue library = C_IR_LIBRARY_VALUE_VOID_POINTER;
+                bool memory = builtin == C_SYMBOL_BUILTIN_MEMORY && c_semantic_memory_builtin_result(name, &library);
+                if (builtin == C_SYMBOL_BUILTIN_EXPECT)
+                {
+                    return c_parse_expression_scalar_type(result, C_TYPE_LONG);
+                }
+                if (builtin == C_SYMBOL_BUILTIN_OBJECT_SIZE || builtin == C_SYMBOL_BUILTIN_STRLEN ||
+                    string_equal(name, S8("__builtin_offsetof")) || (memory && library == C_IR_LIBRARY_VALUE_SIZE))
+                {
+                    return c_parse_expression_scalar_type(result, c_parse_size_type_kind(preprocess.target));
+                }
+                if (memory && library == C_IR_LIBRARY_VALUE_INT)
+                {
+                    return c_parse_expression_scalar_type(result, C_TYPE_INT);
+                }
+                if (builtin == C_SYMBOL_BUILTIN_ASSUME_ALIGNED || builtin == C_SYMBOL_BUILTIN_FRAME_ADDRESS ||
+                    builtin == C_SYMBOL_BUILTIN_RETURN_ADDRESS || builtin == C_SYMBOL_BUILTIN_ALLOCA || memory)
+                {
+                    CTypeKind element = memory && library == C_IR_LIBRARY_VALUE_CHAR_POINTER ? C_TYPE_CHAR : C_TYPE_VOID;
+                    return c_parse_intern_type(result, (CType){.element_type = c_parse_expression_scalar_type(result, element),
+                        .return_type = C_TYPE_ID_INVALID, .array_bound = C_ARRAY_BOUND_INVALID, .kind = C_TYPE_POINTER});
                 }
                 CIrSse2ImmediateShiftBuiltin shift = {0};
                 if (c_semantic_sse2_immediate_shift_builtin(name, &shift))
@@ -16304,6 +16336,51 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
                 c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
             return;
         }
+    }
+    // An atomic builtin has no function entity. Its result is void, a flag,
+    // or the unqualified, non-atomic type of the object its first argument
+    // points to (c_semantic_atomic_builtin_result); that argument is typed in
+    // a child frame, so its nesting stays on the frame stack.
+    if (frame->stage == C_TYPE_PARSE_STAGE_BEGIN && frame->start + 1 < frame->end &&
+        frame->preprocess->tokens[frame->start].kind == C_TOKEN_IDENTIFIER &&
+        c_token_is_punctuator(&frame->preprocess->tokens[frame->start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        c_symbol_builtin_from_spelling(c_token_spelling(frame->preprocess->spelling_base, frame->preprocess->tokens[frame->start])) ==
+            C_SYMBOL_BUILTIN_ATOMIC)
+    {
+        String8 name = c_token_spelling(frame->preprocess->spelling_base, frame->preprocess->tokens[frame->start]);
+        CSemanticAtomicResult atomic = c_semantic_atomic_builtin_result(c_ir_atomic_builtin_spelling(name));
+        u32 close = c_parse_matching_delimiter_indexed(frame->result, *frame->preprocess, frame->start + 1);
+        u32 object_end = close < frame->end
+            ? c_parse_constraint_expression_end(frame->result, *frame->preprocess, frame->start + 2, close) : frame->end;
+        if (close < frame->end && (atomic == C_SEMANTIC_ATOMIC_RESULT_VOID || atomic == C_SEMANTIC_ATOMIC_RESULT_FLAG))
+        {
+            CTypeId type = c_parse_expression_scalar_type(frame->result, atomic == C_SEMANTIC_ATOMIC_RESULT_VOID ? C_TYPE_VOID : C_TYPE_BOOL);
+            type = c_parse_direct_expression_postfix(frame->arena, *frame->preprocess, frame->result, type, close + 1, frame->end);
+            c_type_parse_frame_complete(machine, type, frame->end, type.value < frame->result->type_count);
+        }
+        else if (close < frame->end && atomic == C_SEMANTIC_ATOMIC_RESULT_OBJECT && frame->start + 2 < object_end)
+        {
+            frame->close = close;
+            frame->stage = C_TYPE_PARSE_STAGE_ATOMIC_OBJECT;
+            if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
+                .result = frame->result, .preprocess = frame->preprocess, .arena = frame->arena, .scope = frame->scope,
+                .start = frame->start + 2, .end = object_end, .kind = C_TYPE_PARSE_FRAME_SIZEOF}))
+                c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+        }
+        else
+            c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
+        return;
+    }
+    if (frame->stage == C_TYPE_PARSE_STAGE_ATOMIC_OBJECT)
+    {
+        CTypeId pointer = machine->result_valid ? machine->result_type : C_TYPE_ID_INVALID;
+        CType const* pointer_type = pointer.value < frame->result->type_count ? frame->result->types + pointer.value : 0;
+        CTypeId type = pointer_type && (pointer_type->kind == C_TYPE_POINTER || pointer_type->kind == C_TYPE_ARRAY)
+            ? c_parse_unqualified_type(frame->result, pointer_type->element_type) : C_TYPE_ID_INVALID;
+        if (type.value < frame->result->type_count)
+            type = c_parse_direct_expression_postfix(frame->arena, *frame->preprocess, frame->result, type, frame->close + 1, frame->end);
+        c_type_parse_frame_complete(machine, type, frame->end, type.value < frame->result->type_count);
+        return;
     }
     // A complex constructor's arguments are typed by the same explicit
     // frame stack as casts. It has no declaration entity to answer a leaf.

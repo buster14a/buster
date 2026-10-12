@@ -148,6 +148,20 @@ in both frontend forms.
   has no IR type, so `sizeof(__fp16)` is diagnosed where the scan folded 4.
   `c_test_untyped_operand_diagnostics` runs the leaves natively and requires
   the diagnostics.
+- **The parser's expression typer gives builtins the same results.**
+  `c_parse_expression_leaf_without_cast` answers `__builtin_expect` as `long`,
+  `object_size`, `strlen` and `__builtin_offsetof` as `size_t`,
+  `assume_aligned`, `frame_address`/`return_address` and `alloca` as
+  `void *`, and the `__builtin_mem*`/`__builtin_str*` forms from lowering's
+  prototype table (`c_semantic_memory_builtin_result`). An atomic builtin's
+  leaf frame types the first argument in a child frame
+  (`C_TYPE_PARSE_STAGE_ATOMIC_OBJECT`) and answers what
+  `c_semantic_atomic_builtin_result` classifies, the same rule lowering's
+  `C_IR_SIZEOF_OP_ATOMIC_OBJECT` frame reads. Without these, `__typeof__` of
+  such a call declared nothing and a `_Static_assert` over its `sizeof` was
+  rejected in both `-fsyntax-only` and `-c` (GitHub #2531).
+  `c_test_builtin_result_types` checks every form through semantic-only
+  analysis and both lowering forms on three target layouts.
 - **Every conditional converts to its own common type before its consumer.**
   The selection worklist types immediate children in postorder, retaining only
   the type at each question token. Flattened control flow shares a result place
