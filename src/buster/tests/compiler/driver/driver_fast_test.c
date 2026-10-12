@@ -1084,9 +1084,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
     u32 native_count = BUSTER_ARRAY_LENGTH(modes);
     for (u32 backend = 0; backend < native_count + 3; backend += 1)
     {
-        // Every subset of the adopted recipe, then the recipe plus opt-in CSE.
-        for (u32 selection = 0; selection <= IR_FAST_ALL + 1; selection += 1)
+        // Every subset of the adopted recipe, then the recipe plus opt-in CSE
+        // on the shared fixture and, natively, on the separate CSE control.
+        for (u32 selection = 0; selection <= IR_FAST_ALL + 2; selection += 1)
         {
+            bool control = selection == IR_FAST_ALL + 2;
+            if (control && backend >= native_count) continue;
             u32 mask = selection <= IR_FAST_ALL ? selection : IR_FAST_ALL | IR_FAST_PASS_BIT(IR_FAST_CSE);
             TemporalArena temporary = arena_begin_temporal(arguments->arena);
             Arena* arena = temporary.arena;
@@ -1097,7 +1100,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
             command[count++] = S8("-nostdinc");
             command[count++] = S8("-o");
             command[count++] = path;
-            command[count++] = backend < native_count ? S8("tests/basic_c_canonical_fast.c") : S8("tests/basic_c_canonical_fast_scalar.c");
+            command[count++] = control ? S8("tests/basic_c_canonical_fast_cse.c") :
+                               backend < native_count ? S8("tests/basic_c_canonical_fast.c") : S8("tests/basic_c_canonical_fast_scalar.c");
             if (backend < native_count)
             {
                 command[count++] = string_format(arena, S8("-fregister-allocator={S8}"), modes[backend]);
@@ -1138,6 +1142,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
                 if (backend < native_count)
                 {
                     BUSTER_TEST(arguments, !compiled.codegen_statistics.fallback_function_count);
+                    if (control)
+                    {
+                        // Three commuted arithmetic rows and the repeated 5u.
+                        BUSTER_TEST(arguments, compiled.fast.cse.hits == 4 && compiled.fast.cse.commuted_hits == 3 &&
+                                               compiled.fast.cse.constant_hits == 1);
+                    }
 #if !BUSTER_ANDROID && !BUSTER_IOS
                     String8 run[] = {path};
                     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
