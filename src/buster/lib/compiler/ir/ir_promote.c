@@ -670,24 +670,28 @@ BUSTER_GLOBAL_LOCAL void ir_rewrite_compact(Arena* arena, IrProgram* program, Ir
     {
         if (!removed[index])
         {
-            IrInstruction copy = function->instructions[index];
-            IrValueId* old_operands = copy.operands;
-            copy.operands = copy.operand_count ? operands + operand_cursor : 0;
-            for (u32 operand = 0; operand < copy.operand_count; operand += 1)
+            // Move the untouched row into its compacted slot (never past
+            // index), then rewrite its fields there. Patching a stack copy
+            // and storing it back reloads the narrow field stores as one
+            // wide row, which cannot store-forward (#3291).
+            IrInstruction* row = function->instructions + instruction_map[index];
+            *row = function->instructions[index];
+            IrValueId* old_operands = row->operands;
+            row->operands = row->operand_count ? operands + operand_cursor : 0;
+            for (u32 operand = 0; operand < row->operand_count; operand += 1)
             {
                 u32 value = replacements[old_operands[operand].value];
                 BUSTER_CHECK(value != IR_PROMOTE_NONE);
-                copy.operands[operand].value = value;
+                row->operands[operand].value = value;
             }
-            operand_cursor += copy.operand_count;
-            copy.result.value = copy.result.value < count ? value_map[copy.result.value] : IR_PROMOTE_NONE;
-            copy.next.value = next_map[index];
-            function->instructions[instruction_map[index]] = copy;
+            operand_cursor += row->operand_count;
+            row->result.value = row->result.value < count ? value_map[row->result.value] : IR_PROMOTE_NONE;
+            row->next.value = next_map[index];
             if (function->instruction_canonical_sources)
             {
                 function->instruction_canonical_sources[instruction_map[index]] = function->instruction_canonical_sources[index];
             }
-            function->opcode_summary |= (u64)1 << copy.opcode;
+            function->opcode_summary |= (u64)1 << row->opcode;
         }
     }
     for (u32 block = 0; block < function->block_count; block += 1)
