@@ -5677,6 +5677,112 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_aarch64_gpr_feature_generic_tar
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_x86_common_source_forms(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CommonSourceCase CommonSourceCase;
+    struct CommonSourceCase
+    {
+        String8 att;
+        String8 intel;
+        u8 bytes[15];
+        u32 length;
+        TargetCpuFeature feature;
+    };
+    // GNU as 2.47 independently assembles both dialects to these bytes.
+    static CommonSourceCase const cases[] = {
+        {S8_INITIALIZER("pause\n"), S8_INITIALIZER("pause\n"), {0xf3, 0x90}, 2, TARGET_CPU_FEATURE_NONE},
+        {S8_INITIALIZER("prefetcht0 (%rax)\n"), S8_INITIALIZER("prefetcht0 [rax]\n"), {0x0f, 0x18, 0x08}, 3, TARGET_CPU_FEATURE_NONE},
+        {S8_INITIALIZER("prefetcht1 (%rax)\n"), S8_INITIALIZER("prefetcht1 [rax]\n"), {0x0f, 0x18, 0x10}, 3, TARGET_CPU_FEATURE_NONE},
+        {S8_INITIALIZER("prefetcht2 (%rax)\n"), S8_INITIALIZER("prefetcht2 [rax]\n"), {0x0f, 0x18, 0x18}, 3, TARGET_CPU_FEATURE_NONE},
+        {S8_INITIALIZER("prefetchnta (%rax)\n"), S8_INITIALIZER("prefetchnta [rax]\n"), {0x0f, 0x18, 0x00}, 3, TARGET_CPU_FEATURE_NONE},
+        {S8_INITIALIZER("clflush (%rax)\n"), S8_INITIALIZER("clflush [rax]\n"), {0x0f, 0xae, 0x38}, 3, TARGET_CPU_FEATURE_NONE},
+        {S8_INITIALIZER("movnti %eax, (%rdi)\n"), S8_INITIALIZER("movnti [rdi], eax\n"), {0x0f, 0xc3, 0x07}, 3, TARGET_CPU_FEATURE_NONE},
+        {S8_INITIALIZER("movnti %r8, 8(%rdi)\n"), S8_INITIALIZER("movnti [rdi+8], r8\n"), {0x4c, 0x0f, 0xc3, 0x47, 0x08}, 5, TARGET_CPU_FEATURE_NONE},
+        {S8_INITIALIZER("cvtsi2sdq %rax, %xmm2\n"), S8_INITIALIZER("cvtsi2sd xmm2, rax\n"), {0xf2, 0x48, 0x0f, 0x2a, 0xd0}, 5, TARGET_CPU_FEATURE_NONE},
+        {S8_INITIALIZER("cvtsi2sdl %eax, %xmm2\n"), S8_INITIALIZER("cvtsi2sd xmm2, eax\n"), {0xf2, 0x0f, 0x2a, 0xd0}, 4, TARGET_CPU_FEATURE_NONE},
+        {S8_INITIALIZER("cvtsi2ssl %eax, %xmm1\n"), S8_INITIALIZER("cvtsi2ss xmm1, eax\n"), {0xf3, 0x0f, 0x2a, 0xc8}, 4, TARGET_CPU_FEATURE_NONE},
+        {S8_INITIALIZER("cvtsi2ssq %rax, %xmm1\n"), S8_INITIALIZER("cvtsi2ss xmm1, rax\n"), {0xf3, 0x48, 0x0f, 0x2a, 0xc8}, 5, TARGET_CPU_FEATURE_NONE},
+        {S8_INITIALIZER("cvtsi2sdq (%rax), %xmm2\n"), S8_INITIALIZER("cvtsi2sd xmm2, qword ptr [rax]\n"), {0xf2, 0x48, 0x0f, 0x2a, 0x10}, 5, TARGET_CPU_FEATURE_NONE},
+        {S8_INITIALIZER("cvtsi2sdl (%rax), %xmm2\n"), S8_INITIALIZER("cvtsi2sd xmm2, dword ptr [rax]\n"), {0xf2, 0x0f, 0x2a, 0x10}, 4, TARGET_CPU_FEATURE_NONE},
+        {S8_INITIALIZER("cvtsi2ssl (%rax), %xmm1\n"), S8_INITIALIZER("cvtsi2ss xmm1, dword ptr [rax]\n"), {0xf3, 0x0f, 0x2a, 0x08}, 4, TARGET_CPU_FEATURE_NONE},
+        {S8_INITIALIZER("cvtsi2ssq (%rax), %xmm1\n"), S8_INITIALIZER("cvtsi2ss xmm1, qword ptr [rax]\n"), {0xf3, 0x48, 0x0f, 0x2a, 0x08}, 5, TARGET_CPU_FEATURE_NONE},
+        {S8_INITIALIZER("crc32b %al, %ecx\n"), S8_INITIALIZER("crc32 ecx, al\n"), {0xf2, 0x0f, 0x38, 0xf0, 0xc8}, 5, TARGET_CPU_FEATURE_X86_SSE4_2},
+        {S8_INITIALIZER("crc32w %ax, %ecx\n"), S8_INITIALIZER("crc32 ecx, ax\n"), {0x66, 0xf2, 0x0f, 0x38, 0xf1, 0xc8}, 6, TARGET_CPU_FEATURE_X86_SSE4_2},
+        {S8_INITIALIZER("crc32l %eax, %ecx\n"), S8_INITIALIZER("crc32 ecx, eax\n"), {0xf2, 0x0f, 0x38, 0xf1, 0xc8}, 5, TARGET_CPU_FEATURE_X86_SSE4_2},
+        {S8_INITIALIZER("crc32q %rax, %rcx\n"), S8_INITIALIZER("crc32 rcx, rax\n"), {0xf2, 0x48, 0x0f, 0x38, 0xf1, 0xc8}, 6, TARGET_CPU_FEATURE_X86_SSE4_2},
+        {S8_INITIALIZER("crc32b %al, %rcx\n"), S8_INITIALIZER("crc32 rcx, al\n"), {0xf2, 0x48, 0x0f, 0x38, 0xf0, 0xc8}, 6, TARGET_CPU_FEATURE_X86_SSE4_2},
+        {S8_INITIALIZER("crc32b (%rax), %ecx\n"), S8_INITIALIZER("crc32 ecx, byte ptr [rax]\n"), {0xf2, 0x0f, 0x38, 0xf0, 0x08}, 5, TARGET_CPU_FEATURE_X86_SSE4_2},
+        {S8_INITIALIZER("crc32w (%rax), %ecx\n"), S8_INITIALIZER("crc32 ecx, word ptr [rax]\n"), {0x66, 0xf2, 0x0f, 0x38, 0xf1, 0x08}, 6, TARGET_CPU_FEATURE_X86_SSE4_2},
+        {S8_INITIALIZER("rdtscp\n"), S8_INITIALIZER("rdtscp\n"), {0x0f, 0x01, 0xf9}, 3, TARGET_CPU_FEATURE_X86_RDTSCP},
+        {S8_INITIALIZER("adcx %rax, %rcx\n"), S8_INITIALIZER("adcx rcx, rax\n"), {0x66, 0x48, 0x0f, 0x38, 0xf6, 0xc8}, 6, TARGET_CPU_FEATURE_X86_ADX},
+        {S8_INITIALIZER("adox %eax, %ecx\n"), S8_INITIALIZER("adox ecx, eax\n"), {0xf3, 0x0f, 0x38, 0xf6, 0xc8}, 5, TARGET_CPU_FEATURE_X86_ADX},
+        {S8_INITIALIZER("pclmulqdq $1, %xmm1, %xmm2\n"), S8_INITIALIZER("pclmulqdq xmm2, xmm1, 1\n"), {0x66, 0x0f, 0x3a, 0x44, 0xd1, 0x01}, 6, TARGET_CPU_FEATURE_X86_PCLMUL},
+        {S8_INITIALIZER("bextr %rax, %rbx, %rcx\n"), S8_INITIALIZER("bextr rcx, rbx, rax\n"), {0xc4, 0xe2, 0xf8, 0xf7, 0xcb}, 5, TARGET_CPU_FEATURE_X86_BMI1},
+        {S8_INITIALIZER("bextr %eax, (%rbx), %ecx\n"), S8_INITIALIZER("bextr ecx, [rbx], eax\n"), {0xc4, 0xe2, 0x78, 0xf7, 0x0b}, 5, TARGET_CPU_FEATURE_X86_BMI1},
+        {S8_INITIALIZER("kmovw %k1, %eax\n"), S8_INITIALIZER("kmovw eax, k1\n"), {0xc5, 0xf8, 0x93, 0xc1}, 4, TARGET_CPU_FEATURE_X86_AVX512F},
+        {S8_INITIALIZER("kmovw %eax, %k1\n"), S8_INITIALIZER("kmovw k1, eax\n"), {0xc5, 0xf8, 0x92, 0xc8}, 4, TARGET_CPU_FEATURE_X86_AVX512F},
+        {S8_INITIALIZER("kmovw (%rax), %k1\n"), S8_INITIALIZER("kmovw k1, word ptr [rax]\n"), {0xc5, 0xf8, 0x90, 0x08}, 4, TARGET_CPU_FEATURE_X86_AVX512F},
+        {S8_INITIALIZER("kmovw %k1, (%rax)\n"), S8_INITIALIZER("kmovw word ptr [rax], k1\n"), {0xc5, 0xf8, 0x91, 0x08}, 4, TARGET_CPU_FEATURE_X86_AVX512F},
+        {S8_INITIALIZER("vpcompressd %zmm1, (%rax){%k2}\n"), S8_INITIALIZER("vpcompressd [rax]{k2}, zmm1\n"), {0x62, 0xf2, 0x7d, 0x4a, 0x8b, 0x08}, 6, TARGET_CPU_FEATURE_X86_AVX512F},
+        {S8_INITIALIZER("vpcompressd %zmm1, %zmm3{%k2}\n"), S8_INITIALIZER("vpcompressd zmm3{k2}, zmm1\n"), {0x62, 0xf2, 0x7d, 0x4a, 0x8b, 0xcb}, 6, TARGET_CPU_FEATURE_X86_AVX512F},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        CommonSourceCase test = cases[index];
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX,
+                         .cpu_model = test.feature == TARGET_CPU_FEATURE_NONE ? CPU_MODEL_BASELINE : CPU_MODEL_AMD_ZEN_4};
+        for (u32 dialect = 0; dialect < 2; dialect += 1)
+        {
+            AssemblySyntax syntax = dialect ? ASSEMBLY_SYNTAX_INTEL : ASSEMBLY_SYNTAX_ATT;
+            String8 source = dialect ? test.intel : test.att;
+            AssemblyEncodeResult encoded = assembly_encode(arguments->arena, source,
+                                                           (AssemblyEncodeOptions){.target = target, .syntax = syntax});
+            bool valid = encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                         assembly_test_bytes_equal(encoded.bytes, test.bytes, test.length);
+            BUSTER_TEST(arguments, valid);
+            if (!valid) arguments->show(arguments, S8("COMMON_SOURCE: {S8}"), source);
+            String8 unit_source = syntax == ASSEMBLY_SYNTAX_INTEL
+                ? string_format(arguments->arena, S8(".intel_syntax noprefix\n.text\n{S8}"), source)
+                : string_format(arguments->arena, S8(".text\n{S8}"), source);
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, unit_source,
+                                                                 (AssemblyEncodeOptions){.target = target});
+            BUSTER_TEST(arguments, unit.diagnostic_count == 0 && unit.section_count != 0 &&
+                assembly_test_bytes_equal(unit.sections[0].data, test.bytes, test.length));
+            if (test.feature != TARGET_CPU_FEATURE_NONE)
+            {
+                Target baseline = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+                AssemblyEncodeResult refused = assembly_encode(arguments->arena, source,
+                    (AssemblyEncodeOptions){.target = baseline, .syntax = syntax});
+                String8 expected = string_format(arguments->arena, S8("instruction requires the {S8} target feature"),
+                                                 target_cpu_feature_to_string(test.feature));
+                BUSTER_TEST_RAW(arguments, refused.diagnostic_count == 1 && refused.bytes.length == 0 &&
+                    refused.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                    string_equal(refused.diagnostics[0].message, expected), source);
+                Target intel_target = target;
+                intel_target.cpu_model = CPU_MODEL_INTEL_SKYLAKE_AVX512;
+                AssemblyEncodeResult intel_result = assembly_encode(arguments->arena, source,
+                    (AssemblyEncodeOptions){.target = intel_target, .syntax = syntax});
+                BUSTER_TEST(arguments, intel_result.diagnostic_count == 0 &&
+                    assembly_test_bytes_equal(intel_result.bytes, test.bytes, test.length));
+            }
+        }
+    }
+    String8 invalid[] = {S8("cvtsi2sdq %eax, %xmm1\n"), S8("cvtsi2ssl %rax, %xmm1\n"),
+        S8("crc32w %ax, %rcx\n"), S8("crc32q %rax, %ecx\n"), S8("crc32b %al, %cx\n"),
+        S8("movnti %xmm1, (%rax)\n"), S8("bextr %eax, %rbx, %rcx\n"), S8("kmovw %k1, %rax\n"),
+        S8("vpcompressd %zmm1, (%rax){%k2}{z}\n")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX, .cpu_model = CPU_MODEL_AMD_ZEN_4};
+        AssemblyEncodeResult refused = assembly_encode(arguments->arena, invalid[index],
+            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST_RAW(arguments, refused.diagnostic_count != 0 && refused.bytes.length == 0 &&
+            refused.diagnostics[0].kind != ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, invalid[index]);
+    }
+    return result;
+}
+
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
@@ -5701,6 +5807,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_exclusive_pairs);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_simd_source_forms);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_gpr_feature_generic_targets);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_x86_common_source_forms);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_gnu_compatible_spellings);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_accumulator_alu_forms);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_compiler_directives);

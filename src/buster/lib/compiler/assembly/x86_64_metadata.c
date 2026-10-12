@@ -1,7 +1,9 @@
 // x86 instruction-byte authority: generated form normalization, checked
 // selection/emission, and derived exact-machine specializations live here.
 // Map: buster_x86_metadata_encode (checked request), emit_form_to_scratch
-// (general packing), select_form/prepare_source_tuple_query (source contracts),
+// (general packing, including mixed-width CRC32),
+// select_form/prepare_source_tuple_query/prepare_scalar_store_source_memory_query
+// (source contracts),
 // emit_machine_fast (derived hot plans), tls_prepare
 // and forwarding_prepare/got_prepare (fixed-envelope recipes), prewarm_all_forms
 // (worker publication), condition_parse/condition_mnemonic (shared ordinary
@@ -4323,11 +4325,19 @@ BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_data_operand_width(BusterX86Met
 {
     bool port_io = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("IN")) ||
                    buster_x86_metadata_string_input_equal(form.iclass.offset, S8("OUT"));
+    bool crc32 = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("CRC32"));
     u16 result = 0;
     bool selected = false;
     for (u32 index = 0; !selected && index < binding_count; index += 1)
     {
-        if (port_io)
+        if (crc32)
+        {
+            // The source controls the 66 prefix; the accumulator still owns REX.W.
+            selected = (bindings[index].metadata.access & BUSTER_X86_METADATA_ACCESS_READ) &&
+                       !(bindings[index].metadata.access & BUSTER_X86_METADATA_ACCESS_WRITE);
+            if (selected) result = buster_x86_metadata_emit_operand_width(bindings[index].physical);
+        }
+        else if (port_io)
         {
             // DX is a 16-bit port selector, independently of transferred data.
             // Only the validated accumulator can determine an I/O size prefix.
@@ -5998,6 +6008,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_semantics(BusterX
     bool is_movsx = buster_x86_metadata_emit_form_iclass_equal(form, S8("MOVSX"));
     bool is_movsxd = buster_x86_metadata_emit_form_iclass_equal(form, S8("MOVSXD"));
     bool is_bswap = buster_x86_metadata_emit_form_iclass_equal(form, S8("BSWAP"));
+    bool is_crc32 = buster_x86_metadata_emit_form_iclass_equal(form, S8("CRC32"));
     bool is_vcmp = buster_x86_metadata_emit_atom_prefix(form.iclass, S8("VCMP"));
     bool is_vpermil2 = buster_x86_metadata_emit_form_iclass_equal(form, S8("VPERMIL2PS")) ||
                        buster_x86_metadata_emit_form_iclass_equal(form, S8("VPERMIL2PD"));
@@ -6144,7 +6155,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_semantics(BusterX
         {
             if (common_width && common_width != width)
             {
-                if (!is_movzx && !is_movsx && !is_movsxd)
+                if (!is_movzx && !is_movsx && !is_movsxd && !is_crc32)
                 {
                     return false;
                 }
@@ -6154,7 +6165,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_semantics(BusterX
                 common_width = width;
             }
         }
-        if ((is_movzx || is_movsx || is_movsxd) && data_width_count < BUSTER_ARRAY_LENGTH(data_width))
+        if ((is_movzx || is_movsx || is_movsxd || is_crc32) && data_width_count < BUSTER_ARRAY_LENGTH(data_width))
         {
             data_width[data_width_count++] = width;
         }
@@ -6189,6 +6200,14 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_form_operand_semantics(BusterX
         {
             return false;
         }
+    }
+    // CRC32's accumulator is 32 bits for byte/word/dword sources; a
+    // 64-bit accumulator accepts only byte or qword sources.
+    if (is_crc32 && (data_width_count != 2 ||
+        !((data_width[0] == 32 && (data_width[1] == 8 || data_width[1] == 16 || data_width[1] == 32)) ||
+          (data_width[0] == 64 && (data_width[1] == 8 || data_width[1] == 64)))))
+    {
+        return false;
     }
     if (is_lwpins && (lwpins_width_count != 2 || lwpins_width[0] != 64 || lwpins_width[1] != 32))
     {
@@ -8118,7 +8137,9 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_machine_fast_prepare(BusterX86Metad
         }
     }
 
-    if (form.coverage_class != BUSTER_X86_METADATA_COVERAGE_NORMALIZED ||
+    // CRC32 has independently sized accumulator/source operands.
+    if (buster_x86_metadata_emit_form_iclass_equal(form, S8("CRC32")) ||
+        form.coverage_class != BUSTER_X86_METADATA_COVERAGE_NORMALIZED ||
         (form.prefix_kind != BUSTER_X86_METADATA_PREFIX_LEGACY && form.prefix_kind != BUSTER_X86_METADATA_PREFIX_REX) ||
         (form.encoder_family != BUSTER_X86_METADATA_ENCODER_LEGACY && form.encoder_family != BUSTER_X86_METADATA_ENCODER_REX) ||
         pattern.prefix_kind != form.prefix_kind ||
@@ -9035,18 +9056,19 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prepare_source_tuple_query(
     return true;
 }
 
-// MOVDIRI's unsized source spelling carries its scalar width on the data GPR.
+// MOVDIRI/MOVNTI's unsized source spelling carries its scalar width on the data GPR.
 // Project only this metadata-proven write-only-memory/read-only-GPR topology;
 // each legacy/APX candidate still validates the projected width against its
 // own operand schema and feature policy.
-BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prepare_movdiri_source_memory_query(
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prepare_scalar_store_source_memory_query(
     BusterX86MetadataForm form, BusterX86MetadataPhysicalQuery query,
     BusterX86MetadataPhysicalOperand* candidate_operands)
 {
     bool valid = candidate_operands && query.source_semantics && !query.include_implicit && query.operands &&
                  query.operand_count == 2 &&
-                 buster_x86_metadata_input_string_equal(query.mnemonic, S8("MOVDIRI")) &&
-                 buster_x86_metadata_string_input_equal(form.iclass.offset, S8("MOVDIRI"));
+                 (buster_x86_metadata_input_string_equal(query.mnemonic, S8("MOVDIRI")) ||
+                  buster_x86_metadata_input_string_equal(query.mnemonic, S8("MOVNTI"))) &&
+                 buster_x86_metadata_string_input_equal(form.iclass.offset, query.mnemonic);
     u32 memory_index = UINT32_MAX;
     u32 source_index = UINT32_MAX;
     u32 visible_index = 0;
@@ -9823,17 +9845,18 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                 (query.attributes.has_mask_register || query.attributes.zeroing ||
                  (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST) ||
                  query.operands[0].reg.width == 512 || query.operands[0].reg.index >= 16);
-            bool movdiri_source_query_possible = query.source_semantics && query.operands && query.operand_count == 2 &&
-                buster_x86_metadata_input_string_equal(query.mnemonic, S8("MOVDIRI"));
-            // MOVDIRI source syntax ties the memory element width to its data
+            bool scalar_store_source_query_possible = query.source_semantics && query.operands && query.operand_count == 2 &&
+                (buster_x86_metadata_input_string_equal(query.mnemonic, S8("MOVDIRI")) ||
+                 buster_x86_metadata_input_string_equal(query.mnemonic, S8("MOVNTI")));
+            // MOVDIRI/MOVNTI source syntax ties the memory element width to its data
             // GPR. Reject an explicit qualifier that contradicts that GPR before
             // feature filtering, so an APX-only candidate cannot turn malformed
             // operands into accepted EVEX bytes or a feature diagnostic.
             // Machine queries are deliberately excluded by source_semantics.
-            bool movdiri_source_width_conflict = false;
-            u32 movdiri_width_diagnostic_operand = 0;
-            s64 movdiri_width_diagnostic_value = 0;
-            if (movdiri_source_query_possible)
+            bool scalar_store_source_width_conflict = false;
+            u32 scalar_store_width_diagnostic_operand = 0;
+            s64 scalar_store_width_diagnostic_value = 0;
+            if (scalar_store_source_query_possible)
             {
                 u32 memory_index = UINT32_MAX;
                 u32 source_index = UINT32_MAX;
@@ -9859,9 +9882,9 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                         ((memory.width && memory.width != source.reg.width) ||
                          (memory.memory.source_width && memory.memory.source_width != source.reg.width)))
                     {
-                        movdiri_source_width_conflict = true;
-                        movdiri_width_diagnostic_operand = memory_index;
-                        movdiri_width_diagnostic_value = memory.width ? memory.width : memory.memory.source_width;
+                        scalar_store_source_width_conflict = true;
+                        scalar_store_width_diagnostic_operand = memory_index;
+                        scalar_store_width_diagnostic_value = memory.width ? memory.width : memory.memory.source_width;
                     }
                 }
             }
@@ -9889,7 +9912,7 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                 if (!buster_x86_metadata_candidate_at(candidates, position, &form_id)) continue;
                 BusterX86MetadataForm form = {0};
                 if (!buster_x86_metadata_form(form_id, &form)) continue;
-                if (movdiri_source_width_conflict)
+                if (scalar_store_source_width_conflict)
                 {
                     // Keep invalid source widths authoritative even when the
                     // target disables one or all candidate forms.
@@ -9899,8 +9922,8 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                     if (!failure_recorded)
                     {
                         first_failure = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
-                        first_failure_operand = movdiri_width_diagnostic_operand;
-                        first_failure_value = movdiri_width_diagnostic_value;
+                        first_failure_operand = scalar_store_width_diagnostic_operand;
+                        first_failure_value = scalar_store_width_diagnostic_value;
                         failure_recorded = true;
                         first_failure_form = form;
                         first_failure_form_recorded = true;
@@ -10008,8 +10031,8 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                                                                        &candidate_source_memory_operand);
                     if (!inferred_memory_width)
                     {
-                        inferred_memory_width = movdiri_source_query_possible &&
-                            buster_x86_metadata_prepare_movdiri_source_memory_query(form, query, candidate_operands);
+                        inferred_memory_width = scalar_store_source_query_possible &&
+                            buster_x86_metadata_prepare_scalar_store_source_memory_query(form, query, candidate_operands);
                     }
                     if (!inferred_memory_width)
                     {
@@ -14308,6 +14331,12 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataFeatureRule const buster_x86_metadata_featu
     {S8_INITIALIZER("SSE42"), {S8_INITIALIZER("sse4.2")}},
     {S8_INITIALIZER("BMI2"), {S8_INITIALIZER("bmi2")}},
     {S8_INITIALIZER("ADX"), {S8_INITIALIZER("adx")}},
+    {S8_INITIALIZER("ADOX_ADCX"), {S8_INITIALIZER("adx")}},
+    {S8_INITIALIZER("PCLMULQDQ"), {S8_INITIALIZER("pclmul")}},
+    {S8_INITIALIZER("SSE_PREFETCH"), {S8_INITIALIZER("sse")}},
+    {S8_INITIALIZER("CLFSH"), {S8_INITIALIZER("sse2")}},
+    // PAUSE is REP NOP on processors without the spin-loop hint.
+    {S8_INITIALIZER("PAUSE")},
     {S8_INITIALIZER("MOVBE"), {S8_INITIALIZER("movbe")}},
     {S8_INITIALIZER("RDRAND"), {S8_INITIALIZER("rdrand")}},
     {S8_INITIALIZER("RDSEED"), {S8_INITIALIZER("rdseed")}},
