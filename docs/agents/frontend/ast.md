@@ -460,8 +460,11 @@ unchanged.
     (`c_ast_types_lookups_settled`). Each mark is checked at the file scope
     against its binding, which must be a file-scope entity or none. The file
     scope's answer for a symbol is looked up once per lookup generation and
-    kept beside the symbol table (`CAstTypeSymbol`), and the scan visits only
-    the mark bytes of each flag word.
+    kept beside the symbol table (`CAstTypeSymbol`). The scan skips flag
+    words without a mark in a loop of its own and visits only the mark bytes
+    of the rest. The settlement runs out of line
+    (`c_ast_types_lookups_settle`), so the per-query check
+    (`c_ast_types_lookups_hold`) saves one register, not five.
   - Up to 16 marks per region that a non-file-scope entity also spells are
     recorded. A query over one of them walks its subtree as before. A region
     with more walks for every query.
@@ -3611,5 +3614,19 @@ Callgrind arms (A to D) on tests-off `-march=x86-64-v3` builds, with main
 - **Performance acceptance.** Hosted counts are diagnostic. No 9700X
   comparison is requested, so Zen 5 validation stays incomplete (#2761) and
   the hook stays opt-in.
+
+The second cut's hosted census is
+[`2026-10-12T174307Z`](../../performance-audits/2026-10-12T174307Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. The typer's counters are identical in B and C,
+  and the objects of all four arms are identical at `-g0` and `-g`.
+- The settlement falls from 24.35 M to 20.43 M Ir (−16.1%), and the pilot's
+  compile by 3.92 M (−0.042%). The query path's own cost falls from about
+  6.5 M to 4.1 M, and the scan's from 5.5 M to about 3.8 M.
+- The default path moves +54 Ir on `-fsyntax-only` and +20,431 on `-c`.
+- What remains is mostly the per-mark checks (about 8 M) and the query-time
+  checks themselves. Neither has a lead above the 1 M floor that avoids
+  recording marks in the eager pass.
+- Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
