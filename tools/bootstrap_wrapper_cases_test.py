@@ -187,7 +187,10 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(len(descendants), 1)
         pid = descendants[0]
         if os.name == "nt":
-            self.assertIn(pid, children[0].descendant_waited_pids, diagnostics)
+            # A terminated member can leave the job's PID list before the drain
+            # lists it; the drain certifies an empty job, and the retained
+            # descendant identity is checked directly below.
+            self.assertTrue(children[0].job_drain and children[0].job_drain.get("complete"), diagnostics)
             import ctypes
             from ctypes import wintypes
             kernel = ctypes.WinDLL("kernel32", use_last_error=True)
