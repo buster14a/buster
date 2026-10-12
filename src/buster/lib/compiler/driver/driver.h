@@ -654,10 +654,12 @@ struct CompilerDriverResult
 // native emission also prepares its target's metadata on demand.
 BUSTER_F_DECL void compiler_prewarm(void);
 // Before an embedding caller launches a gang that may compile native C,
-// prepare both native families, including all x86 forms/inline assembly.
-// Idle persistent workers are still live threads; preparing a new target
-// after the first gang starts is too late. The opt-in multi-TU driver calls
-// this before creating its first gang; ordinary serial compilation does not.
+// prepare both native families' serially built tables. The x86 per-form
+// caches, exact plans and machine-encoder tables are not among them: lanes
+// fill the entries they reach, under once-claims. Idle persistent workers are
+// still live threads; preparing a new target after the first gang starts is
+// too late. The opt-in multi-TU driver calls this before creating its first
+// gang; ordinary serial compilation does not.
 BUSTER_F_DECL void compiler_parallel_prewarm(void);
 // When true, an absent -march keeps the host CPU (the test runners set it);
 // when false, the default is the portable baseline like Clang and GCC (#1557).

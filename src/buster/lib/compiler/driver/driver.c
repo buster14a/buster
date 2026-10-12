@@ -9965,9 +9965,13 @@ void compiler_parallel_prewarm(void)
     // A later invocation may change targets while our persistent gang is
     // parked. Prepare both native families before the first worker exists;
     // this opt-in cold cost must not leak into ordinary serial compilation.
+    // The x86 side is the serial compile's own prewarm plus the forwarding
+    // and NOP recipes: its per-form caches, exact plans, TLS/GOT recipe
+    // groups, shapes, dense tables and template rows fill on demand from the
+    // lanes, under once-claims, so a gang prepares the forms it emits, not
+    // all 11,013 (#53).
     codegen_prewarm_for_target((Target){.cpu_arch = CPU_ARCH_X86_64});
-    machine_x86_64_exact_prewarm_all();
-    buster_x86_metadata_prewarm_all_forms();
+    buster_x86_metadata_prewarm_for_lanes();
     buster_aarch64_prewarm();
     buster_aarch64_semantics_prewarm();
 }

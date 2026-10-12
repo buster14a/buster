@@ -192,12 +192,18 @@ and all cohort arenas are released (with `-fkeep-going`, later inputs still
 compile, see [per-input records](#per-input-records-and-continue-on-failure)).
 The one-worker and `BUSTER_SINGLE_THREADED` builds run the same unit kernel.
 
-`compiler_parallel_prewarm()` prepares both native target families, including
-all x86 per-form caches and exact plans, before the first persistent worker.
-Both are needed because a later invocation may switch architectures while
-workers are parked. Embedding callers must call it before starting their own
-gang. The lighter `compiler_prewarm()` remains the serial frontend/common-table
-entry. The full cold prewarm is an opt-in cost, not a new serial startup floor.
+`compiler_parallel_prewarm()` prepares both native target families' serially
+built tables before the first persistent worker. Both are needed because a
+later invocation may switch architectures while workers are parked. On x86 that
+is the serial compile's own prewarm plus the forwarding and NOP recipes
+(`buster_x86_metadata_prewarm_for_lanes`); the per-form metadata caches, exact
+plans, TLS/GOT recipe groups, expansion shapes, dense tables, variable-memory
+cells and template rows are filled by the lanes that reach them, under once-claims (see the
+[parallelism guide](parallelism.md)), so a gang prepares the forms it emits
+instead of all 11,013 (#53). Embedding callers must call it before starting
+their own gang. The lighter `compiler_prewarm()` remains the serial
+frontend/common-table entry. The AArch64 prewarm is still complete and is an
+opt-in cost, not a new serial startup floor.
 `CompilerDriverResult.compilation_workers` reports the largest active cohort
 (or one); it is not a physical-core or memory measurement.
 
