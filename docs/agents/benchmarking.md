@@ -622,6 +622,11 @@ captures (#2741).
   `benchmarks/9700x/compiler-compare.request` (#2769). Apply the
   [request decision](#request-decisions-and-examples) first; see the
   [workload guide](../../benchmarks/9700x/README.md#compiler-comparison-of-a-pull-request).
+  The pull route builds each compiler once and restores the frozen baseline
+  closure (`snapshot-v1`) instead of a third baseline build; its receipt
+  records the policy, explicit rollback and any fallback with its reason and
+  cost ([frozen baseline closure](../compiler-closure-v1.md#ordinary-pull-route-activation)).
+  The main route keeps its routed preparation policy.
   These ordinary compiler A/B paths run no profile steps and no A/A. The
   separately versioned [sampling qualification](../compiler-main-sampling.md)
   route (#3212) is staged disabled; its explicitly admitted, predeclared research

@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -1760,6 +1761,58 @@ class FrozenClosureTest(unittest.TestCase):
         self.assertTrue(compiler_receipt.validate_closure(current, bundle, expected_policy="snapshot-v1"))
         self.assertEqual(compiler_receipt.validate_closure(current, {}, expected_policy="legacy-rebuild"), [])
 
+    def test_preparation_selection_binds_the_snapshot_closure(self):
+        # #3211: the default pull selection must agree with the replayed closure; a receipt that
+        # predates the record keeps its original contract.
+        current, bundle = self.fixture()
+        current["mode"] = "pull"
+        current["preparation_policy"] = "snapshot-v1"
+        current["preparation"] = {"schema": compiler_receipt.PREPARATION_SELECTION_SCHEMA, "source": "default",
+                                  "requested": "snapshot-v1", "policy": "snapshot-v1", "fallback": None}
+        self.assertEqual(compiler_receipt.validate_closure(current, bundle, expected_policy="snapshot-v1"), [])
+        for change in ({"policy": "legacy-rebuild"}, {"requested": "legacy-rebuild"}, {"source": "inferred"},
+                       {"schema": "other"}, {"extra": True},
+                       {"fallback": {"to": "legacy-rebuild", "reason": "x", "closure_rebuild_seconds": 1.0}}):
+            forged = copy.deepcopy(current)
+            forged["preparation"].update(change)
+            self.assertTrue(compiler_receipt.validate_closure(forged, bundle), change)
+        main = copy.deepcopy(current)
+        main["mode"] = "main"
+        self.assertTrue(compiler_receipt.validate_closure(main, bundle))
+        historical = copy.deepcopy(current)
+        historical.pop("preparation")
+        self.assertEqual(compiler_receipt.validate_closure(historical, bundle), [])
+
+    def test_preparation_selection_defaults_rollback_and_unadmitted_fallbacks(self):
+        flags = ("analyzer_profile_requested", "historical_requested", "real_source_requested",
+                 "production_profile_requested", "compiler_probes_requested", "frontend_selector_requested",
+                 "wild_linker_requested", "link_tls_requested")
+
+        def select(mode="pull", policy=None, driver=Path("/trusted/driver"), **selected):
+            arguments = argparse.Namespace(mode=mode, closure_policy=policy, closure_driver=driver,
+                                           **{flag: selected.get(flag, False) for flag in flags})
+            return compiler_compare.select_preparation(arguments), arguments
+
+        selection, arguments = select()
+        self.assertEqual((selection["policy"], selection["fallback"], arguments.closure_policy),
+                         ("snapshot-v1", None, "snapshot-v1"))
+        selection, arguments = select(policy="legacy-rebuild")
+        self.assertEqual((selection["source"], selection["policy"], selection["fallback"]),
+                         ("explicit", "legacy-rebuild", None))
+        selection, arguments = select(mode="main")
+        self.assertEqual((selection["requested"], selection["fallback"]), ("legacy-rebuild", None))
+        selection, arguments = select(driver=None)
+        self.assertEqual(arguments.closure_policy, "legacy-rebuild")
+        self.assertIn("--closure-driver", selection["fallback"]["reason"])
+        for flag in flags:
+            selection, arguments = select(**{flag: True})
+            self.assertEqual((arguments.closure_policy, selection["fallback"]["to"]),
+                             ("legacy-rebuild", "legacy-rebuild"), flag)
+            self.assertIn("does not admit", selection["fallback"]["reason"])
+            # An explicit snapshot request is never silently converted; its own refusals apply.
+            selection, arguments = select(policy="snapshot-v1", **{flag: True})
+            self.assertEqual((arguments.closure_policy, selection["fallback"]), ("snapshot-v1", None), flag)
+
     def test_native_producer_and_consumer_manifest_identity_is_replayed(self):
         current, bundle = self.fixture()
         self.assertEqual(compiler_receipt.validate_closure(current, bundle), [])
@@ -2835,6 +2888,127 @@ class HarnessTest(unittest.TestCase):
         # A main-mode publisher never accepts a pull-mode receipt.
         self.assertEqual(compiler_publish.decide(dict(expected, mode="main"), True, "success", result, summary, "", retained(evidence))[0],
                          "failure")
+
+    def run_pull(self, **change) -> tuple[int, dict, Path]:
+        pull_tree = fixture_git(self.repo, "rev-parse", self.pull_head + "^{tree}")
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.pull_head)
+        return self.run_harness(self.pull_head, mode="pull", ref="refs/pull/7/head", head=self.pull_head,
+                                **{"head-tree": pull_tree}, **change)
+
+    def test_pull_default_without_a_driver_falls_back_explicitly_with_its_cost(self) -> None:
+        # #3211: the pull default is snapshot-v1; without the trusted driver it cannot run, so the
+        # third build happens only as a recorded fallback with its reason and its actual cost.
+        code, result, evidence = self.run_pull()
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        selection = result["preparation"]
+        self.assertEqual({key: selection[key] for key in ("schema", "source", "requested", "policy")},
+                         {"schema": compiler_receipt.PREPARATION_SELECTION_SCHEMA, "source": "default",
+                          "requested": "snapshot-v1", "policy": "legacy-rebuild"})
+        self.assertEqual(selection["fallback"]["to"], "legacy-rebuild")
+        self.assertIn("--closure-driver", selection["fallback"]["reason"])
+        self.assertEqual(selection["fallback"]["closure_rebuild_seconds"], result["timings"]["build_seconds"]["closure"])
+        self.assertEqual(result["preparation_policy"], "legacy-rebuild")
+        self.assertNotIn("closure", result)
+        summary = json.loads((evidence / "lab" / "summary.json").read_text())
+        self.assertEqual(compiler_publish.decide(dict(result["identity"]), True, "success", result, summary, "",
+                                                 retained(evidence))[0], "success")
+        self.assertIn("legacy-rebuild fallback from the default snapshot-v1",
+                      compiler_receipt.render(result, summary, result["state"], []))
+        # A fallback that hides its cost or reason, or claims a different policy, is not publishable.
+        for forged in ({"closure_rebuild_seconds": None}, {"reason": ""}, {"to": "snapshot-v1"}):
+            changed = copy.deepcopy(result)
+            changed["preparation"]["fallback"].update(forged)
+            self.assertEqual(compiler_publish.decide(dict(result["identity"]), True, "success", changed, summary, "",
+                                                     retained(evidence))[0], "failure", forged)
+        silent = copy.deepcopy(result)
+        silent["preparation"]["fallback"] = None
+        self.assertEqual(compiler_publish.decide(dict(result["identity"]), True, "success", silent, summary, "",
+                                                 retained(evidence))[0], "failure")
+
+    def test_pull_explicit_legacy_rollback_rebuilds_without_a_fallback(self) -> None:
+        code, result, evidence = self.run_pull(**{"closure-policy": "legacy-rebuild"})
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertEqual(result["preparation"], {"schema": compiler_receipt.PREPARATION_SELECTION_SCHEMA,
+                                                 "source": "explicit", "requested": "legacy-rebuild",
+                                                 "policy": "legacy-rebuild", "fallback": None})
+        self.assertEqual(set(result["timings"]["build_seconds"]), {"baseline", "candidate", "closure"})
+        summary = json.loads((evidence / "lab" / "summary.json").read_text())
+        self.assertEqual(compiler_publish.decide(dict(result["identity"]), True, "success", result, summary, "",
+                                                 retained(evidence))[0], "success")
+        self.assertIn("legacy-rebuild selected explicitly", compiler_receipt.render(result, summary, result["state"], []))
+
+    def test_main_default_stays_legacy_without_a_fallback(self) -> None:
+        code, result, _ = self.run_harness(self.head)
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertEqual(result["preparation"]["source"], "default")
+        self.assertEqual((result["preparation"]["requested"], result["preparation"]["policy"]),
+                         ("legacy-rebuild", "legacy-rebuild"))
+        self.assertIsNone(result["preparation"]["fallback"])
+
+    def snapshot_pull(self, failing: str = "") -> tuple[int, dict, list, list]:
+        """Run the default pull route with a stand-in native owner; the real one is in compiler_ordinary_fixture_test."""
+        builds, operations = [], []
+        real_build = compiler_compare.build
+        test = self
+
+        class StandInOwner:
+            def __init__(self, driver, work, evidence, receipt, **_):
+                self.directory, self.stopped = evidence / "owned-phases", False
+                receipt["phase_ownership"] = {"phases": []}
+
+            def execute(self, argv, cwd, log, timeout, **_):
+                with log.open("ab") as stream:
+                    return subprocess.run(argv, cwd=cwd, stdout=stream, stderr=subprocess.STDOUT, timeout=timeout,
+                                          check=False)
+
+            def finish(self):
+                pass
+
+        def counted_build(candidate, commit, log):
+            builds.append(commit)
+            return real_build(candidate, commit, log)
+
+        def closure(arguments, candidate, work, evidence, receipt, operation):
+            operations.append(operation)
+            if operation == "restore":
+                test.assertEqual(fixture_git(candidate, "rev-parse", "HEAD"), test.base)
+            return f"native frozen-baseline {operation} exited 1: manifest-digest" if operation == failing else ""
+
+        driver = self.root / "driver"
+        with mock.patch.object(compiler_compare, "NativePhaseContext", StandInOwner), \
+                mock.patch.object(compiler_compare, "build", side_effect=counted_build), \
+                mock.patch.object(compiler_compare, "closure_phase", side_effect=closure):
+            code, result, _ = self.run_pull(**{"closure-driver": str(driver)})
+        return code, result, builds, operations
+
+    def test_pull_default_snapshot_builds_each_compiler_once(self) -> None:
+        code, result, builds, operations = self.snapshot_pull()
+        self.assertEqual(builds, [self.base, self.pull_head])
+        self.assertEqual(operations, ["snapshot", "restore", "verify"])
+        self.assertEqual(set(result["timings"]["build_seconds"]), {"baseline", "candidate"})
+        self.assertIn("closure_checkout_seconds", result["timings"])
+        self.assertEqual(result["preparation"], {"schema": compiler_receipt.PREPARATION_SELECTION_SCHEMA,
+                                                 "source": "default", "requested": "snapshot-v1",
+                                                 "policy": "snapshot-v1", "fallback": None})
+        self.assertEqual(result["preparation_policy"], "snapshot-v1")
+        self.assertEqual(result["closure"]["fallback"], None)
+        # The stand-in owner produces no native manifests, so the strict replay still refuses the attempt.
+        self.assertEqual((code, result["state"]), (1, "failed"))
+        self.assertTrue(any("frozen baseline snapshot receipt/manifest missing" in reason for reason in result["reasons"]))
+
+    def test_pull_default_snapshot_failure_fails_closed_without_a_rebuild(self) -> None:
+        for failing in ("snapshot", "restore"):
+            with self.subTest(failing=failing):
+                for path in (self.root / "work", self.root / "evidence"):
+                    shutil.rmtree(path, ignore_errors=True)
+                code, result, builds, operations = self.snapshot_pull(failing)
+                self.assertEqual((code, result["state"]), (1, "failed"))
+                self.assertTrue(any(f"native frozen-baseline {failing} exited 1" in reason for reason in result["reasons"]))
+                self.assertNotIn("closure", result["timings"]["build_seconds"])
+                self.assertEqual(builds, [self.base] if failing == "snapshot" else [self.base, self.pull_head])
+                self.assertEqual(operations, ["snapshot"] if failing == "snapshot" else ["snapshot", "restore"])
+                self.assertIsNone(result["preparation"]["fallback"])
+                self.assertNotIn("lab", {path.name for path in (self.root / "evidence").iterdir()})
 
     def assert_unadmitted(self, code: int, result: dict, evidence: Path, reason: str) -> None:
         self.assertEqual((code, result["state"]), (1, "failed"))

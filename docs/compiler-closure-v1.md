@@ -1,12 +1,15 @@
 # Frozen baseline closure v1 (#3211)
 
-The ordinary comparison still defaults to the qualified legacy base → head →
-base-build preparation. `compiler_compare.py --closure-policy snapshot-v1`
-is an explicit qualification path; it does not change request authorization,
-profiles, sampling, workloads, thresholds, main-only scheduling or publication.
-Trusted-main staging followed by admitted before/after and A/A controls is
-required before changing that default. Hosted success is functional evidence,
-not a performance saving under #2761.
+The ordinary pull comparison defaults to `snapshot-v1`: the baseline and
+candidate compilers are each built once, and the verified baseline closure is
+restored instead of a third baseline build. An explicit
+`--closure-policy legacy-rebuild` restores the base → head → base-build
+preparation; see [ordinary pull route activation](#ordinary-pull-route-activation).
+The main route keeps the policy selected by its routing record. The policy does
+not change request authorization, profiles, sampling, workloads, thresholds,
+main-only scheduling or publication. Activation was gated on the admitted
+before/after and A/A preparation qualification on the 9700X; hosted success
+is functional evidence, not a performance saving under #2761.
 
 The trusted native build driver owns `compiler_closure`. Historical baselines
 do not need that command. The interface is:
@@ -96,7 +99,7 @@ step name is authoritative (#3390).
 
 `harness_preparation_us` is required in all new snapshot receipts, including an explicit zero when restore/verify performs no harness preparation. A requested snapshot policy requires all three closure receipts and manifests; removing them cannot silently reinterpret the requested route as a historical legacy receipt.
 
-The staged implementation is reviewed and validated on hosted CI first. Trusted request/dispatch support is integrated separately, then the admitted physical preparation controls run on the 9700X. Only matching controls and a reduction in complete measured preparation cost permit a separate default-activation change. Until that activation is reviewed and admitted, ordinary comparisons use legacy-rebuild and this issue remains open for physical qualification.
+The staged implementation is reviewed and validated on hosted CI first. Trusted request/dispatch support is integrated separately, then the admitted physical preparation controls run on the 9700X. Only matching controls and a reduction in complete measured preparation cost permit the separate default activation described below.
 
 The data-only `tools/bench_direct/compiler_preparation.py` adapter exports
 `validate_prepared(expected, prepared, bundle)` for two- or three-arm acquisition,
@@ -129,3 +132,45 @@ sample population and statistical settings must remain fixed. The before/after
 A/B intervals, all attempted controls and all costs are retained; matching flags
 do not establish comparable observations. If any control or utility criterion
 fails, legacy-rebuild remains the default and the failed evidence stays visible.
+
+## Ordinary pull route activation
+
+`compiler_compare.py` resolves the policy in `select_preparation` before any
+child starts. Without `--closure-policy`, pull mode selects `snapshot-v1` and
+main mode `legacy-rebuild` (`DEFAULT_CLOSURE_POLICY`). The `compare-pull` job
+checks out the full trusted tree, resolves its canonical driver with
+`build.sh compiler_closure driver-path`, and passes it as `--closure-driver`.
+The native owner then supervises every child, and the fixed snapshot plan in
+`compiler_owned_plan.py` is replayed before publication.
+
+**Rollback.** Append `--closure-policy legacy-rebuild` to the `compare-pull`
+invocation in `.github/workflows/9700x-direct-bench.yml`.
+`workflow_policy_test.py` accepts exactly that variant. The receipt then records
+`source` `explicit`, and the summary says the rebuild was selected explicitly.
+An explicit policy is never changed by the harness.
+
+**Explicit fallback.** The default falls back to `legacy-rebuild` only when the
+fixed snapshot plan cannot run. That happens when no trusted driver is supplied,
+or when the request selects an analyzer profile, the historical corpus recipe,
+real-source throughput, the PGO/LTO production profile, compiler-probes-v1, the
+frontend-selector probes, wild-linker-v1 or link-tls-v1. Inline self-host
+acceptance, the ast-pilot leg and scaling are admitted by the snapshot plan.
+
+A snapshot, restore or verify that fails never falls back. The attempt fails
+closed with the native `failed_step`, and nothing is rebuilt or repaired.
+
+Each new receipt carries `preparation`:
+
+```text
+{"schema": "buster-compiler-preparation-selection-v1", "source": "default"|"explicit",
+ "requested": POLICY, "policy": POLICY, "fallback": null |
+ {"to": "legacy-rebuild", "reason": TEXT, "closure_rebuild_seconds": SECONDS}}
+```
+
+`closure_rebuild_seconds` is the actual third-build time the fallback spent
+(0 when it never ran). `preparation_selection_problems` refuses malformed
+records, and it refuses any record whose policy differs from the declared
+`preparation_policy` or the replayed closure. It also refuses a default that
+is not the route's, and a fallback that is not default `snapshot-v1` to
+`legacy-rebuild` with a reason and cost. Receipts that predate the record keep
+their original legacy, snapshot and owned-route contracts.

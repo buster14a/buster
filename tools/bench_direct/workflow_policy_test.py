@@ -507,7 +507,15 @@ PULL_RUN_SCRIPT = [line.replace("--mode main", "--mode pull")
                    for line in COMPILER_RUN_SCRIPT]
 PULL_RUN_SCRIPT[5:5] = ["          [[ \"$BQ_HARNESS_ADMISSION\" =~ ^(admitted|historical)$ ]]"]
 PULL_RUN_SCRIPT[-1] += " \\"
-PULL_RUN_SCRIPT.append("            --harness-admission \"$BQ_HARNESS_ADMISSION\"")
+PULL_RUN_SCRIPT.append("            --harness-admission \"$BQ_HARNESS_ADMISSION\" --closure-driver \"${drivers[0]}\"")
+# #3211: the trusted canonical native driver owns the default snapshot-v1 closure.
+PULL_RUN_SCRIPT[7:7] = [
+    "          trusted/build.sh compiler_closure driver-path > \"$RUNNER_TEMP/compiler-pull-driver.txt\"",
+    "          mapfile -t drivers < \"$RUNNER_TEMP/compiler-pull-driver.txt\"",
+    "          [[ \"${#drivers[@]}\" == 1 && \"${drivers[0]}\" == /* ]]",
+]
+# The documented rollback (docs/compiler-closure-v1.md) appends only an explicit legacy policy.
+PULL_ROLLBACK_SCRIPT = [*PULL_RUN_SCRIPT[:-1], PULL_RUN_SCRIPT[-1] + " --closure-policy legacy-rebuild"]
 # A main measurement in progress is never cancelled; pull requests coalesce.
 DIRECT_CONCURRENCY = (
     "concurrency:",
@@ -525,7 +533,7 @@ PULL_RUN_LINES = (
     "      BQ_HARNESS_ADMISSION: ${{ needs.authorize.outputs.harness_admission }}",
 )
 PULL_CHECKOUTS = (
-    COMPILER_CHECKOUTS[0],
+    tuple(line for line in COMPILER_CHECKOUTS[0] if line != "          sparse-checkout: tools"),
     (
         "        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
         "        with:",
@@ -1339,7 +1347,8 @@ def check_compiler_path(errors: list[str]) -> None:
     if len([line for line in compare_pull if "uses:" in line]) != len(PULL_CHECKOUTS) or \
             not all(contains_block(compare_pull, block) for block in PULL_CHECKOUTS):
         errors.append("pull compare job must use exactly two credential-free checkouts and the evidence upload")
-    if run_scripts(compare_pull) != [list(CLEANUP_GUARD_SCRIPT), PULL_RUN_SCRIPT]:
+    if run_scripts(compare_pull) not in ([list(CLEANUP_GUARD_SCRIPT), PULL_RUN_SCRIPT],
+                                         [list(CLEANUP_GUARD_SCRIPT), PULL_ROLLBACK_SCRIPT]):
         errors.append("pull compare job must run only main's harness with validated identities")
     for block in PULL_PUBLISH_BLOCKS:
         if not contains_block(publish_pull, block):

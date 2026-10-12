@@ -42,6 +42,8 @@ Map (searchable symbols):
     MEASURED_OUTCOMES, MIN_PAIRS, classify                 core validity
     THROUGHPUT_PROFILE, classify_throughput, throughput_digest   corpus (#2761)
     THROUGHPUT_HARNESS_FLOOR, HARNESS_ADMISSIONS           base-harness admission (#3714)
+    PREPARATION_SELECTION_SCHEMA, DEFAULT_CLOSURE_POLICY,
+        preparation_selection_problems                     closure policy, rollback and fallback (#3211)
     THROUGHPUT_HISTORICAL_PROFILE, THROUGHPUT_HISTORICAL_REQUEST_LINE   named historical corpus (#3714)
     SCALING_REQUEST, SCALING_PROFILE, classify_scaling, scaling_digest   multi-TU scaling (#424)
     INLINE_ACCEPTANCE_PROFILE, validate_inline_acceptance  issue #48 same-candidate inliner pair
@@ -3679,6 +3681,41 @@ def is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+# #3211 activation: the pull route defaults to the frozen snapshot-v1 closure. An
+# explicit --closure-policy legacy-rebuild is the rollback; request shapes the
+# fixed snapshot plan does not admit fall back to legacy-rebuild explicitly.
+PREPARATION_SELECTION_SCHEMA = "buster-compiler-preparation-selection-v1"
+DEFAULT_CLOSURE_POLICY = {"pull": "snapshot-v1", "main": "legacy-rebuild"}
+
+
+def preparation_selection_problems(receipt: dict) -> list[str]:
+    """Validate the receipt's policy-selection record; receipts that predate it keep their original contract."""
+    selection = receipt.get("preparation")
+    problems: list[str] = []
+    if selection is None:
+        return problems
+    policies = ("legacy-rebuild", "snapshot-v1")
+    declared = receipt.get("preparation_policy", "legacy-rebuild" if receipt.get("closure") is None else "snapshot-v1")
+    fallback = selection.get("fallback") if isinstance(selection, dict) else None
+    if not isinstance(selection, dict) or set(selection) != {"schema", "source", "requested", "policy", "fallback"} or \
+            selection["schema"] != PREPARATION_SELECTION_SCHEMA or selection["source"] not in ("default", "explicit") or \
+            selection["requested"] not in policies or selection["policy"] not in policies or \
+            selection["policy"] != declared:
+        problems.append("preparation selection record is malformed or differs from the declared policy")
+    elif selection["source"] == "default" and selection["requested"] != DEFAULT_CLOSURE_POLICY.get(receipt.get("mode")):
+        problems.append("preparation selection default differs from the route's default policy")
+    elif fallback is None:
+        if selection["policy"] != selection["requested"]:
+            problems.append("preparation policy differs from the requested policy without an explicit fallback")
+    elif not isinstance(fallback, dict) or set(fallback) != {"to", "reason", "closure_rebuild_seconds"} or \
+            selection["source"] != "default" or selection["requested"] != "snapshot-v1" or \
+            selection["policy"] != "legacy-rebuild" or fallback["to"] != "legacy-rebuild" or \
+            not isinstance(fallback["reason"], str) or not fallback["reason"] or \
+            not is_number(fallback["closure_rebuild_seconds"]) or fallback["closure_rebuild_seconds"] < 0:
+        problems.append("preparation fallback must be a default snapshot-v1 to legacy-rebuild record with reason and cost")
+    return problems
+
+
 def validate_closure(receipt: dict, bundle: object, expected_policy: str | None = None,
                      expected_phase_driver_sha256: str | None = None, expected_trusted_revision: str | None = None,
                      require_owned_phases: bool = False, expected_phase_schema: str | None = None,
@@ -3700,6 +3737,9 @@ def validate_closure(receipt: dict, bundle: object, expected_policy: str | None 
             return ["ordinary main profile differs from the trusted named recipe"]
         if expected_phase_schema != "buster-compiler-main-owned-phases-v1" and expected_profile != PROFILE["name"]:
             return ["the short main profile requires its explicit trusted MAIN-owned route"]
+    selection_problems = preparation_selection_problems(receipt)
+    if selection_problems:
+        return selection_problems
     closure = receipt.get("closure")
     declared = receipt.get("preparation_policy", "legacy-rebuild" if closure is None else "snapshot-v1")
     if expected_policy not in (None, "legacy-rebuild", "snapshot-v1") or declared not in ("legacy-rebuild", "snapshot-v1") or \
@@ -4592,7 +4632,16 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
             number(timings.get("harness_preparation_seconds"), "%.3f"),
             number(timings.get("closure_restore_seconds"), "%.3f"),
             number(timings.get("closure_checkout_seconds"), "%.3f")))
-    corpus = receipt.get("throughput") if isinstance(receipt, dict) else None
+    selection = receipt.get("preparation") if isinstance(receipt.get("preparation"), dict) else {}
+    fallback = selection.get("fallback")
+    if isinstance(fallback, dict):
+        lines.append("Frozen baseline closure: legacy-rebuild fallback from the default snapshot-v1 (%s); "
+                     "closure rebuild %s s." % (fallback.get("reason"),
+                                                number(fallback.get("closure_rebuild_seconds"), "%.3f")))
+    elif selection.get("source") == "explicit" and selection.get("policy") == "legacy-rebuild" and \
+            receipt.get("mode") == "pull":
+        lines.append("Frozen baseline closure: legacy-rebuild selected explicitly (rollback from the default snapshot-v1).")
+    corpus =receipt.get("throughput") if isinstance(receipt, dict) else None
     if isinstance(corpus, dict):
         cases = corpus.get("cases") if isinstance(corpus.get("cases"), list) else []
         flagged = [f"{row.get('name')}: {row.get('decision')}" for row in cases if isinstance(row, dict)

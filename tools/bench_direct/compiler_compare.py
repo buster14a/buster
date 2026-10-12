@@ -16,7 +16,12 @@ It follows the documented A/B recipe of docs/agents/benchmarking.md in one
 tree: a tests-off Clang Release `ide` of the base (main baseline or merge base),
 then of the head, then the base again so the frozen workload has its generated
 closure; `tools/uarch_lab.py compare` then times both compilers on that same
-base source. Builds are preparation and are timed separately. Then the
+base source. Builds are preparation and are timed separately. In pull mode
+the default closure policy is snapshot-v1 (#3211, select_preparation): the
+trusted native `compiler_closure` parks the base build after the first build
+and restores the verified closure instead of the third build. An explicit
+`--closure-policy legacy-rebuild` rolls back to the rebuild, and unsupported
+request shapes fall back to it with the reason and cost in the receipt. Then the
 native throughput corpus (THROUGHPUT_PROFILE, #2761) runs on the same two
 binaries through the base revision's `./build.sh bench_throughput`, and its
 own summary and metadata join the evidence. In pull mode, when the pull
@@ -58,7 +63,7 @@ and timings, and is written even when a step fails. The candidate's build runs
 as the runner account before measurement, so the receipt is evidence produced
 under the direct path's owner-only trust boundary, not a sealed result.
 
-Map: queue_head (pull-mode supersession), build (one ide), toolchain, export_tree (bounded evidence export),
+Map: queue_head (pull-mode supersession), build (one ide), select_preparation (#3211 closure policy), toolchain, export_tree (bounded evidence export),
 read_exported_json (classification reads the export, #2929), collect_evidence,
 throughput_harness_problem (#3714 base-harness admission), historical_request_selection and
 prepare_historical_harness (#3714 named historical corpus), measure_throughput (corpus leg),
@@ -115,6 +120,7 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               SCALING_REQUEST, SHA, THROUGHPUT_HARNESS_FLOOR, THROUGHPUT_PROFILE, HARNESS_ADMISSIONS,
                               THROUGHPUT_HISTORICAL_HARNESS_REVISION, THROUGHPUT_HISTORICAL_PROFILE,
                               THROUGHPUT_HISTORICAL_REQUEST_LINE, classify, classify_scaling,
+                              DEFAULT_CLOSURE_POLICY, PREPARATION_SELECTION_SCHEMA,
                               classify_throughput, classify_throughput_exit, dumps, host_problem, inline_acceptance_requested,
                               render, scaling_digest, throughput_digest, validate_inline_acceptance,
                               analyzer_bootstrap_provenance, analyzer_profile_summary)
@@ -1484,8 +1490,9 @@ def parse(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--summary", type=Path, required=True)
-    parser.add_argument("--closure-policy", choices=("legacy-rebuild", "snapshot-v1"), default="legacy-rebuild",
-                        help="snapshot-v1 is qualification-only until approved before/after and A/A evidence")
+    parser.add_argument("--closure-policy", choices=("legacy-rebuild", "snapshot-v1"),
+                        help="default: snapshot-v1 in pull mode (#3211), legacy-rebuild in main mode; "
+                             "an explicit legacy-rebuild is the documented rollback")
     parser.add_argument("--closure-driver", type=Path, help="canonical immutable trusted native driver; required by snapshot-v1")
     parser.add_argument("--utility-owned-phases", action="store_true",
                         help="explicit main-only Utility research: individually supervise every child in either preparation leg")
@@ -1510,6 +1517,38 @@ def parse(argv: list[str] | None) -> argparse.Namespace:
     if arguments.main_owned_phases and arguments.main_profile is None:
         arguments.main_profile = PROFILE["name"]
     return arguments
+
+
+def select_preparation(arguments: argparse.Namespace) -> dict:
+    """Resolve --closure-policy and return the receipt's selection record (#3211).
+
+    An explicit policy is used as given, so `--closure-policy legacy-rebuild` is the rollback.
+    The pull default is snapshot-v1; a request shape its fixed native plan does not admit, or a
+    missing trusted driver, falls back to legacy-rebuild with the reason in the record. The
+    fallback's closure rebuild cost is filled in when the attempt ends. A snapshot that fails
+    its own validation never falls back: the attempt fails closed.
+    """
+    explicit = arguments.closure_policy is not None
+    requested = arguments.closure_policy if explicit else DEFAULT_CLOSURE_POLICY[arguments.mode]
+    reason = ""
+    if not explicit and requested == "snapshot-v1":
+        unsupported = [name for name, selected in (
+            ("an analyzer profile", arguments.analyzer_profile_requested),
+            (THROUGHPUT_HISTORICAL_PROFILE["name"], arguments.historical_requested),
+            ("real-source throughput", arguments.real_source_requested),
+            ("the PGO/LTO production profile", arguments.production_profile_requested),
+            ("compiler-probes-v1", arguments.compiler_probes_requested),
+            ("the frontend-selector probes", arguments.frontend_selector_requested),
+            ("wild-linker-v1", arguments.wild_linker_requested),
+            ("link-tls-v1", arguments.link_tls_requested)) if selected]
+        if arguments.closure_driver is None:
+            reason = "no trusted native --closure-driver was supplied"
+        elif unsupported:
+            reason = "the fixed snapshot-v1 plan does not admit " + ", ".join(unsupported)
+    arguments.closure_policy = "legacy-rebuild" if reason else requested
+    return {"schema": PREPARATION_SELECTION_SCHEMA, "source": "explicit" if explicit else "default",
+            "requested": requested, "policy": arguments.closure_policy,
+            "fallback": {"to": "legacy-rebuild", "reason": reason, "closure_rebuild_seconds": 0.0} if reason else None}
 
 
 def checkpoint(receipt: dict, evidence: Path, phase: str) -> str:
@@ -2438,6 +2477,7 @@ def main(argv: list[str] | None = None) -> int:
         wild_linker_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.link_tls_requested, arguments.link_tls_request_problem = (
         link_tls_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    preparation = select_preparation(arguments)
     identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}
     utility = getattr(arguments, "utility_owned_phases", False)
     main_owned = getattr(arguments, "main_owned_phases", False)
@@ -2449,7 +2489,8 @@ def main(argv: list[str] | None = None) -> int:
                "host": {"hostname": socket.gethostname(), "cpu_model": "" if early_owned else cpu_model()},
                "toolchain": {} if early_owned else toolchain(), "binaries": {}, "lab": {},
                "timings": {"started_at": started_at, "build_seconds": {}},
-               "inline_acceptance": {"requested": False, "status": "not requested"}}
+               "inline_acceptance": {"requested": False, "status": "not requested"},
+               "preparation_policy": arguments.closure_policy, "preparation": preparation}
     reasons = receipt["reasons"]
     if analyzer_request_problem:
         reasons.append(analyzer_request_problem)
@@ -2564,6 +2605,8 @@ def main(argv: list[str] | None = None) -> int:
         OWNED_PHASE_CONTEXT.finish()
         OWNED_PHASE_CONTEXT = None
     summary = summaries[-1] if summaries else None
+    if preparation["fallback"] is not None:
+        preparation["fallback"]["closure_rebuild_seconds"] = receipt["timings"]["build_seconds"].get("closure", 0.0)
     receipt["timings"]["total_seconds"] = round(time.monotonic() - started, 3)
     receipt["timings"]["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     receipt.pop("phase", None)

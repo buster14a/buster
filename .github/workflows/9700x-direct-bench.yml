@@ -1228,12 +1228,12 @@ jobs:
             echo '::error::Native cleanup ownership is retained; manual review is required before host admission.'
             exit 1
           fi
+      # A full trusted tree: its native build driver owns the snapshot-v1 closure (#3211).
       - name: Check out the trusted harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           path: trusted
-          sparse-checkout: tools
           persist-credentials: false
       - name: Record actual checkout identity
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
@@ -1266,6 +1266,9 @@ jobs:
           [[ "$BQ_PULL" =~ ^[1-9][0-9]*$ ]]
           [[ "$BQ_HARNESS_ADMISSION" =~ ^(admitted|historical)$ ]]
           [[ "$(git -C candidate rev-parse HEAD)" == "$BQ_HEAD_COMMIT" ]]
+          trusted/build.sh compiler_closure driver-path > "$RUNNER_TEMP/compiler-pull-driver.txt"
+          mapfile -t drivers < "$RUNNER_TEMP/compiler-pull-driver.txt"
+          [[ "${#drivers[@]}" == 1 && "${drivers[0]}" == /* ]]
           python3 -B trusted/tools/bench_direct/compiler_compare.py --mode pull \
             --candidate candidate --lab trusted/tools/uarch_lab.py \
             --work "$RUNNER_TEMP/compiler-bench/work" --evidence "$RUNNER_TEMP/compiler-bench/evidence" \
@@ -1273,7 +1276,7 @@ jobs:
             --pull "$BQ_PULL" --pull-head "$BQ_HEAD_COMMIT" --base "$BQ_BASE_COMMIT" --base-tree "$BQ_BASE_TREE" \
             --head "$BQ_HEAD_COMMIT" --head-tree "$BQ_HEAD_TREE" --trusted-revision "$BQ_TRUSTED_REVISION" \
             --request-run-id "$BQ_REQUEST_RUN_ID" --run-id "$BQ_RUN_ID" --run-attempt "$BQ_RUN_ATTEMPT" \
-            --harness-admission "$BQ_HARNESS_ADMISSION"
+            --harness-admission "$BQ_HARNESS_ADMISSION" --closure-driver "${drivers[0]}"
       - name: Retain the machine-specification record
         if: ${{ always() }}
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768

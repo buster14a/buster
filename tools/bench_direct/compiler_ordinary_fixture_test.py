@@ -531,6 +531,105 @@ class ActualOrdinaryMeasure(unittest.TestCase):
             self.assertTrue(native["cleanup_proven"])
             self.assertEqual(native["exit_status"], 0)
 
+    def default_pull(self, *extra):
+        """The public pull entry with no --closure-policy: the #3211 default route."""
+        identity = self.identity("pull")
+        arguments = ["--candidate", str(self.candidate), "--lab", str(Path(__file__).resolve()),
+            "--work", str(self.work), "--evidence", str(self.evidence),
+            "--summary", str(self.directory / "default-pull-summary.md"),
+            "--closure-driver", str(NATIVE_DRIVER), *extra]
+        for key, value in identity.items():
+            if key != "mode":
+                arguments.extend(["--" + key.replace("_", "-"), value])
+        arguments.extend(["--mode", "pull"])
+        def diagnostic_host(current):
+            current["diagnostic_fixture"] = copy.deepcopy(DIAGNOSTIC)
+            return ""
+        prior_cwd = os.getcwd()
+        try:
+            os.chdir(self.directory)
+            # The fixture base predates the corpus floor and the pull ref is not live; neither is measured here.
+            with mock.patch.object(compare, "host_problem", side_effect=diagnostic_host), \
+                    mock.patch.object(compare, "throughput_harness_problem", return_value=""), \
+                    mock.patch.object(compare, "queue_head", return_value=identity["head"]):
+                status = compare.main(arguments)
+        finally:
+            os.chdir(prior_cwd)
+        self.current = json.loads((self.evidence / "receipt.json").read_bytes())
+        return status
+
+    def test_default_pull_route_builds_each_compiler_once_through_the_native_closure(self):
+        status = self.default_pull()
+        self.assertEqual(status, 0, self.current["reasons"])
+        self.assertEqual(self.current["state"], "measured")
+        self.assertEqual(self.current["preparation"], {"schema": receipt_contract.PREPARATION_SELECTION_SCHEMA,
+            "source": "default", "requested": "snapshot-v1", "policy": "snapshot-v1", "fallback": None})
+        core = [row for row in self.current["phase_ownership"]["phases"] if row["kind"] == "run"]
+        builds = [row["phase"] for row in core if row["argv"][:2] == ["./build.sh", "build"]]
+        generates = [row["phase"] for row in core if row["argv"][:2] == ["./build.sh", "generate"]]
+        self.assertEqual(builds, ["build-baseline", "build-candidate"])
+        self.assertEqual(generates, ["build-baseline", "build-candidate"])
+        self.assertEqual([row["argv"][2] for row in core if row["argv"][1:2] == ["compiler_closure"]],
+                         ["snapshot", "restore", "verify"])
+        self.assertEqual(set(self.current["timings"]["build_seconds"]), {"baseline", "candidate"})
+        raw = raw_bundle(self.current, self.evidence)
+        self.assertEqual(receipt_contract.validate_closure(self.current, raw, expected_policy="snapshot-v1",
+            expected_phase_driver_sha256=digest(NATIVE_DRIVER), expected_trusted_revision=self.trusted_revision,
+            require_owned_phases=True), [])
+        self.assertEqual(plan_contract.validate_plan(self.current, self.current["phase_ownership"], core), [])
+        # The same receipt with the snapshot stripped or its record relabelled cannot be replayed.
+        stripped = copy.deepcopy(self.current)
+        stripped.pop("closure")
+        self.assertTrue(receipt_contract.validate_closure(stripped, raw))
+        relabelled = copy.deepcopy(self.current)
+        relabelled["preparation"]["policy"] = "legacy-rebuild"
+        self.assertTrue(receipt_contract.validate_closure(relabelled, raw))
+        self.assertEqual(compare.git(self.candidate, "rev-parse", "HEAD"), self.fixture["base"])
+        print("COMPILER_ORDINARY_DEFAULT_PULL_DIAGNOSTIC builds=2 closure=snapshot,restore,verify qualified=0")
+
+    def test_default_pull_route_tampered_snapshot_fails_closed_without_a_rebuild(self):
+        original = compare.closure_phase
+
+        def tamper(arguments, candidate, work, evidence, receipt, operation):
+            if operation == "restore":
+                saved = work / "frozen-baseline"
+                victim = next(path for path in sorted(saved.rglob("*")) if path.is_file() and path.stat().st_size)
+                victim.write_bytes(victim.read_bytes() + b"\n# tampered\n")
+            return original(arguments, candidate, work, evidence, receipt, operation)
+
+        with mock.patch.object(compare, "closure_phase", side_effect=tamper):
+            status = self.default_pull()
+        self.assertEqual(status, 1)
+        self.assertEqual(self.current["state"], "failed")
+        self.assertIsNone(self.current["preparation"]["fallback"])
+        self.assertEqual(self.current["preparation"]["policy"], "snapshot-v1")
+        # The native owner refuses the restore child; no later child, rebuild or repair is admitted.
+        self.assertTrue(any("attempt aborted in phase build-closure" in reason for reason in self.current["reasons"]),
+                        self.current["reasons"])
+        self.assertEqual(self.current["phase_ownership"]["state"], "failed")
+        restore = json.loads((self.evidence / "closure-restore.json").read_bytes())
+        self.assertEqual(restore["state"], "failed")
+        self.assertNotEqual(restore["failed_step"], "-")
+        self.assertIs(restore["cleanup_proven"], True)
+        core = [row for row in self.current["phase_ownership"]["phases"] if row["kind"] == "run"]
+        self.assertEqual([row["phase"] for row in core if row["argv"][:2] == ["./build.sh", "build"]],
+                         ["build-baseline", "build-candidate"])
+        self.assertEqual(core[-1]["argv"][1:3], ["compiler_closure", "restore"])
+        self.assertNotIn("closure", self.current["timings"]["build_seconds"])
+        print("COMPILER_ORDINARY_DEFAULT_PULL_TAMPER failed_step=" + restore["failed_step"] +
+              " builds=2 fallback=none qualified=0")
+
+    def test_explicit_legacy_rollback_rebuilds_the_closure_without_a_snapshot(self):
+        status = self.default_pull("--closure-policy", "legacy-rebuild")
+        self.assertEqual(status, 0, self.current["reasons"])
+        self.assertEqual(self.current["preparation"], {"schema": receipt_contract.PREPARATION_SELECTION_SCHEMA,
+            "source": "explicit", "requested": "legacy-rebuild", "policy": "legacy-rebuild", "fallback": None})
+        self.assertNotIn("closure", self.current)
+        self.assertNotIn("phase_ownership", self.current)
+        self.assertEqual(set(self.current["timings"]["build_seconds"]), {"baseline", "candidate", "closure"})
+        self.assertEqual(receipt_contract.validate_closure(self.current, {}), [])
+        print("COMPILER_ORDINARY_ROLLBACK_DIAGNOSTIC builds=3 closure=none qualified=0")
+
     def test_actual_full_ordinary_measure_writer_then_strict_reader(self):
         arguments, current, context, summaries = self.measurement()
         compare.measure(arguments, self.candidate, self.work, self.evidence, self.bins,
