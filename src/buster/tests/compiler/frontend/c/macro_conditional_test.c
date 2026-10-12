@@ -53,6 +53,35 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_expect_preprocessed(UnitT
 }
 
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+// The same newline-insensitive token sequence, without recording assertions.
+BUSTER_GLOBAL_LOCAL bool c_macro_conditional_semantic_tokens_equal(CLexResult actual, CLexResult expected)
+{
+    bool equal = true;
+    u64 actual_index = 0;
+    u64 expected_index = 0;
+    while (equal && (actual_index < actual.token_count || expected_index < expected.token_count))
+    {
+        if (actual_index < actual.token_count && actual.tokens[actual_index].kind == C_TOKEN_NEWLINE)
+        {
+            actual_index += 1;
+        }
+        else if (expected_index < expected.token_count && expected.tokens[expected_index].kind == C_TOKEN_NEWLINE)
+        {
+            expected_index += 1;
+        }
+        else
+        {
+            equal = actual_index < actual.token_count && expected_index < expected.token_count &&
+                    actual.tokens[actual_index].kind == expected.tokens[expected_index].kind &&
+                    string_equal(c_token_spelling(actual.spelling_base, actual.tokens[actual_index]),
+                                 c_token_spelling(expected.spelling_base, expected.tokens[expected_index]));
+            actual_index += 1;
+            expected_index += 1;
+        }
+    }
+    return equal;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_compare_semantic_tokens(UnitTestArguments* arguments, CLexResult actual, CLexResult expected, String8 diagnostic)
 {
     UnitTestResult result = {0};
@@ -310,6 +339,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_rescan_boundary_tests(UnitTestArgumen
         String8 source;
         String8 expected;
         String8 gcc_expected;
+        // Output an identified GCC 11 prints instead of the expectation; see
+        // the reference loop below. It never becomes a passing expectation.
+        String8 gcc11_observed;
         bool skip_gcc;
     } cases[] = {
         {.source = S8("#define F(x) x\nF\n(11)\n"), .expected = S8("11")},
@@ -330,10 +362,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_rescan_boundary_tests(UnitTestArgumen
             "_Pragma(\"pop_macro(\\\"X\\\")\")\nX\n"), .expected = S8("1")},
         {.source = S8("#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\n"
             "#define RESTORE _Pragma(\"pop_macro(\\\"X\\\")\")\n#define ID(x) x\n"
-            "ID(RESTORE X) X\n"), .expected = S8("2 1")},
+            "ID(RESTORE X) X\n"), .expected = S8("2 1"), .gcc11_observed = S8("1 1")},
         {.source = S8("#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\n#pragma push_macro(\"X\")\n"
             "#undef X\n#define X 3\n#define DUP(x) x x\n"
-            "DUP(_Pragma(\"pop_macro(\\\"X\\\")\") X) X\n"), .expected = S8("3 3 1")},
+            "DUP(_Pragma(\"pop_macro(\\\"X\\\")\") X) X\n"), .expected = S8("3 3 1"), .gcc11_observed = S8("2 2 2")},
         {.source = S8("#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\n"
             "_Pragma(\"push_macro(\\\"X\\\")\") _Pragma(\"pop_macro(\\\"X\\\")\") X "
             "_Pragma(\"pop_macro(\\\"X\\\")\") X\n"), .expected = S8("2 1")},
@@ -385,6 +417,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_rescan_boundary_tests(UnitTestArgumen
             "#define SELF _Pragma(\"pop_macro(\\\"SELF\\\")\") SELF\nSELF SELF\n"), .expected = S8("7 7")},
     };
     CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_C17};
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    // GCC 11 applies a _Pragma pop_macro inside a macro argument at a
+    // different point (observed on 11.4 and 11.5; GCC 12.4, 13.3 and Clang
+    // agree with the expectation). Only an identified GCC 11 printing exactly
+    // the recorded output reports that row NOT_RUN; anything else still fails.
+    TestProcessEnvironment oracle_environment =
+        buster_test_process_environment_with_override(arguments->arena, S8("LC_ALL"), S8("C"));
+    String8 gcc = executable_resolve_in_path(arguments->arena, S8("gcc"));
+    TestReferenceIdentity gcc_identity = gcc.length && oracle_environment.keys.pointer
+        ? buster_test_reference_identity(arguments->arena, gcc, &oracle_environment) : (TestReferenceIdentity){0};
+#endif
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
     {
         for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
@@ -446,9 +489,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_rescan_boundary_tests(UnitTestArgumen
                     {
                         CLexResult reference = c_lex(temporary.arena, BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]));
                         CLexResult expected = c_lex(temporary.arena, reference_expected);
-                        UnitTestResult reference_result = c_macro_conditional_compare_semantic_tokens(arguments, reference, expected, diagnostic);
-                        result.test_count += reference_result.test_count;
-                        result.succeeded_test_count += reference_result.succeeded_test_count;
+                        bool gcc11_divergence = reference_index == 1 && gcc_identity.gcc_major == 11 &&
+                            string_equal(compiler, gcc) && cases[case_index].gcc11_observed.length &&
+                            !wait.streams[STANDARD_STREAM_ERROR].length &&
+                            c_macro_conditional_semantic_tokens_equal(reference, c_lex(temporary.arena, cases[case_index].gcc11_observed));
+                        if (gcc11_divergence)
+                        {
+                            arguments->show(arguments, S8("TEST_ORACLE_V1 suite=c-frontend fixture=macro-rescan-boundary case={u32} "
+                                "status=NOT_RUN required=0 tool={S8} version={S8} observed={S8} expected={S8} "
+                                "reason=GCC 11 pop_macro in a macro argument\n"),
+                                case_index, compiler, gcc_identity.version, cases[case_index].gcc11_observed, reference_expected);
+                        }
+                        else
+                        {
+                            UnitTestResult reference_result = c_macro_conditional_compare_semantic_tokens(arguments, reference, expected, diagnostic);
+                            result.test_count += reference_result.test_count;
+                            result.succeeded_test_count += reference_result.succeeded_test_count;
+                        }
                     }
                 }
             }

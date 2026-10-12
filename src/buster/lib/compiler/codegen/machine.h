@@ -1256,7 +1256,9 @@ struct MachineInlineAssemblyRelocation
     u8 kind;
     u8 is_block;
     u8 is_control;
-    u8 reserved;
+    // The rel32 of a direct CALL, JMP or Jcc (assembly_x86_relocation_is_branch),
+    // which Mach-O spells X86_64_RELOC_BRANCH rather than SIGNED.
+    u8 is_branch;
 };
 
 typedef struct MachineInlineAssembly MachineInlineAssembly;
@@ -1795,6 +1797,8 @@ struct MachineEncodeResult
 // pages under Buster's arenas. Chunk size is a measured default, not a
 // contract.
 #define MACHINE_BUILDER_CHUNK_BYTES BUSTER_KB(16)
+// Initial slots of the builder's virtual-register chunk index; it doubles.
+#define MACHINE_BUILDER_CHUNK_INDEX_INITIAL_CAPACITY 16
 
 typedef struct MachineBuilderChunk MachineBuilderChunk;
 struct MachineBuilderChunk
@@ -1830,6 +1834,11 @@ struct MachineFunctionBuilder
     MachineBuilderStream virtual_registers;
     MachineVirtualRegister* virtual_register_cursor;
     MachineVirtualRegister* virtual_register_end;
+    // First row of every virtual-register chunk in stream order, appended by
+    // the cursor refill, so a row lookup by index never walks the chunk list.
+    MachineVirtualRegister** virtual_register_chunks;
+    u32 virtual_register_chunk_count;
+    u32 virtual_register_chunk_capacity;
     MachineBuilderStream blocks;
     MachineBlock* block_cursor;
     MachineBlock* block_end;
@@ -1940,6 +1949,8 @@ BUSTER_F_DECL void machine_stream_cursor_close(MachineBuilderStream* stream, voi
 BUSTER_F_DECL void machine_stream_flatten(MachineBuilderStream* stream, void* destination);
 BUSTER_F_DECL MachineFunctionBuilder machine_function_builder_begin(Arena* arena);
 BUSTER_F_DECL u32 machine_builder_virtual_register(MachineFunctionBuilder* builder, MachineVirtualRegister virtual_register);
+// Constant-time row of an appended virtual register, or 0 past the count.
+BUSTER_F_DECL MachineVirtualRegister* machine_builder_virtual_register_at(MachineFunctionBuilder* builder, u32 virtual_register);
 BUSTER_F_DECL u32 machine_builder_block_begin(MachineFunctionBuilder* builder);
 BUSTER_F_DECL u32 machine_builder_instruction(MachineFunctionBuilder* builder, MachineInstruction instruction);
 BUSTER_F_DECL void machine_builder_block_end(MachineFunctionBuilder* builder, MachineBlock block);
@@ -2209,6 +2220,10 @@ struct MachineX64ExactMapAudit
     u32 expansion_rows;
     u32 expansion_nonexact_rows;
     u32 dense_encoding_tables;
+    // Dense tables the complete preparation encoded, and how many of them
+    // the metadata authority refused.
+    u32 dense_encoding_ready_tables;
+    u32 dense_encoding_failed_tables;
     u32 immediate_patch_tables;
     u32 memory_base_tables;
     u32 displacement_patch_tables;
@@ -2221,6 +2236,8 @@ struct MachineX64ExactMapAudit
     // the metadata authority refused (those rows keep their metadata lane).
     u32 fixed_template_rows;
     u32 fixed_template_invalid_rows;
+    // Rows still pending after machine_x86_64_exact_prewarm_all.
+    u32 fixed_template_pending_rows;
     bool valid;
     u8 reserved[3];
 };

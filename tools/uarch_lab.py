@@ -162,7 +162,9 @@ import threading
 import time
 
 STEPS = ("env", "timed", "topdown", "timeline", "sampling", "ibs", "threads", "micro")
-DEFAULT_COMPILE = ["cc", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
+# The driver default is baseline since #1557; the compiler-compare workload
+# stays the host-native compile it was before that default.
+DEFAULT_COMPILE = ["cc", "-march=native", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
                    "-DBUSTER_INCLUDE_TESTS=0", "-g", "src/buster/apps/ide/ide.c", "-lm"]
 # The fixed issue #3397 -fc-ast-pilot acceptance cells (compare
 # --ast-pilot-pair CELL): the same unity source at -g0 with no link, A
@@ -2977,7 +2979,10 @@ def prepare_variant(lab, warmups):
         if status != 0:
             raise RuntimeError("warm-up failed: " + err.strip()[-400:])
         print("[compare] %s warm-up %.2f s" % (lab.meta["config"]["role"], lab.last_elapsed), flush=True)
-    shutil.copyfile(out, os.path.join(lab.output, "reference.exe"))
+    reference = os.path.join(lab.output, "reference.exe")
+    shutil.copyfile(out, reference)
+    # Stage-two self-hosting executes this exact output; retain its permissions.
+    shutil.copymode(out, reference)
     if lab.transcripts:
         shutil.copyfile(out + ".diagnostics", os.path.join(lab.output, "reference.diagnostics"))
 

@@ -56,7 +56,7 @@ New runner queues, checkout and evidence uploads affect the actual result.
 | Job group | Lanes | Work |
 | --- | ---: | --- |
 | `test` | 6 | Unchanged complete `test_all_combinations_ci` |
-| `native` | 4 Unix | Unchanged modes and native differential, sequential within each lane |
+| `native` | 4 Unix | Unchanged modes and native differential, sequential within each lane; Linux x86-64 additionally runs the [eBPF kernel oracle](#ebpf-kernel-oracle-1625) |
 | `mobile` | 3 | Unchanged Android and iOS `--all` suites |
 | `lint` | 1 | Workflow lint and approved action references |
 | `complete` | 1 | Fail-closed aggregation of all four groups |
@@ -290,6 +290,34 @@ summaries. The archive SHA-256 is
 its 59,565 members contain 52,160 regular files. All 17,352 `.argv` members
 remain NUL-terminated, both direct summaries match their archived bytes, no
 unexpected member types exist, and neither excluded generated output appears.
+
+## eBPF kernel oracle (#1625)
+
+The eBPF kernel verifier/JIT oracle needs `CAP_BPF`, plus `CAP_PERFMON` for
+pointer comparisons, which unprivileged runners do not grant. A required
+`eBPF kernel verifier/JIT oracle` step therefore runs only on the Linux x86-64
+native lane: it copies `build/Release/ide`, grants that copy the capabilities
+with `sudo setcap cap_bpf,cap_perfmon+ep`, and runs
+`tools/ci_ebpf_kernel_oracle.py` against it. Only the copy is privileged, so
+the rest of the native suite keeps running unprivileged. The tool runs
+`ide test --module=codegen_tests --ci=1` and a bounded metamorphic eBPF
+campaign (`SEED=7 CASES=4 TARGET=ebpf`), then fails closed unless every
+expected codegen row reports `available` and the campaign reports
+`METAMORPHIC_EBPF_KERNEL available=1`. Its single
+`CI_EBPF_KERNEL_ORACLE_V1 status=...` verdict line distinguishes `available`,
+`unavailable` (the kernel refused the programs) and `failed` (any other
+error); a refusal also prints kernel probe context (`unprivileged_bpf_disabled`,
+lockdown, the binary's `security.capability` xattr).
+
+The other native lanes and the desktop suite still run unprivileged, keep
+reporting `unavailable`/`VM only`, and are never kernel evidence. Local
+reproduction on a Linux host:
+
+```sh
+cp build/Release/ide /tmp/ebpf-ide && sudo setcap cap_bpf,cap_perfmon+ep /tmp/ebpf-ide
+python3 tools/ci_ebpf_kernel_oracle.py --ide /tmp/ebpf-ide \
+    --log-directory /tmp/ebpf-ci-logs --metamorphic-output /tmp/ebpf-ci-meta
+```
 
 ## Remaining bottlenecks
 

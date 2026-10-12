@@ -27,6 +27,10 @@
 //                                                assembly metadata tables,
 //                                                with per-run recipe and
 //                                                template caches
+//   codegen_machine_scratch_bound,               per-function machine scratch
+//   codegen_machine_scratch_begin / _end         plan from IR counts; private
+//                                                thread-scratch replacements
+//                                                for an oversized function
 //   codegen_abi_for_target, codegen_prewarm      ABI selection and the serial
 //                                                table prewarm (AGENTS.md)
 //   codegen_canonical_x64_type_is_f80,          shared x87 representation and
@@ -89,6 +93,8 @@ bool codegen_module_relocation_kind_is_aarch64(u8 kind)
     case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_ADD_LO12:
     case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_PAGE21:
     case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_LD64_LO12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12:
         return true;
     default:
         return false;
@@ -2189,6 +2195,187 @@ void codegen_statistics_add(CodegenStatistics* total, CodegenStatistics* unit)
     }
 }
 
+// Machine selection, placement and encoding of one function share one
+// scratch arena, released when the function is done. Its peak grows with the
+// function. For straight-line bodies it measured about 290 bytes per machine
+// row under FAST and 410 under QUALITY, with up to 1.8 machine rows per IR
+// instruction. On top of that come the FAST allocator's dense liveness planes,
+// one row of bits per block over the tracked registers or frame homes; they
+// dominate a function of many blocks (`compiler_driver_tests` in the
+// tests-included unity build, 11,331 blocks, exhausted 256 MiB there).
+// codegen_machine_scratch_bound over-covers both terms several times, from
+// counts known before selection. A function whose bound does not fit the
+// remaining thread scratch runs on private scratch reservations of that
+// size, which commit only the pages they touch. A bound past the limit, or a
+// reservation the system refuses, is a `machine-scratch` capacity failure
+// rather than an arena validation abort (#3413).
+#define CODEGEN_MACHINE_SCRATCH_BASE_BYTES BUSTER_MB(1)
+#define CODEGEN_MACHINE_SCRATCH_INSTRUCTION_BYTES 2048u
+#define CODEGEN_MACHINE_SCRATCH_VALUE_BYTES 512u
+#define CODEGEN_MACHINE_SCRATCH_BLOCK_BYTES 512u
+// Live-in, live-out, read and write planes of the prepass and of the slot
+// and register range passes, with temporaries, bounded together.
+#define CODEGEN_MACHINE_SCRATCH_LIVENESS_PLANES 16u
+#define CODEGEN_MACHINE_SCRATCH_RESERVATION_GRANULE BUSTER_MB(64)
+#define CODEGEN_MACHINE_SCRATCH_LIMIT BUSTER_GB(256)
+
+BUSTER_GLOBAL_LOCAL u64 codegen_machine_scratch_bound(IrFunction const* function)
+{
+    u64 instructions = function->instruction_count;
+    u64 values = function->value_count;
+    u64 blocks = function->block_count;
+    // A tracked liveness row is a machine register or a frame home, and each
+    // stems from at most one IR value, so twice the values bound the rows.
+    u64 words = (2 * values + 63) / 64;
+    u64 plane_bytes = sizeof(u64) * CODEGEN_MACHINE_SCRATCH_LIVENESS_PLANES;
+    u64 linear = CODEGEN_MACHINE_SCRATCH_BASE_BYTES + instructions * CODEGEN_MACHINE_SCRATCH_INSTRUCTION_BYTES +
+                 values * CODEGEN_MACHINE_SCRATCH_VALUE_BYTES + blocks * CODEGEN_MACHINE_SCRATCH_BLOCK_BYTES;
+    // Every count is below 2^32 and words below 2^27, so the linear sum and
+    // blocks * words cannot wrap; anything past the limit saturates before
+    // the plane product could.
+    u64 cells = blocks * words;
+    u64 bound = linear > CODEGEN_MACHINE_SCRATCH_LIMIT || cells > (CODEGEN_MACHINE_SCRATCH_LIMIT - linear) / plane_bytes
+                    ? UINT64_MAX
+                    : linear + cells * plane_bytes;
+    return bound;
+}
+
+typedef struct CodegenMachineScratch CodegenMachineScratch;
+struct CodegenMachineScratch
+{
+    TemporalArena scratch;
+    Arena* owned[SCRATCH_ARENA_COUNT];
+    Arena* saved[SCRATCH_ARENA_COUNT];
+    bool fits;
+};
+
+// The machine passes take nested scratch of their own (the scheduler's
+// windows, the FAST prepass's temporary planes), so a larger arena for the
+// function alone would leave those on the fixed thread scratch. Instead the
+// thread's scratch arenas are replaced, for this one function, by private
+// reservations of the bound, and restored by codegen_machine_scratch_end.
+BUSTER_GLOBAL_LOCAL CodegenMachineScratch codegen_machine_scratch_begin(Arena* arena, IrFunction const* function)
+{
+    CodegenMachineScratch result = {0};
+    u64 bound = codegen_machine_scratch_bound(function);
+    TemporalArena probe = scratch_begin(&arena, 1);
+    ThreadContext* context = thread_context_selected();
+    // A pass's nested scratch_begin may select any thread scratch arena other
+    // than the one it was handed, including one an outer caller holds live
+    // allocations in, so every arena must have the bound's room left.
+    result.fits = true;
+    for (u32 index = 0; index < SCRATCH_ARENA_COUNT; index += 1)
+    {
+        Arena* scratch = context->arenas[index];
+        result.fits = result.fits && bound <= scratch->reserved_size - scratch->position;
+    }
+    if (!result.fits && bound <= CODEGEN_MACHINE_SCRATCH_LIMIT)
+    {
+        bool created = true;
+        for (u32 index = 0; index < SCRATCH_ARENA_COUNT && created; index += 1)
+        {
+            result.owned[index] = arena_create((ArenaCreation){
+                .reserved_size = align_forward(bound, CODEGEN_MACHINE_SCRATCH_RESERVATION_GRANULE),
+                .flags = {.no_pool = 1},
+            });
+            created = result.owned[index] != 0;
+        }
+        for (u32 index = 0; index < SCRATCH_ARENA_COUNT; index += 1)
+        {
+            if (created)
+            {
+                result.saved[index] = context->arenas[index];
+                context->arenas[index] = result.owned[index];
+            }
+            else if (result.owned[index])
+            {
+                bool destroyed = arena_destroy(result.owned[index], 1);
+                BUSTER_CHECK(destroyed);
+                result.owned[index] = 0;
+            }
+        }
+        result.fits = created;
+    }
+    result.scratch = result.owned[0] ? scratch_begin(&arena, 1) : probe;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_machine_scratch_end(CodegenMachineScratch* machine_scratch)
+{
+    scratch_end(machine_scratch->scratch);
+    if (machine_scratch->owned[0])
+    {
+        ThreadContext* context = thread_context_selected();
+        for (u32 index = 0; index < SCRATCH_ARENA_COUNT; index += 1)
+        {
+            context->arenas[index] = machine_scratch->saved[index];
+            bool destroyed = arena_destroy(machine_scratch->owned[index], 1);
+            BUSTER_CHECK(destroyed);
+        }
+    }
+}
+
+#if BUSTER_INCLUDE_TESTS
+CodegenTestMachineScratch codegen_test_machine_scratch(Arena* arena, u32 instruction_count, u32 value_count, u32 block_count, u64 other_remaining)
+{
+    IrFunction function = {.instruction_count = instruction_count, .value_count = value_count, .block_count = block_count};
+    ThreadContext* context = thread_context_selected();
+    Arena* before[SCRATCH_ARENA_COUNT];
+    u64 positions[SCRATCH_ARENA_COUNT];
+    for (u32 index = 0; index < SCRATCH_ARENA_COUNT; index += 1)
+    {
+        before[index] = context->arenas[index];
+        positions[index] = before[index]->position;
+    }
+    // Occupy the thread arena the planner will not hand out first, leaving
+    // `other_remaining` bytes: a live outer allocation a nested pass's
+    // scratch_begin can still land on.
+    Arena* other = 0;
+    if (other_remaining)
+    {
+        Arena* first = scratch_begin(&arena, 1).arena;
+        for (u32 index = 0; index < SCRATCH_ARENA_COUNT && !other; index += 1)
+        {
+            other = before[index] != first ? before[index] : 0;
+        }
+        // A thread context holds SCRATCH_ARENA_COUNT distinct live arenas,
+        // so one besides `first` exists; anything else is a broken context,
+        // and the control must fail rather than quietly not occupy one.
+        BUSTER_VALIDATE(other != 0);
+        u64 remaining = other->reserved_size - other->position;
+        (void)arena_allocate_bytes(other, remaining > other_remaining ? remaining - other_remaining : 0, 1);
+    }
+    CodegenMachineScratch machine_scratch = codegen_machine_scratch_begin(arena, &function);
+    CodegenTestMachineScratch result = {
+        .bound = codegen_machine_scratch_bound(&function),
+        .fits = machine_scratch.fits,
+        .replaced = machine_scratch.owned[0] != 0,
+        .scratch_reserved = machine_scratch.scratch.arena->reserved_size,
+    };
+    // A pass's own nested scratch must land on a replacement as well.
+    TemporalArena nested = scratch_begin(&machine_scratch.scratch.arena, 1);
+    result.nested_reserved = nested.arena->reserved_size;
+    result.nested_distinct = nested.arena != machine_scratch.scratch.arena;
+    (void)arena_allocate(nested.arena, u8, BUSTER_KB(64));
+    scratch_end(nested);
+    (void)arena_allocate(machine_scratch.scratch.arena, u8, BUSTER_KB(64));
+    codegen_machine_scratch_end(&machine_scratch);
+    for (u32 index = 0; index < SCRATCH_ARENA_COUNT; index += 1)
+    {
+        if (before[index] == other)
+        {
+            arena_set_position(other, positions[index]);
+        }
+    }
+    result.restored = true;
+    for (u32 index = 0; index < SCRATCH_ARENA_COUNT; index += 1)
+    {
+        result.restored = result.restored && context->arenas[index] == before[index] && before[index]->position == positions[index];
+    }
+    return result;
+}
+#endif
+
 String8 codegen_fallback_reason_string(CodegenFallbackReason reason)
 {
     String8 result = S8("invalid");
@@ -2203,6 +2390,7 @@ String8 codegen_fallback_reason_string(CodegenFallbackReason reason)
         break; case CODEGEN_FALLBACK_ENCODING: result = S8("encoding");
         break; case CODEGEN_FALLBACK_OUTPUT_CAPACITY: result = S8("output-capacity");
         break; case CODEGEN_FALLBACK_UNWIND: result = S8("unwind");
+        break; case CODEGEN_FALLBACK_MACHINE_SCRATCH: result = S8("machine-scratch");
         break; case CODEGEN_FALLBACK_REASON_COUNT: break;
     }
     return result;
@@ -3826,11 +4014,16 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_relocation_kind(AssemblyRelocat
 
 // The relocation of one half of an AArch64 page-pair address. The selector
 // chose the pair's form per symbol and the encoder only says which half a site
-// is: Darwin has one pair, and ELF has the plain page pair and the GOT slot.
-BUSTER_GLOBAL_LOCAL CodegenModuleRelocationKind codegen_aarch64_page_relocation_kind(u8 reference, bool low)
+// is: each format has the plain page pair and the GOT slot, and only the
+// object format decides how the GOT pair is spelled.
+BUSTER_GLOBAL_LOCAL CodegenModuleRelocationKind codegen_aarch64_page_relocation_kind(u8 reference, bool low, bool mach)
 {
     CodegenModuleRelocationKind result = low ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12 : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21;
-    if (reference == MACHINE_SYMBOL_REFERENCE_GOT)
+    if (reference == MACHINE_SYMBOL_REFERENCE_GOT && mach)
+    {
+        result = low ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12 : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21;
+    }
+    else if (reference == MACHINE_SYMBOL_REFERENCE_GOT)
     {
         result = low ? CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_LD64_LO12 : CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_PAGE21;
     }
@@ -3849,6 +4042,7 @@ bool codegen_publish_machine_relocations(IrProgram* program, CodegenModule* resu
                                          u32 code_base, Target target)
 {
     u32 relocation_start = result->relocation_count;
+    bool mach = object_format_for_target(target) == OBJECT_FORMAT_MACH_O64;
     bool valid = relocation_start <= relocation_capacity &&
                  encoded->call_site_count <= relocation_capacity - relocation_start &&
                  encoded->inline_assembly_relocation_count <= relocation_capacity - relocation_start - encoded->call_site_count;
@@ -3882,7 +4076,7 @@ bool codegen_publish_machine_relocations(IrProgram* program, CodegenModule* resu
                                          ? codegen_aarch64_page_relocation_kind(
                                                function->call_target_references ? function->call_target_references[encoded->call_sites[site_index].target]
                                                                                 : (u8)MACHINE_SYMBOL_REFERENCE_DIRECT,
-                                               encoded->call_sites[site_index].page_low != 0)
+                                               encoded->call_sites[site_index].page_low != 0, mach)
                                      : encoded->call_sites[site_index].absolute ? CODEGEN_MODULE_RELOCATION_ABSOLUTE64
                                                                                : CODEGEN_MODULE_RELOCATION_AARCH64_CALL26),
                 };
@@ -3946,6 +4140,8 @@ bool codegen_publish_machine_relocations(IrProgram* program, CodegenModule* resu
                 {
                     addend += 4;
                 }
+                // A direct branch keeps its instruction identity for Mach-O.
+                kind = mach && relocation.is_branch ? CODEGEN_MODULE_RELOCATION_X86_64_PLT32 : kind;
             }
             IrSymbolId symbol = valid ? codegen_global_assembly_symbol(program, relocation.symbol, target, IR_SYMBOL_DATA) : IR_SYMBOL_ID_INVALID;
             valid = valid && symbol.value != IR_ID_UNDERLYING_INVALID;
@@ -4013,6 +4209,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_encode_instruction(Arena* arena
         {
             valid = valid && addend <= INT64_MAX - 4;
             addend += 4;
+            // A direct branch keeps its instruction identity for Mach-O.
+            kind = object_format_for_target(target) == OBJECT_FORMAT_MACH_O64 && assembly_x86_relocation_is_branch(encoded.bytes, relocation)
+                       ? CODEGEN_MODULE_RELOCATION_X86_64_PLT32
+                       : kind;
         }
         if (valid)
         {
@@ -7160,11 +7360,19 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // prologue instruction represented in its unwind description.
         if (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64)
         {
-            TemporalArena machine_scratch = scratch_begin(&arena, 1);
+            CodegenMachineScratch machine_scratch = codegen_machine_scratch_begin(arena, function);
+            Arena* machine_arena = machine_scratch.scratch.arena;
             MachineSelectResult selected = {0};
-            selected = machine_select_validated_canonical_function(machine_scratch.arena, program, function, target, position_independent,
-                                                                   options.debug_info, machine_module);
-            if (bootstrap_trace)
+            if (machine_scratch.fits)
+            {
+                selected = machine_select_validated_canonical_function(machine_arena, program, function, target, position_independent,
+                                                                       options.debug_info, machine_module);
+            }
+            else
+            {
+                fallback_reason = CODEGEN_FALLBACK_MACHINE_SCRATCH;
+            }
+            if (bootstrap_trace && machine_scratch.fits)
             {
                 bootstrap_trace_machine(bootstrap_trace, function, &selected);
                 if (bootstrap_trace->invalid_mir)
@@ -7184,7 +7392,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 WORK_LEDGER_RECORD(MACHINE_VIRTUAL_REGISTERS, selected.function.virtual_register_count);
                 WORK_LEDGER_RECORD(MACHINE_BLOCKS, selected.function.block_count);
             }
-            if (!selected.supported && fallback_reason != CODEGEN_FALLBACK_VERIFICATION)
+            if (!selected.supported && fallback_reason != CODEGEN_FALLBACK_VERIFICATION && fallback_reason != CODEGEN_FALLBACK_MACHINE_SCRATCH)
             {
                 fallback_opcode = selected.failed_opcode < IR_OPCODE_COUNT ? selected.failed_opcode : IR_OPCODE_COUNT;
                 fallback_reason = selected.signature_rejected ? CODEGEN_FALLBACK_SIGNATURE
@@ -7226,11 +7434,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
 
                 if (options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY)
                 {
-                    placement = machine_quality_placement_build(machine_scratch.arena, &selected.function);
+                    placement = machine_quality_placement_build(machine_arena, &selected.function);
                 }
                 else
                 {
-                    placement = machine_fast_placement_build(machine_scratch.arena, &selected.function);
+                    placement = machine_fast_placement_build(machine_arena, &selected.function);
                 }
 
                 // Stage-9 scheduling, QUALITY only: reorder rows within
@@ -7249,7 +7457,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 if (placement.valid && placement.reload_count + placement.spill_count > 0 &&
                     options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY)
                 {
-                    MachineScheduleResult scheduled = machine_schedule_function(machine_scratch.arena, &selected.function);
+                    MachineScheduleResult scheduled = machine_schedule_function(machine_arena, &selected.function);
                     if (scheduled.moved)
                     {
                         bool scheduled_valid = true;
@@ -7269,7 +7477,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         if (scheduled_valid)
                         {
                             result.statistics.allocator_scheduled_function_count += 1;
-                            MachineStackPlacement scheduled_placement = machine_quality_placement_build(machine_scratch.arena, &scheduled.function);
+                            MachineStackPlacement scheduled_placement = machine_quality_placement_build(machine_arena, &scheduled.function);
                             if (options.verify_invariants && !scheduled_placement.valid)
                             {
                                 // Frame capacity keeps its own diagnostic; any other
@@ -7319,9 +7527,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     u64 code_remaining = buffer.count <= buffer.capacity ? buffer.capacity - buffer.count : 0;
                     switch (target.cpu_arch)
                     {
-                        break; case CPU_ARCH_AARCH64: encoded = machine_encode_aarch64_into(machine_scratch.arena, &selected.function, &placement,
+                        break; case CPU_ARCH_AARCH64: encoded = machine_encode_aarch64_into(machine_arena, &selected.function, &placement,
                                                                                            code_destination, code_remaining);
-                        break; case CPU_ARCH_X86_64: encoded = machine_encode_x86_64_into(machine_scratch.arena, &selected.function, &placement,
+                        break; case CPU_ARCH_X86_64: encoded = machine_encode_x86_64_into(machine_arena, &selected.function, &placement,
                                                                                          code_destination, code_remaining);
                         break; default: BUSTER_TODO();
                     }
@@ -7386,7 +7594,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                                   (u32)buffer.count + encoded.byte_count, machine_frame_base_offset, target))
                             {
                                 result.error = result.error == CODEGEN_ERROR_NONE ? CODEGEN_ERROR_INVALID_IR : result.error;
-                                scratch_end(machine_scratch);
+                                codegen_machine_scratch_end(&machine_scratch);
                                 return result;
                             }
                             buffer.count += encoded.byte_count;
@@ -7405,7 +7613,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 if (!codegen_machine_canonical_block_offsets(machine_block_offsets, function, &selected, &encoded))
                                 {
                                     result.error = CODEGEN_ERROR_INVALID_IR;
-                                    scratch_end(machine_scratch);
+                                    codegen_machine_scratch_end(&machine_scratch);
                                     return result;
                                 }
                             }
@@ -7427,7 +7635,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             {
                 result.statistics.mutable_virtual_register_count += selected.mutable_virtual_register_count;
             }
-            scratch_end(machine_scratch);
+            codegen_machine_scratch_end(&machine_scratch);
         }
         if (machine_function_emitted)
         {
@@ -7500,7 +7708,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         }
         result.error = fallback_reason == CODEGEN_FALLBACK_SIGNATURE ? CODEGEN_ERROR_UNSUPPORTED_ABI
                        : fallback_reason == CODEGEN_FALLBACK_VERIFICATION ? CODEGEN_ERROR_INVALID_IR
-                       : fallback_reason == CODEGEN_FALLBACK_PLACEMENT || fallback_reason == CODEGEN_FALLBACK_OUTPUT_CAPACITY
+                       : fallback_reason == CODEGEN_FALLBACK_PLACEMENT || fallback_reason == CODEGEN_FALLBACK_OUTPUT_CAPACITY ||
+                                 fallback_reason == CODEGEN_FALLBACK_MACHINE_SCRATCH
                            ? CODEGEN_ERROR_CAPACITY
                            : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
         return result;

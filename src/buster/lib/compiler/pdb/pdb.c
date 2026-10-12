@@ -6,6 +6,9 @@
 // pdb_rewrite_field_list remaps every member and LF_INDEX continuation.
 // pdb_msf_build owns the checked periodic-FPM block layout;
 // pdb_emit_contribution writes both DBI descriptions from module-owned ranges.
+// pdb_type_record_hash supplies TPI lookup buckets in the final record walk.
+// pdb_gsi_order/pdb_gsi_emit build the global and public hash tables that
+// pdb_build fills from each module's top-level procedures and data.
 // ByteWriter supplies bounded writes; PDB owns stream allocation and MSF layout.
 
 #include <buster/lib/compiler/pdb/pdb_internal.h>
@@ -490,6 +493,114 @@ BUSTER_GLOBAL_LOCAL u64 pdb_skip_name(ByteSlice bytes, u64 offset)
     return offset < bytes.length ? offset + 1 : bytes.length + 1;
 }
 
+// PDB v80 hashes use the reflected CRC-32 polynomial with initial state zero
+// and no final complement. The fixed lookup table is derived from 0xedb88320.
+BUSTER_GLOBAL_LOCAL u32 pdb_hash_record_crc(ByteSlice bytes)
+{
+    static u32 const table[] = {
+        0x00000000u, 0x77073096u, 0xee0e612cu, 0x990951bau, 0x076dc419u, 0x706af48fu, 0xe963a535u, 0x9e6495a3u,
+        0x0edb8832u, 0x79dcb8a4u, 0xe0d5e91eu, 0x97d2d988u, 0x09b64c2bu, 0x7eb17cbdu, 0xe7b82d07u, 0x90bf1d91u,
+        0x1db71064u, 0x6ab020f2u, 0xf3b97148u, 0x84be41deu, 0x1adad47du, 0x6ddde4ebu, 0xf4d4b551u, 0x83d385c7u,
+        0x136c9856u, 0x646ba8c0u, 0xfd62f97au, 0x8a65c9ecu, 0x14015c4fu, 0x63066cd9u, 0xfa0f3d63u, 0x8d080df5u,
+        0x3b6e20c8u, 0x4c69105eu, 0xd56041e4u, 0xa2677172u, 0x3c03e4d1u, 0x4b04d447u, 0xd20d85fdu, 0xa50ab56bu,
+        0x35b5a8fau, 0x42b2986cu, 0xdbbbc9d6u, 0xacbcf940u, 0x32d86ce3u, 0x45df5c75u, 0xdcd60dcfu, 0xabd13d59u,
+        0x26d930acu, 0x51de003au, 0xc8d75180u, 0xbfd06116u, 0x21b4f4b5u, 0x56b3c423u, 0xcfba9599u, 0xb8bda50fu,
+        0x2802b89eu, 0x5f058808u, 0xc60cd9b2u, 0xb10be924u, 0x2f6f7c87u, 0x58684c11u, 0xc1611dabu, 0xb6662d3du,
+        0x76dc4190u, 0x01db7106u, 0x98d220bcu, 0xefd5102au, 0x71b18589u, 0x06b6b51fu, 0x9fbfe4a5u, 0xe8b8d433u,
+        0x7807c9a2u, 0x0f00f934u, 0x9609a88eu, 0xe10e9818u, 0x7f6a0dbbu, 0x086d3d2du, 0x91646c97u, 0xe6635c01u,
+        0x6b6b51f4u, 0x1c6c6162u, 0x856530d8u, 0xf262004eu, 0x6c0695edu, 0x1b01a57bu, 0x8208f4c1u, 0xf50fc457u,
+        0x65b0d9c6u, 0x12b7e950u, 0x8bbeb8eau, 0xfcb9887cu, 0x62dd1ddfu, 0x15da2d49u, 0x8cd37cf3u, 0xfbd44c65u,
+        0x4db26158u, 0x3ab551ceu, 0xa3bc0074u, 0xd4bb30e2u, 0x4adfa541u, 0x3dd895d7u, 0xa4d1c46du, 0xd3d6f4fbu,
+        0x4369e96au, 0x346ed9fcu, 0xad678846u, 0xda60b8d0u, 0x44042d73u, 0x33031de5u, 0xaa0a4c5fu, 0xdd0d7cc9u,
+        0x5005713cu, 0x270241aau, 0xbe0b1010u, 0xc90c2086u, 0x5768b525u, 0x206f85b3u, 0xb966d409u, 0xce61e49fu,
+        0x5edef90eu, 0x29d9c998u, 0xb0d09822u, 0xc7d7a8b4u, 0x59b33d17u, 0x2eb40d81u, 0xb7bd5c3bu, 0xc0ba6cadu,
+        0xedb88320u, 0x9abfb3b6u, 0x03b6e20cu, 0x74b1d29au, 0xead54739u, 0x9dd277afu, 0x04db2615u, 0x73dc1683u,
+        0xe3630b12u, 0x94643b84u, 0x0d6d6a3eu, 0x7a6a5aa8u, 0xe40ecf0bu, 0x9309ff9du, 0x0a00ae27u, 0x7d079eb1u,
+        0xf00f9344u, 0x8708a3d2u, 0x1e01f268u, 0x6906c2feu, 0xf762575du, 0x806567cbu, 0x196c3671u, 0x6e6b06e7u,
+        0xfed41b76u, 0x89d32be0u, 0x10da7a5au, 0x67dd4accu, 0xf9b9df6fu, 0x8ebeeff9u, 0x17b7be43u, 0x60b08ed5u,
+        0xd6d6a3e8u, 0xa1d1937eu, 0x38d8c2c4u, 0x4fdff252u, 0xd1bb67f1u, 0xa6bc5767u, 0x3fb506ddu, 0x48b2364bu,
+        0xd80d2bdau, 0xaf0a1b4cu, 0x36034af6u, 0x41047a60u, 0xdf60efc3u, 0xa867df55u, 0x316e8eefu, 0x4669be79u,
+        0xcb61b38cu, 0xbc66831au, 0x256fd2a0u, 0x5268e236u, 0xcc0c7795u, 0xbb0b4703u, 0x220216b9u, 0x5505262fu,
+        0xc5ba3bbeu, 0xb2bd0b28u, 0x2bb45a92u, 0x5cb36a04u, 0xc2d7ffa7u, 0xb5d0cf31u, 0x2cd99e8bu, 0x5bdeae1du,
+        0x9b64c2b0u, 0xec63f226u, 0x756aa39cu, 0x026d930au, 0x9c0906a9u, 0xeb0e363fu, 0x72076785u, 0x05005713u,
+        0x95bf4a82u, 0xe2b87a14u, 0x7bb12baeu, 0x0cb61b38u, 0x92d28e9bu, 0xe5d5be0du, 0x7cdcefb7u, 0x0bdbdf21u,
+        0x86d3d2d4u, 0xf1d4e242u, 0x68ddb3f8u, 0x1fda836eu, 0x81be16cdu, 0xf6b9265bu, 0x6fb077e1u, 0x18b74777u,
+        0x88085ae6u, 0xff0f6a70u, 0x66063bcau, 0x11010b5cu, 0x8f659effu, 0xf862ae69u, 0x616bffd3u, 0x166ccf45u,
+        0xa00ae278u, 0xd70dd2eeu, 0x4e048354u, 0x3903b3c2u, 0xa7672661u, 0xd06016f7u, 0x4969474du, 0x3e6e77dbu,
+        0xaed16a4au, 0xd9d65adcu, 0x40df0b66u, 0x37d83bf0u, 0xa9bcae53u, 0xdebb9ec5u, 0x47b2cf7fu, 0x30b5ffe9u,
+        0xbdbdf21cu, 0xcabac28au, 0x53b39330u, 0x24b4a3a6u, 0xbad03605u, 0xcdd70693u, 0x54de5729u, 0x23d967bfu,
+        0xb3667a2eu, 0xc4614ab8u, 0x5d681b02u, 0x2a6f2b94u, 0xb40bbe37u, 0xc30c8ea1u, 0x5a05df1bu, 0x2d02ef8du,
+    };
+    u32 result = 0;
+    for (u64 offset = 0; offset < bytes.length; offset += 1)
+    {
+        result = (result >> 8) ^ table[(result ^ bytes.pointer[offset]) & 255];
+    }
+    return result;
+}
+
+// Complete unscoped tags hash their friendly name; scoped tags hash their
+// unique name. Forward declarations and anonymous-tag special spellings use
+// the full record CRC. These buckets let debuggers resolve FwdRef records.
+BUSTER_GLOBAL_LOCAL bool pdb_type_record_hash(ByteSlice record, u32* hash)
+{
+    u16 leaf = 0;
+    bool valid = pdb_read_u16_checked(record, 2, &leaf);
+    bool tag = leaf == PDB_LF_STRUCTURE || leaf == PDB_LF_UNION || leaf == PDB_LF_ENUM;
+    String8 name = {0};
+    String8 unique_name = {0};
+    u16 properties = 0;
+    if (valid && tag)
+    {
+        valid = pdb_read_u16_checked(record, 6, &properties);
+        u64 name_offset = leaf == PDB_LF_ENUM ? 16 : pdb_skip_numeric(record, leaf == PDB_LF_STRUCTURE ? 20 : 12);
+        u64 name_end = pdb_skip_name(record, name_offset);
+        valid = valid && name_offset < record.length && name_end <= record.length;
+        if (valid)
+        {
+            name = (String8){.pointer = (char8*)(record.pointer + name_offset), .length = name_end - name_offset - 1};
+            if (properties & 0x0200)
+            {
+                u64 unique_end = pdb_skip_name(record, name_end);
+                valid = name_end < record.length && unique_end <= record.length;
+                if (valid)
+                {
+                    unique_name = (String8){.pointer = (char8*)(record.pointer + name_end), .length = unique_end - name_end - 1};
+                }
+            }
+        }
+    }
+    if (valid)
+    {
+        bool anonymous = false;
+        String8 anonymous_names[] = {S8_INITIALIZER("<unnamed-tag>"), S8_INITIALIZER("__unnamed")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(anonymous_names); index += 1)
+        {
+            String8 spelling = anonymous_names[index];
+            if (name.length >= spelling.length && !memcmp(name.pointer + name.length - spelling.length, spelling.pointer, spelling.length))
+            {
+                u64 prefix_length = name.length - spelling.length;
+                anonymous |= !prefix_length || (prefix_length >= 2 && name.pointer[prefix_length - 1] == ':' && name.pointer[prefix_length - 2] == ':');
+            }
+        }
+        anonymous = anonymous && (properties & 0x0200) != 0;
+        bool full = tag && !(properties & 0x0080) && !anonymous;
+        if (full && !(properties & 0x0100))
+        {
+            *hash = pdb_hash_string_v1(name);
+        }
+        else if (full && (properties & 0x0200))
+        {
+            *hash = pdb_hash_string_v1(unique_name);
+        }
+        else
+        {
+            *hash = pdb_hash_record_crc(record);
+        }
+    }
+    return valid;
+}
+
 // Scope links in .debug$S are not module-stream offsets: the split removes
 // subsection headers and interleaved line data, then the module adds a u32
 // signature. Reconstruct links from record nesting after flattening instead
@@ -939,11 +1050,190 @@ BUSTER_GLOBAL_LOCAL bool pdb_prepare_modules(Arena* arena, PdbInput input, PdbMo
     return valid;
 }
 
+// Global (GSI) and public symbol indexes. DbgHelp loads a PDB whose globals
+// and publics streams are empty only as "public symbols & lines"; a populated
+// index, as MS link and LLD write it, is what makes it a private PDB (#3411).
+// Layout follows the reference GSI: hash records (record offset + 1, one
+// reference) grouped into IPHR_HASH buckets by hashStringV1, a presence bitmap
+// of 4096 + 1 bits, then each present bucket's first record times 12 (the
+// in-memory HRFile stride readers rescale by).
+enum
+{
+    PDB_S_PUB32 = 0x110e,
+    PDB_S_PROCREF = 0x1125,
+    PDB_S_LPROCREF = 0x1127,
+    PDB_GSI_BUCKET_COUNT = 4096,
+    PDB_GSI_BITMAP_WORDS = (PDB_GSI_BUCKET_COUNT + 32) / 32,
+    PDB_GSI_HASH_RECORD_SIZE = 8,
+    PDB_GSI_BUCKET_OFFSET_UNIT = 12,
+    // CV_PUBSYMFLAGS fCode | fFunction.
+    PDB_PUBLIC_FUNCTION_FLAGS = 3,
+    // Field offsets from the start of a record, including its length prefix.
+    PDB_PROC_ADDRESS_OFFSET = 32,
+    PDB_PROC_NAME_OFFSET = 39,
+    PDB_DATA_ADDRESS_OFFSET = 8,
+    PDB_DATA_NAME_OFFSET = 14,
+};
+
+typedef struct PdbGsiEntry PdbGsiEntry;
+struct PdbGsiEntry
+{
+    String8 name;
+    u32 record_offset;
+    u32 bucket;
+};
+
+BUSTER_GLOBAL_LOCAL String8 pdb_record_name(ByteSlice symbols, u64 record, u64 name_offset, u64 size)
+{
+    String8 name = {0};
+    u64 start = record + name_offset;
+    u64 end = record + size;
+    if (start < end)
+    {
+        u64 cursor = start;
+        while (cursor < end && symbols.pointer[cursor])
+        {
+            cursor += 1;
+        }
+        if (cursor < end)
+        {
+            name = (String8){.pointer = (char8*)(symbols.pointer + start), .length = cursor - start};
+        }
+    }
+    return name;
+}
+
+// The reference GSI orders a bucket by name length, then case-insensitively
+// for ASCII names and bytewise otherwise; readers may rely on that order.
+BUSTER_GLOBAL_LOCAL bool pdb_gsi_name_less(String8 left, String8 right)
+{
+    bool less = left.length < right.length;
+    if (left.length == right.length)
+    {
+        bool ascii = true;
+        for (u64 index = 0; index < left.length; index += 1)
+        {
+            ascii = ascii && (u8)left.pointer[index] < 0x80 && (u8)right.pointer[index] < 0x80;
+        }
+        s32 order = 0;
+        for (u64 index = 0; index < left.length && !order; index += 1)
+        {
+            u8 a = (u8)left.pointer[index];
+            u8 b = (u8)right.pointer[index];
+            if (ascii)
+            {
+                a = (u8)(a >= 'A' && a <= 'Z' ? a + 32 : a);
+                b = (u8)(b >= 'A' && b <= 'Z' ? b + 32 : b);
+            }
+            order = (s32)a - (s32)b;
+        }
+        less = order < 0;
+    }
+    return less;
+}
+
+// Groups entries by bucket (counting sort) and orders each bucket; returns the
+// number of present buckets.
+BUSTER_GLOBAL_LOCAL u32 pdb_gsi_order(Arena* arena, PdbGsiEntry const* entries, u32 count, u32* order)
+{
+    u32* bucket_start = arena_allocate_zeroed(arena, u32, PDB_GSI_BUCKET_COUNT + 1);
+    for (u32 index = 0; index < count; index += 1)
+    {
+        bucket_start[entries[index].bucket + 1] += 1;
+    }
+    u32 present = 0;
+    for (u32 bucket = 0; bucket < PDB_GSI_BUCKET_COUNT; bucket += 1)
+    {
+        present += bucket_start[bucket + 1] != 0;
+        bucket_start[bucket + 1] += bucket_start[bucket];
+    }
+    u32* cursor = arena_allocate(arena, u32, PDB_GSI_BUCKET_COUNT);
+    memcpy(cursor, bucket_start, PDB_GSI_BUCKET_COUNT * sizeof(*cursor));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        order[cursor[entries[index].bucket]++] = index;
+    }
+    for (u32 bucket = 0; bucket < PDB_GSI_BUCKET_COUNT; bucket += 1)
+    {
+        for (u32 position = bucket_start[bucket] + 1; position < bucket_start[bucket + 1]; position += 1)
+        {
+            u32 moving = order[position];
+            u32 slot = position;
+            while (slot > bucket_start[bucket] && pdb_gsi_name_less(entries[moving].name, entries[order[slot - 1]].name))
+            {
+                order[slot] = order[slot - 1];
+                slot -= 1;
+            }
+            order[slot] = moving;
+        }
+    }
+    return present;
+}
+
+BUSTER_GLOBAL_LOCAL u64 pdb_gsi_size(u32 count, u32 present)
+{
+    return PDB_GSI_HASH_HEADER_SIZE + (u64)count * PDB_GSI_HASH_RECORD_SIZE + PDB_GSI_BITMAP_WORDS * 4u + (u64)present * 4u;
+}
+
+BUSTER_GLOBAL_LOCAL void pdb_gsi_emit(ByteWriter* out, PdbGsiEntry const* entries, u32 count, u32 const* order, u32 present)
+{
+    byte_writer_emit_u32_le(out, 0xffffffff);
+    byte_writer_emit_u32_le(out, PDB_GSI_HASH_VERSION);
+    byte_writer_emit_u32_le(out, count * PDB_GSI_HASH_RECORD_SIZE);
+    byte_writer_emit_u32_le(out, PDB_GSI_BITMAP_WORDS * 4u + present * 4u);
+    u32 bitmap[PDB_GSI_BITMAP_WORDS] = {0};
+    for (u32 index = 0; index < count; index += 1)
+    {
+        PdbGsiEntry const* entry = entries + order[index];
+        byte_writer_emit_u32_le(out, entry->record_offset + 1);
+        byte_writer_emit_u32_le(out, 1);
+        bitmap[entry->bucket / 32] |= 1u << (entry->bucket % 32);
+    }
+    for (u32 word = 0; word < PDB_GSI_BITMAP_WORDS; word += 1)
+    {
+        byte_writer_emit_u32_le(out, bitmap[word]);
+    }
+    // `order` is grouped by ascending bucket, so each bucket's first record is
+    // where the bucket number changes.
+    u32 emitted = 0;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        if (!index || entries[order[index]].bucket != entries[order[index - 1]].bucket)
+        {
+            byte_writer_emit_u32_le(out, index * PDB_GSI_BUCKET_OFFSET_UNIT);
+            emitted += 1;
+        }
+    }
+    out->overflow |= emitted != present;
+}
+
+// Stable bottom-up merge sort of `order` by `keys`, used for the publics
+// address map (section, then offset).
+BUSTER_GLOBAL_LOCAL void pdb_sort_by_key(u32* order, u32* scratch, u64 const* keys, u32 count)
+{
+    for (u64 width = 1; width < count; width *= 2)
+    {
+        for (u64 left = 0; left < count; left += 2 * width)
+        {
+            u64 middle = BUSTER_MIN(left + width, (u64)count);
+            u64 right = BUSTER_MIN(left + 2 * width, (u64)count);
+            u64 a = left;
+            u64 b = middle;
+            for (u64 out = left; out < right; out += 1)
+            {
+                bool take_left = a < middle && (b >= right || keys[order[a]] <= keys[order[b]]);
+                scratch[out] = take_left ? order[a++] : order[b++];
+            }
+        }
+        memcpy(order, scratch, (u64)count * sizeof(*order));
+    }
+}
+
 PdbResult pdb_build(Arena* arena, PdbInput input)
 {
     PdbResult result = {0};
     if (!arena || !input.section_count || !input.sections || input.section_count >= UINT16_MAX ||
-        input.module_count > UINT16_MAX - PDB_STREAM_COUNT + 1)
+        input.module_count > UINT16_MAX - PDB_STREAM_COUNT)
     {
         return result;
     }
@@ -999,7 +1289,20 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         total_source_file_count += source_counts[module_index];
     }
     String8* source_names = arena_allocate(arena, String8, total_source_file_count ? total_source_file_count : 1);
-    u32* all_names_offsets = arena_allocate(arena, u32, total_source_file_count ? total_source_file_count : 1);
+    // /names holds each distinct path once: every module that names a header
+    // points its checksum entry at the one copy, so the stream and its hash
+    // buckets grow with distinct paths rather than with module references.
+    // name_slots indexes unique_names by content, each slot a unique index
+    // plus one, under half full.
+    String8* unique_names = arena_allocate(arena, String8, total_source_file_count ? total_source_file_count : 1);
+    u32* unique_offsets = arena_allocate(arena, u32, total_source_file_count ? total_source_file_count : 1);
+    u32 unique_name_count = 0;
+    u64 name_slot_count = 16;
+    while (name_slot_count < (u64)total_source_file_count * 2 + 1)
+    {
+        name_slot_count <<= 1;
+    }
+    u32* name_slots = arena_allocate_zeroed(arena, u32, name_slot_count);
     u64 source_names_size = 0;
     u64 names_buffer_size = 1;
     u32 source_cursor = 0;
@@ -1025,14 +1328,26 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
             {
                 return result;
             }
-            source_names[source_cursor] = (String8){
+            String8 name = {
                 .pointer = (char8*)(split->string_table.pointer + string_offset),
                 .length = length,
             };
-            names_offsets[file_index] = (u32)names_buffer_size;
-            all_names_offsets[source_cursor] = names_offsets[file_index];
+            source_names[source_cursor] = name;
+            u64 slot = pdb_hash_string_v1(name) & (name_slot_count - 1);
+            while (name_slots[slot] && !string_equal(unique_names[name_slots[slot] - 1], name))
+            {
+                slot = (slot + 1) & (name_slot_count - 1);
+            }
+            if (!name_slots[slot])
+            {
+                unique_names[unique_name_count] = name;
+                unique_offsets[unique_name_count] = (u32)names_buffer_size;
+                unique_name_count += 1;
+                name_slots[slot] = unique_name_count;
+                names_buffer_size += length + 1;
+            }
+            names_offsets[file_index] = unique_offsets[name_slots[slot] - 1];
             source_cursor += 1;
-            names_buffer_size += length + 1;
             source_names_size += length + 1;
         }
         split->c13 = pdb_rebuild_c13(arena, modules[module_index].codeview_symbols, names_offsets, split->checksum_offsets, source_count);
@@ -1185,7 +1500,7 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     u64 ec_substream_size = align_forward(12 + 1 + 4 + 4 + 4, 4);
     u64 dbg_header_size = PDB_DBG_HEADER_COUNT * sizeof(u16);
     u64 names_bucket_capacity = 2;
-    while (names_bucket_capacity < (u64)source_file_count * 2 + 2)
+    while (names_bucket_capacity < (u64)unique_name_count * 2 + 2)
     {
         names_bucket_capacity *= 2;
     }
@@ -1210,6 +1525,7 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     }
     u64 names_key_capacity = 16;
     u32 stream_count = PDB_STREAM_COUNT + (module_count > 1 ? module_count - 1 : 0);
+    u32 tpi_hash_stream = live_count ? stream_count++ : UINT16_MAX;
     ByteWriter* streams = arena_allocate(arena, ByteWriter, stream_count);
     memset(streams, 0, (u64)stream_count * sizeof(*streams));
 #define PDB_STREAM_BEGIN(index, size)                                                                                                                          \
@@ -1244,15 +1560,26 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     // records have already been deduplicated and rewritten above; IPI remains
     // an empty but valid stream until the compiler emits id records.
     u64 type_record_bytes = 0;
+    u32 tpi_index_offset_count = 0;
     for (u32 live_position = 0; live_position < live_count; live_position += 1)
     {
         ByteSlice type = normalized[live[live_position]];
-        if (type.length >= UINT32_MAX - PDB_TPI_HEADER_SIZE - type_record_bytes)
+        tpi_index_offset_count += !live_position || (type_record_bytes + type.length) / 8192 > type_record_bytes / 8192;
+        if (type.length >= UINT32_MAX - PDB_TPI_HEADER_SIZE - type_record_bytes ||
+            (u64)live_count * 4 + (u64)tpi_index_offset_count * 8 >= UINT32_MAX)
         {
             return result;
         }
         type_record_bytes += type.length;
     }
+    u64 tpi_hash_values_size = (u64)live_count * 4;
+    // Counts were collected with the existing type-byte budget; hashes and
+    // sparse 8KiB offsets are written during the existing final TPI walk.
+    if (live_count)
+    {
+        PDB_STREAM_BEGIN(tpi_hash_stream, tpi_hash_values_size + (u64)tpi_index_offset_count * 8);
+    }
+    u64 tpi_index_offsets_size = 0;
     for (u32 pass = 0; pass < 2; pass += 1)
     {
         u32 stream_index = pass ? PDB_STREAM_IPI : PDB_STREAM_TPI;
@@ -1264,15 +1591,15 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         byte_writer_emit_u32_le(type_stream, 0x1000);
         byte_writer_emit_u32_le(type_stream, 0x1000 + (pass ? 0 : live_count));
         byte_writer_emit_u32_le(type_stream, (u32)(pass ? 0 : type_record_bytes));
-        byte_writer_emit_u16_le(type_stream, 0xffff);
-        byte_writer_emit_u16_le(type_stream, 0xffff);
+        byte_writer_emit_u16_le(type_stream, (u16)(pass ? UINT16_MAX : tpi_hash_stream));
+        byte_writer_emit_u16_le(type_stream, UINT16_MAX);
         byte_writer_emit_u32_le(type_stream, 4);
         byte_writer_emit_u32_le(type_stream, 0x3ffff);
         byte_writer_emit_u32_le(type_stream, 0);
+        byte_writer_emit_u32_le(type_stream, pass ? 0 : (u32)tpi_hash_values_size);
+        byte_writer_emit_u32_le(type_stream, pass ? 0 : (u32)tpi_hash_values_size);
         byte_writer_emit_u32_le(type_stream, 0);
-        byte_writer_emit_u32_le(type_stream, 0);
-        byte_writer_emit_u32_le(type_stream, 0);
-        byte_writer_emit_u32_le(type_stream, 0);
+        byte_writer_emit_u32_le(type_stream, pass ? 0 : (u32)tpi_hash_values_size);
         byte_writer_emit_u32_le(type_stream, 0);
         if (!pass)
         {
@@ -1282,9 +1609,29 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
                 if (type.length)
                 {
                     byte_writer_emit_bytes(type_stream, type.pointer, type.length);
+                    ByteWriter* hashes = streams + tpi_hash_stream;
+                    u32 hash = 0;
+                    hashes->overflow |= !pdb_type_record_hash(type, &hash);
+                    byte_writer_emit_u32_le(hashes, hash % 0x3ffff);
+                    u64 record_offset = type_stream->count - PDB_TPI_HEADER_SIZE - type.length;
+                    if (!live_position || (record_offset + type.length) / 8192 > record_offset / 8192)
+                    {
+                        ByteWriter offsets = byte_writer_make(hashes->bytes + tpi_hash_values_size + tpi_index_offsets_size,
+                                                             hashes->capacity - tpi_hash_values_size - tpi_index_offsets_size);
+                        byte_writer_emit_u32_le(&offsets, 0x1000 + live_position);
+                        byte_writer_emit_u32_le(&offsets, (u32)record_offset);
+                        hashes->overflow |= offsets.overflow;
+                        tpi_index_offsets_size += offsets.count;
+                    }
                 }
             }
         }
+    }
+
+    if (live_count)
+    {
+        streams[tpi_hash_stream].count += tpi_index_offsets_size;
+        byte_writer_patch_u32_le(streams + PDB_STREAM_TPI, 44, (u32)tpi_index_offsets_size);
     }
 
     // Stream 8: the image section table, which maps addresses to sections.
@@ -1443,28 +1790,156 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         byte_writer_emit_u16_le(dbi, index == PDB_DBG_HEADER_SECTION_HEADERS ? (u16)PDB_STREAM_SECTION_HEADERS : (u16)0xffff);
     }
 
-    // Streams 5 and 6 hold no records yet, but readers still expect their
-    // hash headers to be present and well formed.
-    PDB_STREAM_BEGIN(PDB_STREAM_GLOBALS, PDB_GSI_HASH_HEADER_SIZE);
-    ByteWriter* globals = streams + PDB_STREAM_GLOBALS;
-    byte_writer_emit_u32_le(globals, 0xffffffff);
-    byte_writer_emit_u32_le(globals, PDB_GSI_HASH_VERSION);
-    byte_writer_emit_u32_le(globals, 0);
-    byte_writer_emit_u32_le(globals, 0);
-    PDB_STREAM_BEGIN(PDB_STREAM_PUBLICS, PDB_PUBLICS_HEADER_SIZE + PDB_GSI_HASH_HEADER_SIZE);
+    // Streams 5-7: the global and public indexes over the symbol-records
+    // stream. A top-level procedure gets a module reference (S_PROCREF or
+    // S_LPROCREF naming its module-stream offset) and, when global, an S_PUB32;
+    // top-level data is copied into the globals and, when global, gets an
+    // S_PUB32. The first pass sizes everything, the second writes it.
+    u64 symbol_record_bytes = 0;
+    u32 global_count = 0;
+    u32 public_count = 0;
+    PdbGsiEntry* global_entries = 0;
+    PdbGsiEntry* public_entries = 0;
+    u64* public_keys = 0;
+    bool symbols_valid = true;
+    for (u32 pass = 0; pass < 2 && symbols_valid; pass += 1)
+    {
+        if (pass)
+        {
+            symbols_valid = symbol_record_bytes < UINT32_MAX;
+            global_entries = arena_allocate(arena, PdbGsiEntry, global_count ? global_count : 1);
+            public_entries = arena_allocate(arena, PdbGsiEntry, public_count ? public_count : 1);
+            public_keys = arena_allocate(arena, u64, public_count ? public_count : 1);
+            PDB_STREAM_BEGIN(PDB_STREAM_SYMBOL_RECORDS, symbol_record_bytes);
+            global_count = 0;
+            public_count = 0;
+        }
+        ByteWriter* symbol_records = streams + PDB_STREAM_SYMBOL_RECORDS;
+        for (u32 module_index = 0; module_index < module_count && symbols_valid; module_index += 1)
+        {
+            ByteSlice symbols = splits[module_index].symbols;
+            u64 offset = 0;
+            u32 depth = 0;
+            while (offset < symbols.length && symbols_valid)
+            {
+                u16 length = 0;
+                u16 kind = 0;
+                symbols_valid = pdb_read_u16_checked(symbols, offset, &length) && pdb_read_u16_checked(symbols, offset + 2, &kind);
+                u64 size = 2 + (u64)length;
+                symbols_valid = symbols_valid && size <= symbols.length - offset;
+                bool procedure = kind == PDB_S_GPROC32 || kind == PDB_S_LPROC32;
+                bool data = kind == PDB_S_GDATA32 || kind == PDB_S_LDATA32;
+                String8 name = {0};
+                if (symbols_valid && !depth && (procedure || data))
+                {
+                    name = pdb_record_name(symbols, offset, procedure ? PDB_PROC_NAME_OFFSET : PDB_DATA_NAME_OFFSET, size);
+                }
+                if (name.length)
+                {
+                    bool global = kind == PDB_S_GPROC32 || kind == PDB_S_GDATA32;
+                    u64 reference_size = procedure ? align_forward(2 + 2 + 4 + 4 + 2 + name.length + 1, 4) : align_forward(size, 4);
+                    u64 public_size = align_forward(2 + 2 + 4 + 4 + 2 + name.length + 1, 4);
+                    symbols_valid = reference_size <= UINT16_MAX && public_size <= UINT16_MAX;
+                    if (!pass)
+                    {
+                        symbol_record_bytes += reference_size + (global ? public_size : 0);
+                        global_count += 1;
+                        public_count += global;
+                    }
+                    else if (symbols_valid)
+                    {
+                        u64 record = symbol_records->count;
+                        global_entries[global_count] = (PdbGsiEntry){
+                            .name = name,
+                            .record_offset = (u32)record,
+                            .bucket = pdb_hash_string_v1(name) % PDB_GSI_BUCKET_COUNT,
+                        };
+                        if (procedure)
+                        {
+                            byte_writer_emit_u16_le(symbol_records, (u16)(reference_size - 2));
+                            byte_writer_emit_u16_le(symbol_records, global ? PDB_S_PROCREF : PDB_S_LPROCREF);
+                            byte_writer_emit_u32_le(symbol_records, 0);
+                            byte_writer_emit_u32_le(symbol_records, (u32)(4 + offset));
+                            byte_writer_emit_u16_le(symbol_records, (u16)(module_index + 1));
+                            byte_writer_emit_bytes(symbol_records, name.pointer, name.length);
+                            byte_writer_emit_zero(symbol_records, 1);
+                        }
+                        else
+                        {
+                            byte_writer_emit_bytes(symbol_records, symbols.pointer + offset, size);
+                            byte_writer_patch_u16_le(symbol_records, record, (u16)(reference_size - 2));
+                        }
+                        byte_writer_align4(symbol_records);
+                        global_count += 1;
+                        if (global)
+                        {
+                            u64 address = offset + (procedure ? PDB_PROC_ADDRESS_OFFSET : PDB_DATA_ADDRESS_OFFSET);
+                            u32 section_offset = pdb_read_u32(symbols, address);
+                            u16 section = 0;
+                            memcpy(&section, symbols.pointer + address + 4, sizeof(section));
+                            u64 public_record = symbol_records->count;
+                            byte_writer_emit_u16_le(symbol_records, (u16)(public_size - 2));
+                            byte_writer_emit_u16_le(symbol_records, PDB_S_PUB32);
+                            byte_writer_emit_u32_le(symbol_records, procedure ? PDB_PUBLIC_FUNCTION_FLAGS : 0);
+                            byte_writer_emit_u32_le(symbol_records, section_offset);
+                            byte_writer_emit_u16_le(symbol_records, section);
+                            byte_writer_emit_bytes(symbol_records, name.pointer, name.length);
+                            byte_writer_emit_zero(symbol_records, 1);
+                            byte_writer_align4(symbol_records);
+                            public_entries[public_count] = (PdbGsiEntry){
+                                .name = name,
+                                .record_offset = (u32)public_record,
+                                .bucket = pdb_hash_string_v1(name) % PDB_GSI_BUCKET_COUNT,
+                            };
+                            public_keys[public_count] = (u64)section << 32 | section_offset;
+                            public_count += 1;
+                        }
+                    }
+                }
+                bool opens = procedure || kind == PDB_S_GPROC32_ID || kind == PDB_S_LPROC32_ID || kind == PDB_S_BLOCK32 ||
+                             kind == PDB_S_INLINESITE || kind == PDB_S_THUNK32;
+                bool closes = kind == PDB_S_END || kind == PDB_S_INLINESITE_END || kind == PDB_S_PROC_ID_END;
+                symbols_valid = symbols_valid && (!closes || depth);
+                depth = opens ? depth + 1 : closes && depth ? depth - 1 : depth;
+                offset += size;
+            }
+        }
+    }
+    if (!symbols_valid || streams[PDB_STREAM_SYMBOL_RECORDS].count != symbol_record_bytes)
+    {
+        return result;
+    }
+    u32* global_order = arena_allocate(arena, u32, global_count ? global_count : 1);
+    u32* public_order = arena_allocate(arena, u32, public_count ? public_count : 1);
+    u32 global_present = pdb_gsi_order(arena, global_entries, global_count, global_order);
+    u32 public_present = pdb_gsi_order(arena, public_entries, public_count, public_order);
+    u64 global_hash_size = pdb_gsi_size(global_count, global_present);
+    u64 public_hash_size = pdb_gsi_size(public_count, public_present);
+    PDB_STREAM_BEGIN(PDB_STREAM_GLOBALS, global_hash_size);
+    pdb_gsi_emit(streams + PDB_STREAM_GLOBALS, global_entries, global_count, global_order, global_present);
+    PDB_STREAM_BEGIN(PDB_STREAM_PUBLICS, PDB_PUBLICS_HEADER_SIZE + public_hash_size + (u64)public_count * 4);
     ByteWriter* publics = streams + PDB_STREAM_PUBLICS;
-    byte_writer_emit_u32_le(publics, PDB_GSI_HASH_HEADER_SIZE);
-    byte_writer_emit_u32_le(publics, 0);
+    byte_writer_emit_u32_le(publics, (u32)public_hash_size);
+    byte_writer_emit_u32_le(publics, public_count * 4);
     byte_writer_emit_u32_le(publics, 0);
     byte_writer_emit_u32_le(publics, 0);
     byte_writer_emit_u16_le(publics, 0);
     byte_writer_emit_u16_le(publics, 0);
     byte_writer_emit_u32_le(publics, 0);
     byte_writer_emit_u32_le(publics, 0);
-    byte_writer_emit_u32_le(publics, 0xffffffff);
-    byte_writer_emit_u32_le(publics, PDB_GSI_HASH_VERSION);
-    byte_writer_emit_u32_le(publics, 0);
-    byte_writer_emit_u32_le(publics, 0);
+    pdb_gsi_emit(publics, public_entries, public_count, public_order, public_present);
+    // The address map lists public record offsets by (section, offset).
+    u32* address_order = arena_allocate(arena, u32, public_count ? public_count : 1);
+    u32* address_scratch = arena_allocate(arena, u32, public_count ? public_count : 1);
+    for (u32 index = 0; index < public_count; index += 1)
+    {
+        address_order[index] = index;
+    }
+    pdb_sort_by_key(address_order, address_scratch, public_keys, public_count);
+    for (u32 index = 0; index < public_count; index += 1)
+    {
+        byte_writer_emit_u32_le(publics, public_entries[address_order[index]].record_offset);
+    }
     // Stream 10: the checked byte capacity also bounds the bucket count to u32.
     u32 names_bucket_count = (u32)names_bucket_capacity;
     PDB_STREAM_BEGIN(PDB_STREAM_NAMES, names_capacity);
@@ -1473,25 +1948,24 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     byte_writer_emit_u32_le(names, 1);
     byte_writer_emit_u32_le(names, (u32)names_buffer_size);
     byte_writer_emit_zero(names, 1);
-    for (u32 file_index = 0; file_index < source_file_count; file_index += 1)
+    for (u32 name_index = 0; name_index < unique_name_count; name_index += 1)
     {
-        byte_writer_emit_bytes(names, source_names[file_index].pointer, source_names[file_index].length);
+        byte_writer_emit_bytes(names, unique_names[name_index].pointer, unique_names[name_index].length);
         byte_writer_emit_zero(names, 1);
     }
     byte_writer_emit_u32_le(names, names_bucket_count);
     u64 names_bucket_start = names->count;
     byte_writer_emit_zero(names, (u64)names_bucket_count * 4);
-    for (u32 file_index = 0; file_index < source_file_count; file_index += 1)
+    for (u32 name_index = 0; name_index < unique_name_count; name_index += 1)
     {
-        u32 bucket = pdb_hash_string_v1(source_names[file_index]) % names_bucket_count;
+        u32 bucket = pdb_hash_string_v1(unique_names[name_index]) % names_bucket_count;
         while (pdb_read_u32((ByteSlice){.pointer = names->bytes, .length = names->count}, names_bucket_start + (u64)bucket * 4))
         {
             bucket = (bucket + 1) % names_bucket_count;
         }
-        byte_writer_patch_u32_le(names, names_bucket_start + (u64)bucket * 4, all_names_offsets[file_index]);
+        byte_writer_patch_u32_le(names, names_bucket_start + (u64)bucket * 4, unique_offsets[name_index]);
     }
-    byte_writer_emit_u32_le(names, source_file_count);
-    // Stream 7 stays empty: no symbol records are published yet.
+    byte_writer_emit_u32_le(names, unique_name_count);
     for (u32 index = 0; index < stream_count; index += 1)
     {
         if (streams[index].overflow)

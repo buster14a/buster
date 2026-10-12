@@ -132,6 +132,7 @@
 #include <buster/tests/compiler/pdb/pdb_test.h>
 #include <buster/tests/compiler/object/object_test.h>
 #include <buster/tests/compiler/jit/jit_test.h>
+#include <buster/tests/compiler/embed/embed_test.h>
 #include <buster/tests/compiler/link/link_test.h>
 #include <buster/tests/compiler/gpu/gpu_test.h>
 #include <buster/tests/compiler/spirv/spirv_test.h>
@@ -198,6 +199,7 @@
 #include <buster/tests/compiler/pdb/pdb_test.c>
 #include <buster/tests/compiler/object/object_test.c>
 #include <buster/tests/compiler/jit/jit_test.c>
+#include <buster/tests/compiler/embed/embed_test.c>
 #include <buster/tests/compiler/link/link_test.c>
 #include <buster/tests/compiler/gpu/gpu_test.c>
 #include <buster/tests/compiler/spirv/spirv_test.c>
@@ -920,6 +922,7 @@ typedef enum TestId
     TEST_ID_PDB,
     TEST_ID_OBJECT,
     TEST_ID_JIT,
+    TEST_ID_EMBED,
     TEST_ID_LINK,
     TEST_ID_GPU_PIPELINE,
     TEST_ID_SPIRV_COMPUTE,
@@ -993,6 +996,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_PDB] = {S8_INITIALIZER("pdb_tests"), &pdb_tests, !BUSTER_IOS},
     [TEST_ID_OBJECT] = {S8_INITIALIZER("object_tests"), &object_tests},
     [TEST_ID_JIT] = {S8_INITIALIZER("jit_tests"), &jit_tests},
+    [TEST_ID_EMBED] = {S8_INITIALIZER("embed_tests"), &embed_tests},
     [TEST_ID_LINK] = {S8_INITIALIZER("link_tests"), &link_tests, !BUSTER_ANDROID && !BUSTER_IOS},
     [TEST_ID_GPU_PIPELINE] = {S8_INITIALIZER("gpu_pipeline_tests"), &gpu_pipeline_tests},
     [TEST_ID_SPIRV_COMPUTE] = {S8_INITIALIZER("spirv_compute_tests"), &spirv_compute_tests},
@@ -1177,11 +1181,11 @@ bool buster_test_module_selection_check(String8 selection)
     return result;
 }
 
-// Match the native parent independently. Windows x64's checked frontend
-// dominates the old rest group; ARM retains the better-balanced driver split.
+// Match the native parent independently. The frontend dominates the rest
+// group on sanitized lanes; Windows ARM keeps the driver split.
 BUSTER_GLOBAL_LOCAL String8 test_module_group_primary_name(void)
 {
-    String8 result = BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64 ? S8("c_frontend_tests") : S8("compiler_driver_tests");
+    String8 result = BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 ? S8("compiler_driver_tests") : S8("c_frontend_tests");
     return result;
 }
 
@@ -1515,6 +1519,113 @@ TestProcessEnvironment buster_test_process_environment_with_override(Arena* aren
     BUSTER_UNUSED(arena);
     BUSTER_UNUSED(name);
     BUSTER_UNUSED(value);
+#endif
+    return result;
+}
+
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+// One silent, complete identity query; its stdout is returned in arena.
+BUSTER_GLOBAL_LOCAL bool test_reference_identity_query(Arena* arena, String8 compiler, String8 const* options, u64 option_count,
+                                                       const TestProcessEnvironment* environment, String8* output)
+{
+    bool result = false;
+    String8 command[8] = {compiler};
+    u64 count = 1;
+    for (u64 index = 0; index < option_count && count < BUSTER_ARRAY_LENGTH(command); index += 1)
+    {
+        command[count] = options[index];
+        count += 1;
+    }
+    *output = (String8){0};
+    ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = command, .length = count}, environment->keys, environment->values,
+        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .new_process_group = true, .search_path = false,
+            .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_KB(64), [STANDARD_STREAM_ERROR] = BUSTER_KB(64)},
+                               .total = BUSTER_KB(128)},
+            .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
+    if (spawn.handle)
+    {
+        ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, 30000000);
+        *output = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_OUTPUT]);
+        result = waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out && !waited.capture_failed &&
+                 !waited.capture_limit_exceeded && !waited.output_truncated && !waited.process_tree_cleanup_failed &&
+                 !waited.process_group_reservation_retained && !waited.process_group_ownership_lost &&
+                 waited.observed_bytes[STANDARD_STREAM_ERROR] == 0;
+    }
+    return result;
+}
+#endif
+
+u32 buster_test_reference_gcc_major(Arena* arena, String8 version, String8 target, String8 profile)
+{
+    u32 result = 0;
+#if BUSTER_CPU_ARCH_X86_64
+    String8 architecture = S8("x86_64");
+    String8 architecture_macro = S8("#define __x86_64__ 1\n");
+#else
+    String8 architecture = S8("aarch64");
+    String8 architecture_macro = S8("#define __aarch64__ 1\n");
+#endif
+    bool native = string_first_sequence(target, architecture) == 0 &&
+                  string_first_sequence(target, S8("linux")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(profile, S8("#define __linux__ 1\n")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(profile, architecture_macro) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(profile, S8("#define __clang__")) == BUSTER_STRING_NO_MATCH;
+    String8 gnuc = S8("#define __GNUC__ ");
+    u64 gnuc_offset = string_first_sequence(profile, gnuc);
+    if (native && gnuc_offset != BUSTER_STRING_NO_MATCH && string_first_sequence(version, S8("gcc ")) == 0)
+    {
+        String8 tail = string_slice(profile, gnuc_offset + gnuc.length, profile.length);
+        u64 tail_newline = string_first_sequence(tail, S8("\n"));
+        IntegerParsingU64 major = tail_newline == BUSTER_STRING_NO_MATCH ? (IntegerParsingU64){0} :
+            string8_parse_u64_decimal(string_slice(tail, 0, tail_newline));
+        bool parsed = major.status == INTEGER_PARSING_SUCCESS && major.length == tail_newline && major.value && major.value < 1000;
+        // Bind the final release token, e.g. "11.5.0" in "gcc (Ubuntu 11.5.0-1ubuntu1) 11.5.0";
+        // the package description in parentheses may name a different release.
+        u64 release_offset = 0;
+        for (u64 index = 0; index < version.length; index += 1)
+        {
+            release_offset = version.pointer[index] == ' ' ? index + 1 : release_offset;
+        }
+        String8 release = string_slice(version, release_offset, version.length);
+        String8 release_prefix = parsed ? string_format(arena, S8("{u64}."), major.value) : (String8){0};
+        if (parsed && release.length > release_prefix.length && string_first_sequence(release, release_prefix) == 0)
+        {
+            result = (u32)major.value;
+        }
+    }
+    return result;
+}
+
+TestReferenceIdentity buster_test_reference_identity(Arena* arena, String8 compiler, const TestProcessEnvironment* environment)
+{
+    TestReferenceIdentity result = {0};
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
+    if (arena && compiler.length && environment)
+    {
+        String8 version_options[] = {S8("--version")};
+        String8 target_options[] = {S8("-dumpmachine")};
+        String8 profile_options[] = {S8("-nostdinc"), S8("-dM"), S8("-E"), S8("-x"), S8("c"), S8("/dev/null")};
+        String8 version_output = {0};
+        String8 target_output = {0};
+        String8 profile_output = {0};
+        bool version_ok = test_reference_identity_query(arena, compiler, version_options, BUSTER_ARRAY_LENGTH(version_options),
+                                                        environment, &version_output);
+        bool target_ok = test_reference_identity_query(arena, compiler, target_options, BUSTER_ARRAY_LENGTH(target_options),
+                                                       environment, &target_output);
+        bool profile_ok = test_reference_identity_query(arena, compiler, profile_options, BUSTER_ARRAY_LENGTH(profile_options),
+                                                        environment, &profile_output);
+        u64 version_newline = string_first_sequence(version_output, S8("\n"));
+        u64 target_newline = string_first_sequence(target_output, S8("\n"));
+        result.version = version_newline == BUSTER_STRING_NO_MATCH ? version_output : string_slice(version_output, 0, version_newline);
+        result.target = target_newline == BUSTER_STRING_NO_MATCH ? target_output : string_slice(target_output, 0, target_newline);
+        result.observed = version_ok && target_ok && profile_ok && result.version.length && result.target.length;
+        result.gcc_major = result.observed ? buster_test_reference_gcc_major(arena, result.version, result.target, profile_output) : 0;
+    }
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(compiler);
+    BUSTER_UNUSED(environment);
 #endif
     return result;
 }
@@ -2091,6 +2202,50 @@ BUSTER_GLOBAL_LOCAL void test_process_observation_set_capture(TestProcessObserva
     observation->wait.captured_total = output.length + error.length;
 }
 
+// Reference identity accepts only a native, non-Clang GCC whose version line
+// and __GNUC__ agree. Each negative removes one witness from the positive.
+BUSTER_GLOBAL_LOCAL bool test_reference_gcc_major_self_test(void)
+{
+    bool result = false;
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
+    if (arena)
+    {
+#if BUSTER_CPU_ARCH_X86_64
+        String8 target = S8("x86_64-linux-gnu");
+        String8 architecture_macro = S8("#define __x86_64__ 1\n");
+#else
+        String8 target = S8("aarch64-linux-gnu");
+        String8 architecture_macro = S8("#define __aarch64__ 1\n");
+#endif
+        String8 version = S8("gcc (Ubuntu 11.5.0-1ubuntu1~24.04.1) 11.5.0");
+        String8 profile = string_format(arena, S8("#define __GNUC__ 11\n#define __linux__ 1\n{S8}"), architecture_macro);
+        String8 clang_profile = string_format(arena, S8("{S8}#define __clang__ 1\n"), profile);
+        String8 foreign_profile = string_format(arena, S8("#define __GNUC__ 11\n{S8}"), architecture_macro);
+        String8 malformed_profile = string_format(arena, S8("#define __GNUC__ 11x\n#define __linux__ 1\n{S8}"), architecture_macro);
+        bool accepted = buster_test_reference_gcc_major(arena, version, target, profile) == 11;
+        bool clang_refused = buster_test_reference_gcc_major(arena, version, target, clang_profile) == 0;
+        bool disagreeing_release_refused = buster_test_reference_gcc_major(arena, S8("gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"),
+                                                                    target, profile) == 0;
+        bool other_driver_refused = buster_test_reference_gcc_major(arena, S8("cc (GCC) 11.5.0"), target, profile) == 0;
+        bool foreign_target_refused = buster_test_reference_gcc_major(arena, version, S8("arm-none-eabi"), profile) == 0;
+        bool non_linux_profile_refused = buster_test_reference_gcc_major(arena, version, target, foreign_profile) == 0;
+        bool malformed_major_refused = buster_test_reference_gcc_major(arena, version, target, malformed_profile) == 0;
+        bool empty_refused = buster_test_reference_gcc_major(arena, (String8){0}, (String8){0}, (String8){0}) == 0;
+        // The package description must not stand in for the final release token, in either direction.
+        bool old_description_new_release_refused = buster_test_reference_gcc_major(arena,
+            S8("gcc (Ubuntu 11.5.0-1ubuntu1~24.04.1) 13.3.0"), target, profile) == 0;
+        String8 profile_13 = string_format(arena, S8("#define __GNUC__ 13\n#define __linux__ 1\n{S8}"), architecture_macro);
+        bool new_description_old_release_refused = buster_test_reference_gcc_major(arena,
+            S8("gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 11.5.0"), target, profile_13) == 0;
+        bool release_suffix_refused = buster_test_reference_gcc_major(arena, S8("gcc (GCC) 111.0.0"), target, profile) == 0;
+        result = accepted && clang_refused && disagreeing_release_refused && other_driver_refused && foreign_target_refused &&
+                 non_linux_profile_refused && malformed_major_refused && empty_refused && old_description_new_release_refused &&
+                 new_description_old_release_refused && release_suffix_refused;
+        result = arena_destroy(arena, 1) && result;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool test_oracle_probe_disposition_self_test(void)
 {
     bool result = false;
@@ -2615,6 +2770,7 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
               string_first_sequence(text, S8("case=success-with-native-signal")) != BUSTER_STRING_NO_MATCH;
 #endif
     passed &= test_oracle_probe_disposition_self_test();
+    passed &= test_reference_gcc_major_self_test();
     passed = arena_destroy(arena, 1) && passed;
     passed = arena_destroy(output, 1) && passed;
     return passed;
@@ -3229,6 +3385,35 @@ String8 buster_test_temporary_unique_path(Arena* arena, String8 name, String8 su
     String8 result = buster_test_temporary_path(arena, name, unique_suffix);
     return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+OsError buster_test_executable_delete(UnitTestArguments* arguments, String8 path)
+{
+    // DeleteFileW refuses a mapped image or an open handle without
+    // FILE_SHARE_DELETE. Retry only cleanup, never compilation or execution.
+    u64 start = os_now_microseconds();
+    OsError error = os_file_delete_checked(path);
+    OsError first_error = error;
+    u32 attempts = 1;
+#if BUSTER_WINDOWS
+    enum { RETRY_MICROSECONDS = 500000, RETRY_MILLISECONDS = 10, MAX_ATTEMPTS = 51 };
+    while ((error.v == ERROR_SHARING_VIOLATION || error.v == ERROR_ACCESS_DENIED) &&
+           attempts < MAX_ATTEMPTS && os_now_microseconds() - start < RETRY_MICROSECONDS)
+    {
+        Sleep(RETRY_MILLISECONDS);
+        error = os_file_delete_checked(path);
+        attempts += 1;
+    }
+#endif
+    if (first_error.v)
+    {
+        arguments->show(arguments, S8("TEST_EXECUTABLE_CLEANUP path={S8} first_error={u32} final_error={u32} attempts={u32} elapsed_us={u64} status={S8} error={EOs}\n"),
+                        path, first_error.v, error.v, attempts, os_now_microseconds() - start,
+                        error.v ? S8("failed") : S8("recovered"), error);
+    }
+    return error;
+}
+#endif
 
 void default_show(UnitTestArguments* arguments, String8 format, ...)
 {
