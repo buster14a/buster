@@ -64,6 +64,12 @@ binary size. Call `llvm_bitcode_artifact_is_valid` before consuming the bytes.
 Deterministic emission is the default. Types, constants, globals, functions,
 basic blocks, and instruction results receive stable IDs before records are
 written, so identical canonical IR and options produce identical bitcode.
+Requested global and function sections receive one-based IDs in first-seen
+order (globals, then functions). A content-keyed hash index locates those IDs
+without rescanning prior names; declarations and absent names keep ID zero.
+Equal names share an ID even when their storage differs. The index never
+determines record order.
+
 The unit test emits the same module twice, compares every byte, verifies the
 bitcode magic, and checks the reported counts.
 
