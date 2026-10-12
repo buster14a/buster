@@ -3435,6 +3435,9 @@ BUSTER_GLOBAL_LOCAL MachineFastFrameAddresses machine_fast_certify_frame_address
     memset(value_offsets, 0xff, (u64)value_axis * sizeof(*value_offsets));
     memset(addressed, 0, function->stack_slot_count);
     memset(safe, 1, function->stack_slot_count);
+    // Copies, uses and edge sources only refine values a frame address row
+    // certifies here; without one the remaining walks change nothing.
+    bool certified = false;
     for (u32 row = 0; row < function->instruction_count; row += 1)
     {
         MachineInstruction const* instruction = function->instructions + row;
@@ -3456,6 +3459,7 @@ BUSTER_GLOBAL_LOCAL MachineFastFrameAddresses machine_fast_certify_frame_address
                 {
                     value_slots[value] = slot;
                     value_offsets[value] = instruction->payload;
+                    certified = true;
                 }
                 else
                 {
@@ -3468,7 +3472,7 @@ BUSTER_GLOBAL_LOCAL MachineFastFrameAddresses machine_fast_certify_frame_address
             }
         }
     }
-    for (u32 row = 0; row < function->instruction_count; row += 1)
+    for (u32 row = 0; certified && row < function->instruction_count; row += 1)
     {
         MachineInstruction const* instruction = function->instructions + row;
         if (instruction->opcode == MACHINE_X64_MOV_RR || instruction->opcode == MACHINE_A64_MOV_RR)
@@ -3499,10 +3503,9 @@ BUSTER_GLOBAL_LOCAL MachineFastFrameAddresses machine_fast_certify_frame_address
             }
         }
     }
-    for (u32 row = 0; row < function->instruction_count; row += 1)
+    for (u32 row = 0; certified && row < function->instruction_count; row += 1)
     {
         MachineInstruction const* instruction = function->instructions + row;
-        MachineScheduleMemoryAccess access = machine_schedule_frame_access(function, instruction);
         bool load_pointer = instruction->opcode == MACHINE_X64_LOAD_PTR8 || instruction->opcode == MACHINE_X64_LOAD_PTR16 ||
                             instruction->opcode == MACHINE_X64_LOAD_PTR32 || instruction->opcode == MACHINE_X64_LOAD_PTR64 ||
                             instruction->opcode == MACHINE_A64_LOAD_PTR8 || instruction->opcode == MACHINE_A64_LOAD_PTR16 ||
@@ -3530,6 +3533,9 @@ BUSTER_GLOBAL_LOCAL MachineFastFrameAddresses machine_fast_certify_frame_address
                                    value_offsets[machine_ref_payload(instruction->operands[0])] == value_offsets[value];
                 u32 width = machine_fast_pointer_width(instruction->opcode);
                 bool pointer_use = (load_pointer && operand == 1) || (store_pointer && operand == 0);
+                // Only a pointer use reads the row's frame access.
+                MachineScheduleMemoryAccess access = pointer_use ? machine_schedule_frame_access(function, instruction)
+                                                                 : (MachineScheduleMemoryAccess){0};
                 bool bounded = pointer_use && value_offsets[value] <= function->stack_slot_sizes[slot] &&
                                instruction->payload <= function->stack_slot_sizes[slot] - value_offsets[value] &&
                                width <= function->stack_slot_sizes[slot] - value_offsets[value] - instruction->payload &&
@@ -3538,7 +3544,7 @@ BUSTER_GLOBAL_LOCAL MachineFastFrameAddresses machine_fast_certify_frame_address
             }
         }
     }
-    for (u32 source = 0; source < function->edge_copy_source_count; source += 1)
+    for (u32 source = 0; certified && source < function->edge_copy_source_count; source += 1)
     {
         MachineRef reference = function->edge_copy_sources[source];
         u32 value = machine_ref_payload(reference);
