@@ -54,7 +54,7 @@ present is still checked.
 
 Map: validate_inline_bundle and validate_ast_pilot_bundle (opt-in flag pairs),
 validate_real_source_bundle, validate_production_profile_bundle and
-validate_compiler_probes_bundle (#2761 opt-in legs),
+validate_compiler_probes_bundle and validate_frontend_selector_bundle (#2761 opt-in legs),
 decide (pure decision), inventory_rows (discharged inventory rows),
 machine_record and machine_record_required (#2758 host facts), read_evidence,
 verify_analyzer_request_freshness (fresh request selectors), queue_delay, links,
@@ -95,6 +95,8 @@ from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE,
                               PRODUCTION_PROFILE_PROFILE, PRODUCTION_PROFILE_REQUEST_LINE, validate_production_profile,
                               COMPILER_PROBES_PROFILE, COMPILER_PROBES_REQUEST_LINE, compiler_probes_digest,
                               validate_compiler_probes,
+                              FRONTEND_SELECTOR_PROFILE, FRONTEND_SELECTOR_REQUEST_LINE, frontend_selector_digest,
+                              validate_frontend_selector,
                               MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
                               check_name, classify, classify_scaling, classify_throughput, host_problem, number,
                               range_label, regression_policy, render, SCALING_PROFILE, scaling_digest, validate_inline_acceptance,
@@ -325,6 +327,37 @@ def validate_compiler_probes_bundle(record: object, bundle: object, base: str, h
     return problems
 
 
+FRONTEND_SELECTOR_BUNDLE_FILES = {
+    "provenance": "frontend_selector/frontend_scaling/provenance.json",
+    "results": "frontend_selector/frontend_scaling/results.json",
+    "report": "frontend_selector/selection/report.json",
+    "bench": "frontend_selector/ide_bench/ide-bench.json",
+}
+
+
+def validate_frontend_selector_bundle(record: object, bundle: object, binaries: object) -> list[str]:
+    """Re-derive the requested #2761 frontend and selector probes from their exported records."""
+    if record is None:
+        return []
+    if not isinstance(record, dict) or record.get("requested") is not True:
+        return ["receipt frontend-selector record is present but not a request"]
+    problems: list[str] = []
+    if record.get("status") != "complete" or record.get("exits") != {"frontend_scaling": 0, "selection": 0}:
+        problems.append("receipt frontend-selector run did not complete successfully")
+    if record.get("request_line") != FRONTEND_SELECTOR_REQUEST_LINE:
+        problems.append("receipt frontend-selector request selector is not the exact supported line")
+    if record.get("profile") != FRONTEND_SELECTOR_PROFILE:
+        problems.append("receipt frontend-selector profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(FRONTEND_SELECTOR_BUNDLE_FILES):
+        return [*problems, "requested frontend-selector evidence bundle is incomplete"]
+    exits = record.get("exits") if isinstance(record.get("exits"), dict) else {}
+    problems.extend(validate_frontend_selector(exits.get("frontend_scaling"), bundle["provenance"], bundle["results"],
+                                               exits.get("selection"), bundle["report"], bundle["bench"], binaries))
+    if record.get("cells") != frontend_selector_digest(bundle["results"], bundle["report"], bundle["bench"]):
+        problems.append("receipt frontend-selector cells do not match the exported evidence")
+    return problems
+
+
 def decide(expected: dict, authorized: bool, compare_result: str, receipt: object, summary: object,
            policy_value: str, throughput: object = None, require_throughput: bool = True,
            extra_reasons: list[str] | None = None, *,
@@ -410,6 +443,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.append(f"{selected_profile['name']} cannot be combined with the PGO/LTO production profile")
                 if receipt.get("compiler_probes") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with the compiler probes")
+                if receipt.get("frontend_selector") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with the frontend-selector probes")
                 reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
                 reasons.extend(validate_analyzer_bundle(receipt,
                                                         analyzer_bundle.get("summary") if isinstance(analyzer_bundle, dict) else None,
@@ -475,6 +510,17 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.extend(validate_compiler_probes_bundle(receipt["compiler_probes"],
                                                                    corpus.get("compiler_probes_bundle"),
                                                                    expected.get("base", ""), expected.get("head", "")))
+                if receipt.get("frontend_selector") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("the frontend-selector probes are valid only in pull mode")
+                    if any(receipt.get(key) is not None for key in
+                           ("throughput_real_source", "ast_pilot_acceptance", "production_profile", "compiler_probes")):
+                        reasons.append("the frontend-selector probes cannot be combined with real-source throughput, "
+                                       "ast-pilot acceptance, the PGO/LTO production profile or the compiler probes")
+                    reasons.extend(validate_frontend_selector_bundle(receipt["frontend_selector"],
+                                                                     corpus.get("frontend_selector_bundle"),
+                                                                     receipt.get("binaries")))
             if compare_result != "success":
                 reasons.append(f"compare job result is {compare_result!r}, not success")
             if problem:
@@ -823,7 +869,7 @@ def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
     if receipt.get("throughput_profile") != THROUGHPUT_PROFILE or "scaling_profile" in receipt or \
             not isinstance(receipt.get("inline_acceptance"), dict) or receipt["inline_acceptance"].get("requested") is not False or \
             "ast_pilot_acceptance" in receipt or "throughput_real_source" in receipt or "production_profile" in receipt or \
-            "compiler_probes" in receipt:
+            "compiler_probes" in receipt or "frontend_selector" in receipt:
         raise ValueError("owned ordinary Main evidence changed the complete original corpus recipe")
     identity = receipt.get("identity")
     if not isinstance(identity, dict) or identity.get("trusted_revision") != route["main_measurement_revision"]:
@@ -1146,6 +1192,23 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         break
                 throughput["compiler_probes_bundle"] = (bundle if not problem and
                                                         len(bundle) == len(COMPILER_PROBES_BUNDLE_FILES) else None)
+            if isinstance(receipt, dict) and receipt.get("frontend_selector") is not None and not problem:
+                bundle = {}
+                for key, member in FRONTEND_SELECTOR_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required frontend-selector evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed"
+                        break
+                throughput["frontend_selector_bundle"] = (bundle if not problem and
+                                                          len(bundle) == len(FRONTEND_SELECTOR_BUNDLE_FILES) else None)
     return receipt, summary, problem, artifact, throughput
 
 
@@ -1214,12 +1277,14 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     head_real_count = head_lines.count(THROUGHPUT_REAL_SOURCE_REQUEST_LINE)
     head_production_count = head_lines.count(PRODUCTION_PROFILE_REQUEST_LINE)
     head_probes_count = head_lines.count(COMPILER_PROBES_REQUEST_LINE)
+    head_selector_count = head_lines.count(FRONTEND_SELECTOR_REQUEST_LINE)
     parent_analyzer_deltas = {line: [] for line in ANALYZER_REQUEST_LINES}
     parent_inline_counts = []
     ast_deltas = []
     real_deltas = []
     production_deltas = []
     probes_deltas = []
+    selector_deltas = []
     for parent in parent_shas:
         parent_bytes, problem = _github_file(api, parent)
         if problem:
@@ -1235,6 +1300,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
         real_deltas.append(head_real_count - parent_lines.count(THROUGHPUT_REAL_SOURCE_REQUEST_LINE))
         production_deltas.append(head_production_count - parent_lines.count(PRODUCTION_PROFILE_REQUEST_LINE))
         probes_deltas.append(head_probes_count - parent_lines.count(COMPILER_PROBES_REQUEST_LINE))
+        selector_deltas.append(head_selector_count - parent_lines.count(FRONTEND_SELECTOR_REQUEST_LINE))
     ast_record = receipt.get("ast_pilot_acceptance")
     if ast_record is not None and not all(delta == 1 for delta in ast_deltas):
         return ("the exact ast-pilot selector was not freshly added once at this head relative to every parent; "
@@ -1259,6 +1325,12 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
                 "parent; append one selector line for each explicit compiler-probes request")
     if probes_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in probes_deltas):
         return "a fresh compiler-probes selector has no compiler-probes record in the receipt"
+    selector_record = receipt.get("frontend_selector")
+    if selector_record is not None and not all(delta == 1 for delta in selector_deltas):
+        return ("the exact frontend-selector selector was not freshly added once at this head relative to every "
+                "parent; append one selector line for each explicit frontend-selector request")
+    if selector_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in selector_deltas):
+        return "a fresh frontend-selector selector has no frontend-selector record in the receipt"
     if analyzer_profile:
         selected_deltas = parent_analyzer_deltas[request_line]
         other_deltas = [delta for line, values in parent_analyzer_deltas.items() if line != request_line

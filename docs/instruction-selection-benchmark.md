@@ -32,9 +32,13 @@ argument and result, signed extension, indexed memory, and loop/branch forms.
 Python computes independent integer checksums modulo 2^64. `--check` executes
 them under each requested allocator and requires zero exit status and identical
 stdout/stderr bytes. It also exercises malformed command lines, empty and
-invalid sources, declaration-only input, and the current 25-argument selector
-fallback. Update that last fixture deliberately when the supported ABI limit
-changes; do not silently stop testing fallback rejection.
+invalid sources and declaration-only input. Its former 25-argument selector
+fallback fixture was dropped once that function began to select (since the
+removal of stack-only code generation; `--check` then failed on every run).
+No source is currently known to fall back, so live fallback rejection has no
+fixture. `parse_report` and the C command still refuse any result with
+`fallback_functions` above zero. Restore a fixture deliberately when an
+unsupported construct is identified.
 
 `--source path.c` is repeatable. Inputs must be self-contained: external
 include lookup is disabled. The input arena and macro-expansion budget are
