@@ -942,7 +942,8 @@ source and encoder paths did for this snapshot; they do not supply an
 independent architectural oracle for every form. The broader #2931 issue
 remains open for unrelated encoding defects and further proof.
 
-X86 source forms also include baseline `pause`, `prefetcht0`/`prefetcht1`/
+X86 source forms also include baseline `pause`, operand-free `rep nop` (also
+`repe nop` and `repz nop`), `prefetcht0`/`prefetcht1`/
 `prefetcht2`/`prefetchnta`, `clflush`, and 32/64-bit `movnti` stores. PAUSE is
 an unconditional REP-NOP hint; prefetch and cache-flush rows map to the existing
 SSE/SSE2 baseline. ADX and PCLMUL metadata aliases use `adx` and `pclmul`.
@@ -966,6 +967,9 @@ AVX-512 profiles and malformed neighbours. The driver's
 Buster listings with byte-identical text and captured pristine GCC 16.2.1
 `-O2 -S` scalar conversions. These bounded witnesses do not claim every
 metadata form or arbitrary external listing is source-complete (#2931).
+`assembly_test_x86_rep_nop` checks the operand-free REP-NOP aliases and
+malformed operands in both dialects; `compiler_driver_test_gcc_pause_listing`
+assembles the pristine GCC PAUSE loop with its maximum-skip alignment directives.
 
 On Mach-O, `.section SEGMENT,SECTION[,TYPE[,ATTRIBUTES]]` and
 `.pushsection` accept the pairs Buster's listing writer represents:
