@@ -541,7 +541,12 @@ hosts execute its independent expected-value fixture.
 - Shared FAST/QUALITY placement colors frame storage by lifetime instead of
   giving every spilled value and every stack slot its own bytes. Selector slots
   close their touched rows through a block-level liveness fixed point over
-  covering writes and upward-exposed reads. Allocator-created spill homes use
+  covering writes and upward-exposed reads. That solve
+  (`machine_fast_solve_liveness`, shared with the prepass value liveness)
+  always visits the lowest-ranked pending block in reverse postorder of the
+  reversed CFG, so a value carried through a deep loop nest reaches every inner
+  block in one pass instead of one pass per nesting level (#3771); the order
+  changes only the work, never the least fixed point. Allocator-created spill homes use
   the same closure on a direct acyclic block chain: a spill covers the previous
   contents of a home, while a reload before that spill reads the value arriving
   from a predecessor. Retroactive edge repairs at one machine point have no
@@ -1390,14 +1395,15 @@ combination. The retired direct emitter had no such path; current `none`
 selects MIR-stack.
 
 `va_arg` of a MEMORY-class struct, union or array aligned past sixteen bytes
-(`_Alignas(32)` or `_Alignas(64)`, any size from 32 bytes) takes the same
+(`_Alignas(32)` and up, any size from 32 bytes) takes the same
 overflow-only path: `machine_x64_va_arg_metadata` admits it through
 `machine_x64_va_arg_over_aligned_memory` (a single MEMORY part, a power-of-two
-alignment up to `MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT`), and the row
+alignment up to `MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT`, 2^31, the largest
+the row's sign-extended imm32 `add`/`and` rounding encodes), and the row
 rounds the cursor up to the alignment before the exact chunked copy. The
 verifier accepts that shape only for the x86-64 row that copies the record
 exactly (`wide_memory` in `machine_verify_function`); AArch64 and Win64 keep
 their sixteen-byte limit and an over-aligned scalar or vector still falls back
 with a structured refusal. `compiler_driver_test_sysv_packed_x87_overaligned_va_arg`
-covers 32- and 64-byte alignments, a 96-byte record, an odd overflow slot and
+covers 32-, 64-, 128- and 256-byte alignments, a 96-byte record, an odd overflow slot and
 `va_copy` in both compiler directions.
