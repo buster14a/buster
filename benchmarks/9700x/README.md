@@ -345,6 +345,18 @@ combined with the other opt-in profiles. Its evidence is under `link_tls/`
 in the artifact, and a partial, failed or cancelled leg fails the check.
 Its method is in [benchmarking.md](../../docs/agents/benchmarking.md).
 
+A fresh exact `profile: self-host-inline-compare-v1` line, added once against
+every parent, adds the self-built inline-mode leg (#58). After each role's
+Clang Release build, that `ide` builds its own revision's stage-1 compiler
+with `-fcanonical-inline`. After the corpus leg, the trusted
+`tools/bench_direct/selfhost_inline_compare.py` times the two stage-1
+compilers compiling the frozen merge-base tree with the same flag. It runs 30
+ABBA pairs on CPU 2 and requires byte-identical outputs, then runs the topdown
+and sampling profile steps for both. It is report-only and cannot be combined
+with the other opt-in profiles. Its evidence is under `selfhost_inline/` in
+the artifact, and a partial, failed or cancelled leg fails the check. Its
+method is in [benchmarking.md](../../docs/agents/benchmarking.md).
+
 V1 preserves its historical fixed 182-row qualification and 135-execution,
 47-alias candidate profile. V2 independently derives the ordered Release
 inventory and analyzer argument projection from the exact retained candidate

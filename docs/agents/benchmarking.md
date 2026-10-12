@@ -1407,6 +1407,63 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    90-minute `compare-pull` job next to the roughly 14-minute ordinary
    comparison. No job timeout changed.
 
+   **Issue #58 opt-in self-built inline-mode leg.** The same route accepts
+   one fresh exact line `profile: self-host-inline-compare-v1`, selected by
+   the same every-parent freshness rule. It is the Zen 5 route for
+   `uarch_lab:compare@self-host-inline-compare`, the compilers each side
+   would self-build with `-fcanonical-inline`. The #48 profile above times
+   one head against itself, inliner off against on; this one times base
+   against head, both with the inliner on. It cannot be combined with any
+   other opt-in profile, `canonical-inline-self-host-v1` included. The
+   trusted revision's `tools/bench_direct/selfhost_inline_compare.py` runs in
+   two parts:
+   - **Stage 1, untimed.** Right after each role's Clang Release build, with
+     that revision and its `build/generated` still checked out,
+     `build_selfhost_inline_stage1` runs the role's `ide` once with the
+     profile's `stage1_command`: the unity source with `-fcanonical-inline`.
+     It refuses a checkout that is not the role's revision, and inputs or a
+     compiler that change during the build. Each `stage1.json` records the
+     building compiler's SHA-256 and the stage-1 compiler's.
+   - **Timed comparison.** After the corpus leg, on the ordinary comparison's
+     frozen merge-base tree, `measure_selfhost_inline` runs
+     `uarch_lab.py compare` on the two stage-1 compilers with fixed
+     arguments: `--pairs 30 --warmups 1 --cpu 2 --profile-steps
+     topdown,sampling --require-identical-output --min-effect 0.5 --
+     -fcanonical-inline`. The outputs must be byte-identical before anything
+     is timed. Topdown runs each Zen 5 metric group (PipelineL1 and L2,
+     branch, decoder and op-cache, cache and TLB) for both compilers, and
+     the report lists the front-end rows. Sampling adds per-symbol movers.
+
+   `compiler_publish.py` re-validates the receipt's `selfhost_inline` record
+   against the seven exported documents under `selfhost_inline/`
+   (`validate_selfhost_inline` and
+   `selfhost_inline_compare.validate_compare_documents`). It refuses:
+   - a stage-1 record not built from its role's revision by the receipt's
+     binary with the frozen command;
+   - a result that did not time those stage-1 compilers on the merge-base
+     tree;
+   - a run that is not 30 complete deterministic fresh-copy ABBA pairs with
+     the fixed flags, CPU, floor and profile steps;
+   - outputs that differ, or a prepare, timed, topdown or sampling step that
+     did not complete;
+   - missing wall-time intervals, unavailable hardware counters, missing
+     instruction, cycle or branch-miss counts, or missing topdown metrics;
+   - a receipt digest that the exported summary does not give.
+
+   Every value is report-only. On a pull request the merge base is the
+   baseline; for #58 a draft head carries one selector variant against the
+   production selector.
+
+   Cost is an estimate (no hosted host has perf, and no Zen 5 group count is
+   on record). Each stage-1 build took 4.7 s with the Clang-built compiler on
+   a hosted Xeon, and one self-built compile took about 19 s there; the 9700X
+   compiles the same source with a Clang-built compiler in about 1.5 s. That
+   puts a self-built compile near 5 s, and 30 pairs, both profiles and their
+   multiplexed metric re-runs near 220 compiles, about 25 to 30 minutes. Its
+   45-minute leg timeout keeps it inside the unchanged 90-minute
+   `compare-pull` job. No job timeout changed; record the first receipt's
+   `selfhost_inline_seconds` before relying on the estimate.
+
    **Without perf (#2768).** Before the first timed run the lab runs
    `perf stat -- true` once (`probe_counters`). If perf is missing, exits
    nonzero (for example under a strict `perf_event_paranoid`), or writes no
