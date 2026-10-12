@@ -2082,7 +2082,11 @@ independent installed GCC and Clang preprocessing of the matrix and includes.
 depfile path comes from the object path by removing only the basename's last
 extension and appending `.d`; `-MF` overrides it. `-MT` adds a raw target,
 `-MQ` adds an escaped target, and the default target is the escaped object path.
-Multiple target options retain command-line order. `-MP` adds phony rules for
+Multiple target options retain command-line order, including repeats and empty
+fragments. Parsing retains raw/quoted fragments and joins them once with checked
+sizing; target storage and copying grow linearly with argument and output bytes.
+`compiler_driver_test_dependency_target_scaling` bounds actual parser arena growth
+at 128 and 2,048 targets, directly and through response files. `-MP` adds phony rules for
 header prerequisites. `-MF`, `-MT`, `-MQ`, and `-MP` require `-MD` or `-MMD`;
 explicit `-MF`/target options cannot be used with multiple inputs.
 

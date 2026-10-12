@@ -34979,6 +34979,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_shapes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_depfiles);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_dependency_target_scaling);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_dependency_files);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_idirafter);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_macro_prefix_map);
