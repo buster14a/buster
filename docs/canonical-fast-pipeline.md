@@ -269,9 +269,20 @@ once, by rule, in exactly one class:
   another rule).
 
 For each rule, `fold_late_<rule>` equals the sum of the three
-`fold_match_*_<rule>` counters. An inlined copy keeps its callee row's tag:
-a callee row foldable at its own commit stays direct or cascade, while one
-that folds only with the caller's arguments is post. The classes describe
+`fold_match_*_<rule>` counters. An inlined copy keeps its callee row's tag
+and the inliner adds a clone bit: a callee row foldable at its own commit
+stays direct or cascade, while one that folds only with the caller's
+arguments is post. `fold_match_clone_{direct,cascade,post}` count the clone
+share of each class; they are a split, not further folds.
+
+Survival follows each committed, non-clone birth-foldable row (direct or
+cascade) into FAST. `fold_survival_reached` counts those in functions FAST
+admits and `fold_survival_skipped` those in functions it declines (budget or
+provenance). `fold_survival_unfolded` counts reached rows that the fold pass
+did not fold in that run, for example because `fold` was not among the
+selected passes. Birth folds in functions that never reach
+`ir_fast_function` (`-fno-canonical-fast`, validation skips) or in rows
+deleted before FAST appear in neither. The classes describe
 the late folds FAST applied; birth folds in functions FAST never reaches stay
 in `fold_birth_*` only. These are hosted diagnostic counts, not performance
 evidence.

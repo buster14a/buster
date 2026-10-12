@@ -191,7 +191,13 @@
     X(FOLD_MATCH_POST_BINARY_LEFT_IDENTITY, fold_match_post_binary_left_identity) \
     X(FOLD_MATCH_POST_UNPROBED, fold_match_post_unprobed) \
     X(FOLD_MATCH_POST_UNFOLDABLE_AT_BIRTH, fold_match_post_unfoldable_at_birth) \
-    X(FOLD_MATCH_POST_RULE_CHANGED, fold_match_post_rule_changed)
+    X(FOLD_MATCH_POST_RULE_CHANGED, fold_match_post_rule_changed) \
+    X(FOLD_MATCH_CLONE_DIRECT, fold_match_clone_direct) \
+    X(FOLD_MATCH_CLONE_CASCADE, fold_match_clone_cascade) \
+    X(FOLD_MATCH_CLONE_POST, fold_match_clone_post) \
+    X(FOLD_SURVIVAL_REACHED, fold_survival_reached) \
+    X(FOLD_SURVIVAL_SKIPPED, fold_survival_skipped) \
+    X(FOLD_SURVIVAL_UNFOLDED, fold_survival_unfolded)
 
 typedef enum IrConstructionCounter
 {

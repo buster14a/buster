@@ -131,7 +131,7 @@ in `-fsource-metrics`:
   `commit_retractions`, `commit_truncated_rows`
 - `commit_reopened_markers`, `commit_finalized_blocks`
 - `cfg_terminator_checks`
-- `fold_birth_*`, `fold_late_*` and `fold_match_*`, the construction-time scalar fold census
+- `fold_birth_*`, `fold_late_*`, `fold_match_*` and `fold_survival_*`, the construction-time scalar fold census
   described in [the FAST pipeline](canonical-fast-pipeline.md#construction-time-fold-census-3010)
 
 They count exact events, not time. Compare them with the existing

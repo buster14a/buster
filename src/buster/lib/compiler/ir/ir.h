@@ -529,6 +529,19 @@ struct IrInstruction
 #endif
 };
 
+#if BUSTER_BENCH_ALLOCATIONS
+// IrInstruction.fold_birth: the low three bits are the IrFastFoldRule the
+// commit probe found (NONE when none), PROBED marks a row the C builder
+// committed, CASCADE a rule that needed earlier birth folds, CLONE a copy the
+// inliner made (the callee's verdict is kept), and LATE_FOLDED, cleared on
+// each FAST entry, a row that FAST's fold pass folded in the current run.
+#define IR_FAST_BIRTH_RULE_MASK 0x07u
+#define IR_FAST_BIRTH_LATE_FOLDED 0x10u
+#define IR_FAST_BIRTH_CLONE 0x20u
+#define IR_FAST_BIRTH_CASCADE 0x40u
+#define IR_FAST_BIRTH_PROBED 0x80u
+#endif
+
 BUSTER_CT_CHECK(IR_SIMD_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK((u32)IR_OPCODE_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK((u32)IR_CONVERSION_COUNT <= UINT8_MAX);
