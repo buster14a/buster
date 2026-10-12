@@ -41,7 +41,8 @@ repository's `main`. Its `alert` must link an existing documented heading.
 Each owner-requested fixed profile on the pull-compare route (PROFILE_ROWS)
 needs its own covered `<entry>@<profile>` row (`uarch_lab:compare@...`, or
 `build:bench_throughput@...` for a harness profile, or the entry's own row
-when the profile is its only Zen 5 route, as for `build:production_profile`) whose consumer
+when the profile is its only Zen 5 route, as for `build:production_profile`
+and the two compiler-internal probes of compiler-probes-v1) whose consumer
 validates that exact frozen profile, so a flag-pair profile cannot be added,
 or its validation dropped, without the inventory noticing.
 
@@ -86,6 +87,8 @@ PROFILE_ROWS = {
     "uarch_lab:compare@ast-pilot-acceptance": "AST_PILOT_ACCEPTANCE_PROFILE",
     "build:bench_throughput@throughput-real-source": "THROUGHPUT_REAL_SOURCE_PROFILE",
     "build:production_profile": "PRODUCTION_PROFILE_PROFILE",
+    "tool:fast_ra_scaling.c": "COMPILER_PROBES_PROFILE",
+    "tool:machine_line_mark_scaling.c": "COMPILER_PROBES_PROFILE",
 }
 
 
