@@ -204,9 +204,15 @@ The rules are `cast_identity`, `cast_constant`, `unary_constant`,
 suppress `ir_semantics` recording, so those counters keep measuring only the
 compiler's own semantic work. Rows that SSA construction inserts behind a commit
 (`ir_block_insert_instruction_after`) are not probed, and neither is
-inlined-callee output. A birth count also covers functions that FAST later skips
-or does not run (`-fno-canonical-fast`, budget and provenance skips), so compare
-it with `fold_late_*` from the same run only together with `IR_FAST` skips.
+inlined-callee output.
+
+`fold_birth_*` and `fold_late_*` count independent populations. Birth counts
+include functions that FAST later skips or does not run (`-fno-canonical-fast`,
+budget and provenance skips) and rows that later passes delete. Late counts
+include rows that SSA insertion, promotion and inlining add after commit. No
+per-row birth classification reaches FAST, so neither a birth/late ratio nor
+late minus birth attributes or bounds the late folds that were available at
+commit; that needs a matched per-row association.
 
 ## Tests
 
