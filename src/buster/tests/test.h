@@ -203,6 +203,9 @@ struct TestArenaScope
     String8 watch_parent;
     u64 watch_parent_index;
     TimeDataType start;
+    // The thread's C preprocessing unit serial at begin; a rewinding end
+    // releases the units registered since (GitHub #3431).
+    u64 preprocess_mark;
     bool module;
     bool timing;
     bool watch_parent_module;

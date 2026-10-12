@@ -1,0 +1,356 @@
+--- a/src/buster/lib/compiler/frontend/c/c_parse.c
++++ b/src/buster/lib/compiler/frontend/c/c_parse.c
+@@ -19199,30 +19199,86 @@
+ //             the machine combines it;
+ //   typedef   the name's entity, looked up as c_parse_qualified_typedef_type
+ //             looks it up, qualified by c_parse_add_qualified_type when a
+-//             const or volatile word stands in the list, as there.
++//             const or volatile word stands in the list, as there;
++//   tag       a root run's list may end in one tag reference instead: a
++//             STRUCT_, UNION_ or ENUM_SPECIFIER holding only its TAG_NAME.
++//             Its row is the core frame's (c_parse_scalar_type_core_begin):
++//             c_parse_tag_lookup in the run's scope, the standalone
++//             block-scope declaration's fresh identity, and a new tag row
++//             from c_parse_add_type when none is visible; then the scalar
++//             frame's qualified copy when a const or volatile word asks for
++//             one. A tag of another kind, which the core frame diagnoses,
++//             falls back after the identity answers are settled, which the
++//             machine's own settling then finds done.
+ // The declarator starts one past the list's last word. Rows are appended by
+ // the walker's calls (c_parse_type_identity_prepare, c_parse_intern_type,
+ // c_parse_add_qualified_type) in the walker's order, and nothing else is, so
+ // the type table is the machine's row for row. Anything else -- no list at the
+ // run's first token, a tag, typeof, an attribute, a word outside the plain
+-// set, a word after the list, a combination the machine diagnoses or a name
+-// that is not a typedef -- goes to the machine unchanged, counted under its
+-// CAstSpecifierFallback. Every rule is a fixed number of node and token reads
++// set, a word after the list, a combination the machine diagnoses, a name
++// that is not a typedef or a tag of another kind -- goes to the machine
++// unchanged, counted under its CAstSpecifierFallback. Members' lists that
++// hold a tag go to the machine too, as `input`. Every rule is a fixed number of node and token reads
+ // over the list's children; nothing recurses.
+ 
+ #if BUSTER_INCLUDE_TESTS
+ BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_parse_specifier_read_disabled;
++BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_parse_tag_verify;
++BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestAstTagVerify c_parse_tag_verified;
+ 
+ void c_test_ast_specifiers_set(bool enabled)
+ {
+     c_parse_specifier_read_disabled = !enabled;
+ }
++
++void c_test_ast_tags_verify_set(bool enabled)
++{
++    c_parse_tag_verify = enabled;
++}
++
++CTestAstTagVerify c_test_ast_tags_verify_take(void)
++{
++    CTestAstTagVerify taken = c_parse_tag_verified;
++    c_parse_tag_verified = (CTestAstTagVerify){0};
++    return taken;
++}
+ #endif
+ 
++// What a plain list names: primitive words, a typedef name or a tag.
++typedef enum CAstSpecifierBase
++{
++    C_AST_SPECIFIER_BASE_PRIMITIVE,
++    C_AST_SPECIFIER_BASE_TYPEDEF,
++    C_AST_SPECIFIER_BASE_TAG,
++} CAstSpecifierBase;
++
++// How c_parse_tree_specifiers_type reads a run: a member's, or a root run of a
++// standalone tag declaration (the scalar frame's tag_only_declaration).
++enum
++{
++    C_PARSE_TREE_SPECIFIERS_MEMBER = 1,
++    C_PARSE_TREE_SPECIFIERS_TAG_ONLY = 2,
++};
++
++// The presence data of a STRUCT_, UNION_ or ENUM_SPECIFIER that holds only its
++// TAG_NAME: no attributes, member or enumerator list, or fixed type.
++#define C_PARSE_TAG_REFERENCE_PRESENCE 2
++
++// Whether `child`, a TAG_NAME, and the node after it in `list`'s subtree are
++// a tag reference on consecutive tokens from `keyword`: the specifier on the
++// keyword, the name on the next token.
++BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_tree_tag_reference(CAst const* ast, u32 list, u32 child, u32 keyword)
++{
++    u32 kind = child + 1 < list ? ast->kinds[child + 1] : C_AST_TRANSLATION_UNIT;
++    return (kind == C_AST_STRUCT_SPECIFIER || kind == C_AST_UNION_SPECIFIER || kind == C_AST_ENUM_SPECIFIER) &&
++           ast->data[child + 1] == C_PARSE_TAG_REFERENCE_PRESENCE && ast->tokens[child + 1] == keyword && ast->tokens[child] == keyword + 1;
++}
++
+ // The first token of every word-only DECL_SPECIFIERS node, ascending, with
+ // its node, in the phase arena (CTypeParseMachine). A list is word-only when
+-// its children are SPECIFIER_WORD and TYPEDEF_NAME leaves on consecutive
+-// tokens from its own; only such a list can be read
++// its children are SPECIFIER_WORD and TYPEDEF_NAME leaves and tag references
++// (c_parse_tree_tag_reference) on consecutive tokens from its own; only such
++// a list can be read
+ // (c_parse_tree_specifiers_type), so no other is indexed. A word-only list
+ // holds no other list and lies in no other word-only list, so postorder
+ // reaches these lists in token order: the index is appended in one pass,
+@@ -19248,6 +19304,9 @@
+     {
+         u32 kind = ast->kinds[child];
+         words = (kind == C_AST_SPECIFIER_WORD || kind == C_AST_TYPEDEF_NAME) && ast->tokens[child] == token + (child - first);
++        bool tag = !words && kind == C_AST_TAG_NAME && c_parse_tree_tag_reference(ast, node, child, token + (child - first));
++        words |= tag;
++        child += tag;
+     }
+     *reads += child - first;
+     if (words)
+@@ -19369,18 +19428,105 @@
+     return low < count && starts[low] == token ? machine->ast_specifier_nodes[low] : C_AST_NODE_INVALID;
+ }
+ 
++// A root run's tag reference read from the tree, whose list's words are read
++// already (c_parse_tree_specifiers_type): the core frame's row, then the
++// scalar frame's qualified copy, as the section comment above describes.
++// C_AST_SPECIFIER_FALLBACK_NONE with the answer in *type, or TAG when the
++// name is a visible tag of another kind. Out of line: about one root run in
++// a hundred names a tag, and the read every other run takes keeps its code.
++BUSTER_GLOBAL_LOCAL C_AST_TYPES_NOINLINE CAstSpecifierFallback c_parse_tree_tag_type(CTypeParseMachine* machine, CParseResult* result,
++                                                                                     CPreprocessResult preprocess, CScopeId scope, u32 start,
++                                                                                     u32 end, u32 after, bool tag_only_declaration, CType qualifiers,
++                                                                                     u32 tag, CTypeId* type)
++{
++    CAst const* ast = machine->syntax_tree;
++#if BUSTER_INCLUDE_TESTS
++    // Verify mode: the machine reads the run first and is rolled back, and
++    // the two answers are compared below.
++    bool machine_valid = false;
++    CTypeId machine_type = C_TYPE_ID_INVALID;
++    CType machine_row = {0};
++    u32 machine_index = 0;
++    u32 machine_rows = 0;
++    if (c_parse_tag_verify)
++    {
++        CParseResult checkpoint = *result;
++        u32 mutation_mark = machine->mutation_count;
++        machine_type = c_parse_scalar_type_in_scope_attempt(machine, result, preprocess, scope, start, end, tag_only_declaration, &machine_index);
++        machine_valid = machine_type.value < result->type_count;
++        machine_row = machine_valid ? result->types[machine_type.value] : (CType){0};
++        machine_rows = result->type_count - checkpoint.type_count;
++        c_type_parse_rollback(machine, result, &checkpoint, mutation_mark);
++    }
++    u32 type_count = result->type_count;
++#endif
++    CAstSpecifierFallback reason = C_AST_SPECIFIER_FALLBACK_NONE;
++    c_parse_type_identity_prepare(machine, machine->scratch_arena, preprocess, result, scope, start, end);
++    machine->mutation_type_limit = result->type_count;
++    u32 keyword = ast->kinds[tag + 1];
++    CTypeKind kind = keyword == C_AST_STRUCT_SPECIFIER ? C_TYPE_STRUCT : keyword == C_AST_UNION_SPECIFIER ? C_TYPE_UNION : C_TYPE_ENUM;
++    String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[ast->tokens[tag]]);
++    CTypeId tagged = c_parse_tag_lookup(result, spelling, scope);
++    // A standalone block-scope tag declaration introduces an identity.
++    if (tag_only_declaration && tagged.value < result->type_count && result->types[tagged.value].tag_scope.value != scope.value &&
++        c_parse_skip_attributes(preprocess, after, end) == end)
++    {
++        tagged = C_TYPE_ID_INVALID;
++    }
++    if (tagged.value < result->type_count && result->types[tagged.value].kind != kind)
++    {
++        reason = C_AST_SPECIFIER_FALLBACK_TAG;
++    }
++    else
++    {
++        if (tagged.value == C_ID_UNDERLYING_INVALID)
++        {
++            tagged = c_parse_add_type(result, (CType){
++                                                  .tag = spelling,
++                                                  .tag_scope = scope,
++                                                  .element_type = C_TYPE_ID_INVALID,
++                                                  .return_type = C_TYPE_ID_INVALID,
++                                                  .array_bound = C_ARRAY_BOUND_INVALID,
++                                                  .kind = kind,
++                                              });
++        }
++        CType const* row = &result->types[tagged.value];
++        bool qualify = (qualifiers.is_const && !row->is_const) || (qualifiers.is_volatile && !row->is_volatile);
++        *type = qualify ? c_parse_add_qualified_type(result, tagged, qualifiers) : tagged;
++        machine->result_type = *type;
++        machine->result_index = after;
++        machine->result_valid = true;
++    }
++#if BUSTER_INCLUDE_TESTS
++    if (c_parse_tag_verify && !reason)
++    {
++        CType const* row = &result->types[type->value];
++        bool same = machine_valid && machine_type.value == type->value && machine_index == after && machine_rows == result->type_count - type_count &&
++                    machine_row.kind == row->kind && string_equal(machine_row.tag, row->tag) && machine_row.tag_scope.value == row->tag_scope.value &&
++                    machine_row.is_const == row->is_const && machine_row.is_volatile == row->is_volatile &&
++                    machine_row.is_complete == row->is_complete && machine_row.has_unqualified_type == row->has_unqualified_type &&
++                    machine_row.unqualified_type.value == row->unqualified_type.value;
++        c_parse_tag_verified.compared += 1;
++        c_parse_tag_verified.mismatches += !same;
++    }
++#endif
++    return reason;
++}
++
+ // The specifier run [start, end) read from its DECL_SPECIFIERS node, as the
+ // section comment above describes: C_AST_SPECIFIER_FALLBACK_NONE with the
+ // machine's answer in *type and *declarator_start, or the reason the machine
+-// must read it, with nothing appended. A root run (`member` false) is read
++// must read it, with nothing appended but the identity answers a tag of
++// another kind leaves settled. A root run (`member` false) is read
+ // only with no machine frame open, in place of
+ // c_parse_scalar_type_in_scope_attempt; a member's run is read inside its
+ // aggregate segment frame, in place of the scalar frame the segment pushes
+ // (c_parse_member_specifiers_type), which settles no identity answers.
+ BUSTER_GLOBAL_LOCAL CAstSpecifierFallback c_parse_tree_specifiers_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+-                                                                      CScopeId scope, u32 start, u32 end, bool member, CTypeId* type,
+-                                                                      u32* declarator_start, bool* named)
++                                                                      CScopeId scope, u32 start, u32 end, u32 flags, CTypeId* type,
++                                                                      u32* declarator_start, CAstSpecifierBase* base)
+ {
++    bool member = (flags & C_PARSE_TREE_SPECIFIERS_MEMBER) != 0;
+     enum {TYPEDEF = 1, EXTERN = 2, STATIC = 4, REGISTER = 8, THREAD = 16};
+     CAst const* ast = machine->syntax_tree;
+     bool readable = (member || machine->frame_count == 0) && machine->constant_evaluation_mode != C_CONSTANT_EVALUATION_TYPE;
+@@ -19398,13 +19544,23 @@
+     bool duplicate = false;
+     bool primitive = false;
+     u32 name = UINT32_MAX;
++    u32 tag = UINT32_MAX;
+     for (u32 child = first; !reason && child < node; child += 1)
+     {
+         u32 kind = ast->kinds[child];
+         u32 bit = 0;
+         if (ast->tokens[child] != start + (child - first))
+         {
+-            reason = C_AST_SPECIFIER_FALLBACK_SPECIFIERS;
++            // Only a tag reference's name stands a token on. It is read in a
++            // root run's list, and only as its last item: a word after the
++            // tag is a trailing qualifier the core frame applies first.
++            bool reference = kind == C_AST_TAG_NAME && child + 2 == node && c_parse_tree_tag_reference(ast, node, child, start + (child - first));
++            reason = !reference ? C_AST_SPECIFIER_FALLBACK_SPECIFIERS
++                     : member   ? C_AST_SPECIFIER_FALLBACK_INPUT
++                     : name != UINT32_MAX || primitive ? C_AST_SPECIFIER_FALLBACK_SPECIFIERS
++                                                       : C_AST_SPECIFIER_FALLBACK_NONE;
++            tag = child;
++            child += 1;
+         }
+         else if (kind == C_AST_TYPEDEF_NAME)
+         {
+@@ -19468,7 +19624,7 @@
+         duplicate |= (storage & bit) != 0;
+         storage |= bit;
+     }
+-    if (!reason && !primitive && name == UINT32_MAX)
++    if (!reason && !primitive && name == UINT32_MAX && tag == UINT32_MAX)
+     {
+         reason = C_AST_SPECIFIER_FALLBACK_SPECIFIERS;
+     }
+@@ -19497,7 +19653,7 @@
+                         spelling.type.kind != C_TYPE_VA_LIST;
+         reason = interned ? C_AST_SPECIFIER_FALLBACK_NONE : C_AST_SPECIFIER_FALLBACK_PRIMITIVE;
+     }
+-    else if (!reason)
++    else if (!reason && name != UINT32_MAX)
+     {
+         CToken token = preprocess.tokens[name];
+         if (!c_parse_type_word_for_dialect_token(preprocess, token))
+@@ -19516,7 +19672,14 @@
+         reason = named_type.value < result->type_count && !(qualified && result->types[named_type.value].is_restrict) ? C_AST_SPECIFIER_FALLBACK_NONE
+                                                                                                                        : C_AST_SPECIFIER_FALLBACK_TYPEDEF;
+     }
+-    if (!reason)
++    if (!reason && tag != UINT32_MAX)
++    {
++        reason = c_parse_tree_tag_type(machine, result, preprocess, scope, start, end, after, (flags & C_PARSE_TREE_SPECIFIERS_TAG_ONLY) != 0, qualifiers,
++                                       tag, type);
++        *declarator_start = reason ? *declarator_start : after;
++        *base = C_AST_SPECIFIER_BASE_TAG;
++    }
++    else if (!reason)
+     {
+         // c_parse_scalar_type_in_scope_attempt's order: settle the identity
+         // answers its range holds, then build the run's one row. The scalar
+@@ -19535,7 +19698,7 @@
+             *type = qualifiers.is_const || qualifiers.is_volatile ? c_parse_add_qualified_type(result, named_type, qualifiers) : named_type;
+         }
+         *declarator_start = after;
+-        *named = !primitive;
++        *base = primitive ? C_AST_SPECIFIER_BASE_PRIMITIVE : C_AST_SPECIFIER_BASE_TYPEDEF;
+         machine->result_type = *type;
+         machine->result_index = after;
+         machine->result_valid = true;
+@@ -19553,13 +19716,15 @@
+     CAstSpecifierFallback reason = C_AST_SPECIFIER_FALLBACK_INPUT;
+     if (machine->ast_specifier_starts)
+     {
+-        bool named = false;
+-        reason = c_parse_tree_specifiers_type(machine, result, preprocess, scope, start, end, false, &type, declarator_start, &named);
++        CAstSpecifierBase base = C_AST_SPECIFIER_BASE_PRIMITIVE;
++        reason = c_parse_tree_specifiers_type(machine, result, preprocess, scope, start, end, tag_only_declaration ? C_PARSE_TREE_SPECIFIERS_TAG_ONLY : 0,
++                                              &type, declarator_start, &base);
+         CAstSpecifierStatistics* statistics = machine->ast_specifier_statistics;
+         if (statistics)
+         {
+-            statistics->primitive_answers += !reason && !named;
+-            statistics->typedef_answers += !reason && named;
++            statistics->primitive_answers += !reason && base == C_AST_SPECIFIER_BASE_PRIMITIVE;
++            statistics->typedef_answers += !reason && base == C_AST_SPECIFIER_BASE_TYPEDEF;
++            statistics->tag_answers += !reason && base == C_AST_SPECIFIER_BASE_TAG;
+             if (reason)
+             {
+                 statistics->fallbacks += 1;
+@@ -19645,10 +19810,11 @@
+         c_type_parse_rollback(machine, result, &checkpoint, mutation_mark);
+     }
+ #endif
+-    bool named = false;
++    CAstSpecifierBase base = C_AST_SPECIFIER_BASE_PRIMITIVE;
+     CTypeId type = C_TYPE_ID_INVALID;
+     u32 declarator_start = start;
+-    CAstSpecifierFallback reason = c_parse_tree_specifiers_type(machine, result, preprocess, scope, start, end, true, &type, &declarator_start, &named);
++    CAstSpecifierFallback reason = c_parse_tree_specifiers_type(machine, result, preprocess, scope, start, end, C_PARSE_TREE_SPECIFIERS_MEMBER, &type, &declarator_start,
++                                                                &base);
+     if (!reason)
+     {
+         machine->result_nonplace_projection = false;
+@@ -19669,8 +19835,8 @@
+     CAstSpecifierStatistics* statistics = machine->ast_specifier_statistics;
+     if (statistics)
+     {
+-        statistics->member_primitive_answers += !reason && !named;
+-        statistics->member_typedef_answers += !reason && named;
++        statistics->member_primitive_answers += !reason && base == C_AST_SPECIFIER_BASE_PRIMITIVE;
++        statistics->member_typedef_answers += !reason && base == C_AST_SPECIFIER_BASE_TYPEDEF;
+         statistics->member_fallbacks += reason != C_AST_SPECIFIER_FALLBACK_NONE;
+         statistics->member_fallback_counts[reason] += reason != C_AST_SPECIFIER_FALLBACK_NONE;
+     }
+@@ -19761,13 +19927,14 @@
+     }
+     else
+     {
+-        bool named = false;
+-        CAstSpecifierFallback reason = c_parse_tree_specifiers_type(machine, result, preprocess, scope, start, end, false, type, declarator_start, &named);
++        CAstSpecifierBase base = C_AST_SPECIFIER_BASE_PRIMITIVE;
++        CAstSpecifierFallback reason = c_parse_tree_specifiers_type(machine, result, preprocess, scope, start, end, 0, type, declarator_start, &base);
+         run_machine = reason != C_AST_SPECIFIER_FALLBACK_NONE;
+         if (statistics)
+         {
+-            statistics->type_name_primitive_answers += !run_machine && !named;
+-            statistics->type_name_typedef_answers += !run_machine && named;
++            statistics->type_name_primitive_answers += !run_machine && base == C_AST_SPECIFIER_BASE_PRIMITIVE;
++            statistics->type_name_typedef_answers += !run_machine && base == C_AST_SPECIFIER_BASE_TYPEDEF;
++            statistics->type_name_tag_answers += !run_machine && base == C_AST_SPECIFIER_BASE_TAG;
+             statistics->type_name_fallbacks += run_machine;
+             statistics->type_name_fallback_counts[reason] += run_machine;
+         }
+@@ -28594,6 +28761,9 @@
+     case C_AST_SPECIFIER_FALLBACK_TYPEDEF:
+         name = S8("typedef");
+         break;
++    case C_AST_SPECIFIER_FALLBACK_TAG:
++        name = S8("tag");
++        break;
+     default:
+         name = S8("?");
+         break;

@@ -116,6 +116,13 @@ BUSTER_F_DECL bool c_test_released_log_contains(void const* pointer, u64 length)
 // what a rewind of that arena to `position` is about to discard. A null owner
 // releases every unit of the thread.
 BUSTER_F_DECL void c_test_release_preprocess_arenas_from(Arena* owner, u64 position);
+// The calling thread's next registration serial. Releasing `since` a mark
+// returns every unit the thread preprocessed after taking it and has not
+// released, whatever arena its result lives in. The test harness takes a mark
+// when each fixture and module body begins and releases since it when the
+// scope ends, so no unit outlives the scope that created it (GitHub #3431).
+BUSTER_F_DECL u64 c_test_preprocess_unit_mark(void);
+BUSTER_F_DECL void c_test_release_preprocess_arenas_since(u64 mark);
 // scratch_end for a test that preprocessed into the scratch arena: releases
 // the units the rewind discards, then rewinds.
 BUSTER_F_DECL void c_test_scratch_end(TemporalArena temporary);
