@@ -2653,15 +2653,6 @@ typedef enum CIrMemoryBuiltin
     C_IR_MEMORY_BUILTIN_COUNT,
 } CIrMemoryBuiltin;
 
-// The C types a library builtin's standard prototype is spelled in.
-typedef enum CIrLibraryValue
-{
-    C_IR_LIBRARY_VALUE_VOID_POINTER,
-    C_IR_LIBRARY_VALUE_CHAR_POINTER,
-    C_IR_LIBRARY_VALUE_INT,
-    C_IR_LIBRARY_VALUE_SIZE,
-} CIrLibraryValue;
-
 // One standard prototype: the return value, then up to four parameters.
 typedef struct CIrLibrarySignature CIrLibrarySignature;
 struct CIrLibrarySignature
@@ -2905,6 +2896,19 @@ BUSTER_C_INTERNAL CIrMemoryBuiltin c_ir_memory_builtin(String8 name)
     return result;
 }
 
+// The parser's expression typer answers a library-shaped builtin call from
+// the same prototype table lowering emits it with.
+BUSTER_C_SHARED bool c_semantic_memory_builtin_result(String8 name, CIrLibraryValue* value_out)
+{
+    CIrMemoryBuiltin builtin = c_ir_memory_builtin(name);
+    bool found = builtin != C_IR_MEMORY_BUILTIN_COUNT;
+    if (found)
+    {
+        *value_out = (CIrLibraryValue)c_ir_memory_builtin_signatures[builtin].return_value;
+    }
+    return found;
+}
+
 // The GNU checked-arithmetic builtins. A typed spelling fixes both the
 // operation and the one operand type; the generic `__builtin_*_overflow`
 // spellings carry C_TYPE_INVALID and take their types from the arguments.
@@ -3115,6 +3119,22 @@ BUSTER_C_SHARED bool c_semantic_simd_builtin(String8 name, CIrSimdBuiltin* entry
     bool found = index != C_IR_SIMD_BUILTIN_NONE;
     if (found) *entry = c_ir_simd_builtins[index];
     return found;
+}
+
+BUSTER_C_SHARED CSemanticAtomicResult c_semantic_atomic_builtin_result(CIrAtomicBuiltinSpelling spelling)
+{
+    CIrAtomicBuiltin operation = spelling.builtin;
+    bool void_result = operation == C_IR_ATOMIC_BUILTIN_STORE || operation == C_IR_ATOMIC_BUILTIN_INIT ||
+                       operation == C_IR_ATOMIC_BUILTIN_THREAD_FENCE || operation == C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE ||
+                       operation == C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE || operation == C_IR_ATOMIC_BUILTIN_CLEAR ||
+                       (spelling.generic && operation != C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG);
+    bool flag_result = operation == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG || operation == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_WEAK ||
+                       operation == C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE || operation == C_IR_ATOMIC_BUILTIN_TEST_AND_SET ||
+                       operation == C_IR_ATOMIC_BUILTIN_SYNC_BOOL_COMPARE_AND_SWAP;
+    return operation == C_IR_ATOMIC_BUILTIN_COUNT ? C_SEMANTIC_ATOMIC_RESULT_INVALID
+           : void_result                         ? C_SEMANTIC_ATOMIC_RESULT_VOID
+           : flag_result                         ? C_SEMANTIC_ATOMIC_RESULT_FLAG
+                                                 : C_SEMANTIC_ATOMIC_RESULT_OBJECT;
 }
 
 BUSTER_C_SHARED u32 c_semantic_atomic_builtin_arity(CIrAtomicBuiltinSpelling spelling)
@@ -35078,23 +35098,15 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_classify(CIntegerIrBu
             c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 close = c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            CIrAtomicBuiltinSpelling atomic = c_ir_atomic_builtin_spelling(name);
-            CIrAtomicBuiltin operation = atomic.builtin;
-            bool void_result = operation == C_IR_ATOMIC_BUILTIN_STORE || operation == C_IR_ATOMIC_BUILTIN_INIT ||
-                               operation == C_IR_ATOMIC_BUILTIN_THREAD_FENCE || operation == C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE ||
-                               operation == C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE || operation == C_IR_ATOMIC_BUILTIN_CLEAR ||
-                               (atomic.generic && operation != C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG);
-            bool flag_result = operation == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG || operation == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_WEAK ||
-                               operation == C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE || operation == C_IR_ATOMIC_BUILTIN_TEST_AND_SET ||
-                               operation == C_IR_ATOMIC_BUILTIN_SYNC_BOOL_COMPARE_AND_SWAP;
+            CSemanticAtomicResult atomic = c_semantic_atomic_builtin_result(c_ir_atomic_builtin_spelling(name));
             u32 object_end = close < end ? c_ir_call_argument_separator(builder, start + 2, close) : close;
             CIrSizeofStep atomic_step = C_IR_SIZEOF_STEP_FAIL;
-            if (close < end && operation != C_IR_ATOMIC_BUILTIN_COUNT && (void_result || flag_result))
+            if (close < end && (atomic == C_SEMANTIC_ATOMIC_RESULT_VOID || atomic == C_SEMANTIC_ATOMIC_RESULT_FLAG))
             {
-                *type_out = void_result ? builder->void_type : builder->bool_type;
+                *type_out = atomic == C_SEMANTIC_ATOMIC_RESULT_VOID ? builder->void_type : builder->bool_type;
                 atomic_step = c_ir_sizeof_step_from_bool(c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields));
             }
-            else if (close < end && operation != C_IR_ATOMIC_BUILTIN_COUNT && start + 2 < object_end)
+            else if (close < end && atomic == C_SEMANTIC_ATOMIC_RESULT_OBJECT && start + 2 < object_end)
             {
                 atomic_step = c_ir_sizeof_step_child(frame, C_IR_SIZEOF_OP_ATOMIC_OBJECT, close, start + 2, object_end, false);
             }
