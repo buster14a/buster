@@ -3405,28 +3405,28 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 {
                     compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for this target"),
                                                    x86_execution_mode_option);
-            }
-            else
-            {
-                Target x86_mode_target = invocation.target;
-                if (x86_mode_target.cpu_model == CPU_MODEL_NATIVE)
-                {
-                    x86_mode_target.cpu_model = CPU_MODEL_BASELINE;
-                }
-                x86_mode_target.cpu_arch = CPU_ARCH_I386;
-                x86_mode_target.x86_code16 = x86_execution_mode == 16;
-                if (!target_os_supports_arch(x86_mode_target.cpu_arch, x86_mode_target.os))
-                {
-                    invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-                    invocation.diagnostic = string_format(
-                        arena, S8("unsupported option: {S8} for target {S8}"), x86_execution_mode_option,
-                        target_to_string(arena, invocation.target));
                 }
                 else
                 {
-                    invocation.target = x86_mode_target;
+                    Target x86_mode_target = invocation.target;
+                    if (x86_mode_target.cpu_model == CPU_MODEL_NATIVE)
+                    {
+                        x86_mode_target.cpu_model = CPU_MODEL_BASELINE;
+                    }
+                    x86_mode_target.cpu_arch = CPU_ARCH_I386;
+                    x86_mode_target.x86_code16 = x86_execution_mode == 16;
+                    if (!target_os_supports_arch(x86_mode_target.cpu_arch, x86_mode_target.os))
+                    {
+                        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+                        invocation.diagnostic = string_format(
+                            arena, S8("unsupported option: {S8} for target {S8}"), x86_execution_mode_option,
+                            target_to_string(arena, invocation.target));
+                    }
+                    else
+                    {
+                        invocation.target = x86_mode_target;
+                    }
                 }
-            }
             }
             if (invocation.error == COMPILER_DRIVER_ERROR_NONE)
             {
