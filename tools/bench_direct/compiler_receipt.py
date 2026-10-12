@@ -497,9 +497,13 @@ WILD_LINKER_COMPARATORS = {
 }
 WILD_LINKER_CELLS = ["ide-debug", "ide-unity-release", "ide-separate-release"]
 # What `wild --version` prints and what Wild writes into its output's .comment by default
-# (Args::linker_identity at wild e9a9b0cb, libwild/src/args.rs). Another linker installed as
-# `wild` is refused by both checks.
-WILD_IDENTITY = re.compile(r"Wild [0-9][0-9A-Za-z.+-]* \(compatible with GNU linkers\)\Z")
+# (Args::linker_identity at wild e9a9b0cb, libwild/src/args.rs). Its version is one of the forms
+# wild/build.rs writes: the Cargo version at a release tag, the origin/main merge-base hash, that
+# version and hash with "-modified", or that version with "non-git-build" (distribution builds,
+# e.g. the 9700X host's "Wild 0.10.0 non-git-build"). Another linker installed as `wild` is
+# refused by both checks.
+WILD_IDENTITY = re.compile(r"Wild (?:[0-9][0-9A-Za-z.+-]*(?: (?:[0-9a-f]{40}-modified|non-git-build))?"
+                           r"|[0-9a-f]{40}) \(compatible with GNU linkers\)\Z")
 WILD_LINKER_LINKERS = ("comparator", "wild")
 # Every token of a retained Wild argv: inert inside double quotes and outside them, so the
 # canonical quoted join is one simple command whatever the shell.
