@@ -43,14 +43,10 @@ flush (#2621) saved 7-8 ms of wall per object on a btrfs desktop. No caller
 needs durability today; one that does should flush explicitly with
 `os_file_flush` rather than make every artifact pay for it.
 
-On Linux the staging file is first preallocated to its exact final length with
-`fallocate(2)` mode 0 (`os_file_preallocate`). This is best-effort: a refusal
-changes nothing. ext4 otherwise uses delayed allocation for the staged bytes,
-and the next `rename(2)` over a still-dirty output then frees those pages
-inside the rename, at about 0.5 ms per MiB. A 42 MB self-host link spent 3-23
-ms in `rename` before the change and about 2 ms after (#3685, diagnostic
-evidence). Buster does not overwrite outputs in place as mold and wild do;
-#3687 records the measured gain and the downsides.
+Buster does not overwrite outputs in place as mold and wild do; #3687 records
+the measured gain and the downsides. Preallocating the staging file with
+`fallocate(2)` is measured but not adopted: it awaits qualified Zen 5 evidence
+(#3685).
 
 `-fearly-exit` (API field `early_exit`; off by default, and `-fno-early-exit`
 restores the default) is mold and wild's fork trick (#3686). It lives in
@@ -92,7 +88,11 @@ The costs are why it stays opt-in:
 Do not use it for benchmarks, profiling, debugging or memory budgeting. The
 `compiler_driver_test_early_exit` regression checks byte-identical objects
 against the default path, a replaced output, `-E` output through the caller's
-pipe, and failure propagation.
+pipe, and failure propagation. On desktop POSIX, it also runs both modes with
+fds 0-1 and 0-2 closed, with and without `-v`, and compares raw exit statuses
+and artifacts. It forces the setup-failure fallback through the test-build seam
+`BUSTER_TEST_EARLY_EXIT_PIPE_FAILURE=1`. That seam fails the pipe's
+configuration step and validates that the failure happened.
 
 Opt-in machine-readable records remain on stdout: `CODEGEN_VERIFY`,
 `CODEGEN_FALLBACK*`, `CODEGEN`, `IR_*`, `TARGET`, `GPU`, and the `-v` source

@@ -9,9 +9,8 @@
 // (os_file_replacement_target_stats, os_file_staging_create, os_file_replace),
 // process spawn/wait with deadlines, executable lookup, dynamic libraries, and
 // the crash/failure printers. Replacement publication follows os_file_close;
-// os_file_preallocate follows os_file_set_permissions; the opt-in
-// fork-to-exit-early protocol (os_early_exit_arm/os_early_exit_release,
-// #3686) follows the spawn pipe helpers it reuses
+// The opt-in fork-to-exit-early protocol (os_early_exit_arm/
+// os_early_exit_release, #3686) follows the spawn pipe helpers it reuses
 // (os_process_spawn_pipe_create), just before os_process_spawn.
 // Opt-in child resource witnesses in os_process_wait_deadline retain native
 // accounting scope; they do not alter process ownership or cleanup.
@@ -3143,30 +3142,6 @@ OsError os_file_set_permissions(OsFileDescriptor* file_descriptor, u32 permissio
 }
 #endif
 
-// fallocate mode 0 allocates [0, size) and sets the length to `size`, which is
-// exactly what the caller then writes from offset 0, so the final length and
-// bytes are unchanged. glibc's posix_fallocate is avoided on purpose: where
-// the filesystem refuses, it emulates by writing zeros.
-bool os_file_preallocate(OsFileDescriptor* file_descriptor, u64 size)
-{
-    bool result = false;
-#if defined(__linux__)
-    if (file_descriptor && size && size <= (u64)INT64_MAX)
-    {
-        int status;
-        do
-        {
-            status = fallocate(generic_fd_to_posix(file_descriptor), 0, 0, (off_t)size);
-        } while (status < 0 && errno == EINTR);
-        result = status == 0;
-    }
-#else
-    BUSTER_UNUSED(file_descriptor);
-    BUSTER_UNUSED(size);
-#endif
-    return result;
-}
-
 u64 string8_code_point_count(String8 s, u8 code_point)
 {
     u64 count = 0;
@@ -3652,7 +3627,28 @@ bool os_early_exit_arm(void)
     // (`ide cc` on desktop starts none before this point).
     int ends[2] = {-1, -1};
     ProcessSpawnFailure failure = PROCESS_SPAWN_FAILURE_NONE;
-    if (os_early_exit_pipe < 0 && os_is_only_live_thread() && os_process_spawn_pipe_create(ends, &failure) == 0)
+    bool created = false;
+    if (os_early_exit_pipe < 0 && os_is_only_live_thread())
+    {
+#if BUSTER_INCLUDE_TESTS
+        // Test seam for the setup-failure fallback: fail the pipe's
+        // configuration step deterministically, then insist it happened, so
+        // a control relying on it can never pass through a real fork.
+        bool injected = string_equal(os_get_environment_variable(S8("BUSTER_TEST_EARLY_EXIT_PIPE_FAILURE")), S8("1"));
+        if (injected)
+        {
+            os_process_spawn_test_fail_on_call(OS_PROCESS_SPAWN_TEST_PIPE_CONFIGURATION, 0);
+        }
+#endif
+        created = os_process_spawn_pipe_create(ends, &failure) == 0;
+#if BUSTER_INCLUDE_TESTS
+        if (injected)
+        {
+            BUSTER_VALIDATE(os_process_spawn_test_end() && !created);
+        }
+#endif
+    }
+    if (created)
     {
         pid_t child = fork();
         if (child == 0)

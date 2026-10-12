@@ -56,8 +56,7 @@ BUSTER_F_DECL bool file_write(String8 path, ByteSlice content);
 
 // Atomic publication for complete in-memory artifacts. The destination is
 // inspected without following its final link, then an exclusively-created file
-// in the same directory is preallocated (Linux, best-effort), written, closed,
-// and atomically renamed.
+// in the same directory is written, closed, and atomically renamed.
 // Every result other than FILE_PUBLISH_PUBLISHED leaves an existing destination
 // byte-identical and a missing destination absent. Handled failures remove the
 // staging file; cleanup_error reports a failed close/delete without replacing

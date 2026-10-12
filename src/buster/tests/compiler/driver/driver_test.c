@@ -1866,14 +1866,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_early_exit(UnitTestArgum
 #if !defined(_WIN32)
         // Closed standard streams: the status pipe must never land on fds
         // 0-2, where -v output would reach the parent as a status byte. The
-        // last prelude also exhausts descriptors so the pipe cannot move
-        // above fd 2, which must fall back to an in-process compile. Every
-        // case must give the default path's status and artifact. Sanitizer
-        // runtimes cannot start within three descriptors (both modes spin to
-        // the deadline there), so that prelude runs in plain builds only.
+        // last prelude also makes the pipe setup fail through the test-build
+        // seam (BUSTER_TEST_EARLY_EXIT_PIPE_FAILURE), which must fall back to
+        // an in-process compile. Every case must give the default path's
+        // status and artifact.
         BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source)));
-        String8 preludes[] = {S8("exec 0<&- 1>&-"), S8("exec 0<&- 1>&- 2>&-"), S8("exec 0<&- 1>&-; ulimit -n 3")};
-        u32 prelude_count = BUSTER_SANITIZE ? 2u : (u32)BUSTER_ARRAY_LENGTH(preludes);
+        String8 preludes[] = {S8("exec 0<&- 1>&-"), S8("exec 0<&- 1>&- 2>&-"),
+                              S8("exec 0<&- 1>&-; BUSTER_TEST_EARLY_EXIT_PIPE_FAILURE=1; export BUSTER_TEST_EARLY_EXIT_PIPE_FAILURE")};
+        u32 prelude_count = (u32)BUSTER_ARRAY_LENGTH(preludes);
         String8 modes[] = {S8("-fno-early-exit"), S8("-fearly-exit")};
         for (u32 prelude = 0; prelude < prelude_count; prelude += 1)
         {
@@ -1894,7 +1894,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_early_exit(UnitTestArgum
                                            (objects[0].length == 0 || memory_compare(objects[0].pointer, objects[1].pointer, objects[0].length)));
                 // Without -v nothing is written to the closed streams, so the
                 // compile itself must succeed in both modes.
-                BUSTER_TEST(arguments, verbose || prelude == 2 || (statuses[1] == 0 && objects[1].length == expected.length));
+                BUSTER_TEST(arguments, verbose || (statuses[1] == 0 && objects[1].length == expected.length));
             }
         }
 #endif

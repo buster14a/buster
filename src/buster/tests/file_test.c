@@ -897,9 +897,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_contents(UnitTestArguments*
         BUSTER_TEST(arguments, file_test_bytes_are(arena, artifact, new_content));
         BUSTER_TEST(arguments, file_test_entries_are(arena, directory, artifact_only, 1, 0));
 
-        // The staging file is preallocated to the sum of the slices (#3685):
-        // a sliced publication over a longer destination must still leave
-        // exactly the new bytes, with no preallocated or old tail.
+        // A sliced publication over a longer destination must leave exactly
+        // the new bytes, with no old tail.
         {
             u64 large_length = BUSTER_KB(320);
             u8* large = arena_allocate(arena, u8, large_length);
