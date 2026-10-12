@@ -1,4 +1,4 @@
 # Source-size acknowledgement; see docs/source-size.md.
 schema buster-source-size-ack-v1
-build 36986
-reason The #2761 compiler-probes-v1 pull-compare route for fast_ra_scaling.c and machine_line_mark_scaling.c (#3657): the compiler_probes.py harness, its frozen profile, validator and report in compiler_receipt.py, the compare leg, the publisher bundle check, and their negative tests.
+build 61458
+reason The #2761 compiler-probes-v1 pull-compare route for fast_ra_scaling.c and machine_line_mark_scaling.c (#3657): the native compiler_probes.c harness with its self-test, its frozen profile, validator and report in compiler_receipt.py, the compare leg, the publisher bundle check, and their negative tests.
