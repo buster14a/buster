@@ -2084,10 +2084,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     u64 default_include_capacity = 5;
     u64 linker_argument_capacity = arguments.length;
     u64 macro_prefix_map_capacity = 0;
+    u64 after_include_capacity = 0;
     for (u64 index = 0; index < arguments.length; index += 1)
     {
         String8 argument = arguments.pointer[index];
         macro_prefix_map_capacity += string_starts_with_sequence(argument, S8("-fmacro-prefix-map="));
+        after_include_capacity += string_starts_with_sequence(argument, S8("-idirafter"));
         if (string_starts_with_sequence(argument, S8("-Wl,")))
         {
             for (u64 offset = 4; offset < argument.length; offset += 1)
@@ -2107,6 +2109,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     invocation.link_operations = arena_allocate(arena, CompilerDriverLinkOperation, arguments.length);
     invocation.include_paths = arena_allocate(arena, String8, arguments.length);
     invocation.system_include_paths = arena_allocate(arena, String8, arguments.length + default_include_capacity);
+    String8* after_include_paths = after_include_capacity ? arena_allocate(arena, String8, after_include_capacity) : 0;
+    u32 after_include_count = 0;
     invocation.forced_includes = arena_allocate(arena, String8, arguments.length);
     invocation.macro_operations = arena_allocate(arena, CPreprocessorOperation, arguments.length);
     if (macro_prefix_map_capacity)
@@ -2474,7 +2478,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             continue;
         }
         if (string_equal(argument, S8("-o")) || string_equal(argument, S8("-e")) || string_equal(argument, S8("--entry")) ||
-            string_equal(argument, S8("-I")) || string_equal(argument, S8("-isystem")) ||
+            string_equal(argument, S8("-I")) || string_equal(argument, S8("-isystem")) || string_equal(argument, S8("-idirafter")) ||
             string_equal(argument, S8("-D")) || string_equal(argument, S8("-U")) || string_equal(argument, S8("-L")) || string_equal(argument, S8("-l")) ||
             string_equal(argument, S8("-F")) || string_equal(argument, S8("-framework")) || string_equal(argument, S8("-x")) ||
             string_equal(argument, S8("-target")) || string_equal(argument, S8("--target")) || string_equal(argument, S8("-march")) ||
@@ -2517,6 +2521,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             else if (string_equal(argument, S8("-isystem")))
             {
                 invocation.system_include_paths[invocation.system_include_path_count++] = value;
+            }
+            else if (string_equal(argument, S8("-idirafter")))
+            {
+                after_include_paths[after_include_count++] = value;
             }
             else if (string_equal(argument, S8("-D")))
             {
@@ -3171,6 +3179,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             continue;
         }
+        if (string_starts_with_sequence(argument, S8("-idirafter")))
+        {
+            after_include_paths[after_include_count++] = compiler_driver_option_value(argument, S8("-idirafter"));
+            continue;
+        }
         String8 prefix = {
             .pointer = argument.pointer,
             .length = BUSTER_MIN(argument.length, (u64)2),
@@ -3584,6 +3597,27 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         invocation.target.os != OPERATING_SYSTEM_UEFI && invocation.target.cpu_arch != CPU_ARCH_SPIRV_COMPUTE)
     {
         compiler_driver_append_system_includes(arena, &invocation);
+    }
+    // Explicit after-directories survive -nostdinc and follow every default
+    // root, including Windows INCLUDE's exact-sized replacement allocation.
+    // Reuse the preprocessor's system classification and include_next indices.
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && after_include_count)
+    {
+        u64 count = (u64)invocation.system_include_path_count + after_include_count;
+        if (count > UINT32_MAX)
+        {
+            invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation.diagnostic = S8("too many system include paths");
+        }
+        else
+        {
+            String8* paths = arena_allocate(arena, String8, count);
+            if (invocation.system_include_path_count)
+                memcpy(paths, invocation.system_include_paths, (u64)invocation.system_include_path_count * sizeof(*paths));
+            memcpy(paths + invocation.system_include_path_count, after_include_paths, (u64)after_include_count * sizeof(*paths));
+            invocation.system_include_paths = paths;
+            invocation.system_include_path_count = (u32)count;
+        }
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE)
     {
