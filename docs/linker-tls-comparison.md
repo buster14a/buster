@@ -180,5 +180,10 @@ isolates the index. A no-TLS control moved by less than the host's noise. This
 warm, single-object hosted replay does not substitute for cold-cache,
 many-small-object, large-archive, rebuild-control and phase-duration cohorts,
 or for matched 9700X acceptance, all of which remain pending. CI timestamps
-alone are not linker timings. Results and actionable findings belong on #1915
+alone are not linker timings. On the 9700X, the owner-requested direct workloads
+of [audit 2026-10-12T143339Z](performance-audits/2026-10-12T143339Z.md) replay
+the real relocation tables through both link phases' membership questions: at
+32,768 sites the baseline scan took a median 615.3 ms and the #2247 index
+3.6 ms, with identical classifications. That run measured the mechanism only,
+not an end-to-end link. Results and actionable findings belong on #1915
 / its PR.
