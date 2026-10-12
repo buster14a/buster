@@ -10540,6 +10540,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         physical[2].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER)
         scalar_memory_width = physical[0].reg.width;
     else if (assembly_word_equal(mnemonic, S8("kmovw"))) scalar_memory_width = 16;
+    else if (operand_count == 2 && physical[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+             (assembly_word_equal(mnemonic, S8("crc32")) || assembly_word_equal(mnemonic, S8("adcx")) ||
+              assembly_word_equal(mnemonic, S8("adox")))) scalar_memory_width = physical[0].reg.width;
     for (u32 index = 0; index < operand_count; index += 1)
     {
         if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
