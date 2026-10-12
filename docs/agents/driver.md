@@ -43,6 +43,15 @@ flush (#2621) saved 7-8 ms of wall per object on a btrfs desktop. No caller
 needs durability today; one that does should flush explicitly with
 `os_file_flush` rather than make every artifact pay for it.
 
+On Linux the staging file is first preallocated to its exact final length with
+`fallocate(2)` mode 0 (`os_file_preallocate`). This is best-effort: a refusal
+changes nothing. ext4 otherwise uses delayed allocation for the staged bytes,
+and the next `rename(2)` over a still-dirty output then frees those pages
+inside the rename, at about 0.5 ms per MiB. A 42 MB self-host link spent 3-23
+ms in `rename` before the change and about 2 ms after (#3685, diagnostic
+evidence). Buster does not overwrite outputs in place as mold and wild do;
+#3687 records the measured gain and the downsides.
+
 Opt-in machine-readable records remain on stdout: `CODEGEN_VERIFY`,
 `CODEGEN_FALLBACK*`, `CODEGEN`, `IR_*`, `TARGET`, `GPU`, and the `-v` source
 statistics. The differential runner reads `CODEGEN_VERIFY` there and compares

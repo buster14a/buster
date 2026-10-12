@@ -3139,6 +3139,30 @@ OsError os_file_set_permissions(OsFileDescriptor* file_descriptor, u32 permissio
 }
 #endif
 
+// fallocate mode 0 allocates [0, size) and sets the length to `size`, which is
+// exactly what the caller then writes from offset 0, so the final length and
+// bytes are unchanged. glibc's posix_fallocate is avoided on purpose: where
+// the filesystem refuses, it emulates by writing zeros.
+bool os_file_preallocate(OsFileDescriptor* file_descriptor, u64 size)
+{
+    bool result = false;
+#if defined(__linux__)
+    if (file_descriptor && size && size <= (u64)INT64_MAX)
+    {
+        int status;
+        do
+        {
+            status = fallocate(generic_fd_to_posix(file_descriptor), 0, 0, (off_t)size);
+        } while (status < 0 && errno == EINTR);
+        result = status == 0;
+    }
+#else
+    BUSTER_UNUSED(file_descriptor);
+    BUSTER_UNUSED(size);
+#endif
+    return result;
+}
+
 u64 string8_code_point_count(String8 s, u8 code_point)
 {
     u64 count = 0;

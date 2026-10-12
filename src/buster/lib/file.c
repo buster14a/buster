@@ -214,6 +214,18 @@ FilePublishResult file_publish_slices_checked(String8 path, ByteSlice const* sli
             result.error = os_file_set_permissions(staging.file, final_permissions);
         }
 #endif
+        // Allocating the staged extent up front makes a later rename over
+        // this file cheap even while its pages are still dirty, where a
+        // delayed-allocation file costs about 0.5 ms per MiB to free (#3685).
+        u64 staged_length = 0;
+        for (u64 index = 0; index < slice_count; index += 1)
+        {
+            staged_length += slices[index].length;
+        }
+        if (!result.error.v)
+        {
+            (void)os_file_preallocate(staging.file, staged_length);
+        }
         for (u64 index = 0; index < slice_count && !result.error.v && result.status != FILE_PUBLISH_INVALID_STAGING; index += 1)
         {
             OsFileTransferResult written = os_file_write_checked(staging.file, slices[index]);

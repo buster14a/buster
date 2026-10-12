@@ -485,6 +485,11 @@ BUSTER_F_DECL OsError os_file_replace(String8 path, String8 destination);
 // fchmod restricted to the 0777 permission bits.
 BUSTER_F_DECL OsError os_file_set_permissions(OsFileDescriptor* file_descriptor, u32 permissions);
 #endif
+// Best-effort Linux fallocate(fd, 0, 0, size) on an empty file about to
+// receive exactly `size` bytes from offset 0 (it sets the length to `size`);
+// false wherever it is refused or unavailable, which callers ignore. Publication uses it so the staged extent is allocated up
+// front rather than through delayed allocation (#3685).
+BUSTER_F_DECL bool os_file_preallocate(OsFileDescriptor* file_descriptor, u64 size);
 BUSTER_F_DECL OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OsFileAccess access, OsFileCreateMode create_mode,
                                               OsFileShareFlags share_flags);
 BUSTER_F_DECL OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OsFileAccess access, OsFileCreateMode create_mode,
