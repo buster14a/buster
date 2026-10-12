@@ -2049,6 +2049,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     invocation.omit_spelled_bytes = !invocation.verbose && !invocation.source_metrics_path.length;
     CompilerDriverResult compile = query ? (CompilerDriverResult){0} : compiler_driver_execute_invocation(arena, invocation);
     ProcessResult result = PROCESS_RESULT_SUCCESS;
+    if (compile.linker_report.length)
+    {
+        string_print(S8("{S8}"), compile.linker_report);
+    }
     if (compile.warning.length)
     {
         compiler_print_diagnostic(S8("{S8}"), compile.warning);
@@ -2169,6 +2173,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          tree.statements.fallbacks,
                          c_ast_statement_fallback_name(tree.statements.fallbacks ? tree.statements.reason : C_AST_STATEMENT_FALLBACK_NONE),
                          tree.statements.fallbacks ? tree.statements.fallback_token : UINT32_MAX);
+            // Counts: the declaration specifier runs read from the tree, and the runs left to the type machine, by reason.
+            CAstSpecifierStatistics specifiers = tree.specifiers;
+            string_print(S8("C_AST_SPECIFIERS lists={u64} indexed={u64} index_reads={u64} primitive_answers={u64} typedef_answers={u64} fallbacks={u64} input={u64} specifiers={u64} "
+                            "storage={u64} primitive={u64} typedef={u64} reason={S8} fallback_token={u32}\n"),
+                         specifiers.lists, specifiers.indexed, specifiers.index_reads, specifiers.primitive_answers, specifiers.typedef_answers, specifiers.fallbacks,
+                         specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_INPUT], specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_SPECIFIERS],
+                         specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_STORAGE], specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_PRIMITIVE],
+                         specifiers.fallback_counts[C_AST_SPECIFIER_FALLBACK_TYPEDEF],
+                         c_ast_specifier_fallback_name(specifiers.fallbacks ? specifiers.reason : C_AST_SPECIFIER_FALLBACK_NONE),
+                         specifiers.fallbacks ? specifiers.fallback_token : UINT32_MAX);
             // Counts: the extent table lowering read controlled body ranges from, and the queries its token walker answered.
             string_print(S8("C_AST_EXTENTS bodies={u64} entries={u64} entry_declines={u64} answers={u64} walked_input={u64} walked_anchor={u64} "
                             "walked_shape={u64} refused_input={u64} refused_anchor={u64} reason={S8} fallback_token={u32}\n"),

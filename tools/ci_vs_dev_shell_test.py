@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Regressions for the Windows CI Visual Studio shell helper and its wiring."""
+"""Regressions for the Windows CI Visual Studio shell helper and its wiring.
+
+VS_PROBE_TRACE retains PowerShell UTC-millisecond stages and CMD local %TIME%
+stages separately. Launch-to-script-entry attributes interpreter startup;
+helper and fixture stage order attributes work after that startup. Stage clocks
+are diagnostic only and never replace the monotonic launch-relative deadline.
+"""
+import json
 import os
 from pathlib import Path
 import re
@@ -73,7 +80,7 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIsNone(re.search(r"(?mi)^[^#\n]*\bexit\b", helper))
         self.assertIn("-HostArch amd64 -SkipAutomaticLocation", helper)
         order = [helper.index(fragment) for fragment in (
-            "Launch-VsDevShell.ps1') -Arch", '$env:PATH = "$LlvmBin;$env:PATH"',
+            "Launch-VsDevShell.ps1')) -Arch", '$env:PATH = "$LlvmBin;$env:PATH"',
             "PATH<<$PathDelimiter", "where.exe $Compiler", "& clang --version")]
         self.assertEqual(order, sorted(order))
 
@@ -83,14 +90,29 @@ class Probe:
     def __init__(self, shell, directory, vswhere, arguments, environment):
         directory.mkdir(parents=True)
         self.launch_log = directory / "launch.log"
+        self.stage_path = directory / "stages.log"
         self.github_env = directory / "github-env"
         self.stdout_path = directory / "stdout.txt"
         self.stderr_path = directory / "stderr.txt"
         script = directory / "step.ps1"
         script.write_text(
             "$ErrorActionPreference = 'Stop'\n"
+            "function Write-FixtureStage([string]$Stage) {\n"
+            "    [System.IO.File]::AppendAllText($env:FAKE_STAGE_LOG, "
+            "\"stage=$Stage utc_ms=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())`n\")\n"
+            "}\n"
+            "if ($env:FAKE_PS_LOCATION) { $null = $ExecutionContext.SessionState.Path.SetLocation($env:FAKE_PS_LOCATION) }\n"
+            "if ($env:FAKE_OS_CURRENT_DIRECTORY) { [System.Environment]::CurrentDirectory = $env:FAKE_OS_CURRENT_DIRECTORY }\n"
+            "Write-FixtureStage script-entry\n"
+            "if ($env:BUSTER_VS_PROBE_COLD_TEST_PATH -eq '1') {\n"
+            "    Write-FixtureStage filesystem-command-entry\n"
+            f"    $null = Test-Path -LiteralPath '{vswhere}'\n"
+            "    Write-FixtureStage filesystem-command-exit\n"
+            "}\n"
+            "Write-FixtureStage helper-entry\n"
             f"& '{HELPER}' -VsWhere '{vswhere}' -Arch amd64 -Component fixture.component "
             + arguments.replace("<github_env>", str(self.github_env)) + "\n"
+            "Write-FixtureStage helper-exit\n"
             "Write-Output \"AFTER_PATH=$env:PATH\"\n"
             "Write-Output \"AFTER_TARGET=$env:VSCMD_ARG_TGT_ARCH\"\n",
             encoding="utf-8")
@@ -98,13 +120,16 @@ class Probe:
         self.returncode = None
         self.timed_out = False
         self.stdout = self.stderr = ""
+        self.stages = ""
+        self.launch_utc_ms = time.time_ns() // 1000000
         self.started = time.monotonic()
         # File-backed capture: collecting one child can never block on another
         # child's pipe capacity or on a pipe handle inherited by a grandchild.
         self.outputs = (self.stdout_path.open("wb"), self.stderr_path.open("wb"))
         try:
             self.process = subprocess.Popen(
-                self.command, env=dict(environment, FAKE_LAUNCH_LOG=str(self.launch_log)),
+                self.command, env=dict(environment, FAKE_LAUNCH_LOG=str(self.launch_log),
+                                       FAKE_STAGE_LOG=str(self.stage_path)),
                 stdin=subprocess.DEVNULL, stdout=self.outputs[0], stderr=self.outputs[1])
         except BaseException:
             for output in self.outputs:
@@ -123,6 +148,10 @@ class Probe:
             output.close()
         self.stdout = self.stdout_path.read_text(errors="replace")
         self.stderr = self.stderr_path.read_text(errors="replace")
+        self.stages = self.stage_path.read_text(errors="replace") if self.stage_path.exists() else ""
+        print("VS_PROBE_TRACE " + json.dumps({"launch_utc_ms": self.launch_utc_ms,
+              "stage_log": str(self.stage_path), "stages": self.stages,
+              "timed_out": self.timed_out}), flush=True)
 
     def stop(self):
         if self.process.poll() is None:
@@ -160,12 +189,11 @@ def probe_plan_run(shell, root, llvm_bin, plan, environment, probes):
 
 @unittest.skipUnless(os.name == "nt", "The Visual Studio shell exists only on Windows runners")
 class HelperBehaviorTests(unittest.TestCase):
-    # Each step is still a separate powershell.exe process with its own script,
-    # launch log and GITHUB_ENV file, exactly as a workflow step runs it. Every
-    # Windows PowerShell start costs about 23 s on the hosted AArch64 runner,
-    # so two owners overlap per batch. Seven simultaneous starts exceeded each
-    # owner's 120 s deadline on ARM64 while other suites also compiled fixtures.
-    # All seven cases and their launch-relative deadlines remain intact.
+    # Each step remains a separate PowerShell process with private outputs.
+    # Preserve two-owner admission and launch-relative deadlines. Stage receipts
+    # attributed the old ~23s prefix to work before any vswhere child ran; the
+    # optional cold Test-Path prefix isolates that command without resetting time.
+    EXTRA_CASES = ("vswhere directory", "vswhere provider", "relative filesystem")
     FAILURES = {
         "wrong clang target": ({"FAKE_CLANG_TARGET": "aarch64-pc-windows-msvc"},
                                "-LlvmBin '<llvm_bin>' -Require cl, clang -ClangArch x86_64"),
@@ -188,19 +216,23 @@ class HelperBehaviorTests(unittest.TestCase):
         cls.vs_bin.mkdir()
         (tools / "Launch-VsDevShell.ps1").write_text(
             "param([string]$Arch, [string]$HostArch, [switch]$SkipAutomaticLocation)\n"
-            "Add-Content -LiteralPath $env:FAKE_LAUNCH_LOG -Value \"arch=$Arch host=$HostArch skip=$SkipAutomaticLocation\"\n"
+            "Write-FixtureStage vsdev-entry\n"
+            "[System.IO.File]::AppendAllText($env:FAKE_LAUNCH_LOG, \"arch=$Arch host=$HostArch skip=$SkipAutomaticLocation`n\")\n"
             "$env:VSCMD_ARG_TGT_ARCH = $Arch\n"
-            f"$env:PATH = '{cls.vs_bin};' + $env:PATH\n",
+            f"$env:PATH = '{cls.vs_bin};' + $env:PATH\n"
+            "Write-FixtureStage vsdev-exit\n",
             encoding="utf-8")
         for compiler in ("cl", "gcc", "zig"):
             (cls.vs_bin / f"{compiler}.cmd").write_text("@echo off\r\n")
         cls.llvm_bin = cls.root / "llvm/bin"
         cls.llvm_bin.mkdir(parents=True)
         (cls.llvm_bin / "clang.cmd").write_text(
-            "@echo off\r\necho clang version fixture\r\necho Target: %FAKE_CLANG_TARGET%\r\n")
-        vswhere = cls.root / "vswhere.cmd"
+            '@echo off\r\necho stage=clang-entry local_time=%TIME% >> "%FAKE_STAGE_LOG%"\r\n'
+            "echo clang version fixture\r\necho Target: %FAKE_CLANG_TARGET%\r\n")
+        vswhere = cls.root / "vswhere[fixture].cmd"
         vswhere.write_text(
-            "@echo off\r\nif defined FAKE_VS_PATH echo %FAKE_VS_PATH%\r\nexit /b %FAKE_VSWHERE_STATUS%\r\n")
+            '@echo off\r\necho stage=vswhere-entry local_time=%TIME% >> "%FAKE_STAGE_LOG%"\r\n'
+            "if defined FAKE_VS_PATH echo %FAKE_VS_PATH%\r\nexit /b %FAKE_VSWHERE_STATUS%\r\n")
         environment = dict(
             os.environ,
             FAKE_VS_PATH=str(cls.root / "vs"),
@@ -216,6 +248,13 @@ class HelperBehaviorTests(unittest.TestCase):
         }
         for name, (overrides, arguments) in cls.FAILURES.items():
             plan[name] = (vswhere, overrides, arguments)
+        plan["vswhere directory"] = (cls.root / "vs", {}, "")
+        plan["vswhere provider"] = ("Env:FAKE_VS_PATH", {}, "")
+        plan["relative filesystem"] = (Path(vswhere.name), {
+            "FAKE_PS_LOCATION": str(cls.root),
+            "FAKE_OS_CURRENT_DIRECTORY": str(ROOT),
+            "PATH": environment["PATH"] + ";caf\u00e9-fixture",
+        }, "-GithubEnv 'relative-env'")
         cls.probes = {}
         # Registered before the first launch and run before the fixture
         # directory is removed, so an early failure never leaks a child.
@@ -238,12 +277,19 @@ class HelperBehaviorTests(unittest.TestCase):
     def probe(self, name):
         probe = self.probes[name]
         self.assertFalse(probe.timed_out, f"{probe.command} exceeded {PROBE_TIMEOUT_SECONDS}s: "
-                                          + probe.stdout + probe.stderr)
+                                          + probe.stdout + probe.stderr + "\nstages:\n" + probe.stages)
         return probe
 
     def test_combination_shell_exports_path_and_probes_every_compiler(self):
         result = self.probe("combination")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        stages = [line.split()[0] for line in result.stages.splitlines()]
+        expected = ["stage=script-entry"]
+        if os.environ.get("BUSTER_VS_PROBE_COLD_TEST_PATH") == "1":
+            expected += ["stage=filesystem-command-entry", "stage=filesystem-command-exit"]
+        expected += ["stage=helper-entry", "stage=vswhere-entry", "stage=vsdev-entry",
+                     "stage=vsdev-exit", "stage=clang-entry", "stage=helper-exit"]
+        self.assertEqual(stages, expected)
         self.assertEqual(result.launch_log.read_text().split(), ["arch=amd64", "host=amd64", "skip=True"])
         after = re.search(r"AFTER_PATH=(.*)", result.stdout).group(1)
         self.assertTrue(after.startswith(f"{self.llvm_bin};{self.vs_bin};"), after)
@@ -272,9 +318,28 @@ class HelperBehaviorTests(unittest.TestCase):
         self.assertIn("vswhere was not found", result.stdout + result.stderr)
 
 
+    def test_literal_relative_and_provider_paths_preserve_export_contract(self):
+        for name, marker in (("vswhere directory", "was not found"),
+                             ("vswhere provider", "requires a FileSystem path")):
+            with self.subTest(case=name):
+                result = self.probe(name)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(marker, result.stdout + result.stderr)
+                self.assertNotIn("AFTER_PATH=", result.stdout)
+        result = self.probe("relative filesystem")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("AFTER_TARGET=amd64", result.stdout)
+        raw = (self.root / "relative-env").read_bytes()
+        self.assertIn("caf\u00e9-fixture".encode("utf-8"), raw)
+        self.assertFalse(raw.startswith(b"\xef\xbb\xbf"))
+        self.assertNotIn(b"\n", raw.replace(b"\r\n", b""))
+        self.assertTrue(raw.endswith(b"VSCMD_ARG_TGT_ARCH=amd64\r\n"))
+
+
 class ProbeSchedulingTests(unittest.TestCase):
     def plan(self):
-        names = ["combination", "msvc", "missing vswhere", *HelperBehaviorTests.FAILURES]
+        names = ["combination", "msvc", "missing vswhere", *HelperBehaviorTests.FAILURES,
+                 *HelperBehaviorTests.EXTRA_CASES]
         return {name: (Path("vswhere"), {}, "") for name in names}
 
     def run_fake_plan(self, timeout_slot=None, launch_error_slot=None):
@@ -318,14 +383,14 @@ class ProbeSchedulingTests(unittest.TestCase):
         probes, events, live = self.run_fake_plan()
         self.assertEqual(PROBE_CONCURRENT_LIMIT, 2)
         self.assertEqual(list(probes), list(self.plan()))
-        self.assertEqual([event[1] for event in events if event[0] == "finish"], list(range(7)))
+        self.assertEqual([event[1] for event in events if event[0] == "finish"], list(range(10)))
         self.assertEqual(max(event[2] for event in events), 2)
         self.assertFalse(live)
 
     def test_timeout_does_not_drop_later_cases(self):
         probes, events, live = self.run_fake_plan(timeout_slot=0)
         self.assertTrue(probes["combination"].timed_out)
-        self.assertEqual(len([event for event in events if event[0] == "finish"]), 7)
+        self.assertEqual(len([event for event in events if event[0] == "finish"]), 10)
         self.assertTrue(all(probe.returncode == 0 for name, probe in probes.items() if name != "combination"))
         self.assertFalse(live)
 
@@ -345,6 +410,9 @@ class ProbeSchedulingTests(unittest.TestCase):
         probe.outputs = (mock.Mock(), mock.Mock())
         probe.stdout_path = mock.Mock()
         probe.stderr_path = mock.Mock()
+        probe.stage_path = mock.Mock()
+        probe.stage_path.exists.return_value = False
+        probe.launch_utc_ms = 0
         with mock.patch("time.monotonic", return_value=190):
             probe.finish()
         probe.process.wait.assert_called_once_with(timeout=30)
@@ -361,6 +429,9 @@ class ProbeSchedulingTests(unittest.TestCase):
         probe.outputs = (mock.Mock(), mock.Mock())
         probe.stdout_path = mock.Mock()
         probe.stderr_path = mock.Mock()
+        probe.stage_path = mock.Mock()
+        probe.stage_path.exists.return_value = False
+        probe.launch_utc_ms = 0
         with mock.patch("time.monotonic", return_value=221):
             probe.finish()
         probe.process.wait.assert_called_once_with(timeout=0)

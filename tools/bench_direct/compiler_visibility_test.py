@@ -34,6 +34,9 @@ REPO = "buster14a/buster"
 HEAD, TRUSTED, PARENT, OLDER = "a" * 40, "9" * 40, "b" * 40, "c" * 40
 BOT = {"login": "github-actions[bot]", "id": 41898282, "type": "Bot"}
 HUMAN = {"login": "davidgmbb", "id": 39247043, "type": "User"}
+# compiler_publish.main dispatches on sys.argv[1:]; the default publish command
+# takes no arguments, so a focused test run's own arguments must not leak in (#3680).
+PUBLISH_ARGV = [compiler_publish.__file__]
 
 
 def corpus_members() -> dict:
@@ -604,6 +607,7 @@ class RecoveryTest(unittest.TestCase):
             values = {"BQ_REPOSITORY": REPO, "BQ_RECOVER_RUN_ID": "37486885378", "BQ_RECOVER_ATTEMPT": "1",
                       "GH_TOKEN": "t", "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": os.devnull}
             with mock.patch.dict(os.environ, values, clear=True), \
+                    mock.patch.object(sys, "argv", PUBLISH_ARGV), \
                     mock.patch.object(compiler_publish, "Api", lambda repository, token: api), \
                     mock.patch("sys.stdout", new_callable=io.StringIO), \
                     mock.patch("sys.stderr", new_callable=io.StringIO):
@@ -712,6 +716,7 @@ class PublishTest(unittest.TestCase):
                     return {"jobs": []}
                 return original(path, data, method)
             with mock.patch.dict(os.environ, values, clear=True), \
+                    mock.patch.object(sys, "argv", PUBLISH_ARGV), \
                     mock.patch.object(api, "request", routed), \
                     mock.patch.object(compiler_publish, "Api", lambda repository, token: api), \
                     mock.patch("sys.stdout", new_callable=io.StringIO):
@@ -726,6 +731,19 @@ class PublishTest(unittest.TestCase):
                 recorded = receipt()
                 recorded["production_profile"] = {"requested": True, "status": "failed",
                                                   "binaries": {"baseline": role, "candidate": role}}
+                api, started, unused_written = self.publish(machine_bytes(), recorded)
+                self.assertEqual((len(api.checks), started["status"], started["conclusion"]),
+                                 (1, "completed", "failure"))
+
+    def test_out_of_range_production_profile_numbers_end_in_a_terminal_failure(self) -> None:
+        """An integer past the float range in rendered cells must not raise before the check completes (#3675)."""
+        for label, wall in (("huge integer", [10 ** 309, 1.0]), ("huge negative", [-(10 ** 309), 1.0]),
+                            ("boolean", [True, 1.0])):
+            with self.subTest(wall=label):
+                recorded = receipt()
+                recorded["production_profile"] = {"requested": True, "status": "failed", "binaries": {},
+                                                  "cells": [{"name": "tiny_startup/fast", "decision": "regression",
+                                                             "wall_seconds": wall}]}
                 api, started, unused_written = self.publish(machine_bytes(), recorded)
                 self.assertEqual((len(api.checks), started["status"], started["conclusion"]),
                                  (1, "completed", "failure"))
