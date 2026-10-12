@@ -1,0 +1,6434 @@
+{
+  "schema": "buster-parameter-edge-scaling-diagnostic-v1",
+  "revision": "a0857f47cd7902265c5793af6f4664b433c776ea",
+  "platform": "Linux-7.2.9-2-cachyos-x86_64-with-glibc2.44",
+  "llvm_cov_version": "LLVM (http://llvm.org/):\n  LLVM version 23.1.1\n  Optimized build.",
+  "source_sha256": "4824aba67ca3c26d130d6af4fbf306f826df3d975945aee8f7f97a361fb57931",
+  "probe_sha256": "f276c03c6ffee100188ff96f9336ef07e53f722ce6f67552a0549fc649d0c2dc",
+  "collector_sha256": "de1b1da9753c88606d982c213e7ddbdcde74050440c42283ad7d533a896604cb",
+  "binary_sha256": "ab7c7afad8412fa2c70d29eb5daab77d65692bfffc420c8a676a83f61a0a04eb",
+  "points": {
+    "count_edges": [
+      2297,
+      13
+    ],
+    "index_edges": [
+      2354,
+      17
+    ],
+    "prefix_blocks": [
+      2366,
+      17
+    ],
+    "scatter_edges": [
+      2371,
+      17
+    ],
+    "number_edges": [
+      2381,
+      21
+    ],
+    "map_edges": [
+      2441,
+      21
+    ],
+    "reset_edges": [
+      2518,
+      21
+    ],
+    "publish_edges": [
+      2536,
+      17
+    ],
+    "copy_rows": [
+      2454,
+      21
+    ]
+  },
+  "rows": [
+    {
+      "target": "x64",
+      "shape": "chain",
+      "blocks": 0,
+      "edges": 0,
+      "counts": {
+        "count_edges": 0,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 0,
+        "remaps": 0
+      },
+      "stdout": "blocks=0 edges=0 shape=chain target=x64 splits=0 retained_bytes=0 peak_bytes=0 hash=cbf29ce484222325 split_ns=1693",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "70af3ad3caaf612e74d6dd4f80fd66f829d99d7971705328b9b022954d8fbfb4",
+      "profdata_sha256": "afee1b4436b5765727a0e66c9a3037cb4d681bf65744997236fa1b2e1ccf38c8"
+    },
+    {
+      "target": "x64",
+      "shape": "chain",
+      "blocks": 1,
+      "edges": 0,
+      "counts": {
+        "count_edges": 0,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 0,
+        "remaps": 0
+      },
+      "stdout": "blocks=1 edges=0 shape=chain target=x64 splits=0 retained_bytes=0 peak_bytes=0 hash=eab2bddba9a25b48 split_ns=2134",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "6d0666a84490b707a31fc5f71603a9744df500a2897169fba95b3715c801f0f7",
+      "profdata_sha256": "cf57c79d467e782335495ffc52de891ea01e8e9a105870946dbd1f18691ba769"
+    },
+    {
+      "target": "x64",
+      "shape": "chain",
+      "blocks": 2,
+      "edges": 1,
+      "counts": {
+        "count_edges": 1,
+        "index_edges": 1,
+        "prefix_blocks": 2,
+        "scatter_edges": 1,
+        "number_edges": 1,
+        "map_edges": 1,
+        "reset_edges": 1,
+        "publish_edges": 1,
+        "copy_rows": 2,
+        "needs_split": 2,
+        "remaps": 2
+      },
+      "stdout": "blocks=2 edges=1 shape=chain target=x64 splits=1 retained_bytes=200 peak_bytes=244 hash=76a1d8e8679db2eb split_ns=11913",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          2,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          2,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "ade4e4cfcd1dc109fb15c39439f4127fe36a191796042c347599058418a25778",
+      "profdata_sha256": "033b06f4870386a47e1eff3696d1e4589f43f1c2c7a0fa0eb967d8c08e3a6b96"
+    },
+    {
+      "target": "x64",
+      "shape": "chain",
+      "blocks": 17,
+      "edges": 16,
+      "counts": {
+        "count_edges": 16,
+        "index_edges": 16,
+        "prefix_blocks": 17,
+        "scatter_edges": 16,
+        "number_edges": 16,
+        "map_edges": 16,
+        "reset_edges": 16,
+        "publish_edges": 16,
+        "copy_rows": 17,
+        "needs_split": 32,
+        "remaps": 32
+      },
+      "stdout": "blocks=17 edges=16 shape=chain target=x64 splits=16 retained_bytes=2360 peak_bytes=2764 hash=e5e04b37a464f768 split_ns=7475",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          17,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          17,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "bae4943711a3e4723fca5a4fdb1f56e102416d9b329fc97567bef3bc95563241",
+      "profdata_sha256": "6ea0065be6596bb247f52705b64db4de6d5725b4d80c3ef661c60a88b677a63d"
+    },
+    {
+      "target": "x64",
+      "shape": "chain",
+      "blocks": 257,
+      "edges": 256,
+      "counts": {
+        "count_edges": 256,
+        "index_edges": 256,
+        "prefix_blocks": 257,
+        "scatter_edges": 256,
+        "number_edges": 256,
+        "map_edges": 256,
+        "reset_edges": 256,
+        "publish_edges": 256,
+        "copy_rows": 257,
+        "needs_split": 512,
+        "remaps": 512
+      },
+      "stdout": "blocks=257 edges=256 shape=chain target=x64 splits=256 retained_bytes=36920 peak_bytes=43084 hash=b451795c348d3d52 split_ns=29256",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          257,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          257,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "ce75c1adb570bf601e32d4a610424303250a0502d960f1663fa1feb1382038a9",
+      "profdata_sha256": "d4e7540039b70d690a48516e97b066f8e51a8f8cd5a3e6dd99dc1ef43c2aae61"
+    },
+    {
+      "target": "x64",
+      "shape": "chain",
+      "blocks": 4097,
+      "edges": 4096,
+      "counts": {
+        "count_edges": 4096,
+        "index_edges": 4096,
+        "prefix_blocks": 4097,
+        "scatter_edges": 4096,
+        "number_edges": 4096,
+        "map_edges": 4096,
+        "reset_edges": 4096,
+        "publish_edges": 4096,
+        "copy_rows": 4097,
+        "needs_split": 8192,
+        "remaps": 8192
+      },
+      "stdout": "blocks=4097 edges=4096 shape=chain target=x64 splits=4096 retained_bytes=589880 peak_bytes=688204 hash=d9aebbf84382ea88 split_ns=144356",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          4097,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          4097,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "39a74b4f3afa134f436724f4683c321370302ec7d4394e53d633e4d91a2fa731",
+      "profdata_sha256": "c36fd8e5ea21608c254a3b6e11599de7436a7a12955150b93361bd8ccf22b9b9"
+    },
+    {
+      "target": "x64",
+      "shape": "chain",
+      "blocks": 16384,
+      "edges": 16383,
+      "counts": {
+        "count_edges": 16383,
+        "index_edges": 16383,
+        "prefix_blocks": 16384,
+        "scatter_edges": 16383,
+        "number_edges": 16383,
+        "map_edges": 16383,
+        "reset_edges": 16383,
+        "publish_edges": 16383,
+        "copy_rows": 16384,
+        "needs_split": 32766,
+        "remaps": 32766
+      },
+      "stdout": "blocks=16384 edges=16383 shape=chain target=x64 splits=16383 retained_bytes=2359208 peak_bytes=2752420 hash=74d496c1b59d68c1 split_ns=867459",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          16384,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          16384,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "d4fdab3ba543e1bdf3f4056ca209fc5a66912fce002aebbc3a6bfbbb047b4535",
+      "profdata_sha256": "faf372e6016d053e849363bcf5b90de95dc49d6dfabcbf02b5a9ca88934863ff"
+    },
+    {
+      "target": "x64",
+      "shape": "fanout",
+      "blocks": 0,
+      "edges": 0,
+      "counts": {
+        "count_edges": 0,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 0,
+        "remaps": 0
+      },
+      "stdout": "blocks=0 edges=0 shape=fanout target=x64 splits=0 retained_bytes=0 peak_bytes=0 hash=cbf29ce484222325 split_ns=1864",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "f69c5951eaf055440eb6e4fa66c8bd5cfd6d63a56377335f3b678c8612cfe5f6",
+      "profdata_sha256": "f209912c8a6b282718b035b06ba56579a43e3b4fae67583455c846b0e8d17d42"
+    },
+    {
+      "target": "x64",
+      "shape": "fanout",
+      "blocks": 1,
+      "edges": 0,
+      "counts": {
+        "count_edges": 0,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 0,
+        "remaps": 0
+      },
+      "stdout": "blocks=1 edges=0 shape=fanout target=x64 splits=0 retained_bytes=0 peak_bytes=0 hash=eab2bddba9a25b48 split_ns=2134",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "d64007859838c9157ff9886b1e30803497bb08749914b5da4b545bf1c06ff02b",
+      "profdata_sha256": "5610653790fa6abebbfd91078322ef4acf4c3e293f634c7d7d2ab2fc6cc18f16"
+    },
+    {
+      "target": "x64",
+      "shape": "fanout",
+      "blocks": 2,
+      "edges": 1,
+      "counts": {
+        "count_edges": 1,
+        "index_edges": 1,
+        "prefix_blocks": 2,
+        "scatter_edges": 1,
+        "number_edges": 1,
+        "map_edges": 1,
+        "reset_edges": 1,
+        "publish_edges": 1,
+        "copy_rows": 2,
+        "needs_split": 2,
+        "remaps": 2
+      },
+      "stdout": "blocks=2 edges=1 shape=fanout target=x64 splits=1 retained_bytes=216 peak_bytes=260 hash=b8e3727fae480298 split_ns=7224",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          2,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          2,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "db00d348ac22973e7a5e87203819ee3ed4926e0b018598575691f96b62acf43a",
+      "profdata_sha256": "3a379febfc1ad543bfdb3a261524b52733aedcbd89b8e0c1cc960009eae39074"
+    },
+    {
+      "target": "x64",
+      "shape": "fanout",
+      "blocks": 17,
+      "edges": 16,
+      "counts": {
+        "count_edges": 16,
+        "index_edges": 16,
+        "prefix_blocks": 17,
+        "scatter_edges": 16,
+        "number_edges": 16,
+        "map_edges": 16,
+        "reset_edges": 16,
+        "publish_edges": 16,
+        "copy_rows": 17,
+        "needs_split": 32,
+        "remaps": 17
+      },
+      "stdout": "blocks=17 edges=16 shape=fanout target=x64 splits=16 retained_bytes=2616 peak_bytes=3020 hash=0e07f3a4474e3d65 split_ns=7284",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          17,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          17,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "d37aee92eba7f0f7a8a13b13ffe0f598472a01f21e36a14bba4957428fa54667",
+      "profdata_sha256": "adfada1bfacae753b82e1df67a5b7ea86686f2587b62aa2c6502528b02930d63"
+    },
+    {
+      "target": "x64",
+      "shape": "fanout",
+      "blocks": 257,
+      "edges": 256,
+      "counts": {
+        "count_edges": 256,
+        "index_edges": 256,
+        "prefix_blocks": 257,
+        "scatter_edges": 256,
+        "number_edges": 256,
+        "map_edges": 256,
+        "reset_edges": 256,
+        "publish_edges": 256,
+        "copy_rows": 257,
+        "needs_split": 512,
+        "remaps": 257
+      },
+      "stdout": "blocks=257 edges=256 shape=fanout target=x64 splits=256 retained_bytes=41016 peak_bytes=47180 hash=636970bfa52b7700 split_ns=27874",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          257,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          257,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "b7dafe449529e948fda4f5bc61a4fb79688889c717bc9cf449ffbbf3545555ff",
+      "profdata_sha256": "98e65f9dd119847c6d02b40b5bd9b32ea3ab9ecdc60c76a7f2e18d2a26170f81"
+    },
+    {
+      "target": "x64",
+      "shape": "fanout",
+      "blocks": 4097,
+      "edges": 4096,
+      "counts": {
+        "count_edges": 4096,
+        "index_edges": 4096,
+        "prefix_blocks": 4097,
+        "scatter_edges": 4096,
+        "number_edges": 4096,
+        "map_edges": 4096,
+        "reset_edges": 4096,
+        "publish_edges": 4096,
+        "copy_rows": 4097,
+        "needs_split": 8192,
+        "remaps": 4097
+      },
+      "stdout": "blocks=4097 edges=4096 shape=fanout target=x64 splits=4096 retained_bytes=655416 peak_bytes=753740 hash=2352306e95461365 split_ns=129979",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          4097,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          4097,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "76f265fc182a399ca947eefbf42e8b3417e12be4d34d999acb7ea82adc9905cd",
+      "profdata_sha256": "1842b7c61b2cbe4771471068d68885229300f9c0444144e2cd469b7a4319999e"
+    },
+    {
+      "target": "x64",
+      "shape": "fanout",
+      "blocks": 16384,
+      "edges": 16383,
+      "counts": {
+        "count_edges": 16383,
+        "index_edges": 16383,
+        "prefix_blocks": 16384,
+        "scatter_edges": 16383,
+        "number_edges": 16383,
+        "map_edges": 16383,
+        "reset_edges": 16383,
+        "publish_edges": 16383,
+        "copy_rows": 16384,
+        "needs_split": 32766,
+        "remaps": 16384
+      },
+      "stdout": "blocks=16384 edges=16383 shape=fanout target=x64 splits=16383 retained_bytes=2621336 peak_bytes=3014548 hash=7f46de6fb84a806e split_ns=620508",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          16384,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          16384,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "ed76206dcdf19a1eb115a6d4270e597a3634b6f8ad55aa69b7b5d22a1dc5c590",
+      "profdata_sha256": "5ad595681f407737ce562c418f7ac90f6c240d0f6246b02437be6c6415869a63"
+    },
+    {
+      "target": "x64",
+      "shape": "duplicates",
+      "blocks": 0,
+      "edges": 0,
+      "counts": {
+        "count_edges": 0,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 0,
+        "remaps": 0
+      },
+      "stdout": "blocks=0 edges=0 shape=duplicates target=x64 splits=0 retained_bytes=0 peak_bytes=0 hash=cbf29ce484222325 split_ns=3216",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "0f92667bad6ad4194d96f285a7807ed72f0c88350c158e6cc30e63889c94e389",
+      "profdata_sha256": "e05534eb6a25c93ed632a455a3c323dc1b0c8b67a1a814db3280a7876866fe61"
+    },
+    {
+      "target": "x64",
+      "shape": "duplicates",
+      "blocks": 1,
+      "edges": 0,
+      "counts": {
+        "count_edges": 0,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 0,
+        "remaps": 0
+      },
+      "stdout": "blocks=1 edges=0 shape=duplicates target=x64 splits=0 retained_bytes=0 peak_bytes=0 hash=eab2bddba9a25b48 split_ns=2074",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "73c5e11579fd6bf8063df023f8d35d8d745c1261cb3642b8165f476292a32ca9",
+      "profdata_sha256": "c1a73b09de95f3cfb7e89831d628cc87d4c99f102d02aa309c248462d702e74f"
+    },
+    {
+      "target": "x64",
+      "shape": "duplicates",
+      "blocks": 2,
+      "edges": 3,
+      "counts": {
+        "count_edges": 3,
+        "index_edges": 3,
+        "prefix_blocks": 2,
+        "scatter_edges": 3,
+        "number_edges": 3,
+        "map_edges": 3,
+        "reset_edges": 3,
+        "publish_edges": 3,
+        "copy_rows": 2,
+        "needs_split": 6,
+        "remaps": 2
+      },
+      "stdout": "blocks=2 edges=3 shape=duplicates target=x64 splits=2 retained_bytes=320 peak_bytes=380 hash=c830ee22411bc0f2 split_ns=6653",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          3,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          3,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          2,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          3,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          3,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          3,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          3,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          3,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          2,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "a282c84990804308fdb43c0f134caea28b9c8f7e7006742079772cb1314b8727",
+      "profdata_sha256": "f95bfa6bf04fbd620954a5c686fc00922eaca7340fac451b631750fa1b3c5140"
+    },
+    {
+      "target": "x64",
+      "shape": "duplicates",
+      "blocks": 17,
+      "edges": 48,
+      "counts": {
+        "count_edges": 48,
+        "index_edges": 48,
+        "prefix_blocks": 17,
+        "scatter_edges": 48,
+        "number_edges": 48,
+        "map_edges": 48,
+        "reset_edges": 48,
+        "publish_edges": 48,
+        "copy_rows": 17,
+        "needs_split": 96,
+        "remaps": 17
+      },
+      "stdout": "blocks=17 edges=48 shape=duplicates target=x64 splits=32 retained_bytes=4280 peak_bytes=4940 hash=039e1fe61f591c9a split_ns=8236",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          48,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          48,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          17,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          48,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          48,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          48,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          48,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          48,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          17,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "5dda75f02dd30ba230d3a07cedfc37841f39557acb71c5d0084c2567c9a8e499",
+      "profdata_sha256": "023f4a129cb6349bdf5fb34eb59f2ae01631201633128a9bb55b1bb04aae5852"
+    },
+    {
+      "target": "x64",
+      "shape": "duplicates",
+      "blocks": 257,
+      "edges": 768,
+      "counts": {
+        "count_edges": 768,
+        "index_edges": 768,
+        "prefix_blocks": 257,
+        "scatter_edges": 768,
+        "number_edges": 768,
+        "map_edges": 768,
+        "reset_edges": 768,
+        "publish_edges": 768,
+        "copy_rows": 257,
+        "needs_split": 1536,
+        "remaps": 257
+      },
+      "stdout": "blocks=257 edges=768 shape=duplicates target=x64 splits=512 retained_bytes=67640 peak_bytes=77900 hash=3f7a299c1ebefbed split_ns=21020",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          768,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          768,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          257,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          768,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          768,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          768,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          768,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          768,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          257,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "e061aaf17d9bc382e0e8d84175a1ef7ddb806b1fe0e90d29eb5e9071b2be4d95",
+      "profdata_sha256": "ebed5f5275db8ce557ad83cd9503330aea424c513413b77f2bcf8fb72f7e1fe2"
+    },
+    {
+      "target": "x64",
+      "shape": "duplicates",
+      "blocks": 4097,
+      "edges": 12288,
+      "counts": {
+        "count_edges": 12288,
+        "index_edges": 12288,
+        "prefix_blocks": 4097,
+        "scatter_edges": 12288,
+        "number_edges": 12288,
+        "map_edges": 12288,
+        "reset_edges": 12288,
+        "publish_edges": 12288,
+        "copy_rows": 4097,
+        "needs_split": 24576,
+        "remaps": 4097
+      },
+      "stdout": "blocks=4097 edges=12288 shape=duplicates target=x64 splits=8192 retained_bytes=1081400 peak_bytes=1245260 hash=d5e529c73964c9bb split_ns=249497",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          12288,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          12288,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          4097,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          12288,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          12288,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          12288,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          12288,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          12288,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          4097,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "7c4ce02756dc54b65cf80e7400712051bedd91282fe71905d25443195da61b18",
+      "profdata_sha256": "0d0531709030575b90013a5bc7850baa45bd562bb6009cd2ece65b53c6db03ed"
+    },
+    {
+      "target": "x64",
+      "shape": "duplicates",
+      "blocks": 16384,
+      "edges": 49149,
+      "counts": {
+        "count_edges": 49149,
+        "index_edges": 49149,
+        "prefix_blocks": 16384,
+        "scatter_edges": 49149,
+        "number_edges": 49149,
+        "map_edges": 49149,
+        "reset_edges": 49149,
+        "publish_edges": 49149,
+        "copy_rows": 16384,
+        "needs_split": 98298,
+        "remaps": 16384
+      },
+      "stdout": "blocks=16384 edges=49149 shape=duplicates target=x64 splits=32766 retained_bytes=4325168 peak_bytes=4980508 hash=71c64dac40baebb4 split_ns=1139430",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          49149,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          49149,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          16384,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          49149,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          49149,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          49149,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          49149,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          49149,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          16384,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "23f3416302bb35b5d79b5ef987799c7a341f65b3c83114657628db230be910e9",
+      "profdata_sha256": "b6ff4dbecbaf011c1480b6ed03dae8d3863ffa13542f5a329e131e46ef586425"
+    },
+    {
+      "target": "x64",
+      "shape": "no-split",
+      "blocks": 0,
+      "edges": 0,
+      "counts": {
+        "count_edges": 0,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 0,
+        "remaps": 0
+      },
+      "stdout": "blocks=0 edges=0 shape=no-split target=x64 splits=0 retained_bytes=0 peak_bytes=0 hash=cbf29ce484222325 split_ns=3547",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "a6086540c8771a7ddb550539fc49b27467c120fdad13b36aeb8f4c0cab6e732c",
+      "profdata_sha256": "87aaf146750430842260410b10e38ba142510f9f13a8cf5d102cbad97bce9e0d"
+    },
+    {
+      "target": "x64",
+      "shape": "no-split",
+      "blocks": 1,
+      "edges": 0,
+      "counts": {
+        "count_edges": 0,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 0,
+        "remaps": 0
+      },
+      "stdout": "blocks=1 edges=0 shape=no-split target=x64 splits=0 retained_bytes=0 peak_bytes=0 hash=eab2bddba9a25b48 split_ns=2175",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "cc0cdb46112cb365ac6566944273d37c79d4d3e54f7f75a1597369e4882a368b",
+      "profdata_sha256": "51edd629a2ac4c66ae001af817193323589fb06aa1c4ee2950dec08eb65762dd"
+    },
+    {
+      "target": "x64",
+      "shape": "no-split",
+      "blocks": 2,
+      "edges": 1,
+      "counts": {
+        "count_edges": 1,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 1,
+        "remaps": 0
+      },
+      "stdout": "blocks=2 edges=1 shape=no-split target=x64 splits=0 retained_bytes=0 peak_bytes=0 hash=d9fd1cefe4673b32 split_ns=3075",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "0972f407656366c847951e8e7a368c460c49437c8b9296530c10b641ce846a24",
+      "profdata_sha256": "4f9855d5d083745bb829b66d9675dadfda694c34fc6215367dd84b4208cf0ec9"
+    },
+    {
+      "target": "x64",
+      "shape": "no-split",
+      "blocks": 17,
+      "edges": 16,
+      "counts": {
+        "count_edges": 16,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 16,
+        "remaps": 0
+      },
+      "stdout": "blocks=17 edges=16 shape=no-split target=x64 splits=0 retained_bytes=0 peak_bytes=0 hash=fe6c7357677718e8 split_ns=1824",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "138a9ce29786f051a1a04992ecfd22426f03f98341475a27fd31ac16cf57d4fc",
+      "profdata_sha256": "28e856a646a913062e45b9bfea45908d702947352ffd59ebdedbdb5b0f551a8a"
+    },
+    {
+      "target": "x64",
+      "shape": "no-split",
+      "blocks": 257,
+      "edges": 256,
+      "counts": {
+        "count_edges": 256,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 256,
+        "remaps": 0
+      },
+      "stdout": "blocks=257 edges=256 shape=no-split target=x64 splits=0 retained_bytes=0 peak_bytes=0 hash=2d492b7f366bd98c split_ns=2685",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "c7c99c442833baf5636a866ce4eec36a8c27f421542ebb1328924098f6138b9d",
+      "profdata_sha256": "872a615f9f3285d93b9c052794dc862c8eed63c37b21a14e8a3aadf7525f4642"
+    },
+    {
+      "target": "x64",
+      "shape": "no-split",
+      "blocks": 4097,
+      "edges": 4096,
+      "counts": {
+        "count_edges": 4096,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 4096,
+        "remaps": 0
+      },
+      "stdout": "blocks=4097 edges=4096 shape=no-split target=x64 splits=0 retained_bytes=0 peak_bytes=0 hash=5c46c86f21b39de8 split_ns=7144",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "08d97b04e826a3aae666a338fbb188cf8947be7972abb97a05831d431ccf8c69",
+      "profdata_sha256": "dbd31b32e2b6310524a6eddf3c9f72bc44a9583c7d0e69033abb3dc43438e216"
+    },
+    {
+      "target": "x64",
+      "shape": "no-split",
+      "blocks": 16384,
+      "edges": 16383,
+      "counts": {
+        "count_edges": 16383,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 16383,
+        "remaps": 0
+      },
+      "stdout": "blocks=16384 edges=16383 shape=no-split target=x64 splits=0 retained_bytes=0 peak_bytes=0 hash=3941eeb6a942ec26 split_ns=25098",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "08c777c9518359f46000391ddf09be51acbf14a94cb79a7c7b9772b0c40e54fe",
+      "profdata_sha256": "79e054bba1b540a60f13e43f8527b9ef48e0d8bc86f9ac15fd7d2c2c260337cb"
+    },
+    {
+      "target": "a64",
+      "shape": "chain",
+      "blocks": 0,
+      "edges": 0,
+      "counts": {
+        "count_edges": 0,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 0,
+        "remaps": 0
+      },
+      "stdout": "blocks=0 edges=0 shape=chain target=a64 splits=0 retained_bytes=0 peak_bytes=0 hash=cbf29ce484222325 split_ns=1693",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "82ce8bdfbaa23ac79f98eb904a19f994acddacecc224483857f7260bd4d08210",
+      "profdata_sha256": "ee8139b83e973ad7edeb0e77cd98be6b6b6dac59f7288bc23887a19b706eb98f"
+    },
+    {
+      "target": "a64",
+      "shape": "chain",
+      "blocks": 1,
+      "edges": 0,
+      "counts": {
+        "count_edges": 0,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 0,
+        "remaps": 0
+      },
+      "stdout": "blocks=1 edges=0 shape=chain target=a64 splits=0 retained_bytes=0 peak_bytes=0 hash=8dd744f0cff021c1 split_ns=1853",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "6190670ad1502b55bff490b7a2eefdd216ea271afc10a5fb5ba1618f9bc99a2b",
+      "profdata_sha256": "f106cc95e5e5137bd641463c86882697c64bc67f715a50fdb9683d259dba416c"
+    },
+    {
+      "target": "a64",
+      "shape": "chain",
+      "blocks": 2,
+      "edges": 1,
+      "counts": {
+        "count_edges": 1,
+        "index_edges": 1,
+        "prefix_blocks": 2,
+        "scatter_edges": 1,
+        "number_edges": 1,
+        "map_edges": 1,
+        "reset_edges": 1,
+        "publish_edges": 1,
+        "copy_rows": 2,
+        "needs_split": 2,
+        "remaps": 2
+      },
+      "stdout": "blocks=2 edges=1 shape=chain target=a64 splits=1 retained_bytes=200 peak_bytes=244 hash=efc7c11c1c4fd164 split_ns=11872",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          2,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          2,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "aec9d10b0e91221e4713e2f739506e1e8f17ab7fbda03cb4a70671f6484ad881",
+      "profdata_sha256": "710278bb202773d3a069f0431f32dc367bb9823497b869163a52a094f66749ae"
+    },
+    {
+      "target": "a64",
+      "shape": "chain",
+      "blocks": 17,
+      "edges": 16,
+      "counts": {
+        "count_edges": 16,
+        "index_edges": 16,
+        "prefix_blocks": 17,
+        "scatter_edges": 16,
+        "number_edges": 16,
+        "map_edges": 16,
+        "reset_edges": 16,
+        "publish_edges": 16,
+        "copy_rows": 17,
+        "needs_split": 32,
+        "remaps": 32
+      },
+      "stdout": "blocks=17 edges=16 shape=chain target=a64 splits=16 retained_bytes=2360 peak_bytes=2764 hash=cc0dd3f9048ca761 split_ns=7124",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          17,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          17,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "46cc267530aad9123c92ef89533c915713eef7642ea6b84e37c5bc6360a145cb",
+      "profdata_sha256": "fc98c4e0bbcc30fec6ecc50745ea17ab21de021d95e7d0e486a161c07eb0d795"
+    },
+    {
+      "target": "a64",
+      "shape": "chain",
+      "blocks": 257,
+      "edges": 256,
+      "counts": {
+        "count_edges": 256,
+        "index_edges": 256,
+        "prefix_blocks": 257,
+        "scatter_edges": 256,
+        "number_edges": 256,
+        "map_edges": 256,
+        "reset_edges": 256,
+        "publish_edges": 256,
+        "copy_rows": 257,
+        "needs_split": 512,
+        "remaps": 512
+      },
+      "stdout": "blocks=257 edges=256 shape=chain target=a64 splits=256 retained_bytes=36920 peak_bytes=43084 hash=f9924746edb4c27b split_ns=15630",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          257,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          257,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "659cb9bec8f9542c407dfc935456710cfbd23fd122dc4481a41177b525c310aa",
+      "profdata_sha256": "c97f63f0c436dd81b2b703bdaedaa7c4a65ec26a76634ebce8325bc262a2c319"
+    },
+    {
+      "target": "a64",
+      "shape": "chain",
+      "blocks": 4097,
+      "edges": 4096,
+      "counts": {
+        "count_edges": 4096,
+        "index_edges": 4096,
+        "prefix_blocks": 4097,
+        "scatter_edges": 4096,
+        "number_edges": 4096,
+        "map_edges": 4096,
+        "reset_edges": 4096,
+        "publish_edges": 4096,
+        "copy_rows": 4097,
+        "needs_split": 8192,
+        "remaps": 8192
+      },
+      "stdout": "blocks=4097 edges=4096 shape=chain target=a64 splits=4096 retained_bytes=589880 peak_bytes=688204 hash=646b420e18279401 split_ns=316906",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          4097,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          4097,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "5eb9d8953065eecfb8d082c149a11b0c6025297652145d1e1c8487c614becab0",
+      "profdata_sha256": "217b9bd12f576cf8c9bb0bc24b84b551ad531b49c21723a2f7115a4a28d50f58"
+    },
+    {
+      "target": "a64",
+      "shape": "chain",
+      "blocks": 16384,
+      "edges": 16383,
+      "counts": {
+        "count_edges": 16383,
+        "index_edges": 16383,
+        "prefix_blocks": 16384,
+        "scatter_edges": 16383,
+        "number_edges": 16383,
+        "map_edges": 16383,
+        "reset_edges": 16383,
+        "publish_edges": 16383,
+        "copy_rows": 16384,
+        "needs_split": 32766,
+        "remaps": 32766
+      },
+      "stdout": "blocks=16384 edges=16383 shape=chain target=a64 splits=16383 retained_bytes=2359208 peak_bytes=2752420 hash=d822952090f7e6ca split_ns=669651",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          16384,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          16384,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "6db673d8ccfdf237b8e7180d2dda2876fc11e86d6496e202541e7b467e214490",
+      "profdata_sha256": "d496ae9ae8a54ee96175eedfdc501f170960352b579410166e5954e68aeb7ca8"
+    },
+    {
+      "target": "a64",
+      "shape": "fanout",
+      "blocks": 0,
+      "edges": 0,
+      "counts": {
+        "count_edges": 0,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 0,
+        "remaps": 0
+      },
+      "stdout": "blocks=0 edges=0 shape=fanout target=a64 splits=0 retained_bytes=0 peak_bytes=0 hash=cbf29ce484222325 split_ns=2044",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "799b5eec2465129eaab9f5d78233957cae21e03098fc0d056326d172eb922d77",
+      "profdata_sha256": "32fe60b6a5ab6aabfb83622805260220d3f00e1060bbcce361d23b55ea841512"
+    },
+    {
+      "target": "a64",
+      "shape": "fanout",
+      "blocks": 1,
+      "edges": 0,
+      "counts": {
+        "count_edges": 0,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 0,
+        "remaps": 0
+      },
+      "stdout": "blocks=1 edges=0 shape=fanout target=a64 splits=0 retained_bytes=0 peak_bytes=0 hash=8dd744f0cff021c1 split_ns=1763",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "6e9b24a865c49fd9134f0b02e92bdd72ad69db25482102b64e3f8b8c050a65f5",
+      "profdata_sha256": "1ecc910df7523c1b0bb76cdd99d08ff0b154b8a794faf4968e676a985dc5e5a0"
+    },
+    {
+      "target": "a64",
+      "shape": "fanout",
+      "blocks": 2,
+      "edges": 1,
+      "counts": {
+        "count_edges": 1,
+        "index_edges": 1,
+        "prefix_blocks": 2,
+        "scatter_edges": 1,
+        "number_edges": 1,
+        "map_edges": 1,
+        "reset_edges": 1,
+        "publish_edges": 1,
+        "copy_rows": 2,
+        "needs_split": 2,
+        "remaps": 2
+      },
+      "stdout": "blocks=2 edges=1 shape=fanout target=a64 splits=1 retained_bytes=216 peak_bytes=260 hash=21c529bb50ca8091 split_ns=10690",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          2,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          2,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "8f82b70df6c6d7eb837fc719122e35b543b8e38bdf94c45985080dc978fc4dcf",
+      "profdata_sha256": "03dca057c1aeeedd6ef6c5b98ac6184b83f06d168ed6c6a5858b7b67bc211b93"
+    },
+    {
+      "target": "a64",
+      "shape": "fanout",
+      "blocks": 17,
+      "edges": 16,
+      "counts": {
+        "count_edges": 16,
+        "index_edges": 16,
+        "prefix_blocks": 17,
+        "scatter_edges": 16,
+        "number_edges": 16,
+        "map_edges": 16,
+        "reset_edges": 16,
+        "publish_edges": 16,
+        "copy_rows": 17,
+        "needs_split": 32,
+        "remaps": 17
+      },
+      "stdout": "blocks=17 edges=16 shape=fanout target=a64 splits=16 retained_bytes=2616 peak_bytes=3020 hash=8ccfbf852677958c split_ns=13215",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          17,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          17,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "5cfca90249c342842c86dce2db16a6137a7c48c6d01575b1456926c528506d0e",
+      "profdata_sha256": "f468b092d25fa3d8029db4c9d01e7c5fb83e8ccaa85647e8620dec1dc8487a0d"
+    },
+    {
+      "target": "a64",
+      "shape": "fanout",
+      "blocks": 257,
+      "edges": 256,
+      "counts": {
+        "count_edges": 256,
+        "index_edges": 256,
+        "prefix_blocks": 257,
+        "scatter_edges": 256,
+        "number_edges": 256,
+        "map_edges": 256,
+        "reset_edges": 256,
+        "publish_edges": 256,
+        "copy_rows": 257,
+        "needs_split": 512,
+        "remaps": 257
+      },
+      "stdout": "blocks=257 edges=256 shape=fanout target=a64 splits=256 retained_bytes=41016 peak_bytes=47180 hash=8c362bd6a97417c9 split_ns=28965",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          257,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          257,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "86e557a9319316ab5cca50990c88a67b4c179211c2ab624e6cf0125c6ab75c0f",
+      "profdata_sha256": "18970d606047da370642cbc91a2df98315e5ba10e0d7cd2f6bcd03f23d8aac95"
+    },
+    {
+      "target": "a64",
+      "shape": "fanout",
+      "blocks": 4097,
+      "edges": 4096,
+      "counts": {
+        "count_edges": 4096,
+        "index_edges": 4096,
+        "prefix_blocks": 4097,
+        "scatter_edges": 4096,
+        "number_edges": 4096,
+        "map_edges": 4096,
+        "reset_edges": 4096,
+        "publish_edges": 4096,
+        "copy_rows": 4097,
+        "needs_split": 8192,
+        "remaps": 4097
+      },
+      "stdout": "blocks=4097 edges=4096 shape=fanout target=a64 splits=4096 retained_bytes=655416 peak_bytes=753740 hash=e8ed8d31e8a05a4c split_ns=128957",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          4097,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          4097,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "ccb707cda771eb6196236432fd52e8169280d9fed45ee5f91c9ca0cf0b37e674",
+      "profdata_sha256": "41b724f92d2008cfd9b860719127a0e1645a7a5e09a09eb501a5c90d2842230b"
+    },
+    {
+      "target": "a64",
+      "shape": "fanout",
+      "blocks": 16384,
+      "edges": 16383,
+      "counts": {
+        "count_edges": 16383,
+        "index_edges": 16383,
+        "prefix_blocks": 16384,
+        "scatter_edges": 16383,
+        "number_edges": 16383,
+        "map_edges": 16383,
+        "reset_edges": 16383,
+        "publish_edges": 16383,
+        "copy_rows": 16384,
+        "needs_split": 32766,
+        "remaps": 16384
+      },
+      "stdout": "blocks=16384 edges=16383 shape=fanout target=a64 splits=16383 retained_bytes=2621336 peak_bytes=3014548 hash=7722b16c6d172bc7 split_ns=920452",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          16384,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          16384,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "afda505dbe8061f5382edcb3e216f02aca4a5a74b6541985ce75723c1f662a9c",
+      "profdata_sha256": "2c5f1c4d747267776aa11c993b5643239c0799b565f2443c31a015fba3b1c70e"
+    },
+    {
+      "target": "a64",
+      "shape": "duplicates",
+      "blocks": 0,
+      "edges": 0,
+      "counts": {
+        "count_edges": 0,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 0,
+        "remaps": 0
+      },
+      "stdout": "blocks=0 edges=0 shape=duplicates target=a64 splits=0 retained_bytes=0 peak_bytes=0 hash=cbf29ce484222325 split_ns=1814",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "cffdfd27f262d67d953b975765231c2ef572a4bc4fc33cefd9d85e23c2da7818",
+      "profdata_sha256": "90d66fcb7e15c455ab898c46abbf813c7631b6ad26f2a7a4c209ec1e5743f440"
+    },
+    {
+      "target": "a64",
+      "shape": "duplicates",
+      "blocks": 1,
+      "edges": 0,
+      "counts": {
+        "count_edges": 0,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 0,
+        "remaps": 0
+      },
+      "stdout": "blocks=1 edges=0 shape=duplicates target=a64 splits=0 retained_bytes=0 peak_bytes=0 hash=8dd744f0cff021c1 split_ns=1863",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "f47d592be30743a892eb527f047bfd61bf0fa2f8e2f92e2e7714800f8103870d",
+      "profdata_sha256": "44c9d2e3acd654ebbd1e564f8e1b8cec0a4bd682fbbf52b097fab0c21ac0d0da"
+    },
+    {
+      "target": "a64",
+      "shape": "duplicates",
+      "blocks": 2,
+      "edges": 3,
+      "counts": {
+        "count_edges": 3,
+        "index_edges": 3,
+        "prefix_blocks": 2,
+        "scatter_edges": 3,
+        "number_edges": 3,
+        "map_edges": 3,
+        "reset_edges": 3,
+        "publish_edges": 3,
+        "copy_rows": 2,
+        "needs_split": 6,
+        "remaps": 2
+      },
+      "stdout": "blocks=2 edges=3 shape=duplicates target=a64 splits=2 retained_bytes=320 peak_bytes=380 hash=ec82c59c2df31d32 split_ns=6172",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          3,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          3,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          2,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          3,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          3,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          3,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          3,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          3,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          2,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "e4ac39f40fe4e3d3f872ecb8a61b96399c7ce7ca5d10c5f9c37997c6810ca177",
+      "profdata_sha256": "ee07e3d02661948742f6f95f65226db44d327ed95efe7eb937bf2f9843d1d0cf"
+    },
+    {
+      "target": "a64",
+      "shape": "duplicates",
+      "blocks": 17,
+      "edges": 48,
+      "counts": {
+        "count_edges": 48,
+        "index_edges": 48,
+        "prefix_blocks": 17,
+        "scatter_edges": 48,
+        "number_edges": 48,
+        "map_edges": 48,
+        "reset_edges": 48,
+        "publish_edges": 48,
+        "copy_rows": 17,
+        "needs_split": 96,
+        "remaps": 17
+      },
+      "stdout": "blocks=17 edges=48 shape=duplicates target=a64 splits=32 retained_bytes=4280 peak_bytes=4940 hash=2ad582f6c83906b3 split_ns=7084",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          48,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          48,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          17,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          48,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          48,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          48,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          48,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          48,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          17,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "20bd3c508c45120bb5538c45d43c1d3e431b67f7d8659d60afac9acd7620fb2e",
+      "profdata_sha256": "54fad8179bfca218ac1d8cd8918735ec7b85e6550873328466271c2c3674ddb1"
+    },
+    {
+      "target": "a64",
+      "shape": "duplicates",
+      "blocks": 257,
+      "edges": 768,
+      "counts": {
+        "count_edges": 768,
+        "index_edges": 768,
+        "prefix_blocks": 257,
+        "scatter_edges": 768,
+        "number_edges": 768,
+        "map_edges": 768,
+        "reset_edges": 768,
+        "publish_edges": 768,
+        "copy_rows": 257,
+        "needs_split": 1536,
+        "remaps": 257
+      },
+      "stdout": "blocks=257 edges=768 shape=duplicates target=a64 splits=512 retained_bytes=67640 peak_bytes=77900 hash=4be7106a1ff6ad08 split_ns=20530",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          768,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          768,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          257,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          768,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          768,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          768,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          768,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          768,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          257,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "e538fc44f95099ce2b7f1c5564f90f267ea7acb38e29df0c0976f542e8a629d5",
+      "profdata_sha256": "6c096f064813ad092be2399f7bad77f31633a94d45b888a01f9c954b83eacbf7"
+    },
+    {
+      "target": "a64",
+      "shape": "duplicates",
+      "blocks": 4097,
+      "edges": 12288,
+      "counts": {
+        "count_edges": 12288,
+        "index_edges": 12288,
+        "prefix_blocks": 4097,
+        "scatter_edges": 12288,
+        "number_edges": 12288,
+        "map_edges": 12288,
+        "reset_edges": 12288,
+        "publish_edges": 12288,
+        "copy_rows": 4097,
+        "needs_split": 24576,
+        "remaps": 4097
+      },
+      "stdout": "blocks=4097 edges=12288 shape=duplicates target=a64 splits=8192 retained_bytes=1081400 peak_bytes=1245260 hash=79bcee038b6c4a32 split_ns=363536",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          12288,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          12288,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          4097,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          12288,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          12288,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          12288,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          12288,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          12288,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          4097,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "eaf3f336f76f1563bea83f140eb5f4562041d188087a98bc3db1a55266d1e438",
+      "profdata_sha256": "dc65d84924b76b37638a8dca7fc708d23c0060e41f2ba4741d3f7b90f1dd2a56"
+    },
+    {
+      "target": "a64",
+      "shape": "duplicates",
+      "blocks": 16384,
+      "edges": 49149,
+      "counts": {
+        "count_edges": 49149,
+        "index_edges": 49149,
+        "prefix_blocks": 16384,
+        "scatter_edges": 49149,
+        "number_edges": 49149,
+        "map_edges": 49149,
+        "reset_edges": 49149,
+        "publish_edges": 49149,
+        "copy_rows": 16384,
+        "needs_split": 98298,
+        "remaps": 16384
+      },
+      "stdout": "blocks=16384 edges=49149 shape=duplicates target=a64 splits=32766 retained_bytes=4325168 peak_bytes=4980508 hash=75dd967f87b06de4 split_ns=1110515",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          49149,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          49149,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          16384,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          49149,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          49149,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          49149,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          49149,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          49149,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          16384,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "bd01c2c1dc04ce6d80ccf64ea9f486c327496d3dd05618295ca54d9e3b180850",
+      "profdata_sha256": "ac7c2cb3c0be73c78b4dede21fba5fbb478bd9d7ee97e6a0e6743dcf9966e290"
+    },
+    {
+      "target": "a64",
+      "shape": "no-split",
+      "blocks": 0,
+      "edges": 0,
+      "counts": {
+        "count_edges": 0,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 0,
+        "remaps": 0
+      },
+      "stdout": "blocks=0 edges=0 shape=no-split target=a64 splits=0 retained_bytes=0 peak_bytes=0 hash=cbf29ce484222325 split_ns=2064",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "438057e4fc4d0b8348ceaf3c73a63ae7047ae601ebc20027995da2957126f344",
+      "profdata_sha256": "0e69376a4e9f5c1730c7340f9ff0aca4c6532c6b9f635395b1f49a531f24e348"
+    },
+    {
+      "target": "a64",
+      "shape": "no-split",
+      "blocks": 1,
+      "edges": 0,
+      "counts": {
+        "count_edges": 0,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 0,
+        "remaps": 0
+      },
+      "stdout": "blocks=1 edges=0 shape=no-split target=a64 splits=0 retained_bytes=0 peak_bytes=0 hash=8dd744f0cff021c1 split_ns=3416",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "fd13ec2baf1ee7bb999a47892e72a79d310492f748656d06244ba604c4187535",
+      "profdata_sha256": "ae17f480ffb4f48aa066512cacec3407f990b469d25c4b01ef1f23a818d174b6"
+    },
+    {
+      "target": "a64",
+      "shape": "no-split",
+      "blocks": 2,
+      "edges": 1,
+      "counts": {
+        "count_edges": 1,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 1,
+        "remaps": 0
+      },
+      "stdout": "blocks=2 edges=1 shape=no-split target=a64 splits=0 retained_bytes=0 peak_bytes=0 hash=57d56bfc4eec2cf4 split_ns=1914",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "0adbf2098e2dafbd23459697655e4faa1599ac28df39551feb2e1891049a87a9",
+      "profdata_sha256": "4f49d3f3d8cf9c0f1b912dfac09afb1ce52c3897a4b332fa11ca84bdfa6fafe7"
+    },
+    {
+      "target": "a64",
+      "shape": "no-split",
+      "blocks": 17,
+      "edges": 16,
+      "counts": {
+        "count_edges": 16,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 16,
+        "remaps": 0
+      },
+      "stdout": "blocks=17 edges=16 shape=no-split target=a64 splits=0 retained_bytes=0 peak_bytes=0 hash=874d643a0b8110c1 split_ns=3587",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          16,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "4f91f0247cce6916e893e0275382947e37ab1a30d46b2b967990b2ff417495dd",
+      "profdata_sha256": "25e79a57143364d92276aeafa29de63130336ac921a62e0f5ee44a0a7ab1a39e"
+    },
+    {
+      "target": "a64",
+      "shape": "no-split",
+      "blocks": 257,
+      "edges": 256,
+      "counts": {
+        "count_edges": 256,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 256,
+        "remaps": 0
+      },
+      "stdout": "blocks=257 edges=256 shape=no-split target=a64 splits=0 retained_bytes=0 peak_bytes=0 hash=0f1ffcb9ce40dec9 split_ns=3797",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          256,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "592e5ccaa0c28244abf8c66f60828def9594ce16cdb81b7c8770ab1d2a4b76b9",
+      "profdata_sha256": "bb4d3490446e7bfd8d342d8942d612ed1a1803370a74abb948d496bb57693039"
+    },
+    {
+      "target": "a64",
+      "shape": "no-split",
+      "blocks": 4097,
+      "edges": 4096,
+      "counts": {
+        "count_edges": 4096,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 4096,
+        "remaps": 0
+      },
+      "stdout": "blocks=4097 edges=4096 shape=no-split target=a64 splits=0 retained_bytes=0 peak_bytes=0 hash=a11b1ac9ca3145c1 split_ns=7084",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          4096,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "a19bc7db81c2842a4a1651106587fc51ac6146cb40e2e41da72a431fc4a8065a",
+      "profdata_sha256": "d1b115883fb8fefd4c58c5a52b6ad859306c17066ac9663630ae810d51e78eea"
+    },
+    {
+      "target": "a64",
+      "shape": "no-split",
+      "blocks": 16384,
+      "edges": 16383,
+      "counts": {
+        "count_edges": 16383,
+        "index_edges": 0,
+        "prefix_blocks": 0,
+        "scatter_edges": 0,
+        "number_edges": 0,
+        "map_edges": 0,
+        "reset_edges": 0,
+        "publish_edges": 0,
+        "copy_rows": 0,
+        "needs_split": 16383,
+        "remaps": 0
+      },
+      "stdout": "blocks=16384 edges=16383 shape=no-split target=a64 splits=0 retained_bytes=0 peak_bytes=0 hash=7b95a0eb3706c7c8 split_ns=18716",
+      "coverage_regions": [
+        [
+          2296,
+          9,
+          2298,
+          10,
+          16383,
+          0,
+          0,
+          0
+        ],
+        [
+          2353,
+          13,
+          2363,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2365,
+          13,
+          2367,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2370,
+          13,
+          2373,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2380,
+          17,
+          2386,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2439,
+          17,
+          2446,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2513,
+          17,
+          2527,
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2535,
+          13,
+          2557,
+          14,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          2452,
+          17,
+          2511,
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "profraw_sha256": "6f3d8c6d8a7cce48a0bdbf3cc6a093dcb88911e00682d9572aa76a4a22bf05db",
+      "profdata_sha256": "05a459160b6baca8ca343fd4a48bb9d133cc3f9d26b00b342cdec6ad0ba7a5ce"
+    }
+  ]
+}

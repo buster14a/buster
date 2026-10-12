@@ -251,6 +251,28 @@
       }
     },
     {
+      "id": "tool:machine_edge_split_scaling.c",
+      "kind": "tool",
+      "validation": "diagnostic",
+      "measures": "production parameter-edge splitter output records, geometric chain/fanout/duplicate/no-split populations and scoped arena retained/peak bytes; per-call latency is diagnostic only",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "diagnostic only: not a frozen compiler-probes-v1 leg; a performance claim needs an approved Zen 5 route row and matching execution evidence"
+      }
+    },
+    {
+      "id": "tool:machine_edge_split_scaling_coverage.py",
+      "kind": "tool",
+      "validation": "diagnostic",
+      "measures": "actual Clang source-coverage traversal counts for 56 production parameter-edge splitting cells, with source/binary identities and raw LLVM profiles",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "operation-count diagnostics only; source coverage cannot establish wall-time speedup or physical performance acceptance"
+      }
+    },
+    {
       "id": "tool:branch_miss_survey.py",
       "kind": "tool",
       "validation": "diagnostic",

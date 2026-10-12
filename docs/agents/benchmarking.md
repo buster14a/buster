@@ -1689,6 +1689,57 @@ output bytes) and per-phase minor-fault and arena rows. Use them to rank and
 prove removed work, never as timing evidence; see [the work ledger](../work-ledger.md)
 for the key contract and the frozen-corpus runner under `tools/work_ledger/`.
 
+## Parameter-edge splitting populations
+
+`tools/machine_edge_split_scaling.c` drives the production pre-allocation
+parameter-edge splitter with reversed-edge chain/fanout populations, mixed
+duplicates (one non-copy edge followed by two splitting edges), and a no-split
+control. It checks complete transformed block, instruction, edge and switch
+records against closed-form expectations, including copy offsets and the first
+splitting duplicate. Its empty/tiny controls and geometric populations cover
+both native MIR targets. These are structural fixtures with synthetic copy
+slices, not independently executable programs or allocator-validation inputs;
+the registered `machine_tests` supply broader label/debug/definition coverage.
+
+Build the probe from the repository root with the existing Clang/LLVM tools:
+
+```sh
+mkdir -p work/edge-split
+clang -O2 -g -fprofile-instr-generate -fcoverage-mapping \
+  -ffunction-sections -fdata-sections -Wall -Werror \
+  -Wno-unused-function -Wno-unused-variable \
+  -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_OPTIMIZE=1 \
+  -DBUSTER_SINGLE_THREADED=1 -Isrc -fwrapv -fno-strict-aliasing -funsigned-char \
+  tools/machine_edge_split_scaling.c \
+  src/buster/lib/compiler/codegen/machine.c src/buster/lib/compiler/codegen/codegen.c \
+  src/buster/lib/arena.c src/buster/lib/os.c src/buster/lib/integer.c \
+  src/buster/lib/string.c src/buster/lib/float.c src/buster/lib/time.c \
+  -Wl,--gc-sections -lpthread -ldl -lm -o work/edge-split/probe
+python3 tools/machine_edge_split_scaling_coverage.py \
+  --binary work/edge-split/probe --output work/edge-split/attempt-1
+```
+
+The collector requires a fresh output directory and checks 56 cells: both
+targets, four shapes and 0/1/2/17/257/4097/16384 blocks. It locates source
+statements within the splitter and reads their actual LLVM execution regions,
+then checks the expected linear counts. Missing profiles/regions or mismatches
+fail; the expected formula never substitutes for an observed count. Preserve
+the raw `.profraw`/`.profdata` files beside `counts.json` for replay. Source,
+probe, collector and binary hashes bind the diagnostic to its inputs; rebuild
+the probe after any source change. This uses LLVM tooling outside the compiler
+and adds no production counters, rows or permanent indexes.
+
+Each invocation also checks retained allocation and scoped arena high water.
+For a splitting function the temporary maps use
+`4 * (I + 2E + 3B + 1)` bytes plus alignment; the arena cursor must retain only
+the published arrays after the call. A no-split function must preserve its
+entire function record with zero allocation/high-water growth and no indexing
+walks. Timings include the complete splitter call but exclude fixture creation
+and checking. Coverage instrumentation perturbs code and timing; these tools
+are diagnostic only. They are not yet a frozen `compiler-probes-v1` leg or a
+9700X request route and cannot establish a speedup or close #296's physical
+Zen 5, separate Zen 4, whole-compiler or text-budget acceptance cells.
+
 ## Object assembly-printer scaling
 
 `BUSTER_TEST_JOBS=1 BUSTER_OBJECT_ASSEMBLY_BENCH=1 build/Release/ide test --ci=1`
