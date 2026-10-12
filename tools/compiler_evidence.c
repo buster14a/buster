@@ -13,7 +13,8 @@
 // machine record, so neither is a manifest row.
 //
 // Map: compiler_evidence_identity (trusted header), compiler_evidence_path_valid
-// (path identity rules), compiler_evidence_collect (bounded nofollow walk),
+// (path identity rules), compiler_evidence_collect (bounded nofollow walk; hidden
+// entries are not retained),
 // compiler_evidence_facts / compiler_evidence_required (inventory v1),
 // compiler_evidence_omissions_valid, compiler_evidence_manifest,
 // compiler_evidence_seal_text, compiler_evidence_seal, compiler_evidence_verify,
@@ -288,11 +289,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_evidence_collect(Arena* arena, String8 bundle,
         for (u64 index = 0; success && index < listed_count; index += 1)
         {
             String8 relative = node->string.length ? path_join(arena, node->string, listed[index].name) : listed[index].name;
-            if (listed[index].is_directory)
+            // Hidden entries are not retained: actions/upload-artifact drops them (the
+            // producer's scratch marker is one), so no manifest row may name them.
+            bool hidden = listed[index].name.length && listed[index].name.pointer[0] == '.';
+            if (!hidden && listed[index].is_directory)
             {
                 string8_list_push(arena, &pending, relative);
             }
-            else
+            else if (!hidden)
             {
                 String8 terminated = string_duplicate_arena(arena, path_join(arena, bundle, relative), true);
                 struct stat status = {0};

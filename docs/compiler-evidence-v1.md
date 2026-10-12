@@ -92,6 +92,10 @@ must not contain any of the following:
 - empty segments
 - backslashes
 
+An entry whose name starts with `.` is not retained, and no manifest row
+names it: `actions/upload-artifact` drops hidden files, including the
+producer's scratch marker.
+
 The walk refuses:
 
 - symlinks and any other non-regular file

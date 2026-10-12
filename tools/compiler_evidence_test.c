@@ -279,6 +279,19 @@ BUSTER_GLOBAL_LOCAL bool compiler_evidence_self_test(Arena* arena)
                 string_format(arena, S8("incomplete:omissions-{u64}"), index), problem);
         }
 
+        // Hidden entries, which actions/upload-artifact drops, are not retained rows.
+        bundle = compiler_evidence_fixture(&test, S8("10"), compiler_evidence_valid_omissions());
+        bool hidden = compiler_evidence_put(arena, bundle, S8(".buster-compiler-compare-scratch"), S8("marker\n")) &&
+            compiler_evidence_put(arena, bundle, S8("lab/.cache/state"), S8("state\n"));
+        problem = (String8){0};
+        sealed = hidden && compiler_evidence_try_seal(&test, bundle, ordinary, &problem);
+        manifest = compiler_closure_read(arena, path_join(arena, bundle, S8(COMPILER_EVIDENCE_MANIFEST)), COMPILER_EVIDENCE_MANIFEST_LIMIT);
+        compiler_evidence_expect(&test, sealed && string_first_sequence(manifest, S8("/.")) == BUSTER_STRING_NO_MATCH &&
+            string_first_sequence(manifest, S8("\t.")) == BUSTER_STRING_NO_MATCH, S8("hidden:not-retained"), problem);
+        sealed = sealed && unlink((char*)string_duplicate_arena(arena, path_join(arena, bundle, S8(".buster-compiler-compare-scratch")), true).pointer) == 0;
+        problem = (String8){0};
+        compiler_evidence_expect(&test, sealed && compiler_evidence_try_verify(&test, bundle, ordinary, &problem), S8("hidden:dropped-by-upload"), problem);
+
         // Non-regular entries and case-folded aliases refuse the bundle.
         bundle = compiler_evidence_fixture(&test, S8("10"), compiler_evidence_valid_omissions());
         String8 link = string_duplicate_arena(arena, path_join(arena, bundle, S8("lab/link.txt")), true);
