@@ -942,7 +942,8 @@ source and encoder paths did for this snapshot; they do not supply an
 independent architectural oracle for every form. The broader #2931 issue
 remains open for unrelated encoding defects and further proof.
 
-X86 source forms also include baseline `pause`, `prefetcht0`/`prefetcht1`/
+X86 source forms also include baseline `pause`, operand-free `rep nop` (also
+`repe nop` and `repz nop`), `prefetcht0`/`prefetcht1`/
 `prefetcht2`/`prefetchnta`, `clflush`, and 32/64-bit `movnti` stores. PAUSE is
 an unconditional REP-NOP hint; prefetch and cache-flush rows map to the existing
 SSE/SSE2 baseline. ADX and PCLMUL metadata aliases use `adx` and `pclmul`.
