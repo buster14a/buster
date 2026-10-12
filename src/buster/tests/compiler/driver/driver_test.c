@@ -2,6 +2,7 @@
 // artifact, link, runtime, and cross-mode checks.
 // compiler_driver_test_executable_cleanup checks bounded just-run image cleanup,
 // native Windows locks/denials and checked native-error propagation.
+// compiler_driver_test_empty_dependency_names owns argv/API refusal and output preservation.
 // compiler_driver_test_mach_framework_search owns Apple framework file search/identity. compiler_driver_test_output_paths
 // owns stdout/output placement and publication refusal coverage.
 // compiler_driver_test_pic_arguments
@@ -7968,6 +7969,104 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_assembly_round_t
     os_file_delete(listing);
     os_file_delete(listing_object);
     os_file_delete(direct_object);
+    scratch_end(temporary);
+    return result;
+}
+
+// An assembled file's sections are as many as its source declares, and each
+// stays its own COFF or Mach-O section past the one-per-kind count the
+// codegen object has. 255 cross-calling text sections assemble for every COFF
+// and Mach-O target and read back; COFF keeps each name, including the ones
+// at the initializer arrays' kind slots, which only an initializer array may
+// take as `.CRT$XCU`/`.CRT$XTX`. A 256th section is past Mach-O's one-byte
+// section numbering and is refused by name instead of failing serialization.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_many_sections_source(Arena* arena, u32 section_count, bool aarch64)
+{
+    String8 call = aarch64 ? S8("bl") : S8("call");
+    u64 capacity = (u64)section_count * 64;
+    char8* text = arena_allocate(arena, char8, capacity);
+    u64 length = 0;
+    for (u32 index = 0; index < section_count; index += 1)
+    {
+        String8 line = string_format(arena, S8(".section .text$f{u32},\"x\"\nf{u32}:\n    {S8} f{u32}\n    ret\n"), index, index, call,
+                                     (index + 1) % section_count);
+        memcpy(text + length, line.pointer, line.length);
+        length += line.length;
+    }
+    return (String8){.pointer = text, .length = length};
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_many_object_sections(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    typedef struct ManySectionsCase
+    {
+        String8 triple;
+        Target target;
+        bool coff;
+    } ManySectionsCase;
+    ManySectionsCase cases[] = {
+        {S8("x86_64-windows-msvc"), {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS}, true},
+        {S8("aarch64-windows-msvc"), {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS}, true},
+        {S8("x86_64-apple-macos"), {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS}, false},
+        {S8("aarch64-apple-macos"), {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS}, false},
+    };
+    u32 section_count = OBJECT_MACH_O_MAX_SECTIONS;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        ManySectionsCase test_case = cases[index];
+        bool aarch64 = test_case.target.cpu_arch == CPU_ARCH_AARCH64;
+        String8 target = string_format(arena, S8("--target={S8}"), test_case.triple);
+        String8 assembly = buster_test_temporary_path(arena, S8("many-object-sections"), S8(".s"));
+        String8 object = buster_test_temporary_path(arena, S8("many-object-sections"), S8(".o"));
+        BUSTER_TEST(arguments, file_write(assembly, BUSTER_SLICE_TO_BYTE_SLICE(compiler_driver_test_many_sections_source(arena, section_count, aarch64))));
+        String8 assemble[] = {target, S8("-c"), assembly, S8("-o"), object};
+        CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble)));
+        BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE, test_case.triple);
+        BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE, assembled.diagnostic);
+        if (assembled.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            ByteSlice image = file_read(arena, object, (FileReadOptions){0});
+            u32 written_sections = 0;
+            if (test_case.coff && image.length >= 20 + (u64)section_count * 40)
+            {
+                u16 count = 0;
+                memcpy(&count, image.pointer + 2, sizeof(count));
+                written_sections = count;
+                for (u32 section = OBJECT_SECTION_INIT_ARRAY; section <= OBJECT_SECTION_FINI_ARRAY; section += 1)
+                {
+                    String8 expected = string_format(arena, S8(".text$f{u32}"), section);
+                    String8 name = {.pointer = (char8*)image.pointer + 20 + (u64)section * 40, .length = expected.length};
+                    BUSTER_TEST_RAW(arguments, string_equal(name, expected), expected);
+                }
+            }
+            else if (!test_case.coff && image.length >= 100)
+            {
+                memcpy(&written_sections, image.pointer + 32 + 64, sizeof(written_sections));
+            }
+            BUSTER_TEST_RAW(arguments, written_sections == section_count, test_case.triple);
+            ObjectFile read = object_read(arena, image, test_case.target);
+            BUSTER_TEST_RAW(arguments, read.error == OBJECT_ERROR_NONE, test_case.triple);
+        }
+        if (!test_case.coff)
+        {
+            String8 past_limit = buster_test_temporary_path(arena, S8("many-object-sections-past-limit"), S8(".s"));
+            BUSTER_TEST(arguments, file_write(past_limit, BUSTER_SLICE_TO_BYTE_SLICE(compiler_driver_test_many_sections_source(arena, section_count + 1, aarch64))));
+            String8 refuse[] = {target, S8("-c"), past_limit, S8("-o"), object};
+            CompilerDriverResult refused = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(refuse)));
+            BUSTER_TEST_RAW(arguments, refused.error == COMPILER_DRIVER_ERROR_OBJECT, test_case.triple);
+            BUSTER_TEST_RAW(arguments, string_first_sequence(refused.diagnostic, S8("section '.text$f255' is section 256 of 256")) != BUSTER_STRING_NO_MATCH &&
+                                           string_first_sequence(refused.diagnostic, S8("at most 255 sections")) != BUSTER_STRING_NO_MATCH,
+                            refused.diagnostic);
+            os_file_delete(past_limit);
+        }
+        os_file_delete(assembly);
+        os_file_delete(object);
+    }
     scratch_end(temporary);
     return result;
 }
@@ -16267,6 +16366,148 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_library_search(Unit
                                     string_format(arena, S8("Mach-O target={S8} scenario={u32} expected={S8} versions={u32}/{u32}"),
                                                   target_names[target_index], scenario, expected_name, expected_current_version,
                                                   expected_compatibility_version));
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// Empty dependency names must fail before source reads or output publication.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_empty_dependency_names(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    static String8 const targets[] = {S8_INITIALIZER("aarch64-apple-macos"), S8_INITIALIZER("aarch64-apple-ios")};
+    String8 const options[] = {S8("-l"), S8("-framework")};
+    String8 const diagnostics[] = {S8("empty dependency name after -l"), S8("empty dependency name after -framework")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 base = buster_test_temporary_path(arena, string_format(arena, S8("buster-empty-dependency-{u32}"), target_index), S8(""));
+        if (BUSTER_REQUIRE(arguments, os_make_directory_attempt(base)))
+        {
+            String8 source = string_format_z(arena, S8("{S8}/main.c"), base);
+            String8 other = string_format_z(arena, S8("{S8}/other.c"), base);
+            String8 output = string_format_z(arena, S8("{S8}/existing"), base);
+            String8 sentinel = S8("existing output must survive invalid dependency names");
+            if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))) &&
+                                          file_write(other, BUSTER_SLICE_TO_BYTE_SLICE(S8("int other(void) { return 1; }\n")))))
+            {
+                for (u32 option = 0; option < BUSTER_ARRAY_LENGTH(options); option += 1)
+                {
+                    for (u32 multi = 0; multi < 2; multi += 1)
+                    {
+                        for (u32 following = 0; following < 2; following += 1)
+                        {
+                            for (u32 api = 0; api < 2; api += 1)
+                            {
+                                String8 argv[16] = {S8("-target"), targets[target_index], S8("--sysroot"), base, source,
+                                                    S8("-o"), output};
+                                u32 count = 7;
+                                if (multi) { argv[count++] = other; }
+                                if (!api)
+                                {
+                                    argv[count++] = options[option];
+                                    argv[count++] = S8("");
+                                    if (following)
+                                    {
+                                        argv[count++] = options[option];
+                                        argv[count++] = S8("BusterMissing3643");
+                                    }
+                                }
+                                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){.pointer = argv, .length = count});
+                                String8 names[] = {S8(""), S8("BusterMissing3643")};
+                                if (api)
+                                {
+                                    BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+                                    if (option)
+                                    {
+                                        invocation.frameworks = names;
+                                        invocation.framework_count = 1 + following;
+                                    }
+                                    else
+                                    {
+                                        invocation.libraries = names;
+                                        invocation.library_count = 1 + following;
+                                    }
+                                }
+                                else
+                                {
+                                    BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                                    BUSTER_STRING_TEST(arguments, invocation.diagnostic, diagnostics[option]);
+                                }
+                                if (BUSTER_REQUIRE(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
+                                {
+                                    CompilerDriverResult executed = compiler_driver_execute_invocation(arena, invocation);
+                                    BUSTER_TEST_RAW(arguments, executed.error == COMPILER_DRIVER_ERROR_ARGUMENT,
+                                        string_format(arena, S8("empty dependency target={S8} option={S8} multi={u32} following={u32} api={u32} error={u32}: {S8}"),
+                                                      targets[target_index], options[option], multi, following, api, (u32)executed.error, executed.diagnostic));
+                                    BUSTER_STRING_TEST(arguments, executed.diagnostic, diagnostics[option]);
+                                    BUSTER_TEST(arguments, executed.output.length == 0);
+                                    BUSTER_TEST(arguments, executed.native_link.executable.length == 0);
+                                    BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, output, (FileReadOptions){0})), sentinel);
+                                }
+                            }
+                        }
+                    }
+                    CompilerDriverInvocation no_storage = {.target = target_parse_triple(targets[target_index]).target,
+                        .action = COMPILER_DRIVER_ACTION_LINK};
+                    no_storage.library_count = option ? 0 : 1;
+                    no_storage.framework_count = option ? 1 : 0;
+                    CompilerDriverResult no_storage_result = compiler_driver_execute_invocation(arena, no_storage);
+                    BUSTER_TEST(arguments, no_storage_result.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                    BUSTER_STRING_TEST(arguments, no_storage_result.diagnostic,
+                        string_format(arena, S8("missing dependency name storage after {S8}"), options[option]));
+                    no_storage.query = COMPILER_DRIVER_QUERY_LINKER_VERSION;
+                    CompilerDriverResult query_no_storage = compiler_driver_execute_invocation(arena, no_storage);
+                    BUSTER_TEST(arguments, query_no_storage.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                    BUSTER_STRING_TEST(arguments, query_no_storage.diagnostic, no_storage_result.diagnostic);
+                    String8 empty_name[] = {S8("")};
+                    if (option) { no_storage.frameworks = empty_name; }
+                    else { no_storage.libraries = empty_name; }
+                    CompilerDriverResult query_empty = compiler_driver_execute_invocation(arena, no_storage);
+                    BUSTER_TEST(arguments, query_empty.error == COMPILER_DRIVER_ERROR_ARGUMENT && query_empty.output.length == 0);
+                    BUSTER_STRING_TEST(arguments, query_empty.diagnostic, diagnostics[option]);
+                    no_storage.library_count = 0;
+                    no_storage.framework_count = 0;
+                    CompilerDriverResult query_valid = compiler_driver_execute_invocation(arena, no_storage);
+                    BUSTER_TEST(arguments, query_valid.error == COMPILER_DRIVER_ERROR_NONE && query_valid.output.length != 0);
+                    no_storage.library_count = UINT32_MAX;
+                    CompilerDriverResult query_oversized = compiler_driver_execute_invocation(arena, no_storage);
+                    BUSTER_TEST(arguments, query_oversized.error == COMPILER_DRIVER_ERROR_ARGUMENT && query_oversized.output.length == 0);
+                    BUSTER_STRING_TEST(arguments, query_oversized.diagnostic, S8("native library counts exceed driver limits"));
+                    String8 valid[] = {S8("-target"), targets[target_index], source, options[option], S8("BusterValid3643")};
+                    CompilerDriverInvocation accepted = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(valid));
+                    BUSTER_TEST(arguments, accepted.error == COMPILER_DRIVER_ERROR_NONE);
+                    BUSTER_TEST(arguments, (option ? accepted.framework_count : accepted.library_count) == 1);
+                    if (BUSTER_REQUIRE(arguments, accepted.error == COMPILER_DRIVER_ERROR_NONE &&
+                                                  (option ? accepted.framework_count : accepted.library_count) == 1))
+                    {
+                        BUSTER_STRING_TEST(arguments, option ? accepted.frameworks[0] : accepted.libraries[0], S8("BusterValid3643"));
+                    }
+                    String8 raw[] = {S8("-target"), targets[target_index], source, S8("-Xlinker"), options[option],
+                                     S8("-Xlinker"), S8("")};
+                    CompilerDriverInvocation raw_empty = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(raw));
+                    BUSTER_TEST(arguments, raw_empty.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                    String8 comma[] = {S8("-target"), targets[target_index], source,
+                                       option ? S8("-Wl,-framework,") : S8("-Wl,-l,")};
+                    CompilerDriverInvocation comma_empty = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(comma));
+                    BUSTER_TEST(arguments, comma_empty.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                    String8 missing[] = {S8("-target"), targets[target_index], source, options[option]};
+                    CompilerDriverInvocation absent = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing));
+                    BUSTER_TEST(arguments, absent.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                    BUSTER_STRING_TEST(arguments, absent.diagnostic, string_format(arena, S8("missing argument after {S8}"), options[option]));
+                    String8 response = string_format_z(arena, S8("{S8}/empty.rsp"), base);
+                    String8 contents = string_format(arena, S8("-target {S8} {S8} '' main.c"), targets[target_index], options[option]);
+                    if (BUSTER_REQUIRE(arguments, file_write(response, BUSTER_SLICE_TO_BYTE_SLICE(contents))))
+                    {
+                        String8 response_argv[] = {string_format(arena, S8("@{S8}"), response)};
+                        CompilerDriverInvocation expanded = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(response_argv));
+                        BUSTER_TEST(arguments, expanded.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+                        BUSTER_STRING_TEST(arguments, expanded.diagnostic, diagnostics[option]);
+                    }
                 }
             }
         }
@@ -33939,6 +34180,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_include_population);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_empty_dependency_names);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_linker_scripts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_library_search);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_framework_search);
@@ -33964,6 +34206,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_x86_64_tls_general_dynamic_padding);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_symbol_binding);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_macho_assembly_symbol_names);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_many_object_sections);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_address_integers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_address_integer_native);

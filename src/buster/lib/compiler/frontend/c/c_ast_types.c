@@ -168,6 +168,10 @@
 //                checked-mode operand rule (c_ast_types_binary_safe).
 //   unary        `+ - ~ !`: promotion with the operand's bit-field width;
 //                complex and suitable vector operands keep their type.
+//   PRE_/POST_   `++` and `--`: the operand's own row, as the machine's UPDATE
+//   INCREMENT,   operation and its leaf's postfix update answer; checked-safe
+//   _DECREMENT   only where c_parse_update_operand_modifiable holds
+//                (c_ast_types_update).
 //   assignment   `=` and every compound form: the left operand's unqualified
 //                row, when it exists. The machine checks no constraint here.
 //   COMMA        the right operand's decayed row, when it exists.
@@ -227,7 +231,7 @@
 //   c_ast_types_arithmetic
 //   c_ast_types_builtin_call                     void builtins, failing calls
 //   c_ast_types_binary, c_ast_types_unary,       stage-2 operator rules
-//   c_ast_types_conditional
+//   c_ast_types_update, c_ast_types_conditional
 //   c_ast_types_interned, c_ast_types_type_name,  stage-3 rules over interned
 //   c_ast_types_cast,                             rows
 //   c_ast_types_compound_literal,
@@ -1531,6 +1535,52 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_unary(CAstTypeBody* body, u32 node, u32 rel
     }
 }
 
+// `++` and `--`, prefix and postfix: the operand's own row, unpromoted. The
+// machine's prefix UPDATE operation keeps the operand's answer, and its leaf
+// answers a postfix update with the operand's type: checked, from a nested
+// run over the operand (the leaf's postfix_update); unchecked, from the direct
+// reader, which drops the operator. Neither appends a row. Checked, both test
+// the operand with c_parse_update_operand_modifiable and refuse a struct,
+// union or nullptr operand. For a lone bound identifier that test reduces to
+// the binding and the row, which the pass reads directly; any other operand
+// runs it over the operand's tokens.
+BUSTER_GLOBAL_LOCAL void c_ast_types_update(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node, u32 relative)
+{
+    CParseResult* result = body->result;
+    u32 operand_flags = body->flags[relative - 1];
+    if (operand_flags & C_AST_TYPE_FLAG_ACCEPTED)
+    {
+        CTypeId type = body->types[relative - 1];
+        u32 flags = c_ast_types_inherit(operand_flags, operand_flags);
+        if (flags & C_AST_TYPE_FLAG_SAFE)
+        {
+            CType const* value = result->types + type.value;
+            u32 operand_token = body->ast->tokens[node - 1];
+            CEntity const* entity = body->ast->kinds[node - 1] == C_AST_IDENTIFIER && !(operand_flags & C_AST_TYPE_FLAG_LOOKUP)
+                                        ? c_ast_types_bound_entity(result, operand_token)
+                                        : 0;
+            bool modifiable = false;
+            if (entity && value->kind != C_TYPE_ARRAY)
+            {
+                modifiable = (entity->kind == C_ENTITY_OBJECT || entity->kind == C_ENTITY_LOCAL || entity->kind == C_ENTITY_PARAMETER) &&
+                             !entity->is_constexpr && !value->is_const &&
+                             (c_parse_expression_real_kind(value->kind) || value->kind == C_TYPE_POINTER ||
+                              (body->gnu && c_type_kind_is_complex(value->kind)));
+            }
+            else
+            {
+                bool postfix = body->ast->kinds[node] == C_AST_POST_INCREMENT || body->ast->kinds[node] == C_AST_POST_DECREMENT;
+                u32 token = body->ast->tokens[node];
+                modifiable = c_parse_update_operand_modifiable(result, *preprocess, postfix ? body->first[relative] : token + 1,
+                                                               postfix ? token : body->end[relative], type, false);
+            }
+            bool refused = value->kind == C_TYPE_STRUCT || value->kind == C_TYPE_UNION || value->kind == C_TYPE_NULLPTR;
+            flags = modifiable && !refused ? flags : flags & ~(u32)C_AST_TYPE_FLAG_SAFE;
+        }
+        c_ast_types_accept(body, relative, type, flags);
+    }
+}
+
 // Simple and compound assignment: the machine's ASSIGN operation, the left
 // operand's unqualified type, when that row exists. It checks no constraint.
 BUSTER_GLOBAL_LOCAL void c_ast_types_assignment(CAstTypeBody* body, u32 node, u32 relative)
@@ -1936,6 +1986,14 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_node(CAstTypeBody* body, CTypeParseMac
     case C_AST_LOGICAL_NOT:
     {
         c_ast_types_unary(body, node, relative);
+    }
+    break;
+    case C_AST_PRE_INCREMENT:
+    case C_AST_PRE_DECREMENT:
+    case C_AST_POST_INCREMENT:
+    case C_AST_POST_DECREMENT:
+    {
+        c_ast_types_update(body, preprocess, node, relative);
     }
     break;
     case C_AST_SIZEOF_EXPRESSION:

@@ -903,6 +903,52 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    library) and outbound HTTPS to `raw.githubusercontent.com`, `www.lua.org`
    and `www.sqlite.org`.
 
+   **Issue #2761 opt-in PGO/LTO production profile.** The same route accepts
+   one fresh exact line `profile: production-profile-v1`, selected by the same
+   every-parent freshness rule. It cannot be combined with an analyzer,
+   real-source or ast-pilot profile, so the leg fits the `compare-pull` job.
+   After the corpus leg, `measure_production_profile` makes a shared clone of
+   the head beside the base checkout, which stays untouched for the closure
+   checks. There the head's own
+   `./build.sh production_profile --no-benchmark --jobs 16 --build-lanes 4`
+   builds the seven trees and trains both profiles on the native corpus. It
+   then inspects the PGO+LTO compiler for debug sections and runs `test_all`
+   on it, exactly as [production-profile.md](../production-profile.md)
+   describes. The merge base's `bench_throughput run` then times that run's
+   `release` compiler (base) against its `pgo-lto` production compiler
+   (candidate). It uses the `throughput-corpus-v2` arguments plus
+   `--require-identical-output`, so sampling, rounds and decisions are those
+   of the ordinary corpus leg, and any object that differs between the two
+   compilers fails the run. It is report-only: a confirmed regression is
+   reported, never refused.
+
+   `compiler_publish.py` re-validates the receipt's `production_profile`
+   record against the evidence under `production_profile/`
+   (`validate_production_profile`). It refuses:
+   - a build exit other than 0;
+   - a `summary.txt` that is not `status=passed` for this head, or that lacks
+     `correctness=test_all` and `debug_sections=absent`, or that names a
+     production compiler hash other than the measured `pgo-lto` binary;
+   - a `BUSTER_PGO_PHASES_V1` ledger other than the 23 frozen phases
+     (`PRODUCTION_PROFILE_LEDGER_PHASES`), each passed exactly once in slot
+     order, so a duplicated, missing, substituted or reordered phase fails;
+   - identical release and PGO+LTO binaries;
+   - any corpus evidence the ordinary corpus validator refuses.
+
+   The receipt's observed host must be the Ryzen 7 9700X, as for every
+   comparison. The host needs `llvm-profdata`, `llvm-readobj` and Clang's
+   profile runtime (`libclang_rt.profile`); a missing one fails the build
+   leg with its log.
+
+   Cost: on a hosted 4-vCPU 2.8 GHz Xeon with three build lanes (diagnostic,
+   not Zen 5), `production_profile --no-benchmark` passed all 23 phases in
+   1200 s. Each of the seven tree builds took 300 to 480 s, both trainings
+   about 11 s each, and `test_all` 159 s. The corpus run on its two
+   compilers then took 55 s, with identical outputs. The build leg has its
+   own 40-minute timeout and the corpus run the ordinary 30-minute one, so
+   the leg fits inside the unchanged 90-minute `compare-pull` job next to the
+   roughly 14-minute ordinary comparison. No job timeout changed.
+
    **Without perf (#2768).** Before the first timed run the lab runs
    `perf stat -- true` once (`probe_counters`). If perf is missing, exits
    nonzero (for example under a strict `perf_event_paranoid`), or writes no
