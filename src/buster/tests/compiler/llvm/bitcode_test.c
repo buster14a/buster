@@ -4371,7 +4371,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_alias(UnitTestArguments* ar
             }
         }
 #endif
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }

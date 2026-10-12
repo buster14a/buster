@@ -1987,7 +1987,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, ir_test_direct_call_count(defaults_program, defaults_caller, S8("small_leaf")) == 0);
             BUSTER_TEST(arguments, ir_validate_canonical_module(defaults_program, defaults_module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(defaults_temporary);
+        c_test_scratch_end(defaults_temporary);
     }
 
     // With FAST selected, a caller whose splices were all optional defers its
@@ -2061,7 +2061,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
                 BUSTER_TEST(arguments, deferred_module->inline_unchecked_count == 0);
             }
         }
-        scratch_end(deferred_temporary);
+        c_test_scratch_end(deferred_temporary);
     }
 
     // A tiny site in a caller much larger than its growth stays a call by
@@ -2132,7 +2132,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, !bound_caller ||
                                        ir_validate_canonical_module(bound_program, bound_module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(bound_temporary);
+        c_test_scratch_end(bound_temporary);
     }
 
     // Mandatory sites must be budgeted before optional sites, even when
@@ -2221,8 +2221,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, ir_test_direct_call_count(priority_program, optional_caller, S8("optional_leaf")) == 1);
             BUSTER_TEST(arguments, ir_validate_canonical_module(priority_program, priority_module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(priority_temporary);
-        scratch_end(required_temporary);
+        c_test_scratch_end(priority_temporary);
+        c_test_scratch_end(required_temporary);
     }
 
     // A leading acyclic mandatory feeder must not hide a later required
@@ -2370,7 +2370,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
                 }
             }
         }
-        scratch_end(cycle_temporary);
+        c_test_scratch_end(cycle_temporary);
     }
 
     // An explicit function-growth limit on a required call reports the
@@ -2456,7 +2456,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             }
             BUSTER_TEST(arguments, ir_validate_canonical_module(refusal_program, refusal_module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(refusal_temporary);
+        c_test_scratch_end(refusal_temporary);
     }
 
     // A real caller with substantial spare capacity must still admit a
@@ -2605,7 +2605,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
                 }
             }
         }
-        scratch_end(capacity_temporary);
+        c_test_scratch_end(capacity_temporary);
     }
 
     // Optional tiny sites bound retained storage per caller, as FAST does.
@@ -2694,7 +2694,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             }
             BUSTER_TEST(arguments, ir_validate_canonical_module(spread_program, spread_module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(spread_temporary);
+        c_test_scratch_end(spread_temporary);
     }
 
     return result;

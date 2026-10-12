@@ -186,7 +186,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_cse_tests(UnitTestArguments* argument
                 BUSTER_TEST(arguments, ir_test_opcode_count(function, IR_OPCODE_CONSTANT_INTEGER) == constants - cases[index].constants);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // One block with more distinct keys than the table admits: insertion is
     // declined, probes collide, and the duplicates keyed before saturation
@@ -208,7 +208,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_cse_tests(UnitTestArguments* argument
             BUSTER_TEST(arguments, census.saturation_declines != 0 && census.collisions != 0);
             BUSTER_TEST(arguments, census.max_block_candidates > IR_FAST_CSE_SLOTS && census.table_bytes != 0);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // The linear arm keeps only the last IR_FAST_CSE_WINDOW keyed rows: a
     // duplicate behind WINDOW-1 other keyed rows still hits, one more pushes
@@ -231,7 +231,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_cse_tests(UnitTestArguments* argument
             if (census.hits != (u64)((run & 1) && (run >> 1) ? 0 : 1)) arguments->show(arguments, S8("CSE window run {u32}: hits={u64} candidates={u64}\n"), run, census.hits, census.candidates);
             BUSTER_TEST(arguments, census.hits == (u64)((run & 1) && (run >> 1) ? 0 : 1) && !census.saturation_declines);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // Hits age the window too: in A, B x k, A (call arguments, so nothing
     // else between them is keyed) the window keeps A behind seven repeated
@@ -255,7 +255,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_cse_tests(UnitTestArguments* argument
             if (census.hits != expected) arguments->show(arguments, S8("CSE repeated-hit run {u32}: hits={u64} candidates={u64}\n"), run, census.hits, census.candidates);
             BUSTER_TEST(arguments, census.hits == expected && census.candidates == repeats + 2);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // Hand-edited duplicates: an exact match whose result facts differ is
     // declined, an ordered operation is a different key, a volatile row is
@@ -289,7 +289,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_cse_tests(UnitTestArguments* argument
                 BUSTER_TEST(arguments, table_bytes != 0 && statistics.cse.table_bytes == (variant == 4 ? 2 * table_bytes : table_bytes));
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -410,7 +410,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_decline_tests(UnitTestArguments* argu
                 BUSTER_TEST(arguments, strict.function.value == (module_scope ? IR_ID_UNDERLYING_INVALID : broken->id.value));
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -710,7 +710,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
 #undef IR_PREPARATION_DELTA
 #endif
         }
-        scratch_end(inline_temporary);
+        c_test_scratch_end(inline_temporary);
     }
     // A safely backed budget-control input: no instruction/block traversal and
     // no value storage. The guard must decline before allocating or touching
@@ -801,7 +801,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, late.values[IR_CONSTRUCTION_FOLD_LATE_BINARY_RIGHT_IDENTITY] - probed.values[IR_CONSTRUCTION_FOLD_LATE_BINARY_RIGHT_IDENTITY] == 1);
             BUSTER_TEST(arguments, late.values[IR_CONSTRUCTION_FOLD_LATE_REPLACED_ROOTS] == probed.values[IR_CONSTRUCTION_FOLD_LATE_REPLACED_ROOTS]);
         }
-        scratch_end(census_temporary);
+        c_test_scratch_end(census_temporary);
     }
 #endif
     return result;

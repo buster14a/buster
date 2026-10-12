@@ -1060,7 +1060,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_backward_chains(UnitTestAr
                 BUSTER_TEST_ERROR(S8("backward chain shape {u32} depth {u32}: {u64} pass attempts over {u64} pass solves, {u64} type mapping attempts\n"),
                                   shape, depth, statistics.pass_attempts, statistics.pass_solves, lowered.type_mapping_attempts);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;

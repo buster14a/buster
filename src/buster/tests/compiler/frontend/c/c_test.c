@@ -1742,7 +1742,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parse_large_static_initializers(UnitTe
                     BUSTER_TEST(arguments, bound.has_inferred_count && bound.inferred_count == element_count);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
         BUSTER_TEST(arguments, arena_destroy(persistent, 1));
     }
@@ -15100,7 +15100,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_attribute_retention(UnitTestArg
                 BUSTER_TEST(arguments, vendor_return && !vendor_unreachable);
             }
         }
-        scratch_end(c23_temporary);
+        c_test_scratch_end(c23_temporary);
     }
 
     String8 conflicting_source = S8(
@@ -24159,7 +24159,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_special_float_spellings(UnitTe
                 }
                 BUSTER_TEST(arguments, !imported);
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     typedef struct CTestSpecialFloatInvalid CTestSpecialFloatInvalid;
@@ -24204,7 +24204,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_special_float_spellings(UnitTe
                 S8("special float invalid case={u32} form={u32}: first diagnostic {S8}"), index, form,
                 lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
             BUSTER_TEST(arguments, !lowered.canonical_ir_certified && lowered.program == 0);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -40031,7 +40031,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_label_address(UnitTestArguments
             }
             BUSTER_TEST(arguments, conjunction == BUSTER_ARRAY_LENGTH(expected));
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
     {
@@ -40055,7 +40055,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_label_address(UnitTestArguments
                         BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
             for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
             {
@@ -40070,7 +40070,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_label_address(UnitTestArguments
                     undeclared |= string_first_sequence(semantic.diagnostics[row].message, S8("use of undeclared identifier")) != BUSTER_STRING_NO_MATCH;
                 }
                 BUSTER_TEST_RAW(arguments, undeclared, invalid[index]);
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
             for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(escapes); index += 1)
             {
@@ -40085,7 +40085,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_label_address(UnitTestArguments
                     found |= string_first_sequence(semantic.diagnostics[row].message, escapes[index].message) != BUSTER_STRING_NO_MATCH;
                 }
                 BUSTER_TEST_RAW(arguments, found, escapes[index].source);
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -55987,7 +55987,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_nested_loop_parameters(Unit
         {
             BUSTER_TEST(arguments, ir_validate_canonical_module(direct.program, direct.program->modules).error == IR_VALIDATION_NONE);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }

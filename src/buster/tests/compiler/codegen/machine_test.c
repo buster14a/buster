@@ -3314,7 +3314,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_incoming_aggregate_capacity(Unit
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
         // Keep ordinary large stack parameters supported.
@@ -3331,7 +3331,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_incoming_aggregate_capacity(Unit
                 BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -5119,7 +5119,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_division_clobber_vacate(Unit
 #endif
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
