@@ -824,6 +824,23 @@ typedef struct CMathLibmShape
 BUSTER_C_EXTERN CMathLibmShape c_semantic_math_libm_shape(String8 name);
 BUSTER_C_EXTERN bool c_semantic_math_link_is_long_double(String8 link_name);
 
+// The constant-valued special-float math builtins: positive infinity, or the
+// default quiet NaN of a `nan*("")` call, in the floating type `kind` names.
+typedef enum CMathSpecial
+{
+    C_MATH_SPECIAL_NONE,
+    C_MATH_SPECIAL_INFINITY,
+    C_MATH_SPECIAL_QUIET_NAN,
+} CMathSpecial;
+
+typedef struct CMathSpecialValue
+{
+    CTypeKind kind;
+    CMathSpecial special;
+} CMathSpecialValue;
+
+BUSTER_C_EXTERN CMathSpecialValue c_semantic_math_special_value(String8 link_name);
+
 struct CSymbolTable
 {
     Arena* arena;
@@ -1228,7 +1245,8 @@ struct CParseExpressionTypeTask
     // The false arm of a conditional whose own top-level `?` and `:` its
     // parent already found sits in `split` and `colon`; it skips the scan.
     bool conditional_hinted;
-    u8 reserved[1];
+    // The parent proved this assignment suffix has no top-level comma.
+    bool assignment_rhs;
 };
 
 struct CTypeParseFrame
@@ -1291,6 +1309,7 @@ struct CTypeParseFrame
     // own range holds it.
     u32 shared_specifier_end;
     u32 mutation_mark;
+    // SIZEOF frames also use this as the type-row count at query entry.
     u32 definition_type_start;
     // PARAMETER frames: the diagnostic count at entry, so a failed type
     // specifier that said nothing can be named.
@@ -1558,6 +1577,24 @@ struct CTypeParseMachine
     CAstStatementStatistics* ast_statement_statistics;
     u32* ast_statement_bodies;
     u32 ast_statement_body_count;
+    // The declaration specifier read (c_parse_declaration_specifiers_type)
+    // reads the same tree: `ast_specifier_starts` holds the first token of
+    // every DECL_SPECIFIERS node, ascending, and `ast_specifier_nodes` the
+    // node at the same position, built once before the declarations are
+    // typed (count in `ast_specifier_count`, null without a tree), with the
+    // position of the last lookup in `ast_specifier_cursor`;
+    // `ast_specifier_statistics` the optional counts.
+    CAstSpecifierStatistics* ast_specifier_statistics;
+    u32* ast_specifier_starts;
+    u32* ast_specifier_nodes;
+    u32 ast_specifier_count;
+    u32 ast_specifier_cursor;
+    // Beside it, one bit per token for the first token of every
+    // DECL_SPECIFIERS node, word-only or not, over `ast_specifier_first_limit`
+    // tokens: a type-name run whose first token has no bit begins no type
+    // name (c_parse_type_name_specifiers).
+    u64* ast_specifier_firsts;
+    u32 ast_specifier_first_limit;
     CAstTypeBodyIndex* ast_bodies;
     CAstTypeBody* ast_types;
     CParseExpressionQuery* expression_queries;
@@ -1744,6 +1781,10 @@ BUSTER_C_EXTERN String8 c_parse_scalar_conversion_message(Target target, CTypeKi
 // Whether [start, end) has the shape of a place, the constraint the machine's
 // `&` checks.
 BUSTER_C_EXTERN bool c_parse_expression_place_shape(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end);
+// Whether [start, end) is a place `++` or `--` may modify, given its type and
+// whether it is a nonplace projection: the machine's checked update rule.
+BUSTER_C_EXTERN bool c_parse_update_operand_modifiable(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CTypeId type,
+                                                       bool nonplace_projection);
 // The binding strength the machine's operator scan gives a token: 1 for the
 // comma, 2 for the assignment family, then 4 (`||`) to 13 (`*`); 0 for none.
 BUSTER_C_EXTERN u32 c_parse_expression_operator_precedence(CToken token);
@@ -1901,6 +1942,7 @@ BUSTER_C_EXTERN bool c_ir_constant_float_to_integer(f64 floating, IrType* target
 BUSTER_C_EXTERN f64 c_ir_float16_round(f64 value);
 BUSTER_C_EXTERN f64 c_ir_bfloat16_round(f64 value);
 BUSTER_C_EXTERN bool c_ir_constant_float_literal_for_type(IrType const* type, String8 spelling, CIrConstantValue* result);
+BUSTER_C_EXTERN CIrConstantValue c_ir_constant_math_special(IrType const* type, CMathSpecial special);
 BUSTER_C_EXTERN bool c_ir_number_imaginary_spelling(Arena* arena, String8 spelling, String8* real_out);
 BUSTER_C_EXTERN bool c_ir_constant_wide_float_binary(IrTypeId integer_type, CConditionalOperator operation, CIrConstantValue left, CIrConstantValue right, IrType const* type, CIrConstantValue* result);
 

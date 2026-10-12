@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import stat
@@ -22,7 +21,7 @@ import subprocess
 import sys
 import time
 
-from compiler_receipt import INLINE_ACCEPTANCE_PROFILE
+from compiler_receipt import INLINE_ACCEPTANCE_PROFILE, _finite_positive
 
 PAIRS = INLINE_ACCEPTANCE_PROFILE["pairs"]
 WARMUPS = INLINE_ACCEPTANCE_PROFILE["warmups"]
@@ -94,7 +93,7 @@ def run_compare(lab: Path, compiler_a: Path, compiler_b: Path, root: Path, cpu: 
 
 
 def _positive_number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+    return _finite_positive(value)
 
 
 def validate_documents(summary: dict, meta: dict, labs: dict, expected_baseline_sha: str,

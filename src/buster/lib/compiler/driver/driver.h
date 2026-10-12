@@ -144,6 +144,8 @@ struct CompilerDriverLinkOperation
 {
     u32 index;
     CompilerDriverLinkOperationKind kind;
+    // Linux ELF driver policy for this library occurrence.
+    bool as_needed;
 };
 
 // The -W<name> groups that name a warning the driver publishes today. Other
@@ -318,6 +320,7 @@ struct CompilerDriverInvocation
     // -MP emits phony rules for header prerequisites.
     bool dependency_phony_targets;
     bool verbose;
+    bool linker_verbose;
     // -w: the driver publishes no warning text or warning records.
     bool suppress_warnings;
     // -Werror, -Wno-error and the per-group spellings (see CompilerDriverWarningPolicy).
@@ -331,6 +334,10 @@ struct CompilerDriverInvocation
     // -working-directory: relative input paths resolve against it.
     String8 working_directory;
     bool debug_info;
+    // -ffreestanding controls __STDC_HOSTED__ in the C frontend.
+    bool freestanding;
+    // Accepted only for I386, where native artifact generation is refused.
+    bool no_asynchronous_unwind_tables;
     bool disable_direct_ssa;
     bool disable_local_promotion;
     bool disable_target_local_promotion;
@@ -345,6 +352,9 @@ struct CompilerDriverInvocation
     // explicit -O/-O0 use zero, and explicit pass controls override either.
     u32 fast_passes;
     bool measure_fast_passes;
+    // -fcanonical-fast-cse-strategy=window selects the CSE census's linear
+    // arm; =table, the default, selects the hash table (#3011).
+    bool fast_cse_window;
     // Tiny direct-call inlining defaults off. An explicit optimization level
     // above -O0 enables it; -O0 disables it. The last -O* or explicit
     // -fcanonical-inline/-fno-canonical-inline option wins. always_inline
@@ -402,6 +412,11 @@ struct CompilerDriverInvocation
     TimeDataType metrics_origin;
     // Where `ide cc` writes the records; the driver never writes it.
     String8 metrics_output_path;
+    // -fearly-exit (off by default; -fno-early-exit restores it): `ide cc`
+    // forks before any lane exists and reports its status once every
+    // artifact and report is out, leaving teardown to the child (#3686,
+    // os_early_exit_arm). The driver itself never reads it.
+    bool early_exit;
 };
 
 // Contiguous intervals of compiler_driver_execute_c_single, named after the
@@ -552,6 +567,10 @@ struct CompilerDriverCAstPilotResult
     // segments and hints read from the tree, and bodies left to the token
     // walk and why. Zero when the analysis had no tree to use.
     CAstStatementStatistics statements;
+    // The declaration specifier runs read from the tree (c_parse.c): runs
+    // answered, and runs left to the type machine and why. Zero when the
+    // analysis had no tree to use.
+    CAstSpecifierStatistics specifiers;
     // The extent table lowering read controlled body ranges from
     // (c_gen.c): bodies, entries and answers, and the queries the token
     // walker answered and why. Zero when lowering had no tree to use.
@@ -577,6 +596,7 @@ struct CompilerDriverResult
     CompilerDiagnostic* diagnostics;
     u32 diagnostic_count;
     String8 output;
+    String8 linker_report;
     NativeExecutableLinkResult native_link;
     WasmArtifact wasm;
     // Compatibility mirror; both artifacts reference the same arena-owned

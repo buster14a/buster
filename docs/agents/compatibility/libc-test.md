@@ -11,6 +11,10 @@ link lines describe earlier harness states. Check the current manifest and
 link construction in `build.c` and reproduce the relevant stage before
 treating any of those descriptions as a current failure or required workaround.
 
+The [musl + BusyBox](busybox.md) userspace command invokes this existing suite
+as a prerequisite. Its shell workload is additional application evidence and
+does not replace this suite or rebaseline its reference exclusions.
+
 ### libc-test
 
 Given a second path, the harness then runs libc-test, musl's own test suite.

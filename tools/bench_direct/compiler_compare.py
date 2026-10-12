@@ -26,7 +26,32 @@ alone, from the same base checkout, and its bundle joins the evidence. In pull
 mode, a fresh exact THROUGHPUT_REAL_SOURCE_REQUEST_LINE adds the real-source
 leg (#2761): throughput_real_source.stage fetches the pinned inputs outside
 timing, then `./build.sh bench_throughput run --real-source` times each
-descriptor's compile-link on the same two binaries.
+descriptor's compile-link on the same two binaries. A fresh exact
+PRODUCTION_PROFILE_REQUEST_LINE adds the PGO/LTO production-profile leg
+(#2761): the head's own `./build.sh production_profile` builds its compilers in
+an isolated clone of the head, then the base revision's harness times that
+run's Release compiler against its PGO+LTO compiler on the corpus. A fresh exact
+FRONTEND_SELECTOR_REQUEST_LINE adds the frontend and selector probes (#2761):
+the base revision's benchmark_frontend_scaling.py and selection_benchmark.py
+run on the same two binaries, then `ide bench` runs in alternating fresh
+processes of both.
+A fresh exact COMPILER_PROBES_REQUEST_LINE adds the compiler-probes leg (#2761): the
+trusted native compiler_probes.c harness builds the FAST register-allocation and
+scheduler line-mark probes against both revisions in isolated clones and times
+them as pairs.
+On the pull route --harness-admission is hosted authorization's corpus
+disposition (#3714); this host re-derives it before any build. A fresh exact
+THROUGHPUT_HISTORICAL_REQUEST_LINE on a merge base that predates the harness
+floor runs the corpus from the pinned THROUGHPUT_HISTORICAL_HARNESS_REVISION
+harness in a detached worktree instead of the base's own.
+A fresh exact WILD_LINKER_REQUEST_LINE adds the linker leg
+(#2761): the head's ide objects are built in an isolated clone of the head,
+then the trusted revision's wild_linker_acceptance.c --link-only times the
+host's installed Wild against mold (or the host's default ld) on them.
+A fresh exact LINK_TLS_REQUEST_LINE adds the TLS companion link leg (#1915):
+the trusted revision's tools/link_tls_bench.py builds frozen TLS-heavy inputs
+and times fresh `ide cc` links of both binaries, after requiring byte-identical
+images that print the frozen output.
 
 The receipt records identities, the profile, toolchain versions, binary hashes
 and timings, and is written even when a step fails. The candidate's build runs
@@ -35,9 +60,16 @@ under the direct path's owner-only trust boundary, not a sealed result.
 
 Map: queue_head (pull-mode supersession), build (one ide), toolchain, export_tree (bounded evidence export),
 read_exported_json (classification reads the export, #2929), collect_evidence,
-measure_throughput (corpus leg), scaling_requested and measure_scaling (scaling leg),
+throughput_harness_problem (#3714 base-harness admission), historical_request_selection and
+prepare_historical_harness (#3714 named historical corpus), measure_throughput (corpus leg),
+scaling_requested and measure_scaling (scaling leg),
 ast_pilot_request_selection and measure_ast_pilot (#3397 opt-in flag pair),
-real_source_request_selection and measure_real_source (#2761 real-source leg), main. Validity rules live in compiler_receipt.classify.
+real_source_request_selection and measure_real_source (#2761 real-source leg),
+production_profile_request_selection and measure_production_profile (#2761 PGO/LTO leg),
+compiler_probes_request_selection and measure_compiler_probes (#2761 probe leg),
+frontend_selector_request_selection and measure_frontend_selector (#2761 probes),
+wild_linker_request_selection, host_linker and measure_wild_linker (#2761 linker leg),
+link_tls_request_selection and measure_link_tls (#1915 TLS link leg), main. Validity rules live in compiler_receipt.classify.
 """
 
 from __future__ import annotations
@@ -53,6 +85,7 @@ import shutil
 import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -65,10 +98,23 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_ACCEPTANCE_REQUEST_LINE, validate_ast_pilot_acceptance,
                               THROUGHPUT_REAL_SOURCE_PROFILE, THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
                               throughput_real_source_digest, validate_throughput_real_source,
+                              PRODUCTION_PROFILE_PROFILE, PRODUCTION_PROFILE_REQUEST_LINE, validate_production_profile,
+                              COMPILER_PROBES_PROFILE, COMPILER_PROBES_REQUEST_LINE, COMPILER_PROBES_ROLES,
+                              COMPILER_PROBES_HARNESS, COMPILER_PROBES_HARNESS_FLAGS,
+                              compiler_probes_digest, validate_compiler_probes,
+                              FRONTEND_SELECTOR_PROFILE, FRONTEND_SELECTOR_REQUEST_LINE, FRONTEND_SELECTOR_SCHEMA,
+                              frontend_selector_digest, validate_frontend_selector,
+                              WILD_LINKER_PROFILE, WILD_LINKER_REQUEST_LINE, WILD_LINKER_SCHEMA, WILD_LINKER_COMPARATORS,
+                              wild_linker_bundle_files, wild_linker_digest, validate_wild_linker, WILD_IDENTITY,
+                              WILD_LINKER_LINKERS,
+                              LINK_TLS_PROFILE, LINK_TLS_REQUEST_LINE, LINK_TLS_HARNESS, link_tls_digest,
+                              validate_link_tls,
                               INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUEST_LINE,
                               ANALYZER_REQUEST_LINES,
                               ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, MAIN40_PROFILE, MAIN_PROFILES, named_main_profile, RECEIPT_SCHEMA, SCALING_PROFILE,
-                              SCALING_REQUEST, SHA, THROUGHPUT_PROFILE, classify, classify_scaling,
+                              SCALING_REQUEST, SHA, THROUGHPUT_HARNESS_FLOOR, THROUGHPUT_PROFILE, HARNESS_ADMISSIONS,
+                              THROUGHPUT_HISTORICAL_HARNESS_REVISION, THROUGHPUT_HISTORICAL_PROFILE,
+                              THROUGHPUT_HISTORICAL_REQUEST_LINE, classify, classify_scaling,
                               classify_throughput, classify_throughput_exit, dumps, host_problem, inline_acceptance_requested,
                               render, scaling_digest, throughput_digest, validate_inline_acceptance,
                               analyzer_bootstrap_provenance, analyzer_profile_summary)
@@ -84,6 +130,33 @@ AST_PILOT_ACCEPTANCE_TIMEOUT_SECONDS = 2 * 60 * 60
 # Measured: the whole leg (42 passes over its six cells) took 508 s on a hosted
 # 2.8 GHz Xeon; this bound keeps it inside the unchanged compare-pull budget.
 REAL_SOURCE_TIMEOUT_SECONDS = 1800
+# Measured: the whole --no-benchmark build (seven trees, two trainings,
+# inspection and test_all) took 1200 s with three lanes on a hosted 4-vCPU
+# 2.8 GHz Xeon. Twice that keeps the leg, its corpus run and the ordinary
+# comparison inside the unchanged 90-minute compare-pull job.
+PRODUCTION_PROFILE_BUILD_TIMEOUT_SECONDS = 40 * 60
+# Measured: the whole compiler-probes leg (the native harness build, two
+# clones, four probe builds, 12 cases of 2 + 30 pairs) took 241 s on a hosted
+# 4-vCPU 2.8 GHz Xeon; this bound keeps it inside the unchanged compare-pull budget.
+COMPILER_PROBES_TIMEOUT_SECONDS = 20 * 60
+# Measured: the whole frontend-selector leg took 57 s on a hosted 2.1 GHz Xeon
+# (frontend scaling 45 s, selection 6 s, 40 ide bench runs 7 s). Each bound is
+# far above its tool's time and the sum stays inside the unchanged compare-pull job.
+FRONTEND_SCALING_TIMEOUT_SECONDS = 20 * 60
+SELECTION_TIMEOUT_SECONDS = 10 * 60
+IDE_BENCH_TIMEOUT_SECONDS = 30
+# Measured on a hosted 4-vCPU 2.3 GHz Xeon: the head's three input builds (two
+# generations, Release unity, Debug and Release separate, and the harness compile)
+# took 281 s together and the link-only harness 24 s (GNU ld as comparator, 3.4 MB
+# of evidence). The input steps share one deadline; the two bounds together stay
+# inside the unchanged 90-minute compare-pull job with its ordinary comparison.
+WILD_LINKER_BUILD_TIMEOUT_SECONDS = 20 * 60
+WILD_LINKER_HARNESS_TIMEOUT_SECONDS = 15 * 60
+WILD_LINKER_PROBE_TIMEOUT_SECONDS = 30
+# Measured on a hosted 4-vCPU 2.8 GHz Xeon against a pre-#2247 baseline, whose scan
+# is slowest: building the inputs and the seven cells of 2 warmups + 20 pairs took
+# 248 s. The bound stays inside the unchanged compare-pull job with its ordinary comparison.
+LINK_TLS_TIMEOUT_SECONDS = 20 * 60
 ANALYZER_DRIVER_BUILD_TIMEOUT_SECONDS = 600
 ANALYZER_GENERATE_TIMEOUT_SECONDS = 900
 ANALYZER_HELPER_TIMEOUT_SECONDS = 76 * 60
@@ -104,7 +177,15 @@ OMISSIONS_SHOWN = 50
 LAB_REQUIRED = ("summary.json",)
 THROUGHPUT_REQUIRED = ("summary.json", "metadata.json")
 REAL_SOURCE_REQUIRED = ("summary.json", "metadata.json", "staging.json", "cpuinfo.txt")
+PRODUCTION_PROFILE_REQUIRED = ("summary.txt", "evidence/phases.tsv")
+COMPILER_PROBES_REQUIRED = ("summary.json",)
+# The same LLVM tools production-profile.yml ensures; the LTO lanes link with -fuse-ld=lld.
+PRODUCTION_PROFILE_HOST_TOOLS = ("clang", "ld.lld", "llvm-profdata", "llvm-readobj")
 SCALING_REQUIRED = ("scaling.json", "scaling-metadata.json")
+FRONTEND_SCALING_REQUIRED = ("provenance.json", "results.json")
+SELECTION_REQUIRED = ("report.json",)
+WILD_LINKER_REQUIRED = tuple(wild_linker_bundle_files().values())
+LINK_TLS_REQUIRED = ("summary.json",)
 # Raw evidence without compiled outputs, per-run binary copies or perf data.
 EVIDENCE_IGNORE = ("*.exe", "instances", "*.data", "*.data.old", "*.o", "*.obj")
 # A scaling bundle keeps its reports, raw samples and per-sample logs; its
@@ -113,6 +194,18 @@ SCALING_IGNORE = (*EVIDENCE_IGNORE, "inputs", "*.metrics")
 # The real-source leg keeps its reports, raw samples and per-sample logs; its
 # metrics files repeat samples.csv, and its executables are not evidence.
 REAL_SOURCE_IGNORE = SCALING_IGNORE
+# production_profile keeps its summary, phase ledger, command logs and profile
+# manifests; its seven build trees and raw profiles are rebuilt from the head.
+PRODUCTION_PROFILE_IGNORE = (*EVIDENCE_IGNORE, "release", "g0", "lto", "pgo", "pgo-lto", "instrumented",
+                             "instrumented-lto", "*.profraw", "*.profdata")
+# The probe leg keeps its summary and logs; its clones and binaries are not evidence.
+COMPILER_PROBES_IGNORE = (*EVIDENCE_IGNORE, "bin")
+# Frontend scaling keeps its JSON records; its generated sources (up to a few
+# MB, identified by hash in results.json) and objects are not evidence.
+FRONTEND_SCALING_IGNORE = (*EVIDENCE_IGNORE, "*.c")
+# The linker leg keeps its samples, command logs, argv and manifests; linked
+# images stay in the build trees, outside its evidence directory.
+WILD_LINKER_IGNORE = (*EVIDENCE_IGNORE, "*.elf")
 TOOLS = (("clang", "--version"), ("cmake", "--version"), ("ninja", "--version"), ("tcc", "-v"),
          ("perf", "--version"), ("taskset", "--version"), ("git", "--version"))
 
@@ -692,8 +785,12 @@ def collect_evidence(lab: Path, evidence: Path, omissions: dict) -> list[str]:
 
 
 def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, base: str, head: str,
-                       binaries: dict, omissions: dict, harness: Path | None = None) -> tuple[list[str], dict]:
-    """Run and validate the exported corpus before admitting a later snapshot child."""
+                       binaries: dict, omissions: dict, harness: Path | None = None,
+                       cwd: Path | None = None) -> tuple[list[str], dict]:
+    """Run and validate the exported corpus before admitting a later snapshot child.
+
+    cwd is the pinned historical harness worktree (#3714); its own build.sh runs the corpus there.
+    """
     output = work / "throughput"
     argv = [*([str(harness)] if harness else ["./build.sh", "bench_throughput"]), "run",
             "--baseline", str(bins / "ide-base"), "--candidate", str(bins / "ide-cand"),
@@ -702,7 +799,7 @@ def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, 
     context = OWNED_PHASE_CONTEXT
     try:
         if context is None:
-            status = run(argv, candidate, evidence / "throughput.log", THROUGHPUT_TIMEOUT_SECONDS)
+            status = run(argv, cwd or candidate, evidence / "throughput.log", THROUGHPUT_TIMEOUT_SECONDS)
         else:
             status = context.execute(argv, candidate, evidence / "throughput.log", THROUGHPUT_TIMEOUT_SECONDS,
                                      exit_policy="corpus-report-only-v1").returncode
@@ -802,6 +899,36 @@ def scaling_requested(candidate: Path, base: str, head: str) -> bool:
     present = captured_run(["git", "-C", str(candidate), "cat-file", "-e", f"{head}:{SCALING_REQUEST}"],
                              capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode == 0
     return bool(changed) and present
+
+
+def throughput_harness_problem(candidate: Path, base: str, historical: bool = False) -> str:
+    """Why this base cannot run its selected corpus recipe; '' when admitted (#3714).
+
+    Without the historical recipe the base revision's own harness must carry the floor; with it,
+    the base must predate the floor, since only such a base needs the pinned harness. Only the
+    commit graph is read, so the blob-less checkout fetches nothing. A floor git cannot place,
+    and a probe that times out or cannot start, fail closed, as a reason the caller retains in
+    the failed receipt.
+    """
+    try:
+        status = captured_run(["git", "-C", str(candidate), "merge-base", "--is-ancestor", THROUGHPUT_HARNESS_FLOOR,
+                               base], capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode
+    except (subprocess.TimeoutExpired, OSError) as error:
+        status = f"{error.__class__.__name__}: {error}"
+    problem = ""
+    if isinstance(status, str):
+        problem = f"throughput harness admission probe failed ({status}); not measured"
+    elif status == 1 and not historical:
+        problem = (f"unsupported historical throughput harness: base {base} predates {THROUGHPUT_HARNESS_FLOOR}, "
+                   f"so its --mode all is not the {THROUGHPUT_PROFILE['name']} FAST/QUALITY population; "
+                   "not measured")
+    elif status == 0 and historical:
+        problem = (f"{THROUGHPUT_HISTORICAL_PROFILE['name']} requested, but base {base} already carries "
+                   f"{THROUGHPUT_HARNESS_FLOOR}; not measured")
+    elif status not in (0, 1):
+        problem = (f"throughput harness admission could not place {THROUGHPUT_HARNESS_FLOOR} before base {base} "
+                   f"(git exited {status}); not measured")
+    return problem
 
 
 def request_selector_count(candidate: Path, revision: str, selector: str) -> int | None:
@@ -911,6 +1038,111 @@ def real_source_request_selection(candidate: Path, head: str) -> tuple[bool, str
         return False, ""
     if any(delta != 1 for delta in deltas):
         return False, "the real-source throughput selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
+def historical_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #3714's named historical corpus only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, THROUGHPUT_HISTORICAL_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the historical corpus selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the historical corpus selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
+def prepare_historical_harness(candidate: Path, work: Path, evidence: Path, receipt: dict) -> tuple[Path | None, str]:
+    """A detached worktree at THROUGHPUT_HISTORICAL_HARNESS_REVISION for the corpus (#3714); (root, problem).
+
+    The worktree lives under --work, so the candidate checkout and its build tree are untouched.
+    It keeps the candidate's own remote, so checking out the pinned revision lazily fetches its
+    missing blobs exactly as the base checkout does in the blob-less clone; a shared clone would
+    have only the local candidate as remote. Its own `./build.sh bench_throughput` builds and runs
+    that revision's harness.
+    """
+    clone = work / "historical-harness"
+    log = evidence / "historical-harness.log"
+    revision = THROUGHPUT_HISTORICAL_HARNESS_REVISION
+    record = receipt.setdefault("throughput_historical", {"harness_revision": revision})
+    argv = ["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null",
+            "-C", str(candidate), "worktree", "add", "--quiet", "--detach", str(clone), revision]
+    problem = ""
+    started = time.monotonic()
+    status = run(argv, candidate, log, GIT_TIMEOUT_SECONDS)
+    if status != 0:
+        problem = f"historical corpus harness worktree exited {status}"
+    if not problem:
+        try:
+            observed = git(clone, "rev-parse", "HEAD")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
+            observed, problem = None, f"historical corpus harness checkout cannot be inspected: {error}"
+        record["observed_revision"] = observed
+        if not problem and observed != revision:
+            problem = f"historical corpus harness checkout {observed} is not the pinned {revision}"
+    receipt["timings"]["historical_harness_seconds"] = round(time.monotonic() - started, 3)
+    record["status"] = "failed" if problem else "prepared"
+    return (None if problem else clone), problem
+
+
+def production_profile_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #2761's PGO/LTO profile only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, PRODUCTION_PROFILE_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the production-profile selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the production-profile selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
+def compiler_probes_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #2761's probe profile only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, COMPILER_PROBES_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the compiler-probes selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the compiler-probes selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
+def frontend_selector_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #2761's frontend and selector probes only when the exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, FRONTEND_SELECTOR_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the frontend-selector selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the frontend-selector selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
+def wild_linker_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #2761's Wild linker leg only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, WILD_LINKER_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the wild-linker selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the wild-linker selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
+def link_tls_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #1915's TLS companion link leg only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, LINK_TLS_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the link-tls selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the link-tls selector must be added exactly once relative to every head parent"
     return True, ""
 
 
@@ -1262,6 +1494,8 @@ def parse(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--main-profile", choices=sorted(MAIN_PROFILES),
                         help="fixed named main recipe; requires --main-owned-phases")
     parser.add_argument("--mode", choices=sorted(MODES), required=True)
+    parser.add_argument("--harness-admission", choices=HARNESS_ADMISSIONS[:2],
+                        help="pull only: the hosted pre-dispatch corpus disposition this host must re-derive (#3714)")
     for name in IDENTITY_KEYS[1:]:
         parser.add_argument("--" + name.replace("_", "-"), required=True)
     arguments = parser.parse_args(argv)
@@ -1271,6 +1505,8 @@ def parse(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--main-owned-phases requires main mode and trusted driver, exclusively from Utility")
     if arguments.main_profile is not None and not arguments.main_owned_phases:
         parser.error("--main-profile requires --main-owned-phases")
+    if arguments.harness_admission is not None and arguments.mode != "pull":
+        parser.error("--harness-admission is the pull route's hosted disposition")
     if arguments.main_owned_phases and arguments.main_profile is None:
         arguments.main_profile = PROFILE["name"]
     return arguments
@@ -1425,6 +1661,387 @@ def measure_real_source(candidate: Path, bins: Path, work: Path, evidence: Path,
     record["status"] = "complete" if not errors else "failed"
 
 
+def measure_production_profile(candidate: Path, bins: Path, work: Path, evidence: Path, head: str,
+                               receipt: dict, harness: Path | None = None) -> None:
+    """Build the head's PGO/LTO compilers in an isolated clone, then time Release against PGO+LTO on the corpus."""
+    record = receipt["production_profile"]
+    source = work / "production-profile-source"
+    output = source / "build" / "production-profile"
+    exported = evidence / "production_profile"
+    errors: list[str] = []
+    status = None
+    measured = time.monotonic()
+    # A shared clone keeps the base checkout and its build tree untouched for the closure checks.
+    steps = ((["git", "-c", "core.hooksPath=/dev/null", "clone", "--quiet", "--shared", "--no-checkout",
+               str(candidate), str(source)], candidate, GIT_TIMEOUT_SECONDS),
+             (["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null",
+               "-C", str(source), "checkout", "--quiet", "--detach", head], candidate, GIT_TIMEOUT_SECONDS),
+             (["./build.sh", "production_profile", *PRODUCTION_PROFILE_PROFILE["build_arguments"]], source,
+              PRODUCTION_PROFILE_BUILD_TIMEOUT_SECONDS))
+    missing = [tool for tool in PRODUCTION_PROFILE_HOST_TOOLS if shutil.which(tool) is None]
+    if missing:
+        errors.append(f"production profile host lacks {', '.join(missing)}; install them before requesting this profile")
+    record["missing_tools"] = missing
+    build_status = 1 if missing else 0
+    for argv, cwd, timeout in steps:
+        if build_status == 0:
+            build_status = run(argv, cwd, evidence / "production-profile-build.log", timeout)
+    receipt["timings"]["production_profile_build_seconds"] = round(time.monotonic() - measured, 3)
+    if output.is_dir():
+        problems, record["evidence_omissions"] = export_tree(output, exported, evidence, PRODUCTION_PROFILE_IGNORE,
+                                                             PRODUCTION_PROFILE_REQUIRED)
+        errors.extend(problems)
+    compilers = {}
+    for role, tree in PRODUCTION_PROFILE_PROFILE["compilers"].items():
+        built = output / tree / "Release" / "ide"
+        if build_status == 0 and built.is_file():
+            binary = bins / f"ide-production-{tree}"
+            shutil.copyfile(built, binary)
+            binary.chmod(0o755)
+            compilers[role] = {"sha256": sha256(binary), "size_bytes": binary.stat().st_size, "revision": head, "tree": tree}
+    record["binaries"] = compilers
+    texts = {}
+    for name in PRODUCTION_PROFILE_REQUIRED:
+        try:
+            texts[name] = (exported / name).read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            texts[name] = None
+            errors.append(f"production profile {name} unreadable: {error}")
+    documents = [None, None]
+    if len(compilers) == 2:
+        timing = work / "production-profile-throughput"
+        argv = [*([str(harness)] if harness else ["./build.sh", "bench_throughput"]), "run",
+                "--baseline", str(bins / "ide-production-release"), "--candidate", str(bins / "ide-production-pgo-lto"),
+                "--output", str(timing), "--baseline-id", head + "-release", "--candidate-id", head + "-pgo-lto",
+                *PRODUCTION_PROFILE_PROFILE["arguments"]]
+        measured = time.monotonic()
+        status = run(argv, candidate, evidence / "production-profile-throughput.log", THROUGHPUT_TIMEOUT_SECONDS)
+        receipt["timings"]["production_profile_throughput_seconds"] = round(time.monotonic() - measured, 3)
+        if timing.is_dir():
+            problems, omissions = export_tree(timing, exported / "throughput", evidence, EVIDENCE_IGNORE, THROUGHPUT_REQUIRED)
+            errors.extend(problems)
+            record["throughput_evidence_omissions"] = omissions
+        documents, unreadable = read_exported_pair(exported / "throughput", THROUGHPUT_REQUIRED, "production_profile/throughput")
+        errors.extend(unreadable)
+    errors.extend(validate_production_profile(build_status, texts["summary.txt"], texts["evidence/phases.tsv"], head,
+                                              status, documents[0], documents[1], compilers))
+    record["cells"] = throughput_real_source_digest(documents[0])
+    record["build_exit"] = build_status
+    record["exit"] = status
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
+def measure_compiler_probes(candidate: Path, work: Path, evidence: Path, base: str, head: str, receipt: dict) -> None:
+    """Build the trusted native probe harness, run #2761's probe leg and record it with independently hashed inputs."""
+    record = receipt["compiler_probes"]
+    output = work / "compiler-probes"
+    scratch = work / "compiler-probes-work"
+    harness = work / "compiler-probes-harness"
+    exported = evidence / "compiler_probes"
+    log = evidence / "compiler-probes.log"
+    errors: list[str] = []
+    measured = time.monotonic()
+    # The harness comes from this trusted checkout's tools/, never from the candidate.
+    status = run(["clang", *COMPILER_PROBES_HARNESS_FLAGS,
+                  str(Path(__file__).resolve().with_name(COMPILER_PROBES_HARNESS)), "-o", str(harness)],
+                 candidate, log, GIT_TIMEOUT_SECONDS)
+    record["harness_exit"] = status
+    if status == 0:
+        status = run([str(harness), str(candidate), base, head, str(scratch), str(output)], candidate, log,
+                     COMPILER_PROBES_TIMEOUT_SECONDS)
+    receipt["timings"]["compiler_probes_seconds"] = round(time.monotonic() - measured, 3)
+    binaries: dict = {}
+    sources: dict = {}
+    for probe, definition in COMPILER_PROBES_PROFILE["probes"].items():
+        copied = scratch / "probe-sources" / Path(definition["source"]).name
+        if copied.is_file():
+            sources[probe] = sha256(copied)
+        for role, revision in zip(COMPILER_PROBES_ROLES, (base, head)):
+            built = output / "bin" / f"{probe}-{role}"
+            if built.is_file():
+                binaries.setdefault(probe, {})[role] = {"sha256": sha256(built), "size_bytes": built.stat().st_size,
+                                                        "revision": revision}
+    record["binaries"] = binaries
+    record["probe_source_sha256"] = sources
+    summary = None
+    if output.is_dir():
+        problems, record["evidence_omissions"] = export_tree(output, exported, evidence, COMPILER_PROBES_IGNORE,
+                                                             COMPILER_PROBES_REQUIRED)
+        errors.extend(problems)
+        summary, problem = read_exported_json(exported / "summary.json")
+        if problem:
+            errors.append(f"exported evidence compiler_probes/summary.json unreadable: {problem}")
+    errors.extend(validate_compiler_probes(status, summary, base, head, binaries, sources))
+    record["cells"] = compiler_probes_digest(summary)
+    record["exit"] = status
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
+def measure_frontend_selector(candidate: Path, bins: Path, work: Path, evidence: Path, receipt: dict) -> None:
+    """Run #2761's frontend and selector probes from the base checkout on both binaries and record them."""
+    record = receipt["frontend_selector"]
+    profile = FRONTEND_SELECTOR_PROFILE
+    exported = evidence / "frontend_selector"
+    roles = {"baseline": bins / "ide-base", "candidate": bins / "ide-cand"}
+    errors: list[str] = []
+    scaling_output = work / "frontend-scaling"
+    measured = time.monotonic()
+    scaling_status = run([sys.executable, "-B", "tools/benchmark_frontend_scaling.py", "--baseline", str(roles["baseline"]),
+                          "--candidate", str(roles["candidate"]), "--out", str(scaling_output),
+                          *profile["frontend_scaling"]["arguments"]],
+                         candidate, evidence / "frontend-scaling.log", FRONTEND_SCALING_TIMEOUT_SECONDS)
+    receipt["timings"]["frontend_scaling_seconds"] = round(time.monotonic() - measured, 3)
+    selection_output = work / "selection"
+    measured = time.monotonic()
+    selection_status = run([sys.executable, "-B", "tools/selection_benchmark.py", "--compiler", str(roles["baseline"]),
+                            "--candidate", str(roles["candidate"]), "--workloads", str(work / "selection-sources"),
+                            "--output", str(selection_output / "report.json"), *profile["selection"]["arguments"]],
+                           candidate, evidence / "selection.log", SELECTION_TIMEOUT_SECONDS)
+    receipt["timings"]["selection_seconds"] = round(time.monotonic() - measured, 3)
+    bench_output = work / "ide-bench"
+    bench_output.mkdir(parents=True, exist_ok=True)
+    bench = {"schema": FRONTEND_SELECTOR_SCHEMA, "cpu": profile["cpu"], "cpu_model": cpu_model(),
+             "binaries": {role: sha256(path) for role, path in roles.items()}, "runs": []}
+    measured = time.monotonic()
+    for pair in range(profile["ide_bench"]["pairs"]):
+        for role in ("baseline", "candidate") if pair % 2 == 0 else ("candidate", "baseline"):
+            log = bench_output / f"{len(bench['runs']):02d}-{role}.log"
+            status = run(["taskset", "-c", str(profile["cpu"]), str(roles[role]), "bench"], candidate, log,
+                         IDE_BENCH_TIMEOUT_SECONDS)
+            text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+            lines = [line for line in text.splitlines() if line.startswith("BENCH_C_FRONTEND ")]
+            bench["runs"].append({"role": role, "exit": status, "line": lines[0] if len(lines) == 1 else None})
+    receipt["timings"]["ide_bench_seconds"] = round(time.monotonic() - measured, 3)
+    if {role: sha256(path) for role, path in roles.items()} != bench["binaries"]:
+        bench["binaries"] = None
+    (bench_output / "ide-bench.json").write_text(dumps(bench) + "\n", encoding="utf-8")
+    record["evidence_omissions"] = {}
+    for name, source, ignore, required in (("frontend_scaling", scaling_output, FRONTEND_SCALING_IGNORE,
+                                            FRONTEND_SCALING_REQUIRED),
+                                           ("selection", selection_output, EVIDENCE_IGNORE, SELECTION_REQUIRED),
+                                           ("ide_bench", bench_output, EVIDENCE_IGNORE, ("ide-bench.json",))):
+        if source.is_dir():
+            problems, record["evidence_omissions"][name] = export_tree(source, exported / name, evidence, ignore, required)
+            errors.extend(problems)
+        else:
+            errors.append(f"frontend-selector {name} produced no output")
+    documents = {}
+    for key, path in (("provenance", "frontend_scaling/provenance.json"), ("results", "frontend_scaling/results.json"),
+                      ("report", "selection/report.json"), ("bench", "ide_bench/ide-bench.json")):
+        documents[key], problem = read_exported_json(exported / path)
+        if problem:
+            errors.append(f"exported evidence frontend_selector/{path} unreadable: {problem}")
+    errors.extend(validate_frontend_selector(scaling_status, documents["provenance"], documents["results"],
+                                             selection_status, documents["report"], documents["bench"],
+                                             receipt["binaries"]))
+    record["cells"] = frontend_selector_digest(documents["results"], documents["report"], documents["bench"])
+    record["exits"] = {"frontend_scaling": scaling_status, "selection": selection_status}
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
+def host_linker(command: str, log: Path) -> tuple[dict | None, str, bool]:
+    """(identity, problem, absent) of the host's installed `command`, found with `command -v`, never downloaded."""
+    identity, problem, found = None, "", ""
+    try:
+        found = captured_run(["/bin/sh", "-c", f"command -v {command}"], capture_output=True, text=True,
+                             timeout=WILD_LINKER_PROBE_TIMEOUT_SECONDS, check=False).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired) as error:
+        problem = f"could not look up the host's {command}: {error.__class__.__name__}"
+    absent = not problem and not (found.startswith("/") and os.path.isfile(found) and os.access(found, os.X_OK))
+    if absent:
+        problem = f"the host has no installed {command} (command -v {command} found {found!r})"
+    if not problem and ("'" in found or '"' in found):
+        problem = f"the host's {command} path {found!r} cannot be quoted for the harness"
+    if not problem:
+        try:
+            result = captured_run([found, "--version"], capture_output=True, text=True,
+                                  timeout=WILD_LINKER_PROBE_TIMEOUT_SECONDS, check=False)
+            lines = (result.stdout + result.stderr).strip().splitlines()
+            version = lines[0].strip() if result.returncode == 0 and lines else ""
+        except (OSError, subprocess.TimeoutExpired):
+            version = ""
+        if not version:
+            problem = f"the host's {command} at {found} did not report a version"
+        else:
+            real = os.path.realpath(found)
+            identity = {"command": command, "path": found, "realpath": real, "version": version,
+                        "sha256": sha256(Path(real))}
+    with log.open("a", encoding="utf-8") as stream:
+        stream.write(f"$ command -v {command}\n{found}\n{identity or problem}\n")
+    return identity, problem, absent
+
+
+def elf_comment(data: bytes) -> list[str] | None:
+    """The NUL-separated strings of a little-endian ELF64 image's .comment section, or None if it has none."""
+    strings = None
+    try:
+        if data[:4] == b"\x7fELF" and data[4] == 2 and data[5] == 1:
+            shoff, = struct.unpack_from("<Q", data, 0x28)
+            entsize, count, names = struct.unpack_from("<HHH", data, 0x3A)
+            sections = [struct.unpack_from("<IIQQQQ", data, shoff + index * entsize) for index in range(count)]
+            table = sections[names]
+            for name, _, _, _, offset, size in sections:
+                end = data.index(b"\0", table[4] + name)
+                if data[table[4] + name:end] == b".comment":
+                    strings = [item.decode("utf-8", "replace") for item in data[offset:offset + size].split(b"\0") if item]
+    except (struct.error, IndexError, ValueError):
+        strings = None
+    return strings
+
+
+def record_link_comment(tree: Path, output: Path, cell: str, linker: str) -> list[str]:
+    """Write the .comment strings of the harness's saved output for one cell and linker, after checking that the
+    saved image is the one whose hash the harness recorded; return the problems."""
+    problems: list[str] = []
+    image = tree / f"{cell}-{linker}.elf"
+    recorded = output / f"{cell}-{linker}.output.sha256"
+    try:
+        data = image.read_bytes()
+        expected = recorded.read_text(encoding="utf-8").strip()
+    except OSError as error:
+        data, expected = b"", None
+        problems.append(f"wild-linker {cell} {linker} output unreadable: {error.__class__.__name__}")
+    if expected is not None and hashlib.sha256(data).hexdigest() != expected:
+        problems.append(f"wild-linker {cell} {linker} saved output is not the image the harness hashed")
+    strings = elf_comment(data) if not problems else None
+    if strings is None and not problems:
+        problems.append(f"wild-linker {cell} {linker} output has no readable .comment section")
+    (output / f"{cell}-{linker}.comment.txt").write_text("".join(item + "\n" for item in strings or []),
+                                                        encoding="utf-8")
+    return problems
+
+
+def measure_wild_linker(candidate: Path, work: Path, evidence: Path, head: str, receipt: dict) -> None:
+    """Build the head's ide link inputs in an isolated clone, then time the host's Wild against its comparator."""
+    record = receipt["wild_linker"]
+    profile = WILD_LINKER_PROFILE
+    log = evidence / "wild-linker-build.log"
+    exported = evidence / "wild_linker"
+    errors: list[str] = []
+    status = None
+    linkers = {}
+    wild, problem, _ = host_linker("wild", log)
+    if wild is not None and not WILD_IDENTITY.fullmatch(wild["version"]):
+        problem = f"the host's wild at {wild['path']} reports {wild['version']!r}, not Wild's own identity"
+    if problem:
+        errors.append(problem)
+    else:
+        linkers["wild"] = {**wild, "kind": "wild", "policy": profile["wild"]["policy"],
+                           "threads1": profile["wild"]["threads1"]}
+        # The audit's comparator, mold; the host's default linker only when mold is not installed at all.
+        for kind, frozen in WILD_LINKER_COMPARATORS.items():
+            if "comparator" not in linkers and not errors:
+                comparator, problem, absent = host_linker(frozen["command"], log)
+                if comparator is not None and not comparator["version"].startswith(frozen["version"]):
+                    problem = f"the host's {frozen['command']} reports {comparator['version']!r}, not a {kind} version"
+                if not problem:
+                    linkers["comparator"] = {**comparator, "kind": kind, "policy": frozen["policy"],
+                                             "threads1": frozen["threads1"], "substituted": kind != "mold"}
+                elif not (absent and kind == "mold"):
+                    errors.append(f"comparator {kind}: {problem}")
+    source = work / "wild-linker-source"
+    output = work / "wild-linker"
+    tools = Path(__file__).resolve().parents[1]
+    harness_sources = {name: sha256(tools / name) for name in ("wild_linker_acceptance.c", "wild_linker_bench.c")
+                       if (tools / name).is_file()}
+    harness = work / "wild-linker-harness"
+    if len(linkers) == 2:
+        measured = time.monotonic()
+        # A shared clone keeps the candidate checkout and its build tree untouched for the closure checks.
+        steps = [(["git", "-c", "core.hooksPath=/dev/null", "clone", "--quiet", "--shared", "--no-checkout",
+                   str(candidate), str(source)], candidate, GIT_TIMEOUT_SECONDS),
+                 (["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null",
+                   "-C", str(source), "checkout", "--quiet", "--detach", head], candidate, GIT_TIMEOUT_SECONDS)]
+        for tree, arguments in profile["trees"].items():
+            steps.append((["./build.sh", "generate", "--build-directory", tree, *arguments], source,
+                          WILD_LINKER_BUILD_TIMEOUT_SECONDS))
+            steps.extend((["./build.sh", "build", "--build-directory", tree, "--config", config, "-t", "ide"], source,
+                          WILD_LINKER_BUILD_TIMEOUT_SECONDS) for built, config in profile["builds"] if built == tree)
+        steps.append((["clang", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-Wpedantic",
+                       str(tools / "wild_linker_acceptance.c"), "-o", str(harness)], candidate, GIT_TIMEOUT_SECONDS))
+        build_status = 0
+        # One deadline for every input step, so the leg's worst case is the two bounds together.
+        deadline = measured + WILD_LINKER_BUILD_TIMEOUT_SECONDS
+        for argv, cwd, timeout in steps:
+            if build_status == 0:
+                build_status = run(argv, cwd, log, max(1, min(timeout, int(deadline - time.monotonic()))))
+        receipt["timings"]["wild_linker_build_seconds"] = round(time.monotonic() - measured, 3)
+        record["build_exit"] = build_status
+        if build_status != 0:
+            errors.append(f"the wild-linker input build or harness compile exited {build_status} (see {log.name})")
+        else:
+            output.mkdir(parents=True, exist_ok=False)
+            measured = time.monotonic()
+            status = run(["taskset", "-c", ",".join(str(cpu) for cpu in profile["cpus"]), str(harness), "--link-only",
+                          str(output), str(source), linkers["wild"]["path"], linkers["comparator"]["path"],
+                          linkers["comparator"]["policy"], linkers["comparator"]["threads1"]],
+                         source, evidence / "wild-linker.log", WILD_LINKER_HARNESS_TIMEOUT_SECONDS)
+            receipt["timings"]["wild_linker_harness_seconds"] = round(time.monotonic() - measured, 3)
+            for linker in linkers.values():
+                try:
+                    linker["sha256_after"] = sha256(Path(linker["realpath"]))
+                except OSError:
+                    # Removed or replaced during the leg: recorded, and refused by validate_wild_linker.
+                    linker["sha256_after"] = None
+            inputs = {}
+            for cell in profile["cells"]:
+                manifest = output / f"{cell}-inputs.sha256"
+                inputs[cell] = sha256(manifest) if manifest.is_file() else None
+                for linker in WILD_LINKER_LINKERS if status == 0 else ():
+                    errors.extend(record_link_comment(source / profile["cell_trees"][cell][0], output, cell, linker))
+            identity = {"schema": WILD_LINKER_SCHEMA, "profile": profile["name"], "head": head, "cpu_model": cpu_model(),
+                        "cpus": profile["cpus"], "linkers": linkers, "harness": harness_sources, "inputs": inputs,
+                        "build_root": str(source), "exit": status}
+            (output / "wild-linker.json").write_text(dumps(identity) + "\n", encoding="utf-8")
+            record["identity"] = identity
+            problems, record["evidence_omissions"] = export_tree(output, exported, evidence, WILD_LINKER_IGNORE,
+                                                                 WILD_LINKER_REQUIRED)
+            errors.extend(problems)
+            files = {}
+            for key, name in wild_linker_bundle_files().items():
+                try:
+                    files[key] = (exported / name).read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as error:
+                    errors.append(f"exported evidence wild_linker/{name} unreadable: {error.__class__.__name__}")
+            errors.extend(validate_wild_linker(status, files, head, identity))
+            record["cells"] = wild_linker_digest(files.get("raw"), files.get("summary"))
+    record["linkers"] = linkers
+    record["exit"] = status
+    record["errors"] = errors
+    record["status"] = "complete" if not errors and status == 0 else "failed"
+
+
+def measure_link_tls(bins: Path, work: Path, evidence: Path, receipt: dict) -> None:
+    """Run the trusted revision's TLS companion link harness on both binaries and record it (#1915)."""
+    record = receipt["link_tls"]
+    output = work / "link-tls"
+    exported = evidence / "link_tls"
+    errors: list[str] = []
+    harness = Path(__file__).resolve().parents[1] / LINK_TLS_HARNESS
+    record["harness_sha256"] = sha256(harness) if harness.is_file() else None
+    measured = time.monotonic()
+    # The harness comes from this trusted checkout's tools/, never from the candidate.
+    status = run([sys.executable, "-I", str(harness), str(bins / "ide-base"), str(bins / "ide-cand"),
+                  str(work / "link-tls-work"), str(output)], work, evidence / "link-tls.log", LINK_TLS_TIMEOUT_SECONDS)
+    receipt["timings"]["link_tls_seconds"] = round(time.monotonic() - measured, 3)
+    summary = None
+    if output.is_dir():
+        problems, record["evidence_omissions"] = export_tree(output, exported, evidence, EVIDENCE_IGNORE,
+                                                             LINK_TLS_REQUIRED)
+        errors.extend(problems)
+        summary, problem = read_exported_json(exported / "summary.json")
+        if problem:
+            errors.append(f"exported evidence link_tls/summary.json unreadable: {problem}")
+    errors.extend(validate_link_tls(status, summary, receipt["binaries"]))
+    record["cells"] = link_tls_digest(summary)
+    record["exit"] = status
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
 def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path, bins: Path, log: Path,
             receipt: dict, summaries: list) -> None:
     """Build both revisions and run the lab, corpus and scaling legs; the lab summary goes to summaries."""
@@ -1467,6 +2084,80 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     if real_requested:
         receipt["throughput_real_source"] = {"requested": True, "request_line": THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
                                              "profile": THROUGHPUT_REAL_SOURCE_PROFILE, "status": "pending"}
+    production_requested = arguments.mode == "pull" and getattr(arguments, "production_profile_requested", False)
+    problem = getattr(arguments, "production_profile_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if production_requested:
+        receipt["production_profile"] = {"requested": True, "request_line": PRODUCTION_PROFILE_REQUEST_LINE,
+                                         "profile": PRODUCTION_PROFILE_PROFILE, "status": "pending"}
+        # Its build leg and the other long opt-in legs together would not fit the compare-pull job.
+        if real_requested or ast_requested:
+            reasons.append("production-profile-v1 cannot be combined with real-source throughput or ast-pilot acceptance")
+    probes_requested = arguments.mode == "pull" and getattr(arguments, "compiler_probes_requested", False)
+    problem = getattr(arguments, "compiler_probes_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if probes_requested:
+        receipt["compiler_probes"] = {"requested": True, "request_line": COMPILER_PROBES_REQUEST_LINE,
+                                      "profile": COMPILER_PROBES_PROFILE, "status": "pending"}
+        # One long opt-in leg per compare-pull job keeps the unchanged 90-minute budget provable.
+        if real_requested or ast_requested or production_requested:
+            reasons.append("compiler-probes-v1 cannot be combined with real-source throughput, ast-pilot acceptance "
+                           "or the PGO/LTO production profile")
+    selector_requested = arguments.mode == "pull" and getattr(arguments, "frontend_selector_requested", False)
+    problem = getattr(arguments, "frontend_selector_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if selector_requested:
+        receipt["frontend_selector"] = {"requested": True, "request_line": FRONTEND_SELECTOR_REQUEST_LINE,
+                                        "profile": FRONTEND_SELECTOR_PROFILE, "status": "pending"}
+        # One long opt-in leg per compare-pull job keeps the leg's measured cost inside its unchanged budget.
+        if real_requested or ast_requested or production_requested or probes_requested:
+            reasons.append("frontend-selector-v1 cannot be combined with real-source throughput, ast-pilot "
+                           "acceptance, the PGO/LTO production profile or compiler-probes-v1")
+    linker_requested = arguments.mode == "pull" and getattr(arguments, "wild_linker_requested", False)
+    problem = getattr(arguments, "wild_linker_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if linker_requested:
+        receipt["wild_linker"] = {"requested": True, "request_line": WILD_LINKER_REQUEST_LINE,
+                                  "profile": WILD_LINKER_PROFILE, "status": "pending"}
+        # The long opt-in legs and its input builds together would not fit the compare-pull job, and one
+        # opt-in leg per attempt keeps a report from being shared between two profiles.
+        if real_requested or ast_requested or production_requested or probes_requested or selector_requested:
+            reasons.append("wild-linker-v1 cannot be combined with real-source throughput, ast-pilot acceptance, "
+                           "the PGO/LTO production profile, compiler-probes-v1 or the frontend-selector probes")
+    link_tls_requested = arguments.mode == "pull" and getattr(arguments, "link_tls_requested", False)
+    problem = getattr(arguments, "link_tls_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if link_tls_requested:
+        receipt["link_tls"] = {"requested": True, "request_line": LINK_TLS_REQUEST_LINE, "profile": LINK_TLS_PROFILE,
+                               "status": "pending"}
+        # One opt-in leg per attempt keeps a report from being shared between two profiles.
+        if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
+                linker_requested:
+            reasons.append("link-tls-v1 cannot be combined with real-source throughput, ast-pilot acceptance, the "
+                           "PGO/LTO production profile, compiler-probes-v1, the frontend-selector probes or wild-linker-v1")
+    # #3714: the named historical recipe swaps only the corpus harness; every other opt-in leg would
+    # still run the base's own pre-floor harness, so none may join it. Its pinned worktree is prepared
+    # before any build.
+    historical_root = None
+    if receipt.get("throughput_profile") == THROUGHPUT_HISTORICAL_PROFILE:
+        others = (real_requested or ast_requested or production_requested or probes_requested or selector_requested
+                  or inline_requested or linker_requested or link_tls_requested
+                  or (arguments.mode == "pull" and scaling_requested(candidate, arguments.base,
+                                                                                           arguments.head)))
+        if snapshot_closure:
+            reasons.append(f"{THROUGHPUT_HISTORICAL_PROFILE['name']} runs only with the legacy-rebuild closure")
+        elif others:
+            reasons.append(f"{THROUGHPUT_HISTORICAL_PROFILE['name']} cannot be combined with another opt-in leg")
+        if not reasons:
+            mark(receipt, evidence, "historical-harness")
+            historical_root, problem = prepare_historical_harness(candidate, work, evidence, receipt)
+            if problem:
+                reasons.append(problem)
     if not reasons:
         for role, commit in (("baseline", arguments.base), ("candidate", arguments.head), ("closure", arguments.base)):
             mark(receipt, evidence, f"build-{role}")
@@ -1565,7 +2256,8 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         measured = time.monotonic()
         corpus, receipt["throughput"] = measure_throughput(candidate, bins, work, evidence, arguments.base,
                                                            arguments.head, receipt["binaries"],
-                                                           receipt.setdefault("evidence_omissions", {}), harness)
+                                                           receipt.setdefault("evidence_omissions", {}), harness,
+                                                           cwd=historical_root)
         receipt["timings"]["throughput_seconds"] = round(time.monotonic() - measured, 3)
         reasons.extend(corpus)
         if arguments.mode == "pull" and scaling_requested(candidate, arguments.base, arguments.head):
@@ -1579,6 +2271,21 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         if real_requested:
             mark(receipt, evidence, "throughput-real-source")
             measure_real_source(candidate, bins, work, evidence, arguments.base, arguments.head, receipt, harness)
+        if production_requested:
+            mark(receipt, evidence, "production-profile")
+            measure_production_profile(candidate, bins, work, evidence, arguments.head, receipt, harness)
+        if probes_requested:
+            mark(receipt, evidence, "compiler-probes")
+            measure_compiler_probes(candidate, work, evidence, arguments.base, arguments.head, receipt)
+        if selector_requested:
+            mark(receipt, evidence, "frontend-selector")
+            measure_frontend_selector(candidate, bins, work, evidence, receipt)
+        if linker_requested:
+            mark(receipt, evidence, "wild-linker")
+            measure_wild_linker(candidate, work, evidence, arguments.head, receipt)
+        if link_tls_requested:
+            mark(receipt, evidence, "link-tls")
+            measure_link_tls(bins, work, evidence, receipt)
         mark(receipt, evidence, "validate")
         raw_closure = {}
         if snapshot_closure:
@@ -1652,6 +2359,46 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             reasons.append("real-source throughput was requested but did not reach its measurement phase")
         if record["status"] != "complete":
             receipt["state"] = "failed"
+    if production_requested:
+        record = receipt["production_profile"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("the PGO/LTO production profile was requested but did not reach its measurement phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
+    if probes_requested:
+        record = receipt["compiler_probes"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("the compiler probes were requested but did not reach their measurement phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
+    if selector_requested:
+        record = receipt["frontend_selector"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("the frontend-selector probes were requested but did not reach their measurement phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
+    if linker_requested:
+        record = receipt["wild_linker"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("the wild-linker leg was requested but did not reach its measurement phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
+    if link_tls_requested:
+        record = receipt["link_tls"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("the link-tls leg was requested but did not reach its measurement phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
 
 
 
@@ -1679,6 +2426,18 @@ def main(argv: list[str] | None = None) -> int:
         ast_pilot_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.real_source_requested, arguments.real_source_request_problem = (
         real_source_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.historical_requested, arguments.historical_request_problem = (
+        historical_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.production_profile_requested, arguments.production_profile_request_problem = (
+        production_profile_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.compiler_probes_requested, arguments.compiler_probes_request_problem = (
+        compiler_probes_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.frontend_selector_requested, arguments.frontend_selector_request_problem = (
+        frontend_selector_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.wild_linker_requested, arguments.wild_linker_request_problem = (
+        wild_linker_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.link_tls_requested, arguments.link_tls_request_problem = (
+        link_tls_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}
     utility = getattr(arguments, "utility_owned_phases", False)
     main_owned = getattr(arguments, "main_owned_phases", False)
@@ -1759,6 +2518,24 @@ def main(argv: list[str] | None = None) -> int:
     expected = (arguments.head, arguments.base, arguments.pull_head, arguments.head_tree, arguments.base_tree)
     if observed is not None and observed != expected:
         reasons.append(f"candidate checkout {observed} does not match the authorized identity {expected}")
+    # Admit the corpus harness before any build or lab (#3714): the base revision's own, or the
+    # pinned one of the named historical recipe. The MAIN-owned routes replay a sealed preflight
+    # and measure only main commits past the floor. On the pull route this host's disposition must
+    # equal the hosted one that dispatched it.
+    if arguments.historical_request_problem:
+        reasons.append(arguments.historical_request_problem)
+    if not reasons and not early_owned and not analyzer_requested:
+        problem = throughput_harness_problem(candidate, arguments.base, arguments.historical_requested)
+        if problem:
+            reasons.append(problem)
+        derived = "historical" if arguments.historical_requested else "admitted"
+        if not problem and arguments.harness_admission is not None and arguments.harness_admission != derived:
+            reasons.append(f"hosted harness admission {arguments.harness_admission!r} is not this host's {derived!r}; "
+                           "not measured")
+        if arguments.historical_requested:
+            receipt["throughput_profile"] = THROUGHPUT_HISTORICAL_PROFILE
+    elif arguments.historical_requested and analyzer_requested:
+        reasons.append("an analyzer profile cannot be combined with the historical corpus recipe")
 
     # Skip a pull request whose head already moved; an unknown answer measures.
     # A main commit stays on main as main moves on, so it is always measured.

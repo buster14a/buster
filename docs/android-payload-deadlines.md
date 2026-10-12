@@ -7,22 +7,63 @@ have separate deadlines.
 
 ## Recorded baselines and defaults
 
-Issue #728 records equivalent hosted `ubuntu-26.04` emulator runs where Debug
-completed in 42 seconds and Release completed in 16-18 seconds. The same work
-varied by about 1.5x between hosts. Android CI therefore selects configuration
-specific defaults before invoking `android/run_tests.sh`:
+The earlier #728 baseline (42 s Debug, 16–18 s Release, about 1.5x hosted
+variance) predates the intended deep logical-chain coverage in #3225. #3265
+subsequently removed two quadratic switch-overlap scans while retaining the
+65,535-label fixture. Post-fix Debug still reached the 180 s watchdog on slow
+hosts; #3258 records the measured cause and the new sizing.
 
-| Configuration | Recorded baseline | 1.5x baseline | Default watchdog |
+The failing and fast jobs below both checked out
+`11be402e1b27e0e68aa26a57bdd44eea0c887bbc` (PR #3273 merge checkout,
+head `1775237cd716fcf6cd8eab3a4ff4b1c2f54a889d`), on the same hosted
+ubuntu-26.04 image. These are different hosts at identical source, not a
+before/after compiler speedup.
+
+| Configuration | Slow attempt 1 | Fast attempt 2 | Default watchdog |
 |---|---:|---:|---:|
-| Debug | 42 s | 63 s | 180 s |
-| Release | 16-18 s | 24-27 s | 60 s |
+| Debug | 180 s cutoff; 59/62 modules completed | 75 s; all 62 modules pass | 240 s |
+| Release | 52 s; passes | 21 s; passes | 60 s |
 
-The Debug value preserves the 180-second whole-suite watchdog introduced after
-real Debug compiler-driver fixtures exceeded the former one-minute limit. The
-Release value retains more than twice the observed 1.5x runtime without copying
-Debug's much larger budget. Terminal success or failure markers still stop the
-monitor immediately; a missing marker or a payload that reaches its selected
-deadline still fails and names that deadline in the output.
+Receipts: [slow job 113913719062](https://github.com/buster14a/buster/actions/runs/37958029351/job/113913719062)
+and [fast job 113923566277](https://github.com/buster14a/buster/actions/runs/37958029351/job/113923566277).
+The slow log retains the last Debug fixture, `compiler_driver_test_native_frame_vectors`
+(index 116), when the slow attempt stops. Release success leaves the Debug
+failure intact. Module measurements use `TEST_MODULE_TIMING`; fixture
+measurements use consecutive device timestamps on `TEST_FIXTURE_START_V1`.
+
+| Debug module | Fast seconds | Slow seconds | Slow/fast |
+|---|---:|---:|---:|
+| c_frontend_tests | 40.781 | 108.668 | 2.66x |
+| c_ast_tests | 2.076 | 5.167 | 2.49x |
+| aarch64_encoding_tests | 2.838 | 5.989 | 2.11x |
+| c_macro_conditional_tests | 1.631 | 3.878 | 2.38x |
+| x86_64_completion_census_tests | 2.165 | 4.714 | 2.18x |
+| Same 59 completed modules, sum | 59.775 | 152.691 | 2.55x |
+
+The fast full-module sum is 74.415 s; `compiler_driver_tests` accounts for
+14.640 s (19.7%), and `c_frontend_tests` for 54.8%. Driver fixtures already
+completed by the cutoff also slow: `object_write_limits` 1.98 → 4.92 s,
+`machine_fallback` 1.37 → 3.71 s and `large_static_initializers` 1.16 → 2.99 s.
+The interrupted `native_frame_vectors` has no complete slow duration. The
+[full same-source analysis](https://github.com/buster14a/buster/issues/3258#issuecomment-6089950433)
+records module and driver-fixture comparisons. Variation affects unrelated
+modules and Release as well as Debug; it is not one concentrated code tail.
+The exact physical host mechanism remains unmeasured.
+
+Applying the matched 2.554x module ratio to the fast full sum estimates
+190.089 s for slow Debug completion. This is an extrapolation, not an observed
+completed run. The 240 s Debug watchdog is 3.2x the observed 75 s fast payload
+and about 1.26x that slow estimate. The executable sizing control rounds host
+variation up to 2.6x (195 s); that fits 240 s and still triggers the retained
+40% warning. Release's recorded slow 52 s remains below its unchanged 60 s
+watchdog and warns. Restore/reassess Debug sizing against matched emulator
+receipts if future payload-cost fixes make this allowance unnecessary.
+
+The standalone `android/run_tests.sh` default remains 180 s. CI selects the
+configuration-specific defaults before calling that monitor. Terminal success
+or failure markers stop monitoring immediately; missing or malformed markers,
+assertion failures and watchdog expiry still fail. This sizing changes no
+compiler behavior and makes no approved-host performance claim.
 
 No test is skipped, shortened, disabled, or moved to fit either watchdog.
 

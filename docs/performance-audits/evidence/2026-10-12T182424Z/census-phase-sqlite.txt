@@ -1,0 +1,5 @@
+population                     fns    rows   t8 base   t8 cand  total base  total cand
+slots=0                       1893  111187     0.31M     0.33M      47.56M      51.72M
+slots>0, nothing shareable     396   71761     6.20M     3.93M      35.33M      36.31M
+shareable>0                    331  129076     9.87M    10.38M      71.98M      76.51M
+all                           2620  312024    16.38M    14.64M     154.87M     164.55M

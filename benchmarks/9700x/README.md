@@ -206,7 +206,13 @@ and these jobs follow `authorize`:
   `throughput-corpus-v2`: the default CI corpus under both retained FAST and
   QUALITY modes (12 workload/mode cells, 20 pairs in each of two rounds) on
   the same two binaries (#2761, #3053). Historical four-mode v1 receipts keep
-  their original identity. A head
+  their original identity. A merge base without the FAST/QUALITY retirement
+  (`compiler_receipt.THROUGHPUT_HARNESS_FLOOR`) has a four-mode `--mode all`
+  harness that cannot produce the v2 population. Hosted `authorize` finds such
+  a base from GitHub's records (`harness_admission=unsupported`), so no 9700X
+  job is dispatched and `publish-pull` posts an explicit "Not benchmarked:
+  unsupported historical harness" check; the host re-derives the same
+  disposition before any build (#3714). A head
   that moved before measurement is recorded as superseded.
 - `start-pull` (hosted) creates or adopts the exact attempt's queued
   `9700X compiler benchmark (pull request)` check after authorization, then
@@ -255,6 +261,89 @@ checked against pinned hashes before timing. The leg is report-only. Its
 evidence is under `throughput_real_source/` in the artifact, and a missing,
 partial, failed or cancelled leg fails the check. Its method is in
 [benchmarking.md](../../docs/agents/benchmarking.md).
+
+A fresh exact `profile: throughput-corpus-historical-v1` line, added once
+against every parent, selects the named historical corpus recipe (#3714). It
+is admitted only for a merge base that predates the FAST/QUALITY harness floor
+and refused for any other base. The corpus then runs from `tools/throughput`
+at the pinned main revision `afe67cbe`, built and run by that revision's own
+`./build.sh bench_throughput` in a detached worktree, with the
+`throughput-corpus-v2` arguments and FAST/QUALITY population on the same two
+binaries. The receipt names `throughput-corpus-historical-v1` and the pinned
+revision it observed; the publisher accepts that profile only when hosted
+authorization admitted it, and it never discharges the v2 corpus row. It
+cannot be combined with another opt-in leg, since those would still run the
+base's own harness.
+
+A fresh exact `profile: production-profile-v1` line, added once against every
+parent, adds the PGO/LTO production-profile leg (#2761) after the corpus leg.
+The head's own `./build.sh production_profile --no-benchmark` runs in an
+isolated clone of the head: it builds and trains the PGO compilers and runs
+`test_all` on the PGO+LTO one. The merge base's `bench_throughput run` then
+times that run's Release compiler against its PGO+LTO compiler on the same
+corpus as the ordinary leg. It is report-only and cannot be combined with the
+real-source or ast-pilot profiles. The host needs `ld.lld`, `llvm-profdata`,
+`llvm-readobj` and Clang's profile runtime; a missing tool fails the leg
+before the build starts. Its evidence is under
+`production_profile/` in the artifact, and a missing, partial, failed or
+cancelled leg fails the check. Its method is in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
+A fresh exact `profile: compiler-probes-v1` line, added once against every
+parent, adds the compiler-probes leg (#2761) after the corpus leg. It is the
+route for a targeted register-allocator or scheduler claim.
+`tools/fast_ra_scaling.c` and `tools/machine_line_mark_scaling.c` include
+compiler internals, so they cannot be workloads in this directory. Instead,
+the native harness `tools/bench_direct/compiler_probes.c` builds each probe from the head's
+probe source twice: against the merge base's `src/` and against the head's,
+each in an isolated clone. It then times the two builds as fixed alternating
+pairs on CPU 2. It is report-only and cannot be combined with the
+real-source, ast-pilot or production-profile profiles. Its evidence is under
+`compiler_probes/` in the artifact, and a missing, partial, failed or
+cancelled leg fails the check. Its method is in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
+A fresh exact `profile: frontend-selector-v1` line, added once against every
+parent, adds the frontend and selector probes (#2761) after the corpus leg.
+The merge base's `tools/benchmark_frontend_scaling.py` and
+`tools/selection_benchmark.py` run on the same two binaries, pinned to
+CPU 2 and with frozen arguments. Then `ide bench` runs in 20 alternating
+pairs of fresh processes. Objects and selected work counts must match
+between the binaries; the timings are report-only. The profile cannot be
+combined with the other opt-in profiles. Its evidence is under
+`frontend_selector/` in the artifact, and a missing, partial, failed or
+cancelled leg fails the check. Its method is in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
+A fresh exact `profile: wild-linker-v1` line, added once against every
+parent, adds the host Wild linker leg (#2761, #2645) after the corpus leg.
+It uses the Wild installed on this host (`command -v wild`) and nothing is
+downloaded onto the host. Its comparator is mold, or the host's default
+GNU `ld` only when mold is not installed. The receipt records the paths,
+versions and SHA-256 of both linkers. The trusted revision's
+`tools/wild_linker_acceptance.c --link-only` times the audit's three
+direct link-only `ide` cells, at default threads and at one thread, on
+the head's own no-LTO objects, pinned to CPUs 2-5. The cells use the
+audit's link policy (`--no-gc-sections --icf=none --no-fork`, fixed build
+ID). Repeat links must be byte-identical, and the timings are
+report-only. The profile cannot be combined with the other opt-in
+profiles. Its evidence is under `wild_linker/` in the artifact, and a
+missing linker or a partial, failed or cancelled leg fails the check. Its
+method and the linkers' licenses are in
+[benchmarking.md](../../docs/agents/benchmarking.md).
+
+A fresh exact `profile: link-tls-v1` line, added once against every
+parent, adds the TLS companion link leg (#1915) after the corpus leg. The
+trusted revision's `tools/link_tls_bench.py` builds frozen TLS-heavy inputs
+with the host's clang and ar: 2,048 to 32,768 general-dynamic TLS sites as
+plain, `-fno-plt`, archive and PIE cells, plus a no-TLS control. Each of the
+two `ide` binaries links every cell once, and both images must be
+byte-identical and print the cell's frozen output. Only then does it time
+fresh `ide cc` link processes of both binaries, 2 warmups and 20
+alternating pairs per cell on CPU 2. It is report-only and cannot be
+combined with the other opt-in profiles. Its evidence is under `link_tls/`
+in the artifact, and a partial, failed or cancelled leg fails the check.
+Its method is in [benchmarking.md](../../docs/agents/benchmarking.md).
 
 V1 preserves its historical fixed 182-row qualification and 135-execution,
 47-alias candidate profile. V2 independently derives the ordered Release

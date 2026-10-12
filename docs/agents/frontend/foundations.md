@@ -4,6 +4,43 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+## Assignment-chain traversal
+
+The token expression typer keeps the right-associative assignment split in
+`CParseExpressionTypeTask.assignment_rhs`. An assignment's initial operator
+scan proves that its suffix has no top-level comma; the suffix can stop at
+its first assignment. A preceding conditional retains the complete scan,
+and opening a parenthesized range drops the hint.
+
+`c_type_parse_sizeof_step` publishes completed assignment suffix types to the
+existing per-body expression memo only from a non-speculative root that added
+no type rows, mutations or diagnostics and has no expression constraint.
+The normal checked/runtime/constant flags, endpoint and scope still gate reuse.
+Consequently failed queries can roll back safely, and typing that creates rows
+still runs through the original path.
+
+During body validation, `c_parse_body_expression_ends_build` computes natural
+expression endpoints backwards, using the existing delimiter index. Queries
+clamp that endpoint to their own bound. Reuse also requires the exact supplying
+token-stream pointer; a private query with different tokens takes the scalar
+walk even when its copied model retains the position index. The table uses guarded body scratch,
+is detached before the arena rewinds, and malformed delimiter streams retain
+the scalar walk. The private boundary regression compares every subrange with
+that walk, including bounds inside delimiter groups and a query with no
+position index. Such a query uses scalar delimiter matching as well.
+
+Lowering's assignment continuation retains the comma-free suffix range that
+its parent scanned. Moving into a group changes the endpoint and requires a
+new scan. `c_ir_root_conditional_scan` stops once an assignment proves that a
+later conditional belongs to its right operand. Assignment completions keep
+their original order, conversions and stores. Counted chain regressions cover
+simple, distinct-local and compound assignments through both frontend SSA
+forms. The native runtime fixture also compiles the three 20,000-link object
+inputs (including distinct compound-assignment array elements) through the real CLI and reports process wall time as a diagnostic
+receipt, with optimization/sanitizer flags; elapsed time is not a test gate.
+Executable controls cover narrowing, mixed compound operators, comma
+and conditional operands, aggregate/pointer values and single evaluation.
+
 ## Logical constant eligibility
 
 `c_ir_constant_apply_binary` preserves unknownness for the necessarily evaluated
@@ -76,8 +113,21 @@ independent fallback for every retained memory owner.
 The current-value table is sparse `(block, owner)` state, not a blocks × locals
 matrix. Unresolved reads create provisional block parameters. Sealing waits
 until all backedges and goto predecessors are known; an iterative queue fills
-incoming values, forwarding through single-predecessor chains. Trivial
-parameters and unused parameter cycles are removed. A parameter is trivial
+incoming values, forwarding through single-predecessor chains and through
+loop headers: `c_ir_ssa_finish_loops` checks each recorded `for`/`while`/`do`
+for a header with one predecessor from outside and no other loop block entered
+from outside (labels, case labels and gotos into a loop fail it), and a read of
+a local no block of that loop writes passes from the header straight to the
+entry. Without it, N nested loops that each declare their own variable placed
+a trivial parameter for every enclosing variable at every inner header: N^2
+parameters, refused past ~2000 levels (#3723). The walk only looks slots up;
+it inserts one where it ends unresolved and caches its answer on the path
+within a budget of twice the other slots (plus a constant), since caching every
+walk past N nested `do` loops for each of their N variables needed N^2 slots
+(#3771). A skipped cache entry costs a later walk, never a different value. Trivial
+parameters and unused parameter cycles are removed; a replaced parameter hands
+its user rows on without those that can no longer requeue, so a chain of
+trivial parameters stays linear. A parameter is trivial
 when every edge out of a reachable block carries the same value; an edge out
 of an unreachable block never runs, so its value decides only when no
 reachable edge carries one; then every dead edge must agree, as before. A braced statement ending in `break`, `goto`,
@@ -105,6 +155,17 @@ The semantic type query classifies the final statement in its own parsed block
 scope, so a local value shadows an outer typedef. A final declaration still
 produces void; an expired nested shadow does not change the enclosing typedef,
 and a const-qualified shadow remains unmodifiable.
+
+GNU statement-expression type queries resolve their final statement's lexical
+scope through the active function-body map, even when the query begins under
+an inner scope. Statement-expression constraint bodies run in reverse source
+order, so an enclosing tail reads its already-checked child's expression memo
+with the same range, scope and mode flags. This avoids repeatedly typing every
+inner tail and descending from a different root at every level (#3724).
+`c_test_statement_expression_work_growth` bounds tail visits and scope levels
+through depth 10,000, validates canonical IR, and covers GNU17/GNU23 and both
+frontend SSA forms. These work bounds are deterministic correctness checks;
+local elapsed times remain diagnostic pending the approved-host route.
 
 Nested GNU statement-expression body walks reuse the function's label block at
 the same source token. Allocating a second block leaves the predeclared label
@@ -2021,3 +2082,32 @@ The existing capacity and translation-unit lifetime are unchanged. Raw table
 readers must prove token kind and direction; a closer row is now populated.
 The registered position-index regression checks both directions, clipped ranges,
 malformed streams, dirty storage, scalar/shape parity and 64/4096 boundaries.
+
+## Logical-chain cast and reference work
+
+Label-address cast proofs reuse the matching-opener index. Before classifying a
+group's type words, `c_parse_label_address_group_may_be_type` rejects interiors
+containing an indexed `&& identifier`. The typedef-aware proof retains a scoped
+exception for a genuine leading `typeof` specifier, after qualifiers: its bounded
+operand has its own expression/type grammar and may contain a conjunction.
+The ordinary proof still rejects that punctuator. The exception's prefix probes
+are charged to the same work counter; a left-nested logical group starts with
+`(` and declines in constant work. The search reads the existing sorted position
+population. A miss keeps the complete proof; absent indexes and unmatched groups
+retain the scan fallback. The population rejects nested logical groups in
+logarithmic probes per group, rather than re-reading their growing parentheses.
+
+Checked lowering records whether any prepared callee has started at a `(`
+token. Every call-chain lookup still receives its independent reference check.
+When no callee has done so, publication proves that no row can have the source
+call's opening parenthesis as its key. Otherwise the full reference scan remains.
+The fact stays true across typeof rollback; a removed callee can cause extra
+checking, never a missed candidate. Release call-chain selection is unchanged.
+
+`c_test_logical_chain_work_growth` bounds counted work across all six shapes at
+three depths, includes a named label to exercise the semantic cast proof, and
+checks that a returned-function call retains the positive reference scan.
+`c_test_label_address_prefix_indexed_paths` also retains scalar/indexed parity
+for typeof and qualified-typeof casts plus their interior-conjunction negatives.
+The landed decorated-label runtime controls, original deep lowering and
+runtime-order fixtures remain separate.

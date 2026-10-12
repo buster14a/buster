@@ -6,6 +6,8 @@
 // invocation occurs on restore. Unsupported state fails without a fallback.
 // The existing compiler comparison owns admission, subprocess cancellation
 // and attempt-root cleanup; .complete is published only after both moves.
+// compiler_closure_step/_move record the first failed transfer step and its
+// errno in the receipt (failed_step/errno), e.g. park-build EXDEV.
 //
 // Linux is the approved measurement platform. Other driver builds retain an
 // explicit unsupported result rather than an unverified filesystem recipe.
@@ -673,6 +675,37 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_cache_valid(Arena* arena, String8 root
     return result;
 }
 
+// The first failed transfer step and the errno observed right after it are
+// retained in the receipt; errno 0 marks a refused identity/content check.
+typedef struct CompilerClosureFailure CompilerClosureFailure;
+struct CompilerClosureFailure
+{
+    String8 step;
+    u32 error;
+};
+
+BUSTER_GLOBAL_LOCAL bool compiler_closure_step_error(CompilerClosureFailure* failure, bool passed, u32 error, String8 step)
+{
+    if (!passed && !failure->step.length)
+    {
+        failure->step = step;
+        failure->error = error;
+    }
+    return passed;
+}
+
+// Callers clear errno first; it is read only after `passed` was evaluated.
+BUSTER_GLOBAL_LOCAL bool compiler_closure_step(CompilerClosureFailure* failure, bool passed, String8 step)
+{
+    return compiler_closure_step_error(failure, passed, (u32)errno, step);
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_closure_move(CompilerClosureFailure* failure, String8 from, String8 to, String8 step)
+{
+    OsError moved = os_file_replace(from, to);
+    return compiler_closure_step_error(failure, moved.v == 0, moved.v, step);
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operation, String8 root, String8 snapshot,
     String8 base, String8 tree, String8 receipt_path, String8 expected_digest)
 {
@@ -696,67 +729,108 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operati
     u64 harness_preparation_us = 0;
     String8 harness_hash = {0};
     CompilerClosureBootstrapIdentity producer = {0};
-    bool success = compiler_closure_admitting() && (snapshot_operation || restore || verify);
+    CompilerClosureFailure failure = {0};
+    bool success = compiler_closure_step_error(&failure, compiler_closure_admitting() && (snapshot_operation || restore || verify),
+        0, S8("admission"));
     if (success && snapshot_operation)
     {
-        success = compiler_closure_cache_valid(arena, root) && !path_exists(arena, snapshot);
+        errno = 0;
+        success = compiler_closure_step(&failure, compiler_closure_cache_valid(arena, root), S8("baseline-cache"));
+        success = success && compiler_closure_step_error(&failure, !path_exists(arena, snapshot), 0, S8("snapshot-absent"));
         if (success)
         {
             u64 preparation_start = os_now_microseconds();
-                    String8 prepare[] = {path_join(arena, root, S8("build.sh")), S8("bench_throughput"), S8("help")};
+            String8 prepare[] = {path_join(arena, root, S8("build.sh")), S8("bench_throughput"), S8("help")};
             ProductionProfileCommandResult prepared = compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(prepare));
             harness_preparation_us = os_now_microseconds() - preparation_start;
             struct stat harness_status = {0};
-            success = prepared.success && compiler_closure_hash(arena, path_join(arena, build, S8("throughput-tools/throughput")),
-                &harness_hash, &harness_status) && (harness_status.st_mode & 0111);
+            success = compiler_closure_step_error(&failure, prepared.success, 0, S8("harness-prepare"));
+            errno = 0;
+            success = success && compiler_closure_step(&failure, compiler_closure_hash(arena, path_join(arena, build,
+                S8("throughput-tools/throughput")), &harness_hash, &harness_status) && (harness_status.st_mode & 0111), S8("harness-hash"));
         }
-        if (success) { manifest = compiler_closure_inventory(arena, root, root, build, bootstrap, base, tree); }
-        success = success && manifest.length && os_make_directory_exclusive(snapshot).created;
+        if (success)
+        {
+            errno = 0;
+            manifest = compiler_closure_inventory(arena, root, root, build, bootstrap, base, tree);
+            success = compiler_closure_step(&failure, manifest.length != 0, S8("inventory"));
+        }
+        if (success)
+        {
+            OsDirectoryCreateResult created = os_make_directory_exclusive(snapshot);
+            success = compiler_closure_step_error(&failure, created.created, created.error.v, S8("create-snapshot"));
+        }
         if (success)
         {
             digest = production_profile_sha256_text(arena, manifest);
-            success = production_profile_write(manifest_path, manifest) && os_make_directory_exclusive(saved_source).created &&
-                compiler_closure_copy_source(arena, root, saved_source, manifest) &&
-                os_file_replace(build, saved_build).v == 0 && os_file_replace(bootstrap, saved_bootstrap).v == 0 &&
-                string_equal(manifest, compiler_closure_inventory(arena, root, saved_source, saved_build, saved_bootstrap, base, tree)) &&
-                production_profile_write(marker_path, digest);
+            errno = 0;
+            success = compiler_closure_step(&failure, production_profile_write(manifest_path, manifest), S8("write-manifest"));
+            OsDirectoryCreateResult created = success ? os_make_directory_exclusive(saved_source) : (OsDirectoryCreateResult){0};
+            success = success && compiler_closure_step_error(&failure, created.created, created.error.v, S8("create-source"));
+            errno = 0;
+            success = success && compiler_closure_step(&failure, compiler_closure_copy_source(arena, root, saved_source, manifest), S8("copy-source"));
+            // Parking is a rename: a SNAPSHOT on another filesystem fails here with EXDEV.
+            success = success && compiler_closure_move(&failure, build, saved_build, S8("park-build"));
+            success = success && compiler_closure_move(&failure, bootstrap, saved_bootstrap, S8("park-bootstrap"));
+            errno = 0;
+            success = success && compiler_closure_step(&failure, string_equal(manifest,
+                compiler_closure_inventory(arena, root, saved_source, saved_build, saved_bootstrap, base, tree)), S8("parked-inventory"));
+            errno = 0;
+            success = success && compiler_closure_step(&failure, production_profile_write(marker_path, digest), S8("write-marker"));
         }
     }
     else if (success)
     {
+        errno = 0;
         manifest = compiler_closure_read(arena, manifest_path, BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
-        String8 marker = compiler_closure_read(arena, marker_path, SHA256_HEX_CAPACITY - 1);
+        success = compiler_closure_step(&failure, manifest.length && manifest.length <= BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT, S8("read-manifest"));
+        errno = 0;
+        String8 marker = success ? compiler_closure_read(arena, marker_path, SHA256_HEX_CAPACITY - 1) : (String8){0};
+        success = success && compiler_closure_step(&failure, marker.length != 0, S8("read-marker"));
         digest = production_profile_sha256_text(arena, manifest);
-        success = manifest.length && manifest.length <= BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT &&
-            stage_object_sha256_valid(expected_digest) && string_equal(digest, expected_digest) && string_equal(marker, digest);
+        success = success && compiler_closure_step_error(&failure, stage_object_sha256_valid(expected_digest) &&
+            string_equal(digest, expected_digest) && string_equal(marker, digest), 0, S8("manifest-digest"));
         if (success && restore)
         {
-            success = string_equal(manifest, compiler_closure_inventory(arena, root, saved_source, saved_build, saved_bootstrap, base, tree));
-            if (success)
-            {
-                // Source/root/parked bytes and tools are verified before the
-                // only destructive operations. Candidate cache entries cannot
-                // survive to select a candidate driver for baseline workloads.
-                success = compiler_closure_admitting() && compiler_closure_clear_source(arena, root) && compiler_closure_copy_source(arena, saved_source, root, manifest) &&
-                    remove_path_recursive(arena, build) && remove_path_recursive(arena, bootstrap) &&
-                    os_file_replace(saved_build, build).v == 0 && os_file_replace(saved_bootstrap, bootstrap).v == 0;
-            }
+            errno = 0;
+            success = compiler_closure_step(&failure, string_equal(manifest,
+                compiler_closure_inventory(arena, root, saved_source, saved_build, saved_bootstrap, base, tree)), S8("saved-inventory"));
+            // Source/root/parked bytes and tools are verified before the
+            // only destructive operations. Candidate cache entries cannot
+            // survive to select a candidate driver for baseline workloads.
+            success = success && compiler_closure_step_error(&failure, compiler_closure_admitting(), 0, S8("admission"));
+            errno = 0;
+            success = success && compiler_closure_step(&failure, compiler_closure_clear_source(arena, root), S8("clear-source"));
+            errno = 0;
+            success = success && compiler_closure_step(&failure, compiler_closure_copy_source(arena, saved_source, root, manifest), S8("copy-source"));
+            errno = 0;
+            success = success && compiler_closure_step(&failure, remove_path_recursive(arena, build), S8("remove-build"));
+            errno = 0;
+            success = success && compiler_closure_step(&failure, remove_path_recursive(arena, bootstrap), S8("remove-bootstrap"));
+            success = success && compiler_closure_move(&failure, saved_build, build, S8("return-build"));
+            success = success && compiler_closure_move(&failure, saved_bootstrap, bootstrap, S8("return-bootstrap"));
         }
         if (success)
         {
-            success = compiler_closure_cache_valid(arena, root) &&
-                string_equal(manifest, compiler_closure_inventory(arena, root, root, build, bootstrap, base, tree));
+            errno = 0;
+            success = compiler_closure_step(&failure, compiler_closure_cache_valid(arena, root), S8("baseline-cache"));
+            errno = 0;
+            success = success && compiler_closure_step(&failure, string_equal(manifest,
+                compiler_closure_inventory(arena, root, root, build, bootstrap, base, tree)), S8("root-inventory"));
         }
     }
     if (success && !snapshot_operation)
     {
         struct stat status = {0};
-        success = compiler_closure_hash(arena, path_join(arena, build, S8("throughput-tools/throughput")), &harness_hash, &status);
+        errno = 0;
+        success = compiler_closure_step(&failure, compiler_closure_hash(arena, path_join(arena, build, S8("throughput-tools/throughput")),
+            &harness_hash, &status), S8("harness-hash"));
     }
     if (success)
     {
-        success = compiler_closure_bootstrap_identity(arena, root, snapshot_operation ? saved_source : root,
-            snapshot_operation ? saved_bootstrap : bootstrap, &producer);
+        errno = 0;
+        success = compiler_closure_step(&failure, compiler_closure_bootstrap_identity(arena, root, snapshot_operation ? saved_source : root,
+            snapshot_operation ? saved_bootstrap : bootstrap, &producer), S8("bootstrap-identity"));
     }
     {
         String8 receipt = string_format(arena, S8("{{\"schema\":\"" BUSTER_COMPILER_CLOSURE_SCHEMA "\",\"policy\":\"snapshot-v1\","
@@ -764,20 +838,21 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operati
             "\"manifest_sha256\":\"{S8}\",\"harness_sha256\":\"{S8}\",\"bootstrap_marker_sha256\":\"{S8}\","
             "\"bootstrap_artifact_sha256\":\"{S8}\",\"duration_us\":{u64},\"harness_preparation_us\":{u64},"
             "\"ownership_schema\":\"buster-native-qualification-supervisor-v1\",\"cleanup_proven\":{S8},"
-            "\"cleanup_us\":{u64},\"cleanup_waves\":{u64},\"cleanup_signalled\":{u64},\"cleanup_reaped\":{u64}\n}\n"),
+            "\"cleanup_us\":{u64},\"cleanup_waves\":{u64},\"cleanup_signalled\":{u64},\"cleanup_reaped\":{u64},"
+            "\"failed_step\":\"{S8}\",\"errno\":{u32}\n}\n"),
             success ? S8("complete") : S8("failed"), operation, base, tree, production_profile_sha256_text(arena, root), digest, harness_hash, producer.marker_sha256, producer.artifact_sha256,
             os_now_microseconds() - start, harness_preparation_us,
             !compiler_closure_cleanup_failed ? S8("true") : S8("false"), compiler_closure_cleanup_us - cleanup_us,
             compiler_closure_cleanup_waves - cleanup_waves, compiler_closure_cleanup_signalled - cleanup_signalled,
-            compiler_closure_cleanup_reaped - cleanup_reaped);
+            compiler_closure_cleanup_reaped - cleanup_reaped, failure.step.length ? failure.step : S8("-"), failure.error);
         bool retained = !compiler_closure_cleanup_failed || production_profile_write(
             string_format(arena, S8("{S8}.cleanup-uncertain"), receipt_path), S8("native child ownership or cleanup could not be proven; retain this attempt root\n"));
         bool written = retained && (!manifest.length || production_profile_write(string_format(arena, S8("{S8}.manifest.tsv"), receipt_path), manifest)) &&
             production_profile_write(receipt_path, receipt);
-        success = success && written;
+        success = success && compiler_closure_step_error(&failure, written, 0, S8("write-receipt"));
     }
-    string_print(S8("COMPILER_CLOSURE operation={S8} state={S8} same_root=1 compiler_rebuilds=0\n"), operation,
-        success ? S8("complete") : S8("failed"));
+    string_print(S8("COMPILER_CLOSURE operation={S8} state={S8} same_root=1 compiler_rebuilds=0 failed_step={S8} errno={u32}\n"), operation,
+        success ? S8("complete") : S8("failed"), failure.step.length ? failure.step : S8("-"), failure.error);
     return success;
 }
 #endif

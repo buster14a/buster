@@ -3,6 +3,7 @@
 #include <buster/lib/compiler/driver/driver.h>
 
 BUSTER_F_DECL bool compiler_driver_language_is_native(CompilerDriverLanguage language);
+BUSTER_F_DECL String8 compiler_driver_native_link_report(Arena* arena, CompilerDriverInvocation invocation);
 typedef struct CompilerDriverDependencyQuoteResult CompilerDriverDependencyQuoteResult;
 struct CompilerDriverDependencyQuoteResult
 {
@@ -10,6 +11,8 @@ struct CompilerDriverDependencyQuoteResult
     bool representable;
 };
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL void compiler_driver_test_merge_fast_declines(Arena* arena, IrFastStatistics* total, IrFastStatistics const* unit,
+                                                            String8 source, u64* capacity);
 // GCC Makefile escaping and object-derived depfile path helpers.
 BUSTER_F_DECL CompilerDriverDependencyQuoteResult compiler_driver_dependency_quote(Arena* arena, String8 value);
 BUSTER_F_DECL String8 compiler_driver_dependency_path(Arena* arena, String8 object_path);

@@ -107,10 +107,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_validation_tests(UnitTestArgumen
                         // A fault inside one certified function predates
                         // promotion, so the promotion-output check leaves it
                         // to the consumers that accept it without transform
-                        // checks; FAST still declines the module.
+                        // checks; FAST declines only that function.
                         BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE && module->local_promotion_complete);
                         BUSTER_TEST(arguments, module->local_promotion.promoted_locals > 0 && function->instruction_count < old_instructions);
-                        BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.functions == 0);
+                        BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.functions == 1);
                     }
                     else
                     {
@@ -177,7 +177,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_validation_tests(UnitTestArgumen
                     BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT);
                     BUSTER_TEST(arguments, ir_test_opcode_count(function, IR_OPCODE_LOCAL) == 0);
                     BUSTER_TEST(arguments, ir_test_opcode_count(other, IR_OPCODE_LOCAL) == 0);
-                    BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.functions == 0);
+                    BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.functions == 1);
                     IrValidationResult after = ir_validate_canonical_module(program, module);
                     BUSTER_TEST(arguments, after.error == original.error && after.function.value == other->id.value);
                 }
@@ -282,6 +282,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
             {
                 u32 old_instructions = function->instruction_count;
                 u32 old_values = function->value_count;
+                u32 old_value_capacity = function->value_capacity;
                 u32 old_locals = ir_test_opcode_count(function, IR_OPCODE_LOCAL);
                 BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
                 program->disable_local_promotion = true;
@@ -345,6 +346,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
                     BUSTER_TEST(arguments, module->local_promotion.removed_parameters > 0);
                 }
                 IrLocalPromotionStatistics stats = module->local_promotion;
+                // Lowering trims the value array to its count (#1307). Join
+                // parameters are staged and appended once at the exact size,
+                // so promotion leaves no doubled, unwritten value tail.
+                BUSTER_TEST(arguments, old_value_capacity == old_values);
+                BUSTER_TEST(arguments, function->value_capacity == old_values + stats.inserted_parameters);
                 BUSTER_TEST(arguments, stats.instructions_before - stats.instructions_after == stats.promoted_locals + stats.removed_loads + stats.removed_stores);
                 // Each fixture has one lowered function. The declaration-only
                 // callees contribute no sweeps, and promotion preserves blocks.

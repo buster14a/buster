@@ -20,6 +20,7 @@
 // Collection-time lookups stay O(1) expected as the module grows:
 // llvm_bc_add_constant deduplicates through the constant_slots hash index,
 // llvm_bc_name_available checks link names through the name_slots hash index,
+// llvm_bc_section_id interns ordered section names through a content hash index,
 // and llvm_bc_find_integer_count reads the integer_count_functions table. These
 // indexes only locate rows; pool and entity order, and therefore value IDs,
 // remain insertion order.
@@ -31,8 +32,8 @@
 // llvm_bc_prepare_inline_assembly translates GCC inline assembly into an
 // INLINEASM constant during collection; llvm_bc_emit_inline_assembly writes
 // its call or callbr. LLVM_BITCODE.md tabulates the translation.
-// Test-only integer operand access lives at llvm_bitcode_test_integer_operand;
-// normal builds omit that private boundary entirely.
+// Private test seams expose integer operands and section lookup probe counts;
+// normal builds omit those boundaries entirely.
 
 enum
 {
@@ -6539,46 +6540,96 @@ BUSTER_GLOBAL_LOCAL void llvm_bc_emit_attributes(LlvmBcContext* context)
     }
 }
 
-// The one-based MODULE_CODE_SECTIONNAME index of a definition's requested
-// section (issue 1276), appending the name when it is new; zero, the
-// record's "no section", for a declaration or a definition that names none.
-static u32 llvm_bc_section_id(String8* names, u32* name_count, IrSymbol* symbol, bool declaration)
+// Ordered names own the one-based wire IDs. Slots only locate those IDs;
+// zero is empty. At most one new name per entity keeps occupancy <= 1/2.
+// Allocate the index lazily so modules without named sections pay no hash
+// table allocation or clearing cost.
+typedef struct LlvmBcSections LlvmBcSections;
+struct LlvmBcSections
+{
+    Arena* arena;
+    String8* names;
+    u32* slots;
+    u64 slot_mask;
+    u32 entity_count;
+    u32 name_count;
+#if BUSTER_INCLUDE_TESTS
+    u64 probes;
+#endif
+};
+
+// Declarations and definitions without a requested section retain ID zero.
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_section_id(LlvmBcSections* sections, IrSymbol* symbol, bool declaration)
 {
     u32 result = 0;
     String8 name = symbol && !declaration ? symbol->section_name : (String8){0};
-    for (u32 index = 0; index < *name_count && name.length && !result; index += 1)
+    if (name.length)
     {
-        result = string_equal(names[index], name) ? index + 1 : 0;
+        if (!sections->slots)
+        {
+            u64 capacity = 1;
+            while (capacity < (u64)sections->entity_count * 2)
+            {
+                capacity *= 2;
+            }
+            sections->slots = arena_allocate(sections->arena, u32, capacity);
+            memset(sections->slots, 0, capacity * sizeof(*sections->slots));
+            sections->slot_mask = capacity - 1;
+        }
+        u64 hash = buster_hash_64((u8*)name.pointer, name.length);
+        for (u64 slot = hash & sections->slot_mask; !result; slot = (slot + 1) & sections->slot_mask)
+        {
+#if BUSTER_INCLUDE_TESTS
+            sections->probes += 1;
+#endif
+            u32 id = sections->slots[slot];
+            if (!id)
+            {
+                sections->names[sections->name_count++] = name;
+                result = sections->name_count;
+                sections->slots[slot] = result;
+            }
+            else if (string_equal(sections->names[id - 1], name))
+            {
+                result = id;
+            }
+        }
     }
-    if (name.length && !result)
-    {
-        names[*name_count] = name;
-        *name_count += 1;
-        result = *name_count;
-    }
-
     return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+LlvmBitcodeTestSections llvm_bitcode_test_section_ids(Arena* arena, IrSymbol** symbols, bool const* declarations, u32 count, u32* ids)
+{
+    LlvmBcSections sections = {.arena = arena, .entity_count = count, .names = arena_allocate(arena, String8, (u64)count + 1)};
+    for (u32 index = 0; index < count; index += 1)
+    {
+        ids[index] = llvm_bc_section_id(&sections, symbols[index], declarations[index]);
+    }
+    return (LlvmBitcodeTestSections){.name_count = sections.name_count, .probes = sections.probes};
+}
+#endif
 
 static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
 {
     // Every section name is recorded ahead of the entities that refer to it,
     // which is the order a reader resolves them in.
-    String8* section_names = arena_allocate(context->arena, String8, context->global_count + context->function_count + 1);
-    u32* section_ids = arena_allocate(context->arena, u32, context->global_count + context->function_count + 1);
-    u32 section_name_count = 0;
+    u32 entity_count = context->global_count + context->function_count;
+    LlvmBcSections sections = {.arena = context->arena, .entity_count = entity_count,
+                              .names = arena_allocate(context->arena, String8, (u64)entity_count + 1)};
+    u32* section_ids = arena_allocate(context->arena, u32, (u64)entity_count + 1);
     for (u32 index = 0; index < context->global_count; index += 1)
     {
-        section_ids[index] = llvm_bc_section_id(section_names, &section_name_count, context->globals[index].symbol, context->globals[index].declaration);
+        section_ids[index] = llvm_bc_section_id(&sections, context->globals[index].symbol, context->globals[index].declaration);
     }
     for (u32 index = 0; index < context->function_count; index += 1)
     {
         section_ids[context->global_count + index] =
-            llvm_bc_section_id(section_names, &section_name_count, context->functions[index].symbol, context->functions[index].declaration);
+            llvm_bc_section_id(&sections, context->functions[index].symbol, context->functions[index].declaration);
     }
-    for (u32 index = 0; index < section_name_count; index += 1)
+    for (u32 index = 0; index < sections.name_count; index += 1)
     {
-        llvm_bc_string_record(&context->stream, LLVM_BC_MODULE_SECTIONNAME, section_names[index]);
+        llvm_bc_string_record(&context->stream, LLVM_BC_MODULE_SECTIONNAME, sections.names[index]);
     }
     for (u32 index = 0; index < context->global_count; index += 1)
     {

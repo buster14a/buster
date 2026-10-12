@@ -188,7 +188,7 @@ mode = "off" if "-fno-canonical-inline" in args else "on"
 if "-fcanonical-inline-module-growth=1048576" in args:
     mode = "lifted"
 defect = pathlib.Path("defect").read_text() if pathlib.Path("defect").exists() else ""
-counts = {"off": (3, 3), "on": (3, 1), "lifted": (0, 0)}[mode]
+counts = {"off": (3, 3), "on": (0, 0), "lifted": (0, 0)}[mode]
 if defect == "no-removal":
     counts = (3, 3)
 assembly = ""
