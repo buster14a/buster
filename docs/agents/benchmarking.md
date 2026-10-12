@@ -936,9 +936,11 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    - any corpus evidence the ordinary corpus validator refuses.
 
    The receipt's observed host must be the Ryzen 7 9700X, as for every
-   comparison. The host needs `llvm-profdata`, `llvm-readobj` and Clang's
-   profile runtime (`libclang_rt.profile`); a missing one fails the build
-   leg with its log.
+   comparison. The host needs `clang`, `ld.lld` (the LTO lanes link with
+   `-fuse-ld=lld`), `llvm-profdata`, `llvm-readobj` and Clang's profile
+   runtime (`libclang_rt.profile`). A missing tool on `PATH` fails the leg
+   before the build starts and the receipt names it; a missing runtime fails
+   the build leg with its log.
 
    Cost: on a hosted 4-vCPU 2.8 GHz Xeon with three build lanes (diagnostic,
    not Zen 5), `production_profile --no-benchmark` passed all 23 phases in
