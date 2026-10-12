@@ -87,13 +87,15 @@
 ## Native C link cohorts
 
 The opt-in driver consumer is documented in [driver.md](driver.md#opt-in-native-translation-unit-lanes).
-It reuses `lane_run`, not a new pool or dispatch system. A worker-sized cohort
-has no queued second TU to claim: each participating lane owns one input
-slot, and ordered publication releases that cohort before the next one. An
-atomic take-index would add contention without changing ownership in this
-bounded slice. Extending to more pending inputs must evaluate dynamic claims,
-full-TU/fragment lifetimes, grain size and memory together; no load-balancing
-speedup is established by this implementation.
+It reuses `lane_run`, not a new pool or dispatch system. After the first
+cohort a window may hold up to four slots per worker. Its width is bounded by
+the previous cohort's largest live TU arena, so small TUs share one dispatch
+and barrier while large TUs keep one slot per worker. Lanes claim slots with
+the atomic take-index described above. The coordinator still creates, publishes
+and releases every slot in input order before the next window. Retention, grain
+and the budget are documented in [driver.md](driver.md#opt-in-native-translation-unit-lanes).
+No load-balancing speedup is established until a 9700X `scaling-v1` run
+measures it.
 
 Do not parallelize functions by copying the TU design blindly: signature plans,
 IR source cursors, module line suppression and inline-assembly symbol changes
@@ -118,7 +120,8 @@ arena parks on the destroying thread and only that thread's `arena_create`
 can take it back. A pooled arena that one lane fills and another thread
 releases must therefore be created by the releasing thread. The TU cohort's
 coordinator creates each slot's arena before `lane_run` and destroys it after
-ordered publication, so at most one TU arena per slot circulates. Creating it
+ordered publication, so at most one TU arena per slot circulates. The window
+stays within `ARENA_POOL_LIMIT` so every slot arena can return to that pool. Creating it
 on the lane reserved a fresh arena on every worker lane in every cohort and
 parked each one on the coordinator, up to `ARENA_POOL_LIMIT`; no worker ever
 reused one.

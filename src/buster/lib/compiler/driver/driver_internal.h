@@ -10,6 +10,15 @@ struct CompilerDriverDependencyQuoteResult
     String8 text;
     bool representable;
 };
+// A native C link window may hold more slots than lanes, so one dispatch and
+// barrier cover several TUs and a lane finishing early takes the next slot
+// instead of idling. Every slot's full TU arena lives until ordered
+// publication, so the window widens only while the previous cohort's largest
+// live TU arena, times the window, stays within WORKER_BYTES per worker; a
+// cohort of large TUs keeps exactly one slot per worker. The byte budget is a
+// chosen bound, not a measured optimum.
+#define COMPILER_DRIVER_UNIT_WINDOW_FACTOR 4
+#define COMPILER_DRIVER_UNIT_WINDOW_WORKER_BYTES ((u64)32 << 20)
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL void compiler_driver_test_merge_fast_declines(Arena* arena, IrFastStatistics* total, IrFastStatistics const* unit,
                                                             String8 source, u64* capacity);
@@ -19,6 +28,10 @@ BUSTER_F_DECL String8 compiler_driver_dependency_path(Arena* arena, String8 obje
 // Lowers the per-input function-record cap so a test can reach it; zero
 // restores COMPILER_DRIVER_INPUT_FUNCTION_LIMIT. Set only between invocations.
 BUSTER_F_DECL void compiler_driver_test_set_function_limit(u32 limit);
+// Replaces COMPILER_DRIVER_UNIT_WINDOW_WORKER_BYTES so a test can keep small
+// TUs from widening a native C link window; zero restores it. Set only
+// between invocations.
+BUSTER_F_DECL void compiler_driver_test_set_unit_window_worker_bytes(u64 bytes);
 // Fail one coordinator-owned TU arena creation, counting only TU creations.
 BUSTER_F_DECL void compiler_driver_test_fail_unit_arena_reservation(u32 ordinal);
 BUSTER_F_DECL bool compiler_driver_test_unit_arena_reservation_pending(void);

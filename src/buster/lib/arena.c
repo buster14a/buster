@@ -459,7 +459,6 @@ BUSTER_GLOBAL_LOCAL bool arena_destroy_extended(Arena* arena, u64 count, u64 res
 // reservation-size match, so differently shaped arenas never satisfy each
 // other's requests. Multi-arena reservations, execute or locked pages, and
 // entries past the cap unmap exactly as before.
-#define ARENA_POOL_LIMIT 16
 #define ARENA_POOL_LINK_END (arena_minimum_position + sizeof(Arena*))
 BUSTER_THREAD_LOCAL_DECL Arena* arena_pool_head;
 BUSTER_THREAD_LOCAL_DECL u64 arena_pool_count;

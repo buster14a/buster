@@ -124,6 +124,8 @@ struct TemporalArena
 BUSTER_F_DECL void arena_huge_pages_initialize(String8 value);
 BUSTER_F_DECL Arena* arena_create(ArenaCreation initialization);
 BUSTER_F_DECL bool arena_destroy(Arena* arena, u64 count);
+// Arenas each OS thread may park for reuse; destruction past it unmaps.
+#define ARENA_POOL_LIMIT 16
 // Unmaps every otherwise-reusable arena parked in the calling OS thread's
 // local pool. OS thread teardown must call this after releasing its context.
 BUSTER_F_DECL u64 arena_pool_release_thread(void);

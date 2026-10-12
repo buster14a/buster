@@ -182,14 +182,27 @@ cpuset or a job object narrows it; cgroup CPU quotas are not considered), input
 count and one inside an embedding caller's multi-lane gang. The default
 `lane_run` width uses the same count.
 
-Each cohort contains at most one full TU per worker. `lane_range` gives
-stable input slots, the existing persistent gang is reused, and each worker
-uses a private TU arena and diagnostic collector. No worker writes an output
-file. The caller deep-copies compact objects and diagnostics in input order,
+Each cohort is a window of consecutive input slots. The first window holds
+one slot per worker. Each later window starts from the largest live TU arena
+(`Arena.position`) of the previous cohort. It widens to as many slots as keep
+that footprint times the window within `COMPILER_DRIVER_UNIT_WINDOW_WORKER_BYTES`
+(32 MiB) per worker. It never exceeds `COMPILER_DRIVER_UNIT_WINDOW_FACTOR` (4)
+slots per worker or `ARENA_POOL_LIMIT` (16), and never goes below one slot per
+worker. One worker always keeps one slot. Constants and the
+`compiler_driver_test_set_unit_window_worker_bytes` test seam are in
+`driver_internal.h`.
+
+Lanes claim slots with an atomic take-index (`atomic_u64_add` on the batch),
+so a lane that finishes early takes the next slot. Results are indexed by
+slot, not by lane or completion order. The existing persistent gang is reused
+with at most one lane per slot, and each slot uses a private TU arena and
+diagnostic collector. No worker writes an output file. The caller deep-copies compact objects and diagnostics in input order,
 retains constructor priorities, and uses the existing ordered linker. The
 first failing input wins; later completed results and warnings are discarded
 and all cohort arenas are released (with `-fkeep-going`, later inputs still
 compile, see [per-input records](#per-input-records-and-continue-on-failure)).
+Later slots in the failing window may already have compiled; that discarded
+work is bounded by the window.
 The one-worker and `BUSTER_SINGLE_THREADED` builds run the same unit kernel.
 
 `compiler_parallel_prewarm()` prepares both native target families, including
@@ -198,15 +211,19 @@ Both are needed because a later invocation may switch architectures while
 workers are parked. Embedding callers must call it before starting their own
 gang. The lighter `compiler_prewarm()` remains the serial frontend/common-table
 entry. The full cold prewarm is an opt-in cost, not a new serial startup floor.
-`CompilerDriverResult.compilation_workers` reports the largest active cohort
-(or one); it is not a physical-core or memory measurement.
+`CompilerDriverResult.compilation_workers` reports the largest active lane
+count (or one); it is not a physical-core or memory measurement.
+`compilation_cohorts` counts windows dispatched to `lane_run` (one per C input
+at one worker). It is telemetry only and is not part of the metrics record.
 
 This is a bounded feature, **not an accepted throughput improvement**. The
 default stays one pending paired representative measurements. A large input
-can still dominate a cohort; no adaptive grain, dynamic claim queue, cgroup
-admission or physical-memory estimate is introduced. Full-TU retention is
-bounded by the worker request, but compact objects still accumulate for the
-link as before. Function compilation remains serial within each TU, preserving
+can still dominate a cohort. There is no cgroup admission or physical-memory
+estimate, and the footprint budget is a chosen bound, not a measured optimum.
+Live full-TU retention is bounded by the window. It is at most
+`COMPILER_DRIVER_UNIT_WINDOW_FACTOR` times the one-slot-per-worker bound, and
+reaches that only when a window of large TUs follows a cohort of small ones.
+Compact objects still accumulate for the link as before. Function compilation remains serial within each TU, preserving
 signature/source-cursor and inline-assembly ordering. Existing SIMD kernels
 inside each lane are unchanged.
 

@@ -28,6 +28,7 @@
 // initial-exec object whose pairs are non-adjacent the same way (#2582).
 // compiler_driver_test_cached_plan_lanes owns prepared-key reuse across gangs;
 // compiler_driver_test_unit_batches owns failed-cohort recovery and exact output.
+// compiler_driver_test_unit_take_index_window owns widened take-index windows.
 // compiler_driver_test_native_frame_vectors compiles its matrix on a lane gang
 // (compiler_driver_test_frame_vector_lane) and checks the cells serially.
 // compiler_driver_test_elf_weak_unwind checks local FDE anchors and host overrides.
@@ -7502,11 +7503,160 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batches(UnitTestArg
     return result;
 }
 
+// Native C link windows after the first widen to several slots per worker
+// while the previous cohort's TUs were small, and lanes claim slots by atomic
+// take-index. A widened window must publish the same bytes and diagnostics as
+// serial compilation, keep first-error order for a failure inside it, and a
+// window whose footprint exceeds the budget keeps one slot per worker.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_take_index_window(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 main_path = buster_test_temporary_path(arena, S8("buster-unit-window-main"), S8(".c"));
+    String8 tiny_path = buster_test_temporary_path(arena, S8("buster-unit-window-tiny"), S8(".c"));
+    String8 broken_path = buster_test_temporary_path(arena, S8("buster-unit-window-broken"), S8(".c"));
+    String8 later_path = buster_test_temporary_path(arena, S8("buster-unit-window-later"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-unit-window"), S8(".out"));
+    String8 main_source = S8("int main(void) { return 0; }\n");
+    String8 tiny_source = S8("#warning unit-window-warning\ntypedef int unit_window_int;\n");
+    String8 broken_source = S8("#warning broken-warning\nint broken(void) { return missing_value; }\n");
+    String8 later_source = S8("#warning later-warning\n#error later-error\n");
+    BUSTER_TEST(arguments, file_write(main_path, BUSTER_SLICE_TO_BYTE_SLICE(main_source)));
+    BUSTER_TEST(arguments, file_write(tiny_path, BUSTER_SLICE_TO_BYTE_SLICE(tiny_source)));
+    BUSTER_TEST(arguments, file_write(broken_path, BUSTER_SLICE_TO_BYTE_SLICE(broken_source)));
+    BUSTER_TEST(arguments, file_write(later_path, BUSTER_SLICE_TO_BYTE_SLICE(later_source)));
+    u32 workers = (u32)buster_test_worker_count(BUSTER_MIN((u64)2, (u64)BUSTER_MAX(os_get_logical_thread_count(), (u32)1)));
+    workers = BUSTER_MAX(workers, (u32)1);
+    // More inputs than one window per worker holds, with an odd tail.
+    u32 input_count = workers * COMPILER_DRIVER_UNIT_WINDOW_FACTOR + 1;
+    u32 narrow_cohorts = (input_count + workers - 1) / workers;
+    String8 targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux")};
+#define BUSTER_UNIT_WINDOW_ALLOCATOR(name, mode) S8("-fregister-allocator=" name),
+    String8 allocators[] = {BUSTER_CODEGEN_ALLOCATORS(BUSTER_UNIT_WINDOW_ALLOCATOR)};
+#undef BUSTER_UNIT_WINDOW_ALLOCATOR
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(allocators); mode += 1)
+        {
+            TemporalArena attempt = arena_begin_temporal(arena);
+            u32 command_count = 6 + input_count;
+            String8* command = arena_allocate(arena, String8, command_count);
+            command[0] = S8("-target");
+            command[1] = targets[target];
+            command[2] = allocators[mode];
+            command[3] = S8("-nostdinc");
+            command[4] = S8("-o");
+            command[5] = output;
+            for (u32 index = 0; index < input_count; index += 1)
+            {
+                command[6 + index] = index ? tiny_path : main_path;
+            }
+            CompilerDriverInvocation invocation =
+                compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command, .length = command_count});
+            BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+            invocation.compile_jobs = 1;
+            CompilerDriverResult serial = compiler_driver_execute_invocation(arena, invocation);
+            BUSTER_TEST_RAW(arguments, serial.error == COMPILER_DRIVER_ERROR_NONE, serial.diagnostic);
+            BUSTER_TEST(arguments, serial.compilation_workers == 1 && serial.compilation_cohorts == input_count);
+            BUSTER_TEST(arguments, serial.tokenizer_warning_count == input_count - 1);
+            ByteSlice original = file_read(arena, output, (FileReadOptions){0});
+            BUSTER_TEST(arguments, original.length != 0);
+            // A one-byte budget pins every window to one slot per worker; the
+            // default budget widens every window after the first.
+            u64 budgets[] = {1, 0};
+            for (u32 budget = 0; budget < BUSTER_ARRAY_LENGTH(budgets); budget += 1)
+            {
+                compiler_driver_test_set_unit_window_worker_bytes(budgets[budget]);
+                invocation.compile_jobs = workers;
+                CompilerDriverResult parallel = compiler_driver_execute_invocation(arena, invocation);
+                BUSTER_TEST_RAW(arguments, parallel.error == COMPILER_DRIVER_ERROR_NONE, parallel.diagnostic);
+                BUSTER_TEST(arguments, parallel.compilation_workers == workers);
+                if (budgets[budget] || workers == 1)
+                {
+                    BUSTER_TEST(arguments, parallel.compilation_cohorts == narrow_cohorts);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, parallel.compilation_cohorts < narrow_cohorts);
+                }
+                UnitTestResult equal = compiler_driver_test_unit_results(arguments, arena, serial, parallel);
+                result.test_count += equal.test_count;
+                result.succeeded_test_count += equal.succeeded_test_count;
+                ByteSlice candidate = file_read(arena, output, (FileReadOptions){0});
+                BUSTER_TEST(arguments, candidate.length == original.length && candidate.length &&
+                                      memory_compare(candidate.pointer, original.pointer, candidate.length));
+            }
+            compiler_driver_test_set_unit_window_worker_bytes(0);
+            scratch_end(attempt);
+        }
+    }
+
+    // The first window holds inputs [0, workers); the failure and the later
+    // error sit in the widened second window, behind valid inputs in it.
+    u32 failure_count = workers + 4;
+    String8* failure_command = arena_allocate(arena, String8, 5 + failure_count);
+    failure_command[0] = S8("-target");
+    failure_command[1] = targets[0];
+    failure_command[2] = S8("-nostdinc");
+    failure_command[3] = S8("-o");
+    failure_command[4] = output;
+    for (u32 index = 0; index < failure_count; index += 1)
+    {
+        String8 path = index ? tiny_path : main_path;
+        path = index == workers + 1 ? broken_path : path;
+        path = index == workers + 2 ? later_path : path;
+        failure_command[5 + index] = path;
+    }
+    CompilerDriverInvocation failure =
+        compiler_driver_parse_arguments(arena, (SliceString8){.pointer = failure_command, .length = 5 + failure_count});
+    BUSTER_TEST(arguments, failure.error == COMPILER_DRIVER_ERROR_NONE);
+    String8 recovery_command[] = {S8("-target"), targets[0], S8("-nostdinc"), S8("-o"), output, main_path, tiny_path, tiny_path,
+                                 tiny_path, tiny_path};
+    CompilerDriverInvocation recovery = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(recovery_command));
+    recovery.compile_jobs = 1;
+    CompilerDriverResult reference = compiler_driver_execute_invocation(arena, recovery);
+    BUSTER_TEST_RAW(arguments, reference.error == COMPILER_DRIVER_ERROR_NONE, reference.diagnostic);
+    ByteSlice reference_bytes = file_read(arena, output, (FileReadOptions){0});
+    BUSTER_TEST(arguments, reference_bytes.length != 0);
+    String8 sentinel = S8("no output may be published after a failed unit");
+    for (u32 suppressed = 0; suppressed < 2; suppressed += 1)
+    {
+        failure.suppress_diagnostic_records = suppressed != 0;
+        failure.compile_jobs = 1;
+        BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+        CompilerDriverResult serial = compiler_driver_execute_invocation(arena, failure);
+        BUSTER_TEST(arguments, serial.error == COMPILER_DRIVER_ERROR_ANALYSIS);
+        BUSTER_TEST(arguments, suppressed ? serial.diagnostic_count == 0 : serial.diagnostic_count > 0);
+        failure.compile_jobs = workers;
+        CompilerDriverResult parallel = compiler_driver_execute_invocation(arena, failure);
+        BUSTER_TEST(arguments, parallel.compilation_workers == workers);
+        BUSTER_TEST(arguments, workers == 1 || parallel.compilation_cohorts == 2);
+        UnitTestResult equal = compiler_driver_test_unit_results(arguments, arena, serial, parallel);
+        result.test_count += equal.test_count;
+        result.succeeded_test_count += equal.succeeded_test_count;
+        ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+        BUSTER_TEST(arguments, bytes.length == sentinel.length && memory_compare(bytes.pointer, sentinel.pointer, bytes.length));
+        recovery.compile_jobs = workers;
+        CompilerDriverResult recovered = compiler_driver_execute_invocation(arena, recovery);
+        BUSTER_TEST_RAW(arguments, recovered.error == COMPILER_DRIVER_ERROR_NONE, recovered.diagnostic);
+        equal = compiler_driver_test_unit_results(arguments, arena, reference, recovered);
+        result.test_count += equal.test_count;
+        result.succeeded_test_count += equal.succeeded_test_count;
+        bytes = file_read(arena, output, (FileReadOptions){0});
+        BUSTER_TEST(arguments, bytes.length && bytes.length == reference_bytes.length &&
+                              memory_compare(bytes.pointer, reference_bytes.pointer, bytes.length));
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // Arena pools are per thread and the coordinator destroys every TU arena after
-// ordered publication. Repeated full cohorts must therefore circulate at most
-// one TU arena per worker through the coordinator's pool. Lane-created arenas
-// instead parked one more per worker lane and cohort, up to ARENA_POOL_LIMIT,
-// and no worker ever reused one.
+// ordered publication. Repeated cohorts must therefore circulate at most one
+// TU arena per window slot through the coordinator's pool: one per worker with
+// a one-byte window budget, and the widest window otherwise. Lane-created
+// arenas instead parked one more per worker lane and cohort, up to
+// ARENA_POOL_LIMIT, and no worker ever reused one.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_arena_ownership(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7541,15 +7691,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_arena_ownership(Uni
     invocation.compile_jobs = workers;
     // Parked arenas are only cached mappings; start from an empty pool so the
     // bound below does not depend on earlier tests.
-    arena_pool_release_thread();
-    for (u32 repetition = 0; repetition < 3; repetition += 1)
+    // These TUs are far below the default budget, so after the first window
+    // of one slot per worker the rest share one widened window.
+    u32 capacity = BUSTER_MIN(workers * COMPILER_DRIVER_UNIT_WINDOW_FACTOR, (u32)ARENA_POOL_LIMIT);
+    u32 widened = workers > 1 ? BUSTER_MAX(workers, BUSTER_MIN(capacity, input_count - workers)) : 1;
+    u64 budgets[] = {1, 0};
+    for (u32 budget = 0; budget < BUSTER_ARRAY_LENGTH(budgets); budget += 1)
     {
-        CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
-        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
-        BUSTER_TEST(arguments, compiled.compilation_workers == workers);
-        u64 parked = arena_test_pool_count(COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE);
-        BUSTER_TEST(arguments, parked == workers);
+        compiler_driver_test_set_unit_window_worker_bytes(budgets[budget]);
+        arena_pool_release_thread();
+        u32 slots = budgets[budget] ? workers : widened;
+        for (u32 repetition = 0; repetition < 3; repetition += 1)
+        {
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            BUSTER_TEST(arguments, compiled.compilation_workers == workers);
+            u64 parked = arena_test_pool_count(COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE);
+            BUSTER_TEST(arguments, parked == slots);
+        }
     }
+    compiler_driver_test_set_unit_window_worker_bytes(0);
     scratch_end(temporary);
     return result;
 }
@@ -35472,6 +35633,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #endif
 
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_batches);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_take_index_window);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_input_metrics);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_input_metrics_lanes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_affinity_worker_clamp);

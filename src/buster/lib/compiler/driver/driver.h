@@ -638,6 +638,9 @@ struct CompilerDriverResult
     // Maximum lanes actually participating in a native C input batch, or
     // one on serial/unsupported paths. This is not a physical-core count.
     u32 compilation_workers;
+    // Native C input windows dispatched to lane_run; zero when no input took
+    // that path. Telemetry only, like compilation_workers.
+    u32 compilation_cohorts;
     bool has_object;
     bool has_wasm;
     bool has_wasm64;

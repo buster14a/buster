@@ -44,9 +44,11 @@
 // destruction; no per-function recording is allocated in ordinary compilation.
 // compiler_driver_finish_investigation publishes an optional single-function
 // capture only after binding retained machine bytes to the completed object.
-// compiler_driver_unit_lane fills one private TU arena/collector per stable
-// input slot; the coordinator creates and destroys those arenas, so the
-// per-thread arena pool circulates them. compiler_driver_unit_arena_create
+// compiler_driver_unit_lane claims stable input slots by atomic take-index and
+// fills one private TU arena/collector per slot; the coordinator creates and
+// destroys those arenas, so the per-thread arena pool circulates them.
+// compiler_driver_unit_window sizes each window from the previous cohort's
+// largest live TU arena, up to compiler_driver_unit_window_capacity. compiler_driver_unit_arena_create
 // shares the serial/lane reservation path, and a failed reservation is a
 // resource failure with its required size. Opt-in native C link batches publish
 // in input order only after the gang returns; assembly and archive selection
@@ -9673,6 +9675,7 @@ BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(compiler_driver_section_classes) == OBJECT_S
 
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL u32 compiler_driver_function_limit_override;
+BUSTER_GLOBAL_LOCAL u64 compiler_driver_unit_window_worker_bytes_override;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 compiler_driver_unit_arena_failure_ordinal;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool compiler_driver_setup_order_armed;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CompilerDriverTestSetupOrder compiler_driver_setup_order;
@@ -9729,6 +9732,11 @@ CompilerDriverTestSetupOrder compiler_driver_test_setup_order_end(void)
 void compiler_driver_test_set_function_limit(u32 limit)
 {
     compiler_driver_function_limit_override = limit;
+}
+
+void compiler_driver_test_set_unit_window_worker_bytes(u64 bytes)
+{
+    compiler_driver_unit_window_worker_bytes_override = bytes;
 }
 
 void compiler_driver_test_fail_unit_arena_reservation(u32 ordinal)
@@ -9917,6 +9925,8 @@ struct CompilerDriverUnitBatch
 {
     CompilerDriverInvocation invocation;
     CompilerDriverUnit* units;
+    // Take-index: each lane claims the next slot until the window is drained.
+    AtomicU64 next;
     u32 first_input;
     u32 count;
     u32 workers;
@@ -9951,6 +9961,27 @@ BUSTER_GLOBAL_LOCAL u32 compiler_driver_unit_worker_limit(CompilerDriverInvocati
     return result;
 }
 
+// Slot capacity of a native C link window for this worker count. One worker
+// keeps one slot. Otherwise the window stays within the coordinator's arena
+// pool so every slot arena returns with its pages already faulted.
+BUSTER_GLOBAL_LOCAL u32 compiler_driver_unit_window_capacity(u32 workers)
+{
+    u32 widened = BUSTER_MIN(workers * COMPILER_DRIVER_UNIT_WINDOW_FACTOR, (u32)ARENA_POOL_LIMIT);
+    return workers > 1 ? BUSTER_MAX(workers, widened) : workers;
+}
+
+// The first window, and any following a zero footprint, holds one slot per
+// worker. Later windows size from the previous cohort's largest live TU arena.
+BUSTER_GLOBAL_LOCAL u32 compiler_driver_unit_window(u32 workers, u64 footprint)
+{
+    u64 worker_bytes = COMPILER_DRIVER_UNIT_WINDOW_WORKER_BYTES;
+#if BUSTER_INCLUDE_TESTS
+    worker_bytes = compiler_driver_unit_window_worker_bytes_override ? compiler_driver_unit_window_worker_bytes_override : worker_bytes;
+#endif
+    u64 fit = footprint ? (u64)workers * worker_bytes / footprint : workers;
+    return (u32)BUSTER_MAX((u64)workers, BUSTER_MIN(fit, (u64)compiler_driver_unit_window_capacity(workers)));
+}
+
 void compiler_parallel_prewarm(void)
 {
     compiler_prewarm();
@@ -9971,8 +10002,10 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_driver_unit_lane(void* argument)
     {
         batch->workers = (u32)lane_count();
     }
-    LaneRange range = lane_range(batch->count);
-    for (u64 index = range.start; index < range.end; index += 1)
+    // TU durations vary, so slots are claimed rather than split by
+    // lane_range. Results stay slot-indexed; which lane compiled a slot is
+    // not observable.
+    for (u64 index = atomic_u64_add(&batch->next, 1); index < batch->count; index = atomic_u64_add(&batch->next, 1))
     {
         // The coordinator created this slot's arena and will destroy it; the
         // lane only fills it.
@@ -10619,7 +10652,9 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     needed_input.objects = objects;
     String8* preprocessed = arena_allocate(arena, String8, invocation.input_count);
     u32 object_count = 0;
-    u32 unit_task_capacity = compiler_driver_unit_worker_limit(invocation);
+    u32 unit_workers = compiler_driver_unit_worker_limit(invocation);
+    u32 unit_task_capacity = compiler_driver_unit_window_capacity(unit_workers);
+    u64 unit_footprint = 0;
     u32 batch_first = 0;
     u32 batch_end = 0;
     bool units_prewarmed = false;
@@ -10747,7 +10782,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 }
                 batch_first = input_index;
                 unit_task_count = 1;
-                while (unit_task_count < unit_task_capacity && unit_task_count < invocation.input_count - input_index &&
+                u32 unit_window = compiler_driver_unit_window(unit_workers, unit_footprint);
+                while (unit_task_count < unit_window && unit_task_count < invocation.input_count - input_index &&
                        unit_task_count < link_operation_count - operation_index)
                 {
                     CompilerDriverLinkOperation next_operation = compiler_driver_link_operation(&invocation, operation_index + unit_task_count);
@@ -10772,7 +10808,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 {
                     unit_tasks[index].arena = compiler_driver_unit_arena_create();
                 }
-                if (unit_task_count > 1 && !units_prewarmed)
+                u32 unit_lanes = BUSTER_MIN(unit_task_count, unit_workers);
+                if (unit_lanes > 1 && !units_prewarmed)
                 {
                     compiler_parallel_prewarm();
                     units_prewarmed = true;
@@ -10780,8 +10817,18 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 CompilerDriverUnitBatch batch = {
                     .invocation = invocation, .units = unit_tasks, .first_input = batch_first, .count = unit_task_count,
                 };
-                lane_run(unit_task_count, &compiler_driver_unit_lane, &batch);
+                lane_run(unit_lanes, &compiler_driver_unit_lane, &batch);
                 result.compilation_workers = BUSTER_MAX(result.compilation_workers, batch.workers);
+                result.compilation_cohorts += 1;
+                // Live TU bytes are what a slot retains until publication.
+                unit_footprint = 0;
+                for (u32 index = 0; index < unit_task_count; index += 1)
+                {
+                    if (unit_tasks[index].arena)
+                    {
+                        unit_footprint = BUSTER_MAX(unit_footprint, unit_tasks[index].arena->position);
+                    }
+                }
             }
             task = &unit_tasks[input_index - batch_first];
             unit_arena = task->arena;
