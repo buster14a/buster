@@ -133,8 +133,8 @@ class CaseProcess(bootstrap.WrapperProcess):
         self.job_drain = None
         self.job_name = None
         if os.name == "nt":
-            # The launcher joins a fresh job before it starts the command, so
-            # every descendant is a kernel-tracked member from birth (#3690).
+            # The launcher assigns the suspended command to a fresh job before
+            # it runs, so every descendant is a kernel-tracked member (#3690).
             self.job_name = "Local\\buster-bootstrap-case-%d-%s" % (os.getpid(), uuid.uuid4().hex)
             command = process_tree_command() + [
                 "launch", self.job_name, str(int(bootstrap.CLEANUP_TIMEOUT_SECONDS * 1000)),
@@ -163,15 +163,20 @@ class CaseProcess(bootstrap.WrapperProcess):
             try:
                 # Waiting only for the direct child can remove fixtures while a
                 # descendant still holds its inherited Windows current-directory
-                # handle (#2985). Drain the whole job first: the launcher is a
-                # member, so draining also ends the direct child.
+                # handle (#2985). Drain the whole job first; the launcher then
+                # exits with its command, before the frozen reap looks at it.
                 if not self.cleaned and os.name == "nt" and self.process.poll() is None:
+                    deadline = started + bootstrap.CLEANUP_TIMEOUT_SECONDS
                     try:
-                        self.job_drain = drain_job(self.job_name, started + bootstrap.CLEANUP_TIMEOUT_SECONDS)
+                        self.job_drain = drain_job(self.job_name, deadline)
                         if self.job_drain.get("absent") and self.process.poll() is None:
                             raise RuntimeError("bootstrap case job is missing while its launcher runs: " +
                                                self.job_name)
                         self.descendant_waited_pids.extend(self.job_drain.get("waited", ()))
+                        self.process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                    except subprocess.TimeoutExpired:
+                        drain_error = RuntimeError("bootstrap case launcher outlived its drained job: " +
+                                                   self.job_name)
                     except Exception as error:
                         drain_error = error
                 try:

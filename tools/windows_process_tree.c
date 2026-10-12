@@ -5,20 +5,23 @@
 // builds this file; the scheduler only receives its path.
 // Entry points:
 // - `launch <job-name> <budget-ms> <command-line>` (Windows): create the named
-//   job with kill-on-close, join it, run the command line, then terminate and
-//   wait for any remaining member within the budget. Exit with the command's
-//   status, or TREE_EXIT_DRAIN_FAILED when members survive the budget.
+//   job with kill-on-close, start the command suspended, assign it to the job,
+//   resume it, wait for it, then terminate and wait for any remaining member
+//   within the budget. Exit with the command's status, or
+//   TREE_EXIT_DRAIN_FAILED when the job cannot be established or emptied.
 // - `drain <job-name> <budget-ms>` (Windows): terminate every member of the
-//   named job and wait for each one within the budget; print one record.
+//   named job and wait for each one within the budget; print one record. The
+//   launcher is not a member; it exits once its command has ended.
 // - `selftest` (Windows): membership controls with a real non-member process.
 // - `fixture <silent|partial|malformed|late <ms>|sleep <ms>>` (every host):
 //   deliberately broken drain records for the scheduler's caller controls.
 // Map: tree_drain owns verification and waiting; tree_member is the only
 // identity test; tree_launch/tree_drain_main/tree_selftest are the modes.
 //
-// Ownership is established before the command starts: the launcher joins the
-// job first, so every descendant is a member regardless of PID reuse, parent
-// links or clock adjustments. A listed PID is waited on only after
+// Ownership is established before the command runs, with the same
+// suspend/assign/resume sequence as os_process_spawn's process groups: every
+// descendant is a member regardless of PID reuse, parent links or clock
+// adjustments. A listed PID is waited on only after
 // IsProcessInJob confirms that the opened handle belongs to this job; a reused
 // PID naming another process is never waited on or terminated. Wait timeouts,
 // wait failures, open/query failures and capacity limits fail the drain.
@@ -170,11 +173,12 @@ BUSTER_GLOBAL_LOCAL void tree_record(u32* list, u32* count, u32 pid)
     }
 }
 
-// Terminate (when asked) and wait for every member except `self` until the
-// job's active-process count shows no other live member, or the deadline
-// passes. An exited member may stay listed while handles to it remain open;
-// its wait then succeeds immediately, so liveness comes from the job count.
-BUSTER_GLOBAL_LOCAL void tree_drain(HANDLE job, DWORD self, bool terminate, u64 deadline)
+// After TerminateJobObject, wait for every member until the job's
+// active-process count shows no live member, or the deadline passes. As in
+// os_windows_job_wait_empty, the count drops at exit even while handles to a
+// process remain open; such a member may stay listed, and its wait then
+// succeeds immediately.
+BUSTER_GLOBAL_LOCAL void tree_drain(HANDLE job, u64 deadline)
 {
     bool members_remain = true;
     tree_result = (TreeDrain){.complete = true};
@@ -192,56 +196,48 @@ BUSTER_GLOBAL_LOCAL void tree_drain(HANDLE job, DWORD self, bool terminate, u64 
         for (DWORD i = 0; tree_result.complete && i < tree_members.listed; i += 1)
         {
             u32 pid = (u32)tree_members.pid[i];
-            if (pid != self)
+            HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            if (!process)
             {
-                HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, FALSE, pid);
-                if (!process)
+                u32 error = (u32)GetLastError();
+                if (error != ERROR_INVALID_PARAMETER) // Otherwise the listed PID has exited.
                 {
-                    u32 error = (u32)GetLastError();
-                    if (error != ERROR_INVALID_PARAMETER) // Otherwise the listed PID has exited.
-                    {
-                        tree_record_failure(pid, error);
-                    }
+                    tree_record_failure(pid, error);
+                }
+            }
+            else
+            {
+                bool member = false;
+                if (!tree_member(process, job, &member))
+                {
+                    tree_record_failure(pid, (u32)GetLastError());
+                }
+                else if (!member)
+                {
+                    tree_record(tree_result.foreign, &tree_result.foreign_count, pid);
                 }
                 else
                 {
-                    bool member = false;
-                    if (!tree_member(process, job, &member))
+                    u64 now = GetTickCount64();
+                    DWORD wait = WaitForSingleObject(process, now < deadline ? (DWORD)(deadline - now) : 0);
+                    if (wait == WAIT_OBJECT_0)
                     {
-                        tree_record_failure(pid, (u32)GetLastError());
+                        // WAIT_OBJECT_0 alone certifies termination.
+                        tree_record(tree_result.waited, &tree_result.waited_count, pid);
                     }
-                    else if (!member)
+                    else if (wait == WAIT_TIMEOUT)
                     {
-                        tree_record(tree_result.foreign, &tree_result.foreign_count, pid);
+                        tree_record(tree_result.pending, &tree_result.pending_count, pid);
+                        tree_result.complete = false;
                     }
                     else
                     {
-                        if (terminate && !TerminateProcess(process, TREE_EXIT_TERMINATED) && GetLastError() != ERROR_ACCESS_DENIED)
-                        {
-                            // ACCESS_DENIED is returned for a member that is already exiting.
-                            tree_record_failure(pid, (u32)GetLastError());
-                        }
-                        u64 now = GetTickCount64();
-                        DWORD wait = WaitForSingleObject(process, now < deadline ? (DWORD)(deadline - now) : 0);
-                        if (wait == WAIT_OBJECT_0)
-                        {
-                            // WAIT_OBJECT_0 alone certifies termination.
-                            tree_record(tree_result.waited, &tree_result.waited_count, pid);
-                        }
-                        else if (wait == WAIT_TIMEOUT)
-                        {
-                            tree_record(tree_result.pending, &tree_result.pending_count, pid);
-                            tree_result.complete = false;
-                        }
-                        else
-                        {
-                            tree_record_failure(pid, wait == WAIT_FAILED ? (u32)GetLastError() : (u32)wait);
-                        }
+                        tree_record_failure(pid, wait == WAIT_FAILED ? (u32)GetLastError() : (u32)wait);
                     }
-                    if (!CloseHandle(process))
-                    {
-                        tree_record_failure(pid, (u32)GetLastError());
-                    }
+                }
+                if (!CloseHandle(process))
+                {
+                    tree_record_failure(pid, (u32)GetLastError());
                 }
             }
         }
@@ -250,7 +246,7 @@ BUSTER_GLOBAL_LOCAL void tree_drain(HANDLE job, DWORD self, bool terminate, u64 
         {
             tree_record_failure(0, (u32)GetLastError());
         }
-        members_remain = accounting.ActiveProcesses > (self ? 1u : 0u);
+        members_remain = accounting.ActiveProcesses != 0;
         if (members_remain && tree_result.complete)
         {
             // An exiting member stays listed briefly after it signals.
@@ -293,6 +289,7 @@ BUSTER_GLOBAL_LOCAL void tree_print_drain(void)
 
 BUSTER_GLOBAL_LOCAL HANDLE tree_owned_job(WCHAR const* name)
 {
+    SetLastError(ERROR_SUCCESS);
     HANDLE result = CreateJobObjectW(0, name);
     if (result && GetLastError() == ERROR_ALREADY_EXISTS)
     {
@@ -321,10 +318,6 @@ BUSTER_GLOBAL_LOCAL int tree_launch(WCHAR const* name, u64 budget, WCHAR const* 
     {
         fprintf(stderr, "windows_process_tree: job creation failed: %lu\n", GetLastError());
     }
-    else if (!AssignProcessToJobObject(job, GetCurrentProcess()))
-    {
-        fprintf(stderr, "windows_process_tree: job assignment failed: %lu\n", GetLastError());
-    }
     else if (wcslen(command_line) >= TREE_COMMAND_CAPACITY)
     {
         fprintf(stderr, "windows_process_tree: command line exceeds %u characters\n", TREE_COMMAND_CAPACITY);
@@ -337,18 +330,30 @@ BUSTER_GLOBAL_LOCAL int tree_launch(WCHAR const* name, u64 budget, WCHAR const* 
         startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
         PROCESS_INFORMATION child = {0};
         memcpy(command, command_line, (wcslen(command_line) + 1) * sizeof(WCHAR));
-        if (!CreateProcessW(0, command, 0, 0, TRUE, 0, 0, 0, &startup, &child))
+        if (!CreateProcessW(0, command, 0, 0, TRUE, CREATE_SUSPENDED, 0, 0, &startup, &child))
         {
             fprintf(stderr, "windows_process_tree: launch failed: %lu\n", GetLastError());
+        }
+        else if (!AssignProcessToJobObject(job, child.hProcess) || ResumeThread(child.hThread) == (DWORD)-1)
+        {
+            // The command never ran outside the job.
+            fprintf(stderr, "windows_process_tree: job assignment failed: %lu\n", GetLastError());
+            TerminateProcess(child.hProcess, TREE_EXIT_DRAIN_FAILED);
+            WaitForSingleObject(child.hProcess, INFINITE);
         }
         else
         {
             DWORD status = TREE_EXIT_DRAIN_FAILED;
-            CloseHandle(child.hThread);
             if (WaitForSingleObject(child.hProcess, INFINITE) == WAIT_OBJECT_0 && GetExitCodeProcess(child.hProcess, &status))
             {
                 // Remaining members are leftovers of a finished command.
-                tree_drain(job, GetCurrentProcessId(), true, GetTickCount64() + budget);
+                bool terminated = TerminateJobObject(job, TREE_EXIT_TERMINATED) != 0;
+                u32 error = (u32)GetLastError();
+                tree_drain(job, GetTickCount64() + budget);
+                if (!terminated)
+                {
+                    tree_record_failure(0, error);
+                }
                 if (tree_result.complete)
                 {
                     result = (int)status;
@@ -360,6 +365,10 @@ BUSTER_GLOBAL_LOCAL int tree_launch(WCHAR const* name, u64 budget, WCHAR const* 
                     tree_print_drain();
                 }
             }
+        }
+        if (child.hProcess)
+        {
+            CloseHandle(child.hThread);
             CloseHandle(child.hProcess);
         }
     }
@@ -385,10 +394,10 @@ BUSTER_GLOBAL_LOCAL int tree_drain_main(WCHAR const* name, u64 budget)
     }
     else
     {
-        // The launcher is a member, so this also ends the direct child.
+        // The launcher is outside the job; it exits once its command ends.
         bool terminated = TerminateJobObject(job, TREE_EXIT_TERMINATED) != 0;
         u32 error = (u32)GetLastError();
-        tree_drain(job, 0, false, deadline);
+        tree_drain(job, deadline);
         if (!terminated)
         {
             tree_record_failure(0, error);
@@ -433,7 +442,7 @@ BUSTER_GLOBAL_LOCAL int tree_selftest(void)
     if (valid)
     {
         TerminateJobObject(job, TREE_EXIT_TERMINATED);
-        tree_drain(job, 0, false, GetTickCount64() + 10000);
+        tree_drain(job, GetTickCount64() + 10000);
     }
     bool outsider_alive = valid && WaitForSingleObject(child[1].hProcess, 0) == WAIT_TIMEOUT;
     bool member_waited = valid && tree_result.waited_count == 1 && tree_result.waited[0] == child[0].dwProcessId;

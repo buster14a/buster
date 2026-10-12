@@ -135,16 +135,18 @@ a lock, and each child's cleanup is serialized against normal collection.
 
 On Windows, ownership is fixed before a case command starts (#3690). The
 scheduler runs every case through `tools/windows_process_tree.c launch`. The
-launcher creates a fresh named Job Object with kill-on-close, joins it itself,
-then starts the command, so every descendant is a kernel-tracked member from
-birth. No membership decision uses PID parent links or wall-clock creation
+launcher creates a fresh named Job Object with kill-on-close, starts the
+command suspended, assigns it to the job and only then resumes it, the same
+sequence `os_process_spawn` uses for process groups. Every descendant is
+therefore a kernel-tracked member from birth. No membership decision uses PID parent links or wall-clock creation
 times, which PID reuse and clock adjustment make unreliable.
 
 Before fixture removal, cleanup runs `drain` with the remaining part of the
 original ten-second cleanup deadline:
 
-- `drain` terminates the job, including the launcher, and waits on each
-  member. A listed PID is waited on only after `IsProcessInJob` confirms that
+- `drain` terminates the job and waits on each member. The launcher is not a
+  member; cleanup waits, within the same deadline, for it to exit with its
+  command before the frozen direct-child reap runs. A listed PID is waited on only after `IsProcessInJob` confirms that
   the opened handle belongs to this job, so a reused PID naming another process
   is never waited on or terminated.
 - It finishes only when the job's active-process count shows no live member;
