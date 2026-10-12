@@ -3919,6 +3919,13 @@ hosted and diagnostic only. It is **negative**, and no code ships:
     One layout rose by 1.80 M once the index's append stopped being inlined.
 - **What was not run.** Verify mode and the model differential were not run,
   since no candidate passed the gate.
+- **Evidence.** The raw material is in
+  [`evidence/2026-10-12T210633Z`](../../performance-audits/evidence/2026-10-12T210633Z/PROVENANCE.md),
+  pinned by `SHA256SUMS`. It holds every Callgrind output, the census and
+  variant 6 patches, which rebuild the measured binaries byte for byte, and
+  variant 3's `c_parse.c`. The sources of variants 1, 2, 4 and 5 were not
+  kept. Their figures rest on the retained Callgrind outputs and binary
+  hashes alone, and their code cannot be replayed.
 
 Tag definitions, attributes, `typeof` and the other rows stay below the gate,
 so all 2,259 runs stay with the machine.
