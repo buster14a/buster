@@ -211,6 +211,7 @@ run_case() {
         fi
     fi
     if [[ $outcome == backpressure ]]; then
+        grep -Eq '^event=collector-start elapsed_seconds=[0-9]+ pid=[1-9][0-9]*$' "$state/collector.log"
         if [[ $expected == 0 ]]; then
             [[ $(grep -c '^BUSTER_IOS_RESULT: SUCCESS' "$state/buster-ios-console.Debug.log") -eq 1 ]]
             [[ $(wc -c <"$state/buster-ios-console.Debug.log") -gt 2097152 ]]
