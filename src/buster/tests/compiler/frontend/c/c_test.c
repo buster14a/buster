@@ -55318,7 +55318,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_controlled_body_extents_linear(UnitTes
                             : shape == C_TEST_EXTENT_BRACED_IF_NEST ? S8("if (c) { x += i; ")
                             : shape == C_TEST_EXTENT_WHILE_NEST    ? S8("while (c) ")
                             : shape == C_TEST_EXTENT_FOR_NEST      ? S8("for (; c;) ")
-                            : shape == C_TEST_EXTENT_SWITCH_NEST   ? S8("switch (c) ")
+                            : shape == C_TEST_EXTENT_SWITCH_NEST   ? S8("switch (c) case 0: ")
                             : shape == C_TEST_EXTENT_DO_NEST       ? S8("do ")
                                                                    : S8("while (c) if (c) ");
             c_test_append_source(bytes, capacity, &length, piece);
@@ -55363,7 +55363,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_controlled_body_extents_linear(UnitTes
             IrFunction* function = c_test_find_ir_function(module, S8("tall"));
             BUSTER_TEST(arguments, function != 0);
             // Every link is its own branch, so the shape survives as blocks.
-            BUSTER_TEST(arguments, function && function->block_count > length_count);
+            BUSTER_TEST_RAW(arguments, function && function->block_count > length_count,
+                            string_format(arguments->arena, S8("controlled-body extent shape={u32} length={u32} blocks={u32}"), shape, length_count,
+                                          function ? function->block_count : 0));
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
         }
         scratch_end(temporary);
