@@ -21,6 +21,12 @@ jobs:
           ref: '526cb7d5d932854ef07ca4f2ce5b48968390211d'
           path: candidate
           persist-credentials: false
+      - name: Install build prerequisite
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
       - name: Build and reproduce old loaded-image deletion
         working-directory: baseline
         shell: bash
