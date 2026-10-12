@@ -401,8 +401,8 @@ preprocessing (`-E`, including `-dM`) and frontend-only validation
 LLVM output and links—is deliberately refused with an explicit #3654
 diagnostic. I386 is supported only for Linux and freestanding targets; an
 execution-mode option on an x86 target with another OS is refused using the
-pre-mode target triple in its diagnostic. `-m64` remains unsupported and is
-tracked separately by #3458.
+pre-mode target triple in its diagnostic. `-m64` switches back to the existing
+x86-64 target as described above.
 
 Without `-march`/`-mcpu` the CPU model is `baseline`, matching Clang's and
 GCC's portable `x86-64` default. A command with no `-target` compiles for the
