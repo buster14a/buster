@@ -43658,6 +43658,36 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArgument
         }
         c_test_scratch_end(temporary);
     }
+    // A choose_expr condition holding a sizeof of the previous level reaches
+    // the operand walk again through its constant query. The query machine
+    // schedules it as a child frame, so a tall nest costs no host stack.
+    u32 height = 4096;
+    String8* nest_parts = arena_allocate(arguments->arena, String8, 2 * height + 1);
+    for (u32 level = 0; level < height; level += 1)
+    {
+        nest_parts[level] = S8("__builtin_choose_expr(sizeof(");
+        nest_parts[2 * height - level] = S8("), i, l)");
+    }
+    nest_parts[height] = S8("i");
+    String8 nest = string_join_arena(arguments->arena, (SliceString8){nest_parts, 2 * height + 1}, false);
+    String8 nest_source = string_format(arguments->arena,
+        S8("unsigned long nested(int i, long l) {{\n"
+           "    return sizeof({S8});\n"
+           "}}\n"),
+        nest);
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, nest_source, (CPreprocessOptions){0});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("builtin-operand-nest.c"), tokens, parsed, target_native,
+            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+        }
+        c_test_scratch_end(temporary);
+    }
     return result;
 }
 

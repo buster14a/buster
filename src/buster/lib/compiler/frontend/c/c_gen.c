@@ -34332,11 +34332,43 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_classify(CIntegerIrBu
             u32 selected_end = UINT32_MAX;
             if (close < end && selection == C_SYMBOL_BUILTIN_CHOOSE_EXPR)
             {
+                // The condition is a query-machine constant request, never a
+                // fresh constant-evaluation root: a `sizeof` in it reaches
+                // this walk again, which a nested root would turn into host
+                // recursion per nesting level. The truth rule matches
+                // c_ir_constant_condition_evaluate: a whole
+                // __builtin_constant_p(x) asks whether x is constant, anything
+                // else must be a nonzero or zero integer constant.
                 u32 first_separator = c_ir_call_argument_separator(builder, start + 2, close);
                 u32 second_separator = first_separator < close ? c_ir_call_argument_separator(builder, first_separator + 1, close) : close;
-                u64 condition = 0;
-                if (second_separator < close && c_ir_call_argument_separator(builder, second_separator + 1, close) == close &&
-                    c_ir_constant_condition_evaluate(builder, start + 2, first_separator, &condition))
+                u32 condition_start = start + 2;
+                u32 condition_end = first_separator;
+                while (condition_start + 1 < condition_end &&
+                       c_token_is_punctuator(&builder->preprocess.tokens[condition_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                       c_ir_matching_delimiter_cached(builder, condition_start, condition_end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                      C_PUNCTUATOR_RIGHT_PARENTHESIS) == condition_end - 1)
+                {
+                    condition_start += 1;
+                    condition_end -= 1;
+                }
+                bool probe = condition_start + 2 < condition_end &&
+                             c_ir_token_builtin_kind(builder, builder->preprocess.tokens[condition_start]) == C_SYMBOL_BUILTIN_CONSTANT_P &&
+                             c_token_is_punctuator(&builder->preprocess.tokens[condition_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                             c_ir_matching_delimiter_cached(builder, condition_start + 1, condition_end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                            C_PUNCTUATOR_RIGHT_PARENTHESIS) == condition_end - 1;
+                u32 query_start = probe ? condition_start + 2 : condition_start;
+                u32 query_end = probe ? condition_end - 1 : condition_end;
+                CIrConstantValue value = {0};
+                bool known = second_separator < close && c_ir_call_argument_separator(builder, second_separator + 1, close) == close &&
+                             query_start < query_end && c_ir_query_constant(builder, query_start, query_end, &value) &&
+                             value.kind != C_IR_CONSTANT_INVALID && value.kind != C_IR_CONSTANT_UNKNOWN;
+                if (builder->queries->has_request)
+                {
+                    return C_IR_SIZEOF_STEP_FAIL;
+                }
+                bool decided = probe || (known && value.kind == C_IR_CONSTANT_INTEGER);
+                bool condition = probe ? known : decided && !ir_integer_is_zero((IrInteger){.low = value.integer, .high = value.integer_high});
+                if (decided && second_separator < close)
                 {
                     selected_start = condition ? first_separator + 1 : second_separator + 1;
                     selected_end = condition ? second_separator : close;
