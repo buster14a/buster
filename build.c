@@ -2824,8 +2824,12 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_is_canonical(Generate generate, C
     bool valid_arguments = !generate.cmake_arguments.length;
     if (generate.ci)
     {
-        valid_arguments = generate.cmake_arguments.length == 1 &&
-                          string_equal(generate.cmake_arguments.pointer[0], S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"));
+        // The partition option only selects test_all's unit launcher; it
+        // changes no compile or link input of the produced ide (#3912).
+        u64 count = generate.cmake_arguments.length;
+        valid_arguments = (count == 1 || count == 2) &&
+                          string_equal(generate.cmake_arguments.pointer[0], S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY")) &&
+                          (count == 1 || string_equal(generate.cmake_arguments.pointer[1], S8("-DBUSTER_TEST_PROCESS_PARTITIONS=ON")));
     }
 
     bool result = generate.compiler == BUILD_COMPILER_CLANG && !generate.cc_set && !generate.linker_set && !generate.config_set && !generate.sanitize &&
@@ -24815,17 +24819,23 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
         string_print(S8("error: artifact fan-out canonical-combination test failed\n"));
         return PROCESS_RESULT_FAILED;
     }
-    // Process partitioning is a test launcher choice, never an admitted
-    // artifact-fanout producer argument. ARM opts in only without fanout.
+    // Process partitioning is a test launcher choice, so it is the one
+    // admitted producer argument; any other extra argument still disqualifies.
     String8 partition_arguments[] = {
         S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
         S8("-DBUSTER_TEST_PROCESS_PARTITIONS=ON"),
     };
     Generate partitioned = canonical;
     partitioned.cmake_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(partition_arguments);
-    if (build_artifact_fanout_is_canonical(partitioned, release))
+    String8 unadmitted_arguments[] = {
+        S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
+        S8("-DBUSTER_UNITY_BUILD=OFF"),
+    };
+    Generate unadmitted = canonical;
+    unadmitted.cmake_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(unadmitted_arguments);
+    if (!build_artifact_fanout_is_canonical(partitioned, release) || build_artifact_fanout_is_canonical(unadmitted, release))
     {
-        string_print(S8("error: artifact fan-out accepted a partitioned producer\n"));
+        string_print(S8("error: artifact fan-out must admit only the partition launcher argument\n"));
         return PROCESS_RESULT_FAILED;
     }
     if (!build_artifact_fanout_worker_quota_valid(S8("1")) || build_artifact_fanout_worker_quota_valid((String8){0}) ||
@@ -27835,11 +27845,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     BUSTER_GLOBAL_LOCAL String8 ci_cmake_arguments[] = {
         S8_INITIALIZER("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
     };
-    // Sanitized Clang and Windows AArch64 Release trees use the existing
-    // isolated-process runner at four or more test workers. Smaller quotas
-    // retain the ordinary invocation (tools/ci_unit_tests.c). Windows AArch64
-    // has no artifact-fanout consumer; supported canonical producers retain
-    // exactly the standard arguments (build_artifact_fanout_is_canonical).
+    // Every Clang CI tree, including the canonical Release producer, uses the
+    // existing isolated-process runner at four or more test workers (#3912).
+    // Smaller quotas and single-threaded drivers retain the ordinary
+    // invocation (tools/ci_unit_tests.c); the option changes no artifact input.
     BUSTER_GLOBAL_LOCAL String8 ci_test_cmake_arguments[] = {
         S8_INITIALIZER("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"),
         S8_INITIALIZER("-DBUSTER_TEST_PROCESS_PARTITIONS=ON"),
@@ -27889,7 +27898,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
             .cmake_profile_set = cmake_profile,
             .cmake_profile_summary = cmake_profile,
             .cross_configs = !direct_matrix,
-            .cmake_arguments = !ci ? (SliceString8){0} : compiler == BUILD_COMPILER_CLANG && (tree_plan.sanitize || (coverage_target.windows && coverage_target.aarch64)) ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_test_cmake_arguments)
+            .cmake_arguments = !ci ? (SliceString8){0} : compiler == BUILD_COMPILER_CLANG ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_test_cmake_arguments)
                 : (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments),
         };
         generate = matrix_phase_tree(arena, generate, coverage_manifest, tree_plan);
