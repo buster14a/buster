@@ -349,6 +349,36 @@ struct TreeLaunchStatus
 BUSTER_GLOBAL_LOCAL u32 tree_test_startup_delay_ms;
 BUSTER_GLOBAL_LOCAL u32 tree_test_cleanup_delay_ms;
 BUSTER_GLOBAL_LOCAL u32 tree_test_status_delay_ms;
+typedef struct TreeTestLaunchContext TreeTestLaunchContext;
+struct TreeTestLaunchContext
+{
+    TreeLaunchStatus status;
+    u64 cleanup_limit_ns;
+    u64 publication_started_ns;
+    u64 publication_finished_ns;
+    bool publication_clock_valid;
+    bool publication_ok;
+    char const* publication_stage;
+    DWORD publication_error;
+    bool publication_error_valid;
+};
+BUSTER_GLOBAL_LOCAL TreeTestLaunchContext tree_test_launch_context;
+
+// Called immediately after the operation, before another Win32 call can replace
+// its error. Retain the first failure even when closing the file also fails.
+BUSTER_GLOBAL_LOCAL bool tree_test_publication_check(bool passed, char const* stage, bool win32_error)
+{
+    if (!passed && !tree_test_launch_context.publication_stage)
+    {
+        tree_test_launch_context.publication_error = win32_error ? GetLastError() : ERROR_SUCCESS;
+        tree_test_launch_context.publication_error_valid = win32_error;
+        tree_test_launch_context.publication_stage = stage;
+    }
+    return passed;
+}
+#define TREE_TEST_PUBLICATION_CHECK(value, stage, win32_error) tree_test_publication_check((value), stage, win32_error)
+#else
+#define TREE_TEST_PUBLICATION_CHECK(value, stage, win32_error) (value)
 #endif
 
 // Match the adapter's actual Windows CPython monotonic clock: <=3.12 uses
@@ -430,18 +460,30 @@ BUSTER_GLOBAL_LOCAL bool tree_launch_status(WCHAR const* path, TreeLaunchStatus 
     static WCHAR temporary[TREE_COMMAND_CAPACITY];
     char record[1024];
     size_t length = wcslen(path);
-    bool result = length + 5 < TREE_COMMAND_CAPACITY;
+    bool result = TREE_TEST_PUBLICATION_CHECK(length + 5 < TREE_COMMAND_CAPACITY, "path-capacity", false);
     HANDLE file = INVALID_HANDLE_VALUE;
     if (result)
     {
         memcpy(temporary, path, length * sizeof(WCHAR));
         memcpy(temporary + length, L".tmp", 5 * sizeof(WCHAR));
+#if defined(WINDOWS_PROCESS_TREE_TEST)
+        DWORD attributes = GetFileAttributesW(path);
+        DWORD error = attributes == INVALID_FILE_ATTRIBUTES ? GetLastError() : ERROR_SUCCESS;
+        result = attributes == INVALID_FILE_ATTRIBUTES && error == ERROR_FILE_NOT_FOUND;
+        if (!result)
+        {
+            tree_test_launch_context.publication_stage = "destination-attributes";
+            tree_test_launch_context.publication_error = error;
+            tree_test_launch_context.publication_error_valid = attributes == INVALID_FILE_ATTRIBUTES;
+        }
+#else
         result = GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND;
+#endif
     }
     if (result)
     {
         file = CreateFileW(temporary, GENERIC_WRITE, 0, 0, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0);
-        result = file != INVALID_HANDLE_VALUE;
+        result = TREE_TEST_PUBLICATION_CHECK(file != INVALID_HANDLE_VALUE, "create-temporary", true);
     }
     if (result)
     {
@@ -454,16 +496,18 @@ BUSTER_GLOBAL_LOCAL bool tree_launch_status(WCHAR const* path, TreeLaunchStatus 
             (unsigned long long)status->runtime_deadline_ns, (unsigned long long)status->root_finished_ns,
             (unsigned long long)status->cleanup_started_ns, (unsigned long long)status->cleanup_finished_ns);
         DWORD written = 0;
-        result = bytes > 0 && (size_t)bytes < sizeof(record) &&
-                 WriteFile(file, record, (DWORD)bytes, &written, 0) && written == (DWORD)bytes && FlushFileBuffers(file);
+        result = TREE_TEST_PUBLICATION_CHECK(bytes > 0 && (size_t)bytes < sizeof(record), "format-record", false) &&
+                 TREE_TEST_PUBLICATION_CHECK(WriteFile(file, record, (DWORD)bytes, &written, 0), "write-record", true) &&
+                 TREE_TEST_PUBLICATION_CHECK(written == (DWORD)bytes, "write-length", false) &&
+                 TREE_TEST_PUBLICATION_CHECK(FlushFileBuffers(file), "flush-record", true);
     }
     if (file != INVALID_HANDLE_VALUE)
     {
-        result = CloseHandle(file) != 0 && result;
+        result = TREE_TEST_PUBLICATION_CHECK(CloseHandle(file) != 0, "close-temporary", true) && result;
     }
     if (result)
     {
-        result = MoveFileExW(temporary, path, MOVEFILE_WRITE_THROUGH) != 0;
+        result = TREE_TEST_PUBLICATION_CHECK(MoveFileExW(temporary, path, MOVEFILE_WRITE_THROUGH) != 0, "rename-record", true);
     }
     return result;
 }
@@ -479,6 +523,7 @@ BUSTER_GLOBAL_LOCAL int tree_launch(WCHAR const* name, u64 budget, WCHAR const* 
     bool valid = true;
     bool assigned = false;
 #if defined(WINDOWS_PROCESS_TREE_TEST)
+    tree_test_launch_context = (TreeTestLaunchContext){0};
     Sleep(tree_test_startup_delay_ms);
 #endif
     u64 now = tree_clock_ns(&status);
@@ -596,8 +641,14 @@ BUSTER_GLOBAL_LOCAL int tree_launch(WCHAR const* name, u64 budget, WCHAR const* 
     }
 #if defined(WINDOWS_PROCESS_TREE_TEST)
     Sleep(tree_test_status_delay_ms);
+    // Observe through a copy: a diagnostic clock failure must not change the
+    // owner's clock validity, deadline decision, return code or status record.
+    TreeLaunchStatus publication_clock = status;
+    tree_test_launch_context.publication_started_ns = tree_clock_ns(&publication_clock);
+    tree_test_launch_context.publication_clock_valid = publication_clock.clock_valid;
 #endif
-    if (!tree_launch_status(status_path, &status))
+    bool publication_ok = tree_launch_status(status_path, &status);
+    if (!publication_ok)
     {
         result = TREE_EXIT_DRAIN_FAILED;
     }
@@ -609,6 +660,12 @@ BUSTER_GLOBAL_LOCAL int tree_launch(WCHAR const* name, u64 budget, WCHAR const* 
     {
         result = TREE_EXIT_DRAIN_FAILED;
     }
+#if defined(WINDOWS_PROCESS_TREE_TEST)
+    tree_test_launch_context.status = status;
+    tree_test_launch_context.cleanup_limit_ns = cleanup_limit_ns;
+    tree_test_launch_context.publication_finished_ns = now;
+    tree_test_launch_context.publication_ok = publication_ok;
+#endif
     return result;
 }
 

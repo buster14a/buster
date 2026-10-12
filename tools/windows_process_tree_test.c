@@ -119,7 +119,32 @@ static void tree_test_deadline(char const* mode, bool tick_clock)
         tree_test_startup_delay_ms = startup ? 2000 : (cancel_startup ? 1000 : 0);
         tree_test_cleanup_delay_ms = cleanup ? 2000 : (late_cleanup ? 3500 : 0);
         tree_test_status_delay_ms = late_status ? 3500 : 0;
+        if (!paths) tree_test_launch_context = (TreeTestLaunchContext){0};
         int code = paths ? tree_launch(job, 3000, command, deadline, tick_clock, status) : TREE_EXIT_DRAIN_FAILED;
+        int expected = late_cleanup || late_status ? TREE_EXIT_DRAIN_FAILED : (normal || cancel ? 0 : TREE_EXIT_RUNTIME_TIMEOUT);
+        if (code != expected)
+        {
+            TreeTestLaunchContext const* context = &tree_test_launch_context;
+            TreeLaunchStatus const* observed = &context->status;
+            fprintf(stderr,
+                "WINDOWS_PROCESS_TREE_TEST_CONTEXT case=%s clock=%s code=%d expected=%d paths=%u "
+                "startup_delay_ms=%u cleanup_delay_ms=%u status_delay_ms=%u cleanup_budget_ms=3000 "
+                "complete=%u clock_valid=%u cancelled=%u runtime_timed_out=%u root_status_known=%u root_returncode=%lu "
+                "runtime_deadline_ns=%llu root_finished_ns=%llu cleanup_started_ns=%llu cleanup_finished_ns=%llu "
+                "cleanup_limit_ns=%llu publication_started_ns=%llu publication_finished_ns=%llu "
+                "publication_clock_valid=%u publication_ok=%u publication_stage=%s win32_error_valid=%u win32_error=%lu\n",
+                mode, tick_clock ? "tick" : "qpc", code, expected, (unsigned)paths,
+                tree_test_startup_delay_ms, tree_test_cleanup_delay_ms, tree_test_status_delay_ms,
+                (unsigned)observed->complete, (unsigned)observed->clock_valid, (unsigned)observed->cancelled,
+                (unsigned)observed->runtime_timed_out, (unsigned)observed->root_status_known,
+                (unsigned long)observed->root_returncode, (unsigned long long)observed->runtime_deadline_ns,
+                (unsigned long long)observed->root_finished_ns, (unsigned long long)observed->cleanup_started_ns,
+                (unsigned long long)observed->cleanup_finished_ns, (unsigned long long)context->cleanup_limit_ns,
+                (unsigned long long)context->publication_started_ns, (unsigned long long)context->publication_finished_ns,
+                (unsigned)context->publication_clock_valid, (unsigned)context->publication_ok,
+                context->publication_stage ? context->publication_stage : (context->publication_ok ? "published" : "not-attempted"),
+                (unsigned)context->publication_error_valid, (unsigned long)context->publication_error);
+        }
         tree_test_startup_delay_ms = 0;
         tree_test_cleanup_delay_ms = 0;
         tree_test_status_delay_ms = 0;

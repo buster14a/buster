@@ -149,6 +149,20 @@ struct CTestAstTypeNameVerify
 };
 BUSTER_F_DECL void c_test_ast_type_names_verify_set(bool enabled);
 BUSTER_F_DECL CTestAstTypeNameVerify c_test_ast_type_names_verify_take(void);
+// Verify mode for the member specifier runs read from the tree
+// (c_parse_member_specifiers_type under -fc-ast-pilot): before each read the
+// machine's scalar frame also reads the run, and is rolled back. The counts
+// record the reads compared and those whose type row, its fields or the
+// declarator start differed from the machine's, or that the machine refused.
+// Per thread; the take resets the counts.
+typedef struct CTestAstMemberVerify CTestAstMemberVerify;
+struct CTestAstMemberVerify
+{
+    u64 compared;
+    u64 mismatches;
+};
+BUSTER_F_DECL void c_test_ast_members_verify_set(bool enabled);
+BUSTER_F_DECL CTestAstMemberVerify c_test_ast_members_verify_take(void);
 
 BUSTER_F_DECL CDiagnostic c_test_check_named_call_arities(Arena* arena, CAnalysisResult* analysis, CPreprocessResult preprocess,
                                                         u32 start, u32 end);

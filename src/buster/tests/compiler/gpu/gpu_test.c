@@ -642,6 +642,71 @@ BUSTER_GLOBAL_LOCAL UnitTestResult gpu_test_readonly_source_scratch(UnitTestArgu
 #endif
 
 #if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+// BUSTER_TEST_RAW evaluates this only on failure. Hex keeps binary child output
+// printable, and the independent cap also bounds a broken retention result.
+BUSTER_GLOBAL_LOCAL String8 gpu_test_log_retention_diagnostic(Arena* arena, GpuPipelineResult observed, u64 limit, String8 marker)
+{
+    enum
+    {
+        diagnostic_byte_limit = 64,
+    };
+    char8 const hexadecimal[] = "0123456789abcdef";
+    char8 hex[diagnostic_byte_limit * 2];
+    u64 shown = BUSTER_MIN(observed.log.length, (u64)diagnostic_byte_limit);
+    for (u64 index = 0; index < shown; index += 1)
+    {
+        u8 byte = (u8)observed.log.pointer[index];
+        hex[index * 2] = hexadecimal[byte >> 4];
+        hex[index * 2 + 1] = hexadecimal[byte & 15];
+    }
+    return string_format(arena, S8("GPU_LOG_RETENTION_FAILURE_V1 length={u64} limit={u64} marker_length={u64} suffix={u32} within_limit={u32} "
+                                   "log_dropped_bytes={u64} log_truncated={u32} tool_output_truncated={u32} tool_capture_limit_exceeded={u32} "
+                                   "hex_bytes={u64} hex_omitted={u64} log_hex={S8}"),
+                         observed.log.length, limit, marker.length, (u32)string_ends_with_sequence(observed.log, marker),
+                         (u32)(observed.log.length <= limit), observed.log_dropped_bytes, (u32)observed.log_truncated,
+                         (u32)observed.tool_output_truncated, (u32)observed.tool_capture_limit_exceeded,
+                         shown, observed.log.length - shown, (String8){hex, shown * 2});
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult gpu_test_log_retention_diagnostic_controls(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    // A suffix-only failure includes NUL, newline and a high byte without
+    // allowing raw child bytes to terminate or forge diagnostic records.
+    char8 binary[] = {0, '\n', 0xff};
+    GpuPipelineResult observed = {.log = {binary, sizeof(binary)}, .log_dropped_bytes = 6,
+                                 .log_truncated = true, .tool_output_truncated = true, .tool_capture_limit_exceeded = true};
+    String8 diagnostic = gpu_test_log_retention_diagnostic(arena, observed, 27, S8("M"));
+    BUSTER_STRING_TEST(arguments, diagnostic,
+                       S8("GPU_LOG_RETENTION_FAILURE_V1 length=3 limit=27 marker_length=1 suffix=0 within_limit=1 "
+                          "log_dropped_bytes=6 log_truncated=1 tool_output_truncated=1 tool_capture_limit_exceeded=1 "
+                          "hex_bytes=3 hex_omitted=0 log_hex=000aff"));
+
+    // A bound-only failure still reports the full length and true suffix, but
+    // prints at most 64 bytes even if retention itself is broken.
+    char8 oversized[80];
+    memset(oversized, 'x', sizeof(oversized));
+    oversized[sizeof(oversized) - 1] = 'M';
+    observed = (GpuPipelineResult){.log = {oversized, sizeof(oversized)}};
+    diagnostic = gpu_test_log_retention_diagnostic(arena, observed, 27, S8("M"));
+    String8 expected_head = S8("GPU_LOG_RETENTION_FAILURE_V1 length=80 limit=27 marker_length=1 suffix=1 within_limit=0 "
+                              "log_dropped_bytes=0 log_truncated=0 tool_output_truncated=0 tool_capture_limit_exceeded=0 "
+                              "hex_bytes=64 hex_omitted=16 log_hex=");
+    BUSTER_TEST(arguments, string_starts_with_sequence(diagnostic, expected_head) && diagnostic.length == expected_head.length + 128);
+    bool bounded_hex = true;
+    for (u64 index = expected_head.length; index + 1 < diagnostic.length; index += 2)
+    {
+        bounded_hex = bounded_hex && diagnostic.pointer[index] == '7' && diagnostic.pointer[index + 1] == '8';
+    }
+    BUSTER_TEST(arguments, bounded_hex);
+    // The success path must not allocate or evaluate a failure diagnostic.
+    bool formatted = false;
+    BUSTER_TEST_RAW(arguments, true, ((void)(formatted = true), gpu_test_log_retention_diagnostic(arena, observed, 27, S8("M"))));
+    BUSTER_TEST(arguments, !formatted);
+    return result;
+}
+
 // Fake tools find the -o operand, run `body`, then write a minimal valid SPIR-V
 // module there so a step that does not fail still produces its artifact.
 BUSTER_GLOBAL_LOCAL bool gpu_test_write_tool(Arena* arena, String8 path, String8 body, bool produce_output)
@@ -813,7 +878,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult gpu_test_log_retention(UnitTestArguments* arg
             BUSTER_TEST(arguments, timed.error == GPU_PIPELINE_ERROR_TOOL_TIMEOUT && timed.timed_out && timed.failed_step == 2);
             BUSTER_TEST(arguments, string_first_sequence(timed.diagnostic, S8("GPU tool timed out:")) != BUSTER_STRING_NO_MATCH);
             BUSTER_TEST(arguments, string_first_sequence(timed.diagnostic, timeout_marker) != BUSTER_STRING_NO_MATCH);
-            BUSTER_TEST(arguments, string_ends_with_sequence(timed.log, timeout_marker) && timed.log.length <= limit);
+            BUSTER_TEST_RAW(arguments, string_ends_with_sequence(timed.log, timeout_marker) && timed.log.length <= limit,
+                            gpu_test_log_retention_diagnostic(arena, timed, limit, timeout_marker));
         }
     }
     BUSTER_TEST(arguments, os_file_delete(output));
@@ -838,6 +904,7 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
 
     BUSTER_TEST_FIXTURE(arguments, gpu_test_scratch_roots);
 #if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    BUSTER_TEST_FIXTURE(arguments, gpu_test_log_retention_diagnostic_controls);
     BUSTER_TEST_FIXTURE(arguments, gpu_test_readonly_source_scratch);
     BUSTER_TEST_FIXTURE(arguments, gpu_test_log_retention);
 #endif

@@ -8291,6 +8291,67 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_object_text(ObjectFile const*
     return text;
 }
 
+// Untouched GCC 16.2.1 -O2 -S output: #3740's maximum-skip directives and
+// #3732's REP NOP spelling must work together through the public driver.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_pause_listing(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 listing = buster_test_temporary_path(arena, S8("gcc-pause-listing"), S8(".s"));
+    String8 output = buster_test_temporary_path(arena, S8("gcc-pause-listing"), S8(".o"));
+    // Byte-identical to fixtures/gcc_pause_alignment_spin.s. Embed the input
+    // so mobile runners need no repository filesystem at runtime.
+    String8 source = S8(
+        "\t.file\t\"spin.c\"\n"
+        "\t.text\n"
+        "\t.p2align 4\n"
+        "\t.globl\tspin\n"
+        "\t.type\tspin, @function\n"
+        "spin:\n"
+        ".LFB0:\n"
+        "\t.cfi_startproc\n"
+        "\tjmp\t.L8\n"
+        "\t.p2align 3\n"
+        "\t.p2align 4,,10\n"
+        "\t.p2align 3\n"
+        ".L3:\n"
+        "\trep nop\n"
+        ".L8:\n"
+        "\tmovl\t(%rdi), %eax\n"
+        "\ttestl\t%eax, %eax\n"
+        "\tjne\t.L3\n"
+        "\tret\n"
+        "\t.cfi_endproc\n"
+        ".LFE0:\n"
+        "\t.size\tspin, .-spin\n"
+        "\t.ident\t\"GCC: (GNU) 16.2.1 20260810\"\n"
+        "\t.section\t.note.GNU-stack,\"\",@progbits\n");
+    bool written = file_write(listing, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, written);
+    if (written)
+    {
+        String8 args[] = {S8("-target"), S8("x86_64-linux"), S8("-march=baseline"), S8("-c"), listing, S8("-o"), output};
+        CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(args)));
+        BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object, assembled.diagnostic);
+        if (assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object)
+        {
+            // GNU as places PAUSE at 16 and the load at 18. Buster keeps its
+            // single-byte NOP fill; executable instruction bytes/offsets agree.
+            u8 expected[] = {0xeb, 0x10, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+                             0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+                             0xf3, 0x90, 0x8b, 0x07, 0x85, 0xc0, 0x75, 0xf8, 0xc3};
+            ByteSlice actual = compiler_driver_test_object_text(&assembled.object);
+            BUSTER_TEST(arguments, actual.length == sizeof(expected) && memcmp(actual.pointer, expected, sizeof(expected)) == 0);
+        }
+    }
+    os_file_delete(listing);
+    os_file_delete(output);
+    scratch_end(temporary);
+    return result;
+}
+
 // The GCC fixture is pristine GCC 16.2.1 -O2 -S output for the two scalar
 // conversions in #3732. GCC is an oracle used to capture it, not a test dependency.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pause_conversion_round_trip(UnitTestArguments* arguments)
@@ -35008,6 +35069,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bare_dwarf_sections);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_statements);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_quoted_assembly_round_trip);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_gcc_pause_listing);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pause_conversion_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_compiler_listing_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_assembly_round_trip);
@@ -42503,6 +42565,37 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         {
             ProcessWaitResult c_conditional_operand_wait = os_process_wait_sync(arguments->arena, c_conditional_operand_spawn);
             BUSTER_TEST(arguments, c_conditional_operand_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    // The expression core skips a prepass or a postfix probe that the body's
+    // token prefix table proves empty; a wrong skip drops or repeats a side
+    // effect, so run it.
+    buster_test_arena_end(arguments, driver_fixture, true);
+    driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_expression_core_prepass_skip_path"), false);
+    String8 c_prepass_skip_path = buster_test_temporary_path(arguments->arena, S8("buster-c-expression-core-prepass-skip"), S8(""));
+    String8 c_prepass_skip_command_line[] = {
+        S8("-o"),
+        c_prepass_skip_path,
+        S8("src/buster/tests/compiler/driver/fixtures/expression_core_prepass_skip.c"),
+    };
+    CompilerDriverResult c_prepass_skip = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_prepass_skip_command_line)));
+    BUSTER_TEST(arguments, c_prepass_skip.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_prepass_skip.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_prepass_skip_arguments[] = {
+            c_prepass_skip_path,
+        };
+        ProcessSpawnResult c_prepass_skip_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_prepass_skip_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true, .search_path = true,
+                             });
+        BUSTER_TEST(arguments, c_prepass_skip_spawn.handle != 0);
+        if (c_prepass_skip_spawn.handle)
+        {
+            ProcessWaitResult c_prepass_skip_wait = os_process_wait_sync(arguments->arena, c_prepass_skip_spawn);
+            BUSTER_TEST(arguments, c_prepass_skip_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
     // The prepared-control-expression lookups answer from token-indexed

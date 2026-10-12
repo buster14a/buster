@@ -5415,7 +5415,8 @@ def wild_linker_evidence(head: str = "a" * 40, kind: str = "mold") -> tuple[dict
         tree, config = profile["cell_trees"][cell]
         directory = f"{WILD_ROOT}/{tree}"
         objects = [f"CMakeFiles/ide.dir/{config}/src/{name}.c.o" for name in ("ide", "os", "arena")]
-        argvs[cell] = (f'"{WILD_PATH}" "-z" "relro" "-pie" "-o" "{config}/ide" "/lib/x86_64-linux-gnu/Scrt1.o" ' +
+        argvs[cell] = (f'"{WILD_PATH}" "-z" "relro" "-pie" "-o" "{config}/ide" '
+                       f'"--dependency-file=CMakeFiles/ide.dir/{config}/link.d" "/lib/x86_64-linux-gnu/Scrt1.o" ' +
                        " ".join(f'"{name}"' for name in objects) + ' "-lm" "/lib/x86_64-linux-gnu/crtn.o"')
         manifests[cell] = "".join(f"{'3' * 64}  {directory}/{name}\n" for name in objects)
         wild = f"cd '{directory}' && {argvs[cell]} {common} {profile['wild']['policy']}"
@@ -5461,7 +5462,8 @@ def wild_linker_evidence(head: str = "a" * 40, kind: str = "mold") -> tuple[dict
         for linker in compiler_receipt.WILD_LINKER_LINKERS:
             bundle[f"output {cell} {linker}"] = ("9" if linker == "wild" else "6") * 64 + "\n"
             bundle[f"comment {cell} {linker}"] = "clang version 21.1.8\n" + (
-                WILD_VERSION + "\n" if linker == "wild" else "mold 2.42.1 (compatible with GNU ld)\n" if kind == "mold" else "")
+                "Linker: " + WILD_VERSION + "\n" if linker == "wild" else
+                "mold 2.42.1 (compatible with GNU ld)\n" if kind == "mold" else "")
     record = {"requested": True, "request_line": compiler_receipt.WILD_LINKER_REQUEST_LINE,
               "profile": copy.deepcopy(profile), "status": "complete", "errors": [], "build_exit": 0, "exit": 0,
               "linkers": copy.deepcopy(linkers), "identity": copy.deepcopy(identity),
@@ -5627,8 +5629,15 @@ class WildLinkerTest(unittest.TestCase):
             "Wild prefix only": (linker("wild", version="Wild version 0.10.0"), {}),
             "Wild output without identity": (dict(bundle, **{"comment ide-unity-release wild": "Linker: LLD 18\n"}), {}),
             "Wild output with another version": (dict(bundle, **{"comment ide-debug wild": (
-                "Wild 0.9.0 (compatible with GNU linkers)\n")}), {}),
-            "comparator output is Wild": (dict(bundle, **{"comment ide-debug comparator": WILD_VERSION + "\n"}), {}),
+                "Linker: Wild 0.9.0 (compatible with GNU linkers)\n")}), {}),
+            "Wild identity without Wild's prefix": (dict(bundle, **{"comment ide-debug wild": WILD_VERSION + "\n"}), {}),
+            "comparator output is Wild": (dict(bundle, **{"comment ide-debug comparator": "Linker: " + WILD_VERSION + "\n"}),
+                                          {}),
+            "comparator output is bare Wild": (dict(bundle, **{"comment ide-debug comparator": WILD_VERSION + "\n"}), {}),
+            "dependency file elsewhere": (text("argv ide-debug", lambda value: value.replace(
+                "CMakeFiles/ide.dir/Debug/link.d", "/tmp/link.d")), {}),
+            "dependency file of another config": (text("argv ide-debug", lambda value: value.replace(
+                "CMakeFiles/ide.dir/Debug/link.d", "CMakeFiles/ide.dir/Release/link.d")), {}),
             "missing comment": (without("comment ide-separate-release wild"), {}),
             "no build root": (identity(lambda value: value.pop("build_root")), {}),
             # #3689 review: the timed argv is bound to the hashed inputs and nothing else can run.
