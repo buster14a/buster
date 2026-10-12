@@ -3891,6 +3891,25 @@ class ConstantReuseAcceptanceTest(unittest.TestCase):
             with self.subTest(case=name):
                 self.assertTrue(compiler_receipt.validate_constant_reuse_acceptance(changed, head, binary))
 
+    def test_out_of_range_numbers_fail_closed(self) -> None:
+        huge, head, binary = 10 ** 309, "a" * 40, "c" * 64
+        self.assertFalse(constant_reuse_acceptance._positive_number(huge))
+        self.assertTrue(constant_reuse_acceptance._positive_number(1))
+        record, bundle, acceptance = constant_reuse_evidence(head, binary)
+        for metric, key in (("wall", "ci_high"), ("peak_rss", "b_median"), ("instructions", "a_median"),
+                            ("code_bytes", "b_value")):
+            changed = copy.deepcopy(acceptance)
+            changed["cells"]["cse"]["metrics"][metric][key] = huge
+            with self.subTest(metric=metric):
+                self.assertTrue(compiler_receipt.validate_constant_reuse_acceptance(changed, head, binary))
+                raw = copy.deepcopy(bundle)
+                target = raw["cse_summary"] if metric == "code_bytes" else raw["cse_summary"]["metrics"]
+                target[metric][key] = huge
+                self.assertTrue(compiler_publish.validate_constant_reuse_bundle(record, raw, head, binary))
+                pull = receipt()
+                pull["constant_reuse_acceptance"] = dict(record, summary=changed)
+                self.assertIn("Issue #3011 constant-reuse arms", compiler_receipt.render(pull, summary(), "failure", []))
+
     def test_raw_cell_loader_refuses_wrong_flags_binaries_and_unexplained_na(self) -> None:
         binary = "c" * 64
         for cell in compiler_receipt.CONSTANT_REUSE_CELLS:

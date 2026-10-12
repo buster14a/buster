@@ -2005,11 +2005,11 @@ def validate_constant_reuse_acceptance(summary: object, expected_revision: str, 
         rss = values.get("peak_rss") if isinstance(values.get("peak_rss"), dict) else {}
         code = values.get("code_bytes") if isinstance(values.get("code_bytes"), dict) else {}
         instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else None
-        if not all(_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio", "ci_low", "ci_high")):
+        if not all(_finite_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio", "ci_low", "ci_high")):
             problems.append(f"{label} {cell} wall-time measurements are missing")
-        if not all(_positive(rss.get(key)) for key in ("a_median", "b_median")):
+        if not all(_finite_positive(rss.get(key)) for key in ("a_median", "b_median")):
             problems.append(f"{label} {cell} peak-RSS measurements are missing")
-        if not all(_positive(code.get(key)) for key in ("a_value", "b_value")):
+        if not all(_finite_positive(code.get(key)) for key in ("a_value", "b_value")):
             problems.append(f"{label} {cell} executable-section code bytes are missing")
         if instructions is None:
             problems.append(f"{label} {cell} retired-instruction metric is missing")
@@ -2017,8 +2017,8 @@ def validate_constant_reuse_acceptance(summary: object, expected_revision: str, 
             counters = values.get("counter_availability")
             if not isinstance(counters, dict) or counters.get("perf_stat") is not False or not counters.get("reason"):
                 problems.append(f"{label} {cell} retired-instruction NA has no unavailable-counter reason")
-        elif not _positive(instructions.get("ratio")) or \
-                not all(_positive(instructions.get(key)) for key in ("a_median", "b_median")):
+        elif not _finite_positive(instructions.get("ratio")) or \
+                not all(_finite_positive(instructions.get(key)) for key in ("a_median", "b_median")):
             problems.append(f"{label} {cell} retired-instruction counts are invalid")
         if row.get("diagnostics_identical") is not True:
             problems.append(f"{label} {cell} diagnostics differ between the default and flagged compiles")

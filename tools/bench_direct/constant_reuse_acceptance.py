@@ -28,7 +28,7 @@ import sys
 import time
 
 from compiler_receipt import (CONSTANT_REUSE_ACCEPTANCE_PROFILE, CONSTANT_REUSE_ACCEPTANCE_SCHEMA, CONSTANT_REUSE_CELLS,
-                              CONSTANT_REUSE_COMPILE)
+                              CONSTANT_REUSE_COMPILE, _finite_positive)
 from inline_acceptance import git, hash_inputs, sha256
 
 PAIRS = CONSTANT_REUSE_ACCEPTANCE_PROFILE["pairs"]
@@ -58,7 +58,7 @@ def run_compare(lab: Path, compiler: Path, root: Path, cpu: int, output: Path, p
 
 
 def _positive_number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value and 0 < value < float("inf")
+    return _finite_positive(value)
 
 
 def validate_documents(cell: str, summary: dict, meta: dict, labs: dict, expected_sha: str) -> dict:
