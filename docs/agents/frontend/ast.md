@@ -3591,7 +3591,7 @@ The floor for a code change is 1 M Ir removable. Two items clear it:
   does not.
 
 The candidate keeps every rule. It moves the settlement into its own
-out-of-line function, so the query path needs no saved registers, and scans
+out-of-line function, so the query path saves one register, and scans
 whole flag words with the tail assembled once. These budgets are declared
 before its measured runs. They use the same stage-2 input, flags and four
 Callgrind arms (A to D) on tests-off `-march=x86-64-v3` builds, with main
