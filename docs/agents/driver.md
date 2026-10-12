@@ -585,6 +585,10 @@ The block-local CSE experiment (#3011) is selected only by
 `-fcanonical-fast-cse-strategy=window|table` picks the census's linear or
 hash-table arm (default `table`; the last one given wins). See
 [opt-in block-local CSE](../canonical-fast-pipeline.md#opt-in-block-local-cse-3011).
+`-fcanonical-intern-constants` / `-fno-canonical-intern-constants` turn on and
+off the construction-time constant interning arm in C lowering (off by
+default, last one wins, independent of `-O` and FAST controls); see
+[opt-in construction-time constant interning](../canonical-fast-pipeline.md#opt-in-construction-time-constant-interning-3011).
 
 Canonical inlining is separate from register allocation. Tiny direct-call
 inlining is opt-in at every optimization level: `-fcanonical-inline` enables

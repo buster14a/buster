@@ -415,11 +415,93 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_decline_tests(UnitTestArguments* argu
     return result;
 }
 
+// Lowers `source` with construction-time constant interning (#3011) on or
+// off, validates it through preparation with no optional pass, and returns
+// the lowering counters with the program.
+BUSTER_GLOBAL_LOCAL CIRLowerResult ir_fast_intern_lower(UnitTestArguments* arguments, String8 source, bool intern)
+{
+    CIRLowerResult result = {0};
+    CPreprocessResult preprocess = c_preprocess(arguments->arena, source,
+        (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    CAnalysisResult analysis = c_parse(arguments->arena, preprocess);
+    if (!preprocess.error_count && !analysis.diagnostic_count)
+    {
+        CIRLowerResult lowered = c_lower_to_ir_with_options(arguments->arena, S8("intern.c"), preprocess, analysis, target_native,
+                                                            (CIRLowerOptions){.intern_block_constants = intern});
+        if (lowered.program && !lowered.diagnostic_count && lowered.program->modules->function_count)
+        {
+            lowered.program->fast_passes = 0;
+            if (ir_prepare_canonical_module(lowered.program, lowered.program->modules, false).error == IR_VALIDATION_NONE) result = lowered;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 ir_fast_intern_constant_rows(IrProgram* program)
+{
+    u32 rows = 0;
+    IrModule* module = program->modules;
+    for (u32 index = 0; index < module->function_count; index += 1)
+    {
+        rows += ir_test_opcode_count(module->functions + index, IR_OPCODE_CONSTANT_INTEGER);
+    }
+    return rows;
+}
+
+// Construction-time constant interning (#3011): a repeated literal in one
+// block reuses the earlier constant and allocates no row, while different
+// blocks, types and signs keep their own rows. Off, nothing is looked up.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_intern_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u32 hits;
+    } cases[] = {
+        // Three uses of 3u in one block share the first; 7u is distinct.
+        {S8("unsigned test(unsigned a){return (a*3u)^(a*3u)^(a+7u)^(a*3u);}"), 2},
+        // The same literal in three different blocks is never shared.
+        {S8("int test(int c,int a){int x=a*5;if(c){x=x*5;}else{x=x-1;}return x*5;}"), 0},
+        // 1, 1u and 1ll have different canonical types; only the repeated int 1 is shared.
+        {S8("long long test(int a,unsigned b,long long c){return (a*1)+(b*1u)+(c*1ll)+(a*1);}"), 1},
+        // `-9` lowers as a negation of the literal 9, so all three share it.
+        {S8("int test(int a){return (a*-9)+(a*9)+(a*-9);}"), 2},
+        // A negative enumerator is a negative constant, distinct from its magnitude.
+        {S8("enum{N=-9,P=9};int test(int a){return (a*N)+(a*P)+(a*N);}"), 1},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        CIRLowerResult off = ir_fast_intern_lower(arguments, cases[index].source, false);
+        CIRLowerResult on = ir_fast_intern_lower(arguments, cases[index].source, true);
+        if (BUSTER_REQUIRE(arguments, off.program != 0 && on.program != 0))
+        {
+            CIRConstantInternStatistics interned = on.constant_interning;
+            if (interned.hits != cases[index].hits)
+            {
+                arguments->show(arguments, S8("intern case {u32}: hits={u64} lookups={u64} stale={u64}\n"), index, interned.hits, interned.lookups,
+                                interned.stale);
+            }
+            BUSTER_TEST(arguments, interned.hits == cases[index].hits && interned.lookups >= interned.hits && !interned.stale);
+            BUSTER_TEST(arguments, !off.constant_interning.lookups && !off.constant_interning.hits && !off.constant_interning.stale);
+            // Each hit is a constant row (and its value) that was never built.
+            BUSTER_TEST(arguments, ir_fast_intern_constant_rows(on.program) + cases[index].hits == ir_fast_intern_constant_rows(off.program));
+            BUSTER_TEST(arguments, on.program->modules->functions->value_count + cases[index].hits ==
+                                   off.program->modules->functions->value_count);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(on.program, on.program->modules).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_publication_span_tests(arguments);
     BUSTER_TEST_FIXTURE(arguments, ir_fast_decline_tests);
     BUSTER_TEST_FIXTURE(arguments, ir_fast_cse_tests);
+    BUSTER_TEST_FIXTURE(arguments, ir_fast_intern_tests);
     String8 source = S8("volatile int observed;int effect(int);"
                        "int test(int input,int* p){int x=input+0;int unused=x*9;"
                        "int a=3,b=4;int* q=&*p;observed=effect(x);return x+(a+b)+*q+observed;}");
