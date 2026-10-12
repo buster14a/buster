@@ -33960,7 +33960,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_ide_run(UnitTestArgument
 }
 #endif
 
-// The host default is documented in docs/agents/driver.md (#1557).
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SANITIZE && BUSTER_LINK_LIBC
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_image_retention_exists(String8 path)
 {
     FileStats stats = os_path_followed_stats(path);
@@ -34010,7 +34010,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_image_retention_spawn(Un
     BUSTER_TEST(arguments, os_file_delete(source_path));
     return result;
 }
+#endif
 
+// The host default is documented in docs/agents/driver.md (#1557).
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_default_cpu_model(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
