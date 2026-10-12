@@ -44,59 +44,52 @@ typedef enum IrInlineDiscardTable
     IR_INLINE_DISCARD_TABLE_COUNT,
 } IrInlineDiscardTable;
 
-// Byte ranges of caller tables that relocation abandoned, one list per table
-// kind. The arena cannot free them, but no pointer reads them again, so the
-// pass hands their complete pages back to the OS once its last splice is done
-// (ir_inline_cfg_discard_release). The C frontend carves each kind for every
-// function out of one row stream in module order, and callers are visited in
-// that order, so consecutive relocated callers usually abut: merging them
-// spends one release per run and also frees the pages two callers shared.
+// The open run of abandoned caller-table bytes for each table kind. The arena
+// cannot free a relocated caller's old tables, but no pointer reads them
+// again, so their complete pages go back to the OS. The C frontend carves each
+// kind for every function out of one row stream in module order, and callers
+// are visited in that order, so consecutive relocated callers usually abut:
+// a range that extends the open run joins it (also freeing the page two
+// callers share), and any other range first releases the open run. Only one
+// run per kind is held, so the record needs no planning scratch (#3854).
 typedef struct IrInlineDiscard IrInlineDiscard;
 struct IrInlineDiscard
 {
-    u64* starts;
-    u64* ends;
-    u32 capacity;
-    u32 counts[IR_INLINE_DISCARD_TABLE_COUNT];
+    u64 starts[IR_INLINE_DISCARD_TABLE_COUNT];
+    u64 ends[IR_INLINE_DISCARD_TABLE_COUNT];
+    u64 released_bytes;
 };
+
+BUSTER_GLOBAL_LOCAL void ir_inline_cfg_discard_flush(IrInlineDiscard* discard, IrInlineDiscardTable table)
+{
+    if (discard->ends[table] > discard->starts[table])
+    {
+        discard->released_bytes += os_discard((void*)discard->starts[table], discard->ends[table] - discard->starts[table]);
+    }
+    discard->starts[table] = 0;
+    discard->ends[table] = 0;
+}
 
 BUSTER_GLOBAL_LOCAL void ir_inline_cfg_discard_record(IrInlineDiscard* discard, IrInlineDiscardTable table,
                                                       void const* rows, u64 bytes)
 {
-    if (discard && discard->capacity && rows && bytes)
+    if (discard && rows && bytes)
     {
-        u64* starts = discard->starts + (u64)table * discard->capacity;
-        u64* ends = discard->ends + (u64)table * discard->capacity;
-        u32 count = discard->counts[table];
         u64 start = (u64)rows;
-        if (count && ends[count - 1] == start)
-        {
-            ends[count - 1] = start + bytes;
-        }
-        else if (count < discard->capacity)
-        {
-            starts[count] = start;
-            ends[count] = start + bytes;
-            discard->counts[table] = count + 1;
-        }
+        if (discard->ends[table] != start) ir_inline_cfg_discard_flush(discard, table);
+        if (discard->ends[table] == 0) discard->starts[table] = start;
+        discard->ends[table] = start + bytes;
     }
 }
 
-// Returns the bytes handed back to the OS.
+// Releases every open run; returns the bytes handed back over the pass.
 BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_discard_release(IrInlineDiscard* discard)
 {
-    u64 result = 0;
-    for (u32 table = 0; discard && discard->capacity && table < IR_INLINE_DISCARD_TABLE_COUNT; table += 1)
+    for (u32 table = 0; table < IR_INLINE_DISCARD_TABLE_COUNT; table += 1)
     {
-        u64* starts = discard->starts + (u64)table * discard->capacity;
-        u64* ends = discard->ends + (u64)table * discard->capacity;
-        for (u32 range = 0; range < discard->counts[table]; range += 1)
-        {
-            result += os_discard((void*)starts[range], ends[range] - starts[range]);
-        }
-        discard->counts[table] = 0;
+        ir_inline_cfg_discard_flush(discard, (IrInlineDiscardTable)table);
     }
-    return result;
+    return discard->released_bytes;
 }
 
 // Grow the caller's block, instruction, value and extra tables once, to the

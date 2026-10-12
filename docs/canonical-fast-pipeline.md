@@ -367,12 +367,14 @@ A caller keeps its optional splices only when their planned row growth,
 shifted left by `IR_INLINE_CALLER_GROWTH_SHIFT` (5), reaches its instruction
 rows; otherwise every optional site in it stays a call. The first splice
 relocates the caller's exactly sized tables and the arena keeps the old copy,
-so one tiny site in a large caller costs more memory than it saves. After its
-last splice the pass hands the complete pages of every abandoned table back to
-the OS (`ir_inline_cfg_discard_release`, `os_discard`); the range stays mapped
-and writable. Ranges are merged per table kind first, because the C frontend
-carves each kind out of one row stream in module order and callers are visited
-in that order, so neighbouring relocated callers also free the page they share.
+so one tiny site in a large caller costs more memory than it saves. The pass
+hands the complete pages of every abandoned table back to the OS
+(`ir_inline_cfg_discard_record`, `os_discard`); the range stays mapped and
+writable. It holds one open run per table kind: because the C frontend carves
+each kind out of one row stream in module order and callers are visited in that
+order, a relocated caller's range usually extends the run (freeing the page two
+neighbours share), and any other range first releases the run. The last runs
+are released after the final splice; the record takes no planning scratch.
 The verbose record reports the released bytes (#3854). The shift measurements
 below predate this release. On the
 unity self-host source with `-fcanonical-inline`, shifts 2 through 6 kept 801,

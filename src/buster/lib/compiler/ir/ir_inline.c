@@ -662,13 +662,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                 memset(function_sites_used, 0, sizeof(u32) * (count ? count : 1u));
                 u32 phase_count = options.tiny ? 2u : 1u;
                 IrTypeId void_type = ir_inline_cfg_void_type(program);
-                // A caller can relocate once per phase.
-                IrInlineDiscard discard = {.capacity = count <= UINT32_MAX / 2u ? count * 2u : 0u};
-                if (discard.capacity)
-                {
-                    discard.starts = arena_allocate(arena, u64, (u64)discard.capacity * IR_INLINE_DISCARD_TABLE_COUNT);
-                    discard.ends = arena_allocate(arena, u64, (u64)discard.capacity * IR_INLINE_DISCARD_TABLE_COUNT);
-                }
+                IrInlineDiscard discard = {0};
                 for (u32 phase = 0; phase < phase_count && result.error == IR_VALIDATION_NONE; phase += 1)
                 {
                     for (u32 order_index = 0; order_index < order_count && result.error == IR_VALIDATION_NONE; order_index += 1)
@@ -1468,8 +1462,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     scratch_end(function_scratch);
                     }
                 }
-                // After the last splice no pointer reads a relocated caller's
-                // old tables; hand their pages back before codegen peaks.
+                // No pointer reads a relocated caller's old tables; hand the
+                // remaining open runs back before codegen peaks.
                 module->inlining.released_bytes += ir_inline_cfg_discard_release(&discard);
                 if (result.error == IR_VALIDATION_NONE) module->inline_complete = true;
                 }
