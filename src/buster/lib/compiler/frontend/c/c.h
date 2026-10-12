@@ -1394,6 +1394,22 @@ struct CDeferredStaticAssert
     CSourceSite location;
 };
 
+// The semantic answer for one deferred _Static_assert. Validation stores one
+// per row in CParseResult.deferred_static_assert_verdicts and lowering
+// consumes it instead of evaluating the assertion again (#2531). Unchecked
+// means validation did not run (the model-building entry points); lowering
+// then asks the same semantic evaluator (c_semantic_static_assert_verdict).
+typedef enum CStaticAssertVerdict
+{
+    C_STATIC_ASSERT_UNCHECKED,
+    C_STATIC_ASSERT_HOLDS,
+    C_STATIC_ASSERT_NOT_CONSTANT,
+    C_STATIC_ASSERT_FAILED,
+    // The assertion measured an oversized type; the size diagnostic stands
+    // for it.
+    C_STATIC_ASSERT_SIZE_REPORTED,
+} CStaticAssertVerdict;
+
 typedef enum CParserDeclarationKind
 {
     C_PARSER_DECLARATION_OBJECT,
@@ -2024,6 +2040,10 @@ struct CParseResult
     u32* declarations_by_entity;
     CDiagnostic* diagnostics;
     CDeferredStaticAssert* deferred_static_asserts;
+    // One CStaticAssertVerdict per deferred row, written after parsing by
+    // c_parse_validate_deferred_assertions; null when validation did not run
+    // or nothing was deferred.
+    u8* deferred_static_assert_verdicts;
     // Sparse declaration-point widths and owned diagnostics from private type
     // queries. Snapshots roll these rows back with their parsed members.
     CDeferredBitFieldWidthDiagnostic* deferred_bit_field_width_diagnostics;

@@ -393,10 +393,13 @@ expression task stack without a row; its value belongs to lowering. Each query
 re-walks its range, so a site whose row is retained is recognized from its
 slot's hint without a search.
 
-Lowering's own constant evaluator does not yet fold a `__builtin_choose_expr`
-value in a deferred `_Static_assert`, and lowering cannot take a choice whose
-condition is another choice (#3860); `c_test_builtin_operand_types` therefore
-checks those forms through the parser only. Append-only answers participate in semantic
+A deferred `_Static_assert` no longer reaches lowering's constant evaluator:
+lowering consumes the stored verdict (see the static-assertion entry in
+[foundations](foundations.md)), so `-fsyntax-only` and `-c` agree on a choice
+value there. Lowering's evaluator still does not fold a choice in a static
+array bound, and lowering cannot take a choice whose condition is another
+choice (#3860); `c_test_builtin_operand_types` therefore checks those forms
+through the parser only. Append-only answers participate in semantic
 result checkpoints. Lowering consumes retained answers; model-building-only
 callers resolve missing answers through the same semantic helper.
 

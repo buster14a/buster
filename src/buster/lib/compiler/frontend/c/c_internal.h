@@ -253,6 +253,9 @@ struct CParsePrimitiveSpelling
 BUSTER_C_EXTERN CParsePrimitiveSpelling c_parse_primitive_type_read(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_semantic_type_identity_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                    CScopeId scope, u32 start, u32 end, CTypeIdentityQuery* answer, String8* message);
+// A deferred _Static_assert row's semantic verdict, for lowering when
+// validation left the row unchecked; see CStaticAssertVerdict.
+BUSTER_C_EXTERN CStaticAssertVerdict c_semantic_static_assert_verdict(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, u32 row);
 // Whether a call through this function type ends control flow because the
 // declarator that derived it spelled `noreturn`. The set behind it is empty
 // in almost every translation unit; see CParseResult.noreturn_function_types.
