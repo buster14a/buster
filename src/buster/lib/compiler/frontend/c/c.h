@@ -1806,6 +1806,12 @@ struct CTokenPositionIndex
     // validates the row against the live table, so rollbacks and private query
     // copies that share this index stay correct.
     u32* type_identity_rows_plus_one;
+    // Ascending positions of every typeof, __typeof, __typeof__ and
+    // typeof_unqual word in any dialect: the only places
+    // c_parse_define_typeof_aggregates has anything to define.
+    u32* typeof_positions;
+    u32 typeof_count;
+    u32 typeof_capacity;
 #if BUSTER_INCLUDE_TESTS
     // Diagnostics for tests: lookups, and rows read by the validating scan.
     u64 type_identity_lookups;

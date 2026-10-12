@@ -460,8 +460,11 @@ unchanged.
     (`c_ast_types_lookups_settled`). Each mark is checked at the file scope
     against its binding, which must be a file-scope entity or none. The file
     scope's answer for a symbol is looked up once per lookup generation and
-    kept beside the symbol table (`CAstTypeSymbol`), and the scan visits only
-    the mark bytes of each flag word.
+    kept beside the symbol table (`CAstTypeSymbol`). The scan skips flag
+    words without a mark in a loop of its own and visits only the mark bytes
+    of the rest. The settlement runs out of line
+    (`c_ast_types_lookups_settle`), so the per-query check
+    (`c_ast_types_lookups_hold`) saves one register, not five.
   - Up to 16 marks per region that a non-file-scope entity also spells are
     recorded. A query over one of them walks its subtree as before. A region
     with more walks for every query.
@@ -3453,6 +3456,74 @@ diagnostic only. The candidate passes every hosted budget and ships:
   The assignment site in the same validator, which pairs a checked typing
   with the same wrapper, is left as a lead.
 
+### Assignment value typing
+
+This section has its own anchor, because other open AST branches append to
+the plan's final paragraph. [Call-argument value typing](#call-argument-value-typing)
+left the assignment site in `c_parse_validate_const_assignments` as a lead.
+A simple or compound assignment types its value with
+`c_parse_checked_expression_type`. Unless the assignment conversion message
+already refused it, `c_parse_incompatible_aggregate_value` then types the same
+range again, unchecked, before the aggregate and scalar conversion check.
+
+A census of main `4ed35b59` (a throwaway build that routes the site through
+noinline wrappers, exploratory, not reused as an arm) on the unity self-host
+at `-fsyntax-only` gives the size of the lead:
+- The site makes 46,529 unchecked queries. They cost 8.27 M Ir inclusive,
+  about 178 Ir each, under both default flags and `-fc-ast-pilot`.
+- Under #3806's rule, 45,303 of them could reuse the checked type on the
+  default path and 46,301 under the pilot. The rest follow a typing that
+  appended a type row or did not succeed.
+- The removable ceiling is therefore about 8 M (0.07%), plus whatever setup
+  Clang inlined around the call. The conversion check stays.
+
+The candidate routes the site through `c_parse_incompatible_checked_value`,
+which gains a `simple_value_conversion` argument so a compound assignment
+keeps its scalar conversion rule. The type is reused only when the checked
+typing succeeded and appended no type row; otherwise the range is typed
+again. Reference-check builds (`BUSTER_REFERENCE_CHECKS`) also run the base's
+re-typing and require the same verdict and message. The change is on the
+token path, so it applies to the default path and to `-fc-ast-pilot`.
+
+These budgets were declared before the measured runs. The base is main
+`4ed35b59`. The input, flags and arms are the call-argument slice's: four
+Callgrind arms (`--cache-sim=no --branch-sim=no`) on tests-off
+`-march=x86-64-v3` Release builds whose driver is built by Clang (no TCC on
+the host). A is the base with default flags, B the base with `-fc-ast-pilot`,
+C the candidate with `-fc-ast-pilot`, and D the candidate with default flags.
+- **Correctness:**
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms;
+  - the same exit status and no diagnostics on `-fsyntax-only` in every arm;
+  - the reference check passes in a Debug run of the C frontend and AST
+    tests;
+  - `test_all` passes, and `test_self_host` keeps its fixed point.
+- **The floor, `-fsyntax-only` (D against A, and C against B).** The whole
+  compile must run at least 5 M fewer instructions, and more than the 0.05%
+  rebuild noise fewer. Each arm reports its calls to
+  `c_parse_expression_type_query`; the candidate should make about 45,000
+  fewer.
+- **`-c` (D against A, `-g0`).** The validation runs before lowering, so the
+  compile must also fall by at least 5 M. It may in no case grow by more
+  than the 0.05% noise.
+- **Below the floor.** The audit records a negative result, and no code
+  ships.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761).
+
+The assignment census is
+[`2026-10-12T173747Z`](../../performance-audits/2026-10-12T173747Z.md),
+diagnostic only. The candidate passes every hosted budget and ships:
+- `-fsyntax-only` falls by 8.17 M Ir on the default path (−0.073%) and by
+  8.36 M under the pilot (−0.089%). `-c` falls by the same amounts (−0.032%
+  and −0.035%).
+- 45,303 queries (46,301 under the pilot) are no longer made, exactly the
+  census's reusable count.
+- Objects are byte-identical across the four arms at `-g0` and `-g`.
+- The validator's remaining unchecked queries follow a typing that appended
+  a row or failed, and are kept for `-g` identity.
+  `c_parse_type_identity_prepare`, which every query pays first, is still a
+  lead.
+
 ### Initializer walk
 
 This section has its own anchor because other open AST branches append to
@@ -3585,6 +3656,83 @@ the same way and diagnostic only:
   default path and for bodies the tree does not index.
 - Zen 5 validation stays incomplete (#2761).
 
+### Identity prepare gate
+
+This section has its own anchor because other open AST branches append to
+the plan's final paragraph. `c_parse_type_identity_prepare` settles the
+`_Generic`, `__builtin_types_compatible_p` and `__builtin_classify_type`
+answers in a range before a query reads them. Every expression-type query,
+every scalar specifier attempt, every typed constant and both pilot
+specifier reads pay one out-of-line call to it before anything else, and
+audit [`2026-10-12T131052Z`](../../performance-audits/2026-10-12T131052Z.md)
+counted 1.78 M calls. #3570 recorded that the call never changed a result on
+any input it tried, and left open whether it was needed.
+
+A throwaway census build of main `4ed35b59` (not committed) counted each
+call site's work on the unity self-host at `-fsyntax-only`, using the input
+and flags of [call-argument value typing](#call-argument-value-typing):
+- 1,658,911 calls with default flags and 1,640,181 under `-fc-ast-pilot`.
+  1,458,569 and 1,439,920 of them are `c_parse_expression_type_query`'s. The
+  rest are the scalar specifier attempt, the pilot's two specifier reads,
+  `c_parse_typed_constant` and `c_parse_validate_generic_duplicates`.
+- The input holds no identity site. The position index lists none, so
+  every call finds its range empty. None visits a site, records a row,
+  appends a type or reports a diagnostic. No call finds the index missing,
+  and no call is nested inside another.
+- The base's Callgrind profile (default flags) puts 53.1 M Ir inclusive in
+  the function. Almost none of it is lookup, because both binary searches run
+  over an empty list. The rest is the call itself, the guard and the save
+  and restore of a large frame. The callers also copy the by-value
+  `CPreprocessResult` argument, which that figure does not include.
+
+The candidate splits the function. An inline gate answers from the position
+index alone and returns when the index lists no site in `[start, end)`: an
+empty list, a last site before `start`, or a first site at or after `end`.
+Those are the ranges whose two lower bounds are equal, where the base's loop
+runs no iteration, so the skipped call is exactly a no-op. Every other range,
+and a missing index (which makes the base scan tokens), still calls the
+out-of-line body, unchanged. Reference-check builds (`BUSTER_REFERENCE_CHECKS`)
+check that the two lower bounds are equal for every skipped range. The gate
+is on the default path, because it needs nothing from the tree.
+
+These budgets were declared before the measured runs. The base is main
+`4ed35b59`. The four Callgrind arms are those of
+[call-argument value typing](#call-argument-value-typing): tests-off
+`-march=x86-64-v3` Release builds with a Clang-built driver, A the base with
+default flags, B the base with `-fc-ast-pilot`, C the candidate with
+`-fc-ast-pilot`, and D the candidate with default flags.
+- **Correctness:**
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms;
+  - the same exit status and no diagnostics on `-fsyntax-only` in every arm;
+  - the reference check passes in a Debug run of the C frontend and AST
+    tests, and over the unity self-host input in a Debug `ide`;
+  - a focused regression shows the gate still settles a `_Generic`, a
+    `__builtin_types_compatible_p` and a `__builtin_classify_type` site
+    inside a query's range, and skips a range beside one;
+  - `test_all` passes, and `test_self_host` keeps its fixed point.
+- **The floor, `-fsyntax-only` (D against A, and C against B).** The whole
+  compile must run at least 5 M fewer instructions, and more than the 0.05%
+  rebuild noise fewer. Each arm reports its calls to the out-of-line body.
+- **`-c` (D against A, `-g0`).** The same validation runs before lowering,
+  so the compile must also fall by at least 5 M. It may in no case grow by
+  more than the 0.05% noise.
+- **Below the floor.** The audit records a negative result, and no code
+  ships.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761).
+
+The gate's hosted census is
+[`2026-10-12T175829Z`](../../performance-audits/2026-10-12T175829Z.md),
+diagnostic only. The candidate passes every hosted budget and ships:
+- `-fsyntax-only` falls by 62.6 M Ir on the default path (−0.559%) and by
+  69.4 M under the pilot (−0.741%). `-c` falls by the same amounts (−0.245%
+  and −0.292%).
+- No call reaches the walk on the self-host. 53.1 M of the saving is the
+  function itself, and the rest is the callers' argument copy and call setup.
+- Objects are byte-identical across the four arms at `-g0` and `-g`.
+- The walk is still needed where a range holds a site. A gate that always
+  skips fails 45 fixtures in `c_frontend_tests`.
+
 ### Settling the name checks
 
 This section has its own anchor because other open AST branches append to
@@ -3696,5 +3844,69 @@ No code was written. #3812's inlined branch already uses +0.046% of the
 default path's ±0.05% band in the same frame step. The segment frames,
 alignment frames, declarators and layout attributes stay with the machine.
 Zen 5 validation stays incomplete (#2761).
+
+Results are recorded in a performance audit (`tools/new_audit.py`), not here.
+
+### Settling the name checks, second cut
+
+This section has its own anchor because other open AST branches append to
+the plan's final paragraph. After [the first cut](#settling-the-name-checks),
+a census of main `4ed35b59` under `-fc-ast-pilot`, on the same stage-2 input,
+attributed `c_ast_types_lookups_settled`'s 24.35 M inclusive Ir line by line
+from one Callgrind run (no census wrappers):
+- 132,669 calls, 6,047 settlements, 126,249 marks, one table build;
+- 6.5 M of query-time checks, about 49 Ir a call. 2.1 M of it is the
+  prologue and epilogue: every call saves and restores five callee-saved
+  registers and a frame that only the settlement loop needs;
+- 5.5 M in the flag scan, about 21 Ir per eight-byte group. Each group
+  recomputes its width and tests for a tail;
+- 8.1 M in the per-mark checks, including the binding loads and the 11,474
+  file-scope lookups;
+- 2.3 M in the table build, and 1.7 M of spills spread over the loops.
+
+The floor for a code change is 1 M Ir removable. Two items clear it:
+- the query path pays the settlement's frame on every call, though only
+  6,047 of 132,669 calls settle;
+- the scan pays per-group bookkeeping that a whole-word loop with one tail
+  does not.
+
+The candidate keeps every rule. It moves the settlement into its own
+out-of-line function, so the query path saves one register, and scans
+whole flag words with the tail assembled once. These budgets are declared
+before its measured runs. They use the same stage-2 input, flags and four
+Callgrind arms (A to D) on tests-off `-march=x86-64-v3` builds, with main
+`4ed35b59` as the base:
+- **Correctness.** No answer changes:
+  - no verify mismatch over the corpus, with the existing
+    `c_ast_test_type_lookups` probes;
+  - the typer's `-v` counters on the self-host, `lookups_settled` and
+    `lookups_walked` included, are identical in B and C;
+  - identical diagnostics with and without the flag;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **The settlement's own cost (C against B).** The inclusive instructions of
+  `c_ast_types_lookups_settled` and the new settlement function, plus any
+  increase in `c_ast_types_answer`'s and `c_ast_types_type_body`'s own
+  instructions, fall by at least 12%, and the whole compile falls by at least
+  2 M Ir. Otherwise the result is recorded as negative and the code does not
+  ship.
+- **Default path (D against A).** Within ±0.05% Ir on `-fsyntax-only` and on
+  `-c` (`-g0`).
+- **Performance acceptance.** Hosted counts are diagnostic. No 9700X
+  comparison is requested, so Zen 5 validation stays incomplete (#2761) and
+  the hook stays opt-in.
+
+The second cut's hosted census is
+[`2026-10-12T174307Z`](../../performance-audits/2026-10-12T174307Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. The typer's counters are identical in B and C,
+  and the objects of all four arms are identical at `-g0` and `-g`.
+- The settlement falls from 24.35 M to 20.43 M Ir (−16.1%), and the pilot's
+  compile by 3.92 M (−0.042%). The query path's own cost falls from about
+  6.5 M to 4.1 M, and the scan's from 5.5 M to about 3.8 M.
+- The default path moves +54 Ir on `-fsyntax-only` and +20,431 on `-c`.
+- What remains is mostly the per-mark checks (about 8 M) and the query-time
+  checks themselves. Neither has a lead above the 1 M floor that avoids
+  recording marks in the eager pass.
+- Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.

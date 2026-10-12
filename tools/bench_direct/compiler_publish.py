@@ -106,7 +106,7 @@ from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE,
                               LINK_TLS_PROFILE, LINK_TLS_REQUEST_LINE, link_tls_digest, validate_link_tls,
                               wild_linker_digest,
                               MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
-                              check_name, classify, classify_scaling, classify_throughput, host_problem, number,
+                              check_name, classify, classify_scaling, classify_throughput, host_problem, number, _number,
                               range_label, regression_policy, render, SCALING_PROFILE, scaling_digest, validate_inline_acceptance,
                               THROUGHPUT_PROFILE, throughput_digest, validate_analyzer_bundle, covered_inventory_rows,
                               HARNESS_ADMISSIONS, THROUGHPUT_HARNESS_FLOOR, THROUGHPUT_HISTORICAL_HARNESS_REVISION,
@@ -2784,9 +2784,8 @@ def campaign_json(value: object, *, max_bytes: int = MEMBER_LIMIT) -> bytes:
 
 def campaign_ppm(low: object, high: object) -> tuple[int, int, int]:
     """Conservatively compact an already replayed interval; compute no new statistic."""
-    import math
     from decimal import Decimal, localcontext, ROUND_FLOOR, ROUND_CEILING
-    if any(type(value) not in (int, float) or not math.isfinite(value) for value in (low, high)) or not 0 < low <= high:
+    if not all(_number(value) for value in (low, high)) or not 0 < low <= high:
         raise ValueError("campaign replayed interval is missing, unordered or non-finite")
     with localcontext() as context:
         context.prec = 1100
@@ -5009,7 +5008,6 @@ def utility_series_replay(files: dict[str, bytes], prefix: str, plan: dict, leg:
                           expected_cpu_model: str = "AMD Ryzen 7 9700X 8-Core Processor",
                           expected_profile: str = "compiler-compare-v1", work_root: str | None = None) -> dict:
     """Replay the ordinary profile without turning explanatory warnings into gates."""
-    import math
     from sampling_qualification_receipt import _lab
     from compiler_receipt import named_main_profile
     named_main_profile(expected_profile)
@@ -5085,14 +5083,14 @@ def utility_series_replay(files: dict[str, bytes], prefix: str, plan: dict, leg:
         if not isinstance(record, dict) or type(record.get("pair")) is not int or record["pair"] != number or \
                 record.get("order") != order or record.get("variant") != variant or \
                 type(record.get("exit")) is not int or record["exit"] != 0 or record.get("identical") is not True or \
-                type(record.get("span_s")) not in (int, float) or not math.isfinite(record["span_s"]) or \
+                not _number(record.get("span_s")) or \
                 not 0 < record["span_s"] <= 3600 or type(record.get("counters")) is not bool:
             raise ValueError("utility ordinary raw pair is failed, truncated, unordered or non-deterministic")
         if record["counters"] is not variant_meta[variant]["capabilities"]["perf_stat"]["usable"]:
             raise ValueError("utility raw timed counter status differs from its actual probe")
         for field in ("cpu_s", "maxrss_bytes", "harness_rss_bytes", "wrapper_rss_bytes"):
             value = record.get(field)
-            if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value < 0):
+            if value is not None and (not _number(value) or value < 0):
                 raise ValueError("utility unavailable resource observation is malformed")
         stem = prefix + "pairs/" + f"{number:04d}-{variant}"
         counter_raw, metrics_raw = files.get(stem + ".csv"), files.get(stem + ".ccmetrics")

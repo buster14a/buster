@@ -49,7 +49,8 @@ removed. Selected machine IR still owns its graph: AArch64 legalization can
 split canonical blocks and i128 joins expand a value into two registers. That
 is a target lowering result, not a duplicate canonical CFG.
 
-Publication clears every per-instruction `next` and every builder
+Publication clears every per-instruction `next`, in the same pass that
+permutes rows, and every builder
 parameter/predecessor first/last pointer. The linked construction graph is no
 longer retained as a second authoritative representation. Its arena allocations
 become unreachable; arena high-water memory is reclaimed when the translation
@@ -61,6 +62,8 @@ mutable links from the published slices, then clears the publication pointer.
 Call it **before** mutating published rows or CFG/value identities, and reacquire
 builder pointers afterward. Old construction-node pointers are stale. Builder
 appends and shared-promotion entry perform this transition automatically.
+Every value, block and row append calls it, so its published test is inline in
+`ir.h` and only an actual reopen calls `ir_function_reopen_cfg`.
 Uncertified preparation validates the current representation; passing false is
 not a replacement for reopening construction before a topology mutation.
 Repeated unchanged preparation reuses its publication without reconstruction.
