@@ -3255,6 +3255,82 @@ the same way and diagnostic only:
   pilot's compile by 54.2 M (−0.58%).
 - The default path is within −0.001% on `-fsyntax-only` and +0.001% on `-c`.
 
+### Call-argument value typing
+
+This section has its own anchor, because other open AST branches append to
+the plan's final paragraph. Audit
+[`2026-10-11T170541Z`](../../performance-audits/2026-10-11T170541Z.md) left
+one lead from [initializer value typing](#initializer-value-typing): call
+arguments get the same double typing. In
+`c_parse_validate_const_assignments`, each argument is typed with
+`c_parse_checked_expression_type`. When the callee has a parameter for it,
+`c_parse_incompatible_aggregate_value` then types the same range again,
+unchecked, before it decides the conversion.
+
+A Callgrind census of main `b71dfc89` (base only, exploratory, not reused as
+an arm) on the unity self-host at `-fsyntax-only`, default flags, gives the
+size of the lead:
+- The checked typing of arguments is 145,245 calls (284.4 M Ir inclusive).
+- `c_parse_incompatible_aggregate_value` is inlined into the validator. At
+  its two sites there (call arguments and assignments) it makes 189,839
+  unchecked queries, which cost 28.4 M, and the conversion checks cost
+  72.9 M.
+- The second query is cheap, about 150 Ir, because the per-body memo
+  answers an unchecked probe from the checked answer. What it still pays is
+  `c_parse_type_identity_prepare`, the lookup, and a full run where the
+  memo holds nothing, such as after a constraint message. The expected
+  saving is therefore about 20 M (0.2%), not the 82.9 M the earlier audit
+  charged to the whole wrapper. That figure included the conversion check,
+  which stays.
+
+The candidate applies the shipped rule from
+[initializer value typing](#initializer-value-typing) at the call-argument
+site. `c_parse_incompatible_checked_value` reuses the checked type when the
+checked typing succeeded and appended no type row. Otherwise it types the
+range again. Reference-check builds (`BUSTER_REFERENCE_CHECKS`) also run the
+base's re-typing and require the same verdict and message. The assignment
+site is not part of this slice. The same query feeds both the default path
+and `-fc-ast-pilot`, because the tree typer answers through
+`c_parse_expression_type_query`.
+
+These budgets were declared before the measured runs. The base is main
+`b71dfc89`. The input and flags are the initializer slice's, with four
+Callgrind arms (`--cache-sim=no --branch-sim=no`) on tests-off
+`-march=x86-64-v3` Release builds whose driver is built by Clang (no TCC on
+the host). A is the base with default flags, B the base with `-fc-ast-pilot`,
+C the candidate with `-fc-ast-pilot`, and D the candidate with default flags.
+- **Correctness:**
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms;
+  - the same exit status and no diagnostics on `-fsyntax-only` in every arm;
+  - the reference check passes in a Debug run of the C frontend and AST
+    tests, and over the unity self-host input in a Debug `ide`;
+  - the census expectations in `c_test.c` are unchanged, or any change is
+    explained by the removed query;
+  - `test_all` passes, and `test_self_host` keeps its fixed point.
+- **The floor, `-fsyntax-only` (D against A, and C against B).** The whole
+  compile must run at least 5 M fewer instructions, and more than the 0.05%
+  rebuild noise fewer. Each arm reports its calls to
+  `c_parse_expression_type_query`.
+- **`-c` (D against A, `-g0`).** The same validation runs before lowering, so
+  the compile must also fall by at least 5 M. It may in no case grow by more
+  than the 0.05% noise.
+- **Below the floor.** The audit records a negative result, and no code
+  ships.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested, so Zen 5 validation stays incomplete (#2761).
+
+The call-argument census is
+[`2026-10-12T131052Z`](../../performance-audits/2026-10-12T131052Z.md),
+diagnostic only. The candidate passes every hosted budget and ships:
+- `-fsyntax-only` falls by 27.4 M Ir on the default path (−0.254%) and by
+  30.2 M under the pilot (−0.336%). `-c` falls by the same amounts (−0.108%
+  and −0.127%).
+- 126,768 queries (141,840 under the pilot) are no longer made.
+- Objects are byte-identical across the four arms at `-g0` and `-g`.
+- The gain is small because the memo already answered most second typings.
+  The assignment site in the same validator, which pairs a checked typing
+  with the same wrapper, is left as a lead.
+
 ### Root-conditional `?` refusal without the tree
 
 For the tree-free negative test in `c_ir_root_conditional` (a per-body prefix
