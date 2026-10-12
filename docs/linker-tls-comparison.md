@@ -169,11 +169,16 @@ The implementation session ran no local build, test or timing. The matched
 baseline/candidate replay was run later, in a hosted container, as
 [audit 2026-10-12T121724Z](performance-audits/2026-10-12T121724Z.md). It
 compared the #2247 merge with its first parent on frozen, hashed inputs, with
-T from 512 to 32,768 sites. All 24 object, `-fno-plt` and archive links in
-ET_EXEC and PIE form were byte-identical between the two revisions and ran
-correctly. Paired median process latency at T=32,768 fell from 2,690 ms to
-37 ms (ET_EXEC) and from 1,822 ms to 33 ms (PIE). A no-TLS control moved by
-less than the host's noise. Cold-cache experiments, same-source rebuild
-controls and complete phase-duration profiling remain unrun. Qualified-host
-performance acceptance is still pending. CI timestamps alone are not linker
-timings. Results and actionable findings belong on #1915 / its PR.
+T from 512 to 32,768 sites, and retains its generators, driver, raw samples
+and checksums. All 24 object, `-fno-plt` and archive links in ET_EXEC and PIE
+form, plus two no-TLS controls, were byte-identical between the two revisions
+and ran correctly. Paired median process latency at T=32,768 went from
+2,712 ms to 35 ms (ET_EXEC) and from 1,857 ms to 35 ms (PIE). That is a
+measured association with the revision pair, whose scaling matches the removed
+scan; #2247 also added publication guards, and no same-source rebuild control
+isolates the index. A no-TLS control moved by less than the host's noise. This
+warm, single-object hosted replay does not substitute for cold-cache,
+many-small-object, large-archive, rebuild-control and phase-duration cohorts,
+or for matched 9700X acceptance, all of which remain pending. CI timestamps
+alone are not linker timings. Results and actionable findings belong on #1915
+/ its PR.
