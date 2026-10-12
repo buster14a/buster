@@ -579,6 +579,10 @@ explicit control of each bit wins. Level/alias policy, fixed pass order and
 budgets are in [the FAST pipeline contract](../canonical-fast-pipeline.md#native-optimization-level-policy).
 Verbose output reports disabled as well as enabled passes. Timing is separate
 (`-ftime-canonical-fast -v`); register allocation selection is independent.
+The block-local CSE experiment (#3011) is selected only by
+`-fcanonical-fast-cse`; no level or whole-pipeline control enables it, and
+`-fcanonical-fast`/`-fno-canonical-fast` clear an earlier selection. See
+[opt-in block-local CSE](../canonical-fast-pipeline.md#opt-in-block-local-cse-3011).
 
 Canonical inlining is separate from register allocation. Tiny direct-call
 inlining is opt-in at every optimization level: `-fcanonical-inline` enables

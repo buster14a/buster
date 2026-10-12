@@ -860,6 +860,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_optimization_poli
     String8 last_release[] = {S8("-O0"), S8("-O3"), S8("source.c")};
     CompilerDriverInvocation release = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(last_release));
     BUSTER_TEST(arguments, release.error == COMPILER_DRIVER_ERROR_NONE && release.optimization_level == 3 && release.fast_passes == IR_FAST_ALL);
+    // The CSE experiment (#3011) is outside every level and whole-pipeline
+    // selection; those whole-pipeline controls also clear an earlier opt-in.
+    u32 const cse = IR_FAST_PASS_BIT(IR_FAST_CSE);
+    BUSTER_TEST(arguments, !(IR_FAST_ALL & cse));
+    struct { String8 first; String8 second; u32 expected; } cse_orders[] = {
+        {S8("-fcanonical-fast"), S8("-fcanonical-fast-cse"), IR_FAST_ALL | cse},
+        {S8("-fcanonical-fast-cse"), S8("-fcanonical-fast"), IR_FAST_ALL},
+        {S8("-fcanonical-fast-cse"), S8("-fno-canonical-fast"), 0},
+        {S8("-fcanonical-fast-cse"), S8("-O0"), cse},
+        {S8("-O0"), S8("-fcanonical-fast-cse"), cse},
+        {S8("-fcanonical-fast-cse"), S8("-fno-canonical-fast-cse"), IR_FAST_ALL},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cse_orders); index += 1)
+    {
+        String8 command[] = {cse_orders[index].first, cse_orders[index].second, S8("source.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.fast_passes == cse_orders[index].expected);
+    }
     String8 overrides[] = {S8("-fno-canonical-fast"), S8("-O3"), S8("-fcanonical-fast-fold"), S8("-O0"), S8("source.c")};
     CompilerDriverInvocation overridden = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(overrides));
     BUSTER_TEST(arguments, overridden.error == COMPILER_DRIVER_ERROR_NONE && overridden.fast_passes == IR_FAST_PASS_BIT(IR_FAST_FOLD));
@@ -1066,8 +1084,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
     u32 native_count = BUSTER_ARRAY_LENGTH(modes);
     for (u32 backend = 0; backend < native_count + 3; backend += 1)
     {
-        for (u32 mask = 0; mask <= IR_FAST_ALL; mask += 1)
+        // Every subset of the adopted recipe, then the recipe plus opt-in CSE.
+        for (u32 selection = 0; selection <= IR_FAST_ALL + 1; selection += 1)
         {
+            u32 mask = selection <= IR_FAST_ALL ? selection : IR_FAST_ALL | IR_FAST_PASS_BIT(IR_FAST_CSE);
             TemporalArena temporary = arena_begin_temporal(arguments->arena);
             Arena* arena = temporary.arena;
             String8 path = buster_test_temporary_path(arena, S8("buster-canonical-fast"),
@@ -1101,7 +1121,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
             command[count++] = S8("-fcanonical-fast");
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
             {
-                if (!(mask & IR_FAST_PASS_BIT(pass))) command[count++] = string_format(arena, S8("-fno-canonical-fast-{S8}"), ir_fast_pass_name((IrFastPass)pass));
+                bool selected = (mask & IR_FAST_PASS_BIT(pass)) != 0;
+                if (selected != ((IR_FAST_ALL & IR_FAST_PASS_BIT(pass)) != 0))
+                {
+                    command[count++] = string_format(arena, selected ? S8("-fcanonical-fast-{S8}") : S8("-fno-canonical-fast-{S8}"),
+                                                     ir_fast_pass_name((IrFastPass)pass));
+                }
             }
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){command, count});
             BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.fast_passes == mask);

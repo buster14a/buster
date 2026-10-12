@@ -859,16 +859,28 @@ struct IrLocalPromotionStatistics
 // FAST is opt-in until the paired end-to-end acceptance gate passes. Each
 // selected pass runs at most once per module preparation. Budgets are per
 // function, deterministic, and never reject valid source when exhausted.
+// Enumerators are option bits; ir_fast_function runs CSE between ADDRESS and
+// DCE. IR_FAST_ALL is the adopted four-pass recipe; the CSE experiment (#3011)
+// is outside it and is selected only by its own -fcanonical-fast-cse control.
 typedef enum IrFastPass
 {
     IR_FAST_FOLD,
     IR_FAST_ADDRESS,
     IR_FAST_DCE,
     IR_FAST_PARAMETERS,
+    IR_FAST_CSE,
     IR_FAST_PASS_COUNT,
 } IrFastPass;
 #define IR_FAST_PASS_BIT(pass) (1u << (u32)(pass))
-#define IR_FAST_ALL ((1u << IR_FAST_PASS_COUNT) - 1)
+#define IR_FAST_ALL (IR_FAST_PASS_BIT(IR_FAST_FOLD) | IR_FAST_PASS_BIT(IR_FAST_ADDRESS) | IR_FAST_PASS_BIT(IR_FAST_DCE) | \
+                     IR_FAST_PASS_BIT(IR_FAST_PARAMETERS))
+#define IR_FAST_PASS_MASK ((1u << IR_FAST_PASS_COUNT) - 1)
+// One generation-tagged CSE table per module preparation, at most three
+// quarters full per block, with a bounded probe sequence. The window is the
+// census's simpler linear-window arm.
+#define IR_FAST_CSE_SLOTS 256u
+#define IR_FAST_CSE_PROBES 8u
+#define IR_FAST_CSE_WINDOW 8u
 #define IR_FAST_SCRATCH_BUDGET ((u64)16 * 1024 * 1024)
 #define IR_FAST_RETAINED_BUDGET ((u64)8 * 1024 * 1024)
 #define IR_FAST_PARAMETER_SWEEPS 4u
@@ -882,9 +894,34 @@ struct IrFastPassStatistics
     u64 changes;
 };
 typedef struct IrFastStatistics IrFastStatistics;
+// Census of the opt-in CSE pass (#3011). Candidates are admitted rows
+// (constants included; constant_hits is the share of hits that are constants); a
+// window hit's representative is at most IR_FAST_CSE_WINDOW candidates
+// earlier in its block, so a linear recent-expression window would also
+// capture it. Declines leave the row unchanged: metadata means an exact key
+// match whose result facts differ, saturation a full table or probe budget.
+// table_bytes counts every table byte initialized; the block maximum is a max.
+typedef struct IrFastCseStatistics IrFastCseStatistics;
+struct IrFastCseStatistics
+{
+    u64 blocks;
+    u64 candidates;
+    u64 hits;
+    u64 window_hits;
+    u64 commuted_hits;
+    u64 constant_hits;
+    u64 probes;
+    u64 collisions;
+    u64 metadata_declines;
+    u64 saturation_declines;
+    u64 table_bytes;
+    u64 max_block_candidates;
+};
+
 struct IrFastStatistics
 {
     IrFastPassStatistics passes[IR_FAST_PASS_COUNT];
+    IrFastCseStatistics cse;
     u64 functions;
     u64 validation_skips;
     u64 budget_skips;

@@ -2224,6 +2224,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                          measurement.functions, measurement.validation_skips, measurement.budget_skips, measurement.provenance_skips, measurement.parameter_budget_hits,
                          measurement.scratch_peak_bytes, measurement.retained_bytes, measurement.compact_nanoseconds,
                          measurement.instructions_before, measurement.instructions_after);
+            if (invocation.fast_passes & IR_FAST_PASS_BIT(IR_FAST_CSE))
+            {
+                IrFastCseStatistics cse = measurement.cse;
+                string_print(S8("IR_FAST_CSE blocks={u64} candidates={u64} hits={u64} window_hits={u64} commuted_hits={u64} constant_hits={u64} "
+                                "probes={u64} collisions={u64} metadata_declines={u64} saturation_declines={u64} table_bytes={u64} max_block_candidates={u64}\n"),
+                             cse.blocks, cse.candidates, cse.hits, cse.window_hits, cse.commuted_hits, cse.constant_hits, cse.probes, cse.collisions,
+                             cse.metadata_declines, cse.saturation_declines, cse.table_bytes, cse.max_block_candidates);
+            }
         }
         IrInlineStatistics inlining = compile.inlining;
         if (invocation.inline_options.tiny || inlining.candidates || inlining.always_inlined)
