@@ -187,6 +187,9 @@ struct CTestQualifiedShare
 };
 BUSTER_F_DECL CTestQualifiedShare c_test_qualified_share(CParseResult* result, CTypeId base);
 
+// Cast-proof token visits and logical-position probes on the calling thread.
+BUSTER_F_DECL u64 c_test_logical_label_type_work(void);
+
 // Direct member alignment queries must leave the published model, including
 // spare rows and the type-map input counts/pointers, byte-for-byte unchanged.
 typedef struct CTestMemberAlignmentQuery CTestMemberAlignmentQuery;
