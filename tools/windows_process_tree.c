@@ -4,7 +4,8 @@
 // through `launch`, and drains its job before fixture removal (#2985). CI
 // builds this file; the scheduler only receives its path.
 // Entry points:
-// - `launch <job-name> <budget-ms> <command-line>` (Windows): create the named
+// - `launch <job-name> <budget-ms> --deadline-ns <ns> --clock qpc|tick
+//   --status-path <path> <command-line>` (Windows): create the named
 //   job with kill-on-close, start the command suspended, assign it to the job,
 //   resume it, wait for it, then terminate and wait for any remaining member
 //   within the budget. Exit with the command's status, or
@@ -41,6 +42,9 @@
 #define TREE_EXIT_ABSENT 3
 // A launcher whose command finished but whose job could not be emptied.
 #define TREE_EXIT_DRAIN_FAILED 125
+#define TREE_EXIT_RUNTIME_TIMEOUT 124
+#define TREE_NS_PER_SECOND 1000000000ULL
+#define TREE_NS_PER_MILLISECOND 1000000ULL
 // Status given to members terminated by `drain`.
 #define TREE_EXIT_TERMINATED 0xC000013A
 #define TREE_MEMBER_CAPACITY 4096
@@ -320,73 +324,241 @@ BUSTER_GLOBAL_LOCAL HANDLE tree_owned_job(WCHAR const* name)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL int tree_launch(WCHAR const* name, u64 budget, WCHAR const* command_line)
+typedef struct TreeLaunchStatus TreeLaunchStatus;
+struct TreeLaunchStatus
 {
-    int result = TREE_EXIT_DRAIN_FAILED;
-    static WCHAR command[TREE_COMMAND_CAPACITY];
-    HANDLE job = tree_owned_job(name);
-    if (!job)
+    bool complete;
+    bool runtime_timed_out;
+    bool root_status_known;
+    bool clock_valid;
+    bool tick_clock;
+    DWORD root_pid;
+    DWORD root_returncode;
+    u64 runtime_deadline_ns;
+    u64 root_finished_ns;
+    u64 cleanup_started_ns;
+    u64 cleanup_finished_ns;
+};
+
+#if defined(WINDOWS_PROCESS_TREE_TEST)
+BUSTER_GLOBAL_LOCAL u32 tree_test_startup_delay_ms;
+BUSTER_GLOBAL_LOCAL u32 tree_test_cleanup_delay_ms;
+#endif
+
+// Match the adapter's actual Windows CPython monotonic clock: <=3.12 uses
+// GetTickCount64; >=3.13 uses QPC/QPF. Neither has a per-process origin.
+BUSTER_GLOBAL_LOCAL u64 tree_clock_ns(TreeLaunchStatus* status)
+{
+    u64 result = 0;
+    bool valid;
+    if (status->tick_clock)
     {
-        fprintf(stderr, "windows_process_tree: job creation failed: %lu\n", GetLastError());
-    }
-    else if (wcslen(command_line) >= TREE_COMMAND_CAPACITY)
-    {
-        fprintf(stderr, "windows_process_tree: command line exceeds %u characters\n", TREE_COMMAND_CAPACITY);
+        u64 tick = GetTickCount64();
+        valid = tick <= (u64)INT64_MAX / TREE_NS_PER_MILLISECOND;
+        if (valid)
+        {
+            result = tick * TREE_NS_PER_MILLISECOND;
+        }
     }
     else
     {
-        STARTUPINFOW startup = {.cb = sizeof(startup), .dwFlags = STARTF_USESTDHANDLES};
-        startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-        startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-        startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-        PROCESS_INFORMATION child = {0};
-        memcpy(command, command_line, (wcslen(command_line) + 1) * sizeof(WCHAR));
-        if (!CreateProcessW(0, command, 0, 0, TRUE, CREATE_SUSPENDED, 0, 0, &startup, &child))
+        LARGE_INTEGER counter;
+        LARGE_INTEGER frequency;
+        valid = QueryPerformanceCounter(&counter) && QueryPerformanceFrequency(&frequency) &&
+                counter.QuadPart >= 0 && frequency.QuadPart > 0;
+        if (valid)
         {
-            fprintf(stderr, "windows_process_tree: launch failed: %lu\n", GetLastError());
-        }
-        else if (!AssignProcessToJobObject(job, child.hProcess) || ResumeThread(child.hThread) == (DWORD)-1)
-        {
-            // The command never ran outside the job.
-            fprintf(stderr, "windows_process_tree: job assignment failed: %lu\n", GetLastError());
-            TerminateProcess(child.hProcess, TREE_EXIT_DRAIN_FAILED);
-            WaitForSingleObject(child.hProcess, INFINITE);
-        }
-        else
-        {
-            DWORD status = TREE_EXIT_DRAIN_FAILED;
-            if (WaitForSingleObject(child.hProcess, INFINITE) == WAIT_OBJECT_0 && GetExitCodeProcess(child.hProcess, &status))
+            u64 ticks = (u64)counter.QuadPart;
+            u64 rate = (u64)frequency.QuadPart;
+            u64 seconds = ticks / rate;
+            u64 remainder = ticks % rate;
+            valid = seconds <= (u64)INT64_MAX / TREE_NS_PER_SECOND &&
+                    remainder <= UINT64_MAX / TREE_NS_PER_SECOND;
+            if (valid)
             {
-                // Remaining members are leftovers of a finished command.
-                bool terminated = TerminateJobObject(job, TREE_EXIT_TERMINATED) != 0;
-                u32 error = (u32)GetLastError();
-                tree_drain(job, GetTickCount64() + budget);
-                if (!terminated)
+                u64 whole = seconds * TREE_NS_PER_SECOND;
+                u64 fraction = remainder * TREE_NS_PER_SECOND / rate;
+                valid = whole <= (u64)INT64_MAX - fraction;
+                if (valid)
                 {
-                    tree_record_failure(0, error);
-                }
-                if (tree_result.complete)
-                {
-                    result = (int)status;
-                }
-                else
-                {
-                    fprintf(stderr, "windows_process_tree: job drain incomplete after command exit: ");
-                    fflush(stderr);
-                    tree_print_drain();
+                    result = whole + fraction;
                 }
             }
         }
-        if (child.hProcess)
+    }
+    status->clock_valid = status->clock_valid && valid;
+    return result;
+}
+
+// File-backed terminal evidence is published only after teardown and checked
+// handle closes. A fresh temporary and non-replacing rename reject stale data.
+BUSTER_GLOBAL_LOCAL bool tree_launch_status(WCHAR const* path, TreeLaunchStatus const* status)
+{
+    static WCHAR temporary[TREE_COMMAND_CAPACITY];
+    char record[1024];
+    size_t length = wcslen(path);
+    bool result = length + 5 < TREE_COMMAND_CAPACITY;
+    HANDLE file = INVALID_HANDLE_VALUE;
+    if (result)
+    {
+        memcpy(temporary, path, length * sizeof(WCHAR));
+        memcpy(temporary + length, L".tmp", 5 * sizeof(WCHAR));
+        result = GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND;
+    }
+    if (result)
+    {
+        file = CreateFileW(temporary, GENERIC_WRITE, 0, 0, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0);
+        result = file != INVALID_HANDLE_VALUE;
+    }
+    if (result)
+    {
+        int bytes = snprintf(record, sizeof(record),
+            "{\"complete\":%s,\"runtime_timed_out\":%s,\"root_returncode\":%lld,\"root_pid\":%lu,"
+            "\"runtime_deadline_ns\":%llu,\"root_finished_ns\":%llu,\"cleanup_started_ns\":%llu,\"cleanup_finished_ns\":%llu}\n",
+            status->complete ? "true" : "false", status->runtime_timed_out ? "true" : "false",
+            status->root_status_known ? (long long)status->root_returncode : -1LL, (unsigned long)status->root_pid,
+            (unsigned long long)status->runtime_deadline_ns, (unsigned long long)status->root_finished_ns,
+            (unsigned long long)status->cleanup_started_ns, (unsigned long long)status->cleanup_finished_ns);
+        DWORD written = 0;
+        result = bytes > 0 && (size_t)bytes < sizeof(record) &&
+                 WriteFile(file, record, (DWORD)bytes, &written, 0) && written == (DWORD)bytes && FlushFileBuffers(file);
+    }
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        result = CloseHandle(file) != 0 && result;
+    }
+    if (result)
+    {
+        result = MoveFileExW(temporary, path, MOVEFILE_WRITE_THROUGH) != 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int tree_launch(WCHAR const* name, u64 budget, WCHAR const* command_line,
+                                    u64 deadline_ns, bool tick_clock, WCHAR const* status_path)
+{
+    int result = TREE_EXIT_DRAIN_FAILED;
+    static WCHAR command[TREE_COMMAND_CAPACITY];
+    TreeLaunchStatus status = {.clock_valid = true, .tick_clock = tick_clock, .runtime_deadline_ns = deadline_ns};
+    PROCESS_INFORMATION child = {0};
+    HANDLE job = 0;
+    bool valid = true;
+    bool assigned = false;
+#if defined(WINDOWS_PROCESS_TREE_TEST)
+    Sleep(tree_test_startup_delay_ms);
+#endif
+    u64 now = tree_clock_ns(&status);
+    status.runtime_timed_out = status.clock_valid && now >= deadline_ns;
+    if (!status.runtime_timed_out && status.clock_valid)
+    {
+        job = tree_owned_job(name);
+        valid = job != 0 && wcslen(command_line) < TREE_COMMAND_CAPACITY;
+        if (valid)
         {
-            CloseHandle(child.hThread);
-            CloseHandle(child.hProcess);
+            STARTUPINFOW startup = {.cb = sizeof(startup), .dwFlags = STARTF_USESTDHANDLES};
+            startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+            startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+            startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+            memcpy(command, command_line, (wcslen(command_line) + 1) * sizeof(WCHAR));
+            now = tree_clock_ns(&status);
+            status.runtime_timed_out = status.clock_valid && now >= deadline_ns;
+            if (status.clock_valid && !status.runtime_timed_out)
+            {
+                valid = CreateProcessW(0, command, 0, 0, TRUE, CREATE_SUSPENDED, 0, 0, &startup, &child) != 0;
+            }
+        }
+        if (valid && status.clock_valid && !status.runtime_timed_out)
+        {
+            status.root_pid = child.dwProcessId;
+            assigned = AssignProcessToJobObject(job, child.hProcess) != 0;
+            valid = assigned;
+            now = tree_clock_ns(&status);
+            status.runtime_timed_out = status.clock_valid && now >= deadline_ns;
+            if (valid && status.clock_valid && !status.runtime_timed_out)
+            {
+                valid = ResumeThread(child.hThread) != (DWORD)-1;
+            }
+        }
+        bool waiting = valid && status.clock_valid && !status.runtime_timed_out;
+        while (waiting)
+        {
+            now = tree_clock_ns(&status);
+            if (!status.clock_valid || now >= deadline_ns)
+            {
+                status.runtime_timed_out = status.clock_valid;
+                waiting = false;
+            }
+            else
+            {
+                u64 remaining_ms = (deadline_ns - now + TREE_NS_PER_MILLISECOND - 1) / TREE_NS_PER_MILLISECOND;
+                DWORD slice = (DWORD)(remaining_ms < UINT32_MAX ? remaining_ms : UINT32_MAX - 1);
+                DWORD waited = WaitForSingleObject(child.hProcess, slice);
+                if (waited == WAIT_OBJECT_0)
+                {
+                    status.root_finished_ns = tree_clock_ns(&status);
+                    status.root_status_known = GetExitCodeProcess(child.hProcess, &status.root_returncode) != 0;
+                    valid = status.root_status_known;
+                    status.runtime_timed_out = status.clock_valid && status.root_finished_ns > deadline_ns;
+                    waiting = false;
+                }
+                else if (waited != WAIT_TIMEOUT)
+                {
+                    valid = false;
+                    waiting = false;
+                }
+            }
         }
     }
-    // Kill-on-close ends any member left by a failure above.
+    status.cleanup_started_ns = tree_clock_ns(&status);
+    // Every operation after runtime completion shares this one cleanup budget.
+    // A late timeout observation cannot start a fresh allowance past runtime+budget.
+    u64 cleanup_limit_ns = deadline_ns + budget * TREE_NS_PER_MILLISECOND;
+    if (status.cleanup_started_ns < deadline_ns)
+    {
+        cleanup_limit_ns = status.cleanup_started_ns + budget * TREE_NS_PER_MILLISECOND;
+    }
+    u64 remaining_ms = status.clock_valid && status.cleanup_started_ns < cleanup_limit_ns ?
+                       (cleanup_limit_ns - status.cleanup_started_ns) / TREE_NS_PER_MILLISECOND : 0;
+    u64 cleanup_deadline = GetTickCount64() + remaining_ms;
+#if defined(WINDOWS_PROCESS_TREE_TEST)
+    Sleep(tree_test_cleanup_delay_ms);
+#endif
+    if (job && !TerminateJobObject(job, TREE_EXIT_TERMINATED))
+    {
+        valid = false;
+    }
+    if (child.hProcess)
+    {
+        if (!assigned && !TerminateProcess(child.hProcess, TREE_EXIT_DRAIN_FAILED))
+        {
+            valid = false;
+        }
+        u64 tick = GetTickCount64();
+        DWORD waited = WaitForSingleObject(child.hProcess, tick < cleanup_deadline ? (DWORD)(cleanup_deadline - tick) : 0);
+        valid = waited == WAIT_OBJECT_0 && valid;
+        if (waited == WAIT_OBJECT_0 && !status.root_status_known)
+        {
+            status.root_status_known = GetExitCodeProcess(child.hProcess, &status.root_returncode) != 0;
+            valid = status.root_status_known && valid;
+        }
+        valid = CloseHandle(child.hThread) != 0 && valid;
+        valid = CloseHandle(child.hProcess) != 0 && valid;
+    }
     if (job)
     {
-        CloseHandle(job);
+        tree_drain(job, cleanup_deadline);
+        valid = tree_result.complete && valid;
+        valid = CloseHandle(job) != 0 && valid;
+    }
+    status.cleanup_finished_ns = tree_clock_ns(&status);
+    status.complete = valid && status.clock_valid && status.cleanup_finished_ns <= cleanup_limit_ns;
+    if (status.complete)
+    {
+        result = status.runtime_timed_out ? TREE_EXIT_RUNTIME_TIMEOUT : (int)status.root_returncode;
+    }
+    if (!tree_launch_status(status_path, &status))
+    {
+        result = TREE_EXIT_DRAIN_FAILED;
     }
     return result;
 }
@@ -500,9 +672,18 @@ int main(int argc, char** argv)
         {
             fprintf(stderr, "windows_process_tree: command line decoding failed\n");
         }
-        else if (argc == 5 && strcmp(argv[1], "launch") == 0 && tree_decimal(argv[3], &budget))
+        else if (argc == 11 && strcmp(argv[1], "launch") == 0 && tree_decimal(argv[3], &budget))
         {
-            result = tree_launch(wide[2], budget, wide[4]);
+            u64 deadline_ns = 0;
+            bool tick_clock = strcmp(argv[7], "tick") == 0;
+            bool valid = strcmp(argv[4], "--deadline-ns") == 0 && tree_decimal(argv[5], &deadline_ns) &&
+                         strcmp(argv[6], "--clock") == 0 && (tick_clock || strcmp(argv[7], "qpc") == 0) &&
+                         strcmp(argv[8], "--status-path") == 0 && budget < UINT32_MAX &&
+                         deadline_ns <= (u64)INT64_MAX - budget * TREE_NS_PER_MILLISECOND;
+            if (valid)
+            {
+                result = tree_launch(wide[2], budget, wide[10], deadline_ns, tick_clock, wide[9]);
+            }
         }
         else if (argc == 4 && strcmp(argv[1], "drain") == 0 && tree_decimal(argv[3], &budget))
         {
@@ -520,8 +701,9 @@ int main(int argc, char** argv)
 #endif
     if (result == TREE_EXIT_USAGE)
     {
-        fprintf(stderr, "usage: windows_process_tree launch <job> <budget-ms> <command-line> | drain <job> <budget-ms> | "
-                        "selftest | fixture <silent|partial|malformed|late <ms>|sleep <ms>>\n");
+        fprintf(stderr, "usage: windows_process_tree launch <job> <budget-ms> --deadline-ns <ns> --clock qpc|tick "
+                        "--status-path <path> <command-line> | drain <job> <budget-ms> | "
+                        "selftest | fixture <silent|partial|malformed|repeated|partial-late <ms>|late <ms>|sleep <ms>>\n");
     }
     return result;
 }
