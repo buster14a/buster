@@ -180,6 +180,7 @@ class CaseProcess(bootstrap.WrapperProcess):
         if (not isinstance(record, dict) or record.get("complete") is not True or
                 record.get("runtime_deadline_ns") != self.runtime_deadline_ns or
                 type(record.get("runtime_timed_out")) is not bool or
+                type(record.get("cancelled")) is not bool or
                 any(type(record.get(field)) is not int for field in integer_fields)):
             raise RuntimeError("bootstrap native launch did not certify completion: " + repr(record))
         cleanup_budget_ns = int(bootstrap.CLEANUP_TIMEOUT_SECONDS * 1_000_000_000)
@@ -188,12 +189,15 @@ class CaseProcess(bootstrap.WrapperProcess):
                 not -1 <= record["root_returncode"] <= 0xFFFFFFFF or
                 not 0 <= record["root_finished_ns"] <= record["cleanup_started_ns"] or
                 not record["cleanup_started_ns"] <= record["cleanup_finished_ns"] <= cleanup_limit_ns or
+                (not (record["runtime_timed_out"] or record["cancelled"]) and
+                 (not record["root_pid"] or record["root_returncode"] < 0)) or
                 (not record["runtime_timed_out"] and
-                 (not record["root_pid"] or record["root_returncode"] < 0 or
-                  record["root_finished_ns"] > self.runtime_deadline_ns))):
+                 record["root_finished_ns"] > self.runtime_deadline_ns)):
             raise RuntimeError("bootstrap native launch record violates its deadlines: " + repr(record))
-        if (getattr(self, "require_terminal_observation", False) and
-                time.monotonic_ns() > self.terminal_deadline_ns):
+        observation_deadline_ns = getattr(self, "cleanup_observation_deadline_ns", None)
+        if getattr(self, "require_terminal_observation", False):
+            observation_deadline_ns = min(observation_deadline_ns, self.terminal_deadline_ns) if observation_deadline_ns is not None else self.terminal_deadline_ns
+        if observation_deadline_ns is not None and time.monotonic_ns() > observation_deadline_ns:
             raise RuntimeError("bootstrap native launch terminal record observed after its deadline")
         expected = LAUNCH_RUNTIME_TIMEOUT_EXIT if record["runtime_timed_out"] else 0
         if self.process.returncode != expected:
@@ -211,41 +215,39 @@ class CaseProcess(bootstrap.WrapperProcess):
             started = time.monotonic()
             drain_error = None
             try:
-                # Waiting only for the direct child can remove fixtures while a
-                # descendant still holds its inherited Windows current-directory
-                # handle (#2985). Drain the whole job first; the launcher then
-                # exits with its command, before the frozen reap looks at it.
-                if not self.cleaned and os.name == "nt" and self.process.poll() is None:
+                if os.name == "nt":
                     deadline = started + bootstrap.CLEANUP_TIMEOUT_SECONDS
                     terminal_deadline_ns = getattr(self, "terminal_deadline_ns", None)
                     if terminal_deadline_ns is not None:
                         deadline = min(deadline, terminal_deadline_ns / 1_000_000_000)
                     try:
-                        self.job_drain = drain_job(self.job_name, deadline)
-                        if self.job_drain.get("absent") and self.process.poll() is None:
-                            raise RuntimeError("bootstrap case job is missing while its launcher runs: " +
-                                               self.job_name)
-                        self.descendant_waited_pids.extend(self.job_drain.get("waited", ()))
+                        if not self.cleaned and self.process.poll() is None:
+                            self.cleanup_observation_deadline_ns = int(deadline * 1_000_000_000)
+                            # Let the owner acknowledge cancellation even before
+                            # it creates/assigns the payload. An external drain
+                            # can race that startup and miss the new member.
+                            self.launch_status_path.with_name(self.launch_status_path.name + ".cancel").touch(exist_ok=False)
                         self.process.wait(timeout=max(0.0, deadline - time.monotonic()))
-                    except subprocess.TimeoutExpired:
-                        drain_error = RuntimeError("bootstrap case launcher outlived its drained job: " +
-                                                   self.job_name)
+                        self.launch_status()
                     except Exception as error:
                         drain_error = error
-                try:
-                    super().cleanup()
-                except Exception as error:
-                    if drain_error is not None:
-                        error = RuntimeError("bootstrap descendant cleanup failures: " +
-                                             repr([drain_error, error]))
-                    drain_error = error
-                if drain_error is None and os.name == "nt":
-                    # Reaping the launcher alone cannot certify its job empty.
-                    # Broker status and the record must agree for every
-                    # Windows completion, including cleanup without finish().
+                    finally:
+                        # A failed native owner is still reaped, within the
+                        # same cleanup allowance; it never becomes certified.
+                        try:
+                            if self.process.poll() is None:
+                                self.process.kill()
+                            self.process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                        except Exception as error:
+                            if drain_error is not None:
+                                error = RuntimeError("bootstrap descendant cleanup failures: " +
+                                                     repr([drain_error, error]))
+                            drain_error = error
+                    self.cleaned = drain_error is None
+                else:
                     try:
-                        self.launch_status()
-                    except RuntimeError as error:
+                        super().cleanup()
+                    except Exception as error:
                         drain_error = error
                 if drain_error is not None:
                     raise drain_error
@@ -265,8 +267,15 @@ class CaseProcess(bootstrap.WrapperProcess):
                 # cleanup; explicit shorter waits still use the frozen reap.
                 self.terminal_deadline_ns = self.runtime_deadline_ns + int(bootstrap.CLEANUP_TIMEOUT_SECONDS * 1_000_000_000)
                 observed_ns = time.monotonic_ns()
+                legacy_deadline_ns = int((self.started + bootstrap.WRAPPER_TIMEOUT_SECONDS) * 1_000_000_000)
+                if legacy_deadline_ns < self.runtime_deadline_ns:
+                    # Preserve the frozen expired-launch control as a strictly
+                    # shorter caller wait; it cannot extend the native budget.
+                    self.terminal_deadline_ns = legacy_deadline_ns + int(bootstrap.CLEANUP_TIMEOUT_SECONDS * 1_000_000_000)
+                    timeout_seconds = max(0.0, (legacy_deadline_ns - observed_ns) / 1_000_000_000)
+                else:
+                    timeout_seconds = max(0.0, (self.terminal_deadline_ns - observed_ns) / 1_000_000_000)
                 self.require_terminal_observation = observed_ns < self.terminal_deadline_ns
-                timeout_seconds = max(0.0, (self.terminal_deadline_ns - observed_ns) / 1_000_000_000)
             result = super().finish(timeout_seconds)
             if self.job_name is not None:
                 record = self.launch_status()
