@@ -1431,6 +1431,55 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
     BUSTER_TEST(arguments, x86_64.target.cpu_model == baseline.target.cpu_model);
     BUSTER_TEST(arguments, x86_64.target.cpu_features_explicit == baseline.target.cpu_features_explicit);
     BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(x86_64.target), target_cpu_features_effective(baseline.target)));
+    String8 abi_control_line[] = {S8("--target=x86_64-linux"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation abi_control = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(abi_control_line));
+    // QEMU's host probe repeats -m64. It must preserve the x86-64 ABI and
+    // diagnose the final target in either option order.
+    for (u32 order = 0; order < 2; order += 1)
+    {
+        String8 targets[] = {S8("--target=x86_64-linux"), S8("--target=aarch64-linux"), S8("--target=wasm32-wasi"), S8("--target=spirv64")};
+        for (u32 target_i = 0; target_i < BUSTER_ARRAY_LENGTH(targets); target_i += 1)
+        {
+            String8 line[] = {order ? targets[target_i] : S8("-m64"), order ? S8("-m64") : targets[target_i],
+                              S8("-m64"), S8("-c"), S8("source.c")};
+            CompilerDriverInvocation abi = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(line));
+            BUSTER_TEST(arguments, abi.error == (target_i ? COMPILER_DRIVER_ERROR_ARGUMENT : COMPILER_DRIVER_ERROR_NONE));
+            if (target_i)
+            {
+                BUSTER_STRING_TEST(arguments, abi.diagnostic, S8("unsupported option: -m64 for this target"));
+            }
+            else
+            {
+                BUSTER_TEST(arguments, abi.target.cpu_arch == CPU_ARCH_X86_64 && abi.target.os == OPERATING_SYSTEM_LINUX);
+                BUSTER_TEST(arguments, abi.target.cpu_model == abi_control.target.cpu_model);
+                BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(abi.target), target_cpu_features_effective(abi_control.target)));
+            }
+        }
+    }
+    // The last execution mode wins, including restoring long mode from i386.
+    String8 modes[] = {S8("-m16"), S8("-m32"), S8("-m64")};
+    for (u32 first = 0; first < BUSTER_ARRAY_LENGTH(modes); first += 1)
+    {
+        for (u32 last = 0; last < BUSTER_ARRAY_LENGTH(modes); last += 1)
+        {
+            for (u32 order = 0; order < 2; order += 1)
+            {
+                String8 line[] = {order ? S8("--target=i386-linux") : modes[first],
+                                  order ? modes[first] : S8("--target=i386-linux"), modes[last], S8("-fsyntax-only"), S8("source.c")};
+                CompilerDriverInvocation abi = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(line));
+                BUSTER_TEST(arguments, abi.error == COMPILER_DRIVER_ERROR_NONE);
+                BUSTER_TEST(arguments, abi.target.cpu_arch == (last == 2 ? CPU_ARCH_X86_64 : CPU_ARCH_I386));
+                BUSTER_TEST(arguments, abi.target.x86_code16 == (last == 0));
+            }
+        }
+    }
+    String8 unsupported_abis[] = {S8("-mx32"), S8("-m640")};
+    for (u32 abi_i = 0; abi_i < BUSTER_ARRAY_LENGTH(unsupported_abis); abi_i += 1)
+    {
+        String8 line[] = {S8("--target=x86_64-linux"), unsupported_abis[abi_i], S8("-c"), S8("source.c")};
+        CompilerDriverInvocation abi = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(line));
+        BUSTER_STRING_TEST(arguments, abi.diagnostic, string_format(arguments->arena, S8("unsupported option: {S8}"), unsupported_abis[abi_i]));
+    }
     // -mattr keeps refining the level in either order, and -mcpu is the same option.
     String8 refined_line[] = {S8("-mattr=-avx2"), S8("--target=x86_64-linux"), S8("-mcpu=x86-64-v3"), S8("-c"), S8("source.c")};
     CompilerDriverInvocation refined = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(refined_line));
@@ -1618,7 +1667,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
     }
     // A spelling that names no feature stays an unsupported option, typed as
     // the user wrote it, and the options that are not features keep failing.
-    String8 refused_spellings[] = {S8("-mfoo"), S8("-mno-foo"), S8("-m64"), S8("-mred-zone"), S8("-mno-red-zone"), S8("-mno-"), S8("-m"),
+    String8 refused_spellings[] = {S8("-mfoo"), S8("-mno-foo"), S8("-mred-zone"), S8("-mno-red-zone"), S8("-mno-"), S8("-m"),
                                    S8("-mavx2=1"), S8("-mtune="), S8("-march="), S8("-mAVX2")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused_spellings); index += 1)
     {

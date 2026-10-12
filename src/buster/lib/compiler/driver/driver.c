@@ -2170,10 +2170,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             options_ended = true;
             continue;
         }
-        if (string_equal(argument, S8("-m16")) || string_equal(argument, S8("-m32")))
+        if (string_equal(argument, S8("-m16")) || string_equal(argument, S8("-m32")) || string_equal(argument, S8("-m64")))
         {
             x86_execution_mode_option = argument;
-            x86_execution_mode = string_equal(argument, S8("-m16")) ? 16 : 32;
+            x86_execution_mode = string_equal(argument, S8("-m16")) ? 16 : string_equal(argument, S8("-m32")) ? 32 : 64;
             x86_execution_mode_seen = true;
             continue;
         }
@@ -3414,11 +3414,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 else
                 {
                     Target x86_mode_target = invocation.target;
-                    if (x86_mode_target.cpu_model == CPU_MODEL_NATIVE)
+                    if (x86_execution_mode != 64 && x86_mode_target.cpu_model == CPU_MODEL_NATIVE)
                     {
                         x86_mode_target.cpu_model = CPU_MODEL_BASELINE;
                     }
-                    x86_mode_target.cpu_arch = CPU_ARCH_I386;
+                    x86_mode_target.cpu_arch = x86_execution_mode == 64 ? CPU_ARCH_X86_64 : CPU_ARCH_I386;
                     x86_mode_target.x86_code16 = x86_execution_mode == 16;
                     if (!target_os_supports_arch(x86_mode_target.cpu_arch, x86_mode_target.os))
                     {

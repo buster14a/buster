@@ -384,6 +384,12 @@ publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
 the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
 not predefined at any level. `-mattr` overrides still refine the level.
 The psABI's LAHF-SAHF has no target feature and is implied by long mode.
+`-m64` selects x86-64 execution mode, including from an i386 target, and clears
+`code16`. Together with `-m16` and `-m32`, the last spelling wins independently
+of `--target` order. Repeated `-m64` preserves an existing x86-64 target's OS
+data model and CPU features. All three modes are refused for foreign and GPU
+targets; `-mx32` remains unsupported (#3458).
+
 For 32-bit x86, the canonical target architecture is `i386`; `i386`, `i486`,
 `i586` and `i686` are accepted architecture spellings, while `-march=i386`
 and `-march=i686` select explicit CPU models. The I386 baseline models GCC's
