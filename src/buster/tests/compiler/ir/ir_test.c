@@ -1968,7 +1968,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, defaults_program->inline_options.max_callee_instructions == IR_INLINE_TINY_INSTRUCTIONS);
             BUSTER_TEST(arguments, defaults_program->inline_options.max_function_growth == IR_INLINE_FUNCTION_GROWTH);
             BUSTER_TEST(arguments, IR_INLINE_FUNCTION_GROWTH == 2048u);
-            BUSTER_TEST(arguments, defaults_program->inline_options.max_module_growth == IR_INLINE_MODULE_GROWTH);
+            // The module limit stays relative so each module derives its own.
+            BUSTER_TEST(arguments, defaults_program->inline_options.max_module_growth == 0);
+            BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, 0) == IR_INLINE_MODULE_GROWTH);
+            BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, (u64)IR_INLINE_MODULE_GROWTH << IR_INLINE_MODULE_GROWTH_SHIFT) ==
+                                       IR_INLINE_MODULE_GROWTH);
+            BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, 2000000u) == 2000000u / 32u);
+            BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, UINT64_MAX) == UINT32_MAX);
+            BUSTER_TEST(arguments, ir_inline_module_growth_limit(100u, 2000000u) == 100u);
             BUSTER_TEST(arguments, defaults_program->inline_options.max_call_sites == IR_INLINE_CALL_SITES);
             BUSTER_TEST(arguments, defaults_module->inline_complete);
             BUSTER_TEST(arguments, defaults_module->inlining.inlined >= 1);

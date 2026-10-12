@@ -2067,7 +2067,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             .tiny = false,
             .max_callee_instructions = IR_INLINE_TINY_INSTRUCTIONS,
             .max_function_growth = IR_INLINE_FUNCTION_GROWTH,
-            .max_module_growth = IR_INLINE_MODULE_GROWTH,
+            // Zero: relative to each module (ir_inline_module_growth_limit).
+            .max_module_growth = 0,
             .max_call_sites = IR_INLINE_CALL_SITES,
         },
     };

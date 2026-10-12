@@ -505,6 +505,17 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_plan_graph(IrProgram* program, IrModule* modu
     }
     return result;
 }
+u32 ir_inline_module_growth_limit(u32 max_module_growth, u64 module_rows)
+{
+    u32 result = max_module_growth;
+    if (!result)
+    {
+        u64 relative = module_rows >> IR_INLINE_MODULE_GROWTH_SHIFT;
+        result = relative > IR_INLINE_MODULE_GROWTH ? (u32)BUSTER_MIN(relative, (u64)UINT32_MAX) : IR_INLINE_MODULE_GROWTH;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrModule* module)
 {
     IrValidationResult result = (IrValidationResult){.error = IR_VALIDATION_NONE, .boundary = IR_VALIDATION_BOUNDARY_INLINE_OUTPUT};
@@ -518,7 +529,6 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
         IrInlineOptions options = program->inline_options;
         if (!options.max_callee_instructions) options.max_callee_instructions = IR_INLINE_TINY_INSTRUCTIONS;
         if (!options.max_function_growth) options.max_function_growth = IR_INLINE_FUNCTION_GROWTH;
-        if (!options.max_module_growth) options.max_module_growth = IR_INLINE_MODULE_GROWTH;
         if (!options.max_call_sites) options.max_call_sites = IR_INLINE_CALL_SITES;
         program->inline_options = options;
         bool has_required = false;
@@ -527,13 +537,18 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
             has_required |= program->symbols.symbols[symbol].always_inline;
         }
         u64 planning_rows = 0;
+        u64 module_rows = 0;
         for (u32 function = 0; function < module->function_count; function += 1)
         {
             IrFunction* candidate = module->functions + function;
             if (candidate->state != IR_FUNCTION_LOWERED) continue;
             planning_rows = ir_inline_storage_add(planning_rows, candidate->block_count);
             planning_rows = ir_inline_storage_add(planning_rows, candidate->instruction_count);
+            module_rows = ir_inline_storage_add(module_rows, candidate->instruction_count);
         }
+        // A zero module limit stays relative in the program's options, so
+        // each module derives its own; only this pass uses the result.
+        options.max_module_growth = ir_inline_module_growth_limit(options.max_module_growth, module_rows);
         u64 planning_units = ir_inline_storage_add(module->function_count, program->symbols.count);
         if (has_required)
         {

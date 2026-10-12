@@ -899,9 +899,15 @@ struct IrFastStatistics
 
 // Direct-call expansion is independent of register allocation and FAST cleanup.
 // Zero option limits select these defaults; limits count canonical rows/sites.
+// A zero module limit is relative to the module: the larger of
+// IR_INLINE_MODULE_GROWTH and the module's lowered canonical instruction rows
+// shifted right by IR_INLINE_MODULE_GROWTH_SHIFT (1/32 growth). A fixed
+// module cap starves optional sites in large translation units, because
+// callers are visited in module order rather than by profit (#48).
 #define IR_INLINE_TINY_INSTRUCTIONS 16u
 #define IR_INLINE_FUNCTION_GROWTH (2u * IR_INLINE_TINY_INSTRUCTIONS * IR_INLINE_CALL_SITES)
 #define IR_INLINE_MODULE_GROWTH 4096u
+#define IR_INLINE_MODULE_GROWTH_SHIFT 5u
 #define IR_INLINE_CALL_SITES 64u
 
 typedef struct IrInlineOptions IrInlineOptions;
@@ -913,6 +919,9 @@ struct IrInlineOptions
     u32 max_module_growth;
     u32 max_call_sites;
 };
+
+// Effective module row-growth limit for `module_rows` lowered canonical rows.
+BUSTER_F_DECL u32 ir_inline_module_growth_limit(u32 max_module_growth, u64 module_rows);
 
 typedef enum IrInlineBudgetReason
 {
