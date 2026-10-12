@@ -27669,11 +27669,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_pic_tlsdesc(Unit
 #endif
                     String8 command[] = {S8("-target"), targets[target], S8("-nostdinc"), S8("-g0"), modes[mode], frontends[frontend],
                         S8("-c"), flags[flag], S8("-fverify-codegen"), S8("-fno-machine-fallback"), input, S8("-o"), output};
-                    CompilerDriverResult compiled = {0};
-                    bool compile_ok = host_control;
+                    bool compile_ok;
                     if (!host_control)
                     {
-                        compiled = compiler_driver_execute_invocation(arena,
+                        CompilerDriverResult compiled = compiler_driver_execute_invocation(arena,
                             compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
                         compile_ok = compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object;
                         BUSTER_TEST_RAW(arguments, compile_ok, compiled.diagnostic);
@@ -27705,6 +27704,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_pic_tlsdesc(Unit
                                 }
                             }
                         }
+                    }
+                    else
+                    {
+                        compile_ok = true;
                     }
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && BUSTER_CPU_ARCH_AARCH64 && !BUSTER_ANDROID
                     if (compile_ok && target == 0 && flag == 0)
