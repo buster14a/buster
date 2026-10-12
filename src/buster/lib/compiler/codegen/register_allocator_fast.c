@@ -156,7 +156,6 @@ struct MachineFastState
     // sentinel, maintained by every site that binds or releases a register,
     // and `dirty_mask` is a subset of it.
     u64 held_mask;
-    u64 dirty_mask;
     // Current register per vreg, or UINT32_MAX when the slot is the home.
     u32* virtual_register_locations;
     // Stage-5 liveness: the instruction index of each vreg's last textual
@@ -165,6 +164,11 @@ struct MachineFastState
     // hazards live only across blocks); a non-escaping value strictly past
     // its last use is dead and its spill store is dropped.
     u32* last_use;
+    // Not adjacent to `held_mask`: both often take the same lane update, and
+    // as neighbours the vectorizer fuses them into one 16-byte
+    // read-modify-write whose load spans an earlier 8-byte store to either
+    // mask, which cannot be store-forwarded.
+    u64 dirty_mask;
     u8* escapes;
     // Registers the row being scanned reserves (clobbers, fixed and physical
     // operands, constrained scratches); `machine_fast_vacate` never moves a
