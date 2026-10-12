@@ -11,6 +11,8 @@ struct CompilerDriverDependencyQuoteResult
     bool representable;
 };
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL void compiler_driver_test_merge_fast_declines(Arena* arena, IrFastStatistics* total, IrFastStatistics const* unit,
+                                                            String8 source, u64* capacity);
 // GCC Makefile escaping and object-derived depfile path helpers.
 BUSTER_F_DECL CompilerDriverDependencyQuoteResult compiler_driver_dependency_quote(Arena* arena, String8 value);
 BUSTER_F_DECL String8 compiler_driver_dependency_path(Arena* arena, String8 object_path);

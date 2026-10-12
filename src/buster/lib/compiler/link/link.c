@@ -27,6 +27,8 @@
 // bounded linear work after group arbitration; state marks detect cycles and
 // replay each unresolved path without allocating an auxiliary stack.
 // link_validate_linker_arguments refuses unconsumed options before any writer.
+// link_elf_runtime_path owns loader path/dtag spelling; link_elf_z_option
+// drives hardening and the opt-in link_elf_relr_pack transformation.
 // link_elf_version_script_prepare parses one bounded GNU version node and
 // localizes definitions before preemption planning; link_elf_version_definition_write
 // emits the matching base/node definitions alongside versioned imports.
@@ -231,7 +233,8 @@ BUSTER_GLOBAL_LOCAL void link_elf_loaded_section_indices(ObjectFile* object, u64
 #define BUSTER_LINK_ELF_SYMBOL_SIZE 24
 #define BUSTER_LINK_ELF_SECTION_TYPE_VERSION_NEED 0x6ffffffe
 #define BUSTER_LINK_ELF_SECTION_TYPE_VERSION_SYMBOLS 0x6fffffff
-#define BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT 15
+#define BUSTER_LINK_ELF_SECTION_TYPE_RELR 19
+#define BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT 16
 #define BUSTER_LINK_ELF_VERSION_DEFINITION_COUNT 2
 #define BUSTER_LINK_ELF_SECTION_DESCRIPTOR_CAPACITY                                                                                                          \
     (BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds) + 1 + BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT + BUSTER_ARRAY_LENGTH(link_elf_debug_kinds) + 2)
@@ -269,6 +272,8 @@ struct LinkElfSectionTableLayout
     // A zero size leaves the section out of the table.
     u64 data_relocation_offset;
     u64 data_relocation_size;
+    u64 relr_offset;
+    u64 relr_size;
     u64 got_data_offset;
     u64 got_data_size;
     u64 init_array_offset;
@@ -4611,6 +4616,13 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
                     .type = 15,
                 };
             }
+            if (layout.relr_size)
+            {
+                descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                    .name = S8(".relr.dyn"), .flags = 0x2, .address = image_base + layout.relr_offset,
+                    .offset = layout.relr_offset, .size = layout.relr_size, .alignment = 8, .entry_size = 8, .type = BUSTER_LINK_ELF_SECTION_TYPE_RELR,
+                };
+            }
         }
         u64 debug_offsets[BUSTER_ARRAY_LENGTH(link_elf_debug_kinds)];
         u64 cursor = result->executable.length;
@@ -4958,6 +4970,9 @@ enum
     ELF_DYNAMIC_PROGRAM_HEADER_INDEX = 5,
     ELF_DYNAMIC_TAG_TEXTREL = 22,
     ELF_DYNAMIC_TAG_FLAGS = 30,
+    ELF_DYNAMIC_TAG_RELRSZ = 35,
+    ELF_DYNAMIC_TAG_RELR = 36,
+    ELF_DYNAMIC_TAG_RELRENT = 37,
     ELF_DYNAMIC_TAG_PREINIT_ARRAY = 32,
     ELF_DYNAMIC_TAG_PREINIT_ARRAYSZ = 33,
     ELF_DYNAMIC_TAG_FLAGS_1 = 0x6ffffffb,
@@ -5903,6 +5918,23 @@ BUSTER_GLOBAL_LOCAL LinkElfRuntimePath link_elf_runtime_path(Arena* arena, Nativ
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool link_elf_z_option(NativeExecutableLinkOptions options, String8 name)
+{
+    bool found = false;
+    for (u32 index = 0; index + 1 < options.linker_argument_count; index += 1)
+    {
+        String8 argument = options.linker_arguments[index];
+        if (string_equal(argument, S8("-z"))) found |= string_equal(options.linker_arguments[++index], name);
+        else if (link_elf_linker_argument_takes_operand(argument)) index += 1;
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_elf_options_require_dynamic(NativeExecutableLinkOptions options)
+{
+    return link_elf_z_option(options, S8("relro")) || link_elf_z_option(options, S8("now")) || link_elf_z_option(options, S8("noexecstack"));
+}
+
 BUSTER_GLOBAL_LOCAL String8 link_elf_linker_argument_soname(NativeExecutableLinkOptions options)
 {
     String8 result = {0};
@@ -6244,14 +6276,14 @@ struct LinkElfVersionPlan
 };
 
 BUSTER_GLOBAL_LOCAL LinkElfVersionPlan link_elf_version_plan_build(Arena* arena, LinkElfIndex* exports, String8 const* names, u64 name_count,
-                                                                   u64 import_name_count, u32 needed_library_count, u16 first_index)
+                                                                   u64 import_name_count, u32 needed_library_count, u16 first_index, bool relr)
 {
     LinkElfVersionPlan plan = {.first_index = first_index};
     plan.version_libraries = arena_allocate(arena, u32, name_count + 1);
     plan.version_names = arena_allocate(arena, String8, name_count + 1);
     plan.version_name_offsets = arena_allocate(arena, u32, name_count + 1);
     plan.name_versions = arena_allocate(arena, u16, name_count + 1);
-    u64 maximum_versions = BUSTER_MIN(name_count, (u64)ELF_VERSION_INDEX_MAX - first_index + 1);
+    u64 maximum_versions = BUSTER_MIN(name_count + (u64)relr, (u64)ELF_VERSION_INDEX_MAX - first_index + 1);
     u64 version_capacity = link_elf_index_capacity(maximum_versions);
     u64 version_index_bytes = (version_capacity + maximum_versions + (u64)needed_library_count * 3) * sizeof(u32) + 5 * BUSTER_ALIGN_OF(u32);
     u32* version_slots = 0;
@@ -6271,14 +6303,17 @@ BUSTER_GLOBAL_LOCAL LinkElfVersionPlan link_elf_version_plan_build(Arena* arena,
         memset(plan.library_version_first, 0xff, (u64)needed_library_count * sizeof(u32));
         memset(library_version_last, 0xff, (u64)needed_library_count * sizeof(u32));
     }
-    for (u64 entry = 0; plan.error == LINK_ERROR_NONE && entry < name_count; entry += 1)
+    for (u64 entry = 0; plan.error == LINK_ERROR_NONE && entry < name_count + (u64)relr; entry += 1)
     {
-        String8 name = names[entry];
+        // GLIBC_ABI_DT_RELR is an empty version node, not a symbol import.
+        // Its synthetic plan entry binds to the implicit libc (library zero).
+        bool abi_dependency = entry == name_count;
+        String8 name = abi_dependency ? S8("GLIBC_ABI_DT_RELR") : names[entry];
         u32 library_index = 0;
-        String8 version = {0};
+        String8 version = abi_dependency ? name : (String8){0};
         bool no_default = false;
         u16 version_index = 0;
-        if (link_elf_symbol_version(exports, name, &library_index, &version, &no_default))
+        if (abi_dependency || link_elf_symbol_version(exports, name, &library_index, &version, &no_default))
         {
             u64 bucket = 0;
             if (version.length)
@@ -6635,7 +6670,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         has_undefined_symbol = has_undefined_symbol || link_elf_symbol_needs_dynamic_import(exports, &object->symbols[symbol_index]);
     }
     LinkElfRuntimePath runtime_path = link_elf_runtime_path(arena, options);
-    if (!has_undefined_symbol && !has_thread_local_data && !options.dynamic_library_count && !script->name.length && !runtime_path.path.length)
+    if (!has_undefined_symbol && !has_thread_local_data && !options.dynamic_library_count && !script->name.length && !runtime_path.path.length && !link_elf_options_require_dynamic(options))
     {
         return link_native_executable_elf64_x86_64(arena, object, options);
     }
@@ -6928,7 +6963,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     String8* versioned_names = arena_allocate(arena, String8, versioned_name_count + 1);
     memcpy(versioned_names, import_names, (u64)import_count * sizeof(*versioned_names));
     memcpy(versioned_names + import_count, copies.alias_names, (u64)alias_count * sizeof(*versioned_names));
-    LinkElfVersionPlan versions = link_elf_version_plan_build(arena, exports, versioned_names, versioned_name_count, import_count, needed_library_count, script->name.length ? 3 : 2);
+    LinkElfVersionPlan versions = link_elf_version_plan_build(arena, exports, versioned_names, versioned_name_count, import_count, needed_library_count, script->name.length ? 3 : 2, false);
     if (versions.error != LINK_ERROR_NONE)
     {
         result.error = versions.error;
@@ -7829,7 +7864,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
 //        .rela.plt
 //   RW, read-only after relocation (PT_GNU_RELRO): .rodata, [.init_array,
 //        .fini_array], .dynamic, .got
-//   RW: .got.plt (PLT slots), .data, .tdata, .tbss, .bss, [PIE copy slots]
+//   RW: .got.plt (inside RELRO under -z now), .data, .tdata, .tbss, .bss, [PIE copy slots]
 // .rodata moves behind the relocation boundary because a C constant may hold
 // an address, and the one page of alignment is what avoids text relocations.
 
@@ -8747,6 +8782,69 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_hash_write(LinkElfPicImage* image, u8* byt
     }
 }
 
+// RELR stores implicit addends in their target words. Compact the remaining
+// RELA entries in place, then use their freed reservation for direct RELR
+// addresses and 63-word bitmaps. Natural emission order needs no sorting:
+// each direct address resets the loader's base. Unaligned and zero-fill sites
+// retain RELA; symbolic, TLS, COPY and IRELATIVE entries are never converted.
+BUSTER_GLOBAL_LOCAL bool link_elf_relr_pack(Arena* arena, u8* bytes, u64 byte_count, u64 offset, u64* size, u64* relr_offset, u64* relr_size)
+{
+    u64 count = *size / ELF_RELOCATION_SIZE;
+    u64 capacity = link_elf_index_capacity(count);
+    u64 scratch_bytes = (count + capacity) * sizeof(u64) + 2 * BUSTER_ALIGN_OF(u64);
+    bool valid = scratch_bytes <= arena->reserved_size - arena->position;
+    u64* addresses = valid ? arena_allocate(arena, u64, count) : 0;
+    u64* seen = valid ? arena_allocate_zeroed(arena, u64, capacity) : 0;
+    u64 relative_count = 0;
+    u64 retained = 0;
+    for (u64 index = 0; valid && index < count; index += 1)
+    {
+        u64 record = offset + index * ELF_RELOCATION_SIZE;
+        u64 address = link_read_u64(bytes, record);
+        u64 info = link_read_u64(bytes, record + 8);
+        if (info == ELF_RELOCATION_TYPE_X86_64_RELATIVE && !(address & 7) && address <= byte_count && byte_count - address >= 8)
+        {
+            u64 slot = buster_hash_64((u8*)&address, sizeof(address)) & (capacity - 1);
+            while (seen[slot] && seen[slot] != address + 1) slot = (slot + 1) & (capacity - 1);
+            valid = !seen[slot];
+            if (valid)
+            {
+                seen[slot] = address + 1;
+                addresses[relative_count++] = address;
+                link_write_u64(bytes, address, link_read_u64(bytes, record + 16));
+            }
+        }
+        else
+        {
+            if (retained != index) memmove(bytes + offset + retained * ELF_RELOCATION_SIZE, bytes + record, ELF_RELOCATION_SIZE);
+            retained += 1;
+        }
+    }
+    *relr_offset = offset + *size - relative_count * sizeof(u64);
+    *size = retained * ELF_RELOCATION_SIZE;
+    *relr_size = 0;
+    u64 base = 0;
+    u64 bitmap = 0;
+    for (u64 index = 0; valid && index < relative_count; index += 1)
+    {
+        u64 address = addresses[index];
+        if (*relr_size && address >= base && (address - base) / 8 < 63)
+        {
+            if (!bitmap) { bitmap = 1; *relr_size += sizeof(u64); }
+            bitmap |= UINT64_C(1) << ((address - base) / 8 + 1);
+            link_write_u64(bytes, *relr_offset + *relr_size - sizeof(u64), bitmap);
+        }
+        else
+        {
+            link_write_u64(bytes, *relr_offset + *relr_size, address);
+            *relr_size += sizeof(u64);
+            base = address + sizeof(u64);
+            bitmap = 0;
+        }
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_independent(Arena* arena, ObjectFile* object,
                                                                                             NativeExecutableLinkOptions options,
                                                                                             LinkElfIndex* exports, LinkElfVersionScript* script)
@@ -8772,6 +8870,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
         }
     }
     bool shared = options.image_kind == NATIVE_IMAGE_SHARED;
+    bool bind_now = link_elf_z_option(options, S8("now"));
+    bool pack_relative = link_elf_z_option(options, S8("pack-relative-relocs"));
     LinkElfPicImage image = {.object = object, .exports = exports, .local_dynamic_slot = UINT32_MAX, .shared = shared, .aarch64 = aarch64};
     if (aarch64 && (!bionic || shared))
     {
@@ -8908,6 +9008,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
         result.symbol = image.symbol;
         result.requires_position_independent_objects = image.requires_position_independent_objects;
     }
+    bool use_relr = pack_relative && image.dynamic_relocation_count != 0;
+    if (use_relr && !options.runtime_relr)
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+        result.symbol = S8("-z pack-relative-relocs requires libc GLIBC_ABI_DT_RELR support");
+    }
     String8 soname = shared ? link_elf_linker_argument_soname(options) : (String8){0};
     u32 needed_library_count = options.dynamic_library_count + 1;
     u32* library_name_offsets = arena_allocate(arena, u32, (u64)needed_library_count + 1);
@@ -8957,7 +9063,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
             versioned_names[import] = object->symbols[image.dynamic_symbols[import + 1]].name;
         }
         memcpy(versioned_names + image.import_count, copies.alias_names, (u64)copies.alias_count * sizeof(*versioned_names));
-        versions = link_elf_version_plan_build(arena, exports, versioned_names, versioned_name_count, image.import_count, needed_library_count, script->name.length ? 3 : 2);
+        versions = link_elf_version_plan_build(arena, exports, versioned_names, versioned_name_count, image.import_count, needed_library_count, script->name.length ? 3 : 2, use_relr);
         result.error = versions.error;
         result.symbol = versions.symbol;
         dynamic_string_size += versions.version_name_size;
@@ -9015,6 +9121,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
     u64 definition_offset = align_forward(version_need_offset + versions.version_need_size, 4);
     u64 data_relocation_offset = align_forward(definition_offset + definition_size, 8);
     u64 data_relocation_size = (u64)image.dynamic_relocation_count * ELF_RELOCATION_SIZE;
+    u64 relr_offset = 0;
+    u64 relr_size = 0;
     u64 plt_relocation_offset = data_relocation_offset + data_relocation_size;
     u64 plt_relocation_size = (u64)image.plt_count * ELF_RELOCATION_SIZE;
     u64 read_only_end = plt_relocation_offset + plt_relocation_size;
@@ -9025,18 +9133,21 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
     cursor = section_offsets[OBJECT_SECTION_INIT_ARRAY] + object->sections[OBJECT_SECTION_INIT_ARRAY].data.length;
     section_offsets[OBJECT_SECTION_FINI_ARRAY] = align_forward(cursor, 8);
     cursor = section_offsets[OBJECT_SECTION_FINI_ARRAY] + object->sections[OBJECT_SECTION_FINI_ARRAY].data.length;
-    u32 dynamic_count = needed_library_count + (soname.length ? 1u : 0u) + (runtime_path.path.length ? 1u : 0u) + 5 + (image.plt_count ? 4u : 0u) + (image.dynamic_relocation_count ? 3u : 0u) +
+    u32 dynamic_count = needed_library_count + (soname.length ? 1u : 0u) + (runtime_path.path.length ? 1u : 0u) + 5 + (image.plt_count ? 4u : 0u) + (image.dynamic_relocation_count ? 3u : 0u) + (use_relr ? 3u : 0u) +
                         (object->sections[OBJECT_SECTION_INIT_ARRAY].data.length ? 2u : 0u) +
                         (object->sections[OBJECT_SECTION_FINI_ARRAY].data.length ? 2u : 0u) + (has_versions ? 1u : 0u) + (versions.version_count ? 2u : 0u) + (script->name.length ? 2u : 0u) +
-                        (image.static_tls ? 1u : 0u) + (shared ? 0u : 2u) + (preinit_size ? 2u : 0u) + 1;
+                        ((image.static_tls || bind_now) ? 1u : 0u) + (shared ? 0u : 1u) + ((!shared || bind_now) ? 1u : 0u) + (preinit_size ? 2u : 0u) + 1;
     u64 dynamic_offset = align_forward(cursor, 8);
     u64 dynamic_size = (u64)dynamic_count * ELF_DYNAMIC_SIZE;
     u64 got_offset = dynamic_offset + dynamic_size;
     u64 got_size = (u64)image.got_count * sizeof(u64);
     u64 relro_end = align_forward(got_offset + got_size, ELF_PAGE_SIZE);
-    u64 got_plt_offset = relro_end;
+    u64 got_plt_offset = bind_now ? got_offset + got_size : relro_end;
     u64 got_plt_size = image.plt_count ? ((u64)ELF_GOT_RESERVED_COUNT + image.plt_count) * sizeof(u64) : 0;
-    section_offsets[OBJECT_SECTION_DATA] = align_forward(got_plt_offset + got_plt_size, BUSTER_MAX(object->sections[OBJECT_SECTION_DATA].alignment, 1u));
+    u64 data_alignment = BUSTER_MAX(object->sections[OBJECT_SECTION_DATA].alignment, 1u);
+    if (bind_now) data_alignment = BUSTER_MAX(data_alignment, (u64)ELF_PAGE_SIZE);
+    section_offsets[OBJECT_SECTION_DATA] = align_forward(got_plt_offset + got_plt_size, data_alignment);
+    if (bind_now) relro_end = section_offsets[OBJECT_SECTION_DATA];
     cursor = section_offsets[OBJECT_SECTION_DATA] + object->sections[OBJECT_SECTION_DATA].data.length;
     u64 thread_local_alignment =
         BUSTER_MAX(BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment), 1u);
@@ -9154,6 +9265,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
             result.error = LINK_ERROR_RELOCATION;
         }
     }
+    if (result.error == LINK_ERROR_NONE && use_relr && !link_elf_relr_pack(arena, bytes, file_size, data_relocation_offset,
+                                                                         &data_relocation_size, &relr_offset, &relr_size))
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        result.symbol = S8("could not pack RELATIVE relocation table (duplicate site or insufficient link scratch)");
+    }
     if (result.error == LINK_ERROR_NONE && !shared)
     {
         if (aarch64)
@@ -9262,6 +9379,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
             BUSTER_LINK_DYNAMIC(8, data_relocation_size);
             BUSTER_LINK_DYNAMIC(9, ELF_RELOCATION_SIZE);
         }
+        if (use_relr)
+        {
+            BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_RELR, relr_offset);
+            BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_RELRSZ, relr_size);
+            BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_RELRENT, sizeof(u64));
+        }
         if (init_array_size)
         {
             BUSTER_LINK_DYNAMIC(25, section_offsets[OBJECT_SECTION_INIT_ARRAY]);
@@ -9288,12 +9411,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
             BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_NEED, version_need_offset);
             BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_NEED_COUNT, versions.version_need_count);
         }
-        if (image.static_tls) BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_FLAGS, ELF_DYNAMIC_FLAG_STATIC_TLS);
+        if (image.static_tls || bind_now) BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_FLAGS, (image.static_tls ? ELF_DYNAMIC_FLAG_STATIC_TLS : 0) | (bind_now ? ELF_DYNAMIC_FLAG_BIND_NOW : 0));
         if (!shared)
         {
             BUSTER_LINK_DYNAMIC(21, 0);
-            BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_FLAGS_1, ELF_DYNAMIC_FLAG_1_PIE);
         }
+        if (!shared || bind_now) BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_FLAGS_1, (shared ? 0 : ELF_DYNAMIC_FLAG_1_PIE) | (bind_now ? ELF_DYNAMIC_FLAG_1_NOW : 0));
         BUSTER_LINK_DYNAMIC(0, 0);
 #undef BUSTER_LINK_DYNAMIC
         BUSTER_CHECK(dynamic_cursor == dynamic_offset + dynamic_size);
@@ -9378,6 +9501,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
                                           .dynamic_size = dynamic_size,
                                           .data_relocation_offset = data_relocation_offset,
                                           .data_relocation_size = data_relocation_size,
+                                          .relr_offset = relr_offset,
+                                          .relr_size = relr_size,
                                           .got_data_offset = got_offset,
                                           .got_data_size = got_size,
                                           .init_array_offset = section_offsets[OBJECT_SECTION_INIT_ARRAY],
@@ -16223,9 +16348,20 @@ bool link_validate_linker_arguments(Target target, NativeExecutableLinkOptions o
         {
             valid = target.os == OPERATING_SYSTEM_LINUX && target.cpu_arch == CPU_ARCH_X86_64 && dynamic_image;
         }
+        else if (string_equal(argument, S8("-O1")) || string_equal(argument, S8("--sort-common")))
+        {
+            valid = target.os == OPERATING_SYSTEM_LINUX && target.cpu_arch == CPU_ARCH_X86_64;
+        }
         else if (elf && string_equal(argument, S8("-z")))
         {
-            valid = index + 1 < options.linker_argument_count && string_equal(options.linker_arguments[index + 1], S8("defs"));
+            valid = index + 1 < options.linker_argument_count;
+            if (valid)
+            {
+                String8 value = options.linker_arguments[index + 1];
+                bool hardening = string_equal(value, S8("relro")) || string_equal(value, S8("now")) || string_equal(value, S8("noexecstack"));
+                bool packing = string_equal(value, S8("pack-relative-relocs"));
+                valid = string_equal(value, S8("defs")) || (target.os == OPERATING_SYSTEM_LINUX && target.cpu_arch == CPU_ARCH_X86_64 && (packing || (hardening && dynamic_image)));
+            }
             if (valid) index += 1;
         }
         else if (elf && (soname_pair || soname_joined))
@@ -16610,7 +16746,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
         {
             normalized.object = link_elf_classify_untyped_imports(arena, exports, &normalized.object);
             object = &normalized.object;
-            bool dynamic_image = link_elf_runtime_path(temporary, options).path.length || script.name.length || options.dynamic_library_count || object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ||
+            bool dynamic_image = link_elf_options_require_dynamic(options) || link_elf_runtime_path(temporary, options).path.length || script.name.length || options.dynamic_library_count || object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ||
                                  object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
             for (u32 index = 0; !dynamic_image && index < object->symbol_count; index += 1)
             {

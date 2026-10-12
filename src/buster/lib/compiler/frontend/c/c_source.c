@@ -4399,9 +4399,13 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_llroundl"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_inf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_inff"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_infl"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_nanf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_nan"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_nanl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_huge_valf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_huge_val"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_huge_vall"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isnanf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isnan"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_isinf_sign"), C_SYMBOL_BUILTIN_MATH },
@@ -4839,7 +4843,26 @@ bool c_semantic_math_link_is_long_double(String8 link_name)
     CMathLibmShape libm = c_semantic_math_libm_shape(link_name);
     return string_equal(link_name, S8("fabsl")) || string_equal(link_name, S8("fmaxl")) || string_equal(link_name, S8("fminl")) ||
            string_equal(link_name, S8("powil")) || string_equal(link_name, S8("copysignl")) || string_equal(link_name, S8("signbitl")) ||
-           (libm.arity && libm.argument_kind == C_TYPE_LONG_DOUBLE);
+           c_semantic_math_special_value(link_name).kind == C_TYPE_LONG_DOUBLE || (libm.arity && libm.argument_kind == C_TYPE_LONG_DOUBLE);
+}
+
+// The constant-valued special-float builtins by link name: the census every
+// result-type query, arity check, constant folder and runtime lowering reads.
+// c_ir_math_builtin_link_name folds the spellings onto six link names:
+// `__builtin_inf` onto huge_val, `__builtin_huge_valf` onto inff, and
+// `__builtin_huge_vall` and `__builtin_infl` onto infl.
+CMathSpecialValue c_semantic_math_special_value(String8 link_name)
+{
+    CMathSpecialValue result = {.kind = C_TYPE_INVALID, .special = C_MATH_SPECIAL_NONE};
+    bool infinity = string_equal(link_name, S8("inff")) || string_equal(link_name, S8("huge_val")) || string_equal(link_name, S8("infl"));
+    bool quiet_nan = string_equal(link_name, S8("nanf")) || string_equal(link_name, S8("nan")) || string_equal(link_name, S8("nanl"));
+    if (infinity || quiet_nan)
+    {
+        char8 last = link_name.pointer[link_name.length - 1];
+        result.kind = last == 'f' ? C_TYPE_FLOAT : string_equal(link_name, S8("infl")) || string_equal(link_name, S8("nanl")) ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
+        result.special = infinity ? C_MATH_SPECIAL_INFINITY : C_MATH_SPECIAL_QUIET_NAN;
+    }
+    return result;
 }
 
 // One probe entry of the intern table. The identity of a name is its first
@@ -8209,7 +8232,8 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_pow",           "__builtin_powf",
         "__builtin_prefetch",
         "__builtin_round",         "__builtin_roundf",
-        "__builtin_inf",           "__builtin_inff", "__builtin_nan", "__builtin_nanf", "__builtin_huge_val", "__builtin_isnan", "__builtin_isnanf",
+        "__builtin_inf",           "__builtin_inff", "__builtin_infl", "__builtin_nan", "__builtin_nanf", "__builtin_nanl",
+        "__builtin_huge_val",      "__builtin_huge_valf", "__builtin_huge_vall", "__builtin_isnan", "__builtin_isnanf",
         "__builtin_isinf_sign",
         "__builtin_isinf",         "__builtin_isinff", "__builtin_isfinite",
         "__builtin_isnormal",      "__builtin_fpclassify", "__builtin_isgreater", "__builtin_isgreaterequal",

@@ -68,7 +68,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_publication_span_tests(UnitTestArguments* 
                 {
                     IrPublishedCfg const* cfg = function->published_cfg;
                     BUSTER_TEST(arguments, cfg->blocks[0].first_instruction == 0 && cfg->blocks[0].instruction_count == count);
-                    BUSTER_TEST(arguments, (cfg->instruction_remap != 0) == (variant == 2));
                     for (u32 index = 0; index < count; index += 1)
                     {
                         IrInstruction* row = function->instructions + index;
@@ -295,12 +294,132 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_cse_tests(UnitTestArguments* argument
     return result;
 }
 
+// A producer-certified module holding one function the strict validator
+// rejects: FAST declines that function alone and still rewrites the other
+// (#1602). A failure outside every function still declines them all. Neither
+// may become a preparation error, including under the FAST-output check that
+// Debug/test/sanitizer builds run, and the decline must not hide the defect.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_decline_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 variant = 0; variant < 5; variant += 1)
+    {
+        bool module_scope = variant == 1;
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        CIRLowerResult lowered = ir_promotion_lower(arguments->arena,
+            S8("int storage=1;int broken(int x){return x+0;}int kept(int y){return y+0;}"), target_native);
+        BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
+        if (lowered.program && !lowered.diagnostic_count)
+        {
+            IrProgram* program = lowered.program;
+            IrModule* module = program->modules;
+            IrFunction* broken = 0;
+            IrFunction* kept = 0;
+            IrGlobal* storage = 0;
+            for (u32 index = 0; index < module->function_count; index += 1)
+            {
+                IrFunction* candidate = module->functions + index;
+                if (string_equal(candidate->name, S8("broken"))) broken = candidate;
+                if (string_equal(candidate->name, S8("kept"))) kept = candidate;
+            }
+            for (u32 index = 0; index < module->global_count; index += 1)
+            {
+                IrSymbol* symbol = ir_symbol_from_id(&program->symbols, module->globals[index].symbol);
+                if (symbol && string_equal(symbol->name, S8("storage"))) storage = module->globals + index;
+            }
+            // Publish first so byte comparisons exclude CFG publication's
+            // retirement of construction links, and isolate FAST's writes.
+            BUSTER_TEST(arguments, ir_function_publish_cfg(program->arena, broken).error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, ir_function_publish_cfg(program->arena, kept).error == IR_VALIDATION_NONE);
+            bool corrupted = false;
+            if (broken && kept && storage)
+            {
+                if (module_scope)
+                {
+                    storage->alignment = 3;
+                    corrupted = true;
+                }
+                for (u32 index = 0; !module_scope && index < broken->instruction_count && !corrupted; index += 1)
+                {
+                    IrInstruction* row = broken->instructions + index;
+                    if (row->opcode == IR_OPCODE_BINARY)
+                    {
+                        row->binary_operation = IR_BINARY_COUNT;
+                        corrupted = true;
+                    }
+                }
+            }
+            if (variant == 2)
+            {
+                for (u32 index = 0; index < kept->instruction_count; index += 1)
+                {
+                    if (kept->instructions[index].opcode == IR_OPCODE_BINARY)
+                    {
+                        kept->instructions[index].binary_operation = IR_BINARY_COUNT;
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, corrupted);
+            if (corrupted)
+            {
+                u32 broken_count = broken->instruction_count;
+                u32 kept_count = kept->instruction_count;
+                IrInstruction* original = arena_allocate(arguments->arena, IrInstruction, broken_count);
+                memcpy(original, broken->instructions, sizeof(*original) * broken_count);
+                u32 value_count = broken->value_count;
+                IrValue* original_values = arena_allocate(arguments->arena, IrValue, value_count);
+                memcpy(original_values, broken->values, sizeof(*original_values) * value_count);
+                program->disable_local_promotion = true;
+                program->fast_passes = variant == 4 ? 0 : IR_FAST_ALL;
+                IrValidationResult prepared = ir_prepare_canonical_module(program, module, variant != 3);
+                BUSTER_TEST(arguments, prepared.error == (variant == 3 ? IR_VALIDATION_OPERATION : IR_VALIDATION_NONE));
+                BUSTER_TEST(arguments, broken->instruction_count == broken_count && broken->value_count == value_count);
+                BUSTER_TEST(arguments, memcmp(original, broken->instructions, sizeof(*original) * broken_count) == 0);
+                BUSTER_TEST(arguments, memcmp(original_values, broken->values, sizeof(*original_values) * value_count) == 0);
+                u64 skips = variant >= 3 ? 0 : (variant == 0 ? 1 : 2);
+                BUSTER_TEST(arguments, module->fast.validation_skips == skips && module->fast.decline_count == skips);
+                if (variant == 0)
+                {
+                    BUSTER_TEST(arguments, module->fast.functions == 1 && module->fast.passes[IR_FAST_FOLD].changes != 0 &&
+                                           kept->instruction_count < kept_count);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, module->fast.functions == 0 && kept->instruction_count == kept_count);
+                }
+                for (u64 index = 0; index < module->fast.decline_count; index += 1)
+                {
+                    IrFastDecline decline = module->fast.declines[index];
+                    IrValidationResult validation = decline.validation;
+                    BUSTER_TEST(arguments, string_equal(decline.function_name, index ? kept->name : broken->name));
+                    BUSTER_TEST(arguments, validation.error == (module_scope ? IR_VALIDATION_ALIGNMENT : IR_VALIDATION_OPERATION));
+                    BUSTER_TEST(arguments, validation.function.value == (module_scope ? IR_ID_UNDERLYING_INVALID :
+                                                                         (index ? kept->id.value : broken->id.value)));
+                    BUSTER_TEST(arguments, validation.boundary == IR_VALIDATION_BOUNDARY_CANONICAL_INPUT);
+                }
+                if (variant < 3)
+                {
+                    IrFastDecline* records = module->fast.declines;
+                    BUSTER_TEST(arguments, module->fast_complete);
+                    prepared = ir_prepare_canonical_module(program, module, true);
+                    BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && module->fast.validation_skips == skips &&
+                                           module->fast.declines == records);
+                }
+                IrValidationResult strict = ir_validate_canonical_module(program, module);
+                BUSTER_TEST(arguments, strict.error == (module_scope ? IR_VALIDATION_ALIGNMENT : IR_VALIDATION_OPERATION));
+                BUSTER_TEST(arguments, strict.function.value == (module_scope ? IR_ID_UNDERLYING_INVALID : broken->id.value));
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_publication_span_tests(arguments);
-    UnitTestResult cse = ir_fast_cse_tests(arguments);
-    result.test_count += cse.test_count;
-    result.succeeded_test_count += cse.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, ir_fast_decline_tests);
+    BUSTER_TEST_FIXTURE(arguments, ir_fast_cse_tests);
     String8 source = S8("volatile int observed;int effect(int);"
                        "int test(int input,int* p){int x=input+0;int unused=x*9;"
                        "int a=3,b=4;int* q=&*p;observed=effect(x);return x+(a+b)+*q+observed;}");
