@@ -16161,7 +16161,7 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_elf_classify_untyped_imports(Arena* ar
             NativeDynamicVersionedSymbol* definition = name && name->version && name->version->has_default ? name->version : 0;
             ObjectSymbol resolved = *symbol;
             bool loader_tls_call = false;
-            if (symbol->undefined_untyped && symbol->kind == OBJECT_SYMBOL_DATA && string_equal(symbol->name, S8("__tls_get_addr")))
+            if (symbol->undefined_untyped && string_equal(symbol->name, S8("__tls_get_addr")))
             {
                 if (!tls_built)
                 {
@@ -16214,7 +16214,7 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_elf_classify_untyped_imports(Arena* ar
             }
             else if (symbol->undefined_untyped && !loader_tls_call)
             {
-                result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+                result.error = exports->exports_complete ? LINK_ERROR_UNRESOLVED_SYMBOL : LINK_ERROR_UNSUPPORTED_FEATURE;
             }
             if (result.error != LINK_ERROR_NONE)
             {

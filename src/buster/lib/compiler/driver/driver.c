@@ -7678,7 +7678,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
 // address model establishes that cause. Malformed sites and TLS failures do
 // not say anything about the input's code model. A
 // failed artifact write names the operating-system error that refused it.
-BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena, CompilerDriverInvocation invocation, NativeExecutableLinkResult link)
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena, CompilerDriverInvocation invocation, NativeExecutableLinkResult link,
+                                                                         ObjectFile* objects, u32 object_count)
 {
     String8 diagnostic;
     if (link.error == LINK_ERROR_FILE_WRITE)
@@ -7695,6 +7696,23 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_diagnostic(Arena* arena,
                        link.requires_position_independent_objects
                            ? S8(" (a position-independent image needs objects compiled with -fPIC)") : S8("");
         diagnostic = string_format(arena, S8("native C link failed with {S8}: {S8}{S8}"), link_error_name(link.error), link.symbol, hint);
+    }
+    if ((link.error == LINK_ERROR_UNSUPPORTED_FEATURE || link.error == LINK_ERROR_UNRESOLVED_SYMBOL) && link.symbol.length)
+    {
+        bool attributed = false;
+        for (u32 input = 0; !attributed && input < object_count; input += 1)
+        {
+            for (u32 symbol = 0; !attributed && objects[input].source_name.length && symbol < objects[input].symbol_count; symbol += 1)
+            {
+                ObjectSymbol* reference = objects[input].symbols + symbol;
+                if (reference->undefined_untyped && string_equal(reference->name, link.symbol))
+                {
+                    diagnostic = string_format(arena, S8("{S8}: cannot determine ELF import type for {S8} from the providing library"),
+                                               objects[input].source_name, reference->name);
+                    attributed = true;
+                }
+            }
+        }
     }
     return diagnostic;
 }
@@ -7876,7 +7894,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
         if (result->native_link.error != LINK_ERROR_NONE)
         {
             result->error = COMPILER_DRIVER_ERROR_LINK;
-            result->diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result->native_link);
+            result->diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result->native_link, &object, 1);
         }
     }
 }
@@ -11127,24 +11145,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     if (result.native_link.error != LINK_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result.native_link);
-        if (result.native_link.error == LINK_ERROR_UNSUPPORTED_FEATURE && result.native_link.symbol.length)
-        {
-            bool attributed = false;
-            for (u32 input = 0; !attributed && input < object_count; input += 1)
-            {
-                for (u32 symbol = 0; !attributed && objects[input].source_name.length && symbol < objects[input].symbol_count; symbol += 1)
-                {
-                    ObjectSymbol* reference = objects[input].symbols + symbol;
-                    if (reference->undefined_untyped && string_equal(reference->name, result.native_link.symbol))
-                    {
-                        result.diagnostic = string_format(arena, S8("{S8}: cannot determine ELF import type for {S8} from the providing library"),
-                                                          objects[input].source_name, reference->name);
-                        attributed = true;
-                    }
-                }
-            }
-        }
+        result.diagnostic = compiler_driver_native_link_diagnostic(arena, invocation, result.native_link, objects, object_count);
     }
 finish:
     result.linker_report = linker_report;
