@@ -4,7 +4,9 @@
 // use one reusable O(blocks + edges) scratch tile: a may-uninitialized walk,
 // backward live-in pruning, then block-argument SSA construction. Every walk
 // is iterative, including irreducible loops; no C recursion or blocks*locals
-// resident matrix is required. ir_promote_compact simplifies its parameters;
+// resident matrix is required. Join parameter values are staged in scratch
+// (IrPromoteStagedValues) and appended once by ir_promote_publish_values
+// before ir_promote_compact simplifies them;
 // ir_rewrite_compact owns the shared final ID remap, including instruction
 // sources, extras and builder side data. Label-bearing functions are skipped.
 // ir_prepare_canonical_module owns the input/output validation boundaries;
@@ -36,6 +38,20 @@ struct IrPromoteCfg
     u32* predecessors;
     u8* reachable;
     u32* queue;
+};
+
+// Join parameters created by ir_promote_global, staged in scratch. Their ids
+// continue the function's value numbering from `base`. ir_promote_publish_values
+// appends them once at the exact size: growing the trimmed value array by
+// doubling per parameter would leave an unwritten tail interleaved with the
+// program arena's parameter and incoming rows (#1307).
+typedef struct IrPromoteStagedValues IrPromoteStagedValues;
+struct IrPromoteStagedValues
+{
+    IrTypeId* types;
+    u32 base;
+    u32 count;
+    u32 capacity;
 };
 
 bool ir_local_type_promotable(IrProgram* program, IrTypeId id)
@@ -322,9 +338,53 @@ BUSTER_GLOBAL_LOCAL void ir_promote_remove_events(IrFunction* function, IrPromot
 
 // All arrays below are reused for the next local. Effects are 0=forward the
 // incoming value, 1=store a new definition, 2=LOCAL lifetime reset.
+BUSTER_GLOBAL_LOCAL void ir_promote_stage_reserve(Arena* arena, IrPromoteStagedValues* staged, u32 additional)
+{
+    u32 needed = staged->count + additional;
+    if (needed > staged->capacity)
+    {
+        u32 capacity = BUSTER_MAX(needed, staged->capacity * 2);
+        IrTypeId* types = arena_allocate(arena, IrTypeId, capacity);
+        if (staged->count)
+        {
+            memcpy(types, staged->types, sizeof(IrTypeId) * staged->count);
+        }
+        staged->types = types;
+        staged->capacity = capacity;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ir_promote_publish_values(Arena* arena, IrFunction* function, IrPromoteStagedValues const* staged)
+{
+    BUSTER_CHECK(function->value_count == staged->base);
+    ir_function_invalidate_cfg(function);
+    u32 needed = staged->base + staged->count;
+    if (needed > function->value_capacity)
+    {
+        IR_CONSTRUCTION_RECORD(VALUE_GROWS, 1);
+        IR_CONSTRUCTION_RECORD(VALUE_ROWS_COPIED, function->value_count);
+        IrValue* values = arena_allocate(arena, IrValue, needed);
+        if (function->value_count)
+        {
+            memcpy(values, function->values, sizeof(IrValue) * function->value_count);
+        }
+        function->values = values;
+        function->value_capacity = needed;
+    }
+    for (u32 index = 0; index < staged->count; index += 1)
+    {
+        function->values[staged->base + index] = (IrValue){
+            .canonical_type = staged->types[index], .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_VALUE,
+        };
+    }
+    IR_CONSTRUCTION_RECORD(VALUE_APPENDS, staged->count);
+    function->value_count = needed;
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_promote_global(Arena* arena, IrProgram* program, IrFunction* function, IrPromoteLocal* local,
                                            IrPromoteEvent* events, IrPromoteCfg* cfg, u8* effects, u8* live, u8* bad_in, u8* bad_out,
-                                           u32* entries, u32* exits, u32* replacements, u8* removed, IrLocalPromotionStatistics* statistics)
+                                           u32* entries, u32* exits, u32* replacements, u8* removed, IrPromoteStagedValues* staged,
+                                           IrLocalPromotionStatistics* statistics)
 {
     u32 count = function->block_count;
     memset(effects, 0, count);
@@ -406,7 +466,7 @@ BUSTER_GLOBAL_LOCAL bool ir_promote_global(Arena* arena, IrProgram* program, IrF
             }
         }
         u32 parameter_count = 0;
-        u32 first_parameter = function->value_count;
+        u32 first_parameter = staged->base + staged->count;
         for (u32 block = 0; block < count; block += 1)
         {
             if (live[block] && cfg->offsets[block + 1] - cfg->offsets[block] > 1)
@@ -461,6 +521,7 @@ BUSTER_GLOBAL_LOCAL bool ir_promote_global(Arena* arena, IrProgram* program, IrF
         }
         if (safe)
         {
+            ir_promote_stage_reserve(arena, staged, parameter_count);
             IrTypeId type = function->values[local->value].canonical_type;
             IrLocalId canonical_local = function->instructions[function->values[local->value].definition.value].canonical_local;
             for (u32 block = 0; block < count; block += 1)
@@ -468,9 +529,8 @@ BUSTER_GLOBAL_LOCAL bool ir_promote_global(Arena* arena, IrProgram* program, IrF
                 if (live[block] && cfg->offsets[block + 1] - cfg->offsets[block] > 1)
                 {
                     IrBlock* destination = function->blocks + block;
-                    IrValueId value = ir_function_add_value(program->arena, function, (IrValue){
-                        .canonical_type = type, .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_VALUE,
-                    });
+                    IrValueId value = {.value = staged->base + staged->count};
+                    staged->types[staged->count++] = type;
                     BUSTER_CHECK(value.value == entries[block]);
                     IrBlockParameter* parameter = arena_allocate(program->arena, IrBlockParameter, 1);
                     *parameter = (IrBlockParameter){.value = value, .canonical_type = type, .canonical_local = canonical_local};
@@ -510,7 +570,6 @@ BUSTER_GLOBAL_LOCAL bool ir_promote_global(Arena* arena, IrProgram* program, IrF
     {
         statistics->uninitialized_locals += 1;
     }
-    (void)arena;
     return safe;
 }
 
@@ -870,6 +929,7 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
         u8* bad_out = 0;
         u32* entries = 0;
         u32* exits = 0;
+        IrPromoteStagedValues staged = {.base = old_value_count};
         u64 promoted_before = statistics->promoted_locals;
         for (u32 index = 0; index < local_count; index += 1)
         {
@@ -923,13 +983,14 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
                     if (cfg_valid)
                     {
                         ir_promote_global(arena, program, function, local, events, &cfg, effects, live, bad_in, bad_out,
-                                          entries, exits, replacements, removed, statistics);
+                                          entries, exits, replacements, removed, &staged, statistics);
                     }
                 }
             }
         }
         if (statistics->promoted_locals != promoted_before)
         {
+            ir_promote_publish_values(program->arena, function, &staged);
             ir_promote_compact(arena, program, function, old_value_count, replacements, removed, statistics);
         }
         scratch_end(scratch);
