@@ -3732,6 +3732,21 @@ The budgets:
 - **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
   requested, so Zen 5 validation stays incomplete (#2761).
 
+The replay's census is
+[`2026-10-12T210727Z`](../../performance-audits/2026-10-12T210727Z.md),
+diagnostic only. Every budget passes, and the candidate ships:
+- `-fsyntax-only` falls by 140.9 M Ir on the default path (−1.264%) and by
+  141.3 M under the pilot (−1.522%). `-c` falls by 139.8 M (−0.555%) and
+  140.2 M (−0.600%).
+- The parts: the replay −128.1 M, and the inline end −20.4 M (−19.7 M on
+  `-c`). Validation falls by 149.2 M, and inference pays 7.8 M for its
+  logs.
+- 94 validation walks become replays of 326,329 element checks. The logs
+  take 3.97 MB of phase arena.
+- Objects are byte-identical across the four arms at `-g0` and `-g`.
+- Still open: designated lists, which walk twice; lists that evaluate an
+  array bound; and the 45,232 end scans of longer elements.
+
 ### Root-conditional `?` refusal without the tree
 
 For the tree-free negative test in `c_ir_root_conditional` (a per-body prefix
