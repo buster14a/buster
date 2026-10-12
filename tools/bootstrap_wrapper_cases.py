@@ -3,9 +3,10 @@
 
 run_cases owns a persistent bounded worker gang and ordered result slots.
 CaseProcess adds cancellation ownership and timing to the existing child owner.
-On Windows, tools/windows_process_tree.c owns each case's job: launch and drain.
+On Windows, tools/windows_process_tree.c owns each case's job and enforces the
+frozen runtime/cleanup budgets; this adapter forwards cancellation and evidence.
 The six-writer publication scenario runs alone after the independent cases.
-No test assertions, fake compiler, shell selection or case deadlines live here.
+No behavior assertions, fake compiler or shell selection live here.
 """
 import argparse
 import io
