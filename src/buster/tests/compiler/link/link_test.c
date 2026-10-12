@@ -7384,9 +7384,159 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_pe_x64_tls_index_object(UnitTestArg
     return result;
 }
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL u16 link_test_version_read_u16(u8 const* bytes, u64 offset)
+{
+    return (u16)((u16)bytes[offset] | ((u16)bytes[offset + 1] << 8));
+}
+
+#endif
+
+// Scripts are consumed by the public native link, before any image is
+// published. Literal ELF facts below are independent of the script parser.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_version_scripts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    u8 text[] = {0x31, 0xc0, 0xc3, 0xb8, 7, 0, 0, 0, 0xc3, 0xb8, 11, 0, 0, 0, 0xc3};
+    ObjectSymbol symbols[] = {
+        {.name = S8("main"), .size = 3, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("api"), .value = 3, .size = 6, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("private_weak"), .value = 9, .size = 6, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true, .weak = true},
+        {.name = S8("hidden_api"), .value = 3, .size = 6, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true, .hidden = true},
+        {.name = S8("exit"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+    };
+    ObjectFile object = link_test_object_make(arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(text), symbols, BUSTER_ARRAY_LENGTH(symbols), 0, 0);
+    NativeDynamicVersionedSymbol runtime[] = {
+        {.name = S8("exit"), .version = S8("GLIBC_2.2.5"), .has_default = true},
+        {.name = S8("__cxa_atexit"), .version = S8("GLIBC_2.2.5"), .has_default = true},
+    };
+    String8 script_path = buster_test_temporary_path(arena, S8("buster-version-script"), S8(".map"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-version-script-image"), S8(""));
+    String8 args[] = {S8("--version-script"), script_path, S8("--export-dynamic")};
+    NativeExecutableLinkOptions options = {
+        .linker_arguments = args, .linker_argument_count = BUSTER_ARRAY_LENGTH(args), .output_path = output,
+        .runtime_versioned_symbols = runtime, .runtime_versioned_symbol_count = BUSTER_ARRAY_LENGTH(runtime), .runtime_exports_known = true,
+    };
+    String8 scripts[] = {
+        S8("V_1 { global: api; hidden_api; missing; local: *; };"),
+        S8("{ global: api; hidden_api; missing; local: *; };"),
+        S8("# comment\n V_1 /* node */ { local: private_weak; main; global: api; hidden_api; }; # tail"),
+    };
+    for (u32 script = 0; script < BUSTER_ARRAY_LENGTH(scripts); script += 1)
+    {
+        BUSTER_TEST(arguments, file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(scripts[script])));
+        for (u32 mode = 0; mode < NATIVE_IMAGE_COUNT; mode += 1)
+        {
+            options.image_kind = (u8)mode;
+            NativeExecutableLinkResult linked = link_native_executable(arena, &object, options);
+            if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE))
+            {
+                BUSTER_TEST(arguments, symbols[0].global && symbols[2].global && symbols[2].weak);
+                BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(linked.executable, S8("api"), 0, 0, 0));
+                BUSTER_TEST(arguments, !link_test_elf_dynamic_symbol(linked.executable, S8("private_weak"), 0, 0, 0));
+                BUSTER_TEST(arguments, !link_test_elf_dynamic_symbol(linked.executable, S8("main"), 0, 0, 0));
+                BUSTER_TEST(arguments, !link_test_elf_dynamic_symbol(linked.executable, S8("hidden_api"), 0, 0, 0));
+                LinkTestElfSymbol local = {0};
+                BUSTER_TEST(arguments, link_test_elf_symbol(linked.executable, S8("private_weak"), &local) && (local.info >> 4) == 0);
+                u64 definition_header = 0;
+                bool named = script != 1;
+                BUSTER_TEST(arguments, link_test_elf_section_find(linked.executable, S8(".gnu.version_d"), 0, &definition_header) == named);
+                u64 definition_address = 0, definition_count = 0;
+                BUSTER_TEST(arguments, link_test_elf_dynamic_entry(linked.executable, 0x6ffffffc, &definition_address) == named);
+                BUSTER_TEST(arguments, link_test_elf_dynamic_entry(linked.executable, 0x6ffffffd, &definition_count) == named);
+                if (named && definition_header)
+                {
+                    u64 offset = link_read_u64(linked.executable.pointer, definition_header + 24);
+                    u64 size = link_read_u64(linked.executable.pointer, definition_header + 32);
+                    BUSTER_TEST(arguments, definition_count == 2 && size == 56 &&
+                                           definition_address == link_read_u64(linked.executable.pointer, definition_header + 16));
+                    if (BUSTER_REQUIRE(arguments, offset <= linked.executable.length && size <= linked.executable.length - offset))
+                    {
+                        BUSTER_TEST(arguments, link_read_u32(linked.executable.pointer, definition_header + 4) == 0x6ffffffd);
+                        BUSTER_TEST(arguments, link_test_version_read_u16(linked.executable.pointer, offset) == 1 &&
+                                               link_test_version_read_u16(linked.executable.pointer, offset + 2) == 1 &&
+                                               link_test_version_read_u16(linked.executable.pointer, offset + 4) == 1 &&
+                                               link_read_u32(linked.executable.pointer, offset + 16) == 28);
+                        BUSTER_TEST(arguments, link_test_version_read_u16(linked.executable.pointer, offset + 28) == 1 &&
+                                               link_test_version_read_u16(linked.executable.pointer, offset + 32) == 2 &&
+                                               link_read_u32(linked.executable.pointer, offset + 36) == 0x5c21 &&
+                                               link_read_u32(linked.executable.pointer, offset + 44) == 0);
+                    }
+                }
+                u64 dynsym_header = 0, dynstr_header = 0, versym_header = 0;
+                if (BUSTER_REQUIRE(arguments, link_test_elf_section_find(linked.executable, S8(".dynsym"), 0, &dynsym_header) &&
+                                             link_test_elf_section_find(linked.executable, S8(".dynstr"), 0, &dynstr_header) &&
+                                             link_test_elf_section_find(linked.executable, S8(".gnu.version"), 0, &versym_header)))
+                {
+                    u64 symbol_offset = link_read_u64(linked.executable.pointer, dynsym_header + 24);
+                    u64 symbol_size = link_read_u64(linked.executable.pointer, dynsym_header + 32);
+                    u64 string_offset = link_read_u64(linked.executable.pointer, dynstr_header + 24);
+                    u64 string_size = link_read_u64(linked.executable.pointer, dynstr_header + 32);
+                    u64 version_offset = link_read_u64(linked.executable.pointer, versym_header + 24);
+                    for (u64 entry = 24; entry < symbol_size; entry += 24)
+                    {
+                        String8 name = link_test_elf_dynamic_string(linked.executable, string_offset, string_size,
+                                                                   link_read_u32(linked.executable.pointer, symbol_offset + entry));
+                        u16 version = link_test_version_read_u16(linked.executable.pointer, version_offset + (entry / 24) * 2);
+                        if (string_equal(name, S8("api"))) BUSTER_TEST(arguments, version == (named ? 2 : 1));
+                        if (string_equal(name, S8("exit"))) BUSTER_TEST(arguments, version == (named ? 3 : 2));
+                    }
+                }
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+                if (mode != NATIVE_IMAGE_SHARED)
+                {
+                    String8 command[] = {output};
+                    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                                                               (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                    BUSTER_TEST(arguments, spawn.handle != 0);
+                    if (spawn.handle) BUSTER_TEST(arguments, os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+#endif
+            }
+        }
+    }
+    String8 unsupported[] = {
+        S8(""), S8("V { global: api*; local: *; };"), S8("V { global: *; };"),
+        S8("V { global: api; }"), S8("V { global: api; }; W { local: *; };"),
+        S8("V { global: api; } BASE;"), S8("V { extern \"C++\" { api; }; };"),
+        S8("V { global: api; local: api; };"), S8("V { local: *; *; };"),
+        S8("V { global: api; global: main; };"), S8("V { global: api; }; /* unterminated"),
+        S8("V { global: api;\0 local: *; };"),
+    };
+    String8 sentinel = S8("old output");
+    options.image_kind = NATIVE_IMAGE_SHARED;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unsupported); index += 1)
+    {
+        BUSTER_TEST(arguments, file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(unsupported[index])));
+        BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+        NativeExecutableLinkResult failed = link_native_executable(arena, &object, options);
+        BUSTER_TEST(arguments, failed.error == LINK_ERROR_UNSUPPORTED_FEATURE && !failed.executable.length);
+        BUSTER_TEST(arguments, string_first_sequence(failed.symbol, script_path) < failed.symbol.length);
+        ByteSlice preserved = file_read(arena, output, (FileReadOptions){0});
+        BUSTER_STRING_TEST(arguments, ((String8){.pointer = (char8*)preserved.pointer, .length = preserved.length}), sentinel);
+    }
+    ByteSlice huge = {.pointer = arena_allocate(arena, u8, 1048577), .length = 1048577};
+    memset(huge.pointer, ' ', huge.length);
+    BUSTER_TEST(arguments, file_write(script_path, huge));
+    BUSTER_TEST(arguments, link_native_executable(arena, &object, options).error == LINK_ERROR_UNSUPPORTED_FEATURE);
+    os_file_delete(script_path);
+    BUSTER_TEST(arguments, link_native_executable(arena, &object, options).error == LINK_ERROR_UNSUPPORTED_FEATURE);
+    os_file_delete(output);
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 UnitTestResult link_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, link_test_elf_version_scripts);
     BUSTER_TEST_FIXTURE(arguments, link_test_mach_got_loads);
     BUSTER_TEST_FIXTURE(arguments, link_test_mach_import_pointers);
     BUSTER_TEST_FIXTURE(arguments, link_test_elf_stack_contract);

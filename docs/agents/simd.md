@@ -137,8 +137,8 @@ speedup merely because a proxy improved.
   the pipeline. Two consequences are worth knowing before writing a kernel.
   **Everything in the header remains a macro** so call-free behavior stays
   predictable across build paths. Canonical inlining honors source
-  `always_inline` directives and selects bounded tiny leaves with positive
-  `-O` levels or `-fcanonical-inline`. Eligibility and resource limits still
+  `always_inline` directives at every level and selects bounded tiny leaves
+  only with `-fcanonical-inline`. Eligibility and resource limits still
   apply; keep macros where the API requires call-free expansion.
   Arguments must therefore be free of side effects. A `Simd512` may still
   cross a call boundary by value where that is what the code wants: SystemV

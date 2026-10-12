@@ -9,6 +9,8 @@ on:
     paths:
       - '.github/workflows/gcc13-sanitized.yml'
       - 'docs/gcc13-sanitized-acceptance.md'
+      - 'src/buster/lib/compiler/embed/embed.c'
+      - 'src/buster/tests/compiler/embed/embed_test.c'
       - 'src/buster/lib/string.c'
       - 'src/buster/lib/string.h'
       - 'src/buster/tests/string_test.c'
@@ -73,6 +75,7 @@ jobs:
             -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           "$driver" build --build-directory build-gcc13-string --config Release -t ide -- -j4
           build-gcc13-string/Release/ide test --module=string_tests --verbose=1 --ci=1
+          build-gcc13-string/Release/ide test --module=embed_tests --verbose=1 --ci=1
 
       - name: Release string fixture result and reproduction
         if: ${{ always() && steps.checkout.outcome == 'success' }}

@@ -80,6 +80,10 @@ struct JitProgram
 // reported as JIT_ERROR_CAPACITY. Host reads, writes and pointer identity are
 // preserved; the loader does not copy imported objects into its own image.
 //
+// For admitted imported-data relocation kinds, a missing explicit binding
+// reports JIT_ERROR_UNRESOLVED_IMPORT and names the symbol, including when
+// the binding list is empty. Unsupported data kinds retain their refusal.
+//
 // Imported function PC32 references in text retain the call-thunk policy.
 // PC32 references in data/read-only sections use the explicit binding address,
 // like ABSOLUTE64 pointers, and fail with JIT_ERROR_CAPACITY when that signed
