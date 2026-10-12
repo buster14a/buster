@@ -43,6 +43,57 @@ flush (#2621) saved 7-8 ms of wall per object on a btrfs desktop. No caller
 needs durability today; one that does should flush explicitly with
 `os_file_flush` rather than make every artifact pay for it.
 
+Buster does not overwrite outputs in place as mold and wild do; #3687 records
+the measured gain and the downsides. Preallocating the staging file with
+`fallocate(2)` is measured but not adopted: it awaits qualified Zen 5 evidence
+(#3685).
+
+`-fearly-exit` (API field `early_exit`; off by default, and `-fno-early-exit`
+restores the default) is mold and wild's fork trick (#3686). It lives in
+`run_c_compiler` and `os_early_exit_*` in `src/buster/lib/os.c`.
+
+- **Arming.** After argument parsing, and before the first `lane_run` starts
+  the gang, `ide cc` forks. The parent only waits on a pipe. Arming is
+  skipped on Windows, Android and iOS, and when a tracked thread already
+  exists (`os_is_only_live_thread` does not see untracked threads; desktop
+  `ide cc` starts none before this point). It is also skipped when the
+  status pipe cannot be created through `os_process_spawn_pipe_create`
+  (close-on-exec, both ends moved above fd 2), or when `fork` fails. The
+  compile then simply runs in-process. Because the status pipe never lands
+  on fds 0-2, a process started with standard streams closed cannot write
+  compiler output into it.
+- **Release.** Once every artifact and report is out, the child calls
+  `os_early_exit_release`. It points its standard streams at `/dev/null`,
+  so a build system's pipes reach EOF, and sends its status. The parent
+  `_exit`s with that status, or with the child's own status if the child
+  died before reporting.
+- **Background work.** Destroying the 32 GiB translation-unit arena, then
+  `exit_mmap`, then the release of each output that publication replaced
+  then run in the background. While armed, `file_publish_slices_checked`
+  holds a read-only reference to a replaced destination across the
+  `rename(2)` and hands it to `os_early_exit_defer_close`, so the old
+  inode's blocks are freed after the report rather than inside the rename.
+  Atomic publication is unchanged.
+
+The costs are why it stays opt-in:
+
+- `time(1)`, `getrusage(RUSAGE_CHILDREN)` and `-fmetrics-out` wrappers that
+  measure the process see only the parent (about 5 MB RSS and no CPU time).
+- A debugger follows the parent.
+- A `make -j` or cgroup budget frees the job slot while the child still
+  holds its memory.
+- A failure after the release cannot change the exit status, and any later
+  child output is discarded.
+
+Do not use it for benchmarks, profiling, debugging or memory budgeting. The
+`compiler_driver_test_early_exit` regression checks byte-identical objects
+against the default path, a replaced output, `-E` output through the caller's
+pipe, and failure propagation. On desktop POSIX, it also runs both modes with
+fds 0-1 and 0-2 closed, with and without `-v`, and compares raw exit statuses
+and artifacts. It forces the setup-failure fallback through the test-build seam
+`BUSTER_TEST_EARLY_EXIT_PIPE_FAILURE=1`. That seam fails the pipe's
+configuration step and validates that the failure happened.
+
 Opt-in machine-readable records remain on stdout: `CODEGEN_VERIFY`,
 `CODEGEN_FALLBACK*`, `CODEGEN`, `IR_*`, `TARGET`, `GPU`, and the `-v` source
 statistics. The differential runner reads `CODEGEN_VERIFY` there and compares
@@ -66,6 +117,56 @@ remain native operations. Android and iOS skip this desktop observation path
 explicitly; the existing portable write-failure tests still run. This is
 controlled failure-path coverage, not a real disk-failure or crash-durability
 claim. Run `ide test --module=compiler_diagnostic_tests --verbose=1 --ci=1`.
+
+## In-memory execution (`ide run`)
+
+Use `ide run <C compiler options and inputs> [-- <program arguments>]`.
+Arguments before the first literal `--` are compiler options and inputs;
+everything after it is passed to the program, and omitting the separator means
+there are no program arguments. The first input path becomes `argv[0]` exactly
+as spelled, including `-` for source read from standard input. The program is
+called as `int main(int, char **, char **)`, with the current process
+environment as `envp`; a returned `int` becomes the `ide` process exit status.
+Calling `exit()` instead terminates the `ide` process directly.
+
+The command runs the ordinary C frontend, canonical-IR lowering, native
+code-generation and `link_objects` merge, then passes the merged object to
+`jit_link_object`. It creates neither an intermediate object file nor an
+executable image. Included headers are still read from the filesystem. When
+the source input is `-`, `ide` consumes standard input to EOF before calling
+the program, so the program sees its standard input at EOF.
+
+Failures exit with status 1, print `run: error:` to stderr, and execute no
+program code. Execution requires an x86-64 Linux host and an x86-64 Linux
+target; other hosts report
+`run: error: ide run supports only x86-64 Linux hosts`, and a foreign target
+is named in its refusal. Queries, non-link actions (`-c`, `-S`, `-E`,
+`-fsyntax-only`), explicit `-o`, `-shared`, `-pie`, LLVM bitcode, GPU targets,
+and linker/library/framework options including `-l` are refused. `ide run`
+binds only its documented host imports and loads no libraries.
+
+With `BUSTER_LINK_LIBC` on the supported host, the only imported functions
+bound by the command are:
+
+```text
+puts, putchar, printf, sprintf, snprintf, vprintf, vsnprintf, getchar,
+strlen, strcmp, strncmp, strcpy, strncpy, strcat, strchr, strrchr, strstr,
+memcpy, memmove, memset, memcmp, malloc, calloc, realloc, free, atoi, atol,
+strtol, strtoul, strtod, abs, labs, qsort, rand, srand, exit, abort, write,
+read, __errno_location
+```
+
+Without `BUSTER_LINK_LIBC`, the binding table is empty. Data imports such as
+`stdout`, `stderr` and `environ` are unsupported, as are TLS references;
+nonempty initializer/finalizer arrays are refused. The underlying JIT's Apple
+Silicon implementation remains subject to its one-`MAP_JIT`-region
+restriction, although `ide run` itself is supported only on x86-64 Linux.
+This is in-process execution, not a sandbox: the program has the `ide`
+process's privileges and can affect it. After a returned `main`, the JIT
+program is released and its arena is destroyed; when the program calls
+`exit()`, the operating system reclaims them as the process terminates.
+Executed test coverage is x86-64 Linux only; shebang execution is not
+implemented.
 
 ## Opt-in native translation-unit lanes
 
@@ -283,6 +384,36 @@ publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
 the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
 not predefined at any level. `-mattr` overrides still refine the level.
 The psABI's LAHF-SAHF has no target feature and is implied by long mode.
+For 32-bit x86, the canonical target architecture is `i386`; `i386`, `i486`,
+`i586` and `i686` are accepted architecture spellings, while `-march=i386`
+and `-march=i686` select explicit CPU models. The I386 baseline models GCC's
+`-m32` default (i686 without MMX/SSE). `-m16` and `-m32` select I386 execution
+mode, with the last spelling winning independently of `--target` order;
+`-m16` also records the `code16` target environment. These modes support
+preprocessing (`-E`, including `-dM`) and frontend-only validation
+(`-fsyntax-only`). I386 artifact generation—including assembly, objects,
+LLVM output and links—is deliberately refused with an explicit #3654
+diagnostic. I386 is supported only for Linux and freestanding targets; an
+execution-mode option on an x86 target with another OS is refused using the
+pre-mode target triple in its diagnostic. `-m64` remains unsupported and is
+tracked separately by #3458.
+
+Without `-march`/`-mcpu` the CPU model is `baseline`, matching Clang's and
+GCC's portable `x86-64` default. A command with no `-target` compiles for the
+host's architecture and operating system (`target_native`,
+`compiler_driver_parse_arguments`) but not for its CPU features. It is the
+same as naming the host triple: on x86-64, `-target x86_64-linux` alone gives
+`cpu=baseline features=sse2`, and AArch64 gets `fp-armv8,neon`, Apple targets
+included, where Apple Clang would pick `apple-m1`. So object bytes and the
+predefined feature macros (`__AVX2__`, `__AVX512F__`, ...) do not depend on
+the build machine. `-march=native`, or `-target native`, selects the host's
+detected model and features. Tests exercise native code unless they select a
+target: `ide test` and `ide metamorphic` set
+`compiler_driver_host_cpu_default`, so their in-process invocations keep the
+host CPU, while `compiler_driver_test_run_cc`, the build.c test gates and
+`test_self_host` stage compiles pass `-march=native`.
+The native-retirement census pins `baseline`, and the work ledger pins
+`znver3` (GitHub #1557).
 `-mtune=<model>` is accepted with any nonempty value, `native` included, and
 ignored: it selects only a scheduling model, and instruction selection here has
 no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
@@ -290,7 +421,8 @@ no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
 `-mpclmul`) are `-mattr=+feature` and `-mattr=-feature` in the same ordered
 override list, so the last option naming a feature wins and they refine a
 `-march` level wherever they sit. The feature names are the ones `-mattr`
-takes, dotted spellings included. On x86-64 they also follow GCC's implied
+takes, dotted spellings included. On AArch64, `sve` is a feature name and is
+not included in CPU-model defaults. On x86-64 they also follow GCC's implied
 features: `-mavx2` adds AVX, and `-mno-avx2` / `-mno-avx` also drop every
 enabled feature that requires it (AVX-512, FMA, VNNI, ...). The dependency pairs
 are `target_x86_feature_requirements` in `target.c`: the rules
@@ -313,14 +445,43 @@ left baseline code generation and no hint that the request was ignored.
 `-fno-strict-overflow` is accepted as `-fwrapv` (signed overflow already wraps;
 there is no `-fno-wrapv`, so `-fstrict-overflow` stays unsupported). `-w` is
 accepted and publishes no warning text or records and outranks every other
-warning option. `--version`, `-dumpversion` and
-`-dumpmachine` need no input and exit 0 (`compiler_driver_query_text`):
+warning option.
+`-ffreestanding` publishes `__STDC_HOSTED__` as zero and keeps the builtin
+`<limits.h>` from forwarding to a hosted system header. Buster does not
+implicitly builtinize or fold ordinary library calls such as `memcpy` or
+`strlen`; only explicit `__builtin_*` spellings are compiler builtins, so no
+ordinary-call suppression is needed. `-fomit-frame-pointer` grants permission
+to omit a frame pointer; it does not require one to be omitted. Default native
+objects currently contain `.eh_frame`, so `-fno-asynchronous-unwind-tables` is
+accepted only for I386, where artifact generation is refused.
+`-fcf-protection=none` is accepted because default output contains no
+`endbr32`/`endbr64` instructions and no IBT/SHSTK GNU property note.
+`--version`, `-dumpversion`, `-dumpmachine` and
+`-print-target-triple`/`-print-effective-triple` need no input and exit 0
+(`compiler_driver_query_text`):
 `-dumpversion` prints `18.0.0`, the `__clang_major__`/`__clang_minor__`/
 `__clang_patchlevel__` triple (`__clang_version__` is `18.0.0 (buster)`);
 `-dumpmachine` prints the effective target as `arch-os[-environment]` with the
 `gnu` environment on Linux and `msvc` on Windows (for example
-`x86_64-linux-gnu`); `--version` prints `Buster clang version 18.0.0 (buster)`,
-`Target: <that triple>` and `Thread model: posix`.
+`x86_64-linux-gnu`, or `i386-linux-gnu` under `-m32`); `--version` prints
+`Buster clang version 18.0.0 (buster)`,
+`Target: <that triple>` and `Thread model: posix`. `-print-target-triple` and
+`-print-effective-triple` print Clang's normalized `arch-vendor-os[-environment]`
+form, with the vendor `apple` on macOS/iOS and `unknown` elsewhere (for example
+`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-android`,
+`x86_64-unknown-windows-msvc`).
+`-trigraphs` and `-ftrigraphs` enable trigraph replacement and `-fno-trigraphs`
+disables it. A later `-std=` restores that dialect's default (on in strict C99
+to C17, off in GNU modes and C23), so the last of these options wins, as in
+Clang. `-nostdlibinc` drops the system include directories but keeps the
+compiler resource directory (`stddef.h` and the other freestanding headers);
+`-nostdinc` drops both. `-working-directory=DIR` and `-working-directory DIR`
+resolve relative input paths against `DIR` with host path rules (on POSIX only
+a leading `/` is absolute and `\` and `:` are ordinary filename bytes; on
+Windows `\x.c` takes the root name of `DIR` (`C:` or UNC `\\server`) and
+`C:x.c` its root-relative directory, as in LLVM's `make_absolute`). Output paths and `-I` directories stay relative to the process
+directory, and a `DIR` that is not a directory is rejected with
+`unable to set working directory: DIR`.
 Windows targets implement the MSVC ABI only, so the MinGW spellings
 (`*-mingw32`, and a `gnu`/`gnullvm` environment on Windows) are rejected with
 `unsupported target environment` instead of being aliased to MSVC (#1492);
@@ -331,7 +492,8 @@ vendor meaning. An excess component retains precedence over that refusal.
 Native x86-64 and AArch64 compilation uses the FAST register allocator at
 every optimization level, including the default and `-O0`. Callers may select
 `fast` or `quality`; both run canonical IR -> MIR -> placement ->
-metadata-backed native emission, and the last allocator-affecting option wins.
+metadata-backed native emission. Explicit allocator selection is independent
+of `-O`; the last allocator option wins.
 The stack-only mode is removed: `-fregister-allocator=none`,
 `-fregister-allocator=mir-stack` and `-fno-register-allocator` are argument errors.
 The allocators run on x86-64 under both System V and Win64, and on AArch64
@@ -383,15 +545,46 @@ metadata validates the exact accumulator, port register and immediate range.
 Source selection consumes both operands even though the imported XED rows mark
 the accumulator and DX as implicit. The hidden `OeAX()` accumulator selects
 AX or EAX and has no ModRM field; its width determines the word prefix rather
-than DX's fixed 16-bit width.
+than DX's fixed 16-bit width. The memory-looking `(%dx)` port spelling that
+GNU objdump prints and GNU as accepts names DX itself
+(`assembly_x86_att_port_dx_parse`), so only a bare parenthesized `%dx` on
+`in`/`out` qualifies; `(%rdx)`, `(%edx)`, displacement, segment and index forms
+remain invalid. Unsized Intel `ldmxcsr`/`stmxcsr [mem]` infers MXCSR's only m32
+width, as AT&T's unsuffixed spelling already does.
 `assembly_test_att_port_suffixes` checks exact bytes against matching Intel
 spellings, including immediate boundaries, word prefixes and invalid register,
 memory, suffix-width and 64-bit neighbours. It never executes port I/O.
 
-The default `-fcanonical-fast` shared pipeline and independent
-`-fcanonical-fast-{fold,address,dce,parameters}` controls are described in
-[the FAST pipeline contract](../canonical-fast-pipeline.md). Timing is separate
-(`-ftime-canonical-fast -v`); register allocation selection is unchanged.
+Explicit `-O`/`-O0` skips optional canonical FAST cleanup; positive levels
+select the existing bounded `fold,address,dce,parameters` pipeline. Omission
+retains the adopted throughput recipe. Explicit whole-pipeline and per-pass
+controls override level defaults independently of option order; the last
+explicit control of each bit wins. Level/alias policy, fixed pass order and
+budgets are in [the FAST pipeline contract](../canonical-fast-pipeline.md#native-optimization-level-policy).
+Verbose output reports disabled as well as enabled passes. Timing is separate
+(`-ftime-canonical-fast -v`); register allocation selection is independent.
+
+Canonical inlining is separate from register allocation. Tiny direct-call
+inlining is opt-in at every optimization level: `-fcanonical-inline` enables
+it and `-fno-canonical-inline` disables it (the last of the two wins), and
+`-O*` levels never change it. The matched 9700X tiny-off/on self-host profile
+on #3111 measured no compiler-throughput gain from enabling it (stage-1
+compile wall +1.66%, generated compiler self-host wall +0.68%), so no level
+adopts it by default. The optimizer still enforces `always_inline` requirements when tiny
+inlining is disabled; an impossible requirement produces a source-mapped
+`ir.inline-required` error. Positive 32-bit per-invocation limits are set with
+`-fcanonical-inline-max-callee=N`,
+`-fcanonical-inline-function-growth=N`,
+`-fcanonical-inline-module-growth=N`, and
+`-fcanonical-inline-call-sites=N`. These flags set budgets but do not enable
+tiny inlining; zero is rejected and zero-valued API options normalize to the
+named defaults. Budgets cap callee instruction count, added instructions per
+caller, added instructions per module, and accepted call sites, respectively.
+Verbose output emits one `IR_INLINE` record when tiny inlining is enabled or
+inlining candidates were encountered. Its fields are `tiny`, `candidates`,
+`inlined`, `always_inlined`, `copied_instructions`, `growth`,
+`budget_skips`, `shape_skips`, `linkage_skips`, `recursion_skips`, and
+`visits`. It is compile-work telemetry, not generated-code runtime.
 
 `-fno-frontend-ssa` selects the original memory-form C lowering;
 `-ffrontend-ssa` restores direct SSA for the bounded supported subset. The last
@@ -411,9 +604,11 @@ unit's declaration records then come from the tree
 which hands any unit that `c_parse_ast` would diagnose or read differently
 back to `c_parse_ast`. Semantic analysis answers function-body
 expression-type queries from the tree where it can (the
-[tree expression typer](frontend/ast.md#tree-expression-typer)), and its body
+[tree expression typer](frontend/ast.md#tree-expression-typer)), its body
 binder follows each function body's
-[statement plan](frontend/ast.md#statement-plan-from-the-tree); no other
+[statement plan](frontend/ast.md#statement-plan-from-the-tree), and lowering
+answers its root-conditional splits from it
+([lowering from the tree](frontend/ast.md#lowering-from-the-tree)); no other
 stage reads it. Only under the flag does analysis share the primitive and
 pointer type rows those queries mint
 ([interned rows](frontend/ast.md#interned-rows)). With the flag the object
@@ -422,8 +617,8 @@ the unit with the parse error class and a located diagnostic published like
 `c_parse_ast`'s. It does nothing for `-E`, assembly inputs or the other
 languages. Any other layout value is an argument error
 (`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints
-`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT` and `C_AST_STATEMENTS`
-rows beside `C_TYPE_LAYOUT`.
+`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT`, `C_AST_STATEMENTS` and
+`C_AST_LOWER` rows beside `C_TYPE_LAYOUT`.
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
 nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`
@@ -571,6 +766,18 @@ the object reader, in-memory/ELF linkers and `object_aarch64_elf_page_relocate`
 resolve as S + A - P; Mach-O and COFF have no such relocation, so there a
 target the unit cannot fold is refused.
 
+X86-64 unit assembly relaxes unprefixed symbolic `jmp` and `jcc` to rel8
+when the target is binding-invariant and defined in the same section. Layout
+starts with eligible branches short and grows out-of-range forms to rel32;
+instruction encodings are cached while labels, numeric labels, `.` expressions,
+`.set` aliases, data expressions, symbol sizes and alignment are recomputed.
+Calls, explicit `@PLT`, external/cross-section targets, weak definitions and
+default-visible ELF globals retain rel32. The single-instruction
+`assembly_encode` API keeps its existing encoding policy. Short branches in
+object `-S` listings therefore reassemble with their original bytes when
+labels identify the same targets; this does not preserve an intentionally
+nonminimal near encoding or an instruction prefix that the printer omits.
+
 Symbolic page addressing takes the same relocation path (#2933). `adrp Xd, sym[+off]`
 names its symbol directly; the low 12 bits are `add Xd, Xn, :lo12:sym[+off]` and an
 unsigned-offset `[Xn, :lo12:sym[+off]]` on any LDR/STR/LDRB/LDRH/LDRSB/LDRSH/LDRSW,
@@ -588,8 +795,13 @@ shifted ADD, writeback or post-index addressing, `@PAGE` off
 Mach-O, or an instruction the relocation cannot patch (LDUR, LDP) is a structured
 diagnostic naming the combination. Out-of-range pages and misaligned scaled offsets
 are link-time checks (`object_aarch64_elf_page_relocate` and the PE/Mach-O
-equivalents), as with any assembler. GOT, TLS and codegen-PIC expansion stay with
-their own owners and remain refused here. Numeric `:lo12:` expressions on ELF and COFF
+equivalents), as with any assembler. On ELF, `adrp Xd, :got:sym` and
+`ldr Xt, [Xn, :got_lo12:sym]` are also accepted (#3192), spelling
+`R_AARCH64_ADR_GOT_PAGE` and `R_AARCH64_LD64_GOT_LO12_NC` with an exactly zero
+addend; `:got:` on any other instruction, `:got_lo12:` on anything but a plain
+64-bit `ldr [base, offset]`, and either modifier on Mach-O or COFF are
+diagnosed. TLS and codegen-PIC expansion stay with their own owners and
+remain refused here. Numeric `:lo12:` expressions on ELF and COFF
 are absolute nonnegative immediates without a symbol or relocation. ADD accepts
 0 through 4095; load/store offsets must be aligned and fit the encoded 12-bit
 scaled field, so their byte offset may exceed 4095. Negative, misaligned and
@@ -650,6 +862,17 @@ request from assembly, an external ELF object or a selected archive member
 with a diagnostic naming that input; it publishes no image. Inputs with no
 note remain accepted as nonexecuting. See [object emission](../object-emission.md).
 
+Every section an assembly file declares is its own object section, in
+declaration order, on every format: thousands on ELF, up to 65,279 on COFF
+(`OBJECT_COFF_MAX_SECTIONS`) and 255 on Mach-O (`OBJECT_MACH_O_MAX_SECTIONS`).
+ELF and COFF keep each section's own name; the Mach-O writer spells each one
+by its kind (`__TEXT,__text`, `__TEXT,__const`, ...), so several sections may
+share a name there while keeping their own contents and relocations. Past a format's limit, `-c` refuses with the
+first section that does not fit (`section '.text$f255' is section 256 of 256;
+a mach-o64 object holds at most 255 sections`). Only a section whose kind is
+an initializer array takes COFF's `.CRT$XCU`/`.CRT$XTX` name.
+`compiler_driver_test_assembly_many_object_sections` covers this.
+
 The x86-64 instruction layer accepts the GNU spellings that GCC and Clang
 listings and Buster's own `-S` output use, encoding the same bytes as GNU as:
 register-immediate `movabs`/`movabsq`; AT&T `retq` and `callq`; `endbr32` and
@@ -703,11 +926,34 @@ source and encoder paths did for this snapshot; they do not supply an
 independent architectural oracle for every form. The broader #2931 issue
 remains open for unrelated encoding defects and further proof.
 
+On Mach-O, `.section SEGMENT,SECTION[,TYPE[,ATTRIBUTES]]` and
+`.pushsection` accept the pairs Buster's listing writer represents:
+`__TEXT,__text,regular,pure_instructions`, `__TEXT,__const`,
+`__DATA,__data`, `__DATA,__bss,zerofill`, `__DATA,__thread_data`,
+`__DATA,__thread_bss`, the `__mod_init_func`/`__mod_term_func` pairs with
+`mod_init_funcs`/`mod_term_funcs`, and
+`__TEXT,__eh_frame,coalesced,no_toc+strip_static_syms+live_support`.
+Known `__DWARF,__debug_*` sections retain their debug identities.
+The segment/section pairs normalize to the object's section names, so
+`.text` and `__TEXT,__text` reopen the same section. Unknown pairs, types,
+attributes and extra operands are structured directive diagnostics.
+AArch64 `adrp Xd, sym@TLVPPAGE` and
+`ldr Xt, [Xn, sym@TLVPPAGEOFF]` retain the Darwin TLVP page/load relocations,
+with zero addends; nonzero signed addends are refused because the platform
+linker rejects them. The low half must be a plain 64-bit unsigned-offset
+LDR; ADD, stores, other widths and writeback are refused. The Mach-O-only
+`@GOTPAGE`/`@GOTPAGEOFF` pair uses the existing GOT-load page/load kinds;
+its addend must be zero and its low half must load into a 64-bit integer
+register other than XZR. `compiler_driver_test_macho_aarch64_listing_round_trip` compares
+serialized text and TLVP/GOT kinds, offsets, addends and symbols with direct
+`-c`, for plain functions and defined/undefined TLS in fast/quality modes.
+
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
 suffixes (so `.init_array.00101` keeps its priority; `.preinit_array` takes
-none, as `ld` runs only that exact name), exact `.init`/`.fini`,
-and the existing DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`,
+none, as `ld` runs only that exact name), exact `.init`/`.fini`, exact
+`.tls$` (PE thread-local data, which Windows assembly output prints for both
+TLS kinds), and the existing DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`,
 `.debug_str`, `.debug_loc`, `.debug_ranges`, `.debug_addr`,
 `.debug_str_offsets`, `.debug_line_str`, `.debug_rnglists`,
 `.debug_loclists`). DWARF sections retain nonallocated object identities
@@ -816,12 +1062,12 @@ destinations are the same register, are operand diagnostics, as in llvm-mc.
 Not in this vocabulary, and still refused unless another owner accepts them:
 
 - relocated operands other than the page-address forms documented with the unit
-  vocabulary (GOT, TLS and `:got_lo12:`-style modifiers; the control owner
-  handles label LDR);
+  vocabulary (TLS and further GOT-style modifiers; the control owner handles
+  label LDR, and ELF `:got:`/`:got_lo12:` are documented above);
 - CASP, LDAPR (RCPC), LDTR/STTR, CRC32 and pointer authentication;
 - AdvSIMD forms beyond the list above that the direct SIMD owner does not
-  cover, such as by-element arithmetic (`fmla v0.4s, v1.4s, v2.s[0]`) and
-  multi-register or replicating structure loads and stores.
+  cover. By-element FMLA such as `fmla v0.4s, v1.4s, v2.s[0]` is encoded and
+  asserted by `aarch64_base_assembly_tests` (#2932).
 
 `aarch64_base_assembly_tests` checks the encoder against llvm-mc-derived words
 for each family, plus refusal and feature-gating controls. The driver round
@@ -1063,10 +1309,24 @@ and COFF members count their forms of the same definitions -- external `N_ABS`,
 `N_INDR` and `IMAGE_SYM_ABSOLUTE` symbols, and commons (an undefined external with a
 non-zero value) -- the same way (#1243).
 
+An unindexed archive is accepted, unlike GNU ld's "archive has no index", but
+every member's symbol table must be readable. Selection walks members in archive
+order, so skipping an unreadable member could let a later member satisfy a symbol
+the skipped one defines first and silently change the link. One unreadable
+member therefore rejects the whole archive, even when the link would select only
+other members: `object_archive_read_link` sets `failed_member` and a diagnostic
+naming the member, and the driver reports `could not read archive <path>: member
+<name>: unreadable symbol table in an archive without a symbol index`. Running
+`ranlib` over the archive defers the member's validation to selection, as for any
+indexed archive (#1319).
+
 `compiler_driver_archive_test_lazy` exercises all three object formats, 32/64-bit
 GNU and BSD indexes, BSD extended names, unindexed input, transitive dependencies,
 no-selected-member archives, a required incompatible member, duplicate providers,
-weak references and repeated occurrences. A separate valid ELF `R_X86_64_SIZE64`
+weak references and repeated occurrences.
+`compiler_driver_archive_test_unindexed_unreadable_member` covers the unindexed
+refusal through the reader and both positional and `-l` driver inputs, with an
+indexed control that selects the valid member and leaves the bad one unread. A separate valid ELF `R_X86_64_SIZE64`
 control verifies that an irrelevant same-target unsupported relocation is deferred
 and its selected member still fails.
 
@@ -1100,20 +1360,100 @@ Its configured native Linux control builds a real archive with host compiler
 and archiver, links an independent host control, and runs both Buster's direct
 and sysroot-default named links.
 
-For requested Linux shared libraries, a located GNU linker script beginning
-with `INPUT`, `GROUP`, `AS_NEEDED`, `OUTPUT_FORMAT`, `OUTPUT_ARCH`, or
-`SEARCH_DIR` and an opening parenthesis is refused as
-`unsupported GNU linker script <path> requested by -l<request>`. Leading
-whitespace and C block comments are accepted for this classification. The
-first script in search order stops lookup; a later ELF library cannot hide it.
-The driver neither interprets script members nor creates an image from them.
-Ordinary missing/malformed-library policy and automatic runtime-provider
-lookup retain their existing behavior. `compiler_driver_test_elf_linker_scripts`
-covers literal script/non-script boundaries, both ELF CPUs, normal/exact
-library spellings, single/multi-input links, first-request error ordering,
-later-ELF/script precedence, and preservation of an existing output.
-General GNU linker-script interpretation and Apple's missing-library behavior
-remain separate #1285 work.
+For requested Linux shared libraries, located GNU linker scripts support
+`INPUT(...)`, `GROUP(...)` and `AS_NEEDED(...)`, including nested commands,
+commas, quoted filenames, whitespace and C block comments. Members name ELF64
+shared libraries or further scripts: bare filenames, absolute paths and `-lX`
+(including `-l:FILE`). Bare members search beside the script, then the current
+directory, then the existing explicit/default ELF roots. Named members use the
+existing ELF roots. Absolute members are prefixed with the sysroot when their
+script is inside that sysroot; `=` and `$SYSROOT` force that prefix, following
+[GNU ld's file-command rules](https://sourceware.org/binutils/docs/ld.html).
+Explicit `-L` paths retain their literal meaning.
+
+Expansion uses an explicit worklist in member order, limited to 32 script files
+on a dependency chain, 32 nested command levels, 4,096 total script members per
+invocation, and 65,536 bytes per script. Cycles reach the same depth/count refusal;
+they never recurse on the C stack. DSO identity comes from `DT_SONAME` when
+present, with filename spelling retained otherwise; repeated identities create
+one dynamic-library entry. Worklist and expanded-library storage is allocated
+only when a script is encountered.
+
+This is a shared-library subset: archive/object members are refused, including
+glibc's `libc_nonshared.a`, rather than dropped or admitted as shared objects.
+`GROUP` preserves member order without archive rescanning. `AS_NEEDED` includes
+its members unconditionally, just like `INPUT`; it does not implement GNU ld's
+as-needed selection. Other commands, including `OUTPUT_FORMAT`, `OUTPUT_ARCH`
+and `SEARCH_DIR`, remain unsupported. Unsupported syntax, archive members and
+bounds failures retain `unsupported GNU linker script <path> requested by
+-l<request>`; missing DSOs retain the original request's missing-library error.
+A later DSO cannot hide the first located script. Automatic runtime lookup and
+the existing special treatment of `-lc` are unchanged.
+
+`compiler_driver_test_elf_linker_scripts` covers both ELF CPUs, normal/exact
+requests, single/multi-input links, member forms, comments, SONAME identity,
+nested scripts at/beyond the cap, cycles, parser byte/member/command-depth bounds,
+unsupported grammar, first-request error ordering and preserved output on refusal.
+On native Linux with a configured GCC or Clang driver, a host-style
+`INPUT(-lncursesw)` fixture compares its `DT_NEEDED` identity with GNU ld.
+
+On macOS and iOS, `-lNAME` searches explicit `-L` roots in order, probing
+`libNAME.tbd` before `libNAME.dylib` within each root, then
+`<sysroot>/usr/lib` when a sysroot was supplied. A compatible thin or fat
+Mach-O dylib contributes its `LC_ID_DYLIB` install name and current and
+compatibility versions to `LC_LOAD_DYLIB`; TAPI YAML TBD v1-v4 and JSON TBD v5 stubs provide
+the same metadata, and wrong-CPU or wrong-platform candidates are skipped.
+Mach-O dylib platforms come from `LC_BUILD_VERSION` and `LC_VERSION_MIN_*`;
+TBD v4 `targets:` entries must match both architecture and platform suffix,
+while TBD v1-v3 `archs:` entries match the CPU and an optional top-level
+`platform:` narrows the platform. Located versions are written verbatim,
+including zero; absent TBD current/compatibility versions default to 1.0.0,
+while a present malformed version makes the stub unusable. `-lc` and `-lm` keep
+their existing implicit behavior. Without a located candidate, only the
+allowlisted Apple system libraries retain the legacy `/usr/lib/libNAME.dylib`
+fallback; other requests fail with `cannot find -l<request>`. TBD v5 reads only
+`main_library`: `target_info[].target` must match both CPU and platform, and
+`install_names`, `current_versions` and `compatibility_versions` honor their
+optional `targets` lists. Inlined `libraries` do not supply the identity.
+The JSON scan validates the complete document with a fixed 64-frame stack;
+malformed/truncated input and deeper nesting are unusable. Ordinary metadata
+strings borrow mapped bytes; escaped strings/keys are decoded into the caller
+arena, including Unicode surrogate pairs. Invalid Unicode metadata and embedded
+NUL are refused. Ambiguous duplicate identity fields
+and overlapping target-specific metadata are refused. `compiler_driver_test_mach_library_search` covers parser bounds,
+architecture selection, search order, versions, fallback, refusal and archive
+interaction on every host without running the cross-linked image.
+
+Dependency names passed through `-l NAME` or `-framework NAME` must be
+nonempty. An explicitly empty operand is a `driver.argument` error naming the
+option before any source is read or output is published; response files and
+embedding invocations follow the same rule. A missing operand retains its
+separate `missing argument after OPTION` diagnostic. Empty `-I`/`-L` path
+policy is independent. `compiler_driver_test_empty_dependency_names` covers
+macOS/iOS, single/multiple inputs, an empty request followed by a missing name,
+argv/response/API calls, and preservation of existing output.
+
+`-framework NAME` searches every explicit `-F` root in order, then
+`<sysroot>/System/Library/Frameworks`, or `/System/Library/Frameworks` when
+no sysroot is supplied. Within each root it probes `NAME.framework/NAME.tbd`
+before `NAME.framework/NAME`. The same Mach-O/TAPI CPU and platform checks
+apply; unusable candidates are skipped. YAML TAPI stubs may describe AArch64
+libraries as `arm64e`; this ARM64 CPU subtype is accepted for ordinary AArch64
+consumers, while macOS/iOS platform matching remains exact. Unknown architecture
+spellings and other CPU families remain incompatible. The located file supplies the install
+name and both versions, including zero, rather than the search path. Duplicate
+install names produce one load command. A framework without a compatible file
+fails with `framework not found: NAME` before output publication, preserving
+any existing output. SDK-less links also require a real file: there is no
+framework-name allowlist or guessed load path. Supply `-F` or a sysroot for
+cross links. `compiler_driver_test_mach_framework_search` covers synthetic
+framework trees for macOS and iOS on every host, including both single-source
+and multi-input link paths, without executing the foreign image. On native
+macOS, the same fixture resolves the active SDK through `xcrun` and records
+`MACH_FRAMEWORK_SDK` candidate paths, formats, sizes, statuses, install names
+and packed versions for AppKit, Metal, QuartzCore and Foundation. Every one
+must have a compatible identity; the Release self-host gate also links and
+executes against these real framework identities.
 
 ELF executable data placement honors both page and requested object alignment.
 Align the final virtual address, not only its file offset: an initialized
@@ -1151,6 +1491,52 @@ runtime publishes. Ordinary links with no such unresolved helper do not read
 or name libgcc_s. This uses an installed target runtime; it installs or embeds
 none. Apple, Windows, Android and freestanding runtime provisioning remain
 separate #1272 work.
+
+Native x86-64 Linux links also supply GCC's CPU-feature runtime (GitHub
+#3399). GCC and Clang `target_clones` resolvers and `__builtin_cpu_init`,
+`__builtin_cpu_supports` and `__builtin_cpu_is` call `__cpu_indicator_init`
+and read `__cpu_model` / `__cpu_features2`. Those are hidden definitions in
+the static `libgcc.a` (`cpuinfo.o`, with its own `.init_array` constructor),
+which the host compiler driver links implicitly as `-lgcc`. After objects,
+explicit archives and the ELF runtime object are selected, a remaining strong
+undefined reference to one of these names that no selected object defines
+makes `compiler_driver_elf_cpu_runtime` read `libgcc.a`: first from the `-L`
+directories, then the newest `usr/lib/gcc`, `usr/lib64/gcc` or Debian
+`usr/lib/gcc-cross` `<triple>/<version>/` directory under the sysroot, or the
+host without one (`compiler_driver_elf_libgcc_path`). Only the members that
+define those names are selected; libgcc.a is not otherwise added to the link,
+so the libgcc_s helper policy above is unchanged. Links without such a
+reference, including weak ones, do not read or name libgcc.a. A missing
+archive, or one that does not define the name, fails the link with the archive
+and symbol named, before replacing the output.
+
+The same policy covers AArch64 Linux (GitHub #3508), with a target-keyed name
+set and GCC triple list (`aarch64-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`aarch64-redhat-linux`, `aarch64-suse-linux`); the x86-64 names and triples
+are unchanged. Every AArch64 name below is a hidden definition that only the
+static `libgcc.a` provides; `libgcc_s.so.1` exports none of them, so they
+belong here rather than in the libgcc_s helper policy:
+
+- GCC 10+ and Clang default to `-moutline-atomics`, so `__atomic_*` builtins
+  call `__aarch64_<op><bytes>_<order>` helpers: `cas` (1, 2, 4, 8 and 16
+  bytes) and `swp`, `ldadd`, `ldclr`, `ldeor`, `ldset` (1, 2, 4 and 8 bytes),
+  each with `relax`, `acq`, `rel`, `acq_rel` or `sync`
+  (`compiler_driver_elf_outline_atomic_symbol`). Each helper member references
+  `__aarch64_have_lse_atomics`, so `lse-init.o` and its `.init_array` LSE
+  probe are selected with it.
+- GCC 14+ and compiler-rt FMV resolvers use `__aarch64_cpu_features`,
+  `__init_cpu_features_resolver` and `__init_cpu_features` (`cpuinfo.o`, with
+  its own constructor). GCC 13 and older `libgcc.a` has no `cpuinfo.o`, so such
+  a link fails with the archive and symbol named, as the host link does.
+- `__builtin___clear_cache` calls `__aarch64_sync_cache_range`
+  (`sync-cache.o`).
+
+The selected members reference `getauxval` or `__getauxval`, which bind to
+glibc like any other import. `compiler_driver_elf_aarch64_cpu_runtime_tests`
+checks these links against the host link on AArch64 Linux hosts.
+`compiler_driver_elf_aarch64_cpu_runtime_selection_tests` covers selection,
+refusal, and per-target keying from any Linux host. SME runtime entry points,
+Android, and non-Linux targets remain out of scope.
 
 `compiler_driver_elf_dynamic_symbols` walks that table once and produces two
 things.
@@ -1227,8 +1613,9 @@ model; `-fno-pic` clears it, while `-fno-pie` cancels only a PIE spelling.
 On x86-64 and AArch64 ELF the positive spellings select the implemented PIC
 reference model (see the position-independent code bullets in
 [machine.md](machine.md)). On AArch64 ELF the model makes `-fPIC` objects
-acceptable to `ld.lld -shared -z text`; Buster's own `-shared` and `-pie`
-writers still exist only for x86-64 Linux. Thread-local access under AArch64
+acceptable to `ld.lld -shared -z text`; Buster's Linux `-shared` and `-pie`
+writers still exist only for x86-64. Android AArch64 executable links use the
+AArch64 PIC model automatically. Thread-local access under AArch64
 ELF PIC is refused by a named code-generation diagnostic (emitting TLSDESC is
 not implemented; foreign TLSDESC objects are relaxed at link time, see the
 AArch64 TLS paragraph below) and publishes no output. Cancellation, preprocessing,
@@ -1236,6 +1623,16 @@ syntax-only and assembly/prebuilt-only input routes retain their behavior.
 Mach-O and COFF keep their existing target models; Wasm/eBPF compatibility
 behavior is unchanged. LLVM-bitcode and direct backend model requests remain
 an audit residual of issue #1289.
+On x86-64 and AArch64 Android every executable link is a PIE, with or without
+`-pie` (`-no-pie` cannot select another image there): the kernel places
+bionic's executable at a load bias, so a fixed-address image marked `ET_DYN`
+would run its preinit entries, IFUNC runner and every data pointer
+unrelocated. The writers name `/system/bin/linker64` and `libc.so`; their
+entry stubs do not register a loader finalizer, because bionic's `linker64`
+does not provide the glibc x86-64 RDX finalizer contract or an AArch64 X0
+finalizer. `-shared` stays refused for Android. `android/runtime_order.sh`
+executes an x86-64 image on the CI emulator (see the Android CI notes in
+[testing.md](testing.md)).
 On any other target a link that asks for either image is refused as an
 unsupported option, while a compile-only invocation ignores the link option,
 as GCC does.
@@ -1248,8 +1645,8 @@ value are argument errors, and a GPU target ignores the option. The bit
 reaches `st_other` on ELF only; Mach-O and COFF objects do not record it.
 
 The default fixed-address dynamic executable
-(`link_native_executable_elf64_x86_64_dynamic`, which the AArch64 and Android
-dynamic writers also build on) is hardened the way GNU ld's default is
+(`link_native_executable_elf64_x86_64_dynamic`, which the AArch64 Linux and
+Android dynamic writers also build on) is hardened the way GNU ld's default is
 (#2720). It has three loads: R (headers, `.interp`, `.dynstr`/`.dynsym`/
 `.hash`/version tables, `.rela.plt`/`.rela.dyn`, `.rodata`, `.eh_frame_hdr`,
 `.eh_frame`), R+X (the entry stub, `.text`, `.plt`) and RW. The RW load starts
@@ -1304,15 +1701,23 @@ are tracked on GitHub #1418.
 | `-nostdlib++`, `-nostdlibs`, `-nolibc` | `unsupported option` | Not spellings of the above. |
 | `-mfoo`, `-mno-foo` (no architecture has the feature) | `unsupported option: -mfoo` | `-m<feature>` takes only the names `-mattr` takes. |
 | `-mavx2` for a non-x86 target or a GPU target | `unsupported option: -mavx2` | The feature belongs to another architecture, or the GPU pipeline has no feature overrides. |
-| `-m32`, `-mred-zone`, `-mno-red-zone` | `unsupported option` | They name no target feature and have no implementation. |
+| `-mred-zone`, `-mno-red-zone` | `unsupported option` | They name no target feature and have no implementation. |
 | `-mAVX2`, `-mavx2=1`, `-m`, `-mno-` | `unsupported option` | Feature names are exact lower case; `=` forms belong to `-march=`, `-mcpu=`, `-mtune=`, `-mattr=`, `-masm=`. |
 | `-mno-sse2` | `unsupported option: -mno-sse2 (SSE2 is part of the x86-64 baseline)` | Every x86-64 target here requires SSE2. |
 | `-xc++` and other unknown joined `-x<lang>` | `unsupported language: c++` | Same language names as `-x <lang>`; C is the only source frontend. |
 | bare `-x` | `missing argument after -x` | As GCC and Clang. |
 
-`link_native_image_elf64_x86_64_position_independent` writes both kinds as an
-ET_DYN at base zero. Its orientation comment is the contract; in short:
+`link_native_image_elf64_position_independent` writes the supported
+position-independent images as an ET_DYN at base zero. Its orientation comment
+is the contract; in short:
 
+- An Android AArch64 PIE shares the address-zero ELF layout and uses
+  `EM_AARCH64`, `/system/bin/linker64`, and `libc.so`. Its `R_AARCH64_RELATIVE`,
+  `GLOB_DAT`, and `JUMP_SLOT` relocations use ABI types 1027, 1025, and 1026.
+  The hosted stub omits the X0 loader-finalizer registration; imported calls
+  use PLT thunks, direct page/PREL references bind locally or through copy
+  slots, and imported function-address references without GOT indirection are
+  refused. Linux AArch64 PIE/shared output remains unsupported.
 - Every absolute address becomes a dynamic relocation: `R_X86_64_RELATIVE` for
   a definition bound in the image, `R_X86_64_64`/`GLOB_DAT` for an import and,
   in a shared object, for an exported definition, because an executable may
@@ -1366,7 +1771,7 @@ headers exist, and the `-fPIC` refusal.
 `compiler_driver_test_local_dynamic_tls` links GCC and Clang `-O2 -fPIC`
 local-dynamic objects (plain, `-fno-plt`, and `-g`) into each image kind and
 runs them, the shared object under both a Buster PIE and the host toolchain.
-AArch64 ELF, PE DLLs and Mach-O dylibs have no writer yet.
+AArch64 ELF shared objects, PE DLLs and Mach-O dylibs have no writer yet.
 
 `compiler_driver_test_initial_exec_tls` serializes independent MOV-form ELF
 fixtures using rax and r8, then links and executes them as fixed-address and
@@ -1456,6 +1861,69 @@ Buster-compiled main defining the other thread-local, and the test checks
 every descriptor appears relaxed and the image prints the same values as a
 host-linked control.
 
+## Native linker identity
+
+`ide cc -Wl,--version` and `ide cc -Xlinker --version` print
+`Buster native linker` followed by the effective target triple and exit
+successfully without reading source or standard input, compiling, spawning an
+external tool, or writing an artifact. `-march=x86-64 -O0 -g` may accompany the query. The independent
+`-m64` driver capability is tracked by
+[#3458](https://github.com/buster14a/buster/issues/3458). The typed invocation API exposes
+`COMPILER_DRIVER_QUERY_LINKER_VERSION`; execution returns the identity in
+`CompilerDriverResult.output`.
+
+The query requires a native x86-64/AArch64 link action and a supported native
+OS. The raw linker request must contain exactly `--version`; other linker
+arguments, compiler queries, compile-only actions, bitcode and GPU pipelines
+are refused. A SONAME operand named `--version` retains its ordinary meaning.
+The identity makes no GNU ld/LLD compatibility or invented version claim.
+Buster currently links in process and has no external-linker selector.
+
+For a native Linux x86-64 or AArch64 ELF link, raw linker `-v` from
+`-Wl,-v` or `-Xlinker -v` requests the native linker's identity while allowing
+the link to continue. It is consumed only in option position; operands to
+`-soname`, `--soname`, `-h`, `-z` or `--version-script` are preserved. Other targets and output
+modes continue to reject it. With driver `-v`, the driver also prints a
+` buster-native-ld` link-report line containing the output, explicit and
+target/sysroot library search roots in lookup order, command-line object,
+archive and shared-library inputs, and requested libraries. This is a report
+label for Buster's in-process link, not an executable name or linker choice;
+it does not claim GNU ld or LLD identity. CMake's
+`CMakeDetermineCompilerABI` / `CMakeParseImplicitLinkInfo` consume this
+link-line shape to discover Linux multiarch implicit library directories.
+
+Meson versions without a Buster linker detection/class implementation still
+reject this truthful identity. Native query support alone does not qualify
+Meson/QEMU configuration: upstream recognition and tests against unmodified
+Meson are required under [#3475](https://github.com/buster14a/buster/issues/3475).
+
+### Standalone CMake ABI discovery reduction
+
+`tools/cmake_abi_discovery/CMakeLists.txt` is a standalone reduction, not a CI
+test. Compare its `discovery.txt` output with Clang and Buster in separate
+build directories. For Clang:
+
+```sh
+cmake -S tools/cmake_abi_discovery -B out-clang -DCMAKE_C_COMPILER=clang
+cmake --build out-clang
+cat out-clang/discovery.txt
+```
+
+With CMake 3.29 or newer, point CMake directly at `ide` and make `cc` the
+compiler argument:
+
+```sh
+cmake -S tools/cmake_abi_discovery -B out-buster \
+  -DCMAKE_C_COMPILER=/path/to/ide -DCMAKE_C_COMPILER_ARG1=cc
+cmake --build out-buster
+cat out-buster/discovery.txt
+```
+
+For older CMake, use a wrapper whose contents are `exec /path/to/ide cc "$@"`,
+then configure with `-DCMAKE_C_COMPILER=/path/to/wrapper`. Compare pointer
+size, library architecture, implicit directories, linker identity, and the
+paths found for z and X11.
+
 ## Pass-through options
 
 `-Wl,a,b,c` produces three individual linker arguments, in order. Each
@@ -1474,17 +1942,114 @@ The supported subset is:
 - x86-64 Linux shared objects: `-soname NAME`, `--soname NAME`, `-h NAME`,
   `-soname=NAME`, and `--soname=NAME` set `DT_SONAME`.
 
+- x86-64 Linux executables, PIEs and shared objects: one
+  `--version-script=PATH` or `--version-script PATH` applies a GNU version
+  script. The file must be regular, at most 1 MiB, and contain one anonymous
+  or named node: `[NAME] { [global: SYMBOL; ...] [local: SYMBOL; ...] };`.
+  Clause order is flexible; each clause may occur once. Exact unquoted names
+  use ASCII letters, digits, underscores, dots and dollar signs. The local
+  clause also accepts one `*;` catch-all; exact global names override it.
+  Whitespace, `#` line comments and `/* ... */` comments are accepted.
+  At most 8,192 distinct exact names are accepted. Conflicting exact
+  global/local rules, multiple scripts/nodes, inheritance, quoted names,
+  language blocks, other patterns and malformed/trailing input fail before
+  publication. Missing exact names are permitted, as with GNU ld.
+  Local definitions become local in `.symtab`, leave `.dynsym`, and bind
+  inside shared objects. Input-hidden/local symbols cannot be promoted and
+  undefined imports are not localized. A named node assigns default version
+  index 2 to its exported exact globals, emits base/node `.gnu.version_d`
+  records and `DT_VERDEF/DT_VERDEFNUM`, and shifts needed import versions
+  above index 2. Unmatched exports remain unversioned. The base record names
+  the SONAME or output basename. Executable export selection still follows
+  `--export-dynamic` and library references; the script limits that selection.
+  Anonymous nodes change binding/export visibility without defining a version.
+  This covers pristine SDL3's single-node map and executable CMake probe;
+  broader GNU grammar and other targets remain unsupported.
+
 Other linker values and unsupported targets/output modes fail rather than
 silently losing link semantics. This includes PE, Mach-O, UEFI, compile-only,
 preprocessing, assembly-text and bitcode output. `-rdynamic` uses the same
 export validation. Unknown options, entry overrides, wrapping, archive-mode
-switches, runtime paths, version scripts, and other `-z` modes are refused.
+switches, runtime paths, and other `-z` modes are refused.
 
-`-Wp,` and `-Wa,` are unsupported and are never warning options. This includes
-preprocessor macro/include operations and dependency requests. Direct `-D`,
-`-U`, and `-I` remain available; dependency generation (`-M`, `-MM`, `-MD`,
-`-MMD`, `-MF`, `-MT`, `-MP`) is refused in every spelling. A failed request
-preserves any existing artifact instead of reporting a successful stale build.
+`-Wp,` and `-Wa,` are never warning options. Only the exact
+`-Wp,-MD,PATH` and `-Wp,-MMD,PATH` dependency spellings described below are
+supported; other pass-through requests, including macro/include operations,
+are refused. Direct `-D`, `-U`, and `-I` remain available.
+Standalone `-M`, `-MM`, and `-MG` remain unsupported.
+
+## Macro filename prefix maps
+
+`-fmacro-prefix-map=OLD=NEW` records literal, case-sensitive prefix
+substitutions for C and preprocessed assembly. Empty OLD or NEW is allowed;
+the last `=` separates them, and the last matching option wins once, following
+GCC. Matching is a byte prefix, without a directory-boundary requirement,
+canonicalization or repeated application to the replacement.
+
+The preprocessor applies the mapping when expanding `__FILE__` and
+`__BASE_FILE__`; `__FILE_NAME__` takes its basename first. Logical `#line`
+names can match too. GCC-style directive operands retain their original
+filenames, so mapping cannot redirect `#include __FILE__` or mutate a
+`#line __FILE__` operand. Diagnostics, source maps, include identity/lookup,
+dependency prerequisites, output paths and debug information retain their
+original names. GPU forwarding is explicitly refused. The independent
+`-ffile-prefix-map`, `-fdebug-prefix-map` and `-fcanon-prefix-map` options
+remain unsupported.
+
+GCC 15.2 [prefix-map implementation](https://github.com/gcc-mirror/gcc/blob/releases/gcc-15.2.0/gcc/file-prefix-map.cc)
+and [file builtins](https://github.com/gcc-mirror/gcc/blob/releases/gcc-15.2.0/libcpp/macro.cc)
+define the ordering, separator and directive policy.
+Clang 21.1 [language option parsing](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.0/clang/lib/Frontend/CompilerInvocation.cpp)
+and [mapping](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.0/clang/lib/Basic/LangOptions.cpp)
+agree for the single directory-to-empty Kbuild mapping, but select overlapping
+prefixes in reverse lexical order, retain the first duplicate prefix and split
+the first `=`. These differences
+are explicit oracle cases, not an assertion of universal GCC/Clang equivalence.
+The registered `compiler_driver_test_macro_prefix_map` and
+`compiler_driver_test_macro_prefix_map_files` cover the contract.
+Set `BUSTER_PREFIX_MAP_ORACLES=1` on hosted Linux to additionally require
+independent installed GCC and Clang preprocessing of the matrix and includes.
+
+## Dependency files
+
+`-MD` and `-MMD` write a Make-compatible depfile for C `-c` output. The default
+depfile path comes from the object path by removing only the basename's last
+extension and appending `.d`; `-MF` overrides it. `-MT` adds a raw target,
+`-MQ` adds an escaped target, and the default target is the escaped object path.
+Multiple target options retain command-line order. `-MP` adds phony rules for
+header prerequisites. `-MF`, `-MT`, `-MQ`, and `-MP` require `-MD` or `-MMD`;
+explicit `-MF`/target options cannot be used with multiple inputs.
+
+Prerequisites come from resolved preprocessor include identities, in
+first-inclusion order; the main source comes first unless compiling stdin.
+Repeated identities appear once, builtin headers and `<command-line>` do not
+appear, and forced includes follow the main source. `-MMD` excludes headers
+found in system include paths and all headers included from a system header.
+Makefile-special spaces, tabs, dollar signs, and `#` characters are escaped.
+Paths containing a newline or carriage return cannot be represented and fail
+with a file-write diagnostic.
+The depfile is atomically published only after successful compilation and
+object publication, so a failed compile preserves existing object and depfile
+contents.
+
+The bounded Linux Kbuild/BusyBox spellings `-Wp,-MMD,PATH` and
+`-Wp,-MD,PATH` reuse that collector and writer for exactly one native
+x86-64/AArch64 C input. They support `-c` and `-S -o FILE`; assembly must
+name its output file, so stdout output is refused. The path must be nonempty,
+contain no comma, newline, carriage return or NUL, and cannot be `-` or
+alias the source or artifact. Repeated pass-through dependency requests,
+additional comma-separated operations, direct `-MD/-MMD/-MF/-MT/-MQ/-MP`
+modifiers, retained in-memory objects, libraries and unsupported output modes
+are refused before compilation. Direct dependency options retain their C
+`-c` contract; this does not enable direct `-MD -S`.
+
+The default escaped target is the actual object or assembly output path,
+matching Clang's handling of these pass-through spellings. GCC uses the
+source basename with an `.o` suffix instead; this target-name difference is
+explicit. Linux Kbuild's `fixdep` supplies the real build target separately.
+A depfile is published only after its named artifact succeeds. A failed
+source or artifact write preserves the prior depfile; failure to publish the
+depfile reports failure even if the artifact has already been published.
 
 ## Warning options
 
@@ -1554,25 +2119,61 @@ source debug models and their larger object payloads unless requested.
 `-g` selects DWARF 4 for native ELF/Mach-O targets and CodeView for Windows
 objects. Unwind information remains independent of source debug information.
 
+Direct `wasm32-wasip1`, `wasm64-unknown-freestanding`, and `bpfel-unknown-linux`
+output does not emit source debug information. An enabled `-g` request fails
+with a named `driver.argument` diagnostic before reading source or publishing
+an artifact. The typed invocation API rejects `debug_info=true` too, regardless
+of `debug_info_explicit`. Default output, `-g0`, and `-g -g0` remain supported;
+`-g0 -g` is refused. Preprocessing and syntax-only actions accept `-g` because
+they do not emit a debug artifact. `compiler_driver_test_nonnative_debug_options`
+covers these refusals, option ordering, unchanged existing output, and identical
+default/disabled-debug bytes.
+
+A linked Windows image's PDB (`pdb_build`) gives its TPI stream a hash stream:
+one `hashTypeRecord` bucket per record modulo `0x3ffff` (`pdb_type_record_hash`)
+and a sparse type-index offset entry per 8 KiB of records. DbgHelp (cdb,
+WinDbg, `symchk`, `dbh`) faults with `0xc0000005` loading a PDB whose TPI
+stream names no hash stream (#3411). The regression is `pdb_test_tpi_hashes`.
+The globals and publics streams index each module's top-level procedures
+(`S_PROCREF`/`S_LPROCREF` naming the module-stream record) and data (copies of
+`S_GDATA32`/`S_LDATA32`); global ones also get an `S_PUB32` and an entry in the
+publics address map, sorted by section and offset (`pdb_gsi_emit`). With these
+empty, DbgHelp loads the PDB only as "public symbols & lines". The regression is
+`pdb_test_global_indexes`.
+
+CodeView names a frame-resident location with `S_DEFRANGE_REGISTER_REL`
+against RBP (x86-64) or X29 (AArch64), the base codegen normalizes FRAME offsets
+to (`codeview_emit_frame_relative`). `S_DEFRANGE_FRAMEPOINTER_REL` is not used:
+it needs an `S_FRAMEPROC` record this producer does not emit, and cdb and RAD
+drop it without one. A frame-resident piece of a split variable uses the same
+record with the `spilledUdtMember` flag and its 12-bit offset in the parent; a
+piece past that offset stays unavailable. Consecutive line entries for one
+source line become one C13 row, so a `file:line` breakpoint resolves to a
+single range. Regressions: `codeview_test_long_location_range`,
+`codeview_test_line_ranges`, `codeview_test_pointer_sizes` and the CodeView
+consumer in `codegen_test_machine_debug_locations`.
+
 With `-g`, named scalar locals that need more than one defining instruction to
 describe stay in distinct frame slots, so their location lists follow stores
 through reassignment and control-flow joins. A frame location starts after its
 first entry-block store. A local first stored on a later control-flow path
-gets per-block ranges from a forward must-initialized pass over the published
-CFG (`machine_debug_initialized_build`): the whole of each reachable block
-that every incoming path has written, else the rest of a block after its own
-first write. A write on only some paths therefore never reaches the join, and
-uninitialized frame bytes are never exposed. Ranges are produced in machine
-layout order, and `codegen_canonical_location_append` merges a seed into the
-previous one when it continues the same local with the same whole location,
-so back-to-back blocks become one location-list entry or CodeView
-`S_DEFRANGE_*` record. Past `MACHINE_DEBUG_INITIALIZED_CELL_LIMIT` block-local
-cells, or once a function's deferred ranges would exceed
-`MACHINE_DEBUG_INITIALIZED_RANGE_LIMIT`, the remaining locals stay
-unavailable. The CodeView symbol reserve counts every location range
-(`CODEVIEW_DEFRANGE_RECORD_BYTES`), and a range longer than the 16-bit
-`S_DEFRANGE_*` length is emitted as consecutive records of at most
-`CODEVIEW_DEFRANGE_MAX_LENGTH` bytes rather than clamped. Regressions:
+gets must-initialized ranges from the published CFG
+(`machine_debug_initialized_build`): the whole of each reachable block that
+every incoming path has written, else the rest of a block after its own first
+write. A write on only some paths therefore never reaches the join, and
+uninitialized frame bytes are never exposed. These per-block ranges are
+organized in machine layout order and emitted as one debug value for each
+layout-adjacent run; a partial-start block starts a new run. Machine blocks
+are published in selection layout order, with each block's line marks forming
+a contiguous row group, so adjacent block spans meet at a row boundary.
+Replaying the run therefore preserves the same seeds as separate block
+replay followed by `codegen_canonical_location_append`. Past
+`MACHINE_DEBUG_INITIALIZED_CELL_LIMIT` block-local cells, or once the
+per-block range budget `MACHINE_DEBUG_INITIALIZED_RANGE_LIMIT` is exceeded,
+the remaining locals stay unavailable. The CodeView symbol reserve counts
+every location range (`CODEVIEW_DEFRANGE_RECORD_BYTES`), and a range longer
+than the 16-bit `S_DEFRANGE_*` length is emitted as consecutive records of at
+most `CODEVIEW_DEFRANGE_MAX_LENGTH` bytes rather than clamped. Regressions:
 `codegen_test_debug_local_seed_coverage`,
 `machine_test_debug_value_initialized_blocks`,
 `machine_test_debug_value_initialized_budget`,
@@ -1624,15 +2225,52 @@ sized from the by-value nesting depth of the initialized type
 a flat table does not limit them. Driver regressions
 (`compiler_driver_test_large_static_initializers`) compile with `-c` a
 1,000,000-element `unsigned char` array, a 250,000-entry `const char *` table
-and a 200,000-entry struct array. Remaining limits: a flat initializer past
-about 1.7 million elements stops in `c_parse_typed_constant`; a single
-function of about 225,000 non-foldable statements exhausts the machine scratch
-in `codegen.c` (both tracked by #2527); and an array of
-`struct { int a; const char *s; short v[3]; }` compiles to 220,000 entries but
-aborts with an arena validation failure from 230,000 (#3254). The mobile
-builds of the driver fixture use smaller counts to keep their deadlines. A reservation that cannot be carved
+and a 200,000-entry struct array. Semantic analysis no longer sizes its
+initializer work by the tokens of the whole braced list: the typed-constant
+task stack in `c_parse_typed_constant` grows on demand, and the array-count
+inference frames and continuations are also bounded by the type count.
+`c_test_parse_large_static_initializers` analyses a 230,000-entry
+`struct { int a; const char *s; short v[3]; }` table (#3254) and a
+4,000,000-element byte table, both of which aborted on the 256 MiB thread
+scratch before. Measured with `ide cc -c`: 8,000,000 bytes take 3.2 s and
+471 MB; 1,000,000 entries of that struct take 15 s and 2.7 GB, so time, not a
+reservation, is the next limit. The mobile builds of the driver fixture use
+smaller counts to keep their deadlines. A reservation that cannot be carved
 is a positioned `initializer working storage exceeds the scratch reservation`
 or `initializer nesting exceeds its capacity` diagnostic and a failed result.
+
+Automatic aggregate initializers lower through the nested compound-literal
+machine, which zero-fills each brace-enclosed element before storing its
+members. Its scratch is per element and released with it: the zero-value task
+stack grows with the widest path through the type (`c_ir_emit_zero_value`),
+the cursor stack follows the type's nesting depth, and the unit-lifetime query
+stack gets its own mapping when it would leave lowering less than half of the
+thread scratch. `c_test_ir_local_table_zero_scratch` lowers a 20,000-entry
+local table that previously exhausted the scratch (#2527). A task stack that
+cannot grow is the diagnostic
+`aggregate zero-initializer exceeds the lowering scratch reservation`.
+
+### Large functions in the backend
+
+Machine selection, placement, scheduling and encoding of one function share
+the thread scratch, which is 256 MiB by default. `codegen_machine_scratch_bound` plans the
+function's need from its IR instruction, value and block counts before
+selection. The plan has a linear term several times the measured peak (about
+290 bytes per machine row under FAST, 410 under QUALITY) and a term for the
+FAST allocator's block-by-register liveness planes. When the bound exceeds
+what is left of the thread scratch, `codegen_machine_scratch_begin` installs
+private reservations of that size as the thread's scratch arenas for this one
+function, so nested pass scratch grows with it too, and restores the originals
+afterwards. Ordinary functions, including every function of the self-host,
+never take this path. A bound past 256 GiB, or a reservation the system
+refuses, fails the function with `kind=capacity reason=machine-scratch`
+instead of an arena validation abort (#3413).
+`c_test_large_function_machine_scratch_runtime` compiles and runs a
+5,000-entry local table, about 555,000 machine rows in one block, under both
+allocators; `codegen_test_machine_scratch_plan` checks the plan, the
+replacement and its restoration. Backend time, not memory, is the next limit
+for such functions: 128,000 and 256,000 `sink += x + i;` statements in one
+function take about 10 s and 42 s.
 
 ## ELF TLS companion lookup
 
@@ -1711,9 +2349,19 @@ suffix to classify, so it needs `-x c` or `-x cpp-output`, or `-E`, which reads
 it as C source; without either, or under another language, the parser refuses
 it, and it may appear only once. The source text travels in
 `CompilerDriverInvocation.standard_input`: the `cc` command reads standard
-input to EOF into it after parsing, and embedding callers fill it themselves. A
-null pointer there fails the input as a read error. Diagnostics and `__FILE__`
-name the input `-`, and `-c` without `-o` writes `-.o`, as Clang does.
+input to EOF into it after parsing, and API callers fill it themselves. A null
+pointer there fails the input as a read error. Diagnostics and `__FILE__` name
+the input `-`, and `-c` without `-o` writes `-.o`, as Clang does.
+
+The embedding facade instead sets the API-only
+`CompilerDriverInvocation.input_source` for one C input. A non-null pointer
+means the bytes are used directly and `input_paths[0]` supplies only the
+virtual filename for diagnostics, `__FILE__`, and quoted-include lookup; the
+driver does not open that path and assigns no filesystem identity. An empty
+source is valid when its pointer is non-null. `retain_object` is another
+API-only field: for a single `-c` input it keeps `result.object` in the caller's
+arena and suppresses file output. The public embedding module owns the arena
+through object serialization or JIT release.
 `compiler_driver_test_probe_spellings` covers the admission rules, both routes
 and the `-static`/`-mtune` spellings (GitHub #2851).
 
@@ -1771,3 +2419,28 @@ SOURCE input metrics. Include resolution, preprocessing, semantics, canonical
 IR validation, backends and publication run fresh. See
 [bounded raw source reuse](../source-lex-reuse.md), including ownership and
 qualified-host performance acceptance, which remains pending.
+
+
+## Native fixture-derived AArch64 assembly census
+
+`./build.sh test_aarch64_assembly_census --ide build/Release/ide` compiles the
+sorted `tests/*.c` fixture set for AArch64 Linux at O0, O1 and O2, records
+producer failures and include exclusions, and compares the deduplicated constant
+instruction rows with `llvm-mc` through `llvm-objdump`. Symbolic and nonconstant
+rows are explicit exclusions and need the separate relocation suites. This is a
+fixture-derived correctness census, not a full ISA census or runtime test.
+
+Use `--clang`, `--llvm-mc`, `--llvm-objdump`, `--out` and `--timeout-seconds`
+to pin tools and retain evidence. The output directory must be new. Process,
+capture, fixture, instruction and elapsed-time bounds fail closed. Unknown
+assembler refusals, observer failures, empty comparisons and encoding differences
+fail; every successful row partition accounts for each row as a comparison or an
+unknown refusal. Producer exclusions are reported as `PASS_WITH_EXCLUSIONS`, which
+does not establish coverage for the excluded C fixtures. No refusal is exempt:
+the by-element FMLA spelling once documented by #2688 is encoded since #2932.
+
+`./build.sh test_aarch64_assembly_census --self-test` runs deterministic native
+subprocess controls for refusal detection, observer failures, empty and
+malformed disassembly, raw-word parsing and unequal encodings. The hosted workflow
+retains source/tool/binary identities, listings, constant rows, object files,
+disassembly and the report on success or failure.

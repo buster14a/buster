@@ -18,6 +18,7 @@ contract; this page does not maintain a second copy of command-line flags.
 | `compiler.c` | Preprocess, parse, analyze and lower the active C frontend. | [Frontend guide](../agents/frontend.md) and its topic guides. |
 | `compiler.gnu-callback-storage` | GNU-dialect function-pointer storage through `void *` on native Linux/macOS; strict-C and other target restrictions remain explicit. | [Calls contract](../agents/frontend/calls.md#gnu-callback-storage-through-void-pointers) and [pinned evidence](../capability-portfolios/callback-storage.md). |
 | `compiler.artifacts` | Compile, assemble and link through the headless driver; reusable toolchain modules have their own boundaries. | [Driver guide](../agents/driver.md) and [source map](../agents/project.md). |
+| `compiler.embedding` | Packaged in-memory C compilation and native object JIT for embedding clients. | [Embedding example and contract](../../tools/embed_example/README.md) and [public header](../../src/buster/lib/compiler/embed/embed.h). |
 | `compiler.hot-reload-demo` | Opt-in trusted-module Linux x86-64 counter consumer: edit/rebuild/reload at explicit safe points with host-owned state. | [Runnable workflow and support contract](../../tools/hot_replace_probe/README.md). Application dispatch stays outside compiler internals. |
 | `compiler.wasm64` | Direct core Wasm64 output. | [Wasm64 contract](../../WASM64.md). |
 | `compiler.llvm-bitcode` | Direct binary LLVM bitcode output. | [Bitcode contract](../../LLVM_BITCODE.md). |
@@ -68,6 +69,15 @@ its existing module-state policy; its lifecycle self-test covers both cases.
 Linking and releasing a JIT mapping do not execute runtime initialization or
 finalization.
 
+`ide run <C compiler options and inputs> [-- <program arguments>]` compiles C
+through the ordinary frontend, canonical IR, native code generation and
+`link_objects`, then links the merged object in memory with this JIT and calls
+`main(argc, argv, envp)` in-process, without an intermediate object or
+executable file. It binds only an explicit libc-function allowlist, is not a
+sandbox, and is executed and tested on x86-64 Linux hosts and targets only. See
+the [driver guide](../agents/driver.md#in-memory-execution-ide-run) for its
+full contract and refusals.
+
 ## Validation and work
 
 Use the existing [test/CI guide](../agents/testing.md), focused regression cases
@@ -85,7 +95,8 @@ separate validation gates.
 
 [#309](https://github.com/buster14a/buster/issues/309) owns the specialized backend
 capability/conformance catalogue. Extend that work rather than implementing a
-second matrix here. Implementation, evidence and advertised support are separate.
+second matrix here. See the [backend capability catalogue](../backend-capabilities.md).
+Implementation, evidence and advertised support are separate.
 A performance candidate also needs its applicable acceptance evidence; SIMD code
 or a merged implementation alone is not a speedup.
 

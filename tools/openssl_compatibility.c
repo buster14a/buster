@@ -359,7 +359,7 @@ BUSTER_GLOBAL_LOCAL bool openssl_step(Arena* arena, String8 directory, String8 n
     bool tests = string_equal(name, S8("tests"));
     command_print(arguments);
     RaddebuggerCommandResult command = openssl_command(arena, arguments, directory, prefix, RADDEBUGGER_ENVIRONMENT_INHERIT, stopped,
-                                                       tests ? 1800ull * 1000ull * 1000ull : RADDEBUGGER_PROCESS_TIMEOUT_US);
+                                                       RADDEBUGGER_PROCESS_TIMEOUT_US);
     if (tests)
     {
         // Retain the entire bounded TAP log in the evidence directory and print

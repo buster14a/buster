@@ -1,23 +1,28 @@
 # Darwin AArch64 relocation closure
 
 This tranche owns the object, native-link, and JIT relocation boundary.  The
-exact AArch64 object-relocation denominator is the 12 enum members below
+exact AArch64 object-relocation denominator is the 14 enum members below
 (common `ABS64` is listed separately because it is shared by both targets):
 
 `CALL26`, `JUMP26`, `PREL32`, `MACH_PAGE21`, `MACH_PAGEOFF12`,
+`MACH_GOT_LOAD_PAGE21`, `MACH_GOT_LOAD_PAGEOFF12`,
 `MACH_TLVP_PAGE21`, `MACH_TLVP_PAGEOFF12`, `PE_TLS_INDEX_ADRP`,
 `PE_TLS_INDEX_LO12`, `PE_TLS_OFFSET12`, `TLSLE_ADD_TPREL_HI12`, and
 `TLSLE_ADD_TPREL_LO12`.
 
 | Path | Supported | Explicitly excluded |
 | --- | --- | --- |
-| Mach-O writer/reader | `CALL26/JUMP26`, `PREL32`, `ABS64`, `PAGE21/PAGEOFF12`, `TLVP PAGE21/PAGEOFF12` | TLSLE/PE TLS are non-Mach-O formats |
-| `object_link_executable` | `CALL26/JUMP26`, `PREL32`, `ABS64`, `PAGE21/PAGEOFF12` | TLVP and all TLS forms (`OBJECT_ERROR_UNSUPPORTED_TARGET`); no platform resolver exists in a standalone mapping |
-| JIT | `ABS64`, native `PC32`, `CALL26/JUMP26`, `PREL32`, `PAGE21/PAGEOFF12`; bound external data is accepted for direct page/absolute relocations | TLVP and all TLS forms (`JIT_ERROR_TLS_UNSUPPORTED`); unresolved external data without a binding remains `JIT_ERROR_EXTERNAL_DATA` |
-| Native Darwin link | local `CALL26/JUMP26`, `PREL32`, `ABS64`, `PAGE21/PAGEOFF12`, and TLVP descriptor forms | external TLVP without a local descriptor/resolver and TLSLE; out-of-range branches return `LINK_ERROR_RELOCATION` because this layout has no safe insertion point for a veneer pool |
+| Mach-O writer/reader | `CALL26/JUMP26`, `PREL32`, `ABS64`, `PAGE21/PAGEOFF12`, `GOT_LOAD PAGE21/PAGEOFF12`, `TLVP PAGE21/PAGEOFF12` | TLSLE/PE TLS are non-Mach-O formats |
+| `object_link_executable` | `CALL26/JUMP26`, `PREL32`, `ABS64`, `PAGE21/PAGEOFF12`, and `GOT_LOAD PAGE21/PAGEOFF12` relaxed to the definition's `ADRP`/`ADD` | TLVP and all TLS forms (`OBJECT_ERROR_UNSUPPORTED_TARGET`); no platform resolver exists in a standalone mapping |
+| JIT | `ABS64`, native `PC32`, `CALL26/JUMP26`, `PREL32`, `PAGE21/PAGEOFF12`, and `GOT_LOAD PAGE21/PAGEOFF12` relaxed to the target's `ADRP`/`ADD`; bound external data is accepted for direct and GOT page/absolute relocations | TLVP and all TLS forms (`JIT_ERROR_TLS_UNSUPPORTED`); unresolved external data without a binding remains `JIT_ERROR_EXTERNAL_DATA` |
+| Native Darwin link | local `CALL26/JUMP26`, `PREL32`, `ABS64`, `PAGE21/PAGEOFF12`, and TLVP descriptor forms; `GOT_LOAD PAGE21/PAGEOFF12` against an import's bound `__got` slot or relaxed to a local definition; `ABS64` against an import in a `__DATA` section (`__data`, `__const`, initializer and thread-local templates) as a dyld `BIND_TYPE_POINTER` with its addend (#3547). A direct page reference, or an absolute one in code, to imported data is refused | external TLVP without a local descriptor/resolver and TLSLE; out-of-range branches return `LINK_ERROR_RELOCATION` because this layout has no safe insertion point for a veneer pool |
 
 Mach-O relocation type numbers remain unchanged: `2` branch/call, `3`
-`PAGE21`, `4` `PAGEOFF12`, `8` TLVP `PAGE21`, and `9` TLVP `PAGEOFF12`.
+`PAGE21`, `4` `PAGEOFF12`, `5` `GOT_LOAD_PAGE21`, `6` `GOT_LOAD_PAGEOFF12`,
+`8` TLVP `PAGE21`, and `9` TLVP `PAGEOFF12`. Codegen reaches every symbol the
+module does not define through the GOT pair (#1454); a direct page pair to a
+dylib symbol resolves to page zero under ld64.lld. The GOT pair takes no
+addend, and its low half must be the 64-bit `LDR` of the slot.
 Scattered addend records are accepted for all five page/branch families,
 including TLVP, and malformed instruction shapes, alignment, scale, and
 checked addend overflow fail before a patch is committed.

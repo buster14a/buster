@@ -732,7 +732,12 @@ planner before any workload job or matrix is allocated. Only its trusted
 native `no_code=true` output permits omission. Unknown or incomplete source
 inputs select the normal path. The core aggregate independently recompiles the
 trusted main driver and rechecks the complete source identity before completing
-a no-code decision; all core workload results must be skipped. Failure,
+a no-code decision; all core workload results must be skipped. Its workspace
+checkout stays at depth 1 on every route (#3395): the recheck fetches its own
+bare blobless candidate under `$RUNNER_TEMP` exactly as the planner does
+(tested commit plus trusted policy commit, token only in that command's
+environment) and runs with `GIT_NO_LAZY_FETCH=1`. A failed fetch or
+classification fails `CI complete`. Failure,
 cancellation, missing results and unexpected execution cannot pass that route.
 There is no platform-shaped no-op replacement.
 
@@ -779,3 +784,14 @@ No-code JSON and intentionally skipped jobs are not compiler/test results,
 native-retirement execution receipts, benchmark policy execution receipts, or
 queue-to-main full-coverage proof. Existing full-evidence readers retain their
 positive execution and step inventories and refuse omitted rows.
+
+## External-project integration after merge
+
+[External-project CI](external-project-ci.md) owns ordinary full-project builds
+and tests for each exact main-push SHA. One standard job per OS, a 360-minute
+outer cap, immediate per-project evidence and no main-burst cancellation apply.
+These jobs are outside required PR/merge-group completion. Legacy RAD,
+capability, Git and real-source workflow routes are migrated; apt-input controls
+no longer call a full-project workflow. Native macOS/Windows project coverage
+is pending and explicitly reported. Extra shards require real six-hour timeout
+evidence, preserving inner watchdogs and the complete disjoint assignment.

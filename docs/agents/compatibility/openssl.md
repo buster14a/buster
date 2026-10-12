@@ -87,22 +87,36 @@ test filenames, which GitHub's artifact uploader cannot accept directly. A nativ
 control checks that `file:server.pem` survives inside the archive.
 Children use existing bounded captures,
 deadlines and fail-closed cleanup; a timeout or truncated log cannot pass.
-The full upstream test suite has a 30-minute deadline per cell; other children
-retain the existing ten-minute bound. Final TAP progress/summary is also printed
-to the job log. The first portable reference attempt exceeded the shorter
-original deadline, so it is not a passing test result. The
+All children retain the original ten-minute bound. The unmeasured 600-to-1800
+second test-limit increase was reverted; the portable reference still timed out
+at the larger limit and its cause remains unresolved on #3184. Final bounded
+TAP progress/summary is also printed to the job log. The
 [initial census](https://github.com/buster14a/buster/actions/runs/38131412845/job/114446340801)
 built both Clang references and passed optimized reference tests. Both Buster
 cells stopped on `-m64`, owned by [#3458](https://github.com/buster14a/buster/issues/3458)
 and [PR #3442](https://github.com/buster14a/buster/pull/3442). That run's artifact
 upload failed on the colon filename, so only its job log is retained.
 
-The [hosted intake](../../../.github/workflows/openssl-qualification.yml)
-runs only by explicit dispatch or pushes to the issue's owned experiment branch.
-It adds no ordinary PR, merge-group or main workload. The hosted driver
-bootstrap is the existing CI exception. Correctness development stays hosted;
-diagnostic elapsed times cannot satisfy the approved exact-candidate 9700X
-performance requirement.
+The [final historical intake](https://github.com/buster14a/buster/actions/runs/38133873942/job/114453613810)
+at `e65b49e1efe9f43e671afdec171f8d0238460586` failed: portable reference tests
+timed out at 1800 seconds without capture truncation, optimized reference tests
+exited successfully, and both candidate builds rejected `-m64`; candidate tests
+were not run. Its separate self-host check reached a 40,941,128-byte fixed point.
+[Artifact 11702275158](https://github.com/buster14a/buster/actions/runs/38133873942/artifacts/11702275158)
+was uploaded successfully. The native log records inner archive SHA-256
+`abfec46e016efda32db0b311b2ade445466ac772dc3e9b4a843b6186f3de5e82`;
+this is retained producer evidence, not independent archive certification or a
+complete inspected TAP denominator.
+
+Whole-project execution follows the [main-only shared OS owner](../../external-project-ci.md).
+The obsolete branch-push/manual project workflow is removed. OpenSSL has no
+qualified shared input recipe yet; this PR does not schedule upstream builds or
+tests in PR/merge-group CI. The existing hosted TCC proof job runs only the
+isolated native `--self-test` source/routing/archive fixtures, with no upstream
+checkout or project compilation. Keep this intake draft until the driver owner
+lands, the portable reference timeout is diagnosed and the applicable acceptance
+evidence is complete. Correctness development stays hosted; diagnostic elapsed
+times cannot satisfy the approved exact-candidate 9700X performance requirement.
 
 Before issue completion, retain complete input/dependency/generated-file
 licenses and object/link provenance; qualify upstream tests and known-answer

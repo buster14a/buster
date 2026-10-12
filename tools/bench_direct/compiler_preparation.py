@@ -43,7 +43,7 @@ SERIES = (("legacy", "ab", False), ("legacy", "immutable-aa", True),
 TOOLS = ("CMAKE_C_COMPILER", "CMAKE_LINKER", "CMAKE_MAKE_PROGRAM", "clang", "cmake", "ninja", "tcc")
 OPTIONAL_TOOLS = ("ld", "ld.lld", "mold")
 BINDINGS = {"bootstrap_config", "bootstrap_marker", "bootstrap_artifact", "resource", *TOOLS, *OPTIONAL_TOOLS}
-WORKLOAD_COMMAND = "IDE cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o OUT"
+WORKLOAD_COMMAND = "IDE cc -march=native -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o OUT"
 
 
 def sha(raw: bytes) -> str:

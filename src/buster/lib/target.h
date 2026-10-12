@@ -23,6 +23,7 @@ typedef enum CpuArch
     CPU_ARCH_BPFEL,
     // Vulkan 1.2 logical-address compute; the bounded C interface is ILP32.
     CPU_ARCH_SPIRV_COMPUTE,
+    CPU_ARCH_I386,
     CPU_ARCH_COUNT,
 } CpuArch;
 
@@ -193,6 +194,9 @@ typedef enum CpuModel
     CPU_MODEL_A64_APPLE_A17,
     CPU_MODEL_A64_APPLE_M3,
     CPU_MODEL_A64_APPLE_M4,
+
+    CPU_MODEL_X86_I386,
+    CPU_MODEL_X86_I686,
 
     CPU_MODEL_COUNT,
 } CpuModel;
@@ -448,6 +452,13 @@ typedef enum TargetCpuFeature
     TARGET_CPU_FEATURE_X86_RDPID,
     TARGET_CPU_FEATURE_X86_XSAVEOPT,
     TARGET_CPU_FEATURE_X86_XSAVEC,
+    // AArch64 SVE source feature. Appended to keep serialized feature bits stable.
+    TARGET_CPU_FEATURE_AARCH64_SVE,
+    // SME 64-bit integer outer products and ZA accumulations
+    // (FEAT_SME_I16I64); requires SME. Appended for serialized stability.
+    TARGET_CPU_FEATURE_AARCH64_SME_I16I64,
+    TARGET_CPU_FEATURE_X86_MMX,
+    TARGET_CPU_FEATURE_X86_SSE,
     TARGET_CPU_FEATURE_COUNT,
 } TargetCpuFeature;
 
@@ -461,6 +472,10 @@ BUSTER_CT_CHECK(TARGET_CPU_FEATURE_X86_SM3 == 142);
 BUSTER_CT_CHECK(TARGET_CPU_FEATURE_X86_SM4 == 143);
 BUSTER_CT_CHECK(TARGET_CPU_FEATURE_X86_MOVDIRI == 144);
 BUSTER_CT_CHECK(TARGET_CPU_FEATURE_X86_XSAVEC == 147);
+BUSTER_CT_CHECK(TARGET_CPU_FEATURE_AARCH64_SVE == 148);
+BUSTER_CT_CHECK(TARGET_CPU_FEATURE_AARCH64_SME_I16I64 == 149);
+BUSTER_CT_CHECK(TARGET_CPU_FEATURE_X86_MMX == 150);
+BUSTER_CT_CHECK(TARGET_CPU_FEATURE_X86_SSE == 151);
 BUSTER_CT_CHECK((u32)TARGET_CPU_FEATURE_X86_SVM > 64);
 BUSTER_CT_CHECK((u32)TARGET_CPU_FEATURE_X86_SVM <= (u32)TARGET_CPU_FEATURE_BIT_CAPACITY);
 
@@ -469,6 +484,7 @@ typedef enum TargetStringComponents
     TARGET_STRING_COMPONENT_CPU_ARCH,
     TARGET_STRING_COMPONENT_OPERATING_SYSTEM,
     TARGET_STRING_COMPONENT_CPU_MODEL,
+    TARGET_STRING_COMPONENT_ENVIRONMENT,
     TARGET_STRING_COMPONENT_COUNT,
 } TargetStringComponent;
 
@@ -488,12 +504,16 @@ struct Target
     bool cpu_features_explicit;
     u8 os_version_minor;
     u8 os_version_patch;
+    bool x86_code16;
+    u8 x86_register_parameter_count;
+    u8 x86_preferred_stack_boundary;
     u16 os_version_major;
     TargetCpuFeatures cpu_features;
     // Command-line plain-char overrides; target default keeps the ABI's
     // implementation-defined signedness.
     TargetPlainCharPolicy plain_char_policy;
 };
+BUSTER_CT_CHECK(sizeof(Target) == 64);
 
 typedef struct TargetStringSplit TargetStringSplit;
 struct TargetStringSplit
@@ -542,12 +562,14 @@ BUSTER_V_DECL Target target_native;
 BUSTER_F_DECL bool cpu_is_native(CpuModel model);
 BUSTER_F_DECL CpuModel cpu_detect_model(void);
 BUSTER_F_DECL CpuModel cpu_model_from_string(String8 string);
+BUSTER_F_DECL bool cpu_arch_is_x86(CpuArch arch);
 BUSTER_F_DECL bool cpu_model_supports_arch(CpuModel model, CpuArch arch);
+BUSTER_F_DECL bool target_os_supports_arch(CpuArch arch, OperatingSystem os);
 BUSTER_F_DECL TargetCpuFeatures target_cpu_features_empty(void);
 BUSTER_F_DECL TargetCpuFeatures target_cpu_features_singleton(TargetCpuFeature feature);
 BUSTER_F_DECL TargetCpuFeatures target_cpu_features_add(TargetCpuFeatures features, TargetCpuFeature feature);
 BUSTER_F_DECL TargetCpuFeatures target_cpu_features_remove(TargetCpuFeatures features, TargetCpuFeature feature);
-// x86-64 only: adds `feature` plus everything it requires, or removes it plus
+// x86-family: adds `feature` plus everything it requires, or removes it plus
 // everything that requires it (GCC -m<feature> / -mno-<feature> semantics).
 // Plain add/remove stay exact, as -mattr needs.
 BUSTER_F_DECL TargetCpuFeatures target_cpu_features_x86_apply_with_closure(TargetCpuFeatures features, TargetCpuFeature feature, bool enable);

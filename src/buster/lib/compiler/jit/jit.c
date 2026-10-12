@@ -3,8 +3,8 @@
 // resolves relocations against the object's symbols plus caller-supplied
 // explicit bindings (never dlsym-style implicit lookup), inserts
 // out-of-range call thunks where a target does not fit the relocation's
-// reach, and finalizes W^X — pages are writable during patching or
-// executable afterwards, never both. It is deliberately not a second
+// reach, places relative host-data references within range, and finalizes
+// W^X — pages are writable during patching or executable afterwards, never both. It is deliberately not a second
 // compiler: no frontend or IR types appear here, only the object model.
 
 #include <buster/lib/compiler/jit/jit.h>
@@ -251,29 +251,36 @@ bool jit_apply_aarch64_mach_page_relocation(ObjectRelocationKind kind, u8* patch
 }
 
 
+// The JIT owns no GOT: a Mach-O GOT load (the x86 `movq` of REX_GOTPCRELX or
+// the AArch64 GOT_LOAD pair) is relaxed in place to the direct address of its
+// target -- the import's thunk or binding, or the definition -- which is the
+// value the slot would have held.
 BUSTER_GLOBAL_LOCAL bool jit_relocation_uses_function_thunk(ObjectRelocationKind kind, ObjectSectionKind source_kind)
 {
-    return (kind == OBJECT_RELOCATION_X86_64_PC32 && source_kind == OBJECT_SECTION_TEXT) || kind == OBJECT_RELOCATION_X86_64_PLT32 ||
-           kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26;
+    return ((kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX) && source_kind == OBJECT_SECTION_TEXT) ||
+           kind == OBJECT_RELOCATION_X86_64_PLT32 || kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26;
 }
 
 BUSTER_GLOBAL_LOCAL bool jit_relocation_is_supported(ObjectRelocationKind kind, CpuArch arch)
 {
     return kind == OBJECT_RELOCATION_ABSOLUTE64 ||
            ((kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_PLT32 ||
-             kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S) && arch == CPU_ARCH_X86_64) ||
+             kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S || kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX) && arch == CPU_ARCH_X86_64) ||
            ((kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26 ||
              kind == OBJECT_RELOCATION_AARCH64_PREL32 || kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ||
-             kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12) &&
+             kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 || kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 ||
+             kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12) &&
             arch == CPU_ARCH_AARCH64);
 }
 
 BUSTER_GLOBAL_LOCAL bool jit_external_data_relocation_is_supported(ObjectRelocationKind kind, CpuArch arch)
 {
-    return (arch == CPU_ARCH_X86_64 && kind == OBJECT_RELOCATION_ABSOLUTE64) ||
+    return kind == OBJECT_RELOCATION_ABSOLUTE64 ||
+           (arch == CPU_ARCH_X86_64 && kind == OBJECT_RELOCATION_X86_64_PC32) ||
            (arch == CPU_ARCH_AARCH64 &&
             (kind == OBJECT_RELOCATION_AARCH64_PREL32 || kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ||
-             kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12));
+             kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 || kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 ||
+             kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12));
 }
 
 BUSTER_GLOBAL_LOCAL u64 jit_relocation_size(ObjectRelocationKind kind)
@@ -431,6 +438,130 @@ BUSTER_GLOBAL_LOCAL u32 jit_binding_resolve(JitBindingResolver const* resolver, 
     return found;
 }
 
+// Relative data accesses must reach the actual binding, including writes.
+// These intervals describe image bases, not copies of the imported objects.
+bool jit_address_range_intersect(JitAddressRange* range, u64 target, u64 place_offset, u64 backward, u64 forward)
+{
+    bool valid = range && range->minimum <= range->maximum;
+    if (valid)
+    {
+        u64 place_minimum = target > backward ? target - backward : 0;
+        u64 place_maximum = forward <= UINT64_MAX - target ? target + forward : UINT64_MAX;
+        valid = place_maximum >= place_offset;
+        if (valid)
+        {
+            u64 minimum = place_minimum > place_offset ? place_minimum - place_offset : 0;
+            u64 maximum = place_maximum - place_offset;
+            minimum = BUSTER_MAX(minimum, range->minimum);
+            maximum = BUSTER_MIN(maximum, range->maximum);
+            valid = minimum <= maximum;
+            if (valid)
+            {
+                range->minimum = minimum;
+                range->maximum = maximum;
+            }
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool jit_external_data_image_range(ObjectFile const* object, JitOptions options,
+                                                       u32 const* binding_indices, u64 const* section_offsets,
+                                                       u64 const* class_offsets, JitAddressRange* range,
+                                                       bool* constrained, String8* failing_symbol)
+{
+    bool valid = true;
+    *constrained = false;
+    for (u32 index = 0; valid && index < object->relocation_count; index += 1)
+    {
+        ObjectRelocation const* relocation = object->relocations + index;
+        ObjectSection const* section = object->sections + relocation->section;
+        JitProtectionClass protection = jit_section_protection_class(section->kind);
+        if (protection == JIT_PROTECTION_CLASS_NONE)
+        {
+            continue;
+        }
+        ObjectSymbol const* symbol = object->symbols + relocation->symbol;
+        bool relative = relocation->kind == OBJECT_RELOCATION_X86_64_PC32 ||
+                        relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32 ||
+                        relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ||
+                        relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21;
+        if (symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_DATA && relative)
+        {
+            *constrained = true;
+            *failing_symbol = symbol->name;
+            u64 target = (u64)(uintptr_t)options.bindings[binding_indices[relocation->symbol]].address;
+            u64 place_offset = 0;
+            valid = jit_address_addend(target, relocation->addend, &target) &&
+                    jit_add_u64(class_offsets[protection], section_offsets[relocation->section], &place_offset) &&
+                    jit_add_u64(place_offset, relocation->offset, &place_offset);
+            if (valid)
+            {
+                if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 ||
+                    relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21)
+                {
+                    // ADRP measures signed 21-bit page distances in 4 KiB
+                    // architectural pages, independently of the host page size.
+                    target &= ~UINT64_C(0xfff);
+                    valid = jit_address_range_intersect(range, target, place_offset,
+                                                        (UINT64_C(1) << 32) - 4096, (UINT64_C(1) << 32) + 4095);
+                }
+                else
+                {
+                    valid = jit_address_range_intersect(range, target, place_offset, INT32_MAX, (u64)INT32_MAX + 1);
+                }
+            }
+        }
+    }
+    return valid;
+}
+
+// Windows reservations use 64 KiB granularity; it is also page aligned on the
+// supported POSIX hosts. Hints never use MAP_FIXED or replace an existing map.
+#define JIT_IMAGE_HINT_ALIGNMENT BUSTER_KB(64)
+#define JIT_IMAGE_HINT_ATTEMPTS 64
+
+BUSTER_GLOBAL_LOCAL void* jit_reserve_image(u64 size, ProtectionFlags protection, MapFlags map,
+                                           JitAddressRange range, bool constrained)
+{
+    void* result = 0;
+    if (!constrained)
+    {
+        result = os_reserve(0, size, protection, map);
+    }
+    else
+    {
+        u64 minimum = 0;
+        u64 maximum = range.maximum & ~((u64)JIT_IMAGE_HINT_ALIGNMENT - 1);
+        bool aligned = jit_align_forward(range.minimum, JIT_IMAGE_HINT_ALIGNMENT, &minimum) && minimum <= maximum;
+        // Apple Silicon retains its single MAP_JIT-region construction policy.
+        u32 attempts = BUSTER_MACOS && BUSTER_CPU_ARCH_AARCH64 && map.jit ? 1 : JIT_IMAGE_HINT_ATTEMPTS;
+        for (u32 attempt = 0; aligned && !result && attempt < attempts; attempt += 1)
+        {
+            u64 span = maximum - minimum;
+            u64 hint = attempt ? minimum + (span / (JIT_IMAGE_HINT_ATTEMPTS - 2)) * (attempt - 1)
+                               : minimum + span / 2;
+            hint &= ~((u64)JIT_IMAGE_HINT_ALIGNMENT - 1);
+            void* allocation = os_reserve((void*)(uintptr_t)hint, size, protection, map);
+            if (allocation)
+            {
+                u64 address = (u64)(uintptr_t)allocation;
+                if (address >= range.minimum && address <= range.maximum)
+                {
+                    result = allocation;
+                }
+                else
+                {
+                    // mmap is allowed to ignore a hint. Never truncate the
+                    // resulting relocation or publish an unusable image.
+                    os_unreserve(allocation, size);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL u64 jit_thunk_size(CpuArch arch)
 {
     return arch == CPU_ARCH_X86_64 ? 14 : 16;
@@ -572,13 +703,6 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
         u64 target = 0;
         if (symbol->section == OBJECT_SECTION_UNDEFINED)
         {
-            if (symbol->kind == OBJECT_SYMBOL_DATA && !options.binding_count && object->target.cpu_arch == CPU_ARCH_AARCH64 &&
-                jit_external_data_relocation_is_supported(relocation->kind, object->target.cpu_arch))
-            {
-                program->error = JIT_ERROR_EXTERNAL_DATA;
-                program->failing_symbol = symbol->name;
-                return false;
-            }
             if ((relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26) &&
                 relocation->addend)
             {
@@ -640,7 +764,29 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
             }
         }
         u8* patch = (u8*)program->section_addresses[relocation->section] + relocation->offset;
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32)
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX &&
+            buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX, (u8*)program->section_addresses[relocation->section],
+                                                    relocation->offset, source->data.length, relocation->addend) != BUSTER_X86_METADATA_GOT_PATCH_PC32)
+        {
+            program->error = JIT_ERROR_UNSUPPORTED_RELOCATION;
+            program->failing_symbol = symbol->name;
+            return false;
+        }
+        if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12)
+        {
+            u32 instruction = 0;
+            memcpy(&instruction, patch, sizeof(instruction));
+            if ((instruction & UINT32_C(0xffc00000)) != UINT32_C(0xf9400000) || (instruction & 31) == 31 || relocation->addend)
+            {
+                program->error = JIT_ERROR_UNSUPPORTED_RELOCATION;
+                program->failing_symbol = symbol->name;
+                return false;
+            }
+            instruction = UINT32_C(0x91000000) | (instruction & 0x3ff);
+            memcpy(patch, &instruction, sizeof(instruction));
+        }
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 ||
+            relocation->kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX)
         {
             s64 displacement = 0;
             if (!jit_address_difference(target, (u64)(uintptr_t)patch, relocation->addend, &displacement) || displacement < INT32_MIN ||
@@ -716,18 +862,18 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
             s32 value = (s32)displacement;
             memcpy(patch, &value, sizeof(value));
         }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21)
         {
-            if (!jit_apply_aarch64_mach_page_relocation(relocation->kind, patch, (u64)(uintptr_t)patch, target, relocation->addend))
+            if (!jit_apply_aarch64_mach_page_relocation(OBJECT_RELOCATION_AARCH64_MACH_PAGE21, patch, (u64)(uintptr_t)patch, target, relocation->addend))
             {
                 program->error = JIT_ERROR_CAPACITY;
                 program->failing_symbol = symbol->name;
                 return false;
             }
         }
-        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12)
         {
-            if (!jit_apply_aarch64_mach_page_relocation(relocation->kind, patch, (u64)(uintptr_t)patch, target, relocation->addend))
+            if (!jit_apply_aarch64_mach_page_relocation(OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, patch, (u64)(uintptr_t)patch, target, relocation->addend))
             {
                 program->error = JIT_ERROR_CAPACITY;
                 program->failing_symbol = symbol->name;
@@ -890,6 +1036,15 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
             scratch_end(scratch);
             return result;
         }
+        u64 patch_size = jit_relocation_size(relocation->kind);
+        ObjectSection const* source = object->sections + relocation->section;
+        if (relocation->offset > source->data.length || patch_size > source->data.length - relocation->offset)
+        {
+            result.error = JIT_ERROR_INVALID_INPUT;
+            result.failing_symbol = symbol->name;
+            scratch_end(scratch);
+            return result;
+        }
         if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32 &&
             ((relocation->offset & 3) || object->sections[relocation->section].alignment < 4))
         {
@@ -900,14 +1055,6 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
         }
         if (symbol->section == OBJECT_SECTION_UNDEFINED)
         {
-            if (symbol->kind == OBJECT_SYMBOL_DATA && !options.binding_count && object->target.cpu_arch == CPU_ARCH_AARCH64 &&
-                jit_external_data_relocation_is_supported(relocation->kind, object->target.cpu_arch))
-            {
-                result.error = JIT_ERROR_EXTERNAL_DATA;
-                result.failing_symbol = symbol->name;
-                scratch_end(scratch);
-                return result;
-            }
             if (symbol->kind == OBJECT_SYMBOL_DATA && !jit_external_data_relocation_is_supported(relocation->kind, object->target.cpu_arch))
             {
                 result.error = JIT_ERROR_EXTERNAL_DATA;
@@ -1024,6 +1171,18 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
         return result;
     }
 
+    JitAddressRange image_range = {.minimum = JIT_IMAGE_HINT_ALIGNMENT, .maximum = UINT64_MAX - allocation_size};
+    bool image_constrained = false;
+    String8 range_symbol = {0};
+    if (!jit_external_data_image_range(object, options, binding_indices, section_offsets, class_offsets,
+                                      &image_range, &image_constrained, &range_symbol))
+    {
+        result.error = JIT_ERROR_CAPACITY;
+        result.failing_symbol = range_symbol;
+        scratch_end(scratch);
+        return result;
+    }
+
     void* image_base = 0;
 #if BUSTER_MACOS && BUSTER_CPU_ARCH_AARCH64
     bool jit_code_is_writable = false;
@@ -1037,11 +1196,12 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
         // the sole MAP_JIT prefix while every planned relocation distance is
         // unchanged and mutable data is outside JIT write protection.
         void* jit_allocation =
-            os_reserve(0, allocation_size, (ProtectionFlags){.read = 1, .write = 1, .execute = 1},
-                       (MapFlags){.priv = 1, .anonymous = 1, .jit = 1});
+            jit_reserve_image(allocation_size, (ProtectionFlags){.read = 1, .write = 1, .execute = 1},
+                              (MapFlags){.priv = 1, .anonymous = 1, .jit = 1}, image_range, image_constrained);
         if (!jit_allocation)
         {
-            result.error = JIT_ERROR_EXECUTABLE_MEMORY;
+            result.error = image_constrained ? JIT_ERROR_CAPACITY : JIT_ERROR_EXECUTABLE_MEMORY;
+            result.failing_symbol = range_symbol;
             goto link_failed;
         }
         if (non_executable_allocation_size)
@@ -1073,20 +1233,21 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
     }
     else
     {
-        image_base = os_reserve(0, allocation_size, (ProtectionFlags){.read = 1, .write = 1},
-                                (MapFlags){.priv = 1, .anonymous = 1});
+        image_base = jit_reserve_image(allocation_size, (ProtectionFlags){.read = 1, .write = 1},
+                                       (MapFlags){.priv = 1, .anonymous = 1}, image_range, image_constrained);
         result.allocation_base = image_base;
         result.allocation_size = image_base ? allocation_size : 0;
     }
 #else
-    image_base = os_reserve(0, allocation_size, (ProtectionFlags){.read = 1, .write = 1},
-                            (MapFlags){.priv = 1, .anonymous = 1, .jit = BUSTER_MACOS});
+    image_base = jit_reserve_image(allocation_size, (ProtectionFlags){.read = 1, .write = 1},
+                                   (MapFlags){.priv = 1, .anonymous = 1, .jit = BUSTER_MACOS}, image_range, image_constrained);
     result.allocation_base = image_base;
     result.allocation_size = image_base ? allocation_size : 0;
 #endif
     if (!image_base)
     {
-        result.error = JIT_ERROR_EXECUTABLE_MEMORY;
+        result.error = image_constrained ? JIT_ERROR_CAPACITY : JIT_ERROR_EXECUTABLE_MEMORY;
+        result.failing_symbol = range_symbol;
         goto link_failed;
     }
     void* class_bases[JIT_PROTECTION_CLASS_COUNT] = {0};
