@@ -37,12 +37,18 @@ jobs:
             printf 'CONFIG_BEGIN %s\n' "$config"
             awk '/BUSTER_IOS_LAUNCH_V1 stage=fixtures-ready/ { real=1 } real && (/TEST_MODULE_TIMING/ || /BUSTER_IOS_LAUNCH_V1/ || /Unit tests/ || /BUSTER_IOS_RESULT/ || /TEST_SUMMARY/) { print }' "$evidence_root/$config.log" | head -n 220
             printf 'FIXTURE_TOP_BEGIN %s\n' "$config"
-            awk '/BUSTER_IOS_LAUNCH_V1 stage=fixtures-ready/ { real=1 } real && /TEST_FIXTURE_TIMING_V1/ { duration=0; for(i=1;i<=NF;i++) if($i ~ /^duration_ns=/) { split($i,a,"="); duration=a[2] } print duration, $0 }' "$evidence_root/$config.log" | sort -rn > "$evidence_root/$config-fixtures"
+            awk '/BUSTER_IOS_LAUNCH_V1 stage=fixtures-ready/ { real=1 } real && /TEST_FIXTURE_TIMING_V1 kind=fixture/ { duration=0; for(i=1;i<=NF;i++) if($i ~ /^duration_ns=/) { split($i,a,"="); duration=a[2] } print duration, $0 }' "$evidence_root/$config.log" | sort -rn > "$evidence_root/$config-fixtures"
             sed -n '1,24p' "$evidence_root/$config-fixtures"
             printf 'FIXTURE_TOP_END %s\n' "$config"
-            awk '/BUSTER_IOS_LAUNCH_V1 stage=fixtures-ready/ { real=1 } real { if(/TEST_MODULE_TIMING/) modules++; if(/TEST_FIXTURE_TIMING_V1/) fixtures++; if(/BUSTER_IOS_RESULT: SUCCESS/) success++ } END { printf "IOS_EVIDENCE_COUNTS_V1 modules=%d timed_fixtures=%d terminal_success=%d\\n", modules,fixtures,success; if(modules==0 || fixtures==0) exit 3 }' "$evidence_root/$config.log"
+            awk '/BUSTER_IOS_LAUNCH_V1 stage=fixtures-ready/ { real=1 } real && /TEST_FIXTURE_TIMING_V1 kind=fixture/ && /parenthesized_logical_chains|nested_logical_operands_never_abort/ { print }' "$evidence_root/$config.log"
+            awk '/BUSTER_IOS_LAUNCH_V1 stage=fixtures-ready/ { real=1 } real { if(/TEST_MODULE_TIMING/) modules++; if(/TEST_FIXTURE_TIMING_V1/) fixtures++; if(/BUSTER_IOS_RESULT: SUCCESS/) success++ } END { printf "IOS_EVIDENCE_COUNTS_V1 modules=%d timed_fixtures=%d terminal_success=%d\n", modules,fixtures,success; if(modules==0 || fixtures==0) exit 3 }' "$evidence_root/$config.log"
             printf 'CONFIG_END %s\n' "$config"
           done
           printf 'METADATA_MEMBERS_BEGIN\n'
           awk '/(machine|source|coverage|receipt|result|manifest)/ && $0 !~ /\/$/ {print}' "$evidence_root/members" | head -n 60
           printf 'METADATA_MEMBERS_END\n'
+          for member in coverage.json result.json summary.md machine-specifications/report.json; do
+            printf 'METADATA_BEGIN %s\n' "$member"
+            unzip -p "$evidence_root/ios.zip" "$member" | head -n 180
+            printf 'METADATA_END %s\n' "$member"
+          done
