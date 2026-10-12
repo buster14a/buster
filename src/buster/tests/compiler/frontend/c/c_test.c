@@ -44209,11 +44209,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_semantic_handoff(UnitTestArgume
             BUSTER_TEST(arguments, seen.outside_population >= 1 && seen.conflicts == 0 && seen.scope_differs == 0);
             u64 agree = seen.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER][C_TEST_SIZEOF_HANDOFF_AGREE] +
                         seen.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_PREDICTION][C_TEST_SIZEOF_HANDOFF_AGREE];
-            BUSTER_TEST_RAW(arguments, seen.first_count == 0 && agree >= BUSTER_ARRAY_LENGTH(validation_kinds),
+            // Lowering settles the twelve body operands of the population and
+            // `sizeof s`, which has no row; nothing reaches the prediction path,
+            // and the static assertions' operands are not lowered again.
+            BUSTER_TEST_RAW(arguments, seen.first_count == 0 && agree == 12 &&
+                                           seen.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER][C_TEST_SIZEOF_HANDOFF_UNMATCHED] == 1,
                             string_format(temporary.arena, S8("sizeof handoff: {u32} disagreements, {u64} agreeing answers"), seen.first_count, agree));
-            // TEMPORARY MEASUREMENT PRINT
-            string_print_error(string_format(temporary.arena, S8("HANDOFF-FIXTURE resolver {u64} {u64} {u64} {u64} prediction {u64} {u64} {u64} {u64}\n"),
-                seen.outcomes[0][0], seen.outcomes[0][1], seen.outcomes[0][2], seen.outcomes[0][3], seen.outcomes[1][0], seen.outcomes[1][1], seen.outcomes[1][2], seen.outcomes[1][3]));
             for (u32 index = 0; index < seen.first_count; index += 1)
             {
                 CTestSizeofHandoffMismatch mismatch = seen.first[index];

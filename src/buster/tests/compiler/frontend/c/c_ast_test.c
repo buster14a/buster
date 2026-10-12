@@ -18,6 +18,9 @@
 // split, the declaration split read from the tree (c_parse_ast_from_tree) to
 // c_parse_ast's records field by field (c_ast_corpus_split), and the tree
 // expression typer (c_ast_types.c) to the type machine (c_ast_corpus_types).
+// c_ast_test_sizeof_handoff runs the same inputs through the sizeof handoff
+// comparison (c_test_sizeof_handoff_set), which holds lowering's `sizeof`
+// sizes to semantic analysis's answers.
 // c_ast_test_types probes the typer's accepted kinds, declines and misses one
 // range at a time; c_ast_test_type_lookups holds its name checks to the
 // machine on shadowing shapes; c_ast_test_split runs the tree split on one
@@ -3047,11 +3050,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
     return result;
 }
 
+// Rows kept and lowering answers that agree with them over the fixtures, and
+// rows with the frontend's own sources: about 108, 101 and 7,120 on Linux
+// x86-64 (17 of all the rows from constant contexts, the rest from the
+// validation walk's own queries).
 enum
 {
-    C_AST_SIZEOF_HANDOFF_ROW_FLOOR = 1,
-    C_AST_SIZEOF_HANDOFF_AGREE_FLOOR = 1,
-    C_AST_SIZEOF_HANDOFF_HOSTED_ROW_FLOOR = 1,
+    C_AST_SIZEOF_HANDOFF_ROW_FLOOR = 90,
+    C_AST_SIZEOF_HANDOFF_AGREE_FLOOR = 85,
+    C_AST_SIZEOF_HANDOFF_HOSTED_ROW_FLOOR = 6000,
 };
 
 // The sizeof handoff comparison (c_test_sizeof_handoff_set, GitHub #2531) over
@@ -3195,12 +3202,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_sizeof_handoff(UnitTestArguments* 
                      sum.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_PREDICTION][C_TEST_SIZEOF_HANDOFF_SIZE_MISMATCH];
     BUSTER_TEST_RAW(arguments, mismatches == 0, string_format(arguments->arena, S8("{u64} sizeof answers disagree with semantic analysis"), mismatches));
     BUSTER_TEST(arguments, lowered_units != 0);
-    // TEMPORARY MEASUREMENT PRINT
-    string_print_error(string_format(arguments->arena,
-        S8("HANDOFF fixture_rows={u64} fixture_agree={u64} rows_c={u64} rows_v={u64} bytes={u64} repeats={u64} conflicts={u64} extra={u64} outside={u64} scope_differs={u64} lowered={u64}\n"
-           "HANDOFF resolver agree={u64} mismatch={u64} declined={u64} unmatched={u64}; prediction agree={u64} mismatch={u64} declined={u64} unmatched={u64}\n"),
-        fixture_rows, fixture_agree, sum.rows[0], sum.rows[1], sum.row_bytes, sum.repeats, sum.conflicts, sum.extra_queries, sum.outside_population, sum.scope_differs, lowered_units,
-        sum.outcomes[0][0], sum.outcomes[0][1], sum.outcomes[0][2], sum.outcomes[0][3], sum.outcomes[1][0], sum.outcomes[1][1], sum.outcomes[1][2], sum.outcomes[1][3]));
     return result;
 }
 #endif

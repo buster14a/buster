@@ -162,6 +162,8 @@
 //                                                 with the scalar reference
 //                                                 kept as the differential gate
 //   c_parse_typed_constant                       target-typed scalar constant evaluation
+//   c_parse_sizeof_handoff_record,               test-only sizeof operand rows and their
+//   c_sizeof_handoff_compare                     comparison with lowering (GitHub #2531)
 //   c_parse_type_integer_constant               isolated type-embedded constant queries
 //   c_parse_validate_integer_transform_calls    builtin signatures in every expression context
 //   c_switch_prefix_overlaps,                    switch label overlap: radix sort plus
