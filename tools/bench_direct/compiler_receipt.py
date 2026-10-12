@@ -29,6 +29,11 @@ candidate compiler alone, compiling and linking generated multi-TU inputs with
 -fcompile-jobs=W on whole physical cores. It is report-only too; its bundles
 must be valid and bound to the candidate binary.
 
+A published check names the docs/performance-validation-v1.json rows its
+validated legs discharged (covered_inventory_rows); a failed, skipped,
+superseded or unrequested leg discharges nothing, and
+performance_inventory_test.py keeps INVENTORY_LEGS and the inventory in step.
+
 Map (searchable symbols):
     RECEIPT_SCHEMA, LAB_SCHEMA, MODES, check_name, check_marker   identities
     attempt_marker                                         one attempt's check (#2803)
@@ -44,6 +49,10 @@ Map (searchable symbols):
         throughput_real_source_digest                      real-source throughput (#2761)
     PRODUCTION_PROFILE_PROFILE, validate_production_profile,
         production_profile_fields                          PGO/LTO production profile (#2761)
+    COMPILER_PROBES_PROFILE, validate_compiler_probes,
+        compiler_probes_digest                             FAST RA and line-mark probes (#2761)
+    INVENTORY_LEGS, inventory_leg_record, covered_inventory_rows,
+        render_inventory_coverage                          inventory rows each validated leg discharged (#2761)
     FRONTEND_SELECTOR_PROFILE, validate_frontend_selector, selection_medians,
         frontend_selector_digest                           frontend and selector probes (#2761)
     REGRESSION_POLICIES, regression_policy                 report-only switch
@@ -294,6 +303,86 @@ PRODUCTION_PROFILE_PROFILE = {
     "decision": "report-only: the corpus decisions are reported and never gate",
     "report_only": True,
 }
+# Issue #2761: the Zen 5 route for targeted register-allocator and scheduler
+# claims. tools/fast_ra_scaling.c and tools/machine_line_mark_scaling.c include
+# compiler internals, so they cannot be direct workloads. One fresh exact line
+# in ANALYZER_REQUEST_PATH selects this on the pull-compare route:
+# tools/bench_direct/compiler_probes.c (native, from the trusted checkout) copies the head's probe sources outside
+# both checkouts (the audits' practice), builds each probe with the command its
+# audit records against the merge base's and the head's own src/ in isolated
+# clones, then times both builds as fixed alternating pairs on the pinned CPU.
+# The FAST probe's audit command predates #2876, whose machine.c needs one
+# codegen.c helper; codegen.c is the only source added. Changing any value
+# needs a new name. It is report-only like the corpus.
+COMPILER_PROBES_REQUEST_LINE = "profile: compiler-probes-v1"
+COMPILER_PROBES_SCHEMA = "buster-compiler-probes-v1"
+COMPILER_PROBES_ROLES = ("baseline", "candidate")
+# A timed sample cannot exceed the harness's per-invocation timeout; bounding it here keeps
+# every median and ratio finite before any float arithmetic.
+COMPILER_PROBES_INVOCATION_TIMEOUT_SECONDS = 60
+COMPILER_PROBES_SAMPLE_LIMIT_NS = COMPILER_PROBES_INVOCATION_TIMEOUT_SECONDS * 1_000_000_000
+COMPILER_PROBES_HARNESS = "compiler_probes.c"
+COMPILER_PROBES_HARNESS_FLAGS = ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-fwrapv",
+                                 "-fno-strict-aliasing", "-funsigned-char"]
+_PROBE_DEFINES = ["-DBUSTER_INCLUDE_TESTS=0", "-DBUSTER_LINK_LIBC=1", "-DBUSTER_OPTIMIZE=1", "-DBUSTER_SINGLE_THREADED=1"]
+_PROBE_LANGUAGE = ["-Isrc", "-fwrapv", "-fno-strict-aliasing", "-funsigned-char"]
+_PROBE_LIBRARY = ["src/buster/lib/arena.c", "src/buster/lib/os.c", "src/buster/lib/integer.c", "src/buster/lib/string.c",
+                  "src/buster/lib/float.c", "src/buster/lib/time.c"]
+_PROBE_LINK = ["-Wl,--gc-sections", "-lpthread", "-ldl", "-lm"]
+_DECIMAL = "[0-9]+"
+COMPILER_PROBES_PROFILE = {
+    "name": "compiler-probes-v1",
+    "build": "the candidate head's probe source, copied outside both checkouts, compiled by clang against the merge "
+             "base's and the head's own src/ in isolated shared clones; one binary per probe and revision",
+    "compiler": "clang",
+    "harness": "tools/bench_direct/compiler_probes.c from the trusted checkout, compiled by clang with "
+               "COMPILER_PROBES_HARNESS_FLAGS; its --profile output equals this profile",
+    "probes": {
+        "fast_ra": {
+            "source": "tools/fast_ra_scaling.c",
+            "audit": "docs/performance-audits/2026-09-07T222944Z.md",
+            "compile": ["-O2", "-g", "-ffunction-sections", "-fdata-sections", *_PROBE_DEFINES, *_PROBE_LANGUAGE],
+            "sources": ["src/buster/lib/compiler/codegen/machine.c", "src/buster/lib/compiler/codegen/codegen.c",
+                        *_PROBE_LIBRARY],
+            "link": _PROBE_LINK,
+            "metric": "total_ns",
+            # Every non-_ns field a sample line prints, each matching its pattern exactly.
+            "check_fields": {key: _DECIMAL for key in ("blocks", "prepass_bytes", "total_bytes", "spills", "reloads",
+                                                       "copies", "edits", "frame")},
+            "cases": [{"name": f"{shape}-{blocks}", "arguments": [str(blocks), "11", shape],
+                       "markers": {"blocks": str(blocks)}}
+                      for shape in ("chain", "fanout") for blocks in (256, 1024, 4096, 16384)],
+        },
+        "line_mark": {
+            "source": "tools/machine_line_mark_scaling.c",
+            "audit": "docs/performance-audits/2026-09-18T224655Z.md",
+            "compile": ["-O2", "-g", "-ffunction-sections", "-fdata-sections", "-Wall", "-Werror",
+                        "-Wno-unused-function", "-Wno-unused-variable", *_PROBE_DEFINES,
+                        "-DBUSTER_LINE_MARK_HELPER_BENCH=0", *_PROBE_LANGUAGE],
+            "sources": ["src/buster/lib/compiler/codegen/machine.c", *_PROBE_LIBRARY],
+            "link": _PROBE_LINK,
+            "metric": "schedule_ns",
+            "check_fields": {"mode": "schedule", "leaves": _DECIMAL, "rows": _DECIMAL, "batch": _DECIMAL,
+                             "retained_bytes": _DECIMAL, "permuted": _DECIMAL, "displacement": _DECIMAL,
+                             "hash": "[0-9a-f]{16}"},
+            # The balanced reduction has leaves MOV_RI, leaves - 1 ADD64, one MOV_RR and RET.
+            "cases": [{"name": f"schedule-{leaves}", "arguments": ["schedule", str(leaves), "11", "1"],
+                       "markers": {"mode": "schedule", "leaves": str(leaves), "rows": str(2 * leaves + 1), "batch": "1"}}
+                      for leaves in (1024, 4096, 16384, 65536)],
+        },
+    },
+    # Each invocation prints one line per sample after its own untimed warmup.
+    "repeats": 11,
+    "warmups": 2,
+    "pairs": 30,
+    "order": "warmups alternate baseline, candidate; even pairs run baseline first, odd pairs candidate first",
+    "stopping": "fixed: exactly warmups + pairs invocations per binary and case, no early stop or extension",
+    "cpu": 2,
+    "statistic": "per invocation the median of its samples; per pair candidate/baseline; per case the median pair "
+                 "ratio with a distribution-free 95% order-statistic interval",
+    "decision": "report-only: ratios and intervals are reported and never gate",
+    "report_only": True,
+}
 # Issue #2761: the Zen 5 route for frontend and selector claims. One fresh
 # exact line in ANALYZER_REQUEST_PATH selects it on the pull-compare route.
 # After the corpus leg, the base revision's tools/benchmark_frontend_scaling.py
@@ -315,8 +404,10 @@ FRONTEND_SCALING_CASES = (
     ("fresh-bindings", (0, 1, 4, 16, 64, 256, 1024, 4096, 16384, 65536), ("syntax", "object")),
 )
 SELECTION_WORK_FIELDS = ("functions", "fallback_functions", "ir_instructions", "mir_instructions")
-IDE_BENCH = re.compile(r"BENCH_C_FRONTEND path=(\S+) iterations=(\d+) bytes=(\d+) min_ns=(\d+) median_ns=(\d+) "
-                       r"throughput_mb_s=(\d+)")
+# Every count is captured as 1 to 19 digits, so int() never sees a token past Python's
+# integer-string conversion limit; a longer token simply leaves the line unparsed.
+IDE_BENCH = re.compile(r"BENCH_C_FRONTEND path=(\S+) iterations=([0-9]{1,19}) bytes=([0-9]{1,19}) "
+                       r"min_ns=([0-9]{1,19}) median_ns=([0-9]{1,19}) throughput_mb_s=([0-9]{1,19})")
 FRONTEND_SELECTOR_PROFILE = {
     "name": "frontend-selector-v1",
     "harness": "tools/benchmark_frontend_scaling.py and tools/selection_benchmark.py at the base revision; "
@@ -736,6 +827,153 @@ def validate_production_profile(build_status: object, summary_text: object, ledg
             binaries["baseline"].get("sha256") == candidate.get("sha256"):
         problems.append(f"{label} release and pgo-lto compilers are the same binary")
     problems.extend(f"{label} corpus: {reason}" for reason in classify_throughput_exit(status, summary, metadata, binaries))
+    return problems
+
+
+def compiler_probes_interval(ratios: list) -> tuple[float, float]:
+    """The distribution-free 95% order-statistic interval of the median of ratios (sorted copy taken here)."""
+    ordered = sorted(ratios)
+    count = len(ordered)
+    # The largest k whose lower tail P(Binomial(count, 1/2) < k) stays within 2.5%.
+    lower, tail = 0, 0.0
+    while lower < count // 2 and tail + math.comb(count, lower) / 2 ** count <= 0.025:
+        tail += math.comb(count, lower) / 2 ** count
+        lower += 1
+    lower = max(lower, 1)
+    return ordered[lower - 1], ordered[count - lower]
+
+
+def _compiler_probes_invocation(value: object, definition: dict, case: dict, repeats: int) -> tuple[float | None, object]:
+    """(median sample, check fields) of one well-formed passed invocation, else (None, None).
+
+    Its self-check must carry exactly the probe's check_fields, each matching its pattern, and the
+    case's fixed workload markers (size, and for line-mark the mode, row count and batch).
+    """
+    result = None, None
+    check = value.get("check") if isinstance(value, dict) else None
+    if isinstance(value, dict) and set(value) == {"exit", "samples", "check"} and type(value["exit"]) is int and \
+            value["exit"] == 0 and isinstance(value["samples"], list) and len(value["samples"]) == repeats and \
+            all(type(sample) is int and 0 < sample <= COMPILER_PROBES_SAMPLE_LIMIT_NS for sample in value["samples"]) and \
+            isinstance(check, dict) and set(check) == set(definition["check_fields"]) and \
+            all(isinstance(check[key], str) and re.fullmatch(pattern, check[key])
+                for key, pattern in definition["check_fields"].items()) and \
+            all(check[key] == marker for key, marker in case["markers"].items()):
+        result = float(statistics.median(value["samples"])), value["check"]
+    return result
+
+
+def compiler_probes_case_statistics(probe: str, case: object) -> tuple[dict | None, list[str]]:
+    """Re-derive one case's statistics from its raw invocations; (statistics, problems)."""
+    profile = COMPILER_PROBES_PROFILE
+    definition = profile["probes"].get(probe) if isinstance(probe, str) else None
+    label = f"compiler probes {probe}/{case.get('name') if isinstance(case, dict) else '?'}"
+    expected = None
+    if definition is not None and isinstance(case, dict):
+        expected = next((item for item in definition["cases"] if item["name"] == case.get("name")), None)
+    if expected is None or case.get("probe") != probe or case.get("arguments") != expected["arguments"]:
+        return None, [f"{label} is not a case of the frozen profile"]
+    problems: list[str] = []
+    checks = {role: [] for role in COMPILER_PROBES_ROLES}
+    warmups = case.get("warmups")
+    if not isinstance(warmups, dict) or set(warmups) != set(COMPILER_PROBES_ROLES) or \
+            any(not isinstance(warmups[role], list) or len(warmups[role]) != profile["warmups"] for role in COMPILER_PROBES_ROLES):
+        problems.append(f"{label} does not have {profile['warmups']} warmups per binary")
+    else:
+        for role in COMPILER_PROBES_ROLES:
+            for item in warmups[role]:
+                median, check = _compiler_probes_invocation(item, definition, expected, profile["repeats"])
+                if median is None:
+                    problems.append(f"{label} has a failed or partial {role} warmup")
+                checks[role].append(check)
+    pairs = case.get("pairs")
+    ratios: list[float] = []
+    medians = {role: [] for role in COMPILER_PROBES_ROLES}
+    if not isinstance(pairs, list) or len(pairs) != profile["pairs"]:
+        problems.append(f"{label} does not have exactly {profile['pairs']} pairs")
+        pairs = []
+    for index, pair in enumerate(pairs):
+        order = ["baseline", "candidate"] if index % 2 == 0 else ["candidate", "baseline"]
+        if not isinstance(pair, dict) or pair.get("order") != order or set(pair) != {"order", *COMPILER_PROBES_ROLES}:
+            problems.append(f"{label} pair {index} is malformed or out of the fixed order")
+            continue
+        values = {}
+        for role in COMPILER_PROBES_ROLES:
+            values[role], check = _compiler_probes_invocation(pair[role], definition, expected, profile["repeats"])
+            checks[role].append(check)
+        if values["baseline"] is None or values["candidate"] is None:
+            problems.append(f"{label} pair {index} has a failed or partial invocation")
+            continue
+        for role in COMPILER_PROBES_ROLES:
+            medians[role].append(values[role])
+        ratios.append(values["candidate"] / values["baseline"])
+    for role in COMPILER_PROBES_ROLES:
+        if any(check != checks[role][0] for check in checks[role]):
+            problems.append(f"{label} {role} self-check output is not identical across invocations")
+    if problems or len(ratios) != profile["pairs"]:
+        return None, problems
+    low, high = compiler_probes_interval(ratios)
+    return {"name": f"{probe}/{expected['name']}", "baseline_ns": statistics.median(medians["baseline"]),
+            "candidate_ns": statistics.median(medians["candidate"]), "ratio": statistics.median(ratios),
+            "ratio_low": low, "ratio_high": high,
+            "candidate_faster": sum(1 for ratio in ratios if ratio < 1.0),
+            "outputs_identical": checks["baseline"][0] == checks["candidate"][0]}, []
+
+
+def compiler_probes_digest(summary: object) -> list[dict]:
+    """The re-derived per-case statistics of a compiler-probes summary; malformed cases are left out."""
+    digest = []
+    cases = summary.get("cases") if isinstance(summary, dict) else None
+    for case in cases if isinstance(cases, list) else []:
+        statistics_value, unused_problems = compiler_probes_case_statistics(
+            case.get("probe") if isinstance(case, dict) else None, case)
+        if statistics_value is not None:
+            digest.append(statistics_value)
+    return digest
+
+
+def validate_compiler_probes(status: object, summary: object, base: str, head: str, binaries: object,
+                             sources: object) -> list[str]:
+    """Reasons the evidence is not one complete COMPILER_PROBES_PROFILE run of these probe binaries.
+
+    status is the compiler_probes.c harness's exit and summary its summary.json; base and head are the
+    compared revisions. binaries maps probe -> role -> {"sha256", "revision"} and sources maps probe ->
+    the copied probe source's sha256, both hashed by compiler_compare independently of the harness.
+    Every statistic is re-derived from the raw samples; the harness states none.
+    """
+    label = "compiler probes"
+    profile = COMPILER_PROBES_PROFILE
+    problems: list[str] = []
+    if type(status) is not int or status != 0:
+        problems.append(f"{label} exited {status!r}, not 0")
+    if not isinstance(summary, dict):
+        return [*problems, f"{label} summary is missing or malformed"]
+    for key, wanted in (("schema", COMPILER_PROBES_SCHEMA), ("profile", profile["name"]), ("base", base),
+                        ("head", head), ("status", "complete"), ("errors", [])):
+        if summary.get(key) != wanted:
+            problems.append(f"{label} summary {key} is not {wanted!r}")
+    wanted_builds = [{"probe": probe, "role": role, "revision": revision, "exit": 0}
+                     for probe in profile["probes"] for role, revision in zip(COMPILER_PROBES_ROLES, (base, head))]
+    if summary.get("builds") != wanted_builds:
+        problems.append(f"{label} builds are not one passed build per probe and revision")
+    for probe in profile["probes"]:
+        if not isinstance(sources, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(sources.get(probe, ""))):
+            problems.append(f"{label} {probe} source hash is missing")
+        for role, revision in zip(COMPILER_PROBES_ROLES, (base, head)):
+            measured = binaries.get(probe, {}).get(role) if isinstance(binaries, dict) and \
+                isinstance(binaries.get(probe), dict) else None
+            if not isinstance(measured, dict) or measured.get("revision") != revision or \
+                    not re.fullmatch(r"[0-9a-f]{64}", str(measured.get("sha256", ""))):
+                problems.append(f"{label} {probe} {role} binary is not a measured {revision[:12]} build")
+    cases = summary.get("cases")
+    wanted_cases = [(probe, case["name"]) for probe, definition in profile["probes"].items() for case in definition["cases"]]
+    names = [(case.get("probe"), case.get("name")) if isinstance(case, dict) else None
+             for case in (cases if isinstance(cases, list) else [])]
+    if names != wanted_cases:
+        problems.append(f"{label} cases are not the frozen {len(wanted_cases)} cases in order")
+    for case in cases if isinstance(cases, list) else []:
+        unused_value, case_problems = compiler_probes_case_statistics(
+            case.get("probe") if isinstance(case, dict) else None, case)
+        problems.extend(case_problems)
     return problems
 
 
@@ -3249,6 +3487,7 @@ def render_analyzer(receipt: dict, summary: dict, conclusion: str, notes: list[s
              f"Profile `{profile.get('name', 'NA')}`: {profile.get('workload', 'NA')}.",
              f"Profile evidence status: `{summary.get('status', 'missing')}`. Observed host: "
              f"`{host.get('cpu_model', 'NA')}`.", "",
+             *render_inventory_coverage(receipt.get("inventory_coverage")),
              "| Identity | Value |", "| --- | --- |"]
     for key in IDENTITY_KEYS:
         lines.append(f"| {key} | `{identity.get(key, 'NA')}` |")
@@ -3445,6 +3684,146 @@ def render_analyzer(receipt: dict, summary: dict, conclusion: str, notes: list[s
     return "\n".join(lines)
 
 
+# Inventory rows of docs/performance-validation-v1.json that each receipt leg
+# discharges, per mode (#2761). A row is discharged only by a leg of an attempt
+# whose evidence the publisher validated (conclusion success); every other leg
+# is listed with why it discharged nothing. performance_inventory_test.py fails
+# when a covered main-compare/pull-compare row is reachable from no leg here, or
+# when a leg names a row that is not a covered row of its mode's route.
+INVENTORY_COVERAGE_SCHEMA = "buster-performance-inventory-coverage-v1"
+INVENTORY_ROUTES = {"main": "main-compare", "pull": "pull-compare"}
+INVENTORY_LEGS = {
+    "main": {
+        "self-host": ("uarch_lab:compare@main",),
+        "corpus": ("build:bench_throughput@main",),
+    },
+    "pull": {
+        "self-host": ("uarch_lab:compare",),
+        "corpus": ("build:bench_throughput",),
+        "scaling": ("build:bench_throughput",),
+        "analyzer": ("build:clang_analyze_benchmark", "tool:clang_analyze_benchmark.c"),
+        "inline": ("uarch_lab:compare@canonical-inline-self-host",),
+        "ast-pilot": ("uarch_lab:compare@ast-pilot-acceptance",),
+        "real-source": ("build:bench_throughput@throughput-real-source",),
+        "production-profile": ("build:production_profile",),
+        "compiler-probes": ("tool:fast_ra_scaling.c", "tool:machine_line_mark_scaling.c"),
+        "frontend-selector": ("tool:benchmark_frontend_scaling.py", "tool:selection_benchmark.py", "ide:bench"),
+    },
+}
+# Opt-in legs whose receipt record carries its own requested/status fields.
+INVENTORY_OPT_IN_RECORDS = {"inline": "inline_acceptance", "ast-pilot": "ast_pilot_acceptance",
+                            "real-source": "throughput_real_source", "production-profile": "production_profile",
+                            "compiler-probes": "compiler_probes", "frontend-selector": "frontend_selector"}
+
+
+def inventory_leg_record(receipt: dict, leg: str) -> tuple[bool | None, str]:
+    """(ran, recorded status) of one leg in a receipt; ran is None when the leg left no record.
+
+    ran is False when the receipt says the leg was not requested, and True
+    when it was requested; the recorded status is the receipt's own account
+    of it, which never discharges anything by itself.
+    """
+    analyzer = receipt.get("profile") in ANALYZER_PROFILE_BY_LINE.values()
+    state = receipt.get("state") if isinstance(receipt.get("state"), str) else "missing"
+    ran: bool | None = None
+    recorded = "missing"
+    if leg == "analyzer":
+        ran, recorded = analyzer, state if analyzer else "not requested"
+    elif leg == "self-host":
+        ran, recorded = not analyzer, "not requested" if analyzer else state
+    elif leg == "corpus":
+        if analyzer or ("throughput_profile" in receipt and receipt["throughput_profile"] is None):
+            ran, recorded = False, "not requested"
+        elif "throughput_profile" in receipt:
+            corpus = receipt.get("throughput") if isinstance(receipt.get("throughput"), dict) else {}
+            ran = True
+            recorded = "missing" if not corpus else "valid" if corpus.get("valid") is True and \
+                corpus.get("exit") in (None, 0) else "failed"
+    elif leg == "scaling":
+        if "scaling_profile" in receipt:
+            series = receipt.get("scaling") if isinstance(receipt.get("scaling"), dict) else {}
+            # Compare, never hash: a malformed status (an object or list) is a failure, not a crash.
+            valid = all(isinstance(row, dict) and row.get("status") == "valid"
+                        for row in (series.get(name) for name in SCALING_PROFILE["series"]))
+            ran, recorded = True, "valid" if valid else "failed"
+        else:
+            ran, recorded = False, "not requested"
+    elif leg in INVENTORY_OPT_IN_RECORDS:
+        record = receipt.get(INVENTORY_OPT_IN_RECORDS[leg])
+        if record is None or (isinstance(record, dict) and record.get("requested") is False):
+            ran, recorded = False, "not requested"
+        elif isinstance(record, dict) and record.get("requested") is True:
+            ran, recorded = True, record.get("status") if isinstance(record.get("status"), str) else "missing"
+        else:
+            recorded = "malformed"
+    else:
+        recorded = "unknown leg"
+    return ran, recorded
+
+
+def covered_inventory_rows(receipt: object, conclusion: str, mode: str) -> dict:
+    """Which inventory rows this attempt's validated evidence discharged, per leg (pure).
+
+    mode is the trusted mode being published, never the receipt's own claim.
+    A leg discharges its rows only when the attempt concluded success, which
+    the publisher grants only after re-validating every requested leg's raw
+    evidence; a superseded, failed, invalid, absent or unrequested leg is
+    listed as not discharged with its reason. A row is discharged when every
+    requested leg naming it discharged and at least one did. Report-only:
+    nothing here changes a conclusion.
+    """
+    legs = INVENTORY_LEGS.get(mode, {})
+    receipt = receipt if isinstance(receipt, dict) else None
+    entries: list[dict] = []
+    for leg, rows in legs.items():
+        ran, recorded = inventory_leg_record(receipt, leg) if receipt is not None else (None, "no receipt")
+        if receipt is None:
+            status = "not discharged: no readable receipt"
+        elif ran is False:
+            status = "not discharged: not requested"
+        elif ran is None:
+            status = f"not discharged: no {leg} record ({recorded})"
+        elif conclusion == "success":
+            status = "discharged"
+        elif conclusion == "neutral" or receipt.get("state") == "superseded":
+            status = "not discharged: superseded before measurement"
+        elif recorded not in ("complete", "measured", "valid"):
+            status = f"not discharged: leg {recorded}"
+        else:
+            status = "not discharged: evidence refused by the publisher"
+        entries.append({"leg": leg, "rows": list(rows), "recorded": recorded, "status": status})
+    statuses: dict[str, list[str]] = {}
+    for entry in entries:
+        for row in entry["rows"]:
+            statuses.setdefault(row, []).append(entry["status"])
+    by_row: dict[str, str] = {}
+    for row, found in statuses.items():
+        requested = [status for status in found if status != "not discharged: not requested"] or found
+        by_row[row] = next((status for status in requested if status != "discharged"), "discharged")
+    return {"schema": INVENTORY_COVERAGE_SCHEMA, "inventory": "docs/performance-validation-v1.json",
+            "route": INVENTORY_ROUTES.get(mode, "none"), "conclusion": conclusion, "legs": entries,
+            "rows": dict(sorted(by_row.items())),
+            "discharged": sorted(row for row, status in by_row.items() if status == "discharged")}
+
+
+def render_inventory_coverage(coverage: object) -> list[str]:
+    """Markdown lines naming each inventory row and leg this attempt did or did not discharge."""
+    lines: list[str] = []
+    if isinstance(coverage, dict) and isinstance(coverage.get("legs"), list):
+        discharged = coverage.get("discharged") if isinstance(coverage.get("discharged"), list) else []
+        lines += [f"Inventory coverage (`docs/performance-validation-v1.json`, route `{coverage.get('route', 'NA')}`): "
+                  f"{len(discharged)} rows discharged by this attempt's validated Zen 5 evidence; any other row "
+                  "still needs its own evidence.", "",
+                  "| Leg | Inventory rows | Receipt status | Coverage |", "| --- | --- | --- | --- |"]
+        for entry in coverage["legs"]:
+            if isinstance(entry, dict):
+                rows = entry.get("rows") if isinstance(entry.get("rows"), list) else []
+                lines.append("| %s | %s | %s | %s |" % (entry.get("leg", "NA"), ", ".join(f"`{row}`" for row in rows),
+                                                          entry.get("recorded", "NA"), entry.get("status", "NA")))
+        lines.append("")
+    return lines
+
+
 def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) -> str:
     """Readable per-candidate report: identities, verdict, core metrics and timings."""
     if isinstance(receipt, dict) and receipt.get("profile") in ANALYZER_PROFILE_BY_LINE.values():
@@ -3459,6 +3838,7 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
         "",
         verdict.get("text") or "No wall-time verdict.",
         "",
+        *render_inventory_coverage(receipt.get("inventory_coverage") if isinstance(receipt, dict) else None),
         "| Identity | Value |",
         "| --- | --- |",
     ]
@@ -3632,13 +4012,32 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
         for key, title in (("build_exit", "build"), ("exit", "corpus")):
             if production.get(key) not in (None, 0):
                 lines.append(f"PGO/LTO production profile {title} exit: {production.get(key)}.")
-    probes = receipt.get("frontend_selector") if isinstance(receipt, dict) else None
+    probes = receipt.get("compiler_probes") if isinstance(receipt, dict) else None
     if isinstance(probes, dict) and probes.get("requested"):
-        lines += ["", f"Frontend and selector probes ({FRONTEND_SELECTOR_PROFILE['name']}): {probes.get('status', 'NA')} "
+        profile = COMPILER_PROBES_PROFILE
+        lines += ["", f"Compiler probes ({profile['name']}): {probes.get('status', 'NA')} (FAST register-allocation and "
+                  "scheduler line-mark probes built against the base and the head, "
+                  f"{profile['pairs']} alternating pairs per case on CPU {profile['cpu']}; report-only).", "",
+                  "| Probe / case | Base (us) | Head (us) | Head / base [95% interval] | Head faster | Same self-check |",
+                  "| --- | ---: | ---: | ---: | ---: | --- |"]
+        for row in probes.get("cells") if isinstance(probes.get("cells"), list) else []:
+            row = row if isinstance(row, dict) else {}
+            values = [row.get(key) for key in ("baseline_ns", "candidate_ns", "ratio", "ratio_low", "ratio_high")]
+            ok = all(_finite_positive(value) for value in values)
+            lines.append("| %s | %s | %s | %s | %s/%d | %s |" % (
+                row.get("name", "NA"), "%.1f" % (values[0] / 1000) if ok else "NA",
+                "%.1f" % (values[1] / 1000) if ok else "NA",
+                "%.4f [%.4f, %.4f]" % tuple(values[2:]) if ok else "NA", row.get("candidate_faster", "NA"),
+                profile["pairs"], "yes" if row.get("outputs_identical") is True else "no"))
+        if probes.get("exit") not in (None, 0):
+            lines.append(f"Compiler probes exit: {probes.get('exit')}.")
+    selector = receipt.get("frontend_selector") if isinstance(receipt, dict) else None
+    if isinstance(selector, dict) and selector.get("requested"):
+        lines += ["", f"Frontend and selector probes ({FRONTEND_SELECTOR_PROFILE['name']}): {selector.get('status', 'NA')} "
                   "(benchmark_frontend_scaling.py, selection_benchmark.py and `ide bench` on both binaries; medians; "
                   "report-only).", "",
                   "| Cell | Base | Head | Head / base |", "| --- | ---: | ---: | ---: |"]
-        for row in probes.get("cells") if isinstance(probes.get("cells"), list) else []:
+        for row in selector.get("cells") if isinstance(selector.get("cells"), list) else []:
             values = row.get("values") if isinstance(row, dict) and isinstance(row.get("values"), list) else []
             ok = len(values) == 2 and all(_finite_positive(value) for value in values)
             scale, unit = (1000.0, "ms") if isinstance(row, dict) and row.get("unit") == "s" else (1e-3, "us")
@@ -3646,7 +4045,7 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
                 row.get("name") if isinstance(row, dict) else "NA",
                 "%.1f %s" % (values[0] * scale, unit) if ok else "NA", "%.1f %s" % (values[1] * scale, unit) if ok else "NA",
                 "%.4f" % (values[1] / values[0]) if ok else "NA"))
-        exits = probes.get("exits") if isinstance(probes.get("exits"), dict) else {}
+        exits = selector.get("exits") if isinstance(selector.get("exits"), dict) else {}
         for key, value in exits.items():
             if value not in (None, 0):
                 lines.append(f"Frontend-selector {key} exit: {value}.")

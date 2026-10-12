@@ -2496,6 +2496,7 @@ CodegenAbi codegen_abi_for_target(Target target)
     }
     break;
         break;
+    case CPU_ARCH_I386:
     case CPU_ARCH_WASM32:
     case CPU_ARCH_WASM64:
     case CPU_ARCH_BPFEL:
@@ -7515,7 +7516,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 if (placement.valid)
                 {
                     result.failed_phase = CODEGEN_PHASE_MACHINE_ENCODING;
-                    MachineEncodeResult encoded;
+                    MachineEncodeResult encoded = {0};
                     WORK_LEDGER_RECORD(MACHINE_PLACEMENT_EDITS, placement.edit_count);
 
                     // The encoder writes where the function will live when
@@ -7527,6 +7528,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     u64 code_remaining = buffer.count <= buffer.capacity ? buffer.capacity - buffer.count : 0;
                     switch (target.cpu_arch)
                     {
+                        break; case CPU_ARCH_I386:
+                            buffer.error = CODEGEN_ERROR_UNSUPPORTED_TARGET;
+                            result.error = CODEGEN_ERROR_UNSUPPORTED_TARGET;
+                            result.failure_reason = S8("i386 code generation is not implemented");
+                            break;
                         break; case CPU_ARCH_AARCH64: encoded = machine_encode_aarch64_into(machine_arena, &selected.function, &placement,
                                                                                            code_destination, code_remaining);
                         break; case CPU_ARCH_X86_64: encoded = machine_encode_x86_64_into(machine_arena, &selected.function, &placement,
@@ -7757,6 +7763,10 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
     if (!arena || !program || !module || result.abi >= CODEGEN_ABI_COUNT || (target.cpu_arch != CPU_ARCH_X86_64 && target.cpu_arch != CPU_ARCH_AARCH64))
     {
         result.error = CODEGEN_ERROR_UNSUPPORTED_TARGET;
+        if (target.cpu_arch == CPU_ARCH_I386)
+        {
+            result.failure_reason = S8("i386 code generation is not implemented");
+        }
         return result;
     }
     if (options.register_allocator >= CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT)

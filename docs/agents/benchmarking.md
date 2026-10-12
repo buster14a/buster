@@ -562,6 +562,28 @@ captures (#2741).
   model, prints it in its report, and on any other host compiles and runs
   nothing and fails. The inventory test also refuses a `covered` row whose
   evidence consumer never checks the observed host against `APPROVED_HOST`.
+  Each published `9700X compiler benchmark` check, for both main and pull
+  requests, names the inventory rows that its attempt discharged
+  (`compiler_receipt.covered_inventory_rows`, in the check summary, in its
+  JSON as `inventory_coverage`, and in the main commit report). The mapping
+  `compiler_receipt.INVENTORY_LEGS` ties each receipt leg to its rows. On
+  main, the self-host lab discharges `uarch_lab:compare@main` and the corpus
+  discharges `build:bench_throughput@main`. On a pull request, the lab
+  discharges `uarch_lab:compare`, and the corpus and scaling discharge
+  `build:bench_throughput`. Each opt-in profile discharges its own
+  `PROFILE_ROWS` row (`compiler-probes-v1` discharges both of its probe rows),
+  and the analyzer discharges its two analyzer rows.
+  A leg discharges its rows only when the attempt concluded `success`. Every
+  other leg is listed as not discharged, with the reason: it was not
+  requested, left no record, failed, was pending or skipped, was superseded,
+  or the publisher refused its evidence. A row named by several legs is
+  discharged only when every requested leg discharged. Rows the check does
+  not name still need their own evidence. This is report-only and changes no
+  conclusion. The inventory test fails when a `covered` `main-compare` or
+  `pull-compare` row can't be reached from any leg of its mode, or when a leg
+  names a row that isn't covered on that route. So renaming or deleting a row
+  or a leg cannot silently drop coverage, and a `native-informative` or
+  `NOT VALIDATED` row can never be discharged by a compare check.
 - **The dedicated Ryzen 7 9700X is not a general GitHub Actions executor.**
   The queued benchmark service, its dispatch workflow and the earlier
   `.github/workflows/zen5-audit.yml` are removed (#2708). The only workflow
@@ -1030,9 +1052,11 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    - any corpus evidence the ordinary corpus validator refuses.
 
    The receipt's observed host must be the Ryzen 7 9700X, as for every
-   comparison. The host needs `llvm-profdata`, `llvm-readobj` and Clang's
-   profile runtime (`libclang_rt.profile`); a missing one fails the build
-   leg with its log.
+   comparison. The host needs `clang`, `ld.lld` (the LTO lanes link with
+   `-fuse-ld=lld`), `llvm-profdata`, `llvm-readobj` and Clang's profile
+   runtime (`libclang_rt.profile`). A missing tool on `PATH` fails the leg
+   before the build starts and the receipt names it; a missing runtime fails
+   the build leg with its log.
 
    Cost: on a hosted 4-vCPU 2.8 GHz Xeon with three build lanes (diagnostic,
    not Zen 5), `production_profile --no-benchmark` passed all 23 phases in
@@ -1042,6 +1066,91 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    own 40-minute timeout and the corpus run the ordinary 30-minute one, so
    the leg fits inside the unchanged 90-minute `compare-pull` job next to the
    roughly 14-minute ordinary comparison. No job timeout changed.
+
+   **Issue #2761 opt-in compiler probes.** The same route accepts one fresh
+   exact line `profile: compiler-probes-v1`, selected by the same
+   every-parent freshness rule. It is the Zen 5 route for a targeted
+   register-allocator or scheduler claim, next to the end-to-end self-host.
+   It cannot be combined with an analyzer, real-source, ast-pilot or
+   production profile; one long opt-in leg per job keeps the budget provable.
+   `tools/fast_ra_scaling.c` (the real FAST prepass and prepassed placement on
+   empty-value chain and fanout CFGs) and `tools/machine_line_mark_scaling.c`
+   (`machine_schedule_function` with one line mark per instruction) include
+   compiler internals, so they cannot be direct workloads. After the corpus
+   leg, `measure_compiler_probes` compiles the native harness
+   `tools/bench_direct/compiler_probes.c` from the trusted checkout. It uses
+   only libc, because that checkout holds only `tools/`, so no candidate
+   header reaches it. It then runs the harness, which does the following:
+   - It makes two shared clones of the candidate checkout, at the merge base
+     and at the head. The base checkout and its closure checks stay untouched.
+   - It copies the head's probe sources outside both clones, as the audits do,
+     and builds each probe once against each clone's own `src/` with clang.
+     The commands are those in
+     [2026-09-07T222944Z](../performance-audits/2026-09-07T222944Z.md) and
+     [2026-09-18T224655Z](../performance-audits/2026-09-18T224655Z.md)
+     (line-mark: schedule mode only, `BUSTER_LINE_MARK_HELPER_BENCH=0`). The
+     one addition is `codegen.c` in the FAST probe's source list: since #2876
+     `machine.c` calls its `codegen_a64_windows_save_area_size`, and the
+     audit's command no longer links without it.
+   - Its cases are fixed: FAST chain and fanout at 256, 1024, 4096 and 16384
+     blocks, and line-mark schedule at 1024, 4096, 16384 and 65536 leaves.
+     Each invocation takes 11 timed samples after its own untimed warmup.
+   - Per case and binary there are two warmup invocations, then 30 pairs on
+     CPU 2. Even pairs run the base first and odd pairs the head first. Every
+     pair runs: there is no early stop, rerun or trimming.
+   - The statistic is the median of each invocation's samples (`total_ns` or
+     `schedule_ns`), the head/base ratio per pair, and per case the median
+     ratio with a distribution-free 95% order-statistic interval. It is
+     report-only.
+
+   The probes' `key=value` lines are their structured output; nothing was
+   added to them. Every non-`_ns` field is the self-check, and the profile's
+   `check_fields` fix it exactly: for FAST, `blocks`, `prepass_bytes`,
+   `total_bytes`, `spills`, `reloads`, `copies`, `edits` and `frame`; for
+   line-mark, `mode`, `leaves`, `rows`, `batch`, `retained_bytes`, `permuted`,
+   `displacement` and a 16-digit hex `hash`. Each case's `markers` must match
+   too: its size, and for line-mark `mode=schedule`, `rows` = 2 x leaves + 1
+   and `batch=1`. The self-check must be identical across every invocation of
+   one binary. Whether the base and the head agree is reported, not required,
+   since an allocator or scheduler change may change it legitimately.
+
+   `compiler_publish.py` re-validates the receipt's `compiler_probes` record
+   against `compiler_probes/summary.json` (`validate_compiler_probes`), which
+   keeps every raw sample. It refuses:
+   - an exit other than 0, a failed status or any recorded error;
+   - a profile, base or head other than the frozen profile and the compared
+     revisions;
+   - a build list other than one passed build per probe and revision, or a
+     missing probe binary or source hash. `compiler_compare` hashes the binaries
+     and the copied probe sources itself; the harness reports no hashes;
+   - a missing, extra or reordered case, or changed case arguments;
+   - fewer than two warmups or 30 pairs, or a pair out of the fixed order;
+   - an invocation that failed, timed out or has partial samples, or a sample
+     that is not an integer from 1 ns to the 60-second invocation timeout
+     (checked before any median or ratio arithmetic), a self-check field that
+     is missing, extra or malformed, a workload marker other than the case's,
+     or a self-check that changes.
+
+   The harness states no statistics; every one is re-derived from the raw
+   samples. Its `--self-test` checks output parsing, pair alternation, JSON
+   escaping and a whole fake case, and runs in the benchmark policy job.
+   `compiler_test.py` checks that its `--profile` output equals
+   `COMPILER_PROBES_PROFILE`, so the native and Python copies cannot drift.
+
+   Missing, partial, failed or cancelled evidence therefore fails the check.
+   The binaries are not exported. Their hashes differ even in an A/A run,
+   because `-g` records each clone's path.
+
+   Cost: on a hosted 4-vCPU 2.8 GHz Xeon (diagnostic, not Zen 5), a real A/A
+   run of the whole leg through `measure_compiler_probes` at `8fa1ca80` took
+   241 s, including the harness build. The two clones and four probe builds
+   take about 3 minutes (each probe build 35 to 38 s), and the 12 cases about
+   40 s. Every case's interval contained 1.0. The leg has its
+   own 20-minute timeout, so it fits inside the unchanged 90-minute
+   `compare-pull` job next to the roughly 14-minute ordinary comparison. No
+   job timeout changed. A head whose probe no longer compiles against the
+   merge base (for example after an allocator API change) fails the leg with
+   its build log; land the probe change first.
 
    **Issue #2761 opt-in frontend and selector probes.** The same route
    accepts one fresh exact line `profile: frontend-selector-v1`, selected by
