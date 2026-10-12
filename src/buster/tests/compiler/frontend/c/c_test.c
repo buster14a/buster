@@ -43618,6 +43618,50 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tall_expression_types(UnitTestArgument
     return result;
 }
 
+// The lowering's strict operand typer answers builtin and selection forms
+// itself instead of handing them to the widest-identifier guess, which typed
+// `__builtin_ffs(i) + (char)l` as long because of the cast's operand (GitHub
+// #2531). Every _Static_assert runs again in lowering, and the conditional's
+// result type and value come from the same typer.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source_text = S8(
+        "#define SAME(e, T) _Static_assert(sizeof(e) == sizeof(T) && _Generic(e, T: 1, default: 0), #e)\n"
+        "int builtins(int i, long l, _Complex double z, _Complex long double w, int c) {\n"
+        "    SAME(__builtin_ffs(i) + (char)l, int);\n"
+        "    SAME(__builtin_ffsl(l) + (char)l, int);\n"
+        "    SAME(__builtin_ffsll(l) + (char)l, int);\n"
+        "    SAME(__builtin_constant_p(l) + (char)l, int);\n"
+        "    SAME(__builtin_types_compatible_p(int, long) + (char)l, int);\n"
+        "    SAME(__builtin_classify_type(l) + (char)l, int);\n"
+        "    SAME(__builtin_choose_expr(1, i, l) + (char)l, int);\n"
+        "    SAME(__builtin_choose_expr(0, i, l) + (char)i, long);\n"
+        "    SAME(_Generic(l, long: i, default: l) + (char)l, int);\n"
+        "    SAME(_Generic(i, long: i, default: l) + (char)i, long);\n"
+        "    SAME(__real__ z + (char)l, double);\n"
+        "    SAME(__imag__ w, long double);\n"
+        "    SAME(__real__ i + (char)l, int);\n"
+        "    SAME(~z, _Complex double);\n"
+        "    SAME(c ? __builtin_ffs(i) + (char)l : 0, int);\n"
+        "    return (c ? __builtin_ffs(i) - (int)l : 0) < 0;\n"
+        "}\n");
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source_text, (CPreprocessOptions){0});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("builtin-operand-types.c"), tokens, parsed, target_native,
+            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // Lua's userdata accessor combines nested pointer-cast macros, a
 // builtin-offsetof ternary, and a switch whose other arm returns void *.  The
 // strict expression-type walk must preserve the pointer result instead of
@@ -63722,6 +63766,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_sizeof_conditional_nesting_depth);
     C_TEST_FIXTURE(arguments, c_test_sizeof_long_shallow_operand);
     C_TEST_FIXTURE(arguments, c_test_tall_expression_types);
+    C_TEST_FIXTURE(arguments, c_test_builtin_operand_types);
     C_TEST_FIXTURE(arguments, c_test_nested_offsetof_pointer_prediction);
     C_TEST_FIXTURE(arguments, c_test_nonvoid_falloff);
     C_TEST_FIXTURE(arguments, c_test_noreturn_call_expression_statements);
