@@ -6706,7 +6706,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_eh_frame_sort(UnitTestArguments
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_import_definition_types(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    u8 types[] = {2, 10, 1, 0, 2};
+    u8 types[] = {2, 10, 1, 0, 2, 255};
     for (u32 platform = 0; platform < 4; platform += 1)
     {
         Target target = {.cpu_arch = platform & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64,
@@ -6719,7 +6719,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_import_definition_types(UnitTes
         {
             ObjectSymbol symbols[] = {
                 {.name = S8("main"), .size = code.length, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
-                {.name = S8("provider"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true, .undefined_untyped = type != 4,
+                {.name = S8("provider"), .section = OBJECT_SECTION_UNDEFINED,
+                 .kind = types[type] == 255 ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA, .global = true, .undefined_untyped = type != 4,
                  .thread_local_state = type == 4 ? OBJECT_SYMBOL_THREAD_LOCAL_NO : OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN},
             };
             ObjectRelocation relocation = {.section = OBJECT_SECTION_DATA, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64};
@@ -6728,17 +6729,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_import_definition_types(UnitTes
             object.sections[OBJECT_SECTION_DATA].data = (ByteSlice){.pointer = (u8*)&pointer, .length = sizeof(pointer)};
             object.sections[OBJECT_SECTION_DATA].virtual_size = sizeof(pointer);
             NativeDynamicVersionedSymbol providers[] = {
-                {.name = S8("provider"), .has_default = true, .elf_type = types[type]},
+                {.name = S8("provider"), .has_default = types[type] != 255, .elf_type = types[type]},
                 {.name = S8("exit"), .has_default = true, .elf_type = 2},
                 {.name = S8("__cxa_atexit"), .has_default = true, .elf_type = 2},
                 {.name = S8("atexit"), .has_default = true, .elf_type = 2},
             };
             NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &object, (NativeExecutableLinkOptions){
-                .entry_symbol = S8("main"), .runtime_exports_known = type != 4,
+                .entry_symbol = S8("main"), .runtime_exports_known = type != 4 && types[type] != 255,
                 .runtime_versioned_symbols = providers, .runtime_versioned_symbol_count = BUSTER_ARRAY_LENGTH(providers),
             });
-            if (linked.error != LINK_ERROR_NONE && types[type] != 0) arguments->show(arguments, S8("definition type platform={u32} type={u32}: {S8} {S8}\n"), platform, (u32)types[type], link_error_name(linked.error), linked.symbol);
-            if (types[type] == 0)
+            if (linked.error != LINK_ERROR_NONE && types[type] != 0 && types[type] != 255) arguments->show(arguments, S8("definition type platform={u32} type={u32}: {S8} {S8}\n"), platform, (u32)types[type], link_error_name(linked.error), linked.symbol);
+            if (types[type] == 0 || types[type] == 255)
             {
                 BUSTER_TEST(arguments, linked.error == LINK_ERROR_UNSUPPORTED_FEATURE);
                 BUSTER_STRING_TEST(arguments, linked.symbol, S8("provider"));

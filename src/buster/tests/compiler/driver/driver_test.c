@@ -25048,6 +25048,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_android_import_types(Uni
                 }
             }
         }
+        String8 missing_source = string_format_z(arena, S8("{S8}/missing.s"), directory);
+        String8 missing_object = string_format_z(arena, S8("{S8}/missing.o"), directory);
+        String8 missing_text = architecture ? S8(".text\n.globl main\n.type main, %function\nmain:\nbl absent_provider\nret\n")
+                                           : S8(".text\n.globl main\n.type main, @function\nmain:\ncall absent_provider@PLT\nret\n");
+        BUSTER_TEST(arguments, file_write(missing_source, BUSTER_SLICE_TO_BYTE_SLICE(missing_text)));
+        String8 assemble[] = {S8("-g0"), S8("-target"), triple, S8("-c"), S8("-o"), missing_object, missing_source};
+        CompilerDriverResult assembled = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble)));
+        BUSTER_TEST(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE);
+        for (u32 input = 0; input < 2; input += 1)
+        {
+            String8 path = input ? missing_object : missing_source;
+            String8 output = string_format_z(arena, S8("{S8}/refused-{u32}"), directory, input);
+            String8 previous = S8("previous image");
+            BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(previous)));
+            String8 command[] = {S8("-g0"), S8("-target"), triple, S8("-isysroot"), directory, S8("-o"), output, path};
+            CompilerDriverResult refused = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK && refused.native_link.error == LINK_ERROR_UNSUPPORTED_FEATURE);
+            BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, path) != UINT64_MAX &&
+                                   string_first_sequence(refused.diagnostic, S8("absent_provider")) != UINT64_MAX);
+            ByteSlice retained = file_read(arena, output, (FileReadOptions){0});
+            BUSTER_STRING_TEST(arguments, ((String8){.pointer = (char8*)retained.pointer, .length = retained.length}), previous);
+        }
         scratch_end(temporary);
     }
 #else

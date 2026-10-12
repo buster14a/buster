@@ -1535,8 +1535,11 @@ library definition's `st_type` classifies an import: `STT_FUNC` and
 `STT_GNU_IFUNC` are functions, and `STT_OBJECT` remains data even without a
 storage-table entry. An untyped address reference with no usable definition,
 or a definition of unknown type, fails with its symbol and input named;
-it cannot become a guessed copy relocation. Call-only references retain
-their relocation-proven function kind when target exports are unavailable.
+it cannot become a guessed copy relocation. A call relocation proves use,
+not the providing definition's type: missing target exports refuse untyped
+calls and address references alike. Recognized `__tls_get_addr` companion
+calls retain the existing dynamic-loader ABI contract, including calls the
+writer relaxes away.
 An absent weak reference still follows the existing zero-resolution rule.
 
 Android reads `libc.so` and explicitly requested libraries through the same

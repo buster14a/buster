@@ -16142,8 +16142,9 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_elf_without_unused_got_marker(Arena* a
 // Untyped references carry no data/function claim. Use the providing library's
 // st_type, including IFUNC, rather than absence from the optional storage table.
 // An incomplete export census may still supply an actual definition. Without
-// one, a call relocation proves callable use; an address alone proves nothing
-// and must never silently become a copy relocation (GitHub #1242).
+// one, refuse an untyped import, even if a call proves its use: the definition
+// still owns the type. Recognized TLS resolver calls keep the existing loader
+// ABI contract rather than inventing data storage (GitHub #1242).
 BUSTER_GLOBAL_LOCAL LinkObjectResult link_elf_classify_untyped_imports(Arena* arena, LinkElfIndex* exports, ObjectFile* object)
 {
     LinkObjectResult result = {.object = *object};
@@ -16159,6 +16160,7 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_elf_classify_untyped_imports(Arena* ar
             LinkElfName* name = link_elf_name(exports, symbol->name, false);
             NativeDynamicVersionedSymbol* definition = name && name->version && name->version->has_default ? name->version : 0;
             ObjectSymbol resolved = *symbol;
+            bool loader_tls_call = false;
             if (symbol->undefined_untyped && symbol->kind == OBJECT_SYMBOL_DATA && string_equal(symbol->name, S8("__tls_get_addr")))
             {
                 if (!tls_built)
@@ -16171,6 +16173,7 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_elf_classify_untyped_imports(Arena* ar
                 if (result.error == LINK_ERROR_NONE && link_elf_symbol_only_relaxed_tls_get_addr(&tls_index, object, index, false))
                 {
                     resolved.kind = OBJECT_SYMBOL_FUNCTION;
+                    loader_tls_call = true;
                 }
             }
             if (definition && (definition->elf_type == ELF_SYMBOL_TYPE_FUNCTION || definition->elf_type == ELF_SYMBOL_TYPE_GNU_IFUNC))
@@ -16209,7 +16212,7 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_elf_classify_untyped_imports(Arena* ar
                 // reference into storage in the executable. Refuse explicitly.
                 result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
             }
-            else if (symbol->undefined_untyped && resolved.kind != OBJECT_SYMBOL_FUNCTION)
+            else if (symbol->undefined_untyped && !loader_tls_call)
             {
                 result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
             }
