@@ -5,6 +5,9 @@
 // The unchanged classifier, bypassing every cache, is the side-table oracle.
 BUSTER_F_DECL IrAbiValue ir_test_abi_reference(IrProgram* program, IrTypeId type, IrAbiConvention convention, IrAbiUse use);
 BUSTER_F_DECL IrFastStatistics ir_test_fast_function(IrProgram* program, IrFunction* function);
+// Runs ir_fast_function with a fresh CSE table whose next block generation
+// follows `generation`; UINT32_MAX exercises the clearing rollover.
+BUSTER_F_DECL IrFastStatistics ir_test_fast_cse_function(IrProgram* program, IrFunction* function, u32 generation);
 BUSTER_F_DECL IrValidationError ir_test_validate_va_instruction_operation(IrProgram* program, IrFunction* function, IrType* signature,
                                                                           IrInstruction* instruction);
 // The historical three-pass canonical validator (module ownership proof, then

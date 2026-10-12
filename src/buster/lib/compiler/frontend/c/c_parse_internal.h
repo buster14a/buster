@@ -20,6 +20,9 @@ BUSTER_F_DECL CTypeId c_test_aggregate_lookup_add(CParseResult* result, CType ty
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKind kind, String8 tag, CScopeId scope);
 BUSTER_F_DECL void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpoint);
 
+// Type-task steps, operator-token visits, and expression-end table/walk rows.
+BUSTER_F_DECL u64 c_test_assignment_chain_work(void);
+
 // Caps, on the calling thread, the scratch bytes each function body's guarded
 // validation allocations (c_parse_body_scratch_allocate) may claim past the
 // body's starting position, so a small fixture exhausts the same allocation
@@ -117,16 +120,58 @@ struct CTestAstTypeVerify
     // answered too, and those it did not fail cleanly.
     u64 probes;
     u64 probe_mismatches;
+    // Answers to a member query whose row is a shared qualified copy
+    // (c_parse_intern_qualified_type).
+    u64 shared_members;
     u64 reason_counts[C_TEST_AST_TYPE_MISMATCH_REASONS];
     CTestAstTypeMismatch first[C_TEST_AST_TYPE_MISMATCH_KEPT];
     u32 first_count;
 };
 BUSTER_F_DECL void c_test_ast_type_verify_set(bool enabled);
+// A negative control for the differential: while set, every alignment record
+// a replay inherited is held with its range start moved, so the comparison
+// with the machine's record must report a table mismatch.
+BUSTER_F_DECL void c_test_ast_type_verify_perturb_alignments(bool enabled);
 // The counts since the last take, which resets them.
 BUSTER_F_DECL CTestAstTypeVerify c_test_ast_type_verify_take(void);
+// Turns the declaration specifier read from the tree (c_parse.c) off and back
+// on, per thread, so a test can analyse the same unit with and without it.
+BUSTER_F_DECL void c_test_ast_specifiers_set(bool enabled);
+// Verify mode for the type-name runs skipped as no type name
+// (c_parse_type_name_specifiers under -fc-ast-pilot): the machine's attempt
+// also runs on every skipped run, and the counts record the runs it checked
+// and those where it answered, kept a type row or reported a diagnostic. Per
+// thread; the take resets the counts.
+typedef struct CTestAstTypeNameVerify CTestAstTypeNameVerify;
+struct CTestAstTypeNameVerify
+{
+    u64 checked;
+    u64 answered;
+    u64 appended;
+    u64 diagnosed;
+};
+BUSTER_F_DECL void c_test_ast_type_names_verify_set(bool enabled);
+BUSTER_F_DECL CTestAstTypeNameVerify c_test_ast_type_names_verify_take(void);
+// Verify mode for the member specifier runs read from the tree
+// (c_parse_member_specifiers_type under -fc-ast-pilot): before each read the
+// machine's scalar frame also reads the run, and is rolled back. The counts
+// record the reads compared and those whose type row, its fields or the
+// declarator start differed from the machine's, or that the machine refused.
+// Per thread; the take resets the counts.
+typedef struct CTestAstMemberVerify CTestAstMemberVerify;
+struct CTestAstMemberVerify
+{
+    u64 compared;
+    u64 mismatches;
+};
+BUSTER_F_DECL void c_test_ast_members_verify_set(bool enabled);
+BUSTER_F_DECL CTestAstMemberVerify c_test_ast_members_verify_take(void);
 
 BUSTER_F_DECL CDiagnostic c_test_check_named_call_arities(Arena* arena, CAnalysisResult* analysis, CPreprocessResult preprocess,
                                                         u32 start, u32 end);
+
+// Compare the production endpoint table with its fallback at every subrange.
+BUSTER_F_DECL bool c_test_constraint_expression_ends_agree(Arena* arena, CPreprocessResult preprocess, CParseResult* result, u32 start, u32 count);
 
 BUSTER_F_DECL void c_test_definition_index_record(CParseResult* result, u32 definition_start, CTypeId type);
 BUSTER_F_DECL u32 c_test_definition_scan_start(CParseResult const* result, u32 definition_start);
@@ -162,6 +207,23 @@ BUSTER_F_DECL void c_test_set_literal_query_machine_only(bool machine_only);
 // Keeps the interning window shut (CTypeInterning), so one source can be
 // compiled with and without interned rows and the objects compared.
 BUSTER_F_DECL void c_test_set_type_interning_off(bool off);
+// Two const copies of `base` through c_parse_intern_qualified_type with the
+// window open, and the lookup after them: the same row and one append when
+// the copy may be shared, two rows (and two alignment records for an aligned
+// base) when it may not.
+typedef struct CTestQualifiedShare CTestQualifiedShare;
+struct CTestQualifiedShare
+{
+    CTypeId first;
+    CTypeId second;
+    CTypeId found;
+    u32 types_added;
+    u32 alignments_added;
+};
+BUSTER_F_DECL CTestQualifiedShare c_test_qualified_share(CParseResult* result, CTypeId base);
+
+// Cast-proof token visits and logical-position probes on the calling thread.
+BUSTER_F_DECL u64 c_test_logical_label_type_work(void);
 
 // Direct member alignment queries must leave the published model, including
 // spare rows and the type-map input counts/pointers, byte-for-byte unchanged.
@@ -210,6 +272,11 @@ BUSTER_F_DECL u32 c_test_parse_delimiter_match(CParseResult* result, CPreprocess
 BUSTER_F_DECL bool c_test_parse_direct_expression_type(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                      u32 start, u32 end, CTypeId* type_out);
 
+BUSTER_F_DECL bool c_parse_label_address_prefix_with_typedef(CParseResult* result, CPreprocessResult const* preprocess,
+                                                             CScopeId scope, u32 body_start, u32 index);
+BUSTER_F_DECL bool c_test_parse_label_address_prefix_paths_agree(CParseResult* result, CPreprocessResult const* preprocess,
+                                                                 CScopeId scope, u32 body_start, u32 index);
+
 // Whether c_parse_validate_label_values would walk this function body's
 // values; the analysis must already have built the scope index.
 BUSTER_F_DECL bool c_test_parse_label_values_needed(CParseResult* result, CPreprocessResult preprocess, CDeclaration const* declaration);
@@ -226,9 +293,24 @@ enum
     C_TEST_PARSE_NESTING_SCOPE_LEVELS,
     C_TEST_PARSE_NESTING_STATEMENT_END_STEPS,
     C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS,
+    C_TEST_PARSE_NESTING_STATEMENT_EXPRESSION_TAILS,
     C_TEST_PARSE_NESTING_SLOTS,
 };
 BUSTER_F_DECL u64 c_test_parse_nesting_count(u32 slot);
+
+// Token visits and delimiter/ancestor operations in nested-tag scans.
+// The position-index token population is charged once for its actual build.
+enum
+{
+    C_TEST_PARSE_TAG_SCAN_INDEX_TOKENS,
+    C_TEST_PARSE_TAG_SCAN_DELIMITER_STEPS,
+    C_TEST_PARSE_TAG_SCAN_LAYOUT_TOKENS,
+    C_TEST_PARSE_TAG_SCAN_ALIGNMENT_TOKENS,
+    C_TEST_PARSE_TAG_SCAN_MEMBER_TOKENS,
+    C_TEST_PARSE_TAG_SCAN_ANCESTOR_STEPS,
+    C_TEST_PARSE_TAG_SCAN_SLOTS,
+};
+BUSTER_F_DECL u64 c_test_parse_tag_scan_count(u32 slot);
 
 // Observable answers of the five production specifier-word token queries,
 // including their qualifier writes. No counters or state enter production.
@@ -246,6 +328,23 @@ enum
     C_TEST_WORD_CLASS_QUALIFIERS_AGREE = 1 << 9,
 };
 BUSTER_F_DECL u32 c_test_parse_word_classes(CPreprocessResult preprocess, CToken token);
+
+// A real member search around a failed private workspace replacement:
+// retain the old owner on failure, recover on retry, and release via teardown.
+typedef struct CTestPromotedMemberWorkspace CTestPromotedMemberWorkspace;
+struct CTestPromotedMemberWorkspace
+{
+    CTypeId member_type;
+    bool initial_search;
+    bool failed_growth;
+    bool fault_consumed;
+    bool workspace_preserved;
+    bool structured_error;
+    bool recovered;
+    bool replacement;
+    bool released;
+};
+BUSTER_F_DECL CTestPromotedMemberWorkspace c_test_promoted_member_workspace(CParseResult* result, CTypeId root, String8 name);
 
 typedef struct CTestTypeConstantQuery CTestTypeConstantQuery;
 struct CTestTypeConstantQuery

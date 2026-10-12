@@ -387,6 +387,26 @@ class NativePartitionTests(unittest.TestCase):
 
 class WorkflowSetupTests(unittest.TestCase):
     """Run the actual step bodies with controlled tools and empty log roots."""
+    @classmethod
+    def setUpClass(cls):
+        # Compile one real native authority. The replay copies this binary for
+        # the shell bootstrap only; its helper command still qualifies and
+        # invokes the real compiler against the isolated source fixture.
+        cls.driver_temporary = tempfile.TemporaryDirectory(ignore_cleanup_errors=os.name == "nt")
+        cls.driver = Path(cls.driver_temporary.name).resolve() / "build.exe"
+        compiler = shutil.which("clang")
+        if not compiler:
+            raise RuntimeError("Native bootstrap helper controls require Clang")
+        command = [compiler, "-Isrc", "-Wall", "-Werror", "-Wno-unused-function", "-Wno-unused-variable",
+                   "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", "build.c", "-o", str(cls.driver)]
+        if os.name == "nt":
+            command += ["-Wno-microsoft-enum-forward-reference", "-lws2_32"]
+        subprocess.run(command, cwd=ROOT, check=True, timeout=120)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.driver_temporary.cleanup()
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -407,13 +427,59 @@ class WorkflowSetupTests(unittest.TestCase):
         self.steps = dict(re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", desktop))
         self.environment = dict(os.environ, BUSTER_CI_PYTHON=Path(sys.executable).as_posix(),
                                 RUNNER_TEMP=self.root.as_posix(), BUSTER_MATRIX_SHARD="checks",
-                                ZIG_TARGET="fixture", FIXTURE_EXIT="0", RUNNER_OS="Linux")
+                                ZIG_TARGET="fixture", FIXTURE_EXIT="0", RUNNER_OS="Linux",
+                                MATRIX_WORKFLOW_DRIVER=self.driver.as_posix())
+
+    def copy_process_tree_source(self):
+        # These are the actual helper command's input and discovery closure.
+        # The build driver itself was compiled once from the real source above.
+        for relative in ("tools/windows_process_tree.c", "tools/windows_process_tree_test.c",
+                         "src/buster/lib/base.h", "src/buster/lib/system_headers.h", "tests/build_compiler_identity.h"):
+            (self.root / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, self.root / relative)
 
     def run_step(self, name):
         body = self.steps[name].split("        run: |\n", 1)[1]
         script = "\n".join(line[10:] for line in body.splitlines() if line.startswith("          "))
-        return subprocess.run([self.shell, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
-                              cwd=self.root, env=self.environment, text=True, capture_output=True, timeout=30)
+        if name in ("Workflow tool regression tests", "Bootstrap wrapper regression tests"):
+            # Intercept only the hosted driver bootstrap in the replay shell.
+            # Native os_process_spawn does not inherit shell functions, so
+            # bootstrap_process_owner still compiles and tests the real helper.
+            script = 'clang() { cp "$MATRIX_WORKFLOW_DRIVER" "${@: -1}"; }\n' + script
+        try:
+            result = subprocess.run([self.shell, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
+                                    cwd=self.root, env=self.environment, text=True, capture_output=True, timeout=30)
+        except subprocess.TimeoutExpired as error:
+            # A timeout can precede SUITE_START while the native helper is
+            # built/qualified. Retain both captures, not just suite markers.
+            try:
+                limit = 4096
+                print(f"WORKFLOW_STEP_TIMEOUT step={name[:256]!r} "
+                      f"FIXTURE_EXIT={self.environment.get('FIXTURE_EXIT', '')[:128]!r} timeout_seconds=30", file=sys.stderr)
+                for label, value in (("stdout", error.stdout), ("stderr", error.stderr)):
+                    if isinstance(value, bytes):
+                        value = value.decode("utf-8", errors="replace")
+                    text = value if value is not None else "[unavailable]"
+                    if len(text) > limit:
+                        text = (text[:limit // 2] + f"\n[truncated {len(text) - limit} characters]\n" + text[-limit // 2:])
+                    print(f"WORKFLOW_STEP_TIMEOUT {label}:\n{text or '[empty]'}", file=sys.stderr)
+                owner_log = {"Workflow tool regression tests": "workflow-tools-process-owner.log",
+                             "Bootstrap wrapper regression tests": "bootstrap-wrapper-process-owner.log"}.get(name)
+                if owner_log:
+                    try:
+                        with (self.root / "buster-ci" / owner_log).open("rb") as stream:
+                            size = stream.seek(0, os.SEEK_END)
+                            stream.seek(max(0, size - limit))
+                            tail = stream.read(limit).decode("utf-8", errors="replace")
+                        omitted = f"[truncated {size - limit} bytes]\n" if size > limit else ""
+                        print(f"WORKFLOW_STEP_TIMEOUT {owner_log}:\n{omitted}{tail or '[empty]'}", file=sys.stderr)
+                    except OSError as log_error:
+                        print(f"WORKFLOW_STEP_TIMEOUT {owner_log}: [unavailable: {type(log_error).__name__}]", file=sys.stderr)
+            except Exception:
+                # Secondary diagnostic I/O must never replace the timeout.
+                pass
+            raise
+        return result
 
     def test_workflow_tools_keep_platform_budget_and_all_suites(self):
         block = self.steps["Workflow tool regression tests"]
@@ -452,6 +518,7 @@ class WorkflowSetupTests(unittest.TestCase):
         runner = self.root / "tools/ci_workflow_tools.py"
         runner.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / "tools/ci_workflow_tools.py", runner)
+        self.copy_process_tree_source()
         for suite, _ in expected:
             path = self.root / suite
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -498,6 +565,7 @@ class WorkflowSetupTests(unittest.TestCase):
             "sys.exit(int(os.environ['FIXTURE_EXIT']))\n")
         (tests / "bootstrap_wrapper_test.py").write_text(fixture)
         (tools / "bootstrap_wrapper_cases.py").write_text(fixture)
+        self.copy_process_tree_source()
         selections = (("Linux", "bootstrap_wrapper_test.py", "BootstrapWrapperTests"),
                       ("Windows", "bootstrap_wrapper_cases.py", "--jobs"))
         for platform, entry, argument in selections:
@@ -521,6 +589,95 @@ class WorkflowSetupTests(unittest.TestCase):
                         self.assertIn(f"BOOTSTRAP_TEST fixture {entry}", log)
                         self.assertIn(argument, log)
                         self.assertIn("'2'" if platform == "Windows" else "'-v'", log)
+
+
+class WorkflowStepTimeoutEvidenceTests(unittest.TestCase):
+    """Synthetic timeouts retain evidence without waiting or spawning a shell."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.fixture = WorkflowSetupTests()
+        self.fixture.root = self.root
+        self.fixture.shell = "fixture-bash"
+        self.fixture.environment = {"FIXTURE_EXIT": "7"}
+        self.fixture.steps = {"Workflow tool regression tests": "        run: |\n          printf fixture\n"}
+        self.owner_log = self.root / "buster-ci/workflow-tools-process-owner.log"
+
+    def timeout_output(self, error):
+        output = io.StringIO()
+        with mock.patch.object(subprocess, "run", side_effect=error) as run, contextlib.redirect_stderr(output):
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                self.fixture.run_step("Workflow tool regression tests")
+        self.assertIs(caught.exception, error)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.kwargs, dict(cwd=self.root, env=self.fixture.environment,
+                                                   text=True, capture_output=True, timeout=30))
+        self.assertEqual(run.call_args.args[0][:-1], ["fixture-bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c"])
+        return output.getvalue()
+
+    def test_partial_bytes_and_text_capture_and_existing_helper_log(self):
+        self.fixture.environment["FIXTURE_EXIT"] = "0"
+        self.owner_log.parent.mkdir()
+        self.owner_log.write_bytes(b"helper qualification progress\xff\n")
+        error = subprocess.TimeoutExpired("fixture", 30, output=b"SUITE_START path=fixture\xff\n", stderr="compiler progress\n")
+        text = self.timeout_output(error)
+        self.assertIn("step='Workflow tool regression tests' FIXTURE_EXIT='0' timeout_seconds=30", text)
+        self.assertIn("stdout:\nSUITE_START path=fixture\ufffd", text)
+        self.assertIn("stderr:\ncompiler progress", text)
+        self.assertIn("workflow-tools-process-owner.log:\nhelper qualification progress\ufffd", text)
+
+    def test_large_captures_and_log_are_bounded_and_keep_final_progress(self):
+        self.owner_log.parent.mkdir()
+        self.owner_log.write_bytes(b"omitted-log-start" + b"L" * 9000 + b"helper-tail")
+        error = subprocess.TimeoutExpired("fixture", 30, output="stdout-head" + "X" * 9000 + "stdout-tail",
+                                          stderr=b"stderr-head" + b"Y" * 9000 + b"stderr-tail")
+        text = self.timeout_output(error)
+        for marker in ("stdout-head", "stdout-tail", "stderr-head", "stderr-tail", "helper-tail"):
+            self.assertIn(marker, text)
+        self.assertNotIn("omitted-log-start", text)
+        self.assertEqual(text.count("[truncated "), 3)
+        self.assertLess(len(text), 3 * 4096 + 1024)
+
+    def test_missing_and_empty_captures_and_log_preserve_timeout(self):
+        for stdout, stderr in ((None, None), ("", b"")):
+            for log_present in (False, True):
+                with self.subTest(stdout=stdout, stderr=stderr, log_present=log_present):
+                    if log_present:
+                        self.owner_log.parent.mkdir(exist_ok=True)
+                        self.owner_log.write_bytes(b"")
+                    else:
+                        self.owner_log.unlink(missing_ok=True)
+                    text = self.timeout_output(subprocess.TimeoutExpired("fixture", 30, output=stdout, stderr=stderr))
+                    self.assertIn("[unavailable]" if stdout is None else "[empty]", text)
+                    self.assertIn("workflow-tools-process-owner.log:\n[empty]" if log_present else
+                                  "workflow-tools-process-owner.log: [unavailable: FileNotFoundError]", text)
+
+    def test_helper_log_read_error_is_secondary(self):
+        with mock.patch.object(Path, "open", side_effect=PermissionError("fixture denied")):
+            text = self.timeout_output(subprocess.TimeoutExpired("fixture", 30, output="partial", stderr=None))
+        self.assertIn("stdout:\npartial", text)
+        self.assertIn("[unavailable: PermissionError]", text)
+
+    def test_diagnostic_write_error_does_not_replace_original_timeout(self):
+        error = subprocess.TimeoutExpired("fixture", 30, output="partial")
+        with mock.patch.object(subprocess, "run", side_effect=error) as run:
+            with mock.patch.object(sys, "stderr", mock.Mock(write=mock.Mock(side_effect=OSError("fixture closed")))):
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    self.fixture.run_step("Workflow tool regression tests")
+        self.assertIs(caught.exception, error)
+        run.assert_called_once()
+
+    def test_completed_step_returns_unchanged_without_diagnostic_io(self):
+        result = subprocess.CompletedProcess("fixture", 7, stdout="expected failure", stderr="control")
+        with mock.patch.object(subprocess, "run", return_value=result) as run, mock.patch.object(Path, "open") as opened:
+            with contextlib.redirect_stderr(io.StringIO()) as output:
+                actual = self.fixture.run_step("Workflow tool regression tests")
+        self.assertIs(actual, result)
+        self.assertEqual(output.getvalue(), "")
+        run.assert_called_once()
+        opened.assert_not_called()
 
 
 class CompletionGateTests(unittest.TestCase):

@@ -21,8 +21,8 @@ struct IrValidateTestBuilder
     IrTypeId bool_type;
     IrTypeId i64_type;
     IrTypeId function_type;
-    // An integer type whose layout is unresolved: naming it is the one way a
-    // metadata-free value fails the shape predicate.
+    // An unresolved integer still fails value validation, with or without
+    // label metadata; only address-only opaque aggregate places are exempt.
     IrTypeId unresolved_type;
 };
 
@@ -1162,5 +1162,149 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_equivalence_tests(UnitTestArgumen
         }
     }
     BUSTER_TEST(arguments, random_applied >= IR_VALIDATE_TEST_RANDOM_ROUNDS * 8);
+    return result;
+}
+
+// Opaque places carry addresses, never object bytes. Exercise both provenance
+// paths and reject forged storage users even when their result has a layout.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_incomplete_place_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 metadata = 0; metadata < 2; metadata += 1)
+    {
+        for (u32 variant = 0; variant < 10; variant += 1)
+        {
+            TemporalArena temporary = arena_begin_temporal(arguments->arena);
+            IrValidateTestBuilder builder = ir_validate_test_builder(arguments->arena);
+            IrProgram* program = &builder.program;
+            IrFunction* function = builder.function;
+            program->symbols.symbols = arena_allocate(arguments->arena, IrSymbol, 1);
+            program->symbols.capacity = 1;
+            u32 block = ir_validate_test_block(&builder);
+            IrValueId zero = ir_validate_test_constant(&builder, block, builder.i32_type, 0);
+            IrField field = {.type = builder.i32_type};
+            IrTypeId opaque = ir_program_add_type(program, (IrType){.kind = IR_TYPE_STRUCT, .fields = &field, .field_count = 1});
+            IrTypeId pointer = ir_program_add_type(program, (IrType){.kind = IR_TYPE_POINTER, .element_type = opaque,
+                .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true}});
+            IrSymbolId symbol = ir_program_add_symbol(program, (IrSymbol){.name = S8("opaque"), .kind = IR_SYMBOL_DATA, .type = opaque});
+            IrValueId place = ir_validate_test_value(&builder, opaque, IR_VALUE_PLACE);
+            IrInstructionId global = ir_validate_test_row(&builder, block,
+                (IrInstruction){.opcode = IR_OPCODE_GLOBAL, .canonical_type = opaque, .result = place, .symbol = symbol});
+            IrValueId address = ir_validate_test_value(&builder, pointer, IR_VALUE_VALUE);
+            IrValueId operands[] = {place, zero};
+            IrInstructionId use = ir_validate_test_row(&builder, block, (IrInstruction){.opcode = IR_OPCODE_ADDRESS_OF,
+                .canonical_type = pointer, .result = address, .operands = operands, .operand_count = 1});
+            if (variant == 1)
+            {
+                IrValueId indirect = ir_validate_test_value(&builder, opaque, IR_VALUE_PLACE);
+                IrValueId* pointer_operand = arena_allocate(arguments->arena, IrValueId, 1);
+                pointer_operand[0] = address;
+                ir_validate_test_row(&builder, block, (IrInstruction){.opcode = IR_OPCODE_DEREFERENCE, .canonical_type = opaque,
+                    .result = indirect, .operands = pointer_operand, .operand_count = 1});
+                IrValueId roundtrip = ir_validate_test_value(&builder, pointer, IR_VALUE_VALUE);
+                IrValueId* indirect_operand = arena_allocate(arguments->arena, IrValueId, 1);
+                indirect_operand[0] = indirect;
+                ir_validate_test_row(&builder, block, (IrInstruction){.opcode = IR_OPCODE_ADDRESS_OF, .canonical_type = pointer,
+                    .result = roundtrip, .operands = indirect_operand, .operand_count = 1});
+            }
+            ir_validate_test_return(&builder, block, zero);
+            if (metadata) ir_value_label_metadata_ensure(arguments->arena, function, place);
+            IrInstruction* row = function->instructions + use.value;
+            if (variant == 2)
+            {
+                row->opcode = IR_OPCODE_LOAD;
+                row->canonical_type = opaque;
+                function->values[address.value].canonical_type = opaque;
+            }
+            else if (variant == 3)
+            {
+                row->opcode = IR_OPCODE_STORE;
+                row->canonical_type = builder.void_type;
+                row->result = IR_VALUE_ID_INVALID;
+                row->operand_count = 2;
+                // Keep the old result a defined pointer, so rejection belongs
+                // to the incomplete destination rather than an orphan type.
+                function->values[address.value].definition = global;
+            }
+            else if (variant == 4 || variant == 5)
+            {
+                row->opcode = variant == 4 ? IR_OPCODE_FIELD : IR_OPCODE_INDEX;
+                row->canonical_type = builder.i32_type;
+                function->values[address.value].canonical_type = builder.i32_type;
+                function->values[address.value].category = IR_VALUE_PLACE;
+                u64* field_index = arena_allocate(arguments->arena, u64, 1);
+                field_index[0] = 0;
+                row->immediates = variant == 4 ? field_index : 0;
+                row->immediate_count = variant == 4 ? 1 : 0;
+                row->operand_count = variant == 4 ? 1 : 2;
+                if (variant == 5)
+                {
+                    program->types.types[opaque.value].kind = IR_TYPE_ARRAY;
+                    program->types.types[opaque.value].element_type = builder.i32_type;
+                }
+            }
+            else if (variant == 6)
+            {
+                function->instructions[global.value].opcode = IR_OPCODE_LOCAL;
+            }
+            else if (variant == 7)
+            {
+                function->values[place.value].alignment = 1;
+            }
+            else if (variant == 8)
+            {
+                program->types.types[opaque.value].kind = IR_TYPE_INTEGER;
+            }
+            else if (variant == 9)
+            {
+                function->values[place.value].category = IR_VALUE_VALUE;
+            }
+            IrValidationResult validation = ir_validate_canonical_module(program, program->modules);
+            IrValidationError expected = variant < 2 ? IR_VALIDATION_NONE : variant == 7 ? IR_VALIDATION_ALIGNMENT : IR_VALIDATION_OPERATION;
+            if (validation.error != expected)
+            {
+                string_print(S8("INCOMPLETE_PLACE metadata={u32} variant={u32} error={u32} block={u32} instruction={u32}\n"),
+                    metadata, variant, (u32)validation.error, validation.block.value, validation.instruction.value);
+            }
+            BUSTER_TEST(arguments, validation.error == expected);
+            scratch_end(temporary);
+        }
+    }
+    String8 source = S8("struct Opaque;extern struct Opaque stream;extern int sink(struct Opaque*);"
+        "int wrapper(void){return sink(&stream);}struct Opaque* address(void){return &stream;}"
+        "struct Opaque* roundtrip(struct Opaque* p){return &*p;}"
+        "union Hidden;extern union Hidden hidden;union Hidden* union_address(void){return &hidden;}"
+        "int add(int a,int b){int x=a+0;return x*1+b;}");
+    Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+                        {.cpu_arch = CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_WASI},
+                        {.cpu_arch = CPU_ARCH_BPFEL, .os = OPERATING_SYSTEM_LINUX}};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 storage = 0; storage < 2; storage += 1)
+        {
+            TemporalArena temporary = arena_begin_temporal(arguments->arena);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(arguments->arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CAnalysisResult analysis = c_parse(arguments->arena, preprocess);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(arguments->arena, S8("incomplete-address.c"), preprocess, analysis, target,
+                (CIRLowerOptions){.disable_direct_ssa = storage != 0});
+            if (BUSTER_REQUIRE(arguments, !preprocess.error_count && !analysis.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+            {
+                IrProgram* program = lowered.program;
+                IrModule* module = program->modules;
+                program->fast_passes = IR_FAST_ALL;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, module->fast.validation_skips == 0);
+                BUSTER_TEST(arguments, module->fast.functions == 5);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+            }
+            scratch_end(temporary);
+        }
+    }
     return result;
 }

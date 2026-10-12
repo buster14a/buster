@@ -206,6 +206,10 @@ struct MachineSelectionModule
     u32* x64_signature_slots;
     MachineX64SignaturePlan* x64_signature_plans;
     u32 x64_signature_plan_count;
+    // x86-64 only: whether the target has native 512-bit vector registers
+    // (IR_SIMD_SPLAT_U8 support). Resolving the target's features costs a
+    // feature-set rebuild, so it is answered once per module, not per function.
+    bool x64_vector_registers_supported;
 };
 
 // The normal compiler pipeline validates canonical IR before selection. The

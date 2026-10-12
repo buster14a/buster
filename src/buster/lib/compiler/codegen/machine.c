@@ -430,6 +430,12 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
     },
+    [MACHINE_A64_TLS_DESCRIPTOR] = {
+        // Use the existing conservative call boundary: live values survive
+        // X0/X1/LR and flags, and descriptor resolution can touch loader state.
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+    },
     [MACHINE_X64_SWITCH] = {
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_BLOCK},
@@ -1571,6 +1577,7 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_CVT_F16_TO_F64] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 88,
     [MACHINE_A64_CVT_F32_TO_F16] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 89,
     [MACHINE_A64_CVT_F64_TO_F16] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 90,
+    [MACHINE_A64_TLS_DESCRIPTOR] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 91,
     [MACHINE_X64_KMOV_FROM_GENERAL] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 50,
     [MACHINE_X64_KMOV_TO_GENERAL] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 51,
     [MACHINE_X64_KMOV] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 52,
@@ -1964,6 +1971,27 @@ MachineFunctionBuilder machine_function_builder_begin(Arena* arena)
     return builder;
 }
 
+// Selection looks rows up by index on every definition. A chunk-list walk
+// made that O(n / chunk_capacity) per lookup and selection quadratic in one
+// function's register count (#3569); the doubling index keeps it O(1).
+BUSTER_GLOBAL_LOCAL void machine_builder_index_virtual_register_chunk(MachineFunctionBuilder* builder, MachineVirtualRegister* rows)
+{
+    u32 count = builder->virtual_register_chunk_count;
+    if (count == builder->virtual_register_chunk_capacity)
+    {
+        u32 capacity = count ? count * 2 : MACHINE_BUILDER_CHUNK_INDEX_INITIAL_CAPACITY;
+        MachineVirtualRegister** chunks = arena_allocate(builder->arena, MachineVirtualRegister*, capacity);
+        if (count)
+        {
+            memcpy(chunks, builder->virtual_register_chunks, sizeof(*chunks) * count);
+        }
+        builder->virtual_register_chunks = chunks;
+        builder->virtual_register_chunk_capacity = capacity;
+    }
+    builder->virtual_register_chunks[count] = rows;
+    builder->virtual_register_chunk_count = count + 1;
+}
+
 u32 machine_builder_virtual_register(MachineFunctionBuilder* builder, MachineVirtualRegister virtual_register)
 {
     u32 index = builder->virtual_registers.total_count;
@@ -1972,6 +2000,7 @@ u32 machine_builder_virtual_register(MachineFunctionBuilder* builder, MachineVir
     {
         row = (MachineVirtualRegister*)machine_stream_cursor_refill(builder->arena, &builder->virtual_registers);
         builder->virtual_register_end = row + builder->virtual_registers.chunk_capacity;
+        machine_builder_index_virtual_register_chunk(builder, row);
     }
     builder->virtual_register_cursor = row + 1;
     builder->virtual_registers.total_count = index + 1;
@@ -1979,24 +2008,15 @@ u32 machine_builder_virtual_register(MachineFunctionBuilder* builder, MachineVir
     return index;
 }
 
-BUSTER_GLOBAL_LOCAL MachineVirtualRegister* machine_builder_virtual_register_at(MachineFunctionBuilder* builder, u32 virtual_register)
+MachineVirtualRegister* machine_builder_virtual_register_at(MachineFunctionBuilder* builder, u32 virtual_register)
 {
-    if (!builder || virtual_register >= builder->virtual_registers.total_count || !builder->virtual_registers.first)
+    MachineVirtualRegister* row = 0;
+    if (builder && virtual_register < builder->virtual_registers.total_count)
     {
-        return 0;
+        u32 chunk_capacity = builder->virtual_registers.chunk_capacity;
+        row = builder->virtual_register_chunks[virtual_register / chunk_capacity] + virtual_register % chunk_capacity;
     }
-    u32 chunk_capacity = builder->virtual_registers.chunk_capacity;
-    MachineBuilderChunk* chunk = builder->virtual_registers.first;
-    while (virtual_register >= chunk_capacity)
-    {
-        virtual_register -= chunk_capacity;
-        chunk = chunk->next;
-        if (!chunk)
-        {
-            return 0;
-        }
-    }
-    return (MachineVirtualRegister*)(chunk + 1) + virtual_register;
+    return row;
 }
 
 BUSTER_GLOBAL_LOCAL void machine_builder_mark_virtual_register_mutable(MachineFunctionBuilder* builder, u32 virtual_register)
@@ -4688,6 +4708,7 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
         case MACHINE_X64_TLS_DARWIN:
         case MACHINE_A64_TLS_WINDOWS:
         case MACHINE_A64_TLS_DARWIN:
+        case MACHINE_A64_TLS_DESCRIPTOR:
         case MACHINE_A64_CALL_DIRECT:
         case MACHINE_A64_LEA_SYMBOL:
         case MACHINE_A64_LEA_TLS:
@@ -5830,6 +5851,9 @@ BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_intern
             {
                 break; case CPU_ARCH_X86_64: result = machine_select_canonical_function_x86_64(arena, program, function, target, position_independent, assume_validated, preserve_debug_values, module);
                 break; case CPU_ARCH_AARCH64: result = machine_select_canonical_function_aarch64(arena, program, function, target, position_independent, assume_validated, preserve_debug_values);
+                break; case CPU_ARCH_I386:
+                    result.failure_detail = S8("i386 code generation is not implemented");
+                    break;
                 break; default: BUSTER_TODO();
             }
         }
@@ -5865,6 +5889,7 @@ MachineSelectionModule* machine_select_module_prepare(Arena* arena, IrProgram* p
     if (target.cpu_arch == CPU_ARCH_X86_64)
     {
         machine_x64_signature_plans_prepare(arena, program, module);
+        module->x64_vector_registers_supported = ir_simd_operation_supported(target, IR_SIMD_SPLAT_U8);
     }
     return module;
 }

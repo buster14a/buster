@@ -1,12 +1,66 @@
 # Object emission: planned writing and its work ledger
 
 `object_write` (`src/buster/lib/compiler/object/object.c`) serializes the
-format-neutral `ObjectFile` into ELF64, COFF or Mach-O bytes. This guide states
+format-neutral `ObjectFile` into ELF32, ELF64, COFF or Mach-O bytes. This guide states
 the contract of the planned ELF64 writer, how every writer's work is counted,
 and what remains to be moved onto the same plan. The measured history and the
 staged redesign of the whole path, from machine code to the published file,
 are in the object-emission design issue and the audit that introduced this
 writer.
+
+## ELF32 i386 relocatable objects
+
+`object_format_for_target` selects `OBJECT_FORMAT_ELF32` for i386 Linux and
+freestanding targets. The shared planned ELF writer emits little-endian
+`ELFCLASS32`, `ET_REL`, `EM_386`: a 52-byte header, 40-byte section headers,
+16-byte symbols and 8-byte `SHT_REL` rows aligned to four bytes. The reader
+checks the class and machine together.
+
+| ELF type | Neutral kind | Field width |
+|---|---|---|
+| `R_386_32` (1) | `ABSOLUTE32` | 4 |
+| `R_386_PC32` (2) | `I386_PC32` | 4 |
+| `R_386_PLT32` (4) | `I386_PLT32` | 4 |
+| `R_386_GOTOFF` (9) | `I386_GOTOFF` | 4 |
+| `R_386_GOTPC` (10) | `I386_GOTPC` | 4 |
+| `R_386_16` (20) | `I386_16` | 2 |
+| `R_386_PC16` (21) | `I386_PC16` | 2 |
+| `R_386_GOT32X` (43) | `I386_GOT32X` | 4 |
+
+PC, GOT and PLT formulas remain distinct from the x86-64 kinds. The writer
+stores `ObjectRelocation.addend` in the relocated field, replacing its input
+bytes without modifying the source payload. REL import normalizes absolute
+addends as unsigned field values and other addends as signed values; a foreign
+`SHT_RELA` input retains its signed explicit addend and rewrites as REL.
+Addends that cannot fit their field, offsets/sizes outside the 32-bit file
+domain, symbols beyond the 24-bit relocation index and extended section
+numbering are refused before image allocation. Relocation bounds use the
+original input contribution, including when several input sections merge.
+
+Four-byte initializer entries preserve preinit/constructor priorities across
+import and emission. Ordinary sections, zero-fill, symbol binding/visibility,
+the GNU stack note and eager/lazy archives use the shared ELF policies.
+Informational x86 GNU properties use four-byte ELF32 padding; mandatory or
+unknown properties remain refused. A
+borrowing write copies each relocated ELF32 payload so its inline addends can
+be filled; unrelocated large payloads may still be borrowed. Its statistics
+count each inline store as a patch. ELF64 keeps its separate RELA addends and
+single-store payload contract.
+
+`object_test_elf32`, `object_test_elf32_payloads` and
+`object_test_elf32_archives` cover original raw records, exact wire fields,
+all eight kinds, round trips, hostile inputs, field limits, borrowed/contiguous
+equality and initializer ordering. On Linux x86-64 with GNU binutils installed
+under `/usr/bin`, `object_test_elf32_gnu` imports an independently assembled
+object, checks the rewrite with `readelf -h -S -r`, links both objects with
+`ld -m elf_i386`, at fixed text/data/GOT addresses, and compares their relocated text/data bytes. A missing
+binutils installation is reported as not run.
+
+This object API does not enable i386 driver code generation, Buster image
+linking, in-process i386 execution, code16 instruction encoding or DWARF
+generation. Those remain separate backend capabilities. The wire layout
+follows the [generic ELF specification](https://gabi.xinuos.com/elf/02-eheader.html)
+and [Intel386 psABI](https://github.com/hjl-tools/x86-psabi/wiki/intel386-psABI-1.1.pdf).
 
 ## ELF64: plan every range, then store each byte once
 
@@ -34,15 +88,17 @@ The convention and ELF section flags follow the primary
 and [GNU as section contract](https://sourceware.org/binutils/docs/as/Section.html).
 No external implementation code is reused.
 
-`object_write_elf64` runs in two phases over the object after the priority
+`object_write_elf` runs in two phases over the object after the priority
 split (`object_split_initializer_priorities`). The split appends one section
 per constructor/destructor priority group and records where each grouped
-initializer entry went; it does not copy the relocations. Both phases place
-each relocation through `object_initializer_relocation_place` as they reach
-it. The split's tables are sized by sections and entries, and a split past the
+initializer entry went; it does not copy the relocations. When the split
+grouped an entry (`object_initializer_split_grouped`), both phases place each
+relocation through `object_initializer_relocation_place` as they reach it.
+Without a group they read each relocation as it is and place nothing (#990).
+The split's tables are sized by sections and entries, and a split past the
 section limit or the arena is refused like the plan's own limits.
 
-1. **Plan** (`object_elf64_plan`). One pass over the relocations counts each
+1. **Plan** (`object_elf_plan`). One pass over the relocations counts each
    section's and the number of RELA tables; one pass over the symbols counts
    the locals, sizes `.strtab` and marks sections named by definitions; one pass
    over the sections maps retained inputs to emitted ELF section numbers and
@@ -56,7 +112,7 @@ section limit or the arena is refused like the plan's own limits.
    - a `.strtab` or `.shstrtab` with a byte past a 32-bit offset;
    - an offset or size sum that overflows, or a file the arena cannot hold
      (all `OBJECT_ERROR_CAPACITY`).
-2. **Emit** (`object_elf64_emit`). The image is exactly the planned size. Each
+2. **Emit** (`object_elf_emit`). The image is exactly the planned size. Each
    range -- header, payloads with their padding, each RELA table, the null
    symbol, the locals, the globals, `.strtab`, and `.shstrtab` through the
    section headers -- is filled front to back by one `ObjectImageRange` cursor
@@ -127,7 +183,7 @@ initialized/zero-fill TLS runtime positive control.
 
 ## ELF64 reader refusal diagnostics
 
-`object_read_elf64` reports an unsupported relocation through
+`object_read_elf` reports an unsupported relocation through
 `ObjectFile.diagnostic` together with `OBJECT_ERROR_UNSUPPORTED_TARGET`.
 The message includes the architecture and unsigned ABI type number.
 AArch64 short test/conditional branches (TSTBR14 and CONDBR19) and the
@@ -145,7 +201,7 @@ independently produces the conditional-branch refusal input.
 
 ## ELF64 import semantics
 
-`object_read_elf64` accepts allocated PROGBITS/NOBITS payloads, supported
+`object_read_elf` accepts allocated PROGBITS/NOBITS payloads, supported
 unwind records and init/fini arrays. Exactly the section named `.preinit_array`
 (of type `SHT_PREINIT_ARRAY` or `SHT_PROGBITS`) is a preinit array, as for `ld`
 and `lld`; it takes `IR_INITIALIZER_PRIORITY_PREINIT`, which
@@ -214,18 +270,23 @@ and before every constructor; a static image's stub calls it first. A
 `-shared` object has no runner: each slot carries an `R_X86_64_IRELATIVE`, the
 last of its dynamic relocations, so ld.so fills it while relocating the library,
 before any initializer runs, including an executable's `DT_PREINIT_ARRAY`
-callbacks that call into the library. On AArch64 the runner
-passes hwcap 0, so a resolver that dispatches on hwcap selects its baseline
-implementation. An undefined IFUNC, or one outside code, stays refused. The
-C frontend's own `__attribute__((ifunc("resolver")))` writes the same symbol
-(an indirect `IrSymbolAlias` becomes `ObjectSymbol.indirect` at the
-resolver's address), and is refused by name for COFF and Mach-O output; see
-[linkage](agents/frontend/linkage.md).
+callbacks that call into the library. On AArch64 the runner passes glibc's
+resolver arguments, `x0 = AT_HWCAP | _IFUNC_ARG_HWCAP` and `x1` pointing at an
+`__ifunc_arg_t` (`_size` 24, `_hwcap`, `_hwcap2`) in its frame, so a resolver
+that dispatches on hwcap, function multiversioning included, sees the real CPU.
+The loader calls a preinit entry with `(argc, argv, envp)`, as the static stub
+calls its constructors, and the runner reads `AT_HWCAP` and `AT_HWCAP2` from the
+auxiliary vector past `envp`'s terminator. An undefined IFUNC, or one outside
+code, stays refused. The C frontend's own `__attribute__((ifunc("resolver")))`
+writes the same symbol (an indirect `IrSymbolAlias` becomes
+`ObjectSymbol.indirect` at the resolver's address), and is refused by name for
+COFF and Mach-O output; see [linkage](agents/frontend/linkage.md).
 `compiler_driver_elf_ifunc_tests` checks single resolution and address identity
 against the host linker for static, dynamic, `-pie` and `-shared` images, and a
 host-linked executable whose preinit callback calls a `-shared` library's IFUNC.
 It also compiles the same C with `ide cc`, at `-O0` and `-O2`, and with a
-local (`static`) ifunc, and runs each image against the host-built oracle.
+local (`static`) ifunc, and runs each image against the host-built oracle. On
+AArch64 it checks the hwcap arguments against the program's auxiliary vector.
 `.ctors`/`.dtors` and `.init`/`.fini` inputs stay refused: GNU ld 2.42 folds
 `.ctors` into `.init_array` in reverse but emits a null `.fini_array` slot for
 `.dtors`, and lld 18 runs neither, so no consistent oracle exists, and the

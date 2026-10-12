@@ -30,6 +30,17 @@ returns, partial eightbytes and tail fields with both frontend forms and
 both allocators; desktop lanes execute the native
 fixture as well as compiling both architectures.
 
+
+Zero-byte array members in an aggregate constructor require a resolved empty
+layout and a frame-backed captured value. Both native member writers accept
+that image without emitting a store, as they do for empty struct/union members.
+This includes omitted flexible-array tails; only the fixed header belongs to
+the local object's initialization or copy. The registered
+`compiler_driver_test_flexible_initializers` checks zero and designated local
+initializers, nested array fields, one evaluation and untouched tail storage
+on six native targets, both allocators, both frontend forms and O0/O2. Matching desktop
+hosts execute its independent expected-value fixture.
+
 ## Machine instruction selection and scheduling
 
 - Debug-location seed storage starts with a small arena-backed array and grows
@@ -253,6 +264,16 @@ fixture as well as compiling both architectures.
   output-capacity and unwind failures to structured codegen errors. It never
   invokes direct canonical emission. `-fno-machine-fallback` remains accepted
   for command-line compatibility but cannot make this contract stricter.
+- x86-64 incoming stack aggregates currently expand each eightbyte into two
+  MIR rows and one temporary register. The signature gate limits their combined
+  capture to 65,536 eightbytes (512 KiB), including rounding and conservatively
+  counting register-passed direct aggregates, before building
+  MIR. Larger signatures receive `codegen.unsupported-abi` and no artifact;
+  the bound applies to stack aggregate captures, not indirect Win64 arguments
+  or result pointers. A bounded block-copy lowering is needed to remove it.
+  `machine_test_incoming_aggregate_capacity` checks large and combined
+  parameters, both frontend forms, FAST/QUALITY, Linux/macOS objects and a
+  supported 64 KiB control without executing a large native stack.
 - Native signature and call storage is sized from canonical IR counts. Incoming
   shapes, placements, argument values and normalization rows use arena arrays;
   the existing value-fact walk sizes one reusable call workspace per function.
@@ -381,6 +402,24 @@ fixture as well as compiling both architectures.
   through `machine_a64_cast_copies_constant` and `MACHINE_A64_MOV_RI`; its
   classification pass counts the copy-cast reads and the marking runs after
   branch fusion against the same use counts, edge arguments included.
+- x86-64 selection folds a constant `INDEX` index into its base address
+  offset (`machine_x64_index_constant_offset`). When the index is a
+  `CONSTANT_INTEGER` whose value, read at the index's width and signedness, is
+  non-negative and whose scaled offset fits a 32-bit displacement, the element
+  address is selected through `machine_x64_select_place_address_offset`. A
+  direct frame array then gets one `LEA_FRAME`, which the frame-address recipe
+  above rematerializes; a pointer gets one `LEA_OFFSET`, or a copy at offset
+  zero. Otherwise the result is a mutable copy of the base plus a scaled index,
+  which no recipe covers. A constant that only such rows and constant-copying
+  casts read is `fused_dead`. A `GLOBAL` base folds like a pointer, so its
+  element address is not rematerialized. Negative indices keep the computed
+  form. AArch64 selection applies the same rule through
+  `machine_a64_index_constant_offset` and
+  `machine_a64_select_place_address_offset`, emitting `MACHINE_A64_LEA_FRAME`,
+  `MACHINE_A64_LEA_OFFSET` or `MACHINE_A64_MOV_RR`; the `LEA_OFFSET` encoder
+  materializes offsets past `ADD`'s 12-bit immediate. Its classification pass
+  counts folded `INDEX` reads together with copy-cast reads for the same
+  `fused_dead` marking.
 - FAST/QUALITY start a join's or loop header's general block parameters in
   registers. `machine_fast_parameter_contract` gives each non-pinned,
   non-mutable general parameter a caller-saved (or already-saved) register
@@ -481,8 +520,22 @@ fixture as well as compiling both architectures.
   the row's reservations (`row_reserved_mask`), active pins, unpaid
   callee-saved registers, and physical registers an earlier row wrote that no
   row has read yet (`physical_live_mask`: staged call arguments). A value
-  crossing the next call moves only into a paid callee-saved register. Dead,
+  crossing a later call moves only into a paid callee-saved register. Dead,
   rematerializable, or unplaceable occupants keep the eviction.
+- FAST/QUALITY decide whether a value crosses a call
+  (`machine_fast_crosses_call`) against the prepass's `next_call`, which runs
+  across block boundaries in layout order: a value whose last textual use lies
+  past any later call, in its own block or a later one, prefers a callee-saved
+  register at its definition, at every free reload pick, and when vacated.
+  Once there it survives every later call on every path, so joins stop losing
+  it. On unity `ide.c` this removed 4k–5.5k spills and 6k–9.5k reloads in each
+  mode and target, lowered boundary spills, boundary reloads, copies and code
+  bytes, and added about 3k callee-saved saves (from about 1.0 to 1.5 per
+  function) ([#56 census](https://github.com/buster14a/buster/issues/56#issuecomment-6123628660)).
+  The layout interval over-approximates through a sibling arm's call and
+  misses a loop-body call past the value's last textual use. Incoming argument
+  and call-result captures still bind in their ABI register; moving them to a
+  callee-saved register at entry was measured and deferred.
 - FAST/QUALITY remember the register each value was first bound to
   (`MachineFastState.preferred_registers`). A free pick for a reload
   (`machine_fast_ensure` with no fixed target) takes that register while it is
@@ -502,7 +555,12 @@ fixture as well as compiling both architectures.
 - Shared FAST/QUALITY placement colors frame storage by lifetime instead of
   giving every spilled value and every stack slot its own bytes. Selector slots
   close their touched rows through a block-level liveness fixed point over
-  covering writes and upward-exposed reads. Allocator-created spill homes use
+  covering writes and upward-exposed reads. That solve
+  (`machine_fast_solve_liveness`, shared with the prepass value liveness)
+  always visits the lowest-ranked pending block in reverse postorder of the
+  reversed CFG, so a value carried through a deep loop nest reaches every inner
+  block in one pass instead of one pass per nesting level (#3771); the order
+  changes only the work, never the least fixed point. Allocator-created spill homes use
   the same closure on a direct acyclic block chain: a spill covers the previous
   contents of a home, while a reload before that spill reads the value arriving
   from a predecessor. Retroactive edge repairs at one machine point have no
@@ -918,11 +976,13 @@ fixture as well as compiling both architectures.
   declare RDX/X10 scratch clobbers. Darwin TLS descriptor rows have ordinary
   call effects; a following move captures RAX/X0 into an SSA value. Every
   relocation site distinguishes the index, value offset, or descriptor field.
+  AArch64 ELF PIC descriptor rows use the same call/result capture boundary.
   The thread-local model fixture requires zero fallback for admitted desktop
-  targets, allocators, frontend forms and code models, and named refusal with
-  no artifact for effective AArch64 ELF PIC requests (the TLSDESC model does
-  not exist yet; see the position-independent code bullets). Native hosts execute
-  the supported models with separate definitions and live repeated accesses.
+  targets, allocators, frontend forms and code models, including AArch64 ELF
+  PIC descriptors (see the position-independent code bullets). Native hosts
+  execute the supported models with separate definitions and live repeated
+  accesses; `compiler_driver_test_aarch64_pic_tlsdesc` also checks independent
+  shared-library linking and thread-local isolation on native AArch64 Linux.
 - x86-64 i128 bitwise complement reads both frame-backed limbs and emits
   ordinary three-operand XOR64 rows against one all-ones constant. Each limb
   result has one definition; do not use mutable NOT rows for this expansion.
@@ -1170,15 +1230,25 @@ fixture as well as compiling both architectures.
   `.eh_frame` function references are `R_AARCH64_PREL32` against `.text`, and
   initialized pointers are `R_AARCH64_ABS64` in `.data`: constants with
   relocations already live in writable data, so no `.data.rel.ro` split exists
-  and none is needed for `ld.lld -shared -z text`. Without `-fPIC` nothing
-  changes (objects are byte-identical). Thread-local access under this model
-  is refused by name -- selection fails with `thread-local access under
-  AArch64 ELF position-independent code (TLSDESC) is not implemented`, which
-  the driver reports as a code-generation refusal and publishes no output --
-  instead of emitting local-exec `TPREL` relocations a shared object cannot
-  hold. TLSDESC itself, Buster's own AArch64 `-shared` writer and hidden-visibility
-  attribute propagation (a hidden definition still uses the GOT form, as on
-  x86-64) remain open. The test hook is
+  and none is needed for `ld.lld -shared -z text`. Without `-fPIC` the reference model is unchanged.
+  Thread-local access under ELF PIC selects `MACHINE_A64_TLS_DESCRIPTOR`,
+  an ordinary conservative MIR call boundary followed by an explicit X0
+  result capture. Its adjacent ADRP X0 / LDR X1 / ADD X0 / BLR X1 sequence
+  publishes the four existing TLSDESC relocations (562/563/564/569); the
+  returned TLS offset is added to TPIDR_EL0 after the call. This follows the
+  [AArch64 System V TLS ABI](https://github.com/ARM-software/abi-aa/blob/main/sysvabi64/sysvabi64.rst).
+  The call boundary preserves live values across resolver register/flag effects
+  and keeps loader memory effects ordered. Independent linkers can retain
+  descriptors in shared objects or relax them in executables; Buster's
+  fixed-address linker uses its existing local-exec relaxation. Non-PIC TLS,
+  Darwin and Windows retain their prior forms. The registered
+  `compiler_driver_test_aarch64_pic_tlsdesc` checks both allocators/frontend
+  forms, four flags and Linux/Android object serialization; native AArch64
+  Linux also links a shared library with an independent host linker and runs
+  a pthread observer for imported, defined, zero-initialized and static TLS.
+  Buster's own AArch64 `-shared` writer and hidden-visibility attribute
+  propagation (a hidden definition still uses the GOT form, as on x86-64)
+  remain open. The test hook is
   `compiler_driver_test_aarch64_pic_outputs`, which reads the relocation kind
   per symbol class from a Buster object; on a native Linux AArch64 host it
   also links the object with `ld.lld -shared -z text`.
@@ -1243,6 +1313,25 @@ pinned to the same register.
 `machine_test_x64_inline_port_environment` and
 `c_test_inline_assembly_constraint_unions` hold the byte oracles (GNU as 2.47)
 and the neighbouring refusals; only unprivileged MXCSR/x87 round trips execute.
+
+## Narrow x86-64 call results
+
+Ordinary Boolean and 8/16-bit integer results are captured from RAX with
+zero/sign extension at their ABI width, before their canonical value reaches a
+branch, conversion or spill. Foreign callees may leave the upper RAX bits
+unspecified. `machine_x64_receive_call_result` uses the existing scalar shape's
+extension opcode for direct and indirect calls; aggregate parts and floating,
+vector and full-width scalar capture retain their own paths.
+
+`machine_test_x64_narrow_call_results` checks selected RAX capture widths on all
+five x86-64 OS targets, both frontend forms and both allocators.
+`compiler_driver_test_x64_narrow_call_results` uses independently assembled
+foreign callees with dirty upper bits and literal C expectations. Matching
+Linux/macOS x86-64 hosts first run a host-compiled client, then Buster clients
+against the same foreign object, covering direct/indirect Boolean branches,
+signed/unsigned byte and word boundaries, and 32/64-bit controls. Other hosts
+retain selection and object-generation coverage; cross-generation is not native
+execution.
 
 ## Wide integer conversion rounding
 
@@ -1320,14 +1409,15 @@ combination. The retired direct emitter had no such path; current `none`
 selects MIR-stack.
 
 `va_arg` of a MEMORY-class struct, union or array aligned past sixteen bytes
-(`_Alignas(32)` or `_Alignas(64)`, any size from 32 bytes) takes the same
+(`_Alignas(32)` and up, any size from 32 bytes) takes the same
 overflow-only path: `machine_x64_va_arg_metadata` admits it through
 `machine_x64_va_arg_over_aligned_memory` (a single MEMORY part, a power-of-two
-alignment up to `MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT`), and the row
+alignment up to `MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT`, 2^31, the largest
+the row's sign-extended imm32 `add`/`and` rounding encodes), and the row
 rounds the cursor up to the alignment before the exact chunked copy. The
 verifier accepts that shape only for the x86-64 row that copies the record
 exactly (`wide_memory` in `machine_verify_function`); AArch64 and Win64 keep
 their sixteen-byte limit and an over-aligned scalar or vector still falls back
 with a structured refusal. `compiler_driver_test_sysv_packed_x87_overaligned_va_arg`
-covers 32- and 64-byte alignments, a 96-byte record, an odd overflow slot and
+covers 32-, 64-, 128- and 256-byte alignments, a 96-byte record, an odd overflow slot and
 `va_copy` in both compiler directions.

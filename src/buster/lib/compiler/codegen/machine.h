@@ -770,6 +770,9 @@ typedef enum MachineOpcode
     MACHINE_A64_CVT_F16_TO_F64,
     MACHINE_A64_CVT_F32_TO_F16,
     MACHINE_A64_CVT_F64_TO_F16,
+    // ELF general-dynamic TLS: descriptor resolver call returning its address
+    // in X0. Separate MOV_RR captures the canonical result after the call.
+    MACHINE_A64_TLS_DESCRIPTOR,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -1305,8 +1308,11 @@ BUSTER_CT_CHECK(sizeof(MachineInlineAssembly) == 64);
 // System V x86-64 needs two parts; an AArch64 HFA can contain four.
 #define MACHINE_VA_ARG_PART_LIMIT 4
 // Largest alignment of a SysV x86-64 MEMORY-class aggregate that VA_ARG rounds
-// the overflow area up to: the widest vector the target stores in one slot.
-#define MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT 64u
+// the overflow area up to. The rounding is `add alignment - 1` and
+// `and -alignment` with sign-extended imm32 operands, which encode every power
+// of two up to 2^31; a u32-sized aggregate is a multiple of its alignment, so
+// this admits every alignment such an aggregate can have.
+#define MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT 0x80000000u
 // ELF AAPCS64: three pointers followed by two independent signed 32-bit offsets.
 // Darwin and Windows use their separate one-pointer va_list representations.
 #define MACHINE_A64_VA_STACK_OFFSET 0u
@@ -1697,6 +1703,10 @@ typedef enum MachineThreadLocalSite
     MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX,
     MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET,
     MACHINE_THREAD_LOCAL_SITE_DARWIN_DESCRIPTOR,
+    MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_PAGE,
+    MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_LOAD,
+    MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_ADD,
+    MACHINE_THREAD_LOCAL_SITE_ELF_DESCRIPTOR_CALL,
 } MachineThreadLocalSite;
 
 // A relocation site: the function-relative offset of the field to patch
@@ -1797,6 +1807,8 @@ struct MachineEncodeResult
 // pages under Buster's arenas. Chunk size is a measured default, not a
 // contract.
 #define MACHINE_BUILDER_CHUNK_BYTES BUSTER_KB(16)
+// Initial slots of the builder's virtual-register chunk index; it doubles.
+#define MACHINE_BUILDER_CHUNK_INDEX_INITIAL_CAPACITY 16
 
 typedef struct MachineBuilderChunk MachineBuilderChunk;
 struct MachineBuilderChunk
@@ -1832,6 +1844,11 @@ struct MachineFunctionBuilder
     MachineBuilderStream virtual_registers;
     MachineVirtualRegister* virtual_register_cursor;
     MachineVirtualRegister* virtual_register_end;
+    // First row of every virtual-register chunk in stream order, appended by
+    // the cursor refill, so a row lookup by index never walks the chunk list.
+    MachineVirtualRegister** virtual_register_chunks;
+    u32 virtual_register_chunk_count;
+    u32 virtual_register_chunk_capacity;
     MachineBuilderStream blocks;
     MachineBlock* block_cursor;
     MachineBlock* block_end;
@@ -1942,6 +1959,8 @@ BUSTER_F_DECL void machine_stream_cursor_close(MachineBuilderStream* stream, voi
 BUSTER_F_DECL void machine_stream_flatten(MachineBuilderStream* stream, void* destination);
 BUSTER_F_DECL MachineFunctionBuilder machine_function_builder_begin(Arena* arena);
 BUSTER_F_DECL u32 machine_builder_virtual_register(MachineFunctionBuilder* builder, MachineVirtualRegister virtual_register);
+// Constant-time row of an appended virtual register, or 0 past the count.
+BUSTER_F_DECL MachineVirtualRegister* machine_builder_virtual_register_at(MachineFunctionBuilder* builder, u32 virtual_register);
 BUSTER_F_DECL u32 machine_builder_block_begin(MachineFunctionBuilder* builder);
 BUSTER_F_DECL u32 machine_builder_instruction(MachineFunctionBuilder* builder, MachineInstruction instruction);
 BUSTER_F_DECL void machine_builder_block_end(MachineFunctionBuilder* builder, MachineBlock block);

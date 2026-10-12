@@ -3,6 +3,7 @@
 #include <buster/lib/compiler/driver/driver.h>
 
 BUSTER_F_DECL bool compiler_driver_language_is_native(CompilerDriverLanguage language);
+BUSTER_F_DECL String8 compiler_driver_native_link_report(Arena* arena, CompilerDriverInvocation invocation);
 typedef struct CompilerDriverDependencyQuoteResult CompilerDriverDependencyQuoteResult;
 struct CompilerDriverDependencyQuoteResult
 {
@@ -10,6 +11,8 @@ struct CompilerDriverDependencyQuoteResult
     bool representable;
 };
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL void compiler_driver_test_merge_fast_declines(Arena* arena, IrFastStatistics* total, IrFastStatistics const* unit,
+                                                            String8 source, u64* capacity);
 // GCC Makefile escaping and object-derived depfile path helpers.
 BUSTER_F_DECL CompilerDriverDependencyQuoteResult compiler_driver_dependency_quote(Arena* arena, String8 value);
 BUSTER_F_DECL String8 compiler_driver_dependency_path(Arena* arena, String8 object_path);
@@ -61,8 +64,15 @@ typedef struct CompilerDriverMachDylibIdentity
     u32 compatibility_version;
 } CompilerDriverMachDylibIdentity;
 
+enum
+{
+    COMPILER_DRIVER_ELF_SCRIPT_BYTES = 65536,
+    COMPILER_DRIVER_ELF_SCRIPT_DEPTH = 32,
+    COMPILER_DRIVER_ELF_SCRIPT_MEMBERS = 4096,
+};
 BUSTER_F_DECL bool compiler_driver_elf_linker_script(ByteSlice bytes);
+BUSTER_F_DECL bool compiler_driver_elf_script_members(ByteSlice bytes, String8* members, u32* count);
 BUSTER_F_DECL CompilerDriverMachDylibStatus compiler_driver_mach_dylib_identity(ByteSlice bytes, Target target,
                                                                                  CompilerDriverMachDylibIdentity* identity);
-BUSTER_F_DECL CompilerDriverMachDylibStatus compiler_driver_mach_tbd_identity(ByteSlice bytes, Target target,
+BUSTER_F_DECL CompilerDriverMachDylibStatus compiler_driver_mach_tbd_identity(Arena* arena, ByteSlice bytes, Target target,
                                                                                 CompilerDriverMachDylibIdentity* identity);

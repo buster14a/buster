@@ -34,6 +34,7 @@
 //   assembly_x86_instruction_size                  and instruction sizing/
 //                                                  encoding
 //   assembly_aarch64_exclusive_pair_instruction_parse typed memory-owner adapter
+//   assembly_x86_metadata_suffix_width_matches     AT&T integer-source widths
 //   assembly_x86_metadata_*                        metadata-driven selection
 //                                                  and emission
 //   assembly_aarch64_base_instruction_parse        AArch64 retry through the
@@ -556,11 +557,13 @@ struct AssemblyInstruction
     u8 aarch64_control_reserved;
     // `:lo12:sym` / `sym@PAGEOFF` and numeric `:lo12:value` use the same
     // checked emitter; numeric values are encoded as scaled immediates.
+    // `aarch64_mach_indirection` selects Darwin descriptor or GOT page/load relocations.
     // `aarch64_got` selects the ELF GOT spellings instead: `adrp Xd, :got:sym`
     // (no `aarch64_lo12` row) and `ldr Xt, [Xn, :got_lo12:sym]` (#3192).
     bool aarch64_lo12;
     bool aarch64_lo12_numeric;
     bool aarch64_got;
+    u8 aarch64_mach_indirection;
     AssemblyExpression aarch64_lo12_expression;
     BusterAarch64SystemInstruction aarch64_system_instruction;
     u16 aarch64_system_register_encoding;
@@ -601,11 +604,12 @@ struct AssemblyBuilder
     // Set by assembly_instruction_parse when `movabs` named the accumulator
     // and an absolute address: the metadata selector must take the moffs row.
     bool statement_source_moffs;
-    // The metadata parser reports this transient semantic fact to the outer
-    // source adapter when a feature-gated typed decorator candidate is the
-    // authoritative form.  It prevents the handwritten INVALID_OPERANDS
-    // fallback from erasing an actual feature-policy diagnostic.
-    bool metadata_failure_typed_decorator_authoritative;
+    // A checked source cohort or feature-gated typed decorator owns its
+    // failure; the preliminary handwritten parser cannot replace that
+    // operand/feature diagnostic.
+    bool metadata_failure_source_authoritative;
+    // Canonical CLI name for a source-cohort feature refusal.
+    String8 metadata_required_feature;
 };
 
 enum
@@ -8840,6 +8844,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
 BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, String8* names, u32 capacity)
 {
     static TargetCpuFeature const x86_feature_bits[] = {
+        TARGET_CPU_FEATURE_X86_SSE,
         TARGET_CPU_FEATURE_X86_SSE2,
         TARGET_CPU_FEATURE_X86_AVX,
         TARGET_CPU_FEATURE_X86_AVX2,
@@ -8865,6 +8870,7 @@ BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, Strin
         TARGET_CPU_FEATURE_X86_MOVBE,
         TARGET_CPU_FEATURE_X86_RDRAND,
         TARGET_CPU_FEATURE_X86_RDSEED,
+        TARGET_CPU_FEATURE_X86_RDTSCP,
         TARGET_CPU_FEATURE_X86_WAITPKG,
         TARGET_CPU_FEATURE_X86_PKU,
         TARGET_CPU_FEATURE_X86_PTWRITE,
@@ -8955,6 +8961,7 @@ BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, Strin
         TARGET_CPU_FEATURE_X86_RDPID,
         TARGET_CPU_FEATURE_X86_XSAVEOPT,
         TARGET_CPU_FEATURE_X86_XSAVEC,
+        TARGET_CPU_FEATURE_X86_MMX,
     };
     static TargetCpuFeature const aarch64_feature_bits[] = {
         TARGET_CPU_FEATURE_AARCH64_NEON,
@@ -9669,9 +9676,12 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_width_matches(String8 mnem
     // data; the port remains DX16 or imm8 and is checked by exact metadata.
     bool port_io = operand_count == 2 && (assembly_word_equal(mnemonic, S8("in")) || assembly_word_equal(mnemonic, S8("out")));
     u32 data_operand = assembly_word_equal(mnemonic, S8("in")) ? 0 : 1;
+    bool source_width = operand_count == 2 &&
+                        (assembly_word_equal(mnemonic, S8("cvtsi2sd")) || assembly_word_equal(mnemonic, S8("cvtsi2ss")) ||
+                         assembly_word_equal(mnemonic, S8("crc32")));
     for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
     {
-        if ((port_io && operand_index != data_operand) || !assembly_x86_metadata_suffix_applies(info.opcode, operand_index, operand_count))
+        if (((port_io || source_width) && operand_index != data_operand) || !assembly_x86_metadata_suffix_applies(info.opcode, operand_index, operand_count))
         {
             continue;
         }
@@ -9691,6 +9701,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_width_matches(String8 mnem
                 return false;
             }
             physical[operand_index].width = suffix_width;
+            if (source_width) physical[operand_index].memory.source_width = suffix_width;
             saw_width_operand = true;
         }
     }
@@ -9933,7 +9944,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_statement_has_extended_gpr(String8 stateme
 BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruction_parse(
     AssemblyBuilder* builder, String8 statement, u32 line, u32 column, u64 offset, Target target, AssemblySyntax syntax)
 {
-    builder->metadata_failure_typed_decorator_authoritative = false;
+    builder->metadata_failure_source_authoritative = false;
+    builder->metadata_required_feature = (String8){0};
     if (target.cpu_arch != CPU_ARCH_X86_64)
     {
         return BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC;
@@ -10521,6 +10533,16 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                                assembly_word_equal(mnemonic, S8("lwpval")))
                                   ? 32
                                   : 0;
+    // BMI1 register control carries the data width on its destination;
+    // KMOVW transfers one word regardless of the GPR32 spelling.
+    if (operand_count == 3 && assembly_word_equal(mnemonic, S8("bextr")) &&
+        physical[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+        physical[2].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER)
+        scalar_memory_width = physical[0].reg.width;
+    else if (assembly_word_equal(mnemonic, S8("kmovw"))) scalar_memory_width = 16;
+    else if (operand_count == 2 && physical[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+             (assembly_word_equal(mnemonic, S8("crc32")) || assembly_word_equal(mnemonic, S8("adcx")) ||
+              assembly_word_equal(mnemonic, S8("adox")))) scalar_memory_width = physical[0].reg.width;
     for (u32 index = 0; index < operand_count; index += 1)
     {
         if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
@@ -10534,7 +10556,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     }
     if (vector_memory_width || scalar_memory_width)
     {
-        if (!scalar_memory_width && (assembly_word_equal(mnemonic, S8("vpslld")) || assembly_word_equal(mnemonic, S8("vpsrld"))))
+        if (assembly_word_equal(mnemonic, S8("vpcompressd"))) scalar_memory_width = 32;
+        else if (assembly_word_equal(mnemonic, S8("vpcompressq"))) scalar_memory_width = 64;
+        else if (!scalar_memory_width && (assembly_word_equal(mnemonic, S8("vpslld")) || assembly_word_equal(mnemonic, S8("vpsrld"))))
             scalar_memory_width = 32;
         else if (!scalar_memory_width && mnemonic.length >= 2 && mnemonic.pointer[mnemonic.length - 2] == 's' && mnemonic.pointer[mnemonic.length - 1] == 's')
             scalar_memory_width = 32;
@@ -11205,10 +11229,21 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             selection.status = BUSTER_X86_METADATA_ENCODE_RELATIVE_RANGE;
         }
     }
+    TargetCpuFeature required = assembly_word_equal(mnemonic, S8("rdtscp")) ? TARGET_CPU_FEATURE_X86_RDTSCP
+        : assembly_word_equal(mnemonic, S8("adcx")) || assembly_word_equal(mnemonic, S8("adox")) ? TARGET_CPU_FEATURE_X86_ADX
+        : assembly_word_equal(mnemonic, S8("pclmulqdq")) ? TARGET_CPU_FEATURE_X86_PCLMUL
+        : assembly_word_equal(mnemonic, S8("crc32")) ? TARGET_CPU_FEATURE_X86_SSE4_2
+        : assembly_word_equal(mnemonic, S8("bextr")) && operand_count == 3 &&
+          physical[2].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER ? TARGET_CPU_FEATURE_X86_BMI1
+        : (assembly_word_equal(mnemonic, S8("kmovw")) || assembly_word_equal(mnemonic, S8("vpcompressd"))) &&
+          !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX10_1) &&
+          !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX10_2) ? TARGET_CPU_FEATURE_X86_AVX512F
+        : TARGET_CPU_FEATURE_NONE;
     AssemblyInstructionInfo source_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
     if (selection.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
-        assembly_instruction_lookup(target, syntax, mnemonic, &source_info) &&
-        assembly_x86_source_layout_uses_metadata((AssemblyInstruction){.opcode = source_info.opcode}))
+        (required != TARGET_CPU_FEATURE_NONE ||
+         (assembly_instruction_lookup(target, syntax, mnemonic, &source_info) &&
+          assembly_x86_source_layout_uses_metadata((AssemblyInstruction){.opcode = source_info.opcode}))))
     {
         // Disabled shadow forms must not turn malformed migrated source into
         // a missing-feature diagnostic. This read-only probe publishes no
@@ -11240,13 +11275,15 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                                                      .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
                                                     .source_semantics = true,
                                                 });
-        builder->metadata_failure_typed_decorator_authoritative = typed_decorator_authoritative &&
-                                                                   selection.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
-                                                                   selection.required_feature.length != 0;
+        if (required != TARGET_CPU_FEATURE_NONE && !target_cpu_feature_has(target, required))
+            builder->metadata_required_feature = target_cpu_feature_to_string(required);
+        builder->metadata_failure_source_authoritative = required != TARGET_CPU_FEATURE_NONE ||
+            (typed_decorator_authoritative && selection.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+             selection.required_feature.length != 0);
         if (selection.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
             (!selection.required_feature.length ||
              (assembly_x86_metadata_physical_has_duplicate_registers(physical, operand_count) && query.source_semantics &&
-              !typed_decorator_authoritative)))
+              !typed_decorator_authoritative && !builder->metadata_required_feature.length)))
         {
             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
         }
@@ -11722,7 +11759,9 @@ BUSTER_GLOBAL_LOCAL void assembly_x86_metadata_diagnostic(AssemblyBuilder* build
     else if (status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE)
     {
         kind = ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE;
-        message = S8("instruction requires an enabled target feature");
+        message = builder->metadata_required_feature.length
+            ? string_format(builder->arena, S8("instruction requires the {S8} target feature"), builder->metadata_required_feature)
+            : S8("instruction requires an enabled target feature");
     }
     else if (status == BUSTER_X86_METADATA_ENCODE_RELATIVE_RANGE)
     {
@@ -13046,6 +13085,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_spelling_movabs_moffs(AssemblyBuilder* bui
 //   accumulator/absolute-address movabs[bwlq] -> mov[bwlq], with the metadata
 //   selector told to pick the moffs row (A0..A3) even for a short address
 //   AT&T retq/callq -> ret/call
+//   operand-free rep/repe/repz nop -> pause (F3 90)
 //   rep bsf/bsr -> tzcnt/lzcnt (GCC's spelling; F3 0F BC/BD either way,
 //   executing as BSF/BSR on CPUs without BMI1/LZCNT)
 //   one-operand shift/rotate -> explicit count 1
@@ -13109,7 +13149,12 @@ BUSTER_GLOBAL_LOCAL String8 assembly_x86_spelling_normalize(AssemblyBuilder* bui
         if (rep_prefix)
         {
             String8 bit_scan = suffix ? base : mnemonic;
-            if (assembly_word_equal(bit_scan, S8("bsf")) || assembly_word_equal(bit_scan, S8("bsr")))
+            if (operand_count == 0 && assembly_word_equal(mnemonic, S8("nop")))
+            {
+                drop_prefix = true;
+                new_mnemonic = S8("pause");
+            }
+            else if (assembly_word_equal(bit_scan, S8("bsf")) || assembly_word_equal(bit_scan, S8("bsr")))
             {
                 bool forward = assembly_word_equal(bit_scan, S8("bsf"));
                 drop_prefix = true;
@@ -13303,7 +13348,11 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_statement(AssemblyBuilder* b
                 }
                 // AT&T movq naming an XMM/MMX register is the MOVQ transfer;
                 // the handwritten suffix reading of it is not a competing form.
-                metadata_source_authoritative |= movq_transfer;
+                // BMI1 BEXTR and GPR/memory KMOVW likewise have valid checked
+                // forms outside the preliminary TBM/mask-only front doors.
+                metadata_source_authoritative |= movq_transfer ||
+                    assembly_word_equal(builder->instructions[instruction_count].metadata_mnemonic, S8("bextr")) ||
+                    assembly_word_equal(builder->instructions[instruction_count].metadata_mnemonic, S8("kmovw"));
                 if ((handwritten_kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE && !metadata_source_authoritative) ||
                     (handwritten_kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
                      (!metadata_source_authoritative &&
@@ -13344,7 +13393,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_statement(AssemblyBuilder* b
             bool metadata_precise = handwritten_requires_metadata || (!handwritten_succeeded &&
                                     (handwritten_kind != ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS ||
                                      (status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
-                                      (builder->metadata_failure_typed_decorator_authoritative ||
+                                      (builder->metadata_failure_source_authoritative ||
                                        (assembly_x86_statement_has_extended_gpr(statement) &&
                                         !assembly_x86_statement_has_no_flags_decorator(statement)))) ||
                                      (handwritten_kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION &&
@@ -13353,7 +13402,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_statement(AssemblyBuilder* b
                                     status != BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC &&
                                     status != BUSTER_X86_METADATA_ENCODE_INVALID_INPUT &&
                                     (handwritten_kind != ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE ||
-                                     builder->metadata_failure_typed_decorator_authoritative));
+                                     builder->metadata_failure_source_authoritative));
             if (metadata_precise)
             {
                 u32 length = statement.length > UINT32_MAX ? UINT32_MAX : (u32)statement.length;
@@ -13390,6 +13439,13 @@ typedef enum AssemblyAarch64ModifierResult
     ASSEMBLY_AARCH64_MODIFIER_REWRITTEN,
     ASSEMBLY_AARCH64_MODIFIER_REFUSED,
 } AssemblyAarch64ModifierResult;
+
+enum
+{
+    ASSEMBLY_AARCH64_MACH_DIRECT,
+    ASSEMBLY_AARCH64_MACH_TLVP,
+    ASSEMBLY_AARCH64_MACH_GOT,
+};
 
 // The unquoted ELF modifier spellings the standalone unit recognizes.
 typedef enum AssemblyAarch64ColonModifier
@@ -13442,9 +13498,9 @@ BUSTER_GLOBAL_LOCAL u64 assembly_aarch64_modifier_find(String8 text, AssemblyAar
     return result;
 }
 
-// The index of an unquoted `@PAGE` or `@PAGEOFF` modifier, or the text length
+// The index of an unquoted Mach-O page or TLVP modifier, or the text length
 // when absent. Any other `@` suffix is not this modifier and is left alone.
-BUSTER_GLOBAL_LOCAL u64 assembly_aarch64_at_modifier_find(String8 text, bool* page_offset)
+BUSTER_GLOBAL_LOCAL u64 assembly_aarch64_at_modifier_find(String8 text, bool* page_offset, bool* tlvp, bool* mach_got)
 {
     u64 result = text.length;
     u64 at = assembly_unquoted_character(text, 0, S8("@"));
@@ -13456,10 +13512,15 @@ BUSTER_GLOBAL_LOCAL u64 assembly_aarch64_at_modifier_find(String8 text, bool* pa
             word_end += 1;
         }
         String8 word = string_slice(text, at + 1, word_end);
-        if (assembly_word_equal(word, S8("PAGE")) || assembly_word_equal(word, S8("PAGEOFF")))
+        if (assembly_word_equal(word, S8("PAGE")) || assembly_word_equal(word, S8("PAGEOFF")) ||
+            assembly_word_equal(word, S8("TLVPPAGE")) || assembly_word_equal(word, S8("TLVPPAGEOFF")) ||
+            assembly_word_equal(word, S8("GOTPAGE")) || assembly_word_equal(word, S8("GOTPAGEOFF")))
         {
             result = at;
-            *page_offset = word.length != 4;
+            *tlvp = assembly_word_equal(word, S8("TLVPPAGE")) || assembly_word_equal(word, S8("TLVPPAGEOFF"));
+            *mach_got = assembly_word_equal(word, S8("GOTPAGE")) || assembly_word_equal(word, S8("GOTPAGEOFF"));
+            *page_offset = assembly_word_equal(word, S8("PAGEOFF")) || assembly_word_equal(word, S8("TLVPPAGEOFF")) ||
+                           assembly_word_equal(word, S8("GOTPAGEOFF"));
         }
         else
         {
@@ -13482,11 +13543,13 @@ BUSTER_GLOBAL_LOCAL String8 assembly_aarch64_modifier_strip(AssemblyBuilder* bui
     if (macho)
     {
         bool page_offset = false;
-        u64 at = assembly_aarch64_at_modifier_find(text, &page_offset);
+        bool tlvp = false;
+        bool mach_got = false;
+        u64 at = assembly_aarch64_at_modifier_find(text, &page_offset, &tlvp, &mach_got);
         if (at < text.length)
         {
             String8 head = string_slice(text, 0, at);
-            String8 tail = string_slice(text, at + (page_offset ? 8 : 5), text.length);
+            String8 tail = string_slice(text, at + (tlvp ? 4 : mach_got ? 3 : 0) + (page_offset ? 8 : 5), text.length);
             result = string_format(builder->arena, S8("{S8}{S8}"), head, tail);
         }
     }
@@ -13505,11 +13568,13 @@ BUSTER_GLOBAL_LOCAL String8 assembly_aarch64_modifier_strip(AssemblyBuilder* bui
 
 BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewrite(AssemblyBuilder* builder, String8 statement, u32 line,
                                                                                      u32 column, String8* rewritten,
-                                                                                     AssemblyExpression* expression, bool* relocated, bool* numeric, bool* got)
+                                                                                     AssemblyExpression* expression, bool* relocated, bool* numeric, bool* got, bool* tlvp, bool* mach_got)
 {
     AssemblyAarch64ModifierResult result = ASSEMBLY_AARCH64_MODIFIER_ABSENT;
     *numeric = false;
     *got = false;
+    *tlvp = false;
+    *mach_got = false;
     statement = assembly_trim(statement);
     u64 mnemonic_end = 0;
     while (mnemonic_end < statement.length && !assembly_space(statement.pointer[mnemonic_end]))
@@ -13523,7 +13588,7 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
     bool page_offset = false;
     AssemblyAarch64ColonModifier operands_modifier = ASSEMBLY_AARCH64_COLON_MODIFIER_NONE;
     bool has_colon = assembly_aarch64_modifier_find(operands, &operands_modifier) < operands.length;
-    bool has_at = assembly_aarch64_at_modifier_find(operands, &page_offset) < operands.length;
+    bool has_at = assembly_aarch64_at_modifier_find(operands, &page_offset, tlvp, mach_got) < operands.length;
     if (has_colon || has_at)
     {
         String8 message = {0};
@@ -13543,9 +13608,11 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
             {
                 tokens[token_count] = assembly_trim(token);
                 bool token_page_offset = false;
+                bool token_tlvp = false;
+                bool token_mach_got = false;
                 AssemblyAarch64ColonModifier token_modifier = ASSEMBLY_AARCH64_COLON_MODIFIER_NONE;
                 if (assembly_aarch64_modifier_find(tokens[token_count], &token_modifier) < tokens[token_count].length ||
-                    assembly_aarch64_at_modifier_find(tokens[token_count], &token_page_offset) < tokens[token_count].length)
+                    assembly_aarch64_at_modifier_find(tokens[token_count], &token_page_offset, &token_tlvp, &token_mach_got) < tokens[token_count].length)
                 {
                     modified = token_count;
                     modified_count += 1;
@@ -13571,7 +13638,7 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
         }
         else if (has_at && !macho)
         {
-            message = S8("'@PAGE' and '@PAGEOFF' are Mach-O modifiers; write :lo12:sym");
+            message = S8("AArch64 @PAGE, @TLVPPAGE and @GOTPAGE modifier families are Mach-O-only");
         }
         else if (!split || modified_count != 1)
         {
@@ -13611,6 +13678,11 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
                 *got = true;
             }
         }
+        else if ((*tlvp || *mach_got) && !adrp && (!ldr || !page_offset || modified != 1 || token_count != 2))
+        {
+            message = *mach_got ? S8("'@GOTPAGEOFF' requires the offset of a plain 64-bit ldr")
+                                : S8("'@TLVPPAGEOFF' requires the offset of a plain 64-bit ldr");
+        }
         else if (adrp)
         {
             if (!macho || page_offset || modified != 1 || token_count != 2)
@@ -13620,6 +13692,7 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
             else
             {
                 replacement = assembly_aarch64_modifier_strip(builder, tokens[modified], macho, &strip_valid);
+                if (*tlvp || *mach_got) symbol_text = replacement;
             }
         }
         else if (add)
@@ -13676,9 +13749,10 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
             {
                 message = S8("an AArch64 GOT operand modifier requires a symbol expression");
             }
-            else if (*got && parsed.addend != 0)
+            else if ((*got || *mach_got || *tlvp) && parsed.addend != 0)
             {
-                message = S8("an AArch64 GOT relocation takes no addend");
+                message = *tlvp ? S8("an AArch64 TLVP relocation takes no addend")
+                                : S8("an AArch64 GOT relocation takes no addend");
             }
             else
             {
@@ -13713,16 +13787,18 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
     bool relocated = false;
     bool numeric = false;
     bool got = false;
+    bool tlvp = false;
+    bool mach_got = false;
     AssemblyAarch64ModifierResult modifier = ASSEMBLY_AARCH64_MODIFIER_ABSENT;
     if (target.cpu_arch == CPU_ARCH_AARCH64 && builder->unit_control_relocations)
     {
-        modifier = assembly_aarch64_modifier_rewrite(builder, statement, line, column, &statement, &expression, &relocated, &numeric, &got);
+        modifier = assembly_aarch64_modifier_rewrite(builder, statement, line, column, &statement, &expression, &relocated, &numeric, &got, &tlvp, &mach_got);
     }
     if (modifier != ASSEMBLY_AARCH64_MODIFIER_REFUSED)
     {
         u32 instruction_count = builder->instruction_count;
         assembly_instruction_parse_statement(builder, statement, line, column, offset, target, syntax);
-        if ((relocated || numeric || got) && builder->instruction_count == instruction_count + 1)
+        if ((relocated || numeric || got || tlvp || mach_got) && builder->instruction_count == instruction_count + 1)
         {
             // A GOT adrp carries `aarch64_got` alone; its PAGE21 emission
             // reads it directly, while a GOT ldr also takes the low-12 row.
@@ -13730,6 +13806,9 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
             builder->instructions[instruction_count].aarch64_lo12_numeric = numeric;
             builder->instructions[instruction_count].aarch64_lo12_expression = expression;
             builder->instructions[instruction_count].aarch64_got = got;
+            builder->instructions[instruction_count].aarch64_mach_indirection = mach_got ? ASSEMBLY_AARCH64_MACH_GOT
+                                                                             : tlvp ? ASSEMBLY_AARCH64_MACH_TLVP
+                                                                                    : ASSEMBLY_AARCH64_MACH_DIRECT;
         }
     }
 }
@@ -14651,7 +14730,9 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                     page_row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_ADRP_PAGE21)
                 {
                     if (!assembly_relocation_append(builder, instruction->offset, expression,
-                                                    instruction->aarch64_got ? ASSEMBLY_RELOCATION_AARCH64_GOT_PAGE21
+                                                    instruction->aarch64_mach_indirection == ASSEMBLY_AARCH64_MACH_GOT ? ASSEMBLY_RELOCATION_AARCH64_MACH_GOT_PAGE21
+                                                    : instruction->aarch64_mach_indirection == ASSEMBLY_AARCH64_MACH_TLVP ? ASSEMBLY_RELOCATION_AARCH64_MACH_TLVP_PAGE21
+                                                    : instruction->aarch64_got ? ASSEMBLY_RELOCATION_AARCH64_GOT_PAGE21
                                                                              : ASSEMBLY_RELOCATION_AARCH64_PAGE21, 0))
                     {
                         assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
@@ -14847,14 +14928,25 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
         // ELF relocation has no narrower or SIMD spelling, and the object
         // reader refuses an xzr destination.
         bool got_load = (word & UINT32_C(0xffc00000)) == UINT32_C(0xf9400000) && (word & 31) != 31;
-        if (instruction->aarch64_got)
+        if (instruction->aarch64_mach_indirection == ASSEMBLY_AARCH64_MACH_TLVP)
+        {
+            kind = (word & UINT32_C(0xffc00000)) == UINT32_C(0xf9400000) ? ASSEMBLY_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12
+                                                                                    : ASSEMBLY_RELOCATION_COUNT;
+        }
+        else if (instruction->aarch64_mach_indirection == ASSEMBLY_AARCH64_MACH_GOT)
+        {
+            kind = got_load ? ASSEMBLY_RELOCATION_AARCH64_MACH_GOT_PAGEOFF12 : ASSEMBLY_RELOCATION_COUNT;
+        }
+        else if (instruction->aarch64_got)
         {
             kind = got_load ? ASSEMBLY_RELOCATION_AARCH64_GOT_LD64_LO12 : ASSEMBLY_RELOCATION_COUNT;
         }
         if (!encoded || !zero_immediate || kind == ASSEMBLY_RELOCATION_COUNT)
         {
             assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
-                                instruction->aarch64_got ? S8("a ':got_lo12:' modifier requires a 64-bit unsigned-offset ldr destination")
+                                instruction->aarch64_mach_indirection == ASSEMBLY_AARCH64_MACH_GOT ? S8("a '@GOTPAGEOFF' modifier requires a 64-bit unsigned-offset ldr destination")
+                                : instruction->aarch64_mach_indirection == ASSEMBLY_AARCH64_MACH_TLVP ? S8("a '@TLVPPAGEOFF' modifier requires a 64-bit unsigned-offset ldr destination")
+                                : instruction->aarch64_got ? S8("a ':got_lo12:' modifier requires a 64-bit unsigned-offset ldr destination")
                                                          : S8("a low-12 modifier applies only to an unshifted ADD immediate or an unsigned-offset load or store"));
             emission_failed = true;
         }

@@ -147,7 +147,10 @@ Logs carry a `PRODUCTION_PROFILE_PHASE start slot=<n>` line and a
 `PRODUCTION_PROFILE_PHASE <done>/<expected> end slot=<n>` line per phase.
 
 Hosted phase timings are diagnostic: they locate the dominant operations but
-do not validate a performance change (#2761).
+do not validate a performance change (#2761). Admitting a PGO compiler on
+performance grounds uses the fixed `production-profile-v1` profile on the
+9700X `compare-pull` route, described in
+[benchmarking.md](agents/benchmarking.md).
 
 ## Build lanes
 

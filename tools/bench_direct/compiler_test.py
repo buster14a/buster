@@ -13,8 +13,10 @@ import json
 import os
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import unittest
 import warnings
@@ -28,6 +30,7 @@ import compiler_publish  # noqa: E402
 import compiler_receipt  # noqa: E402
 import inline_acceptance  # noqa: E402
 import ast_pilot_acceptance  # noqa: E402
+import throughput_real_source  # noqa: E402
 
 A256, B256 = "1" * 64, "2" * 64
 
@@ -2050,6 +2053,166 @@ def archive(members: dict) -> bytes:
     return stream.getvalue()
 
 
+def machine_fields(**change: object) -> dict:
+    """A #2758 record as the C collector writes it: every field carries value, status and reason."""
+    unknown = {"value": "unknown", "status": "unknown", "reason": "not exposed by this OS, unsupported or probe failed"}
+    available = {"schema": "buster-machine-specifications-v1", "run_id": EXPECTED["run_id"],
+                 "run_attempt": EXPECTED["run_attempt"], "job": "compare", "cpu_model": HOST["cpu_model"],
+                 "machine_arch": "x86_64", "cpu_logical_online": "16", "kernel_release": "6.8.0"}
+    record = {key: {"value": value, "status": "available", "reason": ""} for key, value in available.items()}
+    record["cpu_vendor"] = dict(unknown)
+    record["cpu_affinity"] = {"value": "unavailable", "status": "unavailable", "reason": "probe refused"}
+    record.update(change)
+    return {key: value for key, value in record.items() if value is not None}
+
+
+def machine_bytes(**change: object) -> bytes:
+    return json.dumps(machine_fields(**change)).encode()
+
+
+class MachineRecordTest(unittest.TestCase):
+    """The publisher's consumption of the retained #2758 record (#2761)."""
+
+    def check(self, raw: object, mode: str = "main", run_id: str = "92", attempt: str = "1",
+              current: object = None, require: bool = True) -> tuple[list[str], dict]:
+        return compiler_publish.machine_record(raw, receipt() if current is None else current, mode, run_id, attempt,
+                                               require=require)
+
+    def test_matching_record_passes_and_keeps_unavailable_facts_explicit(self) -> None:
+        problems, facts = self.check(machine_bytes())
+        self.assertEqual(problems, [])
+        self.assertEqual(facts["cpu_model"], HOST["cpu_model"])
+        self.assertEqual(facts["cpu_vendor"], "unknown (not exposed by this OS, unsupported or probe failed)")
+        self.assertEqual(facts["cpu_affinity"], "unavailable (probe refused)")
+        self.assertEqual(facts["memory_total_bytes"], "absent from the record")
+        pull = machine_bytes(job={"value": "compare-pull", "status": "available", "reason": ""})
+        self.assertEqual(self.check(pull, mode="pull")[0], [])
+
+    def test_absent_record_fails_unless_recovering_a_past_attempt(self) -> None:
+        self.assertIn("missing", self.check(None)[0][0])
+        self.assertEqual(self.check(None, require=False), ([], {}))
+        self.assertTrue(self.check(machine_bytes(cpu_model={"value": "Intel", "status": "available", "reason": ""}),
+                                   require=False)[0])
+
+    def test_malformed_record_fails(self) -> None:
+        for raw in (b"{not json", b"\xff", b"[]", b"{}", b'{"a": 1, "a": 1}', b'{"cpu_model": "AMD Ryzen 7 9700X"}',
+                    json.dumps({"cpu_model": {"value": "x", "status": "guessed", "reason": ""}}).encode(),
+                    json.dumps({"cpu_model": {"value": 1, "status": "available", "reason": ""}}).encode(),
+                    json.dumps(dict(machine_fields(), job={"value": "compare", "status": "available"})).encode(),
+                    "AMD Ryzen 7 9700X"):
+            with self.subTest(raw=raw):
+                problems, facts = self.check(raw)
+                self.assertTrue(problems)
+                self.assertIn("malformed", problems[0])
+                self.assertEqual(facts, {})
+
+    def test_required_facts_must_be_available_and_are_never_fabricated(self) -> None:
+        for key in compiler_publish.MACHINE_REQUIRED:
+            for value in (None, {"value": "unknown", "status": "unknown", "reason": "probe failed"},
+                          {"value": "AMD Ryzen 7 9700X", "status": "partial", "reason": "bounded field truncated"}):
+                with self.subTest(key=key, value=value):
+                    problems = self.check(machine_bytes(**{key: value}))[0]
+                    self.assertEqual(problems, [f"machine-specification record lacks required host fact {key}: "
+                                                + ("absent from the record" if value is None else
+                                                   f"{value['status']} ({value['reason']})")])
+
+    def test_non_9700x_record_fails(self) -> None:
+        for model in ("AMD EPYC 9B14", "AMD Ryzen 9 9950X 16-Core Processor", "Intel(R) Xeon(R) Platinum 8370C"):
+            with self.subTest(model=model):
+                fields = {"cpu_model": {"value": model, "status": "available", "reason": ""}}
+                problems = self.check(machine_bytes(**fields),
+                                      current=dict(receipt(), host=dict(HOST, cpu_model=model)))[0]
+                self.assertEqual(len(problems), 1)
+                self.assertIn("is not the approved Zen 5 host", problems[0])
+        arch = self.check(machine_bytes(machine_arch={"value": "aarch64", "status": "available", "reason": ""}))[0]
+        self.assertEqual(arch, ["machine-specification record architecture 'aarch64' is not x86_64"])
+
+    def test_record_and_receipt_must_name_the_same_model(self) -> None:
+        other = "AMD Ryzen 7 9700X 8-Core Processor (other)"
+        for current in (dict(receipt(), host=dict(HOST, cpu_model=other)), dict(receipt(), host={}),
+                        dict(receipt(), host=None)):
+            with self.subTest(host=current["host"]):
+                problems = self.check(machine_bytes(), current=current)[0]
+                self.assertEqual(len(problems), 1)
+                self.assertIn("differs from the receipt's observed CPU", problems[0])
+
+    def test_stale_run_attempt_or_job_identity_fails(self) -> None:
+        for label, change in (("an earlier run", {"run_id": "91"}), ("an earlier attempt", {"attempt": "2"}),
+                              ("another job", {"mode": "pull"}), ("an unknown mode", {"mode": "queue"})):
+            with self.subTest(label=label):
+                problems = self.check(machine_bytes(), **change)[0]
+                self.assertEqual(len(problems), 1)
+                self.assertIn("is not this attempt's", problems[0])
+        schema = {"value": "buster-machine-specifications-v0", "status": "available", "reason": ""}
+        self.assertIn("schema", self.check(machine_bytes(schema=schema))[0][0])
+
+    def test_publication_fails_through_the_retained_artifact(self) -> None:
+        base = {"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary()),
+                "throughput/summary.json": json.dumps(corpus()["summary"]),
+                "throughput/metadata.json": json.dumps(corpus()["metadata"])}
+        stale = machine_bytes(run_attempt={"value": "2", "status": "available", "reason": ""})
+        for members, expected in ((base, "failure"), (dict(base, **{compiler_publish.MACHINE_RECORD: machine_bytes()}), "success"),
+                                  (dict(base, **{compiler_publish.MACHINE_RECORD: stale}), "failure"),
+                                  (dict(base, **{compiler_publish.MACHINE_RECORD: b"{"}), "failure")):
+            with self.subTest(members=sorted(members), expected=expected):
+                got = compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+                problems = self.check(got[4]["machine"])[0]
+                decision = compiler_publish.decide(dict(EXPECTED), True, "success", got[0], got[1], "", got[4],
+                                                   extra_reasons=problems)
+                self.assertEqual(decision[0], expected)
+                self.assertEqual(decision[2], problems)
+        oversized = dict(base, **{compiler_publish.MACHINE_RECORD: b" " * (compiler_publish.MEMBER_LIMIT + 1)})
+        got = compiler_publish.read_evidence(FakeApi(archive(oversized)), "92", "buster-9700x-compiler-x-1")
+        self.assertIn("malformed", self.check(got[4]["machine"])[0][0])
+
+    def test_owned_main_layout_keeps_the_record_at_the_same_path(self) -> None:
+        files = compiler_publish.main_archive_files(archive({"evidence/receipt.json": "{}",
+                                                             "evidence/" + compiler_publish.MACHINE_RECORD: machine_bytes()}))
+        self.assertEqual(files[compiler_publish.MACHINE_RECORD], machine_bytes())
+
+
+def contents_record(text: str) -> dict:
+    raw = text.encode()
+    return {"type": "file", "encoding": "base64", "size": len(raw), "content": base64.b64encode(raw).decode()}
+
+
+class MachineRecordRequiredTest(unittest.TestCase):
+    """Recovery waives the record only for a bench workflow revision that never retained it."""
+
+    REVISION = "7" * 40
+    WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "9700x-direct-bench.yml"
+
+    def required(self, answer: object, revision: str = REVISION) -> tuple[bool, list[str]]:
+        paths: list[str] = []
+
+        class Contents:
+            def request(self, path: str, data: dict | None = None) -> object:
+                paths.append(path)
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+        return compiler_publish.machine_record_required(Contents(), revision), paths
+
+    def test_current_workflow_retains_the_record_in_every_compare_upload(self) -> None:
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(text.count(compiler_publish.MACHINE_RETENTION_STEP), 3)
+        self.assertEqual(self.required(contents_record(text))[0], True)
+
+    def test_only_a_readable_legacy_revision_waives_the_record(self) -> None:
+        legacy = self.WORKFLOW.read_text(encoding="utf-8").replace(compiler_publish.MACHINE_RETENTION_STEP, "x\n")
+        required, paths = self.required(contents_record(legacy))
+        self.assertEqual(required, False)
+        self.assertEqual(urllib.parse.urlsplit(paths[0]).path, "/contents/.github/workflows/9700x-direct-bench.yml")
+        self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(paths[0]).query), {"ref": [self.REVISION]})
+        for label, answer in (("absent file", urllib.error.HTTPError("u", 404, "absent", {}, None)),
+                              ("server error", urllib.error.HTTPError("u", 502, "bad gateway", {}, None)),
+                              ("network", OSError("reset")), ("malformed record", {"type": "dir"}),
+                              ("size mismatch", dict(contents_record(legacy), size=1))):
+            with self.subTest(label=label):
+                self.assertEqual(self.required(answer)[0], True)
+        self.assertEqual(self.required(contents_record(legacy), revision="main"), (True, []))
+
+
 class EvidenceTest(unittest.TestCase):
     def test_reads_receipt_and_summary_as_data(self) -> None:
         payload = archive({"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary()),
@@ -2059,7 +2222,7 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual(got[:3], (receipt(), summary(), ""))
         self.assertEqual(got[3]["name"], "buster-9700x-compiler-x-1")
         unscaled = {name: {"summary": None, "metadata": None} for name in compiler_receipt.SCALING_PROFILE["series"]}
-        self.assertEqual(got[4], dict(corpus(), scaling=unscaled))
+        self.assertEqual(got[4], dict(corpus(), scaling=unscaled, machine=None))
         bundles = scaling()
         members = {f"scaling/{name}/{leaf}": json.dumps(bundles[name][key]) for name in bundles
                    for leaf, key in (("scaling.json", "summary"), ("scaling-metadata.json", "metadata"))}
@@ -2601,7 +2764,7 @@ class HarnessTest(unittest.TestCase):
         self.directory.cleanup()
 
     def run_harness(self, live: object, cpu: str = HOST["cpu_model"], corpus_behavior: str = "",
-                    scaling_behavior: str = "", **change) -> tuple[int, dict, Path]:
+                    scaling_behavior: str = "", floor: str | None = None, **change) -> tuple[int, dict, Path]:
         values = {"mode": "main", "candidate": str(self.repo), "lab": str(self.lab), "work": str(self.root / "work"),
                   "evidence": str(self.root / "evidence"), "summary": str(self.root / "step.md"),
                   "repository": "buster14a/buster", "ref": "refs/heads/main",
@@ -2610,8 +2773,10 @@ class HarnessTest(unittest.TestCase):
                   "request-run-id": "91", "run-id": "92", "run-attempt": "1"}
         values.update(change)
         argv = [item for key, value in values.items() for item in ("--" + key, value)]
+        # The fixture's own base stands in for the real harness floor unless a test names another.
         with mock.patch.object(compiler_compare, "queue_head", return_value=live), \
                 mock.patch.object(compiler_compare, "cpu_model", return_value=cpu), \
+                mock.patch.object(compiler_compare, "THROUGHPUT_HARNESS_FLOOR", floor or self.base), \
                 mock.patch.dict(os.environ, {"PATH": os.environ.get("PATH", ""), "FAKE_THROUGHPUT": corpus_behavior,
                                              "FAKE_SCALING": scaling_behavior}):
             code = compiler_compare.main(argv)
@@ -2670,6 +2835,175 @@ class HarnessTest(unittest.TestCase):
         # A main-mode publisher never accepts a pull-mode receipt.
         self.assertEqual(compiler_publish.decide(dict(expected, mode="main"), True, "success", result, summary, "", retained(evidence))[0],
                          "failure")
+
+    def assert_unadmitted(self, code: int, result: dict, evidence: Path, reason: str) -> None:
+        self.assertEqual((code, result["state"]), (1, "failed"))
+        self.assertEqual(len(result["reasons"]), 1, result["reasons"])
+        self.assertIn(reason, result["reasons"][0])
+        # Rejected before the expensive work: nothing built, no lab and no corpus.
+        self.assertEqual((result["timings"]["build_seconds"], result["binaries"], result["lab"]), ({}, {}, {}))
+        self.assertNotIn("throughput", result)
+        self.assertFalse((evidence / "lab").exists())
+        self.assertFalse((evidence / "throughput").exists())
+
+    def test_base_predating_the_harness_floor_is_rejected_before_measurement(self) -> None:
+        # #3714: the floor (here the pull head) is not in the base's history, as #3406's base lacks
+        # the FAST/QUALITY retirement, so its --mode all cannot produce the v2 population.
+        pull_tree = fixture_git(self.repo, "rev-parse", self.pull_head + "^{tree}")
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.pull_head)
+        code, result, evidence = self.run_harness(self.pull_head, mode="pull", ref="refs/pull/7/head", head=self.pull_head,
+                                                  floor=self.pull_head, **{"head-tree": pull_tree})
+        self.assert_unadmitted(code, result, evidence, "unsupported historical throughput harness")
+        self.assertIn(compiler_receipt.THROUGHPUT_PROFILE["name"], result["reasons"][0])
+
+    def test_unplaceable_harness_floor_fails_closed(self) -> None:
+        code, result, evidence = self.run_harness(self.head, floor="f" * 40)
+        self.assert_unadmitted(code, result, evidence, "throughput harness admission could not place")
+
+    def test_harness_floor_probe_faults_retain_a_failed_receipt(self) -> None:
+        # A timed-out or unlaunchable floor probe is a retained refusal, never an escaped exception.
+        real = compiler_compare.captured_run
+        for fault in (subprocess.TimeoutExpired(["git"], 120), FileNotFoundError("git")):
+            def probe(argv, **options):
+                if argv[3:5] == ["merge-base", "--is-ancestor"] and argv[5] == self.base:
+                    raise fault
+                return real(argv, **options)
+            with self.subTest(fault=type(fault).__name__), mock.patch.object(compiler_compare, "captured_run", probe):
+                code, result, evidence = self.run_harness(self.head)
+                self.assert_unadmitted(code, result, evidence, "throughput harness admission probe failed")
+                self.assertIn(type(fault).__name__, result["reasons"][0])
+
+    def test_harness_floor_is_the_fast_quality_retirement(self) -> None:
+        # #3406's historical base 3bf9d004 predates the floor; current history contains it.
+        floor = compiler_receipt.THROUGHPUT_HARNESS_FLOOR
+        self.assertRegex(floor, "^[0-9a-f]{40}$")
+        historical = "3bf9d004f2d1f6b4312e02825f17c56d7f3da14c"
+        root = Path(__file__).resolve().parents[2]
+        present = [subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{commit}^{{commit}}"],
+                                  capture_output=True, check=False).returncode == 0 for commit in (floor, historical)]
+        if not all(present):
+            self.skipTest("this checkout lacks the floor or #3406's base commit")
+        self.assertEqual(compiler_compare.throughput_harness_problem(root, "HEAD"), "")
+        self.assertIn("unsupported historical throughput harness",
+                      compiler_compare.throughput_harness_problem(root, historical))
+
+    def test_native_evidence_inventory_matches_the_receipt_contract(self) -> None:
+        # tools/compiler_evidence.c derives required raw members from the same admitted profiles (#2918).
+        import re
+        source = (Path(__file__).resolve().parents[2] / "tools" / "compiler_evidence.c").read_text()
+        table = re.search(r"compiler_evidence_workloads\[\] = \{(.*?)\};", source, re.S)
+        self.assertIsNotNone(table)
+        self.assertEqual(re.findall(r'S8_INITIALIZER\("([^"]+)"\)', table.group(1)), compiler_receipt.THROUGHPUT_PROFILE["workloads"])
+        self.assertIn(f'#define COMPILER_EVIDENCE_HARNESS_REVISION "{compiler_receipt.THROUGHPUT_HISTORICAL_HARNESS_REVISION}"', source)
+        for name in (compiler_receipt.PROFILE["name"], compiler_receipt.THROUGHPUT_PROFILE["name"],
+                     compiler_receipt.THROUGHPUT_HISTORICAL_PROFILE["name"]):
+            self.assertIn(f'S8("{name}")', source)
+
+    def historical_fixture(self, extra_lines: tuple[str, ...] = ()) -> tuple[str, str, str]:
+        """(pinned harness commit, head commit, head tree) for the #3714 historical recipe.
+
+        The pinned commit's fake corpus also writes pinned.txt, so the export shows which harness ran.
+        """
+        git = lambda *arguments: fixture_git(self.repo, *arguments)  # noqa: E731
+        git("checkout", "-q", "--detach", self.base)
+        marker = "open(os.path.join(output, 'pinned.txt'), 'w').write('pinned harness')\nsys.exit("
+        self.assertEqual(FAKE_THROUGHPUT.count("\nsys.exit("), 1)
+        (self.repo / "throughput_fake.py").write_text(FAKE_THROUGHPUT.replace("\nsys.exit(", "\n" + marker))
+        git("commit", "-qam", "pinned harness")
+        pinned = git("rev-parse", "HEAD")
+        git("checkout", "-q", "--detach", self.pull_head)
+        request = self.repo / compiler_receipt.ANALYZER_REQUEST_PATH
+        request.parent.mkdir(parents=True, exist_ok=True)
+        request.write_text("".join(line + "\n" for line in (compiler_receipt.THROUGHPUT_HISTORICAL_REQUEST_LINE,
+                                                            *extra_lines)))
+        git("add", compiler_receipt.ANALYZER_REQUEST_PATH)
+        git("commit", "-qm", "request the historical corpus")
+        return pinned, git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+
+    def run_historical(self, pinned: str, head: str, tree: str, admission: str = "historical",
+                       floor: str | None = None) -> tuple[int, dict, Path]:
+        # The pull head stands in for a floor the base predates.
+        with mock.patch.object(compiler_compare, "THROUGHPUT_HISTORICAL_HARNESS_REVISION", pinned):
+            return self.run_harness(head, mode="pull", ref="refs/pull/7/head", head=head, floor=floor or self.pull_head,
+                                    **{"head-tree": tree, "pull-head": head, "harness-admission": admission})
+
+    def test_historical_recipe_measures_the_corpus_with_the_pinned_harness(self) -> None:
+        pinned, head, tree = self.historical_fixture()
+        code, result, evidence = self.run_historical(pinned, head, tree)
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertEqual(result["throughput_profile"], compiler_receipt.THROUGHPUT_HISTORICAL_PROFILE)
+        self.assertEqual(result["throughput_historical"],
+                         {"harness_revision": pinned, "observed_revision": pinned, "status": "prepared"})
+        # The corpus ran from the pinned worktree; the candidate checkout kept the base tree.
+        self.assertEqual((evidence / "throughput" / "pinned.txt").read_text(), "pinned harness")
+        self.assertEqual((self.repo / "compiler.txt").read_text(), "base compiler\n")
+        summary = json.loads((evidence / "lab" / "summary.json").read_text())
+        expected = dict(result["identity"])
+        historical = compiler_receipt.THROUGHPUT_HISTORICAL_PROFILE
+        with mock.patch.object(compiler_publish, "THROUGHPUT_HISTORICAL_HARNESS_REVISION", pinned):
+            decided = compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence),
+                                              expected_throughput_profile=historical)
+            self.assertEqual(decided[0], "success", decided[2])
+            # It discharges only its own inventory row, never the v2 corpus row.
+            rows = compiler_receipt.covered_inventory_rows(result, "success", "pull")["rows"]
+            self.assertEqual(rows["build:bench_throughput@throughput-corpus-historical"], "discharged")
+            self.assertEqual(rows["build:bench_throughput"], "not discharged: not requested")
+            # Without the hosted historical admission the same receipt never publishes.
+            self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "",
+                                                     retained(evidence))[0], "failure")
+        # Nor does a receipt whose harness was not the pinned revision.
+        decided = compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence),
+                                          expected_throughput_profile=historical)
+        self.assertEqual(decided[0], "failure")
+        self.assertTrue(any("pinned revision" in reason for reason in decided[2]), decided[2])
+
+    def test_historical_recipe_refusals_happen_before_any_build(self) -> None:
+        pinned, head, tree = self.historical_fixture()
+        cases = (
+            # The recipe on a base that already carries the floor.
+            ({"floor": self.base}, "already carries"),
+            # The host and the hosted disposition disagree.
+            ({"admission": "admitted"}, "hosted harness admission 'admitted'"),
+        )
+        for change, reason in cases:
+            with self.subTest(reason=reason):
+                code, result, evidence = self.run_historical(pinned, head, tree, **change)
+                self.assert_unadmitted(code, result, evidence, reason)
+        # An unpreparable pinned revision fails before any build.
+        code, result, evidence = self.run_historical("f" * 40, head, tree)
+        self.assert_unadmitted(code, result, evidence, "historical corpus harness worktree exited")
+        self.assertEqual(result["throughput_historical"]["status"], "failed")
+
+    def test_historical_recipe_refuses_every_other_opt_in_leg_before_preparation(self) -> None:
+        # Each fresh opt-in selector beside the historical one would still run the base's own harness.
+        for line in (compiler_receipt.WILD_LINKER_REQUEST_LINE, compiler_receipt.THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
+                     compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE, compiler_receipt.COMPILER_PROBES_REQUEST_LINE,
+                     compiler_receipt.FRONTEND_SELECTOR_REQUEST_LINE,
+                     compiler_receipt.AST_PILOT_ACCEPTANCE_REQUEST_LINE):
+            with self.subTest(line=line):
+                fixture_git(self.repo, "checkout", "-q", "main")
+                pinned, head, tree = self.historical_fixture((line,))
+                with mock.patch.object(compiler_compare, "prepare_historical_harness",
+                                       side_effect=AssertionError("prepared beside another opt-in leg")):
+                    code, result, evidence = self.run_historical(pinned, head, tree)
+                self.assertEqual((code, result["state"]), (1, "failed"))
+                self.assertTrue(any("cannot be combined" in reason for reason in result["reasons"]), result["reasons"])
+                self.assertEqual((result["timings"]["build_seconds"], result["binaries"], result["lab"]), ({}, {}, {}))
+                self.assertNotIn("throughput_historical", result)
+
+    def test_hosted_historical_admission_without_the_request_is_refused(self) -> None:
+        pull_tree = fixture_git(self.repo, "rev-parse", self.pull_head + "^{tree}")
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.pull_head)
+        code, result, evidence = self.run_harness(self.pull_head, mode="pull", ref="refs/pull/7/head",
+                                                  head=self.pull_head, **{"head-tree": pull_tree,
+                                                                          "harness-admission": "historical"})
+        self.assert_unadmitted(code, result, evidence, "hosted harness admission 'historical'")
+
+    def test_publisher_reports_an_undispatched_unsupported_base_explicitly(self) -> None:
+        conclusion, title, reasons = compiler_publish.decide({}, False, "skipped", None, None, "",
+                                                             dispatch_refusal="unsupported historical throughput harness")
+        self.assertEqual((conclusion, title, reasons), ("failure", "Not benchmarked: unsupported historical harness",
+                                                        ["unsupported historical throughput harness"]))
 
     def scaling_head(self) -> tuple[str, str]:
         """A pull request head that adds the scaling request on top of the candidate; (commit, tree)."""
@@ -3462,6 +3796,2625 @@ class AstPilotAcceptanceTest(unittest.TestCase):
         report = compiler_receipt.render(pull, summary(), "success", [])
         self.assertIn("Issue #3397 -fc-ast-pilot adoption budget: complete, verdict pass", report)
         self.assertIn("| syntax-only | 0.9000", report)
+
+
+def real_source_evidence() -> tuple[dict, dict]:
+    """A complete synthetic throughput-real-source-v1 record and its exported bundle on BINARIES."""
+    profile = compiler_receipt.THROUGHPUT_REAL_SOURCE_PROFILE
+    inputs = profile["inputs"]
+    tests = [{"metric": metric, "round": number, "median_ratio": 1.0, "ci_low": 0.98, "ci_high": 1.02,
+              "baseline_relative_mad": 0.01, "candidate_relative_mad": 0.01, "margin_exceedances": 0,
+              "pairs": profile["pairs_per_round"], "p_value": 1, "regression": False}
+             for metric in ("wall_seconds", "peak_rss_bytes") for number in range(profile["rounds"])]
+    cells = [f"{name}/{mode}" for name in inputs for mode in profile["modes"]]
+    result = {"schema": 2, "guard_enabled": False, "family_alpha": 0.01, "per_test_alpha": 0.01 / (len(cells) * 2),
+              "telemetry": [], "confirmed_regressions": 0, "inconclusive_cases": 0, "valid": True,
+              "comparisons": [{"name": cell, "medians": {"wall_seconds": [0.5, 0.49], "peak_rss_bytes": [9e7, 9e7]},
+                               "tests": copy.deepcopy(tests), "decision": "diagnostic (guard disabled)"} for cell in cells]}
+    jobs = [{"job": index, "name": name, "mode": mode, "artifact": "executable",
+             "source": "/work/candidate/" + inputs[name]["descriptor"], "sha256": inputs[name]["input_tree_sha256"],
+             "bytes": inputs[name]["requested_translation_unit_bytes"], "physical_lines": 0, "defined_functions": 0}
+            for index, (name, mode) in enumerate((name, mode) for name in inputs for mode in profile["modes"])]
+    metadata = {"schema": 2, "seed": 20260907, "pairs_per_round": 20, "rounds": 2, "warmups": 2, "cpu": 2,
+                "profile": "ci", "scale": 1, "input_schema": 1, "workloads": [], "flags": [], "allocation_compilers": [],
+                "cache_policy": "warm-filesystem-new-process", "clock": "monotonic", "jobs": jobs,
+                "real_sources": [{"name": name, "descriptor": "/work/candidate/" + pins["descriptor"],
+                                  "descriptor_sha256": pins["descriptor_sha256"], "source_root": "/work/inputs/" + name,
+                                  "input_tree_sha256": pins["input_tree_sha256"],
+                                  "requested_translation_unit_bytes": pins["requested_translation_unit_bytes"],
+                                  "inputs": 4, "link_inputs": 2, "operation": "source-to-linked-executable",
+                                  "template": "compile_link_argv"} for name, pins in inputs.items()],
+                "compiler_provenance": [{"sha256": A256, "bytes": 1}, {"sha256": B256, "bytes": 1}]}
+    staging = {"schema": compiler_receipt.THROUGHPUT_REAL_SOURCE_STAGING_SCHEMA, "status": "complete",
+               "inputs": {name: {"descriptor": pins["descriptor"], "descriptor_sha256": pins["descriptor_sha256"],
+                                 "root": "/work/inputs/" + name,
+                                 "archive_sha256": pins["archive"]["sha256"] if pins["archive"] else None,
+                                 "files": [{"path": item["path"], "sha256": item["sha256"]} for item in pins["files"]],
+                                 "copies": [{"path": item["path"], "sha256": item["sha256"]} for item in pins["copies"]]}
+                          for name, pins in inputs.items()}}
+    cpuinfo = "processor\t: 0\nmodel name\t: AMD Ryzen 7 9700X 8-Core Processor\nprocessor\t: 1\n" \
+              "model name\t: AMD Ryzen 7 9700X 8-Core Processor\n"
+    bundle = {"summary": result, "metadata": metadata, "staging": staging, "cpuinfo": cpuinfo}
+    record = {"requested": True, "request_line": compiler_receipt.THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
+              "profile": copy.deepcopy(profile), "status": "complete", "exit": 0, "errors": [],
+              "cells": compiler_receipt.throughput_real_source_digest(result)}
+    return record, bundle
+
+
+class RealSourceThroughputTest(unittest.TestCase):
+    """#2761: the fixed throughput-real-source-v1 profile on the pull-compare route."""
+
+    def validate(self, bundle: dict, status: object = 0, binaries: dict = BINARIES) -> list[str]:
+        return compiler_receipt.validate_throughput_real_source(status, bundle["summary"], bundle["metadata"],
+                                                                bundle["staging"], bundle["cpuinfo"], binaries)
+
+    def test_profile_is_frozen_report_only_and_fits_the_job_budget(self) -> None:
+        profile = compiler_receipt.THROUGHPUT_REAL_SOURCE_PROFILE
+        self.assertEqual(profile["name"], "throughput-real-source-v1")
+        self.assertIs(profile["report_only"], True)
+        self.assertIn("--no-guard", profile["arguments"])
+        self.assertEqual(profile["arguments"][profile["arguments"].index("--pairs") + 1], str(profile["pairs_per_round"]))
+        self.assertEqual(profile["arguments"][profile["arguments"].index("--warmups") + 1], str(profile["warmups"]))
+        self.assertEqual(profile["arguments"][profile["arguments"].index("--cpu") + 1], str(profile["cpu"]))
+        self.assertEqual(compiler_receipt.THROUGHPUT_REAL_SOURCE_REQUEST_LINE, "profile: " + profile["name"])
+        root = Path(__file__).resolve().parents[2]
+        for name, pins in profile["inputs"].items():
+            with self.subTest(input=name):
+                descriptor = (root / pins["descriptor"]).read_bytes()
+                self.assertEqual(hashlib.sha256(descriptor).hexdigest(), pins["descriptor_sha256"])
+                text = descriptor.decode("utf-8")
+                self.assertIn(f"name={name}\n", text)
+                self.assertIn(f"input_tree_sha256={pins['input_tree_sha256']}\n", text)
+                self.assertIn(f"requested_translation_unit_bytes={pins['requested_translation_unit_bytes']}\n", text)
+                for item in pins["copies"]:
+                    self.assertEqual(hashlib.sha256((root / item["from"]).read_bytes()).hexdigest(), item["sha256"])
+        # The leg's own timeout stays inside the unchanged 90-minute compare-pull job.
+        self.assertLessEqual(compiler_compare.REAL_SOURCE_TIMEOUT_SECONDS, 30 * 60)
+
+    def test_complete_evidence_validates_and_every_gap_fails(self) -> None:
+        unused_record, bundle = real_source_evidence()
+        self.assertEqual(self.validate(bundle), [])
+        def change(edit):
+            changed = copy.deepcopy(bundle)
+            edit(changed)
+            return changed
+        cases = {
+            "missing summary": (change(lambda b: b.update(summary=None)), 0),
+            "missing metadata": (change(lambda b: b.update(metadata=None)), 0),
+            "failed harness": (bundle, 2),
+            "cancelled harness": (bundle, None),
+            "signalled harness": (bundle, -15),
+            "invalid summary": (change(lambda b: b["summary"].update(valid=False)), 0),
+            "guarded run": (change(lambda b: b["summary"].update(guard_enabled=True)), 0),
+            "partial cells": (change(lambda b: b["summary"]["comparisons"].pop()), 0),
+            "foreign cell": (change(lambda b: b["summary"]["comparisons"][0].update(name="tiny_startup/fast")), 0),
+            "gated decision": (change(lambda b: b["summary"]["comparisons"][0].update(decision="regression")), 0),
+            "short round": (change(lambda b: b["summary"]["comparisons"][1]["tests"][0].update(pairs=19)), 0),
+            "missing round": (change(lambda b: b["summary"]["comparisons"][2]["tests"].pop()), 0),
+            "missing median": (change(lambda b: b["summary"]["comparisons"][3]["medians"].update(wall_seconds=[0.5])), 0),
+            "different pairs": (change(lambda b: b["metadata"].update(pairs_per_round=10)), 0),
+            "synthetic corpus": (change(lambda b: b["metadata"].update(workloads=["tiny_startup"])), 0),
+            "extra flag": (change(lambda b: b["metadata"].update(flags=["-O0"])), 0),
+            "changed descriptor": (change(lambda b: b["metadata"]["real_sources"][0].update(descriptor_sha256="0" * 64)), 0),
+            "changed tree": (change(lambda b: b["metadata"]["real_sources"][1].update(input_tree_sha256="0" * 64)), 0),
+            "missing descriptor": (change(lambda b: b["metadata"]["real_sources"].pop()), 0),
+            "object job": (change(lambda b: b["metadata"]["jobs"][0].update(artifact="object")), 0),
+            "job on another tree": (change(lambda b: b["metadata"]["jobs"][5].update(sha256="0" * 64)), 0),
+            "partial jobs": (change(lambda b: b["metadata"]["jobs"].pop()), 0),
+            "stale baseline": (change(lambda b: b["metadata"]["compiler_provenance"][0].update(sha256="3" * 64)), 0),
+            "stale candidate": (change(lambda b: b["metadata"]["compiler_provenance"][1].update(sha256=A256)), 0),
+            "incomplete staging": (change(lambda b: b["staging"].update(status="incomplete")), 0),
+            "missing staging": (change(lambda b: b.update(staging=None)), 0),
+            "unpinned archive": (change(lambda b: b["staging"]["inputs"]["lua-5.4.8-native"].update(archive_sha256="0" * 64)), 0),
+            "unpinned file": (change(lambda b: b["staging"]["inputs"]["cjson-1.7.19-native"]["files"][0].update(sha256="0" * 64)), 0),
+            "other host": (change(lambda b: b.update(cpuinfo="model name\t: AMD EPYC 7763 64-Core Processor\n")), 0),
+            "mixed host": (change(lambda b: b.update(cpuinfo=b["cpuinfo"] + "model name\t: Intel(R) Xeon(R)\n")), 0),
+            "missing host": (change(lambda b: b.update(cpuinfo=None)), 0),
+        }
+        for name, (changed, status) in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(self.validate(changed, status), name)
+
+    def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
+        record, bundle = real_source_evidence()
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["throughput_real_source"] = record
+        values = {"expected": dict(EXPECTED, mode="pull"), "authorized": True, "compare_result": "success",
+                  "receipt": pull, "summary": summary(), "policy_value": "",
+                  "throughput": dict(corpus(), real_source_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        failed = copy.deepcopy(record)
+        failed.update(status="failed", exit=2)
+        stale = copy.deepcopy(record)
+        stale["cells"][0]["wall_seconds"] = [0.5, 0.1]
+        widened = copy.deepcopy(record)
+        widened["profile"]["pairs_per_round"] = 5
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "partial bundle": {"throughput": dict(corpus(), real_source_bundle={
+                key: value for key, value in bundle.items() if key != "staging"})},
+            "failed run": {"receipt": dict(pull, throughput_real_source=failed)},
+            "stale cells": {"receipt": dict(pull, throughput_real_source=stale)},
+            "changed profile": {"receipt": dict(pull, throughput_real_source=widened)},
+            "not a request": {"receipt": dict(pull, throughput_real_source=dict(record, requested=False))},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("Real-source throughput (throughput-real-source-v1): complete", report)
+        self.assertIn("| lua-5.4.8-native/fast | 500.0 | 490.0 | 0.9800 |", report)
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Real Source Test")
+            fixture_git(repo, "config", "user.email", "real-source@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            fixture_git(repo, "add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            fixture_git(repo, "commit", "-qm", "seed")
+            line = compiler_receipt.THROUGHPUT_REAL_SOURCE_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                fixture_git(repo, "commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.real_source_request_selection(
+                        repo, fixture_git(repo, "rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            fixture_git(repo, "commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.real_source_request_selection(repo, fixture_git(repo, "rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.THROUGHPUT_REAL_SOURCE_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", throughput_real_source=real_source_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("throughput_real_source")
+        self.assertIn("no real-source record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+        self.assertEqual(verify(Api(1, 0), expected, dict(plain, state="superseded"), {}), "")
+
+    def test_staging_checks_every_pin_and_refuses_unsafe_members(self) -> None:
+        def tar_gz(members: dict[str, bytes], symlink: str | None = None) -> bytes:
+            buffer = io.BytesIO()
+            with tarfile.open(fileobj=buffer, mode="w:gz") as bundle:
+                for name, data in members.items():
+                    info = tarfile.TarInfo(name)
+                    info.size = len(data)
+                    bundle.addfile(info, io.BytesIO(data))
+                if symlink:
+                    info = tarfile.TarInfo(symlink)
+                    info.type = tarfile.SYMTYPE
+                    info.linkname = "/etc/passwd"
+                    bundle.addfile(info)
+            return buffer.getvalue()
+        def zipped(members: dict[str, bytes]) -> bytes:
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w") as bundle:
+                for name, data in members.items():
+                    bundle.writestr(name, data)
+            return buffer.getvalue()
+        digest = lambda data: hashlib.sha256(data).hexdigest()  # noqa: E731
+        archive = tar_gz({"pkg/src/a.c": b"int a;\n", "pkg/src/sub/b.h": b"#define B\n", "pkg/README": b"x\n"})
+        amalgamation = zipped({"amal/": b"", "amal/one.c": b"int one;\n"})
+        single = b"int single;\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "repo"
+            (repo / "tools").mkdir(parents=True)
+            for name in ("t", "z", "f"):
+                (repo / "tools" / f"{name}.workload").write_text(name, encoding="utf-8")
+            (repo / "copy.c").write_bytes(b"int copy;\n")
+            pins = {
+                "tarred": {"descriptor": "tools/t.workload", "descriptor_sha256": digest(b"t"), "files": [], "copies": [],
+                           "archive": {"url": "https://example.invalid/t.tar.gz", "format": "tar.gz", "prefix": "pkg/src/",
+                                       "sha256": digest(archive)}},
+                "zipped": {"descriptor": "tools/z.workload", "descriptor_sha256": digest(b"z"), "files": [], "copies": [],
+                           "archive": {"url": "https://example.invalid/z.zip", "format": "zip", "prefix": "amal/",
+                                       "sha256": digest(amalgamation)}},
+                "fetched": {"descriptor": "tools/f.workload", "descriptor_sha256": digest(b"f"),
+                            "files": [{"path": "single.c", "url": "https://example.invalid/single.c", "sha256": digest(single)}],
+                            "copies": [{"path": "generated/copy.c", "from": "copy.c", "sha256": digest(b"int copy;\n")}],
+                            "archive": None}}
+            served = {"https://example.invalid/t.tar.gz": archive, "https://example.invalid/z.zip": amalgamation,
+                      "https://example.invalid/single.c": single}
+            def stage(work: str, pinned: dict = pins, fetched: dict = served):
+                with mock.patch.object(throughput_real_source, "THROUGHPUT_REAL_SOURCE_INPUTS", pinned):
+                    return throughput_real_source.stage(repo, Path(temporary) / work, fetched.__getitem__)
+            roots, record = stage("good")
+            self.assertEqual(record["status"], "complete")
+            self.assertEqual(sorted(str(path.relative_to(roots["tarred"])) for path in roots["tarred"].rglob("*")
+                                    if path.is_file()), ["a.c", "sub/b.h"])
+            self.assertEqual((roots["zipped"] / "one.c").read_bytes(), b"int one;\n")
+            self.assertEqual((roots["fetched"] / "generated/copy.c").read_bytes(), b"int copy;\n")
+            self.assertEqual(record["inputs"]["fetched"]["files"], [{"path": "single.c", "sha256": digest(single)}])
+            with mock.patch.object(throughput_real_source, "THROUGHPUT_REAL_SOURCE_INPUTS", pins):
+                self.assertEqual(throughput_real_source.harness_arguments(repo, roots)[:3],
+                                 ["--real-source", str((repo / "tools/t.workload").resolve()), str(roots["tarred"].resolve())])
+            bad = {
+                "tampered archive": (pins, dict(served, **{"https://example.invalid/t.tar.gz": tar_gz({"pkg/src/a.c": b"int b;\n"})})),
+                "tampered file": (pins, dict(served, **{"https://example.invalid/single.c": b"int other;\n"})),
+                "changed descriptor": ({**pins, "tarred": dict(pins["tarred"], descriptor_sha256="0" * 64)}, served),
+                "changed copy": ({**pins, "fetched": dict(pins["fetched"], copies=[dict(pins["fetched"]["copies"][0], sha256="0" * 64)])}, served),
+            }
+            for traversal in ("pkg/src/../escape.c", "pkg/src//abs.c"):
+                unsafe = tar_gz({traversal: b"x\n"})
+                bad[f"unsafe {traversal}"] = ({**pins, "tarred": dict(pins["tarred"], archive=dict(pins["tarred"]["archive"], sha256=digest(unsafe)))},
+                                              dict(served, **{"https://example.invalid/t.tar.gz": unsafe}))
+            linked = tar_gz({"pkg/src/a.c": b"int a;\n"}, symlink="pkg/src/link.c")
+            bad["symlink member"] = ({**pins, "tarred": dict(pins["tarred"], archive=dict(pins["tarred"]["archive"], sha256=digest(linked)))},
+                                     dict(served, **{"https://example.invalid/t.tar.gz": linked}))
+            for index, (name, (pinned, fetched)) in enumerate(bad.items()):
+                with self.subTest(case=name):
+                    with self.assertRaises(ValueError):
+                        stage(f"bad-{index}", pinned, fetched)
+
+    def test_compare_leg_records_staging_and_harness_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "work").mkdir()
+            (root / "evidence").mkdir()
+            def leg() -> dict:
+                receipt_value = {"binaries": copy.deepcopy(BINARIES), "timings": {},
+                                 "throughput_real_source": {"requested": True, "status": "pending"}}
+                compiler_compare.measure_real_source(root / "candidate", root / "bin", root / "work", root / "evidence",
+                                                     "b" * 40, "a" * 40, receipt_value)
+                return receipt_value["throughput_real_source"]
+            with mock.patch.object(throughput_real_source, "stage", side_effect=ValueError("archive SHA-256 differs")):
+                record = leg()
+            self.assertEqual(record["status"], "failed")
+            self.assertIn("could not be staged: archive SHA-256 differs", record["errors"][0])
+            (root / "work" / "inputs").mkdir()
+            with mock.patch.object(throughput_real_source, "stage", return_value=({}, {"status": "complete"})), \
+                    mock.patch.object(throughput_real_source, "harness_arguments", return_value=[]), \
+                    mock.patch.object(compiler_compare, "run", return_value=2) as run:
+                record = leg()
+            self.assertEqual(run.call_args.args[0][:3], ["./build.sh", "bench_throughput", "run"])
+            self.assertEqual(run.call_args.args[0][-len(compiler_receipt.THROUGHPUT_REAL_SOURCE_PROFILE["arguments"]):],
+                             compiler_receipt.THROUGHPUT_REAL_SOURCE_PROFILE["arguments"])
+            self.assertEqual((record["status"], record["exit"]), ("failed", 2))
+            self.assertTrue(any("exited 2" in error for error in record["errors"]), record["errors"])
+
+
+
+def production_profile_evidence(head: str = "a" * 40) -> tuple[dict, dict]:
+    """A complete synthetic production-profile-v1 record and its exported bundle: release A256, pgo-lto B256."""
+    phases = compiler_receipt.PRODUCTION_PROFILE_PHASES
+    ledger = (f"{compiler_receipt.PRODUCTION_PROFILE_LEDGER}\tcomplete=1\tphases={phases}\texpected={phases}\n"
+              "index\tlabel\tkind\tvariant\tstart_us\tduration_us\toutcome\tuser_cpu_us\tsystem_cpu_us\tpeak_memory_bytes\n" +
+              "".join(f"{slot}\t{name}\t{kind}\t{variant}\t{slot}\t1\tpassed\t1\t1\t1\n"
+                      for slot, name, kind, variant in compiler_receipt.PRODUCTION_PROFILE_LEDGER_PHASES))
+    build_summary = (f"status=passed\nsource_revision={head}\nsource_tree={'d' * 40}\nproduction_compiler_sha256={B256}\n"
+                     "debug_sections=absent\ncorrectness=test_all\nbenchmarks=skipped\nphase_ledger=evidence/phases.tsv\n")
+    timed = corpus()
+    bundle = {"build_summary": build_summary, "ledger": ledger, "summary": timed["summary"], "metadata": timed["metadata"]}
+    record = {"requested": True, "request_line": compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE,
+              "profile": copy.deepcopy(compiler_receipt.PRODUCTION_PROFILE_PROFILE), "status": "complete",
+              "build_exit": 0, "exit": 0, "errors": [], "binaries": copy.deepcopy(BINARIES),
+              "cells": compiler_receipt.throughput_real_source_digest(timed["summary"])}
+    return record, bundle
+
+
+class ProductionProfileTest(unittest.TestCase):
+    """#2761: the fixed production-profile-v1 PGO/LTO profile on the pull-compare route."""
+
+    def validate(self, bundle: dict, build_status: object = 0, status: object = 0, binaries: dict = BINARIES,
+                 head: str = "a" * 40) -> list[str]:
+        return compiler_receipt.validate_production_profile(build_status, bundle["build_summary"], bundle["ledger"], head,
+                                                            status, bundle["summary"], bundle["metadata"], binaries)
+
+    def test_profile_is_frozen_report_only_and_times_the_ordinary_corpus(self) -> None:
+        profile = compiler_receipt.PRODUCTION_PROFILE_PROFILE
+        self.assertEqual(profile["name"], "production-profile-v1")
+        self.assertEqual(compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE, "profile: " + profile["name"])
+        self.assertIs(profile["report_only"], True)
+        self.assertEqual(profile["arguments"], [*compiler_receipt.THROUGHPUT_PROFILE["arguments"], "--require-identical-output"])
+        self.assertEqual(profile["compilers"], {"baseline": "release", "candidate": "pgo-lto"})
+        self.assertIn("--no-benchmark", profile["build_arguments"])
+        # The build leg's bound plus the corpus stays inside the unchanged 90-minute compare-pull job.
+        self.assertLessEqual(compiler_compare.PRODUCTION_PROFILE_BUILD_TIMEOUT_SECONDS
+                             + compiler_compare.THROUGHPUT_TIMEOUT_SECONDS, 75 * 60)
+        source = (Path(__file__).resolve().parents[2] / "tools/production_profile.c").read_text(encoding="utf-8")
+        self.assertIn(f'LEDGER_VERSION "{compiler_receipt.PRODUCTION_PROFILE_LEDGER}"', source)
+
+    def test_complete_evidence_validates_and_every_gap_fails(self) -> None:
+        unused_record, bundle = production_profile_evidence()
+        self.assertEqual(self.validate(bundle), [])
+        regressed = dict(bundle, **corpus("regression"))
+        self.assertEqual(self.validate(regressed, status=1), [], "a measured regression is reported, not refused")
+        def change(**fields):
+            return dict(bundle, **fields)
+        def summary_line(key: str, value: str) -> str:
+            return "".join(f"{key}={value}\n" if line.startswith(key + "=") else line + "\n"
+                           for line in bundle["build_summary"].splitlines())
+        ledger_lines = bundle["ledger"].splitlines(keepends=True)
+        cases = {
+            "failed build": (bundle, {"build_status": 2}),
+            "cancelled build": (bundle, {"build_status": None}),
+            "failed corpus": (bundle, {"status": 2}),
+            "cancelled corpus": (bundle, {"status": None}),
+            "missing build summary": (change(build_summary=None), {}),
+            "failed build summary": (change(build_summary=summary_line("status", "failed")), {}),
+            "other revision": (change(build_summary=summary_line("source_revision", "f" * 40)), {}),
+            "benchmarked build": (change(build_summary=summary_line("benchmarks", "complete")), {}),
+            "untested compiler": (change(build_summary=summary_line("correctness", "none")), {}),
+            "debug sections": (change(build_summary=summary_line("debug_sections", "present")), {}),
+            "other production compiler": (change(build_summary=summary_line("production_compiler_sha256", A256)), {}),
+            "repeated key": (change(build_summary=bundle["build_summary"] + "status=passed\n"), {}),
+            "missing ledger": (change(ledger=None), {}),
+            "incomplete ledger": (change(ledger=bundle["ledger"].replace("complete=1", "complete=0")), {}),
+            "partial ledger": (change(ledger="".join(ledger_lines[:-1])), {}),
+            "failed phase": (change(ledger=bundle["ledger"].replace("\tpassed\t", "\tfailed\t", 1)), {}),
+            "duplicate phases": (change(ledger="".join(ledger_lines[:2] + [ledger_lines[2]] * len(ledger_lines[2:]))), {}),
+            "missing training": (change(ledger="".join(line for line in ledger_lines if "\ttrain-lto\t" not in line)
+                                        + ledger_lines[-1]), {}),
+            "substituted phase": (change(ledger=bundle["ledger"].replace("\ttest-production\t", "\tskip-tests\t")), {}),
+            "reordered phases": (change(ledger="".join(ledger_lines[:2] + [ledger_lines[3], ledger_lines[2]] + ledger_lines[4:])), {}),
+            "changed columns": (change(ledger=bundle["ledger"].replace("\tpeak_memory_bytes", "\tpeak")), {}),
+            "missing corpus": (change(summary=None, metadata=None), {}),
+            "partial corpus": (change(summary=dict(bundle["summary"], comparisons=bundle["summary"]["comparisons"][:-1])), {}),
+            "stale release": (bundle, {"binaries": {"baseline": {"sha256": "3" * 64}, "candidate": {"sha256": B256}}}),
+            "same binary": (bundle, {"binaries": {"baseline": {"sha256": B256}, "candidate": {"sha256": B256}}}),
+            "no binaries": (bundle, {"binaries": {}}),
+        }
+        for name, (changed, options) in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(self.validate(changed, **options), name)
+
+    def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
+        record, bundle = production_profile_evidence()
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["production_profile"] = record
+        values = {"expected": dict(EXPECTED, mode="pull"), "authorized": True, "compare_result": "success",
+                  "receipt": pull, "summary": summary(), "policy_value": "",
+                  "throughput": dict(corpus(), production_profile_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        failed = dict(copy.deepcopy(record), status="failed", build_exit=2)
+        stale = copy.deepcopy(record)
+        stale["cells"][0]["wall_seconds"] = [1.0, 0.1]
+        widened = copy.deepcopy(record)
+        widened["profile"]["build_arguments"] = ["--no-benchmark"]
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "partial bundle": {"throughput": dict(corpus(), production_profile_bundle={
+                key: value for key, value in bundle.items() if key != "ledger"})},
+            "failed run": {"receipt": dict(pull, production_profile=failed)},
+            "stale cells": {"receipt": dict(pull, production_profile=stale)},
+            "changed profile": {"receipt": dict(pull, production_profile=widened)},
+            "not a request": {"receipt": dict(pull, production_profile=dict(record, requested=False))},
+            "with real-source": {"receipt": dict(pull, throughput_real_source=real_source_evidence()[0]),
+                                 "throughput": dict(corpus(), production_profile_bundle=bundle,
+                                                    real_source_bundle=real_source_evidence()[1])},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("PGO/LTO production profile (production-profile-v1): complete", report)
+        self.assertIn("| tiny_startup/fast | 1000.0 | 1300.0 | 1.3000 |", report)
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Production Profile Test")
+            fixture_git(repo, "config", "user.email", "production-profile@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            fixture_git(repo, "add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            fixture_git(repo, "commit", "-qm", "seed")
+            line = compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                fixture_git(repo, "commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.production_profile_request_selection(
+                        repo, fixture_git(repo, "rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            fixture_git(repo, "commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.production_profile_request_selection(
+                repo, fixture_git(repo, "rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", production_profile=production_profile_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("production_profile")
+        self.assertIn("no production-profile record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+        self.assertEqual(verify(Api(1, 0), expected, dict(plain, state="superseded"), {}), "")
+
+    def test_compare_leg_records_build_and_corpus_failures(self) -> None:
+        head = "a" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("work", "evidence", "bin", "candidate"):
+                (root / name).mkdir()
+            missing: tuple[str, ...] = ()
+            def leg(run_status) -> dict:
+                receipt_value = {"timings": {}, "production_profile": {"requested": True, "status": "pending"}}
+                with mock.patch.object(compiler_compare, "run", side_effect=run_status) as run, \
+                     mock.patch.object(compiler_compare.shutil, "which", side_effect=lambda tool: None if tool in missing else "/usr/bin/" + tool):
+                    compiler_compare.measure_production_profile(root / "candidate", root / "bin", root / "work",
+                                                                root / "evidence", head, receipt_value)
+                return receipt_value["production_profile"], run
+            record, run = leg(lambda argv, *rest: 0 if argv[0] == "git" else 2)
+            self.assertEqual(run.call_args.args[0][:2], ["./build.sh", "production_profile"])
+            self.assertEqual(run.call_args.args[1], root / "work" / "production-profile-source")
+            self.assertEqual((record["status"], record["build_exit"], record["exit"]), ("failed", 2, None))
+            self.assertTrue(any("build exited 2" in error for error in record["errors"]), record["errors"])
+            def built(argv, cwd, *rest):
+                if argv[:2] == ["./build.sh", "production_profile"]:
+                    output = cwd / "build" / "production-profile"
+                    for tree, content in (("release", b"release"), ("pgo-lto", b"pgo-lto")):
+                        (output / tree / "Release").mkdir(parents=True)
+                        (output / tree / "Release" / "ide").write_bytes(content)
+                    (output / "evidence").mkdir()
+                    unused_record, bundle = production_profile_evidence(head)
+                    (output / "summary.txt").write_text(bundle["build_summary"], encoding="utf-8")
+                    (output / "evidence" / "phases.tsv").write_text(bundle["ledger"], encoding="utf-8")
+                    return 0
+                if argv[0] == "git" and "clone" in argv:
+                    (cwd.parent / "work" / "production-profile-source").mkdir()
+                return 0 if argv[0] == "git" else 3
+            record, run = leg(built)
+            self.assertEqual(run.call_args.args[0][:3], ["./build.sh", "bench_throughput", "run"])
+            self.assertEqual(run.call_args.args[0][-len(compiler_receipt.PRODUCTION_PROFILE_PROFILE["arguments"]):],
+                             compiler_receipt.PRODUCTION_PROFILE_PROFILE["arguments"])
+            self.assertEqual(sorted(record["binaries"]), ["baseline", "candidate"])
+            self.assertFalse((root / "evidence" / "production_profile" / "release").exists())
+            self.assertTrue((root / "evidence" / "production_profile" / "evidence" / "phases.tsv").is_file())
+            self.assertEqual((record["status"], record["build_exit"], record["exit"]), ("failed", 0, 3))
+            self.assertTrue(any("corpus" in error for error in record["errors"]), record["errors"])
+            missing = ("ld.lld",)
+            record, run = leg(built)
+            run.assert_not_called()
+            self.assertEqual((record["status"], record["missing_tools"]), ("failed", ["ld.lld"]))
+            self.assertIn("production profile host lacks ld.lld", record["errors"][0])
+
+
+PROBE_HASHES = {"fast_ra": {"baseline": "3" * 64, "candidate": "4" * 64},
+                "line_mark": {"baseline": "5" * 64, "candidate": "6" * 64}}
+
+
+def probe_line(probe: str, case: dict, value: int) -> str:
+    """One sample line in the exact format each probe prints (real 955ea4b2 output, sizes substituted)."""
+    markers = case["markers"]
+    if probe == "fast_ra":
+        return (f"blocks={markers['blocks']} prepass_ns={value // 3} placement_ns={value - value // 3} total_ns={value} "
+                "prepass_bytes=167960 total_bytes=938140 spills=0 reloads=0 copies=0 edits=0 frame=0\n")
+    return (f"mode=schedule leaves={markers['leaves']} rows={markers['rows']} batch=1 schedule_ns={value} "
+            "retained_bytes=393232 permuted=8185 displacement=18282762 hash=c07477f4bdba3597\n")
+
+
+def probe_invocation(probe: str, case: dict, value: int) -> dict:
+    """One passed invocation as compiler_probes.c records it: every *_ns field but the metric dropped."""
+    fields = dict(token.split("=", 1) for token in probe_line(probe, case, value).split())
+    metric = compiler_receipt.COMPILER_PROBES_PROFILE["probes"][probe]["metric"]
+    return {"exit": 0, "samples": [int(fields[metric])] * compiler_receipt.COMPILER_PROBES_PROFILE["repeats"],
+            "check": {key: text for key, text in fields.items() if not key.endswith("_ns")}}
+
+
+def build_probe_harness(directory: Path) -> Path:
+    """Compile the trusted native harness exactly as compiler_compare does."""
+    harness = directory / "compiler-probes-harness"
+    source = Path(compiler_compare.__file__).resolve().with_name(compiler_receipt.COMPILER_PROBES_HARNESS)
+    subprocess.run(["clang", *compiler_receipt.COMPILER_PROBES_HARNESS_FLAGS, str(source), "-o", str(harness)],
+                   check=True, capture_output=True)
+    return harness
+
+
+def compiler_probes_evidence(base: str = "b" * 40, head: str = "a" * 40) -> tuple[dict, dict]:
+    """A complete synthetic compiler-probes-v1 record and bundle: the head is 10% faster on every case."""
+    profile = compiler_receipt.COMPILER_PROBES_PROFILE
+    cases = []
+    for probe, definition in profile["probes"].items():
+        for case in definition["cases"]:
+            values = {"baseline": 1000, "candidate": 900}
+            cases.append({"probe": probe, "name": case["name"], "arguments": list(case["arguments"]),
+                          "warmups": {role: [probe_invocation(probe, case, values[role])
+                                             for unused in range(profile["warmups"])] for role in values},
+                          "pairs": [dict({"order": ["baseline", "candidate"] if index % 2 == 0 else ["candidate", "baseline"]},
+                                         **{role: probe_invocation(probe, case, values[role]) for role in values})
+                                    for index in range(profile["pairs"])]})
+    binaries = {probe: {role: {"sha256": digest, "size_bytes": 1, "revision": base if role == "baseline" else head}
+                        for role, digest in roles.items()} for probe, roles in PROBE_HASHES.items()}
+    builds = [{"probe": probe, "role": role, "revision": revision, "exit": 0}
+              for probe in profile["probes"] for role, revision in (("baseline", base), ("candidate", head))]
+    summary = {"schema": compiler_receipt.COMPILER_PROBES_SCHEMA, "profile": profile["name"], "base": base,
+               "head": head, "builds": builds, "cases": cases, "status": "complete", "errors": []}
+    summary = json.loads(json.dumps(summary))
+    record = {"requested": True, "request_line": compiler_receipt.COMPILER_PROBES_REQUEST_LINE,
+              "profile": copy.deepcopy(profile), "status": "complete", "exit": 0, "harness_exit": 0, "errors": [],
+              "binaries": copy.deepcopy(binaries), "probe_source_sha256": {probe: "7" * 64 for probe in profile["probes"]},
+              "cells": compiler_receipt.compiler_probes_digest(summary)}
+    return record, {"summary": summary}
+
+
+class CompilerProbesTest(unittest.TestCase):
+    """#2761: the fixed compiler-probes-v1 FAST RA and line-mark profile on the pull-compare route."""
+
+    def validate(self, summary: object, status: object = 0, binaries: dict | None = None, sources: object = None,
+                 base: str = "b" * 40, head: str = "a" * 40) -> list[str]:
+        record = compiler_probes_evidence()[0]
+        return compiler_receipt.validate_compiler_probes(status, summary, base, head,
+                                                         record["binaries"] if binaries is None else binaries,
+                                                         record["probe_source_sha256"] if sources is None else sources)
+
+    def test_profile_is_frozen_report_only_and_uses_the_audited_commands(self) -> None:
+        profile = compiler_receipt.COMPILER_PROBES_PROFILE
+        root = Path(__file__).resolve().parents[2]
+        self.assertEqual(profile["name"], "compiler-probes-v1")
+        self.assertEqual(compiler_receipt.COMPILER_PROBES_REQUEST_LINE, "profile: " + profile["name"])
+        self.assertIs(profile["report_only"], True)
+        self.assertEqual((profile["cpu"], profile["warmups"], profile["pairs"]), (2, 2, 30))
+        for probe, definition in profile["probes"].items():
+            with self.subTest(probe=probe):
+                self.assertTrue((root / definition["source"]).is_file())
+                audit = (root / definition["audit"]).read_text(encoding="utf-8")
+                self.assertIn(definition["source"].split("/")[-1], audit)
+                # Every flag and source comes from the audit's own command; codegen.c is the one
+                # recorded addition, needed by machine.c since #2876.
+                for item in [*definition["compile"], *definition["link"], *definition["sources"]]:
+                    if item != "src/buster/lib/compiler/codegen/codegen.c":
+                        self.assertIn(item.replace("-Isrc", "-I"), audit, item)
+                for case in definition["cases"]:
+                    self.assertEqual(case["arguments"].count(str(profile["repeats"])), 1, case)
+                    self.assertLessEqual(set(case["markers"]), set(definition["check_fields"]), case)
+        self.assertLessEqual(compiler_compare.COMPILER_PROBES_TIMEOUT_SECONDS, 20 * 60)
+
+    def test_complete_evidence_validates_and_every_gap_fails(self) -> None:
+        record, bundle = compiler_probes_evidence()
+        summary = bundle["summary"]
+        self.assertEqual(self.validate(summary), [])
+        results = compiler_receipt.compiler_probes_digest(summary)
+        self.assertEqual(len(results), 12)
+        self.assertTrue(all(row["ratio"] == 0.9 and row["candidate_faster"] == 30 for row in results))
+        same = compiler_probes_evidence(head="b" * 40)[1]["summary"]
+        same_binaries = {probe: {role: {"sha256": "3" * 64, "revision": "b" * 40} for role in ("baseline", "candidate")}
+                         for probe in compiler_receipt.COMPILER_PROBES_PROFILE["probes"]}
+        self.assertEqual(self.validate(same, binaries=same_binaries, head="b" * 40), [], "an A/A run is valid")
+
+        def changed(edit) -> dict:
+            value = copy.deepcopy(summary)
+            edit(value)
+            return value
+
+        def invocation(edit, case: int = 0, pair: int = 3, role: str = "candidate"):
+            return changed(lambda value: edit(value["cases"][case]["pairs"][pair][role]))
+
+        cases = {
+            "failed run": (summary, {"status": 1}),
+            "cancelled run": (summary, {"status": None}),
+            "missing summary": (None, {}),
+            "other schema": (changed(lambda value: value.update(schema="other")), {}),
+            "changed profile": (changed(lambda value: value.update(profile="compiler-probes-v2")), {}),
+            "failed build": (changed(lambda value: value["builds"][3].update(exit=1)), {}),
+            "missing build": (changed(lambda value: value["builds"].pop()), {}),
+            "build from another revision": (changed(lambda value: value["builds"][0].update(revision="c" * 40)), {}),
+            "other base": (summary, {"base": "c" * 40}),
+            "other head": (summary, {"head": "c" * 40}),
+            "failed status": (changed(lambda value: value.update(status="failed")), {}),
+            "reported error": (changed(lambda value: value.update(errors=["line_mark baseline build exited 1"])), {}),
+            "missing source hash": (summary, {"sources": {"line_mark": "7" * 64}}),
+            "malformed source hash": (summary, {"sources": {"fast_ra": "7", "line_mark": "7" * 64}}),
+            "unhashed binary": (summary, {"binaries": dict(record["binaries"], fast_ra={
+                "baseline": {"revision": "b" * 40}, "candidate": record["binaries"]["fast_ra"]["candidate"]})}),
+            "missing binary": (summary, {"binaries": dict(record["binaries"], line_mark={
+                "baseline": record["binaries"]["line_mark"]["baseline"]})}),
+            "binary from another revision": (summary, {"binaries": dict(record["binaries"], fast_ra=dict(
+                record["binaries"]["fast_ra"], candidate={"sha256": "4" * 64, "revision": "c" * 40}))}),
+            "no measured binaries": (summary, {"binaries": {}}),
+            "missing case": (changed(lambda value: value["cases"].pop()), {}),
+            "reordered cases": (changed(lambda value: value["cases"].reverse()), {}),
+            "changed case arguments": (changed(lambda value: value["cases"][0].update(arguments=["256", "1", "chain"])), {}),
+            "missing pair": (changed(lambda value: value["cases"][2]["pairs"].pop()), {}),
+            "pair out of order": (changed(lambda value: value["cases"][2]["pairs"][1].update(
+                order=["baseline", "candidate"])), {}),
+            "failed invocation": (invocation(lambda value: value.update(exit=1)), {}),
+            "timed-out invocation": (invocation(lambda value: value.update(exit=124)), {}),
+            "partial samples": (invocation(lambda value: value["samples"].pop()), {}),
+            "zero sample": (invocation(lambda value: value["samples"].__setitem__(0, 0)), {}),
+            "overflowing pair samples": (invocation(lambda value: value.update(samples=[10 ** 309] * 11)), {}),
+            "overflowing warmup samples": (changed(lambda value: value["cases"][9]["warmups"]["baseline"][1].update(
+                samples=[10 ** 309] * 11)), {}),
+            "sample past the invocation timeout": (invocation(lambda value: value["samples"].__setitem__(
+                5, compiler_receipt.COMPILER_PROBES_SAMPLE_LIMIT_NS + 1)), {}),
+            "float sample": (invocation(lambda value: value["samples"].__setitem__(0, 1.5)), {}),
+            "unparsed self-check": (invocation(lambda value: value.update(check=None)), {}),
+            "other probe size": (invocation(lambda value: value["check"].update(blocks="512")), {}),
+            "self-check reduced to its size": (changed(lambda value: [
+                invocation_value.update(check={"blocks": invocation_value["check"]["blocks"]})
+                for case in value["cases"] if case["probe"] == "fast_ra"
+                for invocation_value in [*case["warmups"]["baseline"], *case["warmups"]["candidate"],
+                                         *(pair[role] for pair in case["pairs"] for role in ("baseline", "candidate"))]]), {}),
+            "missing spill count": (invocation(lambda value: value["check"].pop("spills")), {}),
+            "extra self-check field": (invocation(lambda value: value["check"].update(note="1")), {}),
+            "non-numeric frame": (invocation(lambda value: value["check"].update(frame="-1")), {}),
+            "missing line-mark hash": (invocation(lambda value: value["check"].pop("hash"), case=8), {}),
+            "malformed line-mark hash": (invocation(lambda value: value["check"].update(hash="c07477f4"), case=8), {}),
+            "wrong line-mark mode": (invocation(lambda value: value["check"].update(mode="remap-ordered"), case=8), {}),
+            "wrong line-mark batch": (invocation(lambda value: value["check"].update(batch="999"), case=8), {}),
+            "wrong line-mark rows": (invocation(lambda value: value["check"].update(rows="2048"), case=8), {}),
+            "remapped line-mark everywhere": (changed(lambda value: [
+                invocation_value["check"].update(mode="remap", batch="999")
+                for case in value["cases"] if case["probe"] == "line_mark"
+                for invocation_value in [*case["warmups"]["baseline"], *case["warmups"]["candidate"],
+                                         *(pair[role] for pair in case["pairs"] for role in ("baseline", "candidate"))]]), {}),
+            "changing self-check": (invocation(lambda value: value["check"].update(hash="0100")), {}),
+            "missing warmup": (changed(lambda value: value["cases"][1]["warmups"]["baseline"].pop()), {}),
+            "failed warmup": (changed(lambda value: value["cases"][1]["warmups"]["candidate"][0].update(exit=2)), {}),
+        }
+        for name, (value, options) in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(self.validate(value, **options), name)
+                # Malformed evidence is refused with reasons, never raised.
+                self.assertIsInstance(compiler_receipt.compiler_probes_digest(value), list)
+        self.assertEqual(compiler_receipt.compiler_probes_interval([float(item) for item in range(30)]), (9.0, 20.0))
+
+    def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
+        record, bundle = compiler_probes_evidence()
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["compiler_probes"] = record
+        values = {"expected": dict(EXPECTED, mode="pull"), "authorized": True, "compare_result": "success",
+                  "receipt": pull, "summary": summary(), "policy_value": "",
+                  "throughput": dict(corpus(), compiler_probes_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        stale = copy.deepcopy(record)
+        stale["cells"][0]["ratio"] = 0.5
+        widened = copy.deepcopy(record)
+        widened["profile"]["pairs"] = 5
+        rebound = copy.deepcopy(record)
+        rebound["binaries"]["line_mark"]["candidate"]["revision"] = "c" * 40
+        unsourced = copy.deepcopy(record)
+        unsourced["probe_source_sha256"] = {}
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "empty bundle": {"throughput": dict(corpus(), compiler_probes_bundle={})},
+            "failed run": {"receipt": dict(pull, compiler_probes=dict(record, status="failed", exit=1))},
+            "cancelled run": {"receipt": dict(pull, compiler_probes=dict(record, status="pending", exit=None))},
+            "stale cells": {"receipt": dict(pull, compiler_probes=stale)},
+            "changed profile": {"receipt": dict(pull, compiler_probes=widened)},
+            "binary from another revision": {"receipt": dict(pull, compiler_probes=rebound)},
+            "no source hashes": {"receipt": dict(pull, compiler_probes=unsourced)},
+            "other selector": {"receipt": dict(pull, compiler_probes=dict(record, request_line="profile: other"))},
+            "not a request": {"receipt": dict(pull, compiler_probes=dict(record, requested=False))},
+            "other base": {"expected": dict(EXPECTED, mode="pull", base="c" * 40)},
+            "with the production profile": {"receipt": dict(pull, production_profile=production_profile_evidence()[0])},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("Compiler probes (compiler-probes-v1): complete", report)
+        self.assertIn("| fast_ra/chain-256 | 1.0 | 0.9 | 0.9000 [0.9000, 0.9000] | 30/30 | yes |", report)
+
+    def test_artifact_is_read_and_decided_end_to_end(self) -> None:
+        def decided(record: dict, probes_summary: object, drop: bool = False) -> tuple:
+            pull = receipt()
+            pull["mode"] = "pull"
+            pull["identity"].update(mode="pull")
+            pull["compiler_probes"] = record
+            members = {"receipt.json": json.dumps(pull), "lab/summary.json": json.dumps(summary()),
+                       "throughput/summary.json": json.dumps(corpus()["summary"]),
+                       "throughput/metadata.json": json.dumps(corpus()["metadata"])}
+            if not drop:
+                members["compiler_probes/summary.json"] = json.dumps(probes_summary)
+            got = compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+            return compiler_publish.decide(dict(EXPECTED, mode="pull"), True, "success", got[0], got[1], "",
+                                           got[4], extra_reasons=[got[2]] if got[2] else [])
+
+        record, bundle = compiler_probes_evidence()
+        conclusion, unused_title, reasons = decided(record, bundle["summary"])
+        self.assertEqual((conclusion, reasons), ("success", []))
+
+        def consistent(edit) -> tuple:
+            """A malformed artifact whose receipt cells agree with its own samples."""
+            changed_summary = copy.deepcopy(bundle["summary"])
+            for case in changed_summary["cases"]:
+                for item in [*case["warmups"]["baseline"], *case["warmups"]["candidate"],
+                             *(pair[role] for pair in case["pairs"] for role in ("baseline", "candidate"))]:
+                    edit(case["probe"], item["check"])
+            return dict(record, cells=compiler_receipt.compiler_probes_digest(changed_summary)), changed_summary
+
+        def reduce(probe: str, check: dict) -> None:
+            for key in [key for key in check if key not in ("blocks", "leaves")]:
+                check.pop(key)
+
+        def remap(probe: str, check: dict) -> None:
+            if probe == "line_mark":
+                check.update(mode="remap", batch="999")
+
+        def overflowed(locate) -> tuple:
+            """An artifact with one invocation's samples past any finite float, cells re-derived from it."""
+            changed_summary = copy.deepcopy(bundle["summary"])
+            locate(changed_summary["cases"][4]).update(samples=[10 ** 309] * 11)
+            return dict(record, cells=compiler_receipt.compiler_probes_digest(changed_summary)), changed_summary
+
+        for name, (changed_record, changed_summary, drop) in {
+            "overflowing warmup samples": (*overflowed(lambda case: case["warmups"]["candidate"][0]), False),
+            "overflowing timed pair samples": (*overflowed(lambda case: case["pairs"][7]["baseline"]), False),
+            "self-checks reduced to their size": (*consistent(reduce), False),
+            "remapped line-mark": (*consistent(remap), False),
+            "missing member": (record, None, True),
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = decided(changed_record, changed_summary, drop)
+                self.assertEqual(conclusion, "failure", reasons)
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Compiler Probes Test")
+            fixture_git(repo, "config", "user.email", "compiler-probes@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            fixture_git(repo, "add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            fixture_git(repo, "commit", "-qm", "seed")
+            line = compiler_receipt.COMPILER_PROBES_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                fixture_git(repo, "commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.compiler_probes_request_selection(
+                        repo, fixture_git(repo, "rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            fixture_git(repo, "commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.compiler_probes_request_selection(repo, fixture_git(repo, "rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.COMPILER_PROBES_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", compiler_probes=compiler_probes_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("compiler_probes")
+        self.assertIn("no compiler-probes record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+        self.assertEqual(verify(Api(1, 0), expected, dict(plain, state="superseded"), {}), "")
+
+    def test_native_harness_self_test_and_profile_match_the_frozen_profile(self) -> None:
+        """compiler_probes.c parses, pairs and records invocations itself; its profile is this profile."""
+        with tempfile.TemporaryDirectory() as temporary:
+            harness = build_probe_harness(Path(temporary))
+            result = subprocess.run([str(harness), "--self-test"], capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("COMPILER_PROBES_SELF_TEST PASS failures=0", result.stdout)
+            native = json.loads(subprocess.run([str(harness), "--profile"], capture_output=True, text=True,
+                                               check=True).stdout)
+            profile = compiler_receipt.COMPILER_PROBES_PROFILE
+            self.assertEqual({key: native[key] for key in ("name", "compiler", "cpu", "repeats", "warmups", "pairs")},
+                             {key: profile[key] for key in ("name", "compiler", "cpu", "repeats", "warmups", "pairs")})
+            self.assertEqual(native["invocation_timeout_seconds"], compiler_receipt.COMPILER_PROBES_INVOCATION_TIMEOUT_SECONDS)
+            self.assertEqual(native["probes"], {
+                probe: {"source": definition["source"], "metric": definition["metric"], "compile": definition["compile"],
+                        "sources": definition["sources"], "link": definition["link"],
+                        "cases": [{"name": case["name"], "arguments": case["arguments"]} for case in definition["cases"]]}
+                for probe, definition in profile["probes"].items()})
+            # A leg whose revisions cannot be checked out writes a failed summary the validator refuses.
+            root = Path(temporary)
+            (root / "repository").mkdir()
+            status = subprocess.run([str(harness), str(root / "repository"), "b" * 40, "a" * 40, str(root / "work"),
+                                     str(root / "out")], capture_output=True, check=False).returncode
+            failed = json.loads((root / "out" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual((status, failed["status"], failed["cases"]), (1, "failed", []))
+            self.assertTrue(any("could not be checked out" in error for error in failed["errors"]), failed["errors"])
+            self.assertTrue(compiler_receipt.validate_compiler_probes(status, failed, "b" * 40, "a" * 40, {}, {}))
+
+    def test_compare_leg_hashes_binaries_and_records_failures(self) -> None:
+        record_value, bundle = compiler_probes_evidence()
+        head, base = "a" * 40, "b" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("work", "evidence", "candidate"):
+                (root / name).mkdir()
+            def leg(run_status) -> dict:
+                receipt_value = {"timings": {}, "compiler_probes": {"requested": True, "status": "pending"}}
+                with mock.patch.object(compiler_compare, "run", side_effect=run_status) as run:
+                    compiler_compare.measure_compiler_probes(root / "candidate", root / "work", root / "evidence",
+                                                             base, head, receipt_value)
+                return receipt_value["compiler_probes"], run
+            record, run = leg(lambda *rest: 2)
+            source = str(Path(compiler_compare.__file__).resolve().with_name("compiler_probes.c"))
+            self.assertEqual(run.call_count, 1, "a failed harness build runs nothing")
+            self.assertEqual(run.call_args.args[0][:1] + run.call_args.args[0][-3:],
+                             ["clang", source, "-o", str(root / "work" / "compiler-probes-harness")])
+            self.assertEqual((record["status"], record["harness_exit"], record["exit"], record["binaries"]),
+                             ("failed", 2, 2, {}))
+            self.assertTrue(any("exited 2" in error for error in record["errors"]), record["errors"])
+            def produced(argv, cwd, *rest):
+                if argv[0] == "clang":
+                    return 0
+                output = Path(argv[5])
+                (output / "bin").mkdir(parents=True)
+                sources = Path(argv[4]) / "probe-sources"
+                sources.mkdir(parents=True)
+                for definition in compiler_receipt.COMPILER_PROBES_PROFILE["probes"].values():
+                    (sources / Path(definition["source"]).name).write_bytes(b"probe")
+                for probe in compiler_receipt.COMPILER_PROBES_PROFILE["probes"]:
+                    for role in ("baseline", "candidate"):
+                        (output / "bin" / f"{probe}-{role}").write_bytes(f"{probe}-{role}".encode())
+                (output / "summary.json").write_text(json.dumps(bundle["summary"]), encoding="utf-8")
+                return 0
+            output_root = root / "work" / "compiler-probes"
+            record, run = leg(produced)
+            self.assertFalse((root / "evidence" / "compiler_probes" / "bin").exists())
+            self.assertTrue((root / "evidence" / "compiler_probes" / "summary.json").is_file())
+            self.assertEqual(run.call_args.args[0][:4], [str(root / "work" / "compiler-probes-harness"),
+                                                         str(root / "candidate"), base, head])
+            self.assertEqual(record["binaries"]["fast_ra"]["baseline"],
+                             {"sha256": hashlib.sha256(b"fast_ra-baseline").hexdigest(), "size_bytes": 16, "revision": base})
+            self.assertEqual(record["probe_source_sha256"]["line_mark"], hashlib.sha256(b"probe").hexdigest())
+            # The synthetic summary validates against the hashes compare took itself.
+            self.assertEqual((record["status"], record["errors"]), ("complete", []))
+            self.assertEqual(record["cells"], compiler_receipt.compiler_probes_digest(bundle["summary"]))
+            self.assertTrue(output_root.is_dir())
+
+    def test_inventory_coverage_names_both_probe_rows(self) -> None:
+        """The compiler-probes leg discharges its two inventory rows only on a validated success."""
+        rows = ["tool:fast_ra_scaling.c", "tool:machine_line_mark_scaling.c"]
+        self.assertEqual(list(compiler_receipt.INVENTORY_LEGS["pull"]["compiler-probes"]), rows)
+        pull = receipt()
+        pull.update(mode="pull", compiler_probes=compiler_probes_evidence()[0])
+        def leg(receipt_value: dict, conclusion: str) -> dict:
+            coverage = compiler_receipt.covered_inventory_rows(receipt_value, conclusion, "pull")
+            return next(entry for entry in coverage["legs"] if entry["leg"] == "compiler-probes")
+        self.assertEqual(leg(pull, "success")["status"], "discharged")
+        self.assertTrue(set(rows) <= set(compiler_receipt.covered_inventory_rows(pull, "success", "pull")["discharged"]))
+        failed = dict(pull, compiler_probes=dict(pull["compiler_probes"], status="failed"))
+        self.assertEqual(leg(failed, "failure")["status"], "not discharged: leg failed")
+        plain = dict(pull)
+        plain.pop("compiler_probes")
+        self.assertEqual(leg(plain, "success")["status"], "not discharged: not requested")
+        self.assertFalse(set(rows) & set(compiler_receipt.covered_inventory_rows(plain, "success", "pull")["discharged"]))
+
+
+class InventoryCoverageTest(unittest.TestCase):
+    """#2761: a published attempt names exactly the inventory rows its validated evidence discharged."""
+
+    PULL_ROWS = ["build:bench_throughput", "build:bench_throughput@throughput-real-source", "build:production_profile",
+                 "uarch_lab:compare", "uarch_lab:compare@ast-pilot-acceptance",
+                 "uarch_lab:compare@canonical-inline-self-host"]
+
+    def pull(self, **records) -> dict:
+        result = receipt()
+        result["mode"] = "pull"
+        result["identity"].update(mode="pull", ref="refs/pull/7/head")
+        result["inline_acceptance"] = {"requested": False, "status": "not requested"}
+        result["throughput"] = dict(compiler_receipt.throughput_digest(corpus()["summary"]), exit=0)
+        result.update(records)
+        return result
+
+    def opt_ins(self, status: str = "complete") -> dict:
+        record = {"requested": True, "status": status}
+        return {"inline_acceptance": dict(record), "ast_pilot_acceptance": dict(record),
+                "throughput_real_source": dict(record), "production_profile": dict(record),
+                "scaling_profile": copy.deepcopy(compiler_receipt.SCALING_PROFILE),
+                "scaling": {name: {"status": "valid"} for name in compiler_receipt.SCALING_PROFILE["series"]}}
+
+    def legs(self, coverage: dict) -> dict:
+        return {entry["leg"]: entry["status"] for entry in coverage["legs"]}
+
+    def test_every_mapped_leg_is_recognized_and_names_rows(self) -> None:
+        for mode, legs in compiler_receipt.INVENTORY_LEGS.items():
+            self.assertIn(mode, compiler_receipt.MODES)
+            for leg, rows in legs.items():
+                with self.subTest(mode=mode, leg=leg):
+                    self.assertTrue(rows)
+                    self.assertNotEqual(compiler_receipt.inventory_leg_record(self.pull(), leg)[1], "unknown leg")
+
+    def test_validated_main_attempt_discharges_the_lab_and_corpus_rows(self) -> None:
+        main = dict(receipt(), throughput=dict(compiler_receipt.throughput_digest(corpus()["summary"]), exit=0))
+        coverage = compiler_receipt.covered_inventory_rows(main, "success", "main")
+        self.assertEqual(coverage["schema"], compiler_receipt.INVENTORY_COVERAGE_SCHEMA)
+        self.assertEqual(coverage["route"], "main-compare")
+        self.assertEqual(coverage["discharged"], ["build:bench_throughput@main", "uarch_lab:compare@main"])
+        self.assertEqual(set(self.legs(coverage).values()), {"discharged"})
+
+    def test_validated_pull_attempt_discharges_each_requested_leg_only(self) -> None:
+        coverage = compiler_receipt.covered_inventory_rows(self.pull(**self.opt_ins()), "success", "pull")
+        self.assertEqual(coverage["discharged"], self.PULL_ROWS)
+        self.assertEqual(self.legs(coverage)["analyzer"], "not discharged: not requested")
+        for row in ("build:clang_analyze_benchmark", "tool:clang_analyze_benchmark.c"):
+            self.assertEqual(coverage["rows"][row], "not discharged: not requested")
+        # A default pull request discharges only the lab and the corpus.
+        plain = compiler_receipt.covered_inventory_rows(self.pull(), "success", "pull")
+        self.assertEqual(plain["discharged"], ["build:bench_throughput", "uarch_lab:compare"])
+        for leg in ("scaling", "inline", "ast-pilot", "real-source", "production-profile"):
+            self.assertEqual(self.legs(plain)[leg], "not discharged: not requested")
+
+    def test_mode_is_trusted_not_the_receipts_claim(self) -> None:
+        coverage = compiler_receipt.covered_inventory_rows(self.pull(**self.opt_ins()), "success", "main")
+        self.assertEqual(coverage["discharged"], ["build:bench_throughput@main", "uarch_lab:compare@main"])
+        unknown = compiler_receipt.covered_inventory_rows(self.pull(), "success", "other")
+        self.assertEqual((unknown["route"], unknown["legs"], unknown["discharged"]), ("none", [], []))
+
+    def test_failed_legs_discharge_nothing(self) -> None:
+        failed = self.pull(**dict(self.opt_ins(), production_profile={"requested": True, "status": "failed"}))
+        failed["state"] = "failed"
+        coverage = compiler_receipt.covered_inventory_rows(failed, "failure", "pull")
+        self.assertEqual(coverage["discharged"], [])
+        legs = self.legs(coverage)
+        self.assertEqual(legs["production-profile"], "not discharged: leg failed")
+        self.assertEqual(legs["self-host"], "not discharged: leg failed")
+        self.assertEqual(coverage["rows"]["build:production_profile"], "not discharged: leg failed")
+        # A leg the host recorded complete is still not covered when the publisher refused the attempt.
+        refused = compiler_receipt.covered_inventory_rows(self.pull(**self.opt_ins()), "failure", "pull")
+        self.assertEqual(refused["discharged"], [])
+        self.assertEqual(self.legs(refused)["inline"], "not discharged: evidence refused by the publisher")
+        # Pending, skipped or malformed records are failures, never coverage.
+        for status in ("pending", "skipped", "unknown"):
+            with self.subTest(status=status):
+                record = self.pull(**dict(self.opt_ins(), throughput_real_source={"requested": True, "status": status}))
+                coverage = compiler_receipt.covered_inventory_rows(record, "failure", "pull")
+                self.assertEqual(self.legs(coverage)["real-source"], f"not discharged: leg {status}")
+        broken_corpus = self.pull(throughput=dict(self.pull()["throughput"], exit=2))
+        coverage = compiler_receipt.covered_inventory_rows(broken_corpus, "failure", "pull")
+        self.assertEqual(self.legs(coverage)["corpus"], "not discharged: leg failed")
+        partial_scaling = self.pull(**dict(self.opt_ins(), scaling={"equal": {"status": "valid"}}))
+        coverage = compiler_receipt.covered_inventory_rows(partial_scaling, "failure", "pull")
+        self.assertEqual(self.legs(coverage)["scaling"], "not discharged: leg failed")
+        # A row both scaling and the corpus discharge is not covered while either requested leg is not.
+        self.assertEqual(coverage["rows"]["build:bench_throughput"], "not discharged: evidence refused by the publisher")
+
+    def test_malformed_leg_values_are_not_discharged_and_never_raise(self) -> None:
+        # Valid JSON can hold an object or a list where a string belongs; none may stop publication.
+        for bad in ({}, [], None, 3, "pending"):
+            with self.subTest(value=bad):
+                scaling = {name: {"status": bad} for name in compiler_receipt.SCALING_PROFILE["series"]}
+                record = self.pull(**dict(self.opt_ins(), scaling=scaling, inline_acceptance={"requested": True, "status": bad},
+                                          throughput_real_source={"requested": bad, "status": "complete"}),
+                                   throughput=dict(self.pull()["throughput"], valid=bad, exit=bad), state=bad)
+                for conclusion in ("success", "failure", "neutral"):
+                    coverage = compiler_receipt.covered_inventory_rows(record, conclusion, "pull")
+                    if conclusion != "success":
+                        self.assertEqual(coverage["discharged"], [])
+                self.assertEqual(compiler_receipt.inventory_leg_record(record, "scaling"), (True, "failed"))
+                self.assertEqual(compiler_receipt.inventory_leg_record(record, "corpus"), (True, "failed"))
+                failed = compiler_receipt.covered_inventory_rows(record, "failure", "pull")
+                self.assertEqual(self.legs(failed)["scaling"], "not discharged: leg failed")
+        for bad in ({}, [], 3):
+            with self.subTest(record=bad):
+                coverage = compiler_receipt.covered_inventory_rows(self.pull(production_profile=bad), "failure", "pull")
+                self.assertEqual(self.legs(coverage)["production-profile"],
+                                 "not discharged: no production-profile record (malformed)")
+                coverage = compiler_receipt.covered_inventory_rows(self.pull(scaling_profile={}, scaling=bad), "failure", "pull")
+                self.assertEqual(self.legs(coverage)["scaling"], "not discharged: leg failed")
+
+    def test_missing_legs_discharge_nothing(self) -> None:
+        for conclusion in ("success", "failure"):
+            coverage = compiler_receipt.covered_inventory_rows(None, conclusion, "pull")
+            self.assertEqual(coverage["discharged"], [])
+            self.assertEqual(set(self.legs(coverage).values()), {"not discharged: no readable receipt"})
+            self.assertEqual(set(coverage["rows"]), {row for rows in compiler_receipt.INVENTORY_LEGS["pull"].values()
+                                                     for row in rows})
+        legacy = receipt()
+        legacy.pop("throughput_profile")
+        coverage = compiler_receipt.covered_inventory_rows(legacy, "success", "main")
+        self.assertEqual(coverage["discharged"], ["uarch_lab:compare@main"])
+        self.assertEqual(self.legs(coverage)["corpus"], "not discharged: no corpus record (missing)")
+        malformed = self.pull(production_profile="complete")
+        coverage = compiler_receipt.covered_inventory_rows(malformed, "success", "pull")
+        self.assertEqual(self.legs(coverage)["production-profile"], "not discharged: no production-profile record (malformed)")
+        self.assertNotIn("build:production_profile", coverage["discharged"])
+
+    def test_superseded_receipt_discharges_nothing(self) -> None:
+        coverage = compiler_receipt.covered_inventory_rows(dict(self.pull(**self.opt_ins()), state="superseded"),
+                                                           "neutral", "pull")
+        self.assertEqual(coverage["discharged"], [])
+        self.assertEqual(self.legs(coverage)["self-host"], "not discharged: superseded before measurement")
+        self.assertEqual(self.legs(coverage)["analyzer"], "not discharged: not requested")
+
+    def test_analyzer_only_profile_discharges_only_the_analyzer_rows(self) -> None:
+        coverage = compiler_receipt.covered_inventory_rows(analyzer_receipt(), "success", "pull")
+        self.assertEqual(coverage["discharged"], ["build:clang_analyze_benchmark", "tool:clang_analyze_benchmark.c"])
+        legs = self.legs(coverage)
+        for leg in ("self-host", "corpus", "scaling", "inline", "ast-pilot", "real-source", "production-profile"):
+            self.assertEqual(legs[leg], "not discharged: not requested")
+        for row in ("uarch_lab:compare", "build:bench_throughput"):
+            self.assertEqual(coverage["rows"][row], "not discharged: not requested")
+        # An analyzer receipt cannot discharge a main row.
+        self.assertEqual(compiler_receipt.covered_inventory_rows(analyzer_receipt(), "success", "main")["discharged"], [])
+        failed = compiler_receipt.covered_inventory_rows(analyzer_receipt("failed"), "failure", "pull")
+        self.assertEqual(self.legs(failed)["analyzer"], "not discharged: leg failed")
+
+    def test_coverage_is_report_only_and_rendered(self) -> None:
+        pull = self.pull(**self.opt_ins())
+        before = copy.deepcopy(pull)
+        coverage = compiler_receipt.covered_inventory_rows(pull, "success", "pull")
+        self.assertEqual(pull, before, "the mapping never edits the receipt")
+        report = compiler_receipt.render(dict(pull, inventory_coverage=coverage), summary(), "success", [])
+        self.assertIn("route `pull-compare`): 6 rows discharged", report)
+        self.assertIn("| production-profile | `build:production_profile` | complete | discharged |", report)
+        self.assertIn("| analyzer | `build:clang_analyze_benchmark`, `tool:clang_analyze_benchmark.c` | not requested "
+                      "| not discharged: not requested |", report)
+        analyzer = analyzer_receipt()
+        rendered = compiler_receipt.render(
+            dict(analyzer, inventory_coverage=compiler_receipt.covered_inventory_rows(analyzer, "failure", "pull")),
+            {}, "failure", [])
+        self.assertIn("0 rows discharged", rendered)
+        shown = {"inventory_coverage": coverage}
+        self.assertIn("`build:production_profile`", compiler_publish.inventory_rows(shown))
+        self.assertEqual(compiler_publish.inventory_rows({}), "none")
+
+
+
+ZEN5 = "AMD Ryzen 7 9700X 8-Core Processor"
+
+
+def frontend_selector_evidence() -> tuple[dict, dict]:
+    """A complete synthetic frontend-selector-v1 record and its exported bundle on BINARIES."""
+    profile = compiler_receipt.FRONTEND_SELECTOR_PROFILE
+    scaling, selection, bench_profile = profile["frontend_scaling"], profile["selection"], profile["ide_bench"]
+    hashes = {"baseline": A256, "candidate": B256}
+    provenance = {"binary_sha256": dict(hashes), "suite": "all", "warmups": scaling["warmups"],
+                  "repetitions": scaling["repetitions"], "cpu": profile["cpu"], "affinity": [profile["cpu"]],
+                  "cpu_model": ZEN5, "complete": True}
+    results = []
+    for kind, count, mode in compiler_receipt.frontend_scaling_population():
+        row = {"kind": kind, "count": count, "mode": mode, "source_bytes": 10, "source_sha256": "5" * 64,
+               "compilers": {role: {"command": [role], "wall_seconds": [0.01] * scaling["repetitions"],
+                                    "cpu_seconds": [0.0] * scaling["repetitions"], "wall_median": 0.01, "cpu_median": 0.0}
+                             for role in hashes}}
+        if mode == "object":
+            row["object_sha256"] = "6" * 64
+        results.append(row)
+    def sample(name: str) -> dict:
+        metrics = {"version": 1, "iterations": 30, "functions": 3, "fallback_functions": 0, "ir_instructions": 40,
+                   "mir_instructions": 50, "min_ns": 900, "median_ns": 1000, "prepare_median_ns": 10,
+                   "total_median_ns": 1100, "arena_bytes": 100, "peak_arena_bytes": 90, "module_bytes": 80}
+        return {"selection": metrics, "target": "BENCH_SELECT_TARGET arch=x86_64",
+                "objects": {allocator: {"wall_ns": 2000, "sha256": hashlib.sha256((name + allocator).encode()).hexdigest(),
+                                        "bytes": 64} for allocator in selection["allocators"]}}
+    report = {"schema_version": 1, "build_description": profile["name"],
+              "host": {"system": "Linux", "cpu": ZEN5, "affinity": [profile["cpu"]]},
+              "compilers": {role: {"path": f"/bin/{role}", "sha256": digest} for role, digest in hashes.items()},
+              "workloads": [{"path": f"/work/selection-sources/{name}", "sha256": "4" * 64, "bytes": 1,
+                             "samples": {role: [sample(name) for _ in range(selection["samples"])] for role in hashes},
+                             "summary": {role: {"selection_median_ns": 1000, "selection_ns_per_mir": 20.0,
+                                                "compile_median_ns": {"fast": 2000, "quality": 2000}} for role in hashes}}
+                            for name in selection["workloads"]]}
+    line = ("BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=30 bytes=4096 min_ns=900 median_ns=1000 "
+            "throughput_mb_s=4")
+    runs = [{"role": role, "exit": 0, "line": line} for pair in range(bench_profile["pairs"])
+            for role in (("baseline", "candidate") if pair % 2 == 0 else ("candidate", "baseline"))]
+    bench = {"schema": compiler_receipt.FRONTEND_SELECTOR_SCHEMA, "cpu": profile["cpu"], "cpu_model": ZEN5,
+             "binaries": dict(hashes), "runs": runs}
+    bundle = {"provenance": provenance, "results": results, "report": report, "bench": bench}
+    record = {"requested": True, "request_line": compiler_receipt.FRONTEND_SELECTOR_REQUEST_LINE,
+              "profile": copy.deepcopy(profile), "status": "complete", "errors": [],
+              "exits": {"frontend_scaling": 0, "selection": 0},
+              "cells": compiler_receipt.frontend_selector_digest(results, report, bench)}
+    return record, bundle
+
+
+class FrontendSelectorTest(unittest.TestCase):
+    """#2761: the fixed frontend-selector-v1 probes on the pull-compare route."""
+
+    def validate(self, bundle: dict, scaling_status: object = 0, selection_status: object = 0,
+                 binaries: dict = BINARIES) -> list[str]:
+        return compiler_receipt.validate_frontend_selector(scaling_status, bundle["provenance"], bundle["results"],
+                                                           selection_status, bundle["report"], bundle["bench"], binaries)
+
+    def test_profile_is_frozen_report_only_and_fits_the_job(self) -> None:
+        profile = compiler_receipt.FRONTEND_SELECTOR_PROFILE
+        self.assertEqual(profile["name"], "frontend-selector-v1")
+        self.assertEqual(compiler_receipt.FRONTEND_SELECTOR_REQUEST_LINE, "profile: " + profile["name"])
+        self.assertIs(profile["report_only"], True)
+        for leg in ("frontend_scaling", "selection"):
+            arguments = profile[leg]["arguments"]
+            self.assertEqual(arguments[arguments.index("--cpu") + 1], str(profile["cpu"]))
+        self.assertIn("--check", profile["selection"]["arguments"])
+        self.assertEqual(len(compiler_receipt.frontend_scaling_population()), 54)
+        # Each tool's bound plus the ordinary comparison stays inside the unchanged 90-minute compare-pull job.
+        self.assertLessEqual(compiler_compare.FRONTEND_SCALING_TIMEOUT_SECONDS + compiler_compare.SELECTION_TIMEOUT_SECONDS
+                             + 2 * profile["ide_bench"]["pairs"] * compiler_compare.IDE_BENCH_TIMEOUT_SECONDS, 75 * 60)
+
+    def test_population_matches_the_frontend_scaling_tool(self) -> None:
+        """The real tool, on stand-in compilers, emits exactly the frozen population and a complete provenance."""
+        root_dir = Path(__file__).resolve().parents[2]
+        profile = compiler_receipt.FRONTEND_SELECTOR_PROFILE
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            compilers = {}
+            for role in ("baseline", "candidate"):
+                compilers[role] = root / role
+                compilers[role].write_text("#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = -o ]; then "
+                                           "printf object > \"$2\"; fi; shift; done\n", encoding="utf-8")
+                compilers[role].chmod(0o755)
+            arguments = list(profile["frontend_scaling"]["arguments"])
+            del arguments[arguments.index("--cpu"):arguments.index("--cpu") + 2]
+            subprocess.run([sys.executable, "-B", str(root_dir / "tools/benchmark_frontend_scaling.py"),
+                            "--baseline", str(compilers["baseline"]), "--candidate", str(compilers["candidate"]),
+                            "--out", str(root / "out"), *arguments], check=True, capture_output=True)
+            provenance = json.loads((root / "out/provenance.json").read_text(encoding="utf-8"))
+            results = json.loads((root / "out/results.json").read_text(encoding="utf-8"))
+        self.assertIs(provenance["complete"], True)
+        provenance.update(cpu=profile["cpu"], affinity=[profile["cpu"]], cpu_model=ZEN5)
+        unused_record, bundle = frontend_selector_evidence()
+        binaries = {role: {"sha256": digest} for role, digest in provenance["binary_sha256"].items()}
+        bundle.update(provenance=provenance, results=results)
+        problems = [problem for problem in self.validate(bundle, binaries=binaries) if problem.startswith("frontend")]
+        self.assertEqual(problems, [])
+
+    def test_complete_evidence_validates_and_every_gap_fails(self) -> None:
+        unused_record, bundle = frontend_selector_evidence()
+        self.assertEqual(self.validate(bundle), [])
+        def change(key: str, mutate) -> dict:
+            changed = copy.deepcopy(bundle)
+            mutate(changed[key])
+            return changed
+        def drop(container: dict, key: str):
+            container.pop(key)
+        def first_sample(report: dict) -> dict:
+            return report["workloads"][0]["samples"]["candidate"][0]
+        cases = {
+            "failed frontend scaling": (bundle, {"scaling_status": 1}),
+            "cancelled frontend scaling": (bundle, {"scaling_status": None}),
+            "failed selection": (bundle, {"selection_status": 1}),
+            "cancelled selection": (bundle, {"selection_status": 124}),
+            "stale baseline": (bundle, {"binaries": {"baseline": {"sha256": "3" * 64}, "candidate": {"sha256": B256}}}),
+            "no binaries": (bundle, {"binaries": {}}),
+            "missing provenance": (dict(bundle, provenance=None), {}),
+            "incomplete provenance": (change("provenance", lambda value: value.update(complete=False)), {}),
+            "other suite": (change("provenance", lambda value: value.update(suite="legacy")), {}),
+            "fewer repetitions": (change("provenance", lambda value: value.update(repetitions=3)), {}),
+            "unpinned frontend": (change("provenance", lambda value: value.update(affinity=[0, 1, 2, 3])), {}),
+            "frontend not on Zen 5": (change("provenance", lambda value: value.update(cpu_model="Intel Xeon")), {}),
+            "frontend other binary": (change("provenance", lambda value: value["binary_sha256"].update(candidate=A256)), {}),
+            "missing results": (dict(bundle, results=None), {}),
+            "partial results": (change("results", lambda value: value.pop()), {}),
+            "reordered results": (change("results", lambda value: value.reverse()), {}),
+            "short samples": (change("results", lambda value: value[3]["compilers"]["candidate"]["wall_seconds"].pop()), {}),
+            "zero wall": (change("results", lambda value: value[0]["compilers"]["baseline"]["wall_seconds"].__setitem__(0, 0)), {}),
+            "object without hash": (change("results", lambda value: drop(value[1], "object_sha256")), {}),
+            "missing report": (dict(bundle, report=None), {}),
+            "selection not on Zen 5": (change("report", lambda value: value["host"].update(cpu="AMD EPYC 7763")), {}),
+            "unpinned selection": (change("report", lambda value: value["host"].update(affinity=None)), {}),
+            "selection other binary": (change("report", lambda value: value["compilers"]["candidate"].update(sha256=A256)), {}),
+            "missing workload": (change("report", lambda value: value["workloads"].pop()), {}),
+            "short selection": (change("report", lambda value: value["workloads"][1]["samples"]["baseline"].pop()), {}),
+            "fallback selection": (change("report", lambda value: first_sample(value)["selection"].update(
+                fallback_functions=1)), {}),
+            "changed work": (change("report", lambda value: first_sample(value)["selection"].update(mir_instructions=51)), {}),
+            "changed target": (change("report", lambda value: first_sample(value).update(target="other")), {}),
+            "different object": (change("report", lambda value: first_sample(value)["objects"]["fast"].update(
+                sha256="9" * 64)), {}),
+            "missing allocator": (change("report", lambda value: drop(first_sample(value)["objects"], "quality")), {}),
+            "missing bench": (dict(bundle, bench=None), {}),
+            "bench not on Zen 5": (change("bench", lambda value: value.update(cpu_model="NA")), {}),
+            "bench changed binary": (change("bench", lambda value: value.update(binaries=None)), {}),
+            "partial bench": (change("bench", lambda value: value["runs"].pop()), {}),
+            "failed bench run": (change("bench", lambda value: value["runs"][4].update(exit=1)), {}),
+            "unreported bench run": (change("bench", lambda value: value["runs"][5].update(line=None)), {}),
+            "other bench source": (change("bench", lambda value: value["runs"][2].update(
+                line=value["runs"][2]["line"].replace("bytes=4096", "bytes=4097"))), {}),
+            "debug bench": (change("bench", lambda value: value["runs"][2].update(
+                line=value["runs"][2]["line"].replace("iterations=30", "iterations=5"))), {}),
+            "unpaired bench": (change("bench", lambda value: value["runs"].__setitem__(1, dict(value["runs"][0]))), {}),
+        }
+        for name, (changed, options) in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(self.validate(changed, **options), name)
+
+    def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
+        record, bundle = frontend_selector_evidence()
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["frontend_selector"] = record
+        values = {"expected": dict(EXPECTED, mode="pull"), "authorized": True, "compare_result": "success",
+                  "receipt": pull, "summary": summary(), "policy_value": "",
+                  "throughput": dict(corpus(), frontend_selector_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        failed = dict(copy.deepcopy(record), status="failed", exits={"frontend_scaling": 1, "selection": 0})
+        stale = copy.deepcopy(record)
+        stale["cells"][0]["values"] = [1.0, 0.1]
+        widened = copy.deepcopy(record)
+        widened["profile"]["selection"]["samples"] = 3
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "partial bundle": {"throughput": dict(corpus(), frontend_selector_bundle={
+                key: value for key, value in bundle.items() if key != "bench"})},
+            "failed run": {"receipt": dict(pull, frontend_selector=failed)},
+            "stale cells": {"receipt": dict(pull, frontend_selector=stale)},
+            "changed profile": {"receipt": dict(pull, frontend_selector=widened)},
+            "not a request": {"receipt": dict(pull, frontend_selector=dict(record, requested=False))},
+            "with production profile": {"receipt": dict(pull, production_profile=production_profile_evidence()[0]),
+                                        "throughput": dict(corpus(), frontend_selector_bundle=bundle,
+                                                           production_profile_bundle=production_profile_evidence()[1])},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("Frontend and selector probes (frontend-selector-v1): complete", report)
+        self.assertIn("| frontend small-1/syntax | 10.0 ms | 10.0 ms | 1.0000 |", report)
+        self.assertIn("| ide bench | 1.0 us | 1.0 us | 1.0000 |", report)
+
+    def publish(self, record: dict, bundle: dict) -> tuple:
+        """ZIP -> read_evidence -> decide on a pull receipt carrying record, as the publisher runs it."""
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["frontend_selector"] = record
+        members = {"receipt.json": json.dumps(pull), "lab/summary.json": json.dumps(summary()),
+                   "throughput/summary.json": json.dumps(corpus()["summary"]),
+                   "throughput/metadata.json": json.dumps(corpus()["metadata"]),
+                   **{path: json.dumps(bundle[key]) for key, path in compiler_publish.FRONTEND_SELECTOR_BUNDLE_FILES.items()}}
+        read, lab, problem, unused_artifact, throughput = compiler_publish.read_evidence(
+            FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+        self.assertEqual(problem, "")
+        return compiler_publish.decide(dict(EXPECTED, mode="pull"), True, "success", read, lab, "", throughput)
+
+    def test_reported_medians_are_rederived_from_the_samples(self) -> None:
+        record, bundle = frontend_selector_evidence()
+        self.assertEqual(self.publish(record, bundle)[0], "success")
+        frontend = copy.deepcopy(bundle)
+        frontend["results"][0]["compilers"]["candidate"]["wall_median"] = 0.001
+        selection = copy.deepcopy(bundle)
+        selection["report"]["workloads"][0]["summary"]["candidate"]["selection_median_ns"] = 100
+        compile_time = copy.deepcopy(bundle)
+        compile_time["report"]["workloads"][2]["summary"]["baseline"]["compile_median_ns"]["quality"] = 1
+        for name, changed in (("frontend wall median", frontend), ("selection median", selection),
+                              ("compile median", compile_time)):
+            with self.subTest(case=name):
+                # The cells come from the samples, so a contradictory summary cannot move the reported ratio.
+                self.assertEqual(compiler_receipt.frontend_selector_digest(changed["results"], changed["report"],
+                                                                           changed["bench"]), record["cells"])
+                self.assertTrue(any("medians its samples do not give" in problem for problem in self.validate(changed)))
+                conclusion, unused_title, reasons = self.publish(record, changed)
+                self.assertEqual(conclusion, "failure", reasons)
+
+    def test_malformed_selection_identities_fail_without_raising(self) -> None:
+        record, bundle = frontend_selector_evidence()
+        def every_sample(report: dict, mutate) -> None:
+            for row in report["workloads"]:
+                for samples in row["samples"].values():
+                    for sample in samples:
+                        mutate(sample)
+        cases = {
+            "list target": lambda report: report["workloads"][0]["samples"]["baseline"][0].update(target=[]),
+            "object hash": lambda report: report["workloads"][0]["samples"]["candidate"][3]["objects"]["fast"].update(
+                sha256={}),
+            "no target anywhere": lambda report: every_sample(report, lambda sample: sample.pop("target")),
+            "no ir_instructions anywhere": lambda report: every_sample(
+                report, lambda sample: sample["selection"].pop("ir_instructions")),
+            "boolean work count": lambda report: report["workloads"][1]["samples"]["baseline"][2]["selection"].update(
+                functions=True),
+        }
+        for name, mutate in cases.items():
+            changed = copy.deepcopy(bundle)
+            mutate(changed["report"])
+            with self.subTest(case=name):
+                self.assertTrue(any("malformed" in problem for problem in self.validate(changed)), name)
+                conclusion, unused_title, reasons = self.publish(record, changed)
+                self.assertEqual(conclusion, "failure", reasons)
+
+    def test_out_of_range_numbers_fail_closed_through_publication(self) -> None:
+        record, bundle = frontend_selector_evidence()
+        huge = 10 ** 309
+        line = bundle["bench"]["runs"][0]["line"]
+        cases = {
+            "frontend wall sample": lambda changed: changed["results"][0]["compilers"]["candidate"]["wall_seconds"]
+            .__setitem__(0, huge),
+            "frontend cpu sample": lambda changed: changed["results"][5]["compilers"]["baseline"]["cpu_seconds"]
+            .__setitem__(1, huge),
+            "selection median": lambda changed: changed["report"]["workloads"][0]["samples"]["baseline"][0]["selection"]
+            .update(median_ns=huge),
+            "selection compile time": lambda changed: changed["report"]["workloads"][1]["samples"]["candidate"][0]["objects"]
+            ["quality"].update(wall_ns=huge),
+            "ide bench median": lambda changed: [run.update(line=line.replace("median_ns=1000", "median_ns=" + "9" * 330))
+                                                 for run in changed["bench"]["runs"][:2]],
+            # Past Python's 4300-digit integer-string conversion limit, where int() itself raises.
+            "ide bench 5000-digit median": lambda changed: [run.update(
+                line=line.replace("median_ns=1000", "median_ns=" + "9" * 5000)) for run in changed["bench"]["runs"][:2]],
+            "ide bench 5000-digit bytes": lambda changed: changed["bench"]["runs"][3].update(
+                line=line.replace("bytes=4096", "bytes=" + "1" * 5000)),
+        }
+        for name, mutate in cases.items():
+            changed = copy.deepcopy(bundle)
+            mutate(changed)
+            with self.subTest(case=name):
+                self.assertTrue(self.validate(changed), name)
+                conclusion, unused_title, reasons = self.publish(record, changed)
+                self.assertEqual(conclusion, "failure", reasons)
+
+    def test_over_limit_integer_text_fails_closed(self) -> None:
+        """A BENCH_C_FRONTEND token or a JSON integer past the conversion limit is a structured refusal."""
+        record, bundle = frontend_selector_evidence()
+        line = bundle["bench"]["runs"][0]["line"]
+        for field in ("iterations=30", "bytes=4096", "min_ns=900", "median_ns=1000", "throughput_mb_s=4"):
+            key = field.split("=")[0]
+            with self.subTest(field=key):
+                self.assertIsNone(compiler_receipt.ide_bench_fields(line.replace(field, f"{key}={'7' * 5000}")))
+                self.assertIsNone(compiler_receipt.ide_bench_fields(line.replace(field, f"{key}={'7' * 20}")))
+        self.assertEqual(compiler_receipt.ide_bench_fields(line.replace("bytes=4096", "bytes=" + "9" * 18))["bytes"],
+                         int("9" * 18))
+        # A JSON member carrying such an integer is unreadable evidence, not an exception.
+        members = {"receipt.json": json.dumps(dict(receipt(), mode="pull", frontend_selector=record)),
+                   "lab/summary.json": json.dumps(summary()),
+                   "throughput/summary.json": json.dumps(corpus()["summary"]),
+                   "throughput/metadata.json": json.dumps(corpus()["metadata"]),
+                   **{path: json.dumps(bundle[key]) for key, path in compiler_publish.FRONTEND_SELECTOR_BUNDLE_FILES.items()}}
+        path = compiler_publish.FRONTEND_SELECTOR_BUNDLE_FILES["results"]
+        members[path] = members[path].replace('"count": 1,', '"count": ' + "1" * 5000 + ",", 1)
+        got = compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+        self.assertIn(path, got[2])
+        self.assertIsNone(got[4]["frontend_selector_bundle"])
+
+    def test_any_wrongly_typed_field_fails_closed_without_raising(self) -> None:
+        unused_record, bundle = frontend_selector_evidence()
+        def paths(value: object, prefix: tuple = ()):
+            yield prefix
+            children = value.items() if isinstance(value, dict) else enumerate(value[:1]) if isinstance(value, list) else ()
+            for key, child in children:
+                yield from paths(child, (*prefix, key))
+        replacements = (None, [], {}, "x", -1, 1.5, True, [[]], {"": {}}, 10 ** 309, -(10 ** 309),
+                        float("nan"), float("inf"))
+        checked = 0
+        for key in bundle:
+            for path in paths(bundle[key]):
+                for replacement in replacements:
+                    changed = copy.deepcopy(bundle)
+                    if path:
+                        holder = changed[key]
+                        for step in path[:-1]:
+                            holder = holder[step]
+                        holder[path[-1]] = replacement
+                    else:
+                        changed[key] = replacement
+                    compiler_receipt.frontend_selector_digest(changed["results"], changed["report"], changed["bench"])
+                    self.validate(changed)
+                    checked += 1
+        self.assertGreater(checked, 500)
+
+    def test_read_evidence_requires_every_bundle_member(self) -> None:
+        record, bundle = frontend_selector_evidence()
+        pull = dict(receipt(), mode="pull", frontend_selector=record)
+        files = compiler_publish.FRONTEND_SELECTOR_BUNDLE_FILES
+        complete = {"receipt.json": json.dumps(pull), "lab/summary.json": json.dumps(summary()),
+                    "throughput/summary.json": json.dumps(corpus()["summary"]),
+                    "throughput/metadata.json": json.dumps(corpus()["metadata"]),
+                    **{path: json.dumps(bundle[key]) for key, path in files.items()}}
+        got = compiler_publish.read_evidence(FakeApi(archive(complete)), "92", "buster-9700x-compiler-x-1")
+        self.assertEqual((got[2], got[4]["frontend_selector_bundle"]), ("", bundle))
+        for key, path in files.items():
+            for name, members in (("missing", {member: value for member, value in complete.items() if member != path}),
+                                  ("malformed", dict(complete, **{path: "{not json"})),
+                                  ("duplicate key", dict(complete, **{path: '{"a": 1, "a": 2}'}))):
+                with self.subTest(member=key, case=name):
+                    got = compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+                    self.assertIn(path, got[2])
+                    self.assertIsNone(got[4]["frontend_selector_bundle"])
+
+    def test_inventory_coverage_names_the_three_probe_rows(self) -> None:
+        """The frontend-selector leg discharges its three inventory rows only on a validated success."""
+        rows = ["tool:benchmark_frontend_scaling.py", "tool:selection_benchmark.py", "ide:bench"]
+        self.assertEqual(list(compiler_receipt.INVENTORY_LEGS["pull"]["frontend-selector"]), rows)
+        pull = receipt()
+        pull.update(mode="pull", frontend_selector=frontend_selector_evidence()[0])
+        def leg(receipt_value: dict, conclusion: str) -> dict:
+            coverage = compiler_receipt.covered_inventory_rows(receipt_value, conclusion, "pull")
+            return next(entry for entry in coverage["legs"] if entry["leg"] == "frontend-selector")
+        self.assertEqual(leg(pull, "success")["status"], "discharged")
+        self.assertTrue(set(rows) <= set(compiler_receipt.covered_inventory_rows(pull, "success", "pull")["discharged"]))
+        failed = dict(pull, frontend_selector=dict(pull["frontend_selector"], status="failed"))
+        self.assertEqual(leg(failed, "failure")["status"], "not discharged: leg failed")
+        plain = dict(pull)
+        plain.pop("frontend_selector")
+        self.assertEqual(leg(plain, "success")["status"], "not discharged: not requested")
+        self.assertFalse(set(rows) & set(compiler_receipt.covered_inventory_rows(plain, "success", "pull")["discharged"]))
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Frontend Selector Test")
+            fixture_git(repo, "config", "user.email", "frontend-selector@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            fixture_git(repo, "add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            fixture_git(repo, "commit", "-qm", "seed")
+            line = compiler_receipt.FRONTEND_SELECTOR_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                fixture_git(repo, "commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.frontend_selector_request_selection(
+                        repo, fixture_git(repo, "rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            fixture_git(repo, "commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.frontend_selector_request_selection(
+                repo, fixture_git(repo, "rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.FRONTEND_SELECTOR_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", frontend_selector=frontend_selector_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("frontend_selector")
+        self.assertIn("no frontend-selector record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+        self.assertEqual(verify(Api(1, 0), expected, dict(plain, state="superseded"), {}), "")
+
+    def test_compare_leg_records_tool_failures_and_missing_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("work", "evidence", "bin", "candidate"):
+                (root / name).mkdir()
+            for name, content in (("ide-base", b"base"), ("ide-cand", b"cand")):
+                (root / "bin" / name).write_bytes(content)
+            binaries = {"baseline": {"sha256": hashlib.sha256(b"base").hexdigest()},
+                        "candidate": {"sha256": hashlib.sha256(b"cand").hexdigest()}}
+            def leg(run_status) -> tuple[dict, mock.MagicMock]:
+                receipt_value = {"timings": {}, "binaries": binaries,
+                                 "frontend_selector": {"requested": True, "status": "pending"}}
+                with mock.patch.object(compiler_compare, "run", side_effect=run_status) as run:
+                    compiler_compare.measure_frontend_selector(root / "candidate", root / "bin", root / "work",
+                                                               root / "evidence", receipt_value)
+                return receipt_value["frontend_selector"], run
+            record, run = leg(lambda argv, cwd, log, timeout: 2)
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(commands[0][2], "tools/benchmark_frontend_scaling.py")
+            self.assertEqual(commands[1][2], "tools/selection_benchmark.py")
+            self.assertEqual(len(commands), 2 + 2 * compiler_receipt.FRONTEND_SELECTOR_PROFILE["ide_bench"]["pairs"])
+            self.assertEqual(commands[2][:3], ["taskset", "-c", "2"])
+            self.assertEqual([command[3] for command in commands[2:6]],
+                             [str(root / "bin" / name) for name in ("ide-base", "ide-cand", "ide-cand", "ide-base")])
+            self.assertEqual(record["status"], "failed")
+            self.assertEqual(record["exits"], {"frontend_scaling": 2, "selection": 2})
+            self.assertTrue(any("frontend scaling exited 2" in error for error in record["errors"]), record["errors"])
+            self.assertTrue(any("ide bench run 0" in error for error in record["errors"]), record["errors"])
+            self.assertTrue((root / "evidence" / "frontend_selector" / "ide_bench" / "ide-bench.json").is_file())
+
+WILD_PATH = "/usr/local/bin/wild"
+# Wild's own identity format (Args::linker_identity at wild e9a9b0cb): the positive control, in the
+# form the 9700X host's distribution Wild reports (run 38242826849).
+WILD_VERSION = "Wild 0.10.0 non-git-build (compatible with GNU linkers)"
+WILD_ROOT = "/work/wild-linker-source"
+
+
+def wild_linker_evidence(head: str = "a" * 40, kind: str = "mold") -> tuple[dict, dict]:
+    """A complete synthetic wild-linker-v1 record and its exported bundle, laid out as the harness writes them."""
+    profile = compiler_receipt.WILD_LINKER_PROFILE
+    frozen = compiler_receipt.WILD_LINKER_COMPARATORS[kind]
+    comparator_path = "/usr/bin/" + frozen["command"]
+    linkers = {"wild": {"command": "wild", "path": WILD_PATH, "realpath": WILD_PATH, "version": WILD_VERSION,
+                        "sha256": "7" * 64, "sha256_after": "7" * 64, "kind": "wild",
+                        "policy": profile["wild"]["policy"], "threads1": profile["wild"]["threads1"]},
+               "comparator": {"command": frozen["command"], "path": comparator_path, "realpath": comparator_path,
+                              "version": frozen["version"] + "2.42.1", "sha256": "8" * 64, "sha256_after": "8" * 64,
+                              "kind": kind, "policy": frozen["policy"], "threads1": frozen["threads1"],
+                              "substituted": kind != "mold"}}
+    raw = ["sequence,cell,variant,round,exit,wall_ms,user_ms,system_ms,maxrss_kib,minor_faults,major_faults"]
+    commands, summary = [], ["cell,n,median_A_ms,median_B_ms,mad_A_ms,mad_B_ms,median_paired_B_over_A,ci95_low,ci95_high"]
+    sequence = 0
+
+    def row(cell: str, variant: str, round_: int, command: str, exit_status: int = 0, wall: float = 1.0) -> None:
+        nonlocal sequence
+        raw.append(f"{sequence},{cell},{variant},{round_},{exit_status},{wall:.6f},1.000000,1.000000,100,10,0")
+        commands.append(f"{sequence}\t{cell}\t{variant}\t{round_}\t{command}")
+        sequence += 1
+
+    for cell, variant, exit_status in (("self-test-exit", "zero", 0), ("self-test-exit", "seven", 7),
+                                       ("self-test-quoting", "literal", 0)):
+        row(cell, variant, -1, "exit 0", exit_status)
+    orders, states = compiler_receipt.wild_linker_schedule()
+    common = f"--no-gc-sections --build-id={compiler_receipt.WILD_LINKER_BUILD_ID}"
+    manifests, argvs = {}, {}
+    for cell in profile["cells"]:
+        tree, config = profile["cell_trees"][cell]
+        directory = f"{WILD_ROOT}/{tree}"
+        objects = [f"CMakeFiles/ide.dir/{config}/src/{name}.c.o" for name in ("ide", "os", "arena")]
+        argvs[cell] = (f'"{WILD_PATH}" "-z" "relro" "-pie" "-o" "{config}/ide" '
+                       f'"--dependency-file=CMakeFiles/ide.dir/{config}/link.d" "/lib/x86_64-linux-gnu/Scrt1.o" ' +
+                       " ".join(f'"{name}"' for name in objects) + ' "-lm" "/lib/x86_64-linux-gnu/crtn.o"')
+        manifests[cell] = "".join(f"{'3' * 64}  {directory}/{name}\n" for name in objects)
+        wild = f"cd '{directory}' && {argvs[cell]} {common} {profile['wild']['policy']}"
+        reference = f"cd '{directory}' && '{comparator_path}'{argvs[cell][len(WILD_PATH) + 2:]} {common} {frozen['policy']}"
+        for name in ("capture-link-command", "capture-direct-linker", "freeze-object-manifest"):
+            row(name, "setup", -1, "true")
+        comparisons = [(f"{cell}-default", reference, wild, profile["pairs"]),
+                       (f"{cell}-threads1", f"{reference} {frozen['threads1']}", f"{wild} {profile['wild']['threads1']}",
+                        profile["pairs"])]
+        if cell == "ide-debug":
+            comparisons += [("ide-debug-aa-comparator", reference, reference, profile["control_pairs"]),
+                            ("ide-debug-aa-wild", wild, wild, profile["control_pairs"])]
+        for name, first, second, pairs in comparisons:
+            walls = {"A": [], "B": []}
+            for index, lead in enumerate(orders[name]):
+                round_ = index - profile["warmups"]
+                for variant in ("A", "B") if lead == 0 else ("B", "A"):
+                    wall = (20.0 if variant == "A" else 15.0) + (index % 5) * 0.25
+                    row(name, variant, round_, first if variant == "A" else second, wall=wall)
+                    if round_ >= 0:
+                        walls[variant].append(wall)
+            ratios = [b / a for a, b in zip(walls["A"], walls["B"])]
+            low, high = compiler_receipt._paired_interval(ratios, states[name])
+            summary.append("%s,%d,%.6f,%.6f,0.000000,0.000000,%.6f,%.6f,%.6f" % (
+                name, pairs, sorted(walls["A"])[pairs // 2], sorted(walls["B"])[pairs // 2], sorted(ratios)[pairs // 2],
+                low, high))
+        for command in (reference, wild):
+            for name in ("validated-link", "output-identity", "linked-compiler-smoke", "same-linker-repeat",
+                         "same-linker-byte-identity"):
+                row(name, "setup", -1, command)
+        row("unchanged-object-manifest", "setup", -1, "sha256sum --quiet --check")
+    identity = {"schema": compiler_receipt.WILD_LINKER_SCHEMA, "profile": profile["name"], "head": head, "cpu_model": ZEN5,
+                "cpus": list(profile["cpus"]), "linkers": linkers,
+                "harness": {"wild_linker_acceptance.c": "4" * 64, "wild_linker_bench.c": "5" * 64},
+                "inputs": {cell: hashlib.sha256(text.encode()).hexdigest() for cell, text in manifests.items()},
+                "build_root": WILD_ROOT, "exit": 0}
+    bundle = {"identity": json.dumps(identity), "raw": "\n".join(raw) + "\n", "summary": "\n".join(summary) + "\n",
+              "commands": "\n".join(commands) + "\n",
+              "affinity": "affinity=%s\n" % ",".join(str(cpu) for cpu in profile["cpus"]), "completion": "link_only=PASS\n"}
+    for cell in profile["cells"]:
+        bundle[f"inputs {cell}"] = manifests[cell]
+        bundle[f"argv {cell}"] = argvs[cell]
+        for linker in compiler_receipt.WILD_LINKER_LINKERS:
+            bundle[f"output {cell} {linker}"] = ("9" if linker == "wild" else "6") * 64 + "\n"
+            bundle[f"comment {cell} {linker}"] = "clang version 21.1.8\n" + (
+                "Linker: " + WILD_VERSION + "\n" if linker == "wild" else
+                "mold 2.42.1 (compatible with GNU ld)\n" if kind == "mold" else "")
+    record = {"requested": True, "request_line": compiler_receipt.WILD_LINKER_REQUEST_LINE,
+              "profile": copy.deepcopy(profile), "status": "complete", "errors": [], "build_exit": 0, "exit": 0,
+              "linkers": copy.deepcopy(linkers), "identity": copy.deepcopy(identity),
+              "cells": compiler_receipt.wild_linker_digest(bundle["raw"], bundle["summary"])}
+    return record, bundle
+
+
+class WildLinkerTest(unittest.TestCase):
+    """#2761: the fixed wild-linker-v1 leg times the host's installed Wild on the pull-compare route."""
+
+    def validate(self, bundle: dict, status: object = 0, head: str = "a" * 40, identity: object = None) -> list[str]:
+        return compiler_receipt.validate_wild_linker(status, bundle, head, identity)
+
+    def test_profile_is_frozen_report_only_and_fits_the_job(self) -> None:
+        profile = compiler_receipt.WILD_LINKER_PROFILE
+        self.assertEqual(profile["name"], "wild-linker-v1")
+        self.assertEqual(compiler_receipt.WILD_LINKER_REQUEST_LINE, "profile: " + profile["name"])
+        self.assertIs(profile["report_only"], True)
+        self.assertEqual(profile["cells"], ["ide-debug", "ide-unity-release", "ide-separate-release"])
+        # The audit's link policy: no LTO, Wild never forks or folds code, one fixed benchmark build ID.
+        self.assertEqual({key: profile["wild"][key] for key in ("command", "policy", "threads1")},
+                         {"command": "wild", "policy": "--no-fork --icf=none", "threads1": "--threads=1"})
+        self.assertTrue(compiler_receipt.WILD_IDENTITY.fullmatch(WILD_VERSION))
+        self.assertEqual(sorted(profile["cell_trees"]), sorted(profile["cells"]))
+        self.assertEqual(compiler_receipt.WILD_LINKER_COMPARATORS["mold"]["policy"], profile["wild"]["policy"])
+        for arguments in profile["trees"].values():
+            self.assertIn("--no-lto", arguments)
+            self.assertEqual(arguments[arguments.index("--linker") + 1], "DEFAULT")
+        self.assertEqual(len(compiler_receipt.wild_linker_population()), 8)
+        self.assertEqual(json.loads(json.dumps(profile)), profile)
+        # Both bounds together stay inside the unchanged 90-minute compare-pull job with its ordinary comparison.
+        self.assertLessEqual(compiler_compare.WILD_LINKER_BUILD_TIMEOUT_SECONDS +
+                             compiler_compare.WILD_LINKER_HARNESS_TIMEOUT_SECONDS, 40 * 60)
+
+    def test_identity_accepts_every_version_form_wild_builds(self) -> None:
+        # wild/build.rs at e9a9b0cb: release tag, merge-base hash, modified checkout, no git. The
+        # 9700X host's distribution Wild reports the last form (run 38242826849).
+        merge_base = "e9a9b0cb6fd63a23cc7b93aafc931aadd5746be6"
+        for version in ("0.10.0", merge_base, f"0.10.0 {merge_base}-modified", "0.10.0 non-git-build"):
+            with self.subTest(version=version):
+                self.assertTrue(compiler_receipt.WILD_IDENTITY.fullmatch(
+                    f"Wild {version} (compatible with GNU linkers)"))
+        for line in ("Ubuntu LLD 18.1.3 (compatible with GNU linkers)", "Wild (compatible with GNU linkers)",
+                     "Wild 0.10.0 dirty (compatible with GNU linkers)", "Wild 0.10.0 non-git-build",
+                     f"Wild {merge_base[:12]} (compatible with GNU linkers)",
+                     "Wild 0.10.0 non-git-build (compatible with GNU linkers)\nmold 2.42.1"):
+            with self.subTest(line=line):
+                self.assertIsNone(compiler_receipt.WILD_IDENTITY.fullmatch(line))
+
+    def test_schedule_replays_the_harness_generator(self) -> None:
+        """The seeded xorshift order and bootstrap match the C harness's random_u32 (seed 2645)."""
+        state, draws = 2645, []
+        for _ in range(3):
+            state = compiler_receipt._xorshift(state)
+            draws.append(state)
+        self.assertEqual(draws, [673182960, 112355760, 990757426])
+        orders, states = compiler_receipt.wild_linker_schedule()
+        self.assertEqual([len(orders[cell]) for cell, pairs, _, _ in compiler_receipt.wild_linker_population()],
+                         [pairs + 2 for _, pairs, _, _ in compiler_receipt.wild_linker_population()])
+        self.assertEqual(len(set(states.values())), len(states))
+
+    def test_complete_evidence_validates_and_every_gap_fails(self) -> None:
+        for kind in compiler_receipt.WILD_LINKER_COMPARATORS:
+            with self.subTest(comparator=kind):
+                record, bundle = wild_linker_evidence(kind=kind)
+                self.assertEqual(self.validate(bundle, identity=record["identity"]), [])
+        record, bundle = wild_linker_evidence()
+
+        def identity(mutate) -> dict:
+            changed = json.loads(bundle["identity"])
+            mutate(changed)
+            return dict(bundle, identity=json.dumps(changed))
+
+        def text(key: str, mutate) -> dict:
+            return dict(bundle, **{key: mutate(bundle[key])})
+
+        def raw_line(match: str, mutate) -> dict:
+            lines = bundle["raw"].splitlines()
+            index = next(index for index, line in enumerate(lines) if match in line)
+            lines[index] = mutate(lines[index])
+            return dict(bundle, raw="\n".join(lines) + "\n")
+
+        def manifest(cell: str, mutate) -> dict:
+            """A changed manifest whose hash the identity also records, so only the binding predicates refuse it."""
+            changed = mutate(bundle[f"inputs {cell}"])
+            record = json.loads(bundle["identity"])
+            record["inputs"][cell] = hashlib.sha256(changed.encode()).hexdigest()
+            return dict(bundle, identity=json.dumps(record), **{f"inputs {cell}": changed})
+
+        def without(key: str) -> dict:
+            return {name: value for name, value in bundle.items() if name != key}
+
+        def swap_first_round(raw: str) -> str:
+            lines = raw.splitlines()
+            index = next(index for index, line in enumerate(lines) if ",ide-debug-default," in line)
+            first, second = lines[index].split(","), lines[index + 1].split(",")
+            first[2], second[2] = second[2], first[2]
+            lines[index:index + 2] = [",".join(first), ",".join(second)]
+            return "\n".join(lines) + "\n"
+
+        def summary_field(cell: str, column: int, value: str):
+            def mutate(summary: str) -> str:
+                lines = summary.splitlines()
+                for index, line in enumerate(lines):
+                    fields = line.split(",")
+                    if fields[0] == cell:
+                        fields[column] = value
+                        lines[index] = ",".join(fields)
+                return "\n".join(lines) + "\n"
+            return mutate
+
+        def linker(role: str, **values):
+            return identity(lambda value: value["linkers"][role].update(values))
+
+        cases = {
+            "failed harness": (bundle, {"status": 1}),
+            "cancelled harness": (bundle, {"status": None}),
+            "timed-out harness": (bundle, {"status": 124}),
+            "missing raw": (without("raw"), {}),
+            "missing summary": (without("summary"), {}),
+            "missing completion": (without("completion"), {}),
+            "missing output": (without("output ide-debug wild"), {}),
+            "missing manifest": (without("inputs ide-unity-release"), {}),
+            "malformed identity": (dict(bundle, identity="{"), {}),
+            "duplicate identity key": (dict(bundle, identity=bundle["identity"][:-1] + ', "exit": 0}'), {}),
+            "not Zen 5": (identity(lambda value: value.update(cpu_model="AMD EPYC 9V74 96-Core Processor")), {}),
+            "other head": (identity(lambda value: value.update(head="f" * 40)), {}),
+            "other CPUs": (identity(lambda value: value.update(cpus=[2])), {}),
+            "nonzero recorded exit": (identity(lambda value: value.update(exit=1)), {}),
+            "Wild replaced during the leg": (linker("wild", sha256_after="0" * 64), {}),
+            "Wild unhashed": (linker("wild", sha256=None, sha256_after=None), {}),
+            "Wild without version": (linker("wild", version=""), {}),
+            "relative Wild path": (linker("wild", path="wild"), {}),
+            "Wild under another name": (linker("wild", command="ld.wild"), {}),
+            "Wild without no-fork": (linker("wild", policy="--icf=none"), {}),
+            "unsupported comparator": (linker("comparator", kind="lld", command="ld.lld"), {}),
+            "comparator not mold": (linker("comparator", version="GNU ld 2.42"), {}),
+            "unrecorded substitution": (linker("comparator", substituted=True), {}),
+            "comparator without its policy": (linker("comparator", policy=""), {}),
+            "same executable": (linker("comparator", sha256="7" * 64, sha256_after="7" * 64), {}),
+            "unidentified harness": (identity(lambda value: value["harness"].pop("wild_linker_bench.c")), {}),
+            "other input manifest": (text("inputs ide-debug", lambda value: value.replace("3" * 64, "4" * 64)), {}),
+            "empty input manifest": (dict(bundle, **{"inputs ide-separate-release": ""}), {}),
+            "unhashed output": (dict(bundle, **{"output ide-unity-release comparator": "NA\n"}), {}),
+            "unpinned": (dict(bundle, affinity="affinity=0,1,2,3,4,5,6,7\n"), {}),
+            "incomplete pass": (dict(bundle, completion=""), {}),
+            "partial population": (text("raw", lambda value: "\n".join(value.splitlines()[:-60]) + "\n"), {}),
+            "failed link": (raw_line(",ide-unity-release-threads1,B,3,", lambda line: line.replace(",B,3,0,", ",B,3,1,")), {}),
+            "zero wall": (raw_line(",ide-separate-release-default,A,0,", lambda line: ",".join(
+                [*line.split(",")[:5], "0.000000", *line.split(",")[6:]])), {}),
+            "unseeded order": (text("raw", swap_first_round), {}),
+            "edited median": (text("summary", summary_field("ide-debug-default", 3, "1.000000")), {}),
+            "edited interval": (text("summary", summary_field("ide-unity-release-default", 8, "2.000000")), {}),
+            "missing summary cell": (text("summary", lambda value: "\n".join(value.splitlines()[:-1]) + "\n"), {}),
+            "failed byte identity": (raw_line(",same-linker-byte-identity,", lambda line: line.replace(",-1,0,", ",-1,1,")), {}),
+            "changed object manifest": (raw_line(",unchanged-object-manifest,", lambda line: line.replace(",-1,0,", ",-1,1,")), {}),
+            "other linker in a slot": (text("commands", lambda value: value.replace(f'"{WILD_PATH}"', '"/tmp/wild"', 1)), {}),
+            "other build ID": (text("commands", lambda value: value.replace("0x2645", "0x1111", 1)), {}),
+            "one-thread option dropped": (text("commands", lambda value: value.replace(" --threads=1", "", 1)), {}),
+            "receipt identity differs": (bundle, {"identity": dict(record["identity"], cpus=[2, 3])}),
+            # #3689 review: an impostor installed as `wild` is refused by its version and by its output.
+            "impostor Wild version": (linker("wild", version="Ubuntu LLD 18.1.3 (compatible with GNU linkers)"), {}),
+            "Wild prefix only": (linker("wild", version="Wild version 0.10.0"), {}),
+            "Wild output without identity": (dict(bundle, **{"comment ide-unity-release wild": "Linker: LLD 18\n"}), {}),
+            "Wild output with another version": (dict(bundle, **{"comment ide-debug wild": (
+                "Linker: Wild 0.9.0 (compatible with GNU linkers)\n")}), {}),
+            "Wild identity without Wild's prefix": (dict(bundle, **{"comment ide-debug wild": WILD_VERSION + "\n"}), {}),
+            "comparator output is Wild": (dict(bundle, **{"comment ide-debug comparator": "Linker: " + WILD_VERSION + "\n"}),
+                                          {}),
+            "comparator output is bare Wild": (dict(bundle, **{"comment ide-debug comparator": WILD_VERSION + "\n"}), {}),
+            "dependency file elsewhere": (text("argv ide-debug", lambda value: value.replace(
+                "CMakeFiles/ide.dir/Debug/link.d", "/tmp/link.d")), {}),
+            "dependency file of another config": (text("argv ide-debug", lambda value: value.replace(
+                "CMakeFiles/ide.dir/Debug/link.d", "CMakeFiles/ide.dir/Release/link.d")), {}),
+            "missing comment": (without("comment ide-separate-release wild"), {}),
+            "no build root": (identity(lambda value: value.pop("build_root")), {}),
+            # #3689 review: the timed argv is bound to the hashed inputs and nothing else can run.
+            "missing argv": (without("argv ide-debug"), {}),
+            "unhashed object": (text("argv ide-debug", lambda value: value.replace("/src/os.c.o", "/src/other.c.o")), {}),
+            "object dropped from manifest": (manifest("ide-unity-release", lambda value: value.split("\n", 1)[1]), {}),
+            "foreign absolute object": (text("argv ide-separate-release", lambda value: value.replace(
+                '"/lib/x86_64-linux-gnu/crtn.o"', '"/tmp/payload.o"')), {}),
+            "object under the build root": (text("argv ide-debug", lambda value: value.replace(
+                '"/lib/x86_64-linux-gnu/crtn.o"', f'"{WILD_ROOT}/build-wild-unity/x.o"')), {}),
+            "manifest outside its tree": (manifest("ide-debug", lambda value: value.replace(
+                "build-wild-separate", "build-wild-unity", 1)), {}),
+            "argv writes elsewhere": (text("argv ide-debug", lambda value: value.replace('"Debug/ide"', '"Debug/other"')), {}),
+            "argv not Wild": (text("argv ide-debug", lambda value: value.replace(f'"{WILD_PATH}"', '"/usr/bin/ld.lld"')), {}),
+            "injected command": (text("commands", lambda value: value.replace(" --icf=none", " --icf=none; touch /tmp/x", 1)), {}),
+            "injected object": (text("commands", lambda value: value.replace(' "-lm"', ' "/tmp/payload.o" "-lm"', 1)), {}),
+            "identity comment disabled": (text("commands", lambda value: value.replace(
+                " --icf=none", " --icf=none --no-identity-comment")), {}),
+            "validated link replaced": (text("commands", lambda value: value.replace(
+                "\tvalidated-link\tsetup\t-1\tcd ", "\tvalidated-link\tsetup\t-1\ttrue; cd ", 1)), {}),
+        }
+        for name, (changed, options) in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(self.validate(changed, **options), name)
+
+    def test_cells_are_rederived_from_the_samples(self) -> None:
+        record, bundle = wild_linker_evidence()
+        cells = {row["name"]: row for row in record["cells"]}
+        self.assertEqual(sorted(cells), sorted(cell for cell, _, _, _ in compiler_receipt.wild_linker_population()))
+        self.assertEqual(cells["ide-debug-default"]["linkers"], ["comparator", "wild"])
+        self.assertEqual(cells["ide-debug-aa-wild"]["pairs"], 9)
+        self.assertTrue(all(row["ratio"] < 1 for name, row in cells.items() if "-aa-" not in name))
+        edited = bundle["summary"].replace(bundle["summary"].splitlines()[1].split(",")[2], "99.000000", 1)
+        self.assertEqual(compiler_receipt.wild_linker_digest(bundle["raw"], edited), record["cells"])
+
+    def publish(self, record: dict, bundle: dict, **extra) -> tuple:
+        """ZIP -> read_evidence -> decide on a pull receipt carrying record, as the publisher runs it."""
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["wild_linker"] = record
+        pull.update(extra)
+        members = {"receipt.json": json.dumps(pull), "lab/summary.json": json.dumps(summary()),
+                   "throughput/summary.json": json.dumps(corpus()["summary"]),
+                   "throughput/metadata.json": json.dumps(corpus()["metadata"]),
+                   **{path: bundle[key] for key, path in compiler_publish.WILD_LINKER_BUNDLE_FILES.items() if key in bundle}}
+        read, lab, problem, unused_artifact, throughput = compiler_publish.read_evidence(
+            FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+        if problem:
+            return "failure", "", [problem]
+        return compiler_publish.decide(dict(EXPECTED, mode="pull"), True, "success", read, lab, "", throughput)
+
+    def test_forged_argv_with_matching_commands_fails_publication(self) -> None:
+        """#3689 review: a packet whose retained argv and every derived command row are rewritten in lockstep."""
+        record, bundle = wild_linker_evidence()
+        self.assertEqual(self.publish(record, bundle)[0], "success")
+        tail = bundle["argv ide-debug"][len(WILD_PATH) + 2:]
+        for name, suffix in (("appended shell syntax", " ; :"), ("command substitution", ' "$(touch /tmp/x)"'),
+                             ("quoted separator", ' "; :"'), ("unquoted extra word", " -lm"),
+                             ("backquoted word", ' "`id`"'), ("redirection", ' > "/tmp/x"')):
+            with self.subTest(case=name):
+                changed = dict(bundle, **{"argv ide-debug": bundle["argv ide-debug"] + suffix,
+                                          "commands": bundle["commands"].replace(tail, tail + suffix)})
+                self.assertIn(tail + suffix, changed["commands"])
+                problems = self.validate(changed, identity=record["identity"])
+                self.assertTrue(any("shell-inert" in problem for problem in problems), problems)
+                conclusion, unused_title, reasons = self.publish(record, changed)
+                self.assertEqual(conclusion, "failure", reasons)
+        # A clean extra argument in Clang's own form is admitted, and the commands are rebuilt from tokens.
+        plain = ' "-lm"'
+        changed = dict(bundle, **{"argv ide-debug": bundle["argv ide-debug"] + plain,
+                                  "commands": bundle["commands"].replace(tail, tail + plain)})
+        self.assertEqual(self.validate(changed, identity=record["identity"]), [])
+
+    def test_argv_grammar_refuses_unbound_linker_inputs(self) -> None:
+        """#3689 review: inputs Wild would read beyond the hashed manifest, forged into the argv and every
+        derived command row in lockstep, fail publication; Clang's own flags stay admitted."""
+        record, bundle = wild_linker_evidence()
+        tail = bundle["argv ide-debug"][len(WILD_PATH) + 2:]
+
+        def forged(suffix: str) -> dict:
+            return dict(bundle, **{"argv ide-debug": bundle["argv ide-debug"] + suffix,
+                                   "commands": bundle["commands"].replace(tail, tail + suffix)})
+
+        for name, suffix, reason in (
+                ("response file", ' "@/tmp/foreign.rsp"', "response file"),
+                ("relative response file", ' "@inputs.rsp"', "response file"),
+                ("linker script", ' "-T" "/tmp/x.ld"', "unadmitted option"),
+                ("joined script", ' "--script=/tmp/x.ld"', "unadmitted option"),
+                ("plugin", ' "--plugin" "/tmp/p.so"', "unadmitted option"),
+                ("just symbols", ' "--just-symbols=/tmp/x"', "unadmitted option"),
+                ("foreign search directory", ' "-L/tmp" "-lfoo"', "not a system directory"),
+                ("escaping search directory", ' "-L/usr/../tmp"', "not a system directory"),
+                ("foreign shared object", ' "/tmp/x.so"', "not an object or archive"),
+                ("relative shared object", ' "x.so"', "not an object or archive"),
+                ("library path as name", ' "-l/tmp/x"', "unadmitted option"),
+                ("unadmitted -z keyword", ' "-z" "muldefs"', "unadmitted operand"),
+                ("second output", ' "-o" "Debug/other"', "unadmitted operand"),
+                ("escaping system object", ' "/usr/../tmp/x.o"', "neither a hashed input nor a system file")):
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = self.publish(record, forged(suffix))
+                self.assertEqual(conclusion, "failure", reasons)
+                self.assertTrue(any(reason in item for item in reasons), reasons)
+        for name, suffix in (("as-needed libraries", ' "--as-needed" "-lm" "--no-as-needed"'),
+                             ("system search directory", ' "-L/usr/lib/../lib64"'),
+                             ("now", ' "-z" "now"')):
+            with self.subTest(positive=name):
+                self.assertEqual(self.publish(record, forged(suffix))[:3:2], ("success", []))
+
+    def test_traversal_out_of_the_cell_tree_fails_publication(self) -> None:
+        """#3689 review: an object operand and its manifest entry rewritten in lockstep to a path that leaves the
+        cell's tree once normalised, with the manifest hash recomputed in the export and the receipt."""
+        record, bundle = wild_linker_evidence()
+        original = "CMakeFiles/ide.dir/Debug/src/ide.c.o"
+        directory = f"{WILD_ROOT}/build-wild-separate"
+
+        def forged(operand: str | None, extra: str = "") -> tuple[dict, dict]:
+            changed = dict(bundle)
+            manifest = bundle["inputs ide-debug"]
+            if operand is not None:
+                changed["argv ide-debug"] = bundle["argv ide-debug"].replace(f'"{original}"', f'"{operand}"')
+                changed["commands"] = bundle["commands"].replace(f'"{original}"', f'"{operand}"')
+                manifest = manifest.replace(f"{directory}/{original}", f"{directory}/{operand}")
+            changed["inputs ide-debug"] = manifest + extra
+            identity = json.loads(bundle["identity"])
+            identity["inputs"]["ide-debug"] = hashlib.sha256(changed["inputs ide-debug"].encode()).hexdigest()
+            changed["identity"] = json.dumps(identity)
+            return dict(copy.deepcopy(record), identity=identity), changed
+
+        self.assertEqual(self.publish(*forged(original))[0], "success")
+        for name, operand, extra, reason in (
+                ("reviewer's traversal", "../../tmp/foreign.o", "", "leaves build-wild-separate"),
+                ("deep traversal", "CMakeFiles/ide.dir/../../../../tmp/x.o", "", "leaves build-wild-separate"),
+                ("dot component", "./CMakeFiles/ide.dir/Debug/src/ide.c.o", "", "leaves build-wild-separate"),
+                ("empty component", "CMakeFiles//ide.dir/Debug/src/ide.c.o", "", "leaves build-wild-separate"),
+                ("manifest-only traversal", None, f"{'3' * 64}  {directory}/../../tmp/foreign.o\n",
+                 "lists files outside build-wild-separate")):
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = self.publish(*forged(operand, extra))
+                self.assertEqual(conclusion, "failure", reasons)
+                self.assertTrue(any(reason in item for item in reasons), reasons)
+
+    def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
+        record, bundle = wild_linker_evidence()
+        self.assertEqual(self.publish(record, bundle), ("success", self.publish(record, bundle)[1], []))
+        substituted, substituted_bundle = wild_linker_evidence(kind="bfd")
+        self.assertEqual(self.publish(substituted, substituted_bundle)[0], "success")
+        pull = receipt()
+        pull.update(mode="pull", wild_linker=record)
+        pull["identity"].update(mode="pull")
+        values = {"expected": dict(EXPECTED, mode="pull"), "authorized": True, "compare_result": "success",
+                  "receipt": pull, "summary": summary(), "policy_value": "",
+                  "throughput": dict(corpus(), wild_linker_bundle=bundle)}
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        stale = copy.deepcopy(record)
+        stale["cells"][0]["values"] = [1.0, 0.1]
+        widened = copy.deepcopy(record)
+        widened["profile"]["pairs"] = 5
+        relinked = copy.deepcopy(record)
+        relinked["linkers"]["wild"]["path"] = "/opt/wild"
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "partial bundle": {"throughput": dict(corpus(), wild_linker_bundle={
+                key: value for key, value in bundle.items() if key != "raw"})},
+            "failed run": {"receipt": dict(pull, wild_linker=dict(record, status="failed", exit=2))},
+            "failed input build": {"receipt": dict(pull, wild_linker=dict(record, build_exit=1))},
+            "cancelled run": {"receipt": dict(pull, wild_linker=dict(record, status="pending", exit=None))},
+            "stale cells": {"receipt": dict(pull, wild_linker=stale)},
+            "changed profile": {"receipt": dict(pull, wild_linker=widened)},
+            "linkers differ from identity": {"receipt": dict(pull, wild_linker=relinked)},
+            "not a request": {"receipt": dict(pull, wild_linker=dict(record, requested=False))},
+            "other selector": {"receipt": dict(pull, wild_linker=dict(record, request_line="profile: wild-linker-v2"))},
+            "with production profile": {"receipt": dict(pull, production_profile=production_profile_evidence()[0]),
+                                        "throughput": dict(corpus(), wild_linker_bundle=bundle,
+                                                           production_profile_bundle=production_profile_evidence()[1])},
+            "with frontend-selector probes": {"receipt": dict(pull, frontend_selector=frontend_selector_evidence()[0]),
+                                              "throughput": dict(corpus(), wild_linker_bundle=bundle,
+                                                                 frontend_selector_bundle=frontend_selector_evidence()[1])},
+            "with compiler probes": {"receipt": dict(pull, compiler_probes=compiler_probes_evidence()[0]),
+                                     "throughput": dict(corpus(), wild_linker_bundle=bundle,
+                                                        compiler_probes_bundle=compiler_probes_evidence()[1])},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        for name, member in (("missing member", "raw"), ("missing output", "output ide-debug wild")):
+            with self.subTest(case=name):
+                partial = {key: value for key, value in bundle.items() if key != member}
+                self.assertEqual(self.publish(record, partial)[0], "failure")
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("Host Wild linker (wild-linker-v1): complete", report)
+        self.assertIn(f"wild `{WILD_PATH}` ({WILD_VERSION}, `777777777777`)", report)
+        self.assertRegex(report, r"\| ide-debug-default \| 21 \| 20\.\d{3} \| 15\.\d{3} \| 0\.\d{4} \| \[0\.\d{4}, 0\.\d{4}\] \|")
+        self.assertNotIn("default ld", report)
+        pull["wild_linker"] = substituted
+        self.assertIn("mold is not installed on this host, so the comparator is its default ld",
+                      compiler_receipt.render(pull, summary(), "success", []))
+
+    def test_selector_needs_one_exact_fresh_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Wild Linker Test")
+            fixture_git(repo, "config", "user.email", "wild-linker@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            fixture_git(repo, "add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            fixture_git(repo, "commit", "-qm", "seed")
+            line = compiler_receipt.WILD_LINKER_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                fixture_git(repo, "commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.wild_linker_request_selection(
+                        repo, fixture_git(repo, "rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            fixture_git(repo, "commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.wild_linker_request_selection(repo, fixture_git(repo, "rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.WILD_LINKER_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", wild_linker=wild_linker_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("wild_linker")
+        self.assertIn("no wild-linker record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+
+    def leg(self, root: Path, tools: dict, run_status: int = 1) -> tuple[dict, list]:
+        """measure_wild_linker with only `tools` on PATH; run is mocked, so nothing builds or links."""
+        directory = root / "path"
+        directory.mkdir(exist_ok=True)
+        for name, version in tools.items():
+            (directory / name).write_text(f"#!/bin/sh\necho '{version}'\n", encoding="utf-8")
+            (directory / name).chmod(0o755)
+        for name in ("work", "evidence"):
+            (root / name).mkdir(exist_ok=True)
+        receipt_value = {"timings": {}, "wild_linker": {"requested": True, "status": "pending"}}
+        with mock.patch.dict(os.environ, {"PATH": str(directory)}), \
+                mock.patch.object(compiler_compare, "run", return_value=run_status) as run:
+            compiler_compare.measure_wild_linker(root, root / "work", root / "evidence", "a" * 40, receipt_value)
+        return receipt_value["wild_linker"], [call.args[0] for call in run.call_args_list]
+
+    def test_leg_finds_installed_linkers_and_records_missing_ones(self) -> None:
+        cases = {
+            "no Wild": ({"mold": "mold 2.42.1"}, "the host has no installed wild"),
+            "no comparator": ({"wild": WILD_VERSION}, "comparator bfd: the host has no installed ld"),
+            "mold that is not mold": ({"wild": WILD_VERSION, "mold": "LLD 18", "ld": "GNU ld 2.42"},
+                                      "not a mold version"),
+            "silent Wild": ({"wild": ""}, "did not report a version"),
+            "impostor Wild": ({"wild": "Ubuntu LLD 18.1.3 (compatible with GNU linkers)", "mold": "mold 2.42.1"},
+                              "not Wild's own identity"),
+        }
+        for name, (tools, reason) in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temporary:
+                record, commands = self.leg(Path(temporary), tools)
+                self.assertEqual((record["status"], commands), ("failed", []))
+                self.assertTrue(any(reason in error for error in record["errors"]), record["errors"])
+        with tempfile.TemporaryDirectory() as temporary:
+            record, commands = self.leg(Path(temporary), {"wild": WILD_VERSION, "mold": "mold 2.42.1",
+                                                          "ld": "GNU ld 2.42"})
+            self.assertEqual(record["linkers"]["comparator"]["kind"], "mold")
+            self.assertIs(record["linkers"]["comparator"]["substituted"], False)
+            self.assertEqual(record["linkers"]["wild"]["sha256"],
+                             hashlib.sha256(f"#!/bin/sh\necho '{WILD_VERSION}'\n".encode()).hexdigest())
+            # The input build failed, so nothing was timed; the failure is recorded.
+            self.assertEqual((record["status"], record["build_exit"], len(commands)), ("failed", 1, 1))
+            self.assertEqual(commands[0][:4], ["git", "-c", "core.hooksPath=/dev/null", "clone"])
+        with tempfile.TemporaryDirectory() as temporary:
+            record, commands = self.leg(Path(temporary), {"wild": WILD_VERSION, "ld": "GNU ld 2.42"}, 0)
+            self.assertEqual((record["linkers"]["comparator"]["kind"], record["linkers"]["comparator"]["substituted"]),
+                             ("bfd", True))
+            generates = [command for command in commands if command[:2] == ["./build.sh", "generate"]]
+            self.assertEqual([command[3] for command in generates], ["build-wild-unity", "build-wild-separate"])
+            harness = commands[-1]
+            self.assertEqual(harness[:3], ["taskset", "-c", "2,3,4,5"])
+            self.assertEqual(harness[4:5] + harness[6:], ["--link-only", str(Path(temporary) / "work/wild-linker-source"),
+                                                         str(Path(temporary) / "path/wild"), str(Path(temporary) / "path/ld"),
+                                                         "", ""])
+            # The mocked harness wrote nothing, so publication evidence is refused.
+            self.assertEqual(record["status"], "failed")
+            self.assertTrue(any("wild-linker evidence lacks" in error for error in record["errors"]), record["errors"])
+
+
+class OutOfRangeEvidenceNumberTest(unittest.TestCase):
+    """#3675: a JSON integer past the float range fails the check instead of raising OverflowError."""
+
+    HUGE = 10 ** 309
+
+    def inline_summary(self, **wall: object) -> dict:
+        stage = {"metrics": {
+            "wall": {"a_median": 1.0, "b_median": 1.0, "ratio": 1.0, **wall},
+            "instructions": {"a_median": 10.0, "b_median": 10.0, "ratio": 1.0},
+            "counter_availability": {"perf_stat": True, "reason": "usable"},
+            "peak_rss": {"ratio": 1.0},
+            "code_bytes": {"a_value": 100, "b_value": 100, "ratio": 1.0}}}
+        return {"schema": compiler_receipt.INLINE_ACCEPTANCE_SCHEMA, "status": "complete", "source_revision": "a" * 40,
+                "profile": {**compiler_receipt.INLINE_ACCEPTANCE_PROFILE, "source_sha256": "b" * 64, "cpu": 2},
+                "candidate_compiler": {"sha256": "c" * 64, "size_bytes": 1},
+                "fixed_point": {"off": True, "on": True}, "stage1": stage, "selfhost_runtime": copy.deepcopy(stage)}
+
+    def test_predicates_refuse_out_of_range_integers_and_accept_normal_values(self) -> None:
+        huge = self.HUGE
+        for predicate in (compiler_receipt._finite_positive, inline_acceptance._positive_number,
+                          ast_pilot_acceptance._positive_number):
+            with self.subTest(predicate=predicate.__module__):
+                self.assertFalse(predicate(huge))
+                self.assertFalse(predicate(-huge))
+                self.assertTrue(predicate(1))
+                self.assertTrue(predicate(0.5))
+        self.assertEqual(compiler_receipt.number(huge, "%.4f"), "NA")
+        self.assertEqual(compiler_receipt.number(1.25, "%.4f"), "1.2500")
+        self.assertEqual(compiler_receipt.number(3, "%.1f"), "3.0")
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            compiler_publish.campaign_ppm(1, huge)
+        self.assertEqual(compiler_publish.campaign_ppm(1.0, 1.0)[:2], (0, 0))
+
+        self.assertEqual(compiler_receipt.validate_inline_acceptance(self.inline_summary(), "a" * 40, "c" * 64), [])
+        for key in ("a_median", "b_median", "ratio"):
+            with self.subTest(inline=key):
+                problems = compiler_receipt.validate_inline_acceptance(self.inline_summary(**{key: huge}), "a" * 40, "c" * 64)
+                self.assertTrue(any("wall-time measurements are missing" in problem for problem in problems), problems)
+        changed = self.inline_summary()
+        changed["stage1"]["metrics"]["code_bytes"]["ratio"] = huge
+        self.assertTrue(compiler_receipt.validate_inline_acceptance(changed, "a" * 40, "c" * 64))
+        changed = self.inline_summary()
+        changed["stage1"]["metrics"]["instructions"]["ratio"] = huge
+        self.assertTrue(compiler_receipt.validate_inline_acceptance(changed, "a" * 40, "c" * 64))
+
+        unused_record, unused_bundle, acceptance = ast_pilot_evidence()
+        self.assertEqual(compiler_receipt.validate_ast_pilot_acceptance(acceptance, "a" * 40, "c" * 64), [])
+        for metric, key in (("wall", "ratio"), ("peak_rss", "b_median"), ("instructions", "a_median")):
+            changed = copy.deepcopy(acceptance)
+            changed["cells"]["object"]["metrics"][metric][key] = huge
+            with self.subTest(ast_pilot=metric):
+                self.assertTrue(compiler_receipt.validate_ast_pilot_acceptance(changed, "a" * 40, "c" * 64))
+        changed = copy.deepcopy(acceptance)
+        changed["tree"]["retained_bytes"] = huge
+        problems = compiler_receipt.validate_ast_pilot_acceptance(changed, "a" * 40, "c" * 64)
+        self.assertTrue(any("tree retained bytes are missing" in problem for problem in problems), problems)
+
+        self.assertEqual(compiler_receipt.classify(summary(), BINARIES), [])
+        for key in ("ratio", "ci_low", "ci_high"):
+            lab = summary()
+            lab["verdict"][key] = huge
+            lab["metrics"]["wall"][key] = huge
+            with self.subTest(verdict=key):
+                reasons = compiler_receipt.classify(lab, BINARIES)
+                self.assertTrue(any("not a finite positive ratio" in reason for reason in reasons), reasons)
+
+        good = corpus()
+        self.assertNotIn("throughput report-only family_alpha does not match the original gate",
+                         compiler_receipt.classify_throughput_exit(0, good["summary"], good["metadata"], BINARIES))
+        good["summary"]["family_alpha"] = huge
+        self.assertIn("throughput report-only family_alpha does not match the original gate",
+                      compiler_receipt.classify_throughput_exit(0, good["summary"], good["metadata"], BINARIES))
+
+    def publish(self, pull: dict, lab: dict, bundle: dict | None = None) -> tuple:
+        """ZIP -> read_evidence -> decide (then render), as the ordinary publisher runs it."""
+        members = {"receipt.json": json.dumps(pull), "lab/summary.json": json.dumps(lab),
+                   "throughput/summary.json": json.dumps(corpus()["summary"]),
+                   "throughput/metadata.json": json.dumps(corpus()["metadata"])}
+        for key, value in (bundle or {}).items():
+            members[compiler_publish.AST_PILOT_BUNDLE_FILES[key]] = json.dumps(value)
+        read, summary_read, problem, unused_artifact, throughput = compiler_publish.read_evidence(
+            FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+        self.assertEqual(problem, "")
+        decision = compiler_publish.decide(dict(EXPECTED, mode=pull["mode"]), True, "success", read, summary_read, "",
+                                           throughput)
+        compiler_receipt.render(read, summary_read, decision[0], decision[2])
+        return decision
+
+    def test_out_of_range_lab_summary_fails_through_publication(self) -> None:
+        main = receipt()
+        self.assertEqual(self.publish(main, summary())[0], "success")
+        verdict = summary()
+        verdict["verdict"]["ratio"] = self.HUGE
+        verdict["metrics"]["wall"]["ratio"] = self.HUGE
+        metric = summary()
+        metric["verdict"]["ci_high"] = self.HUGE
+        for name, lab in (("verdict ratio", verdict), ("wall ci_high", metric)):
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = self.publish(main, lab)
+                self.assertEqual(conclusion, "failure", reasons)
+                self.assertTrue(any("not a finite positive ratio" in reason for reason in reasons), reasons)
+
+    def test_out_of_range_ast_pilot_receipt_fails_through_publication(self) -> None:
+        record, bundle, unused_acceptance = ast_pilot_evidence("a" * 40, B256)
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["ast_pilot_acceptance"] = record
+        self.assertEqual(self.publish(pull, summary(), bundle)[:3:2], ("success", []))
+
+        def changed(path: tuple, raw: bool) -> tuple[dict, dict]:
+            current, documents = copy.deepcopy(pull), copy.deepcopy(bundle)
+            targets = [current["ast_pilot_acceptance"]["summary"], documents["acceptance"]]
+            if raw:
+                targets = [documents]
+            for target in targets:
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = self.HUGE
+            return current, documents
+        cases = {
+            "acceptance wall ratio": (("cells", "syntax-only", "metrics", "wall", "ratio"), False),
+            "acceptance instruction median": (("cells", "object", "metrics", "instructions", "b_median"), False),
+            "acceptance peak RSS": (("cells", "object", "metrics", "peak_rss", "a_median"), False),
+            "acceptance tree retained bytes": (("tree", "retained_bytes"), False),
+            "raw cell wall median": (("object_summary", "metrics", "wall", "a_median"), True),
+        }
+        for name, (path, raw) in cases.items():
+            with self.subTest(case=name):
+                current, documents = changed(path, raw)
+                conclusion, unused_title, reasons = self.publish(current, summary(), documents)
+                self.assertEqual(conclusion, "failure", reasons)
+                self.assertTrue(reasons)
+
+
+LINK_TLS_TOOL = Path(__file__).resolve().parents[1] / "link_tls_bench.py"
+
+
+def load_link_tls_bench():
+    """Import the trusted tools/link_tls_bench.py by path, as compiler_compare runs it."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("link_tls_bench", LINK_TLS_TOOL)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def link_tls_invocation(wall: int) -> dict:
+    return {"exit": 0, "wall_ns": wall, "cpu_ns": wall - 1000}
+
+
+def link_tls_evidence(binaries: dict | None = None) -> tuple[dict, dict]:
+    """A complete synthetic link-tls-v1 record and bundle: the candidate links 10% faster in every cell."""
+    profile = compiler_receipt.LINK_TLS_PROFILE
+    binaries = copy.deepcopy(BINARIES) if binaries is None else binaries
+    walls = {"baseline": 1_000_000, "candidate": 900_000}
+    cells = []
+    for index, cell in enumerate(profile["cells"]):
+        image = {"exit": 0, "sha256": f"{index:x}" * 64, "size_bytes": 100 + index, "run_exit": 0,
+                 "stdout": cell["stdout"]}
+        cells.append({"name": cell["name"], "arguments": list(cell["arguments"]),
+                      "identity": {role: dict(image) for role in walls},
+                      "warmups": {role: [link_tls_invocation(walls[role]) for unused in range(profile["warmups"])]
+                                  for role in walls},
+                      "pairs": [dict({"order": ["baseline", "candidate"] if pair % 2 == 0 else ["candidate", "baseline"]},
+                                     **{role: link_tls_invocation(walls[role]) for role in walls})
+                                for pair in range(profile["pairs"])]})
+    summary = {"schema": compiler_receipt.LINK_TLS_SCHEMA, "profile": profile["name"], "cpu": profile["cpu"],
+               "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor",
+               "binaries": {role: binaries[role]["sha256"] for role in ("baseline", "candidate")},
+               "toolchain": {"clang": "clang version 21.1.8", "ar": "GNU ar (GNU Binutils) 2.45"},
+               "inputs": {name: "5" * 64 for name in profile["inputs"]}, "cells": cells, "status": "complete",
+               "errors": []}
+    summary = json.loads(json.dumps(summary))
+    record = {"requested": True, "request_line": compiler_receipt.LINK_TLS_REQUEST_LINE,
+              "profile": copy.deepcopy(profile), "status": "complete", "exit": 0, "errors": [],
+              "harness_sha256": "6" * 64, "cells": compiler_receipt.link_tls_digest(summary)}
+    return record, {"summary": summary}
+
+
+class LinkTlsTest(unittest.TestCase):
+    """#1915: the fixed link-tls-v1 whole-link TLS companion profile on the pull-compare route."""
+
+    def test_profile_is_frozen_report_only_and_its_outputs_follow_the_sources(self) -> None:
+        profile = compiler_receipt.LINK_TLS_PROFILE
+        self.assertEqual(profile["name"], "link-tls-v1")
+        self.assertEqual(compiler_receipt.LINK_TLS_REQUEST_LINE, "profile: " + profile["name"])
+        self.assertIs(profile["report_only"], True)
+        self.assertEqual((profile["cpu"], profile["warmups"], profile["pairs"]), (2, 2, 20))
+        self.assertLessEqual(compiler_compare.LINK_TLS_TIMEOUT_SECONDS, 20 * 60)
+        printed = subprocess.run([sys.executable, "-I", str(LINK_TLS_TOOL), "--profile"], capture_output=True,
+                                 text=True, check=True).stdout
+        self.assertEqual(json.loads(printed), json.loads(json.dumps(profile)))
+        bench = load_link_tls_bench()
+        for cell in profile["cells"]:
+            with self.subTest(cell=cell["name"]):
+                operands = [item for item in cell["arguments"][1:] if not item.startswith("-")]
+                self.assertEqual(operands[0], "main.o")
+                self.assertTrue(set(operands) <= set(profile["inputs"]))
+                recipe = profile["inputs"][operands[1]]
+                kind = profile["inputs"][recipe["archive"][0]]["source"] if "archive" in recipe else recipe["source"]
+                # The image runs sum_all twice: the frozen output is what that source computes.
+                source = bench.source_text(kind)
+                if kind.startswith("tls:"):
+                    count = int(kind[4:])
+                    self.assertEqual(source.count("__thread long v"), count)
+                    values = list(range(count))
+                    first = sum(values)
+                    second = sum(value + 1 for value in values)
+                else:
+                    first = second = sum(range(bench.PLAIN_FUNCTIONS))
+                self.assertEqual(cell["stdout"], f"{first} {second}\n")
+
+    def test_complete_evidence_validates_and_every_gap_fails(self) -> None:
+        record, bundle = link_tls_evidence()
+        summary = bundle["summary"]
+        self.assertEqual(compiler_receipt.validate_link_tls(0, summary, BINARIES), [])
+        results = compiler_receipt.link_tls_digest(summary)
+        self.assertEqual([row["name"] for row in results], [cell["name"] for cell in compiler_receipt.LINK_TLS_PROFILE["cells"]])
+        self.assertTrue(all(row["ratio"] == 0.9 and row["candidate_faster"] == 20 for row in results))
+
+        def changed(edit) -> dict:
+            value = copy.deepcopy(summary)
+            edit(value)
+            return value
+
+        def timed(edit, cell: int = 2, pair: int = 3, role: str = "candidate") -> dict:
+            return changed(lambda value: edit(value["cells"][cell]["pairs"][pair][role]))
+
+        same = {"baseline": {"sha256": A256}, "candidate": {"sha256": A256}}
+        cases = {
+            "failed run": (summary, {"status": 1}),
+            "cancelled run": (summary, {"status": None}),
+            "missing summary": (None, {}),
+            "other schema": (changed(lambda value: value.update(schema="other")), {}),
+            "changed profile": (changed(lambda value: value.update(profile="link-tls-v2")), {}),
+            "other CPU": (changed(lambda value: value.update(cpu=3)), {}),
+            "failed status": (changed(lambda value: value.update(status="failed")), {}),
+            "reported error": (changed(lambda value: value.update(errors=["tls-gd-2048: a timed link failed"])), {}),
+            "other binaries": (summary, {"binaries": {"baseline": {"sha256": B256}, "candidate": {"sha256": A256}}}),
+            "same binary": (changed(lambda value: value.update(binaries={"baseline": A256, "candidate": A256})),
+                            {"binaries": same}),
+            "no measured binaries": (summary, {"binaries": {}}),
+            "missing input": (changed(lambda value: value["inputs"].pop("m16384.a")), {}),
+            "unhashed input": (changed(lambda value: value["inputs"].update({"main.o": "5"})), {}),
+            "extra input": (changed(lambda value: value["inputs"].update({"other.o": "5" * 64})), {}),
+            "unrecorded toolchain": (changed(lambda value: value["toolchain"].pop("ar")), {}),
+            "missing cell": (changed(lambda value: value["cells"].pop()), {}),
+            "reordered cells": (changed(lambda value: value["cells"].reverse()), {}),
+            "changed arguments": (changed(lambda value: value["cells"][0].update(
+                arguments=["cc", "-pie", "main.o", "m1024.o"])), {}),
+            "different images": (changed(lambda value: value["cells"][3]["identity"]["candidate"].update(
+                sha256="f" * 64)), {}),
+            "different image sizes": (changed(lambda value: value["cells"][3]["identity"]["candidate"].update(
+                size_bytes=1)), {}),
+            "wrong output": (changed(lambda value: [value["cells"][4]["identity"][role].update(stdout="0 0\n")
+                                                    for role in ("baseline", "candidate")]), {}),
+            "image did not run": (changed(lambda value: value["cells"][1]["identity"]["baseline"].update(
+                run_exit="TimeoutExpired")), {}),
+            "failed identity link": (changed(lambda value: value["cells"][1]["identity"]["candidate"].update(exit=1)), {}),
+            "malformed identity": (changed(lambda value: value["cells"][1]["identity"]["candidate"].pop("stdout")), {}),
+            "missing pair": (changed(lambda value: value["cells"][2]["pairs"].pop()), {}),
+            "pair out of order": (changed(lambda value: value["cells"][2]["pairs"][1].update(
+                order=["baseline", "candidate"])), {}),
+            "failed timed link": (timed(lambda value: value.update(exit=1)), {}),
+            "timed-out link": (timed(lambda value: value.update(exit=124)), {}),
+            "zero wall time": (timed(lambda value: value.update(wall_ns=0)), {}),
+            "float wall time": (timed(lambda value: value.update(wall_ns=1.5)), {}),
+            "wall time past the invocation timeout": (timed(lambda value: value.update(
+                wall_ns=compiler_receipt.LINK_TLS_SAMPLE_LIMIT_NS + 1)), {}),
+            "overflowing wall time": (timed(lambda value: value.update(wall_ns=10 ** 309)), {}),
+            "missing CPU time": (timed(lambda value: value.pop("cpu_ns")), {}),
+            "missing warmup": (changed(lambda value: value["cells"][5]["warmups"]["baseline"].pop()), {}),
+            "failed warmup": (changed(lambda value: value["cells"][5]["warmups"]["candidate"][0].update(exit=2)), {}),
+        }
+        for name, (value, options) in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(compiler_receipt.validate_link_tls(options.get("status", 0), value,
+                                                                   options.get("binaries", BINARIES)), name)
+                # Malformed evidence is refused with reasons, never raised.
+                self.assertIsInstance(compiler_receipt.link_tls_digest(value), list)
+
+    def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
+        record, bundle = link_tls_evidence()
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["link_tls"] = record
+        values = {"expected": dict(EXPECTED, mode="pull"), "authorized": True, "compare_result": "success",
+                  "receipt": pull, "summary": summary(), "policy_value": "",
+                  "throughput": dict(corpus(), link_tls_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        stale = copy.deepcopy(record)
+        stale["cells"][0]["ratio"] = 0.5
+        widened = copy.deepcopy(record)
+        widened["profile"]["pairs"] = 5
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "empty bundle": {"throughput": dict(corpus(), link_tls_bundle={})},
+            "failed run": {"receipt": dict(pull, link_tls=dict(record, status="failed", exit=1))},
+            "cancelled run": {"receipt": dict(pull, link_tls=dict(record, status="pending", exit=None))},
+            "stale cells": {"receipt": dict(pull, link_tls=stale)},
+            "changed profile": {"receipt": dict(pull, link_tls=widened)},
+            "other selector": {"receipt": dict(pull, link_tls=dict(record, request_line="profile: other"))},
+            "not a request": {"receipt": dict(pull, link_tls=dict(record, requested=False))},
+            "other binaries": {"receipt": dict(pull, binaries={"baseline": {"sha256": B256},
+                                                               "candidate": {"sha256": A256}})},
+            "with the compiler probes": {"receipt": dict(pull, compiler_probes=compiler_probes_evidence()[0]),
+                                         "throughput": dict(corpus(), link_tls_bundle=bundle,
+                                                            compiler_probes_bundle=compiler_probes_evidence()[1])},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("TLS companion links (link-tls-v1): complete", report)
+        self.assertIn("| tls-gd-32768 | 1.000 | 0.900 | 0.9000 [0.9000, 0.9000] | 20/20 |", report)
+
+    def test_artifact_is_read_and_decided_end_to_end(self) -> None:
+        record, bundle = link_tls_evidence()
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["link_tls"] = record
+
+        def decided(link_tls: object, drop: bool = False) -> tuple:
+            members = {"receipt.json": json.dumps(pull), "lab/summary.json": json.dumps(summary()),
+                       "throughput/summary.json": json.dumps(corpus()["summary"]),
+                       "throughput/metadata.json": json.dumps(corpus()["metadata"])}
+            if not drop:
+                members["link_tls/summary.json"] = link_tls if isinstance(link_tls, str) else json.dumps(link_tls)
+            got = compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+            return compiler_publish.decide(dict(EXPECTED, mode="pull"), True, "success", got[0], got[1], "",
+                                           got[4], extra_reasons=[got[2]] if got[2] else [])
+
+        self.assertEqual(decided(bundle["summary"])[::2], ("success", []))
+        changed = copy.deepcopy(bundle["summary"])
+        for pair in changed["cells"][2]["pairs"]:
+            pair["candidate"]["wall_ns"] = 2_000_000
+        for name, (value, drop) in {"missing member": (None, True), "malformed member": ("{", False),
+                                    "duplicate key": ('{"schema": 1, "schema": 2}', False),
+                                    "samples that disagree with the receipt": (changed, False)}.items():
+            with self.subTest(case=name):
+                self.assertEqual(decided(value, drop)[0], "failure")
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Link TLS Test")
+            fixture_git(repo, "config", "user.email", "link-tls@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            fixture_git(repo, "add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            fixture_git(repo, "commit", "-qm", "seed")
+            line = compiler_receipt.LINK_TLS_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                fixture_git(repo, "commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.link_tls_request_selection(
+                        repo, fixture_git(repo, "rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            fixture_git(repo, "commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.link_tls_request_selection(repo, fixture_git(repo, "rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.LINK_TLS_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", link_tls=link_tls_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("link_tls")
+        self.assertIn("no link-tls record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+
+    def test_leg_runs_the_trusted_harness_on_both_binaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("work", "evidence", "work/bin"):
+                (root / name).mkdir(exist_ok=True)
+            pull = {"timings": {}, "binaries": copy.deepcopy(BINARIES),
+                    "link_tls": {"requested": True, "status": "pending"}}
+            with mock.patch.object(compiler_compare, "run", return_value=1) as run:
+                compiler_compare.measure_link_tls(root / "work/bin", root / "work", root / "evidence", pull)
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[1:3], ["-I", str(LINK_TLS_TOOL)])
+            self.assertEqual(argv[3:5], [str(root / "work/bin/ide-base"), str(root / "work/bin/ide-cand")])
+            self.assertEqual(pull["link_tls"]["harness_sha256"], hashlib.sha256(LINK_TLS_TOOL.read_bytes()).hexdigest())
+            # The mocked harness exited 1 and wrote nothing, so the leg is refused.
+            self.assertEqual(pull["link_tls"]["status"], "failed")
+            self.assertTrue(any("exited 1" in error for error in pull["link_tls"]["errors"]), pull["link_tls"]["errors"])
+
+    def test_harness_links_real_inputs_and_records_complete_evidence(self) -> None:
+        """A reduced profile, fake ide binaries that link with clang: identity, timing and validation end to end."""
+        bench = load_link_tls_bench()
+        profile = copy.deepcopy(compiler_receipt.LINK_TLS_PROFILE)
+        profile["inputs"] = {name: profile["inputs"][name] for name in ("main.o", "m1024.o", "plain.o")}
+        profile["cells"] = [cell for cell in profile["cells"] if cell["name"] in ("tls-gd-2048", "no-tls-control")]
+        profile.update(warmups=1, pairs=2, cpu=0)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binaries = {}
+            for role in ("baseline", "candidate"):
+                binaries[role] = root / f"ide-{role}"
+                binaries[role].write_text(f"#!/bin/sh\n# {role}\nshift\nexec clang \"$@\"\n", encoding="utf-8")
+                binaries[role].chmod(0o755)
+            with mock.patch.object(bench, "LINK_TLS_PROFILE", profile), \
+                    mock.patch.object(compiler_receipt, "LINK_TLS_PROFILE", profile):
+                status = bench.main([str(binaries["baseline"]), str(binaries["candidate"]), str(root / "work"),
+                                     str(root / "out")])
+                written = json.loads((root / "out/summary.json").read_text(encoding="utf-8"))
+                hashes = {role: {"sha256": hashlib.sha256(path.read_bytes()).hexdigest()} for role, path in binaries.items()}
+                self.assertEqual((status, written["errors"]), (0, []))
+                self.assertEqual(compiler_receipt.validate_link_tls(status, written, hashes), [])
+                self.assertEqual(len(compiler_receipt.link_tls_digest(written)), 2)
+            self.assertEqual(sorted(written["inputs"]), ["m1024.o", "main.o", "plain.o"])
+            # A candidate that links differently is refused before anything is timed.
+            binaries["candidate"].write_text("#!/bin/sh\nshift\nexec clang -Wl,--defsym=link_tls_test_marker=1 \"$@\"\n",
+                                             encoding="utf-8")
+            with mock.patch.object(bench, "LINK_TLS_PROFILE", profile):
+                status = bench.main([str(binaries["baseline"]), str(binaries["candidate"]), str(root / "work2"),
+                                     str(root / "out2")])
+            written = json.loads((root / "out2/summary.json").read_text(encoding="utf-8"))
+            self.assertEqual((status, written["status"]), (1, "failed"))
+            self.assertTrue(all(cell["pairs"] == [] for cell in written["cells"]))
+            self.assertTrue(any("images differ" in error for error in written["errors"]), written["errors"])
 
 
 if __name__ == "__main__":

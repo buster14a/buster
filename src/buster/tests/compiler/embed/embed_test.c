@@ -1,5 +1,6 @@
 #include <buster/tests/compiler/embed/embed_test.h>
 #include <buster/lib/compiler/embed/embed.h>
+#include <buster/lib/string.h>
 #include <buster/lib/system_headers.h>
 
 #if BUSTER_INCLUDE_TESTS
@@ -47,6 +48,25 @@ BUSTER_GLOBAL_LOCAL bool embed_test_contains(BusterEmbedString string, char cons
     }
     return result;
 }
+
+BUSTER_GLOBAL_LOCAL String8 embed_test_status_detail(
+    UnitTestArguments* arguments,
+    u32 module_index,
+    String8 status_name,
+    BusterEmbedStatus status,
+    BusterEmbedModule* module)
+{
+    BusterEmbedString message = buster_embed_module_message(module);
+    String8 result = string_format(
+        arguments->arena,
+        S8("module_index={u32} {S8}={u32} buster_embed_module_status={u32} buster_embed_module_message={S8}"),
+        module_index,
+        status_name,
+        (u32)status,
+        (u32)buster_embed_module_status(module),
+        (String8){.pointer = (char8*)message.pointer, .length = message.length});
+    return result;
+}
 #endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_execution(UnitTestArguments* arguments)
@@ -57,16 +77,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_execution(UnitTestArguments* argum
     BUSTER_TEST(arguments, buster_embed_compiler_create(&compiler) == BUSTER_EMBED_STATUS_OK);
     if (compiler)
     {
-#if BUSTER_CPU_ARCH_AARCH64 && defined(__APPLE__)
-        char const source[] =
-            "extern long long host_add(long long, long long); extern long host_scale; "
-            "long long run(long long x) { return host_add(x, host_scale); }\n";
-#else
         char const source[] =
             "extern long long host_add(long long, long long); extern long host_scale; "
             "static long* const host_scale_ref = &host_scale; "
-            "long long run(long long x) { return host_add(x, *host_scale_ref); }\n";
-#endif
+            "long long run(long long x) { return host_add(x, host_scale + *host_scale_ref); }\n";
         BusterEmbedCompileOptions options = {.source_name = {.pointer = "embed_exec.c", .length = 12}};
         long host_scale[2] = {11, 23};
         BusterEmbedImport imports[2][2];
@@ -80,18 +94,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_execution(UnitTestArguments* argum
             void* address = 0;
             BUSTER_TEST(arguments, buster_embed_module_symbol(
                                       modules[index], (BusterEmbedString){"run", 3}, &address) == BUSTER_EMBED_STATUS_NOT_LOADED);
-#if !(BUSTER_CPU_ARCH_AARCH64 && !defined(__APPLE__))
             BusterEmbedStatus load_status = buster_embed_module_load(modules[index], imports[index], 2);
-            BUSTER_TEST(arguments, load_status == BUSTER_EMBED_STATUS_OK);
-#else
-            BusterEmbedStatus load_status = buster_embed_module_load(modules[index], imports[index], 2);
-            BUSTER_TEST(arguments, load_status == BUSTER_EMBED_STATUS_JIT_FAILED);
-            BusterEmbedString message = buster_embed_module_message(modules[index]);
-            BUSTER_TEST(arguments, embed_test_contains(message, "external data"));
-            BUSTER_TEST(arguments, embed_test_contains(message, "host_scale"));
-#endif
+            String8 load_detail = {0};
+            if (load_status != BUSTER_EMBED_STATUS_OK)
+            {
+                load_detail = embed_test_status_detail(arguments, index, S8("load_status"), load_status, modules[index]);
+            }
+            BUSTER_TEST_RAW(arguments, load_status == BUSTER_EMBED_STATUS_OK, load_detail);
         }
-#if !(BUSTER_CPU_ARCH_AARCH64 && !defined(__APPLE__))
         for (u32 iteration = 0; iteration < 3 && modules[0] && modules[1]; iteration += 1)
         {
             u32 index = iteration & 1;
@@ -101,17 +111,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_execution(UnitTestArguments* argum
                                       BUSTER_EMBED_STATUS_SYMBOL_NOT_FOUND);
             BusterEmbedStatus symbol_status = buster_embed_module_symbol(
                 modules[index], (BusterEmbedString){"run", 3}, &address);
-            BUSTER_TEST(arguments, symbol_status == BUSTER_EMBED_STATUS_OK);
+            String8 symbol_detail = {0};
+            if (symbol_status != BUSTER_EMBED_STATUS_OK)
+            {
+                symbol_detail = embed_test_status_detail(arguments, index, S8("symbol_status"), symbol_status, modules[index]);
+            }
+            BUSTER_TEST_RAW(arguments, symbol_status == BUSTER_EMBED_STATUS_OK, symbol_detail);
             EmbedTestRunFunction* run = 0;
             BUSTER_CT_CHECK(sizeof(run) == sizeof(address));
             memcpy(&run, &address, sizeof(run));
             if (symbol_status == BUSTER_EMBED_STATUS_OK)
             {
-                BUSTER_TEST(arguments, run(7) == (index ? 30 : 18));
+                BUSTER_TEST(arguments, run(7) == 7 + 2 * host_scale[index]);
+                host_scale[index] += 3;
+                BUSTER_TEST(arguments, run(7) == 7 + 2 * host_scale[index]);
             }
             BUSTER_TEST(arguments, buster_embed_module_load(modules[index], imports[index], 2) == BUSTER_EMBED_STATUS_ALREADY_LOADED);
         }
-#endif
         buster_embed_module_release(modules[1]);
         buster_embed_module_release(modules[0]);
         BUSTER_TEST(arguments, buster_embed_compiler_destroy(compiler) == BUSTER_EMBED_STATUS_OK);
@@ -159,7 +175,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_unresolved_function(UnitTestArgume
         BusterEmbedStatus unresolved = buster_embed_module_load(module, 0, 0);
         BUSTER_TEST(arguments, unresolved == BUSTER_EMBED_STATUS_UNRESOLVED_IMPORT);
         BUSTER_TEST(arguments, embed_test_contains(buster_embed_module_message(module), "host_add"));
-        BUSTER_TEST(arguments, buster_embed_module_load(module, &import, 1) == BUSTER_EMBED_STATUS_OK);
+        BusterEmbedStatus load_status = buster_embed_module_load(module, &import, 1);
+        String8 load_detail = {0};
+        if (load_status != BUSTER_EMBED_STATUS_OK)
+        {
+            load_detail = embed_test_status_detail(arguments, 0, S8("load_status"), load_status, module);
+        }
+        BUSTER_TEST_RAW(arguments, load_status == BUSTER_EMBED_STATUS_OK, load_detail);
         void* symbol = 0;
         BusterEmbedStatus symbol_status = buster_embed_module_symbol(module, (BusterEmbedString){"run", 3}, &symbol);
         BUSTER_TEST(arguments, symbol_status == BUSTER_EMBED_STATUS_OK);
@@ -179,15 +201,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_unresolved_function(UnitTestArgume
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_direct_data_refusal(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_host_data(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-#if EMBED_TEST_EXECUTES && BUSTER_CPU_ARCH_X86_64
+#if EMBED_TEST_EXECUTES
     BusterEmbedCompiler* compiler = 0;
     BUSTER_TEST(arguments, buster_embed_compiler_create(&compiler) == BUSTER_EMBED_STATUS_OK);
     if (compiler)
     {
-        char const source[] = "extern long host_scale; long run(void) { return host_scale; }\n";
+        char const source[] =
+            "extern long host_scale; static long* const p = &host_scale; "
+            "long run(long x) { host_scale = x; return *p; } "
+            "long pointer_write(long x) { *p = x; return host_scale; } "
+            "long* address(void) { return &host_scale; }\n";
         BusterEmbedCompileOptions options = {.source_name = {.pointer = "embed_direct.c", .length = 14}};
         BusterEmbedModule* module = 0;
         BUSTER_TEST(arguments, buster_embed_compile(
@@ -199,11 +225,60 @@ BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_direct_data_refusal(UnitTestArgume
             .address = &host_scale,
             .kind = BUSTER_EMBED_SYMBOL_DATA,
         };
+        BusterEmbedImport unrelated_import = import;
+        unrelated_import.name = (BusterEmbedString){"unrelated_data", sizeof("unrelated_data") - 1};
+        // This data-only source reaches DATA resolution before any function
+        // import can mask it. Both failures must leave the module retryable.
+        for (u32 binding_case = 0; binding_case < 2; binding_case += 1)
+        {
+            BusterEmbedStatus unresolved = buster_embed_module_load(
+                module, binding_case ? &unrelated_import : 0, binding_case);
+            BUSTER_TEST(arguments, unresolved == BUSTER_EMBED_STATUS_UNRESOLVED_IMPORT);
+            BUSTER_TEST(arguments, embed_test_contains(buster_embed_module_message(module), "unresolved JIT import"));
+            BUSTER_TEST(arguments, embed_test_contains(buster_embed_module_message(module), "host_scale"));
+            BUSTER_TEST(arguments, buster_embed_module_status(module) == BUSTER_EMBED_STATUS_OK);
+            void* unavailable = &host_scale;
+            BUSTER_TEST(arguments, buster_embed_module_symbol(
+                                      module, (BusterEmbedString){"run", 3}, &unavailable) == BUSTER_EMBED_STATUS_NOT_LOADED);
+            BUSTER_TEST(arguments, !unavailable);
+        }
         BusterEmbedStatus load_status = buster_embed_module_load(module, &import, 1);
-        BUSTER_TEST(arguments, load_status == BUSTER_EMBED_STATUS_JIT_FAILED);
-        BusterEmbedString message = buster_embed_module_message(module);
-        BUSTER_TEST(arguments, embed_test_contains(message, "external data"));
-        BUSTER_TEST(arguments, embed_test_contains(message, "host_scale"));
+        String8 load_detail = {0};
+        if (load_status != BUSTER_EMBED_STATUS_OK)
+        {
+            load_detail = embed_test_status_detail(arguments, 0, S8("load_status"), load_status, module);
+        }
+        BUSTER_TEST_RAW(arguments, load_status == BUSTER_EMBED_STATUS_OK, load_detail);
+        if (load_status == BUSTER_EMBED_STATUS_OK)
+        {
+            BUSTER_TEST(arguments, buster_embed_module_message(module).length == 0);
+            void* address = 0;
+            BusterEmbedStatus status = buster_embed_module_symbol(module, (BusterEmbedString){"run", 3}, &address);
+            BUSTER_TEST(arguments, status == BUSTER_EMBED_STATUS_OK);
+            long (*run)(long) = 0;
+            BUSTER_CT_CHECK(sizeof(run) == sizeof(address));
+            memcpy(&run, &address, sizeof(run));
+            if (status == BUSTER_EMBED_STATUS_OK)
+            {
+                BUSTER_TEST(arguments, run(31) == 31 && host_scale == 31);
+            }
+            status = buster_embed_module_symbol(module, (BusterEmbedString){"pointer_write", 13}, &address);
+            BUSTER_TEST(arguments, status == BUSTER_EMBED_STATUS_OK);
+            memcpy(&run, &address, sizeof(run));
+            if (status == BUSTER_EMBED_STATUS_OK)
+            {
+                BUSTER_TEST(arguments, run(47) == 47 && host_scale == 47);
+            }
+            status = buster_embed_module_symbol(module, (BusterEmbedString){"address", 7}, &address);
+            BUSTER_TEST(arguments, status == BUSTER_EMBED_STATUS_OK);
+            long* (*host_address)(void) = 0;
+            BUSTER_CT_CHECK(sizeof(host_address) == sizeof(address));
+            memcpy(&host_address, &address, sizeof(host_address));
+            if (status == BUSTER_EMBED_STATUS_OK)
+            {
+                BUSTER_TEST(arguments, host_address() == &host_scale);
+            }
+        }
         buster_embed_module_release(module);
         BUSTER_TEST(arguments, buster_embed_compiler_destroy(compiler) == BUSTER_EMBED_STATUS_OK);
     }
@@ -245,7 +320,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult embed_test_failures_and_lifetimes(UnitTestArg
             BUSTER_TEST(arguments, buster_embed_module_object(module, &object) == BUSTER_EMBED_STATUS_OK);
             BUSTER_TEST(arguments, object.length != 0);
 #if EMBED_TEST_EXECUTES
-            BUSTER_TEST(arguments, buster_embed_module_load(module, 0, 0) == BUSTER_EMBED_STATUS_OK);
+            BusterEmbedStatus load_status = buster_embed_module_load(module, 0, 0);
+            String8 load_detail = {0};
+            if (load_status != BUSTER_EMBED_STATUS_OK)
+            {
+                load_detail = embed_test_status_detail(arguments, 0, S8("load_status"), load_status, module);
+            }
+            BUSTER_TEST_RAW(arguments, load_status == BUSTER_EMBED_STATUS_OK, load_detail);
             void* address = 0;
             BusterEmbedStatus symbol_status = buster_embed_module_symbol(
                 module, (BusterEmbedString){"lifetime_value", 14}, &address);
@@ -386,7 +467,7 @@ UnitTestResult embed_tests(UnitTestArguments* arguments)
     UnitTestResult unresolved = embed_test_unresolved_function(arguments);
     result.succeeded_test_count += unresolved.succeeded_test_count;
     result.test_count += unresolved.test_count;
-    UnitTestResult direct_data = embed_test_direct_data_refusal(arguments);
+    UnitTestResult direct_data = embed_test_host_data(arguments);
     result.succeeded_test_count += direct_data.succeeded_test_count;
     result.test_count += direct_data.test_count;
     UnitTestResult foreign = embed_test_foreign_target(arguments);

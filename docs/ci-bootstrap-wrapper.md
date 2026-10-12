@@ -83,6 +83,25 @@ owner limit, complete inventory after timeout, launch failure, cleanup failure
 and original deadline accounting. Hosted Windows execution remains the verdict
 on startup latency; the scheduler alone is not a measured speedup.
 
+The helper's filesystem operations use the already loaded .NET file APIs,
+resolving literal paths through PowerShell's session provider paths so relative
+inputs follow the caller's PowerShell location even when the process cwd differs.
+VsWhere directories and non-FileSystem providers fail before the vendor shell
+runs. GITHUB_ENV paths are resolved at the existing post-vendor append point;
+appends use explicit UTF8 without a BOM and platform newlines. The fake dev-shell
+launch log uses the same direct file append instead of loading a cmdlet module.
+The vendor's real developer-shell script, host/target arguments, compiler probes,
+exceptions and separate PowerShell owners are unchanged.
+
+`VS_PROBE_TRACE` retains launch UTC milliseconds, script/helper/fixture stage
+rows and completion. PowerShell stages use UTC milliseconds; CMD fixtures label
+their local `%TIME%` stamps explicitly. These clocks are diagnostic; deadlines
+remain monotonic and launch-relative. The optional
+`BUSTER_VS_PROBE_COLD_TEST_PATH=1` control stamps a real cold `Test-Path` call
+before helper entry, isolating its cost without retrying or restarting a clock.
+Controls cover literal bracket filenames, differing PowerShell/process locations,
+provider/directory rejection, UTF8 export bytes and all original failure cases.
+
 ## Bounded independent cases (#2034)
 
 Windows admits two independent behavior cases through one persistent worker
@@ -112,9 +131,79 @@ cleanup immediately, before another launch or assertion, and cleanup precedes
 fixture removal.
 
 The scheduler adds a cancellation registry. Registration and cancellation share
-a lock, and each child's cleanup is serialized against normal collection. Windows
-uses the original system `taskkill /T /F`; Unix uses isolated process groups.
-Direct children retain the ten-second cleanup deadline. Workers finish before
+a lock, and each child's cleanup is serialized against normal collection.
+
+On Windows, ownership is fixed before a case command starts (#3690). The
+scheduler runs every case through `tools/windows_process_tree.c launch`. The
+launcher creates a fresh named Job Object with kill-on-close, starts the
+command suspended, assigns it to the job and only then resumes it, the same
+sequence `os_process_spawn` uses for process groups. Every descendant is
+therefore a kernel-tracked member from birth. No membership decision uses PID parent links or wall-clock creation
+times, which PID reuse and clock adjustment make unreliable.
+
+The native launcher receives the original absolute payload deadline before
+startup. Its selected clock matches the caller's Windows monotonic clock
+(`QueryPerformanceCounter` or `GetTickCount64`). It enforces that deadline on
+the payload, then allows only the original separate ten-second cleanup budget.
+Collection can wait for both phases without extending payload runtime.
+
+Before fixture removal, the mechanical adapter requests cancellation by creating
+the private terminal path's `.cancel` file and waits under the original cleanup
+deadline. The native owner checks cancellation before creating or resuming the
+payload and at most every 25 milliseconds during its bounded wait. This avoids
+an external drain racing job creation or payload assignment. Only the native
+owner terminates and certifies its job; the launcher stays outside it.
+
+Native cleanup waits on retained root handles and on listed handles confirmed
+by `IsProcessInJob`, then requires zero active job members. A terminated member
+can leave the PID list before enumeration, so `waited` is diagnostic; controls
+retain live process handles before cancellation. A successful termination
+request alone cannot certify release of inherited current-directory handles
+(#2985).
+
+The owner atomically publishes a fresh terminal record after checked teardown
+and handle closes. The adapter requires a complete record bound to the exact
+deadline, ordered timing fields and the broker's exit: zero for certified normal
+completion or cancellation, 124 for certified runtime timeout, and 125 for
+lifecycle failure. Arbitrary payload statuses, including 124 and 125, are restored
+from the record to the original result. Native publication must also finish by
+the cleanup deadline. Missing, malformed, contradictory or late evidence fails;
+failure reaping shares the remaining cleanup deadline and never relabels an
+uncertified owner as clean. `BOOTSTRAP_COLLECTION.native_launch` retains the
+certificate and actual payload status. Later cleanup reuses the first certified
+record. The standalone `drain` CLI and its bounded malformed/late protocol
+controls remain available, but production cancellation uses the native owner.
+
+`./build.sh bootstrap_process_owner` (or `build.ps1 bootstrap_process_owner`)
+builds the helper through the native driver. It qualifies host Clang, applies
+strict warnings and the existing C semantic flags, and always compiles into a
+fresh, exclusively claimed `.cache/bootstrap-process-owner/` directory outside
+`generate`'s disposable trees. Compilation and the Windows `selftest` each have
+one 60-second native deadline; any nonzero exit, capture or cleanup failure prevents
+publication of `BOOTSTRAP_PROCESS_OWNER <absolute-path>`. Outputs remain available
+for the invoking test process's lifetime. This retains the existing helper's
+`launch`, `drain`, `fixture` and `selftest` protocols.
+`bootstrap_process_owner_test` also builds and runs the standalone native
+deadline controls, under the same flags and a single 60-second deadline.
+When a native deadline control returns an unexpected code, it prints one
+`WINDOWS_PROCESS_TREE_TEST_CONTEXT` line before the original assertion. The
+test-only snapshot retains the runtime and cleanup deadlines, cleanup and
+publication timestamps, clock validity, and the first failed publication
+operation with its immediate Win32 error when available. Diagnostic clock
+sampling uses a copy of the owner's state; the status record, return-code
+rules, assertions and cleanup allowance are unchanged.
+
+CI bootstraps `build.c` with hosted image Clang under the documented exception,
+runs the native control command in the workflow-tools and bootstrap-wrapper
+steps, and mechanically exports its returned path as `BUSTER_WINDOWS_PROCESS_TREE`.
+Python only receives that path; Windows case
+execution refuses to start without it. Native `fixture` modes supply silent,
+partial, repeated and late drain records for the caller controls on every
+host, and `selftest` checks on Windows that a live non-member process is
+neither admitted, waited on, nor terminated.
+
+Unix uses isolated process groups. Direct children retain the ten-second cleanup
+deadline. Workers finish before
 module state is restored; the registry releases native handles between runs.
 These are controlled fixture trees, not containment for detached programs.
 

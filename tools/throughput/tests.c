@@ -3,10 +3,12 @@
  * Build through ./build.sh bench_throughput self-test; shared.c owns linkage.
  */
 #define TP_WORKLOAD_TEST_ALLOCATIONS 1
+#define TP_PROCESS_TEST_OBSERVATIONS 1
 #define main throughput_cli_main
 #include "throughput.c"
 #undef main
 #undef TP_WORKLOAD_TEST_ALLOCATIONS
+#undef TP_PROCESS_TEST_OBSERVATIONS
 #include "retirement_stats.h"
 
 static unsigned test_assertions, test_failures;
@@ -466,6 +468,72 @@ static int test_admission_descriptor(char const* directory, char const* tree_has
     return controls_ok && length > 0 && (size_t)length < sizeof(text) && test_text(directory, "admission.workload", text);
 }
 
+#ifdef __linux__
+/* Preserve the equality oracle. Only its mismatch emits raw counter facts;
+ * wait4 owns one child while RUSAGE_CHILDREN is a separate OS snapshot. */
+static int test_child_counter_diagnostics(FILE* file, TpProcess const* process,
+    struct rusage const* before, struct rusage const* after, TpProcessTestObservation const* observed)
+{
+    int mismatch = process->diagnostics[TP_VOLUNTARY_SWITCHES] != (uint64_t)(after->ru_nvcsw - before->ru_nvcsw);
+    if (mismatch)
+    {
+        fprintf(file, "THROUGHPUT_CHILD_COUNTER_MISMATCH_V1 child=%ld waited=%ld wait_error=%d "
+            "wait4_minor=%ld wait4_major=%ld wait4_voluntary=%ld wait4_involuntary=%ld "
+            "before_minor=%ld after_minor=%ld before_major=%ld after_major=%ld "
+            "before_voluntary=%ld after_voluntary=%ld before_involuntary=%ld after_involuntary=%ld "
+            "collected_voluntary=%" PRIu64 " diagnostics_available=%u exit=%d signal=%d timed_out=%d "
+            "launch_error=%d cleanup_attempted=%d cleanup_result=%d cleanup_error=%d descriptor_cleanup=%d\n",
+            (long)observed->child, (long)observed->waited, observed->wait_error,
+            observed->usage.ru_minflt, observed->usage.ru_majflt, observed->usage.ru_nvcsw, observed->usage.ru_nivcsw,
+            before->ru_minflt, after->ru_minflt, before->ru_majflt, after->ru_majflt,
+            before->ru_nvcsw, after->ru_nvcsw, before->ru_nivcsw, after->ru_nivcsw,
+            process->diagnostics[TP_VOLUNTARY_SWITCHES], process->diagnostics_available,
+            process->exit_code, process->signal_number, process->timed_out, process->launch_error,
+            observed->cleanup_attempted, observed->cleanup_result, observed->cleanup_error, observed->descriptor_cleanup);
+    }
+    return mismatch;
+}
+
+static void test_child_counter_diagnostic_control(void)
+{
+    TpProcess process = {0};
+    process.diagnostics[TP_VOLUNTARY_SWITCHES] = 2;
+    process.diagnostics_available = (1u << TP_DIAGNOSTICS) - 1u;
+    struct rusage before = {0}, after = {0};
+    before.ru_nvcsw = 17;
+    after.ru_nvcsw = 19;
+    TpProcessTestObservation observed = {0};
+    observed.child = 123;
+    observed.waited = 123;
+    observed.usage.ru_nvcsw = 2;
+    observed.cleanup_attempted = 1;
+    observed.cleanup_result = -1;
+    observed.cleanup_error = ESRCH;
+    FILE* file = tmpfile();
+    CHECK(file != NULL);
+    if (file)
+    {
+        CHECK(!test_child_counter_diagnostics(file, &process, &before, &after, &observed));
+        CHECK(ftell(file) == 0);
+        after.ru_nvcsw = 20;
+        CHECK(test_child_counter_diagnostics(file, &process, &before, &after, &observed));
+        CHECK(fflush(file) == 0 && fseek(file, 0, SEEK_SET) == 0);
+        char text[2048] = {0};
+        size_t count = fread(text, 1, sizeof(text) - 1, file);
+        CHECK(count > 0 && count < sizeof(text) - 1 && !ferror(file));
+        CHECK(strstr(text, "THROUGHPUT_CHILD_COUNTER_MISMATCH_V1 child=123 waited=123 wait_error=0 ") != NULL);
+        CHECK(strstr(text, "wait4_voluntary=2") && strstr(text, "before_voluntary=17 after_voluntary=20"));
+        CHECK(strstr(text, "collected_voluntary=2 diagnostics_available=15 exit=0 signal=0 timed_out=0 launch_error=0 ") != NULL);
+        char cleanup[128];
+        int length = snprintf(cleanup, sizeof(cleanup), "cleanup_attempted=1 cleanup_result=-1 cleanup_error=%d descriptor_cleanup=0\n", ESRCH);
+        CHECK(length > 0 && (size_t)length < sizeof(cleanup) && strstr(text, cleanup) != NULL);
+        CHECK(process.diagnostics[TP_VOLUNTARY_SWITCHES] == 2 && observed.usage.ru_nvcsw == 2 &&
+              before.ru_nvcsw == 17 && after.ru_nvcsw == 20);
+        CHECK(fclose(file) == 0);
+    }
+}
+#endif
+
 static void test_processes(char const* executable, char const* root)
 {
     // Foundation-only tools have no application entry-point clock prewarm.
@@ -505,7 +573,11 @@ static void test_processes(char const* executable, char const* root)
     CHECK(large.diagnostics_available == (1u << TP_DIAGNOSTICS) - 1u);
     CHECK(large.diagnostics[TP_MINOR_FAULTS] == (uint64_t)(after.ru_minflt - before.ru_minflt));
     CHECK(large.diagnostics[TP_MAJOR_FAULTS] == (uint64_t)(after.ru_majflt - before.ru_majflt));
+    (void)test_child_counter_diagnostics(stderr, &large, &before, &after, &tp_process_test_observation);
     CHECK(large.diagnostics[TP_VOLUNTARY_SWITCHES] == (uint64_t)(after.ru_nvcsw - before.ru_nvcsw));
+    CHECK(tp_process_test_observation.child > 0 && tp_process_test_observation.waited == tp_process_test_observation.child &&
+          tp_process_test_observation.usage.ru_nvcsw == (long)large.diagnostics[TP_VOLUNTARY_SWITCHES] &&
+          tp_process_test_observation.cleanup_attempted && !tp_process_test_observation.descriptor_cleanup);
     CHECK(large.diagnostics[TP_INVOLUNTARY_SWITCHES] == (uint64_t)(after.ru_nivcsw - before.ru_nivcsw));
     CHECK(large.diagnostics[TP_MINOR_FAULTS] > 0 && large.diagnostics[TP_VOLUNTARY_SWITCHES] > 0);
     printf("PROCESS_DIAGNOSTICS minor=%" PRIu64 " major=%" PRIu64 " voluntary=%" PRIu64 " involuntary=%" PRIu64 "\n",
@@ -979,6 +1051,34 @@ static void test_workload_selection(void)
     invalid[3] = "macro";
     CHECK(!tp_options(4, invalid, &config));
     CHECK(!tp_options(3, invalid, &config));
+    /* A real-source descriptor replaces the synthetic default unless
+     * --workload also selects synthetic cases; its template is frozen. */
+    char* real[] = {"throughput", "run", "--no-guard", "--real-source", "a.workload", "a", "--real-source", "b.workload", "b", NULL};
+    CHECK(tp_options(9, real, &config) && config.workload_mask == 0 && config.real_count == 2 &&
+          !strcmp(config.real_descriptors[1], "b.workload") && !strcmp(config.real_roots[1], "b"));
+    CHECK(tp_job_count(&config, TP_MAX_JOBS, &count) && count == 4);
+    char* mixed[] = {"throughput", "run", "--no-guard", "--real-source", "a.workload", "a", "--workload", "macros",
+                     "--mode", "fast", NULL};
+    CHECK(tp_options(10, mixed, &config) && config.workload_mask == 1u << 6 && config.real_count == 1);
+    CHECK(tp_job_count(&config, TP_MAX_JOBS, &count) && count == 2);
+    real[2] = "--pmu";
+    CHECK(!tp_options(6, real, &config)); /* Guarded and PMU runs refuse real sources. */
+    char* flagged[] = {"throughput", "run", "--no-guard", "--flag", "-DX", "--real-source", "a.workload", "a", NULL};
+    CHECK(!tp_options(8, flagged, &config));
+    flagged[3] = "--artifact";
+    flagged[4] = "assembly";
+    CHECK(!tp_options(8, flagged, &config));
+    char* partial[] = {"throughput", "run", "--no-guard", "--real-source", "a.workload", NULL};
+    CHECK(!tp_options(5, partial, &config));
+    char* other[] = {"throughput", "generate", "--real-source", "a.workload", "a", NULL};
+    CHECK(!tp_options(5, other, &config));
+    char* too_many[] = {"throughput", "run", "--no-guard", "--real-source", "a", "a", "--real-source", "b", "b",
+                        "--real-source", "c", "c", "--real-source", "d", "d", "--real-source", "e", "e", NULL};
+    CHECK(TP_MAX_REAL_SOURCES == 4 && !tp_options(18, too_many, &config));
+    CHECK(tp_options(15, too_many, &config) && config.real_count == TP_MAX_REAL_SOURCES);
+    CHECK(tp_job_count(&config, TP_MAX_JOBS, &count) && count == TP_MAX_REAL_SOURCES * TP_MODES);
+    /* Jobs need the prepared descriptors; a configuration without them is refused. */
+    CHECK(!tp_prepare_jobs(&config, NULL, NULL, TP_MAX_JOBS, &count));
 }
 
 static void test_job_capacity(void)
@@ -1554,6 +1654,59 @@ static void test_workload_admission(char const* executable, char const* root)
           tp_path(failed_output, directory, "oracle-substring"));
     result = test_admit_workload(executable, descriptor, source_root, evidence, failed_output, manifests, failure_log);
     CHECK_CHILD_EXIT(result, 2, failure_log);
+}
+
+/* `run --real-source` times the descriptor's compile-link template on its
+ * verified tree, records the descriptor identity, and refuses a changed tree. */
+static void test_real_source_run(char const* executable, char const* root)
+{
+    char directory[TP_PATH_CAP], source_root[TP_PATH_CAP], descriptor[TP_PATH_CAP], output[TP_PATH_CAP], log[TP_PATH_CAP];
+    char refused[TP_PATH_CAP], path[TP_PATH_CAP];
+    int paths_ok = tp_path(directory, root, "real-source-run") && tp_mkdirs(directory) &&
+                   tp_path(source_root, directory, "inputs") && tp_mkdirs(source_root) &&
+                   tp_path(descriptor, directory, "admission.workload") && tp_path(output, directory, "result") &&
+                   tp_path(refused, directory, "refused") && tp_path(log, directory, "run.log");
+    CHECK(paths_ok);
+    char source[TP_PATH_CAP], generated[TP_PATH_CAP], source_hash[65], generated_hash[65], tree_hash[65];
+    uint64_t source_bytes = 0, generated_bytes = 0, lines = 0;
+    CHECK(paths_ok && test_text(source_root, "source.c", "int source(void) { return 1; }\n") &&
+          test_text(source_root, "generated.c", "int generated(void) { return 2; }\n") &&
+          tp_path(source, source_root, "source.c") && tp_path(generated, source_root, "generated.c") &&
+          tp_hash_file(source, source_hash, &source_bytes, &lines) &&
+          tp_hash_file(generated, generated_hash, &generated_bytes, &lines) && tp_hash_tree(source_root, tree_hash));
+    CHECK(test_admission_descriptor(directory, tree_hash, source_hash, source_bytes, generated_hash, generated_bytes, "",
+                                    "e7635c5d652fd35a6f2c259b32694b78d0aaefc90d611609e6401a76fcf31265"));
+    if (paths_ok)
+    {
+        char* command[] = {(char*)executable, "child", "throughput", "run", "--baseline", (char*)executable,
+            "--candidate", (char*)executable, "--output", output, "--no-guard", "--pairs", "1", "--warmups", "1",
+            "--timeout", "10", "--real-source", descriptor, source_root, NULL};
+        TpProcess result = tp_process(command, NULL, log, 60, -1, 0);
+        CHECK_CHILD_EXIT(result, 0, log);
+        char metadata[16384] = {0}, jobs[256] = {0}, commands[65536] = {0};
+        FILE* file = tp_path(path, output, "metadata.json") ? fopen(path, "rb") : NULL;
+        CHECK(file && fread(metadata, 1, sizeof(metadata) - 1, file) > 0);
+        if (file) fclose(file);
+        CHECK(strstr(metadata, "\"workloads\":[],\"real_sources\":[{\"name\":\"admission-fixture\"") != NULL);
+        CHECK(strstr(metadata, tree_hash) && strstr(metadata, "\"template\":\"compile_link_argv\"") &&
+              strstr(metadata, "\"artifact\":\"executable\"") && strstr(metadata, "\"mode\":\"quality\""));
+        file = tp_path(path, output, "jobs.tsv") ? fopen(path, "rb") : NULL;
+        CHECK(file && fread(jobs, 1, sizeof(jobs) - 1, file) > 0);
+        if (file) fclose(file);
+        CHECK(!strcmp(jobs, "0\tadmission-fixture/fast\n1\tadmission-fixture/quality\n"));
+        file = tp_path(path, output, "commands.jsonl") ? fopen(path, "rb") : NULL;
+        CHECK(file && fread(commands, 1, sizeof(commands) - 1, file) > 0);
+        if (file) fclose(file);
+        /* The measured mode replaces the admission default; the frozen flags remain. */
+        CHECK(strstr(commands, "\"-fregister-allocator=quality\"") && strstr(commands, "\"-ffrontend-ssa\"") &&
+              strstr(commands, "\"-fno-pic\"") && strstr(commands, "\"-lm\"") && !strstr(commands, "\"-c\""));
+        CHECK(test_text(source_root, "undeclared.c", "int undeclared;\n"));
+        command[9] = refused;
+        result = tp_process(command, NULL, log, 60, -1, 0);
+        CHECK_CHILD_EXIT(result, 2, log);
+        struct stat info;
+        CHECK(tp_path(path, refused, "metadata.json") && stat(path, &info) != 0 && errno == ENOENT);
+    }
 }
 
 static void test_checked_in_workload_descriptors(void)
@@ -2186,9 +2339,13 @@ int main(int argc, char** argv)
         test_compiler_failures(executable, root);
         test_workload_descriptors(executable, root);
         test_workload_admission(executable, root);
+        test_real_source_run(executable, root);
         test_checked_in_workload_descriptors();
         test_inputs(root);
         test_maximum_jobs(root);
+#ifdef __linux__
+        test_child_counter_diagnostic_control();
+#endif
         test_processes(executable, root);
 #ifndef _WIN32
         test_process_group_postcondition();

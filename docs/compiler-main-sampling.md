@@ -50,7 +50,13 @@ The committed acquisition plan fixes common guarded source controls, actual
 source and storage paths, toolchain policy and the frozen harness/protocol.
 For plan bytes `P`, `campaign = SHA256(P)` and the native preparation output is
 `store_root/campaign/prepared`. Source and storage roots stay outside the
-Actions workspace and temporary cleanup tree. The baseline closure remains
+Actions workspace and temporary cleanup tree. Because the closure snapshot
+parks the baseline build by rename and the ledger lives under `store_root`, the
+controller refuses before any claim unless `store_root` is an existing
+directory owned and writable by the runner user, on the same device
+(`st_dev`) as `source_root`'s parent (#3390). Every refusal before the claim,
+in the public entry, the owner or the owned worker, prints an `error:` line
+naming its reason to the job log. The baseline closure remains
 at its exact original root; later packets verify its source/generated files,
 configuration, tools and immutable binaries before and after measurement.
 
@@ -76,7 +82,10 @@ claim it proved cleanup. Host observation is recorded from actual
 The artifact retains all requested/attempted trial rows, raw lab inputs/outputs,
 full corpus metadata/results, immutable identities, prepared manifests and
 bounded phase cleanup proofs. It exports data rather than compiler executables
-or source trees. Hosted publication reads bounded regular ZIP members directly
+or source trees: after each trial the packet deletes the lab's `out.exe` and
+`reference.exe`, and after the corpus its `throughput/artifacts` objects. The
+reader refuses executable members and bounds a packet to 64 MiB and 16384
+members. Hosted publication reads bounded regular ZIP members directly
 without extracting or executing artifact contents, rechecks GitHub provenance
 and whole-job occupancy, and independently replays raw configuration/statistics.
 

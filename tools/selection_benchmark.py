@@ -142,12 +142,15 @@ def make_sources(directory: Path) -> list[Path]:
     return sources
 
 
+# One function whose 4 GiB by-value parameter no native selector represents.
+FALLBACK_SOURCE = "struct huge { char bytes[0x100000000]; };\nint refused(struct huge value) { return 0; }\n"
+
+
 def check_failures(compiler: Path, directory: Path, timeout: float) -> None:
     bad = {
         "empty": "",
         "syntax": "int f( {",
         "declarations": "int external(void);",
-        "fallback": "int too_many(" + ", ".join(f"int a{i}" for i in range(25)) + "){return a0 + a24;}",
     }
     for name, source in bad.items():
         path = directory / f"reject-{name}.c"
@@ -155,6 +158,17 @@ def check_failures(compiler: Path, directory: Path, timeout: float) -> None:
         completed = subprocess.run([str(compiler), "bench-select", str(path)], capture_output=True, text=True, timeout=timeout)
         if completed.returncode == 0 or any(line.startswith("BENCH_SELECT ") for line in completed.stdout.splitlines()):
             raise RuntimeError(f"benchmark incorrectly accepted {name}: {completed.stdout}")
+    # Valid canonical IR that both native selectors refuse: their signature
+    # gates (machine_x64_value_shape, machine_a64_value_shape) reject any
+    # aggregate over UINT32_MAX - 7 bytes before body selection. The command
+    # must report it as a fallback, not as an earlier source or IR failure.
+    path = directory / "reject-fallback.c"
+    path.write_text(FALLBACK_SOURCE, encoding="utf-8")
+    completed = subprocess.run([str(compiler), "bench-select", str(path)], capture_output=True, text=True, timeout=timeout)
+    lines = completed.stdout.splitlines()
+    if (completed.returncode == 0 or any(line.startswith("BENCH_SELECT ") for line in lines) or
+            not any(line.startswith("bench-select: invalid workload ") and " fallback_functions=1 " in line for line in lines)):
+        raise RuntimeError(f"benchmark did not refuse a selector fallback: {completed.stdout}")
     for arguments in ([], ["one.c", "two.c"]):
         completed = subprocess.run([str(compiler), "bench-select", *arguments], capture_output=True, timeout=timeout)
         if completed.returncode == 0:
@@ -275,6 +289,29 @@ class ReportTests(unittest.TestCase):
 
     def test_additive_metric(self) -> None:
         self.assertEqual(parse_report(self.text.replace(" version=1", " future_counter=3 version=1"))[0]["future_counter"], 3)
+
+    @unittest.skipIf(os.name == "nt", "fake compilers are POSIX scripts")
+    def test_check_failures_requires_fallback_refusal(self) -> None:
+        # Fake compilers refuse every input except the fallback fixture, where
+        # each prints `fallback` and exits with `status`.
+        refused = "bench-select: invalid workload functions=1 mir_instructions=0 fallback_functions=1 verification_failures=0"
+        accepted = self.row.replace("fallback_functions=0", "fallback_functions=1")
+        cases = ((refused, 1, True), (accepted, 0, False), (accepted, 1, False),
+                 ("bench-select: source or canonical IR validation failed", 1, False))
+        with tempfile.TemporaryDirectory(prefix="buster-selection-test-") as temporary:
+            directory = Path(temporary)
+            for index, (fallback, status, passes) in enumerate(cases):
+                compiler = directory / f"fake-{index}"
+                compiler.write_text(f"#!{sys.executable}\nimport sys\n"
+                                    f"if len(sys.argv) == 3 and sys.argv[2].endswith('reject-fallback.c'):\n"
+                                    f"    print({fallback!r})\n    sys.exit({status})\nsys.exit(1)\n", encoding="utf-8")
+                compiler.chmod(0o755)
+                with self.subTest(fallback=fallback, status=status):
+                    if passes:
+                        check_failures(compiler, directory, 30)
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            check_failures(compiler, directory, 30)
 
 
 def main() -> int:

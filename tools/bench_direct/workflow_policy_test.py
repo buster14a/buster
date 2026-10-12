@@ -26,7 +26,7 @@ LIFECYCLE = WORKFLOWS / "9700x-lifecycle.yml"
 ACTIONLINT = ROOT / ".github" / "actionlint.yaml"
 BENCHMARKING = ROOT / "docs" / "agents" / "benchmarking.md"
 ADMISSION_GUIDE = ROOT / "benchmarks" / "9700x" / "ADMISSION.md"
-RADDEBUGGER = WORKFLOWS / "raddebugger-compatibility.yml"
+RADDEBUGGER = WORKFLOWS / "external-projects.yml"
 
 # Re-running failed or single jobs reuses earlier successful job outputs, so
 # the host job is bound to an authorization produced in this same attempt.
@@ -107,6 +107,12 @@ DIRECT_AUTHORIZE_IF = "    if: ${{ " + " && ".join(DIRECT_TERMS) + " }}"
 DIRECT_RUN_IF = "    if: ${{ " + " && ".join((*DIRECT_TERMS, ATTEMPT_BINDING, REQUEST_BINDING, "needs.authorize.outputs.workloads == 'true'")) + " }}"
 # The pull-request compiler comparison (#2769) shares the direct gate.
 PULL_RUN_IF = "    if: ${{ " + " && ".join((*DIRECT_TERMS, ATTEMPT_BINDING, REQUEST_BINDING, "needs.authorize.outputs.compare == 'true'")) + " }}"
+# The host is dispatched only for an admitted or named historical corpus harness (#3714);
+# the check writer and publisher still run so an unsupported base gets its explicit check.
+PULL_COMPARE_IF = PULL_RUN_IF.replace(
+    "needs.authorize.outputs.compare == 'true' }}",
+    "needs.authorize.outputs.compare == 'true' && (needs.authorize.outputs.harness_admission == 'admitted' || "
+    "needs.authorize.outputs.harness_admission == 'historical') }}")
 PULL_PUBLISH_IF = "    if: ${{ " + " && ".join(("always()", *DIRECT_TERMS, "needs.authorize.outputs.compare == 'true'")) + " }}"
 DIRECT_TRIGGER = (
     "on:",
@@ -499,6 +505,9 @@ PULL_RUN_SCRIPT = [line.replace("--mode main", "--mode pull")
                    .replace("--pull-head \"$BQ_PULL_HEAD\"", "--pull-head \"$BQ_HEAD_COMMIT\"")
                    .replace(" \"$BQ_PULL_HEAD\" \"$BQ_TRUSTED_REVISION\"", " \"$BQ_TRUSTED_REVISION\"")
                    for line in COMPILER_RUN_SCRIPT]
+PULL_RUN_SCRIPT[5:5] = ["          [[ \"$BQ_HARNESS_ADMISSION\" =~ ^(admitted|historical)$ ]]"]
+PULL_RUN_SCRIPT[-1] += " \\"
+PULL_RUN_SCRIPT.append("            --harness-admission \"$BQ_HARNESS_ADMISSION\"")
 # A main measurement in progress is never cancelled; pull requests coalesce.
 DIRECT_CONCURRENCY = (
     "concurrency:",
@@ -507,12 +516,13 @@ DIRECT_CONCURRENCY = (
 )
 PULL_RUN_LINES = (
     "    needs: authorize",
-    PULL_RUN_IF,
+    PULL_COMPARE_IF,
     "    runs-on:",
     "      group: buster-9700x-service-dispatch",
     "      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]",
     "      BQ_BASE_COMMIT: ${{ needs.authorize.outputs.merge_base }}",
     "      BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}",
+    "      BQ_HARNESS_ADMISSION: ${{ needs.authorize.outputs.harness_admission }}",
 )
 PULL_CHECKOUTS = (
     COMPILER_CHECKOUTS[0],
@@ -534,7 +544,8 @@ PULL_PUBLISH_BLOCKS = (
     ("          GH_TOKEN: ${{ github.token }}", "          BQ_MODE: pull"),
     ("          BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}",
      "          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}",
-     "          BQ_COMPARE_RESULT: ${{ needs.compare-pull.result }}"),
+     "          BQ_COMPARE_RESULT: ${{ needs.compare-pull.result }}",
+     "          BQ_HARNESS_ADMISSION: ${{ needs.authorize.outputs.harness_admission }}"),
     ("        run: python3 -B tools/bench_direct/compiler_publish.py",),
 )
 COMPILER_PUBLISH_BLOCKS = (
@@ -1061,15 +1072,15 @@ def check_utility_path(errors: list[str], direct: str | None = None) -> None:
             errors.append(f"utility lacks the exact admitted {key} binding")
 
 def check_postmerge_diagnostics(errors: list[str], text: str | None = None) -> None:
-    """RAD Debugger tests every triggering main SHA without a pre-merge path."""
+    """The shared external-project owner retains RAD on each exact main SHA."""
     text = RADDEBUGGER.read_text(encoding="utf-8") if text is None else text
     if trigger_block(text) != COMPILER_REQUEST_TRIGGER:
         errors.append("RAD Debugger must trigger only on unfiltered pushes to main")
-    for marker in ("ref: ${{ github.sha }}", "group: raddebugger-${{ github.run_id }}",
+    for marker in ("ref: ${{ github.sha }}", "group: external-projects-${{ github.run_id }}",
                    "cancel-in-progress: false", "contents: read", "persist-credentials: false",
-                   "ref: f6b4a38134652886239b91f940cd7a67fedf689d", "if: always()",
-                   "test_raddebugger --self-test", "test_raddebugger --config Release",
-                   "Retain exact-source diagnostics including failures"):
+                   "ref: f6b4a38134652886239b91f940cd7a67fedf689d", "always()",
+                   "test_raddebugger --self-test", "external_projects rad",
+                   "Retain rad evidence immediately", "build/rad-compiler", "timeout-minutes: 360"):
         if marker not in text:
             errors.append(f"RAD Debugger is missing post-merge evidence marker: {marker}")
     if "github.event.pull_request" in text or "contents: write" in text:
@@ -1083,9 +1094,11 @@ def check_premerge_checks(errors: list[str], rules: dict | None = None, admissio
     for rule in rules.get("rules", []):
         for check in rule.get("parameters", {}).get("required_status_checks", []):
             context = check.get("context", "")
-            if context.startswith("9700X ") or context in ("RAD Debugger compatibility", "linux-x86-64"):
+            if context.startswith("9700X ") or context in ("RAD Debugger compatibility", "linux-x86-64",
+                    "External projects after merge", "Linux x86-64 external projects",
+                    "macOS AArch64 inventory (qualification pending)", "Windows x86-64 inventory (qualification pending)"):
                 errors.append(f"post-merge diagnostic is required before merging: {context}")
-    for marker in ("raddebugger-compatibility.yml", "9700x-direct-bench.yml",
+    for marker in ("raddebugger-compatibility.yml", "external-projects.yml", "9700x-direct-bench.yml",
                    "9700x-direct-request.yml", "9700x-compiler-request.yml"):
         if marker in admission:
             errors.append(f"post-merge diagnostic participates in merge admission: {marker}")
@@ -1317,7 +1330,7 @@ def check_compiler_path(errors: list[str]) -> None:
     for line in PULL_RUN_LINES:
         if line not in compare_pull:
             errors.append(f"pull compare job is missing exact line: {line.strip()}")
-    if [line for line in compare_pull if line.startswith("    if:")] != [PULL_RUN_IF]:
+    if [line for line in compare_pull if line.startswith("    if:")] != [PULL_COMPARE_IF]:
         errors.append("pull compare job is missing its exact condition")
     for marker in ("GH_TOKEN", "github.token", "curl ", "api.github.com", "permissions:", "sudo",
                    "environment:", "buster-bench", "secrets.", "--sudo", "--profile-steps"):

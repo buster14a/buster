@@ -69,6 +69,15 @@ thread-local aliases and retains C23's permitted `auto`, `constexpr`, and
 thread-local combinations. A typed `auto` declaration at file scope or with
 another storage class still requires type inference under C23 6.7.1p4.
 
+Storage-class context validation uses the same specifier reader: parameters
+permit only `register`, and resolved function declarations cannot carry thread
+storage (`_Thread_local`, C23 `thread_local`, or GNU `__thread`). Direct and
+nested parameter readers validate the specifier prefix before array adjustment,
+so `int a[static 4]` remains valid. File and block function declarations are
+checked after type resolution, including function typedefs and prototypes.
+`c_test_storage_class_contexts` covers four dialects and three target layouts;
+the driver diagnostic-equivalence matrix compares syntax-only and object paths.
+
 Windows target predefines in `c_source.c` preserve the `__inline` spelling and
 map `__forceinline` to it, without injecting a storage class. The existing needed
 function dependency walk decides which header bodies are reachable; the two late
@@ -360,8 +369,9 @@ publish cache entries. Immutable scalar query types are created before query
 checkpoints; declarator and qualified types remain independent. All borrowed
 cache pointers are cleared before the semantic model is returned.
 
-`CParseResult.type_identity_queries` retains successful `_Generic` selections
-and `__builtin_types_compatible_p` answers through lowering. These compact rows
+`CParseResult.type_identity_queries` retains successful `_Generic` selections,
+`__builtin_choose_expr` selections and `__builtin_types_compatible_p` answers
+through lowering. These compact rows
 contain original token ranges or an integer answer; no frontend identity enters
 canonical IR. The shared semantic resolver uses `CType` compatibility, applies
 lvalue/array/function conversion only to generic controllers, and preserves
@@ -373,7 +383,20 @@ expression's type, including when inspected by `typeof` or `sizeof`.
 The existing token position index records identity-query candidates once.
 Nested queries settle in reverse token order on an explicit work walk; the
 expression task stack follows the selected range without evaluating the
-controller or discarded values. Append-only answers participate in semantic
+controller or discarded values. A `__builtin_choose_expr` row
+(`c_parse_choose_expr_builtin`) selects the arm its integer constant condition
+picks, so the semantic typer and constant evaluator see that arm's unconverted
+type and value; a choice in the condition starts later and is already settled
+when the walk evaluates it. A condition that is not an integer constant
+records nothing. `__builtin_constant_p(x)` is typed as `int` by the
+expression task stack without a row; its value belongs to lowering. Each query
+re-walks its range, so a site whose row is retained is recognized from its
+slot's hint without a search.
+
+Lowering's own constant evaluator does not yet fold a `__builtin_choose_expr`
+value in a deferred `_Static_assert`, and lowering cannot take a choice whose
+condition is another choice (#3860); `c_test_builtin_operand_types` therefore
+checks those forms through the parser only. Append-only answers participate in semantic
 result checkpoints. Lowering consumes retained answers; model-building-only
 callers resolve missing answers through the same semantic helper.
 
@@ -418,6 +441,11 @@ frontend forms and both native allocators, with syntax/object diagnostic
 equivalence for a missing semicolon or attribute arguments.
 
 A modification destination is typed from its whole operand.
+Function-typed destinations are refused before assignment-source conversions,
+including direct, parenthesized and dereferenced designators in unevaluated
+operands. Function pointer objects retain their pointer type and remain valid
+assignment destinations. The driver diagnostic-equivalence corpus covers these
+negative and positive neighbors in C17/C23 and both frontend SSA forms (#3746).
 `c_parse_assignment_identifier_is_operand` is the one rule both assignment
 scans in `c_parse_validate_const_assignments` use for when the identifier in
 front of `=` is that whole operand: a member access, indirection, address-of
@@ -457,7 +485,21 @@ values -- one scope-chain entity lookup per identifier -- only when
 branches through a computed goto. The proof is the walk's own test:
 `c_parse_label_address_prefix_proven`, or `c_parse_label_address_cast_at` for
 the `(type)&&label` form, whose type name may be a typedef resolved in the
-token's scope. Every provenance fact the walk records descends from such a
+token's scope. The scoped prefix proof treats a balanced `typeof (...)`
+specifier as one type-name component; its operand remains owned by expression
+or type-name semantics. Operand matching uses the position index when present
+and the scalar delimiter reference when absent; the registered fixture checks
+both proof paths, including an ordinary conjunction inside the typeof operand. The machineless cast reader falls back to that proof
+for decorated types it cannot resolve. A preceding sizeof/alignof group is
+still an operand, and ordinary conjunctions still bind ordinary identifiers.
+`c_test_typeof_label_address` covers GNU17/GNU23, all six native target
+layouts, both canonical forms, and default/pilot verified execution under
+FAST/QUALITY, with undeclared conjunction/sizeof/alignof/typeof neighbors.
+A complete root equality/inequality is a provenance sink: its result is the
+ordinary integer produced by canonical pointer equality. Conditional, comma,
+logical and cast results retain the conservative policy; decorated pointer
+return/call/static-storage and conditional/comma controls remain rejected.
+Every provenance fact the walk records descends from such a
 root, so a body it skips could have recorded or diagnosed nothing. The
 conjunction operator shares the spelling; a body with a goto label and
 `a && b` is not walked, and a parenthesized sizeof/alignof operand before
@@ -741,3 +783,27 @@ released after validation; completed definitions reuse their source identity.
 The multidimensional constant/runtime pair pins a later array derivation that
 first materializes a member during retry, including its exact source diagnostic.
 A GNU17-only empty-record dimension pins completion without member-row growth.
+
+### Promoted-member workspace
+
+Initializer member paths keep the existing breadth-first search and generation-stamped
+visited table. The semantic machine starts with token-derived workspace capacity,
+but expression queries can append type rows beyond that estimate. A search grows
+its checked private workspace to cover the live type table before indexing it;
+scratch and phase rewinds cannot release those buffers. The next growth releases
+the previous private reservation, and semantic teardown releases the last one.
+Reservation failure produces a structured diagnostic rather than treating an intact
+record as if it lacked the requested member. The depth-16/32 later-assertion regression
+in `c_test_nested_designator_static_assert` covers this interaction in syntax-only
+validation, both frontend forms and the AST pilot; runtime controls check inferred
+array length and member values.
+
+If an omitted outer array bound remains uninferred after a failed initializer
+walk, shape validation still traverses the list through the existing unbounded-root
+mode. It publishes no synthetic bound and diagnoses unknown outer/inner member
+names instead of silently skipping the list (#3672). The same registered fixture
+checks unsized/sized invalid neighbors through direct semantics and the driver,
+with independent Linux GCC/Clang rejection controls. Workspace ownership has its
+own registered fault/recovery control: a failed replacement preserves the old
+reservation and generation, a later search recovers, and production teardown
+returns the private reservation count to its starting value.

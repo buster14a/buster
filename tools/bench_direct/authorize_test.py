@@ -39,6 +39,29 @@ def pull_request() -> dict:
     }
 
 
+def request_contents(texts: dict) -> dict:
+    """GitHub contents replies for COMPARE_REQUEST at each revision; None is a 404."""
+    import base64
+    replies = {}
+    for revision, text in texts.items():
+        path = f"/repos/{REPOSITORY}/contents/{authorize.COMPARE_REQUEST}?ref={revision}"
+        replies[path] = None if text is None else {
+            "type": "file", "encoding": "base64", "size": len(text.encode()),
+            "content": base64.b64encode(text.encode()).decode()}
+    return replies
+
+
+def replay(replies: dict):
+    """A fetch stand-in: a None reply is GitHub's 404."""
+    import urllib.error
+
+    def fetch(path, token):
+        if replies[path] is None:
+            raise urllib.error.HTTPError(path, 404, "Not Found", None, None)
+        return replies[path]
+    return fetch
+
+
 class AuthorizeTest(unittest.TestCase):
     def check(self, run: object, pulls: object) -> tuple[list[str], str]:
         return authorize.verify(REPOSITORY, 91, HEAD, run, pulls)
@@ -349,18 +372,129 @@ class FreshRequestTest(unittest.TestCase):
                         {"filename": authorize.COMPARE_REQUEST, "status": "modified"}],
                     f"{prefix}/commits/{HEAD}": commit,
                     f"{prefix}/compare/{BASE}...{HEAD}": compared,
+                    f"{prefix}/compare/{authorize.THROUGHPUT_HARNESS_FLOOR}...{BASE}": {"status": "ahead"},
+                    **request_contents({HEAD: "# request\n", BASE: None}),
                 }
                 environment = {"BQ_REPOSITORY": REPOSITORY, "BQ_REQUEST_RUN_ID": "91",
                                "BQ_HEAD_COMMIT": HEAD, "BQ_RUN_ATTEMPT": "1",
                                "GH_TOKEN": "offline", "GITHUB_OUTPUT": str(output)}
                 with mock.patch.dict(authorize.os.environ, environment, clear=True), \
-                        mock.patch.object(authorize, "fetch", side_effect=lambda path, token: replies[path]):
+                        mock.patch.object(authorize, "fetch", side_effect=replay(replies)):
                     self.assertEqual(authorize.main(), 0)
                 values = dict(line.split("=", 1) for line in output.read_text().splitlines())
                 self.assertEqual(values["request_head"], HEAD)
                 self.assertEqual(values["compare"], str(fresh).lower())
                 self.assertEqual(values["workloads"], "false")
+                # The stale request never reaches harness admission; the fresh one is admitted.
+                self.assertEqual(values["harness_admission"], "admitted" if fresh else "")
 
+
+
+class HarnessAdmissionTest(unittest.TestCase):
+    """#3714: the merge base's corpus harness is admitted before any host is dispatched."""
+
+    def test_constants_match_the_receipt_contract(self) -> None:
+        self.assertEqual(authorize.THROUGHPUT_HARNESS_FLOOR, compiler_receipt.THROUGHPUT_HARNESS_FLOOR)
+        self.assertEqual(authorize.THROUGHPUT_HISTORICAL_REQUEST_LINE,
+                         compiler_receipt.THROUGHPUT_HISTORICAL_REQUEST_LINE)
+
+    def test_dispositions(self) -> None:
+        cases = (
+            ("ahead", [0], ("admitted", [])), ("identical", [0, 0], ("admitted", [])),
+            ("behind", [0], ("unsupported", [])), ("diverged", [0], ("unsupported", [])),
+            ("diverged", [1], ("historical", [])), ("behind", [1, 1], ("historical", [])),
+        )
+        for status, deltas, expected in cases:
+            with self.subTest(status=status, deltas=deltas):
+                self.assertEqual(authorize.harness_admission({"status": status}, deltas), expected)
+
+    def test_misuse_and_unreadable_records_refuse_authorization(self) -> None:
+        cases = (
+            ({"status": "ahead"}, [1]),        # the recipe on a base that needs none
+            ({"status": "diverged"}, [1, 0]),  # inherited by one parent: not fresh
+            ({"status": "diverged"}, [2]),     # repeated
+            ({"status": "diverged"}, None),    # selector count unprovable
+            ({"status": "unknown"}, [0]), ({}, [0]), (None, [0]), ([], [0]),
+        )
+        for compared, deltas in cases:
+            with self.subTest(compared=compared, deltas=deltas):
+                state, failures = authorize.harness_admission(compared, deltas)
+                self.assertEqual(state, "")
+                self.assertTrue(failures)
+
+    def test_request_deltas_count_exact_lines_per_parent(self) -> None:
+        line = authorize.THROUGHPUT_HISTORICAL_REQUEST_LINE
+        texts = {HEAD: f"# r\n{line}\n", BASE: None, "c" * 40: f"{line}\n"}
+        read = lambda revision: texts[revision]  # noqa: E731
+        self.assertEqual(authorize.historical_request_deltas(read, HEAD, [BASE]), [1])
+        self.assertEqual(authorize.historical_request_deltas(read, HEAD, [BASE, "c" * 40]), [1, 0])
+        texts[HEAD] = f"{line} \n"  # not the exact line
+        self.assertEqual(authorize.historical_request_deltas(read, HEAD, [BASE]), [0])
+        self.assertIsNone(authorize.historical_request_deltas(read, HEAD, []))
+
+        def broken(revision):
+            raise ValueError("sampling input is missing or exceeds the data bound")
+        self.assertIsNone(authorize.historical_request_deltas(broken, HEAD, [BASE]))
+
+    def run_main(self, floor_status: str, head_text: str) -> tuple[int, dict]:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            pull = dict(pull_request(), number=42, changed_files=1)
+            commit = {"sha": HEAD, "parents": [{"sha": BASE}], "commit": {"tree": {"sha": "d" * 40}}}
+            compared = FreshRequestTest.records([authorize.COMPARE_REQUEST])
+            compared["merge_base_commit"] = {"sha": BASE, "commit": {"tree": {"sha": "e" * 40}}}
+            prefix = f"/repos/{REPOSITORY}"
+            replies = {
+                f"{prefix}/actions/runs/91": request_run(),
+                f"{prefix}/commits/{HEAD}/pulls?per_page=100": [pull],
+                f"{prefix}/pulls/42": pull,
+                f"{prefix}/pulls/42/files?per_page=100&page=1": [
+                    {"filename": authorize.COMPARE_REQUEST, "status": "modified"}],
+                f"{prefix}/commits/{HEAD}": commit,
+                f"{prefix}/compare/{BASE}...{HEAD}": compared,
+                f"{prefix}/compare/{authorize.THROUGHPUT_HARNESS_FLOOR}...{BASE}": {"status": floor_status},
+                **request_contents({HEAD: head_text, BASE: None}),
+            }
+            environment = {"BQ_REPOSITORY": REPOSITORY, "BQ_REQUEST_RUN_ID": "91",
+                           "BQ_HEAD_COMMIT": HEAD, "BQ_RUN_ATTEMPT": "1",
+                           "GH_TOKEN": "offline", "GITHUB_OUTPUT": str(output)}
+            with mock.patch.dict(authorize.os.environ, environment, clear=True), \
+                    mock.patch.object(authorize, "fetch", side_effect=replay(replies)):
+                code = authorize.main()
+            values = dict(line.split("=", 1) for line in output.read_text().splitlines()) if output.exists() else {}
+        return code, values
+
+    def test_main_emits_each_disposition_before_dispatch(self) -> None:
+        line = authorize.THROUGHPUT_HISTORICAL_REQUEST_LINE
+        for floor_status, text, expected in (("ahead", "# request\n", "admitted"),
+                                             ("diverged", "# request\n", "unsupported"),
+                                             ("diverged", f"{line}\n", "historical")):
+            with self.subTest(expected=expected):
+                code, values = self.run_main(floor_status, text)
+                self.assertEqual((code, values["compare"], values["harness_admission"]), (0, "true", expected))
+
+    def test_workflow_dispatches_only_admitted_or_historical_harnesses(self) -> None:
+        text = policy.DIRECT.read_text(encoding="utf-8")
+        term = (" && (needs.authorize.outputs.harness_admission == 'admitted' || "
+                "needs.authorize.outputs.harness_admission == 'historical')")
+        self.assertEqual(text.count(term), 1)
+        for mutated in (text.replace(term, ""),
+                        text.replace(term, " && needs.authorize.outputs.harness_admission != ''"),
+                        text.replace("        --harness-admission \"$BQ_HARNESS_ADMISSION\"", ""),
+                        text.replace("          BQ_HARNESS_ADMISSION: ${{ needs.authorize.outputs.harness_admission }}\n",
+                                     "")):
+            with self.subTest(changed=mutated != text), tempfile.TemporaryDirectory() as directory:
+                self.assertNotEqual(mutated, text)
+                path = Path(directory) / "9700x-direct-bench.yml"
+                path.write_text(mutated, encoding="utf-8")
+                errors: list[str] = []
+                with mock.patch.object(policy, "DIRECT", path):
+                    policy.check_compiler_path(errors)
+                self.assertTrue(errors)
+
+    def test_main_refuses_the_recipe_on_an_admitted_base(self) -> None:
+        code, values = self.run_main("ahead", authorize.THROUGHPUT_HISTORICAL_REQUEST_LINE + "\n")
+        self.assertEqual((code, values), (1, {}))
 
 
 class SchedulingPolicyTest(unittest.TestCase):
@@ -420,7 +554,10 @@ class SchedulingPolicyTest(unittest.TestCase):
 
     def test_postmerge_checks_cannot_become_required(self) -> None:
         for context in ("9700X compiler benchmark", "9700X compiler benchmark (pull request)",
-                        "RAD Debugger compatibility", "linux-x86-64"):
+                        "RAD Debugger compatibility", "linux-x86-64",
+                        "External projects after merge", "Linux x86-64 external projects",
+                        "macOS AArch64 inventory (qualification pending)",
+                        "Windows x86-64 inventory (qualification pending)"):
             with self.subTest(context=context):
                 errors: list[str] = []
                 policy.check_premerge_checks(errors, {"rules": [{"parameters": {

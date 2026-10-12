@@ -43,6 +43,57 @@ flush (#2621) saved 7-8 ms of wall per object on a btrfs desktop. No caller
 needs durability today; one that does should flush explicitly with
 `os_file_flush` rather than make every artifact pay for it.
 
+Buster does not overwrite outputs in place as mold and wild do; #3687 records
+the measured gain and the downsides. Preallocating the staging file with
+`fallocate(2)` is measured but not adopted: it awaits qualified Zen 5 evidence
+(#3685).
+
+`-fearly-exit` (API field `early_exit`; off by default, and `-fno-early-exit`
+restores the default) is mold and wild's fork trick (#3686). It lives in
+`run_c_compiler` and `os_early_exit_*` in `src/buster/lib/os.c`.
+
+- **Arming.** After argument parsing, and before the first `lane_run` starts
+  the gang, `ide cc` forks. The parent only waits on a pipe. Arming is
+  skipped on Windows, Android and iOS, and when a tracked thread already
+  exists (`os_is_only_live_thread` does not see untracked threads; desktop
+  `ide cc` starts none before this point). It is also skipped when the
+  status pipe cannot be created through `os_process_spawn_pipe_create`
+  (close-on-exec, both ends moved above fd 2), or when `fork` fails. The
+  compile then simply runs in-process. Because the status pipe never lands
+  on fds 0-2, a process started with standard streams closed cannot write
+  compiler output into it.
+- **Release.** Once every artifact and report is out, the child calls
+  `os_early_exit_release`. It points its standard streams at `/dev/null`,
+  so a build system's pipes reach EOF, and sends its status. The parent
+  `_exit`s with that status, or with the child's own status if the child
+  died before reporting.
+- **Background work.** Destroying the 32 GiB translation-unit arena, then
+  `exit_mmap`, then the release of each output that publication replaced
+  then run in the background. While armed, `file_publish_slices_checked`
+  holds a read-only reference to a replaced destination across the
+  `rename(2)` and hands it to `os_early_exit_defer_close`, so the old
+  inode's blocks are freed after the report rather than inside the rename.
+  Atomic publication is unchanged.
+
+The costs are why it stays opt-in:
+
+- `time(1)`, `getrusage(RUSAGE_CHILDREN)` and `-fmetrics-out` wrappers that
+  measure the process see only the parent (about 5 MB RSS and no CPU time).
+- A debugger follows the parent.
+- A `make -j` or cgroup budget frees the job slot while the child still
+  holds its memory.
+- A failure after the release cannot change the exit status, and any later
+  child output is discarded.
+
+Do not use it for benchmarks, profiling, debugging or memory budgeting. The
+`compiler_driver_test_early_exit` regression checks byte-identical objects
+against the default path, a replaced output, `-E` output through the caller's
+pipe, and failure propagation. On desktop POSIX, it also runs both modes with
+fds 0-1 and 0-2 closed, with and without `-v`, and compares raw exit statuses
+and artifacts. It forces the setup-failure fallback through the test-build seam
+`BUSTER_TEST_EARLY_EXIT_PIPE_FAILURE=1`. That seam fails the pipe's
+configuration step and validates that the failure happened.
+
 Opt-in machine-readable records remain on stdout: `CODEGEN_VERIFY`,
 `CODEGEN_FALLBACK*`, `CODEGEN`, `IR_*`, `TARGET`, `GPU`, and the `-v` source
 statistics. The differential runner reads `CODEGEN_VERIFY` there and compares
@@ -333,6 +384,26 @@ publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
 the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
 not predefined at any level. `-mattr` overrides still refine the level.
 The psABI's LAHF-SAHF has no target feature and is implied by long mode.
+`-m64` selects x86-64 execution mode, including from an i386 target, and clears
+`code16`. Together with `-m16` and `-m32`, the last spelling wins independently
+of `--target` order. Repeated `-m64` preserves an existing x86-64 target's OS
+data model and CPU features. All three modes are refused for foreign and GPU
+targets; `-mx32` remains unsupported (#3458).
+
+For 32-bit x86, the canonical target architecture is `i386`; `i386`, `i486`,
+`i586` and `i686` are accepted architecture spellings, while `-march=i386`
+and `-march=i686` select explicit CPU models. The I386 baseline models GCC's
+`-m32` default (i686 without MMX/SSE). `-m16` and `-m32` select I386 execution
+mode, with the last spelling winning independently of `--target` order;
+`-m16` also records the `code16` target environment. These modes support
+preprocessing (`-E`, including `-dM`) and frontend-only validation
+(`-fsyntax-only`). I386 artifact generation—including assembly, objects,
+LLVM output and links—is deliberately refused with an explicit #3654
+diagnostic. I386 is supported only for Linux and freestanding targets; an
+execution-mode option on an x86 target with another OS is refused using the
+pre-mode target triple in its diagnostic. `-m64` switches back to the existing
+x86-64 target as described above.
+
 Without `-march`/`-mcpu` the CPU model is `baseline`, matching Clang's and
 GCC's portable `x86-64` default. A command with no `-target` compiles for the
 host's architecture and operating system (`target_native`,
@@ -380,14 +451,26 @@ left baseline code generation and no hint that the request was ignored.
 `-fno-strict-overflow` is accepted as `-fwrapv` (signed overflow already wraps;
 there is no `-fno-wrapv`, so `-fstrict-overflow` stays unsupported). `-w` is
 accepted and publishes no warning text or records and outranks every other
-warning option. `--version`, `-dumpversion`, `-dumpmachine` and
+warning option.
+`-ffreestanding` publishes `__STDC_HOSTED__` as zero and keeps the builtin
+`<limits.h>` from forwarding to a hosted system header. Buster does not
+implicitly builtinize or fold ordinary library calls such as `memcpy` or
+`strlen`; only explicit `__builtin_*` spellings are compiler builtins, so no
+ordinary-call suppression is needed. `-fomit-frame-pointer` grants permission
+to omit a frame pointer; it does not require one to be omitted. Default native
+objects currently contain `.eh_frame`, so `-fno-asynchronous-unwind-tables` is
+accepted only for I386, where artifact generation is refused.
+`-fcf-protection=none` is accepted because default output contains no
+`endbr32`/`endbr64` instructions and no IBT/SHSTK GNU property note.
+`--version`, `-dumpversion`, `-dumpmachine` and
 `-print-target-triple`/`-print-effective-triple` need no input and exit 0
 (`compiler_driver_query_text`):
 `-dumpversion` prints `18.0.0`, the `__clang_major__`/`__clang_minor__`/
 `__clang_patchlevel__` triple (`__clang_version__` is `18.0.0 (buster)`);
 `-dumpmachine` prints the effective target as `arch-os[-environment]` with the
 `gnu` environment on Linux and `msvc` on Windows (for example
-`x86_64-linux-gnu`); `--version` prints `Buster clang version 18.0.0 (buster)`,
+`x86_64-linux-gnu`, or `i386-linux-gnu` under `-m32`); `--version` prints
+`Buster clang version 18.0.0 (buster)`,
 `Target: <that triple>` and `Thread model: posix`. `-print-target-triple` and
 `-print-effective-triple` print Clang's normalized `arch-vendor-os[-environment]`
 form, with the vendor `apple` on macOS/iOS and `unknown` elsewhere (for example
@@ -398,7 +481,17 @@ disables it. A later `-std=` restores that dialect's default (on in strict C99
 to C17, off in GNU modes and C23), so the last of these options wins, as in
 Clang. `-nostdlibinc` drops the system include directories but keeps the
 compiler resource directory (`stddef.h` and the other freestanding headers);
-`-nostdinc` drops both. `-working-directory=DIR` and `-working-directory DIR`
+`-nostdinc` drops both. Explicit `-I`, `-isystem` and `-idirafter`
+directories remain available with either switch. `-idirafter DIR` and
+`-idirafterDIR` add system-header directories after `-I`, `-isystem`, the
+compiler resource headers and the default system roots, preserving the order
+of repeated `-idirafter` options. Both quoted and angle includes consult them;
+quoted includes still search the including file\'s directory first. Headers
+resolved there are excluded by `-MMD`. External GPU pipelines refuse
+`-idirafter` explicitly because their system-path forwarding would lose its
+late search position. The registered
+`compiler_driver_test_idirafter` covers shadowed headers, sysroot defaults,
+`-nostdinc`/`-nostdlibinc`, `#include_next`, both spellings and MD/MMD classification. `-working-directory=DIR` and `-working-directory DIR`
 resolve relative input paths against `DIR` with host path rules (on POSIX only
 a leading `/` is absolute and `\` and `:` are ordinary filename bytes; on
 Windows `\x.c` takes the root name of `DIR` (`C:` or UNC `\\server`) and
@@ -415,7 +508,8 @@ vendor meaning. An excess component retains precedence over that refusal.
 Native x86-64 and AArch64 compilation uses the FAST register allocator at
 every optimization level, including the default and `-O0`. Callers may select
 `fast` or `quality`; both run canonical IR -> MIR -> placement ->
-metadata-backed native emission, and the last allocator-affecting option wins.
+metadata-backed native emission. Explicit allocator selection is independent
+of `-O`; the last allocator option wins.
 The stack-only mode is removed: `-fregister-allocator=none`,
 `-fregister-allocator=mir-stack` and `-fno-register-allocator` are argument errors.
 The allocators run on x86-64 under both System V and Win64, and on AArch64
@@ -477,10 +571,50 @@ width, as AT&T's unsuffixed spelling already does.
 spellings, including immediate boundaries, word prefixes and invalid register,
 memory, suffix-width and 64-bit neighbours. It never executes port I/O.
 
-The default `-fcanonical-fast` shared pipeline and independent
-`-fcanonical-fast-{fold,address,dce,parameters}` controls are described in
-[the FAST pipeline contract](../canonical-fast-pipeline.md). Timing is separate
-(`-ftime-canonical-fast -v`); register allocation selection is unchanged.
+Explicit `-O`/`-O0` skips optional canonical FAST cleanup; positive levels
+select the existing bounded `fold,address,dce,parameters` pipeline. Omission
+retains the adopted throughput recipe. Explicit whole-pipeline and per-pass
+controls override level defaults independently of option order; the last
+explicit control of each bit wins. Level/alias policy, fixed pass order and
+budgets are in [the FAST pipeline contract](../canonical-fast-pipeline.md#native-optimization-level-policy).
+Verbose output reports disabled as well as enabled passes. Timing is separate
+(`-ftime-canonical-fast -v`); register allocation selection is independent.
+The block-local CSE experiment (#3011) is selected only by
+`-fcanonical-fast-cse`; no level or whole-pipeline control enables it, and
+`-fcanonical-fast`/`-fno-canonical-fast` clear an earlier selection.
+`-fcanonical-fast-cse-strategy=window|table` picks the census's linear or
+hash-table arm (default `table`; the last one given wins). See
+[opt-in block-local CSE](../canonical-fast-pipeline.md#opt-in-block-local-cse-3011).
+
+Canonical inlining is separate from register allocation. Tiny direct-call
+inlining is opt-in at every optimization level: `-fcanonical-inline` enables
+it and `-fno-canonical-inline` disables it (the last of the two wins), and
+`-O*` levels never change it. The matched 9700X tiny-off/on self-host profile
+on #3111 measured no compiler-throughput gain from enabling it (stage-1
+compile wall +1.66%, generated compiler self-host wall +0.68%), so no level
+adopts it by default. The optimizer still enforces `always_inline` requirements when tiny
+inlining is disabled; an impossible requirement produces a source-mapped
+`ir.inline-required` error. Positive 32-bit per-invocation limits are set with
+`-fcanonical-inline-max-callee=N`,
+`-fcanonical-inline-function-growth=N`,
+`-fcanonical-inline-module-growth=N`,
+`-fcanonical-inline-call-sites=N`, and
+`-fcanonical-inline-caller-growth-shift=N`. These flags set budgets but do not enable
+tiny inlining; zero is rejected and zero-valued API options normalize to the
+named defaults. Budgets cap callee instruction count, added instructions per
+caller, added instructions per module, and accepted call sites, respectively;
+the shift sets the caller relocation bound described below.
+Without an explicit module limit, the module budget is relative: the larger of
+4096 rows and 1/32 of the module's lowered canonical instruction rows
+(`ir_inline_module_growth_limit`). A caller keeps optional splices only when
+their growth is at least 1/32 of its rows (`IR_INLINE_CALLER_GROWTH_SHIFT`);
+see the FAST pipeline contract for the measured memory tradeoff.
+Verbose output emits one `IR_INLINE` record when tiny inlining is enabled or
+inlining candidates were encountered. Its fields are `tiny`, `candidates`,
+`inlined`, `always_inlined`, `copied_instructions`, `growth`,
+`budget_skips`, `shape_skips`, `linkage_skips`, `recursion_skips`, `visits`,
+and `released_bytes` (pages of relocated caller tables handed back to the OS).
+It is compile-work telemetry, not generated-code runtime.
 
 `-fno-frontend-ssa` selects the original memory-form C lowering;
 `-ffrontend-ssa` restores direct SSA for the bounded supported subset. The last
@@ -662,6 +796,18 @@ the object reader, in-memory/ELF linkers and `object_aarch64_elf_page_relocate`
 resolve as S + A - P; Mach-O and COFF have no such relocation, so there a
 target the unit cannot fold is refused.
 
+X86-64 unit assembly relaxes unprefixed symbolic `jmp` and `jcc` to rel8
+when the target is binding-invariant and defined in the same section. Layout
+starts with eligible branches short and grows out-of-range forms to rel32;
+instruction encodings are cached while labels, numeric labels, `.` expressions,
+`.set` aliases, data expressions, symbol sizes and alignment are recomputed.
+Calls, explicit `@PLT`, external/cross-section targets, weak definitions and
+default-visible ELF globals retain rel32. The single-instruction
+`assembly_encode` API keeps its existing encoding policy. Short branches in
+object `-S` listings therefore reassemble with their original bytes when
+labels identify the same targets; this does not preserve an intentionally
+nonminimal near encoding or an instruction prefix that the printer omits.
+
 Symbolic page addressing takes the same relocation path (#2933). `adrp Xd, sym[+off]`
 names its symbol directly; the low 12 bits are `add Xd, Xn, :lo12:sym[+off]` and an
 unsigned-offset `[Xn, :lo12:sym[+off]]` on any LDR/STR/LDRB/LDRH/LDRSB/LDRSH/LDRSW,
@@ -746,6 +892,17 @@ request from assembly, an external ELF object or a selected archive member
 with a diagnostic naming that input; it publishes no image. Inputs with no
 note remain accepted as nonexecuting. See [object emission](../object-emission.md).
 
+Every section an assembly file declares is its own object section, in
+declaration order, on every format: thousands on ELF, up to 65,279 on COFF
+(`OBJECT_COFF_MAX_SECTIONS`) and 255 on Mach-O (`OBJECT_MACH_O_MAX_SECTIONS`).
+ELF and COFF keep each section's own name; the Mach-O writer spells each one
+by its kind (`__TEXT,__text`, `__TEXT,__const`, ...), so several sections may
+share a name there while keeping their own contents and relocations. Past a format's limit, `-c` refuses with the
+first section that does not fit (`section '.text$f255' is section 256 of 256;
+a mach-o64 object holds at most 255 sections`). Only a section whose kind is
+an initializer array takes COFF's `.CRT$XCU`/`.CRT$XTX` name.
+`compiler_driver_test_assembly_many_object_sections` covers this.
+
 The x86-64 instruction layer accepts the GNU spellings that GCC and Clang
 listings and Buster's own `-S` output use, encoding the same bytes as GNU as:
 register-immediate `movabs`/`movabsq`; AT&T `retq` and `callq`; `endbr32` and
@@ -798,6 +955,57 @@ when it fails. The retained witnesses establish what the admitted public
 source and encoder paths did for this snapshot; they do not supply an
 independent architectural oracle for every form. The broader #2931 issue
 remains open for unrelated encoding defects and further proof.
+
+X86 source forms also include baseline `pause`, operand-free `rep nop` (also
+`repe nop` and `repz nop`), `prefetcht0`/`prefetcht1`/
+`prefetcht2`/`prefetchnta`, `clflush`, and 32/64-bit `movnti` stores. PAUSE is
+an unconditional REP-NOP hint; prefetch and cache-flush rows map to the existing
+SSE/SSE2 baseline. ADX and PCLMUL metadata aliases use `adx` and `pclmul`.
+`rdtscp` is independently enableable with `-mattr=+rdtscp` or `-mrdtscp`, is
+included by modern AMD/Intel model profiles, and is detected from extended
+CPUID EDX bit 27 for `-march=native`. Its absence is a named feature refusal.
+
+AT&T `cvtsi2sd{l,q}`, `cvtsi2ss{l,q}` and `crc32{b,w,l,q}` suffixes describe
+the integer source, independently of the XMM/CRC accumulator width. CRC32 word
+sources use the 66 prefix with a 32-bit accumulator; qword sources require a
+64-bit accumulator. Register-controlled `bextr` selects BMI1's VEX form; an
+immediate control still selects the separately gated TBM XOP form. `-mbmi`
+and `-mattr=+bmi` alias `bmi1`. `kmovw` accepts mask/GPR32 and mask/memory16
+transfers, and `vpcompressd` accepts a masked memory destination with a dword
+element, including AT&T `(%rax){%k2}`. Zeroing a memory destination is refused.
+
+`assembly_test_x86_common_source_forms` checks GNU as 2.47 bytes in both
+dialects, public assembly units, baseline feature refusals, Zen 4/Skylake
+AVX-512 profiles and malformed neighbours. The driver's
+`compiler_driver_test_pause_conversion_round_trip` reassembles FAST/QUALITY
+Buster listings with byte-identical text and captured pristine GCC 16.2.1
+`-O2 -S` scalar conversions. These bounded witnesses do not claim every
+metadata form or arbitrary external listing is source-complete (#2931).
+`assembly_test_x86_rep_nop` checks the operand-free REP-NOP aliases and
+malformed operands in both dialects; `compiler_driver_test_gcc_pause_listing`
+assembles the pristine GCC PAUSE loop with its maximum-skip alignment directives.
+
+On Mach-O, `.section SEGMENT,SECTION[,TYPE[,ATTRIBUTES]]` and
+`.pushsection` accept the pairs Buster's listing writer represents:
+`__TEXT,__text,regular,pure_instructions`, `__TEXT,__const`,
+`__DATA,__data`, `__DATA,__bss,zerofill`, `__DATA,__thread_data`,
+`__DATA,__thread_bss`, the `__mod_init_func`/`__mod_term_func` pairs with
+`mod_init_funcs`/`mod_term_funcs`, and
+`__TEXT,__eh_frame,coalesced,no_toc+strip_static_syms+live_support`.
+Known `__DWARF,__debug_*` sections retain their debug identities.
+The segment/section pairs normalize to the object's section names, so
+`.text` and `__TEXT,__text` reopen the same section. Unknown pairs, types,
+attributes and extra operands are structured directive diagnostics.
+AArch64 `adrp Xd, sym@TLVPPAGE` and
+`ldr Xt, [Xn, sym@TLVPPAGEOFF]` retain the Darwin TLVP page/load relocations,
+with zero addends; nonzero signed addends are refused because the platform
+linker rejects them. The low half must be a plain 64-bit unsigned-offset
+LDR; ADD, stores, other widths and writeback are refused. The Mach-O-only
+`@GOTPAGE`/`@GOTPAGEOFF` pair uses the existing GOT-load page/load kinds;
+its addend must be zero and its low half must load into a 64-bit integer
+register other than XZR. `compiler_driver_test_macho_aarch64_listing_round_trip` compares
+serialized text and TLVP/GOT kinds, offsets, addends and symbols with direct
+`-c`, for plain functions and defined/undefined TLS in fast/quality modes.
 
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
@@ -949,7 +1157,15 @@ retain relocations because a linker can replace their addresses.
 Text alignment without an explicit fill uses x86-64 NOP bytes or complete
 little-endian AArch64 NOP instructions. A partial AArch64 instruction boundary
 is zero-filled before the NOPs; explicit fills remain repeated bytes on both
-targets. Data alignment defaults to zero fill.
+targets. Data alignment defaults to zero fill. `.p2align`, `.balign`, and
+`.align` accept `alignment[, fill[, maximum_skip]]`, including an omitted
+fill (`.p2align 4,,10`). A nonzero maximum suppresses the gap when the required
+padding exceeds it; equality permits padding and zero means unlimited. The
+section retains its requested alignment even when padding is suppressed.
+Maximum-skip expressions must be absolute and in 0..4294967295; malformed or
+out-of-range operands are diagnosed. Every branch-relaxation layout replay
+recomputes the gap and limit. `.align` keeps its target-specific interpretation:
+bytes on x86-64 ELF, a power of two on AArch64.
 
 Three things that layer owns rather than the instruction layer. Local numeric
 labels: `1:` becomes a generated name and `1f`/`1b` resolve to the nearest
@@ -1101,8 +1317,8 @@ The parser reserves one operation record per expanded argument; the native
 consumer walks it without another allocation. API-built invocations with a
 zero `link_operation_count` retain the explicit legacy order of all inputs
 followed by all libraries. Non-link output actions retain their prior order.
-Group/whole-archive and dynamic-library as-needed/interposition policy are
-unchanged.
+Group and whole-archive requests remain unsupported. Shared-symbol
+interposition retains its existing behavior.
 
 Provider state changes are monotonic: an edge is revisited at most three times.
 Selection work is expected O(S + A + D log(M + 1)), with S visited selected
@@ -1160,10 +1376,24 @@ and COFF members count their forms of the same definitions -- external `N_ABS`,
 `N_INDR` and `IMAGE_SYM_ABSOLUTE` symbols, and commons (an undefined external with a
 non-zero value) -- the same way (#1243).
 
+An unindexed archive is accepted, unlike GNU ld's "archive has no index", but
+every member's symbol table must be readable. Selection walks members in archive
+order, so skipping an unreadable member could let a later member satisfy a symbol
+the skipped one defines first and silently change the link. One unreadable
+member therefore rejects the whole archive, even when the link would select only
+other members: `object_archive_read_link` sets `failed_member` and a diagnostic
+naming the member, and the driver reports `could not read archive <path>: member
+<name>: unreadable symbol table in an archive without a symbol index`. Running
+`ranlib` over the archive defers the member's validation to selection, as for any
+indexed archive (#1319).
+
 `compiler_driver_archive_test_lazy` exercises all three object formats, 32/64-bit
 GNU and BSD indexes, BSD extended names, unindexed input, transitive dependencies,
 no-selected-member archives, a required incompatible member, duplicate providers,
-weak references and repeated occurrences. A separate valid ELF `R_X86_64_SIZE64`
+weak references and repeated occurrences.
+`compiler_driver_archive_test_unindexed_unreadable_member` covers the unindexed
+refusal through the reader and both positional and `-l` driver inputs, with an
+indexed control that selects the valid member and leaves the bad one unread. A separate valid ELF `R_X86_64_SIZE64`
 control verifies that an irrelevant same-target unsupported relocation is deferred
 and its selected member still fails.
 
@@ -1197,25 +1427,71 @@ Its configured native Linux control builds a real archive with host compiler
 and archiver, links an independent host control, and runs both Buster's direct
 and sysroot-default named links.
 
-For requested Linux shared libraries, a located GNU linker script beginning
-with `INPUT`, `GROUP`, `AS_NEEDED`, `OUTPUT_FORMAT`, `OUTPUT_ARCH`, or
-`SEARCH_DIR` and an opening parenthesis is refused as
-`unsupported GNU linker script <path> requested by -l<request>`. Leading
-whitespace and C block comments are accepted for this classification. The
-first script in search order stops lookup; a later ELF library cannot hide it.
-The driver neither interprets script members nor creates an image from them.
-Other ELF missing/malformed-library policy and automatic runtime-provider
-lookup retain their existing behavior. `compiler_driver_test_elf_linker_scripts`
-covers literal script/non-script boundaries, both ELF CPUs, normal/exact
-library spellings, single/multi-input links, first-request error ordering,
-later-ELF/script precedence, and preservation of an existing output.
-General GNU linker-script interpretation remains separate work.
+Native x86-64 and AArch64 Linux ELF image links also accept direct `.so`
+and versioned `.so.N` file operands (numeric version components), including the full paths returned by
+CMake's `find_library`. Classification uses the per-input language snapshot:
+`-x c`, `-x cpp-output` and `-x assembler` select source even with a
+`.so` suffix; `-x none` restores DSO admission. Automatic `.so.c`,
+`.so.i` and `.so.s` inputs keep their source phases.
+DSOs retain their position among `-l` occurrences
+and form a serial translation-unit boundary. The driver reads exactly the
+supplied path; `-L` and default roots cannot substitute for a missing or
+incompatible direct input. The ordinary ELF export/version reader supplies
+imports, and `DT_NEEDED` uses `DT_SONAME` when present, otherwise the
+operand's original spelling. Repeated identities are emitted once.
+The `-v` `buster-native-ld` line includes each original file operand.
+
+Direct DSOs are refused for compile-only, preprocessing, syntax-only,
+assembly, LLVM/GPU output, foreign/non-ELF targets and the in-memory
+retained-object route. Missing, malformed and target-incompatible files
+fail the link with the supplied path and preserve existing output.
+`compiler_driver_library_path_inputs` checks both ELF targets and allocators,
+SONAME/no-SONAME identity, versioned paths, mixed `-l` order, duplicates,
+linker scripts and refusals. `compiler_driver_library_path_native` compares
+native links and execution against the configured GCC/Clang.
+
+For requested Linux shared libraries, located GNU linker scripts support
+`INPUT(...)`, `GROUP(...)` and `AS_NEEDED(...)`, including nested commands,
+commas, quoted filenames, whitespace and C block comments. Members name ELF64
+shared libraries or further scripts: bare filenames, absolute paths and `-lX`
+(including `-l:FILE`). Bare members search beside the script, then the current
+directory, then the existing explicit/default ELF roots. Named members use the
+existing ELF roots. Absolute members are prefixed with the sysroot when their
+script is inside that sysroot; `=` and `$SYSROOT` force that prefix, following
+[GNU ld's file-command rules](https://sourceware.org/binutils/docs/ld.html).
+Explicit `-L` paths retain their literal meaning.
+
+Expansion uses an explicit worklist in member order, limited to 32 script files
+on a dependency chain, 32 nested command levels, 4,096 total script members per
+invocation, and 65,536 bytes per script. Cycles reach the same depth/count refusal;
+they never recurse on the C stack. DSO identity comes from `DT_SONAME` when
+present, with filename spelling retained otherwise; repeated identities create
+one dynamic-library entry. Worklist and expanded-library storage is allocated
+only when a script is encountered.
+
+This is a shared-library subset: archive/object members are refused, including
+glibc's `libc_nonshared.a`, rather than dropped or admitted as shared objects.
+`GROUP` preserves member order without archive rescanning. `AS_NEEDED` includes
+its members unconditionally, just like `INPUT`; it does not implement GNU ld's
+as-needed selection. Other commands, including `OUTPUT_FORMAT`, `OUTPUT_ARCH`
+and `SEARCH_DIR`, remain unsupported. Unsupported syntax, archive members and
+bounds failures retain `unsupported GNU linker script <path> requested by
+-l<request>`; missing DSOs retain the original request's missing-library error.
+A later DSO cannot hide the first located script. Automatic runtime lookup and
+the existing special treatment of `-lc` are unchanged.
+
+`compiler_driver_test_elf_linker_scripts` covers both ELF CPUs, normal/exact
+requests, single/multi-input links, member forms, comments, SONAME identity,
+nested scripts at/beyond the cap, cycles, parser byte/member/command-depth bounds,
+unsupported grammar, first-request error ordering and preserved output on refusal.
+On native Linux with a configured GCC or Clang driver, a host-style
+`INPUT(-lncursesw)` fixture compares its `DT_NEEDED` identity with GNU ld.
 
 On macOS and iOS, `-lNAME` searches explicit `-L` roots in order, probing
 `libNAME.tbd` before `libNAME.dylib` within each root, then
 `<sysroot>/usr/lib` when a sysroot was supplied. A compatible thin or fat
 Mach-O dylib contributes its `LC_ID_DYLIB` install name and current and
-compatibility versions to `LC_LOAD_DYLIB`; TAPI YAML TBD v1-v4 stubs provide
+compatibility versions to `LC_LOAD_DYLIB`; TAPI YAML TBD v1-v4 and JSON TBD v5 stubs provide
 the same metadata, and wrong-CPU or wrong-platform candidates are skipped.
 Mach-O dylib platforms come from `LC_BUILD_VERSION` and `LC_VERSION_MIN_*`;
 TBD v4 `targets:` entries must match both architecture and platform suffix,
@@ -1225,10 +1501,49 @@ including zero; absent TBD current/compatibility versions default to 1.0.0,
 while a present malformed version makes the stub unusable. `-lc` and `-lm` keep
 their existing implicit behavior. Without a located candidate, only the
 allowlisted Apple system libraries retain the legacy `/usr/lib/libNAME.dylib`
-fallback; other requests fail with `cannot find -l<request>`. TBD v5 JSON is
-unsupported. `compiler_driver_test_mach_library_search` covers parser bounds,
+fallback; other requests fail with `cannot find -l<request>`. TBD v5 reads only
+`main_library`: `target_info[].target` must match both CPU and platform, and
+`install_names`, `current_versions` and `compatibility_versions` honor their
+optional `targets` lists. Inlined `libraries` do not supply the identity.
+The JSON scan validates the complete document with a fixed 64-frame stack;
+malformed/truncated input and deeper nesting are unusable. Ordinary metadata
+strings borrow mapped bytes; escaped strings/keys are decoded into the caller
+arena, including Unicode surrogate pairs. Invalid Unicode metadata and embedded
+NUL are refused. Ambiguous duplicate identity fields
+and overlapping target-specific metadata are refused. `compiler_driver_test_mach_library_search` covers parser bounds,
 architecture selection, search order, versions, fallback, refusal and archive
 interaction on every host without running the cross-linked image.
+
+Dependency names passed through `-l NAME` or `-framework NAME` must be
+nonempty. An explicitly empty operand is a `driver.argument` error naming the
+option before any source is read or output is published; response files and
+embedding invocations follow the same rule. A missing operand retains its
+separate `missing argument after OPTION` diagnostic. Empty `-I`/`-L` path
+policy is independent. `compiler_driver_test_empty_dependency_names` covers
+macOS/iOS, single/multiple inputs, an empty request followed by a missing name,
+argv/response/API calls, and preservation of existing output.
+
+`-framework NAME` searches every explicit `-F` root in order, then
+`<sysroot>/System/Library/Frameworks`, or `/System/Library/Frameworks` when
+no sysroot is supplied. Within each root it probes `NAME.framework/NAME.tbd`
+before `NAME.framework/NAME`. The same Mach-O/TAPI CPU and platform checks
+apply; unusable candidates are skipped. YAML TAPI stubs may describe AArch64
+libraries as `arm64e`; this ARM64 CPU subtype is accepted for ordinary AArch64
+consumers, while macOS/iOS platform matching remains exact. Unknown architecture
+spellings and other CPU families remain incompatible. The located file supplies the install
+name and both versions, including zero, rather than the search path. Duplicate
+install names produce one load command. A framework without a compatible file
+fails with `framework not found: NAME` before output publication, preserving
+any existing output. SDK-less links also require a real file: there is no
+framework-name allowlist or guessed load path. Supply `-F` or a sysroot for
+cross links. `compiler_driver_test_mach_framework_search` covers synthetic
+framework trees for macOS and iOS on every host, including both single-source
+and multi-input link paths, without executing the foreign image. On native
+macOS, the same fixture resolves the active SDK through `xcrun` and records
+`MACH_FRAMEWORK_SDK` candidate paths, formats, sizes, statuses, install names
+and packed versions for AppKit, Metal, QuartzCore and Foundation. Every one
+must have a compatible identity; the Release self-host gate also links and
+executes against these real framework identities.
 
 ELF executable data placement honors both page and requested object alignment.
 Align the final virtual address, not only its file offset: an initialized
@@ -1237,6 +1552,30 @@ The object writer already carries that requirement into the section metadata
 (GitHub #225).
 
 Every hosted ELF link reads the shared libraries' own dynamic symbol tables.
+Undefined ELF `STT_NOTYPE` references carry explicit `undefined_untyped`
+provenance in `ObjectSymbol`; TLS identity is independent. A typed reference
+wins over an untyped one in either object order. Both ELF object writers keep
+untyped assembly references `STT_NOTYPE`, even when a call relocation proves
+their callable use. Before any Linux or Android image writer, the selected
+library definition's `st_type` classifies an import: `STT_FUNC` and
+`STT_GNU_IFUNC` are functions, and `STT_OBJECT` remains data even without a
+storage-table entry. An untyped address reference with no usable definition,
+or a definition of unknown type, fails with its symbol and input named;
+it cannot become a guessed copy relocation. A call relocation proves use,
+not the providing definition's type: missing target exports refuse untyped
+calls and address references alike. Recognized `__tls_get_addr` companion
+calls retain the existing dynamic-loader ABI contract, including calls the
+writer relaxes away.
+An absent weak reference still follows the existing zero-resolution rule.
+
+Android reads `libc.so` and explicitly requested libraries through the same
+export reader. Its roots use `x86_64-linux-android` or
+`aarch64-linux-android` under the supplied sysroot, plus its generic
+`lib64`, `usr/lib64`, `lib` and `usr/lib` roots and explicit `-L` paths.
+Native Android also searches `/system/lib64`; cross Android links never
+search host GNU libc roots. Supply an API-specific NDK library directory
+with `-L` when needed. Missing target exports retain the refusal above.
+
 `compiler_driver_elf_library_exports` looks `libc.so.6` and each requested
 library up where the loader would — the `-L` paths, then the sysroot or host
 `lib`/`usr/lib` roots, multiarch first; without a sysroot also the Debian
@@ -1391,9 +1730,11 @@ reference model (see the position-independent code bullets in
 acceptable to `ld.lld -shared -z text`; Buster's Linux `-shared` and `-pie`
 writers still exist only for x86-64. Android AArch64 executable links use the
 AArch64 PIC model automatically. Thread-local access under AArch64
-ELF PIC is refused by a named code-generation diagnostic (emitting TLSDESC is
-not implemented; foreign TLSDESC objects are relaxed at link time, see the
-AArch64 TLS paragraph below) and publishes no output. Cancellation, preprocessing,
+ELF PIC emits the general-dynamic descriptor sequence and its four TLSDESC
+relocations. Independent platform linkers can build shared objects from these
+objects; Buster's fixed-address AArch64 linker relaxes the descriptor to
+local-exec, using the same path as foreign TLSDESC objects (see the
+AArch64 TLS paragraph below). Cancellation, preprocessing,
 syntax-only and assembly/prebuilt-only input routes retain their behavior.
 Mach-O and COFF keep their existing target models; Wasm/eBPF compatibility
 behavior is unchanged. LLVM-bitcode and direct backend model requests remain
@@ -1476,7 +1817,7 @@ are tracked on GitHub #1418.
 | `-nostdlib++`, `-nostdlibs`, `-nolibc` | `unsupported option` | Not spellings of the above. |
 | `-mfoo`, `-mno-foo` (no architecture has the feature) | `unsupported option: -mfoo` | `-m<feature>` takes only the names `-mattr` takes. |
 | `-mavx2` for a non-x86 target or a GPU target | `unsupported option: -mavx2` | The feature belongs to another architecture, or the GPU pipeline has no feature overrides. |
-| `-m32`, `-mred-zone`, `-mno-red-zone` | `unsupported option` | They name no target feature and have no implementation. |
+| `-mred-zone`, `-mno-red-zone` | `unsupported option` | They name no target feature and have no implementation. |
 | `-mAVX2`, `-mavx2=1`, `-m`, `-mno-` | `unsupported option` | Feature names are exact lower case; `=` forms belong to `-march=`, `-mcpu=`, `-mtune=`, `-mattr=`, `-masm=`. |
 | `-mno-sse2` | `unsupported option: -mno-sse2 (SSE2 is part of the x86-64 baseline)` | Every x86-64 target here requires SSE2. |
 | `-xc++` and other unknown joined `-x<lang>` | `unsupported language: c++` | Same language names as `-x <lang>`; C is the only source frontend. |
@@ -1636,6 +1977,69 @@ Buster-compiled main defining the other thread-local, and the test checks
 every descriptor appears relaxed and the image prints the same values as a
 host-linked control.
 
+## Native linker identity
+
+`ide cc -Wl,--version` and `ide cc -Xlinker --version` print
+`Buster native linker` followed by the effective target triple and exit
+successfully without reading source or standard input, compiling, spawning an
+external tool, or writing an artifact. `-march=x86-64 -O0 -g` may accompany the query. The independent
+`-m64` driver capability is tracked by
+[#3458](https://github.com/buster14a/buster/issues/3458). The typed invocation API exposes
+`COMPILER_DRIVER_QUERY_LINKER_VERSION`; execution returns the identity in
+`CompilerDriverResult.output`.
+
+The query requires a native x86-64/AArch64 link action and a supported native
+OS. The raw linker request must contain exactly `--version`; other linker
+arguments, compiler queries, compile-only actions, bitcode and GPU pipelines
+are refused. A SONAME operand named `--version` retains its ordinary meaning.
+The identity makes no GNU ld/LLD compatibility or invented version claim.
+Buster currently links in process and has no external-linker selector.
+
+For a native Linux x86-64 or AArch64 ELF link, raw linker `-v` from
+`-Wl,-v` or `-Xlinker -v` requests the native linker's identity while allowing
+the link to continue. It is consumed only in option position; operands to
+`-soname`, `--soname`, `-h`, `-z` or `--version-script` are preserved. Other targets and output
+modes continue to reject it. With driver `-v`, the driver also prints a
+` buster-native-ld` link-report line containing the output, explicit and
+target/sysroot library search roots in lookup order, command-line object,
+archive and shared-library inputs, and requested libraries. This is a report
+label for Buster's in-process link, not an executable name or linker choice;
+it does not claim GNU ld or LLD identity. CMake's
+`CMakeDetermineCompilerABI` / `CMakeParseImplicitLinkInfo` consume this
+link-line shape to discover Linux multiarch implicit library directories.
+
+Meson versions without a Buster linker detection/class implementation still
+reject this truthful identity. Native query support alone does not qualify
+Meson/QEMU configuration: upstream recognition and tests against unmodified
+Meson are required under [#3475](https://github.com/buster14a/buster/issues/3475).
+
+### Standalone CMake ABI discovery reduction
+
+`tools/cmake_abi_discovery/CMakeLists.txt` is a standalone reduction, not a CI
+test. Compare its `discovery.txt` output with Clang and Buster in separate
+build directories. For Clang:
+
+```sh
+cmake -S tools/cmake_abi_discovery -B out-clang -DCMAKE_C_COMPILER=clang
+cmake --build out-clang
+cat out-clang/discovery.txt
+```
+
+With CMake 3.29 or newer, point CMake directly at `ide` and make `cc` the
+compiler argument:
+
+```sh
+cmake -S tools/cmake_abi_discovery -B out-buster \
+  -DCMAKE_C_COMPILER=/path/to/ide -DCMAKE_C_COMPILER_ARG1=cc
+cmake --build out-buster
+cat out-buster/discovery.txt
+```
+
+For older CMake, use a wrapper whose contents are `exec /path/to/ide cc "$@"`,
+then configure with `-DCMAKE_C_COMPILER=/path/to/wrapper`. Compare pointer
+size, library architecture, implicit directories, linker identity, and the
+paths found for z and X11.
+
 ## Pass-through options
 
 `-Wl,a,b,c` produces three individual linker arguments, in order. Each
@@ -1651,20 +2055,117 @@ The supported subset is:
 - Linux and Android ELF links: `--no-undefined`, `-no-undefined`, and the
   two arguments `-z defs` require strong references to resolve. Executables
   already enforce this rule; on a shared object it overrides loader resolution.
+- x86-64 Linux driver links: `--as-needed` and `--no-as-needed` select
+  subsequent `-l` requests and automatic-language direct `.so` / `.so.N`
+  operands in input order (the default is no-as-needed). Explicit `-x` source
+  inputs retain their selected language. A DSO
+  is retained when it satisfies a strong unresolved reference from preceding
+  objects, or from a previously retained DSO when the candidate is absent
+  from every retained DSO's DT_NEEDED list (matched by SONAME identity).
+  DSO-only dependencies already named there remain indirect; a regular-object
+  demand still keeps them. Later objects and weak references do not keep it. The driver consumes these switches before the native image API,
+  which receives the selected library list and still refuses raw policy flags
+  without an ordered driver request. GNU linker-script `AS_NEEDED` remains
+  unsupported.
+- x86-64 Linux ELF links: `-O1` permits the native writer's existing layout and
+  hash policy; it does not request generated-code optimization. `--sort-common`
+  is accepted because there are no admitted common symbols to sort: the object
+  reader continues to refuse `SHN_COMMON`, and assembly `.comm` definitions
+  are already ordinary zero-filled definitions.
+- x86-64 Linux executables, PIEs and shared objects: `-z relro`, `-z now` and
+  `-z noexecstack` request RELRO, eager binding and a non-executable stack.
+  The fixed-address dynamic writer already seals its GOT and binds eagerly.
+  `-z now` extends a PIE/shared object's sealed range to include its PLT GOT
+  and emits both NOW flags. These requests select a dynamic executable even
+  without source imports, so their metadata is present on trivial programs.
+- x86-64 Linux ELF links: `-z pack-relative-relocs` converts eligible PIE/shared
+  `R_X86_64_RELATIVE` relocations to `DT_RELR` with direct addresses and bitmaps,
+  storing their implicit addends in the target words. Unaligned and zero-fill
+  locations retain RELA, as do symbolic, TLS, COPY and IRELATIVE relocations.
+  glibc's `GLIBC_ABI_DT_RELR` version dependency is recorded and must be present
+  in the selected libc's version definitions; an incompatible libc is refused.
+  Fixed-address executables have no load-bias-relative relocations to pack.
+  The existing layout reservation stays as padding; this promises RELR
+  semantics, not a smaller artifact or a compiler-throughput improvement.
+- x86-64 Linux executables, PIEs and shared objects: `-rpath DIR`,
+  `--rpath DIR`, `-rpath=DIR` and `--rpath=DIR` write a runtime search path.
+  Repeated paths are joined with `:` in command-line order. The default and
+  `--enable-new-dtags` write `DT_RUNPATH`; `--disable-new-dtags` writes
+  `DT_RPATH`, and the last dtag switch wins. Loader tokens such as `$ORIGIN`
+  are preserved literally (quote them in the shell). Each image's loader
+  expands `$ORIGIN` relative to that image. This is a runtime path, separate
+  from `-L` library discovery at link time; `-rpath-link` remains refused.
+  Missing or empty operands and unsupported targets fail before publication.
 - x86-64 Linux shared objects: `-soname NAME`, `--soname NAME`, `-h NAME`,
   `-soname=NAME`, and `--soname=NAME` set `DT_SONAME`.
+
+- x86-64 Linux executables, PIEs and shared objects: one
+  `--version-script=PATH` or `--version-script PATH` applies a GNU version
+  script. The file must be regular, at most 1 MiB, and contain one anonymous
+  or named node: `[NAME] { [global: SYMBOL; ...] [local: SYMBOL; ...] };`.
+  Clause order is flexible; each clause may occur once. Exact unquoted names
+  use ASCII letters, digits, underscores, dots and dollar signs. The local
+  clause also accepts one `*;` catch-all; exact global names override it.
+  Whitespace, `#` line comments and `/* ... */` comments are accepted.
+  At most 8,192 distinct exact names are accepted. Conflicting exact
+  global/local rules, multiple scripts/nodes, inheritance, quoted names,
+  language blocks, other patterns and malformed/trailing input fail before
+  publication. Missing exact names are permitted, as with GNU ld.
+  Local definitions become local in `.symtab`, leave `.dynsym`, and bind
+  inside shared objects. Input-hidden/local symbols cannot be promoted and
+  undefined imports are not localized. A named node assigns default version
+  index 2 to its exported exact globals, emits base/node `.gnu.version_d`
+  records and `DT_VERDEF/DT_VERDEFNUM`, and shifts needed import versions
+  above index 2. Unmatched exports remain unversioned. The base record names
+  the SONAME or output basename. Executable export selection still follows
+  `--export-dynamic` and library references; the script limits that selection.
+  Anonymous nodes change binding/export visibility without defining a version.
+  This covers pristine SDL3's single-node map and executable CMake probe;
+  broader GNU grammar and other targets remain unsupported.
 
 Other linker values and unsupported targets/output modes fail rather than
 silently losing link semantics. This includes PE, Mach-O, UEFI, compile-only,
 preprocessing, assembly-text and bitcode output. `-rdynamic` uses the same
 export validation. Unknown options, entry overrides, wrapping, archive-mode
-switches, runtime paths, version scripts, and other `-z` modes are refused.
+switches, runtime paths, and other `-z` modes are refused.
 
-`-Wp,` and `-Wa,` are unsupported and are never warning options. This includes
-preprocessor macro/include operations and dependency requests. Direct `-D`,
-`-U`, and `-I` remain available; `-Wp,-M*` stays refused. The driver supports
-the bounded `-MD`/`-MMD` dependency-file contract described below; standalone
-`-M`, `-MM`, and `-MG` remain unsupported.
+`-Wp,` and `-Wa,` are never warning options. Only the exact
+`-Wp,-MD,PATH` and `-Wp,-MMD,PATH` dependency spellings described below are
+supported; other pass-through requests, including macro/include operations,
+are refused. Direct `-D`, `-U`, and `-I` remain available.
+Standalone `-M`, `-MM`, and `-MG` remain unsupported.
+
+## Macro filename prefix maps
+
+`-fmacro-prefix-map=OLD=NEW` records literal, case-sensitive prefix
+substitutions for C and preprocessed assembly. Empty OLD or NEW is allowed;
+the last `=` separates them, and the last matching option wins once, following
+GCC. Matching is a byte prefix, without a directory-boundary requirement,
+canonicalization or repeated application to the replacement.
+
+The preprocessor applies the mapping when expanding `__FILE__` and
+`__BASE_FILE__`; `__FILE_NAME__` takes its basename first. Logical `#line`
+names can match too. GCC-style directive operands retain their original
+filenames, so mapping cannot redirect `#include __FILE__` or mutate a
+`#line __FILE__` operand. Diagnostics, source maps, include identity/lookup,
+dependency prerequisites, output paths and debug information retain their
+original names. GPU forwarding is explicitly refused. The independent
+`-ffile-prefix-map`, `-fdebug-prefix-map` and `-fcanon-prefix-map` options
+remain unsupported.
+
+GCC 15.2 [prefix-map implementation](https://github.com/gcc-mirror/gcc/blob/releases/gcc-15.2.0/gcc/file-prefix-map.cc)
+and [file builtins](https://github.com/gcc-mirror/gcc/blob/releases/gcc-15.2.0/libcpp/macro.cc)
+define the ordering, separator and directive policy.
+Clang 21.1 [language option parsing](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.0/clang/lib/Frontend/CompilerInvocation.cpp)
+and [mapping](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.0/clang/lib/Basic/LangOptions.cpp)
+agree for the single directory-to-empty Kbuild mapping, but select overlapping
+prefixes in reverse lexical order, retain the first duplicate prefix and split
+the first `=`. These differences
+are explicit oracle cases, not an assertion of universal GCC/Clang equivalence.
+The registered `compiler_driver_test_macro_prefix_map` and
+`compiler_driver_test_macro_prefix_map_files` cover the contract.
+Set `BUSTER_PREFIX_MAP_ORACLES=1` on hosted Linux to additionally require
+independent installed GCC and Clang preprocessing of the matrix and includes.
 
 ## Dependency files
 
@@ -1672,7 +2173,11 @@ the bounded `-MD`/`-MMD` dependency-file contract described below; standalone
 depfile path comes from the object path by removing only the basename's last
 extension and appending `.d`; `-MF` overrides it. `-MT` adds a raw target,
 `-MQ` adds an escaped target, and the default target is the escaped object path.
-Multiple target options retain command-line order. `-MP` adds phony rules for
+Multiple target options retain command-line order, including repeats and empty
+fragments. Parsing retains raw/quoted fragments and joins them once with checked
+sizing; target storage and copying grow linearly with argument and output bytes.
+`compiler_driver_test_dependency_target_scaling` bounds actual parser arena growth
+at 128 and 2,048 targets, directly and through response files. `-MP` adds phony rules for
 header prerequisites. `-MF`, `-MT`, `-MQ`, and `-MP` require `-MD` or `-MMD`;
 explicit `-MF`/target options cannot be used with multiple inputs.
 
@@ -1687,6 +2192,25 @@ with a file-write diagnostic.
 The depfile is atomically published only after successful compilation and
 object publication, so a failed compile preserves existing object and depfile
 contents.
+
+The bounded Linux Kbuild/BusyBox spellings `-Wp,-MMD,PATH` and
+`-Wp,-MD,PATH` reuse that collector and writer for exactly one native
+x86-64/AArch64 C input. They support `-c` and `-S -o FILE`; assembly must
+name its output file, so stdout output is refused. The path must be nonempty,
+contain no comma, newline, carriage return or NUL, and cannot be `-` or
+alias the source or artifact. Repeated pass-through dependency requests,
+additional comma-separated operations, direct `-MD/-MMD/-MF/-MT/-MQ/-MP`
+modifiers, retained in-memory objects, libraries and unsupported output modes
+are refused before compilation. Direct dependency options retain their C
+`-c` contract; this does not enable direct `-MD -S`.
+
+The default escaped target is the actual object or assembly output path,
+matching Clang's handling of these pass-through spellings. GCC uses the
+source basename with an `.o` suffix instead; this target-name difference is
+explicit. Linux Kbuild's `fixdep` supplies the real build target separately.
+A depfile is published only after its named artifact succeeds. A failed
+source or artifact write preserves the prior depfile; failure to publish the
+depfile reports failure even if the artifact has already been published.
 
 ## Warning options
 
@@ -1756,11 +2280,35 @@ source debug models and their larger object payloads unless requested.
 `-g` selects DWARF 4 for native ELF/Mach-O targets and CodeView for Windows
 objects. Unwind information remains independent of source debug information.
 
+Direct `wasm32-wasip1`, `wasm64-unknown-freestanding`, and `bpfel-unknown-linux`
+output does not emit source debug information. An enabled `-g` request fails
+with a named `driver.argument` diagnostic before reading source or publishing
+an artifact. The typed invocation API rejects `debug_info=true` too, regardless
+of `debug_info_explicit`. Default output, `-g0`, and `-g -g0` remain supported;
+`-g0 -g` is refused. Preprocessing and syntax-only actions accept `-g` because
+they do not emit a debug artifact. `compiler_driver_test_nonnative_debug_options`
+covers these refusals, option ordering, unchanged existing output, and identical
+default/disabled-debug bytes.
+
 A linked Windows image's PDB (`pdb_build`) gives its TPI stream a hash stream:
 one `hashTypeRecord` bucket per record modulo `0x3ffff` (`pdb_type_record_hash`)
 and a sparse type-index offset entry per 8 KiB of records. DbgHelp (cdb,
 WinDbg, `symchk`, `dbh`) faults with `0xc0000005` loading a PDB whose TPI
 stream names no hash stream (#3411). The regression is `pdb_test_tpi_hashes`.
+The globals and publics streams index each module's top-level procedures
+(`S_PROCREF`/`S_LPROCREF` naming the module-stream record) and data (copies of
+`S_GDATA32`/`S_LDATA32`); global ones also get an `S_PUB32` and an entry in the
+publics address map, sorted by section and offset (`pdb_gsi_emit`). With these
+empty, DbgHelp loads the PDB only as "public symbols & lines". The regression is
+`pdb_test_global_indexes`. Bucket ordering retains the format hash and name
+comparison, with stable insertion sort capped at 16 entries and stable bottom-up
+merge sort for larger buckets (#3737). One scratch array sized to the largest
+bucket is reused, bounding comparisons to O(N log N) even for repeated-hash
+names. `pdb_test_gsi_sorting` checks comparison bounds and stable ties;
+`pdb_test_gsi_colliding_indexes` checks both emitted indexes. The existing
+mixed ASCII/non-ASCII comparator can be non-transitive (#3752); for such inputs the
+large-bucket merge order is deterministic but may differ from insertion order.
+No comparator or on-disk format change is made.
 
 CodeView names a frame-resident location with `S_DEFRANGE_REGISTER_REL`
 against RBP (x86-64) or X29 (AArch64), the base codegen normalizes FRAME offsets

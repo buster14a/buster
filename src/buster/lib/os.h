@@ -426,6 +426,7 @@ BUSTER_F_DECL OsDirectoryCreateResult os_make_directory(String8 path);
 // umask). Existing names are reported as collisions without claiming ownership.
 BUSTER_F_DECL OsDirectoryCreateResult os_make_directory_exclusive(String8 path);
 // Creates one owner-only directory or accepts an existing directory.
+// Empty, null and embedded-NUL paths fail without attempting creation.
 BUSTER_F_DECL bool os_make_directory_attempt(String8 path);
 
 BUSTER_F_DECL bool os_file_delete(String8 path);
@@ -485,6 +486,31 @@ BUSTER_F_DECL OsError os_file_replace(String8 path, String8 destination);
 // fchmod restricted to the 0777 permission bits.
 BUSTER_F_DECL OsError os_file_set_permissions(OsFileDescriptor* file_descriptor, u32 permissions);
 #endif
+// Opt-in early exit, mold/wild's fork trick (#3686). os_early_exit_arm forks
+// while the process is still single-threaded: the parent blocks until the
+// child calls os_early_exit_release and then _exits with the status it was
+// sent, or, if the child dies first, with the child's own status. The child
+// returns true and carries on with the work. Arming fails (false, nothing
+// forked) on Windows, Android and iOS, once any tracked thread exists, or when
+// the status pipe cannot be created above the standard streams or fork fails;
+// the caller then simply continues in-process. os_is_only_live_thread does
+// not see untracked threads, so a caller must also have started none.
+//
+// The trade-offs are why it is never the default: time(1), getrusage and
+// per-process counters see only the parent; a debugger follows the parent;
+// the child's memory outlives the job slot the parent frees; and nothing that
+// fails after the release can change the exit status. Release points the
+// standard streams at /dev/null first, so later child output is discarded.
+#define OS_EARLY_EXIT_DEFERRED_LIMIT (64)
+BUSTER_F_DECL bool os_early_exit_arm(void);
+BUSTER_F_DECL bool os_early_exit_armed(void);
+// Hands a descriptor to be closed after the release, so the final close of a
+// replaced output (which frees its blocks) leaves the reported path. False,
+// and the caller keeps ownership, when not armed or past the limit.
+BUSTER_F_DECL bool os_early_exit_defer_close(OsFileDescriptor* file_descriptor);
+// Reports `exit_code` to the waiting parent, then closes deferred descriptors.
+// Does nothing when not armed.
+BUSTER_F_DECL void os_early_exit_release(u8 exit_code);
 BUSTER_F_DECL OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OsFileAccess access, OsFileCreateMode create_mode,
                                               OsFileShareFlags share_flags);
 BUSTER_F_DECL OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OsFileAccess access, OsFileCreateMode create_mode,
@@ -735,8 +761,19 @@ BUSTER_F_DECL bool os_commit_diagnose(void* address, u64 size, ProtectionFlags p
                                      OsCommitFailureContext* failure_context);
 BUSTER_F_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefault);
 BUSTER_F_DECL OsPrefaultResult os_prefault(void* address, u64 size);
+// Requests transparent huge pages for a reserved range. Advisory on every
+// target: refusal leaves the range usable. Explicit advice can increase RSS
+// and cause synchronous compaction even under an existing `always` policy.
+// It is a no-op where the target has no such facility.
+BUSTER_F_DECL void os_advise_huge_pages(void* address, u64 size);
 BUSTER_F_DECL bool os_protect(void* address, u64 size, ProtectionFlags protection);
 BUSTER_F_DECL bool os_decommit(void* address, u64 size);
+// Releases the physical pages wholly inside [address, address + size) that a
+// caller has abandoned within a live, committed mapping: no other pointer may
+// read them as data again. The range stays mapped and writable with undefined
+// contents, so an arena may later reuse it. Returns the bytes advised; zero
+// when no complete page lies inside the range or the platform refuses.
+BUSTER_F_DECL u64 os_discard(void* address, u64 size);
 BUSTER_F_DECL bool os_unreserve(void* address, u64 size);
 BUSTER_F_DECL bool os_flush_instruction_cache(void* address, u64 size);
 // Selects write (false) or execute (true) access for MAP_JIT mappings on the

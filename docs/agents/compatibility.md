@@ -25,9 +25,12 @@ directory and removes the compiler and in-progress outputs.
 | QuickJS and Test262 | [QuickJS](compatibility/quickjs.md) |
 | Git (Linux x86-64 opt-in build census) | [Git](compatibility/git.md) |
 | musl | [musl](compatibility/musl.md) |
+| musl + BusyBox (Linux diagnostic userspace) | [musl + BusyBox](compatibility/busybox.md) |
 | libc-test through the musl harness | [libc-test](compatibility/libc-test.md), after [musl](compatibility/musl.md) |
 | CPython | [CPython](compatibility/cpython.md) |
+| QEMU (opt-in Linux x86-64 TCG census) | [QEMU](compatibility/qemu.md) |
 | RAD Debugger (Linux x86-64 diagnostic campaign) | [RAD Debugger](compatibility/raddebugger.md) |
+| curl/libcurl (Linux x86-64 blocker census) | [curl/libcurl](compatibility/curl.md) |
 | Clang test corpus | [Clang suite](compatibility/clang-suite.md) |
 
 ## Compiler selection
@@ -51,3 +54,12 @@ options built that compiler.
 
 The musl and libc-test guides form one investigation in that order; references
 to preceding stages and later tests cross that boundary.
+
+## Ordinary post-merge scheduling
+
+Whole-project integration runs under the single [external-project owner](../external-project-ci.md)
+after each main push. Its assignment table records applicable Linux workloads
+and pending native macOS/Windows cells. Keep focused compiler regressions in
+pre-merge CI; add future pinned project recipes to the shared OS job rather than
+creating a project workflow or an arbitrary dispatch/reusable route. Project
+qualification and performance evidence contracts remain separate.

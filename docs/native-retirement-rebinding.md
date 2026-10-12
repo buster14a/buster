@@ -356,6 +356,41 @@ row and the retained blocked support pin. The retired benchmark service and
 its former profile mirrors must not be restored. Fresh exact-head hosted
 correctness and protected integration remain required for both transitions.
 
+For #2889, the reader bootstrap admits exactly one successor of the #2276
+support declaration, while preserving every historical digest:
+`80065d1e9da7d6ce0ae36aee6a7d2c4b7f6f64134a0af3e7537d7b34fe81d66e`.
+Only four subject rows change their byte/hash identities as the SIMD vocabulary
+moves from `_byte`/`_word` to `_u8`/`_u32`:
+
+| Fixture | Successor bytes | Successor SHA-256 |
+|---|---:|---|
+| `tests/basic_c_predicate_bank.c` | 865 | `a194061e5e518e7c422cce6aea3af406aa01939297e3479c74098cd4bfd3cc64` |
+| `tests/basic_c_simd.c` | 21095 | `e1971b2465b81fcc4f910fbbfd36afe6874fb5aaaed0b731fe52fc16e8e1ef28` |
+| `tests/basic_c_simd_translate.c` | 7130 | `e283fc4b47513fecd564ebdedf4c2beab9a889fd2673287f522b2248a82859ce` |
+| `tests/basic_c_vector_register_pressure.c` | 8220 | `e5e71360a03d663cdf20740e3c54efad379801c023101f9fb016827df6d00484` |
+
+The declaration remains 79,756 bytes with 559 inputs, 411 subjects, and unchanged
+roles, obligations, axes and 78,912 row identities. The same reader bootstrap
+admits applicability successor
+`77415a9c72cfa04c28c642d06cd1abc73b30035338a304f375c910b3b1122feb`
+alongside both historical digests: 65,467 bytes and the same 374 identities,
+with only six predicate-bank and two translate `fixture_sha256` cells changed.
+The readers authenticate exact declaration/ledger bytes and their matching
+fixture identities; partial migrations and unknown digests remain rejected.
+Private test projections recognize only the exact old/new SIMD support rows
+and reject unknown, missing and duplicate rows.
+
+This bootstrap leaves the four frozen fixtures, both reviewed ledgers, census
+producer pin, schemas, blocked support pin and thresholds unchanged. Only the
+retained blocked recipe's validator byte pin tracks its modified reader;
+`status=blocked` stays intact. After the reader lands through the trusted
+integration writer, #3787 needs a separate policy transition updating the four
+fixtures and support rows, eight applicability cells, census producer pin and
+retained blocked support pin, and removing the transitional compiler aliases.
+Neither step restores the retired benchmark service or grants performance
+acceptance. Fresh exact-head authorization, hosted correctness and protected
+integration remain required for each transition.
+
 `authorization_mode: solo-maintainer` is explicit owner authorization of one
 bootstrap or policy transition. It is recorded separately from independent
 review; `maintainer_approvals` remains empty. The CLI default remains `independent-review`. The workflow default `configured`
@@ -504,7 +539,8 @@ Two requirements are part of the decision:
      integration head on that PR, then enables auto-merge with its
      publication credential, which queues it in the same native queue. The writer gets no direct write path to `main` and no ruleset
      bypass. If `main` moves during the run, the writer still publishes
-     for its expected base while that head would be admitted below;
+     for its expected base while that head would be admitted below and
+     `main` has not changed the standing automation policy since that base;
      see [staleness](native-retirement-automation.md#staleness-failure-and-cancellation).
    - **Admission.** A catch-up is a writer integration of an empty candidate.
      It is admitted when all of these hold:

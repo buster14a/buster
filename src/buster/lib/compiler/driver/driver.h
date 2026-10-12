@@ -91,7 +91,8 @@ typedef enum CompilerDriverAction
 } CompilerDriverAction;
 
 // Informational queries answered without any input: --version, -dumpversion,
-// -dumpmachine and -print-target-triple/-print-effective-triple.
+// -dumpmachine, -print-target-triple/-print-effective-triple, and the native
+// linker identity (-Wl,--version or -Xlinker --version).
 // compiler_driver_query_text renders the text.
 typedef enum CompilerDriverQuery
 {
@@ -100,6 +101,7 @@ typedef enum CompilerDriverQuery
     COMPILER_DRIVER_QUERY_DUMP_VERSION,
     COMPILER_DRIVER_QUERY_DUMP_MACHINE,
     COMPILER_DRIVER_QUERY_TARGET_TRIPLE,
+    COMPILER_DRIVER_QUERY_LINKER_VERSION,
     COMPILER_DRIVER_QUERY_COUNT,
 } CompilerDriverQuery;
 
@@ -142,6 +144,8 @@ struct CompilerDriverLinkOperation
 {
     u32 index;
     CompilerDriverLinkOperationKind kind;
+    // Linux ELF driver policy for this library occurrence.
+    bool as_needed;
 };
 
 // The -W<name> groups that name a warning the driver publishes today. Other
@@ -205,6 +209,8 @@ struct CompilerDriverInvocation
     // arrays remain an execution compatibility path for API-built invocations
     // and are used only when macro_operation_count is zero.
     CPreprocessorOperation* macro_operations;
+    // -fmacro-prefix-map=OLD=NEW, in argv order; only builtin spellings change.
+    CMacroPrefixMap* macro_prefix_maps;
     String8* definitions;
     String8* undefinitions;
     String8* library_paths;
@@ -290,6 +296,7 @@ struct CompilerDriverInvocation
     u32 system_include_path_count;
     u32 forced_include_count;
     u32 macro_operation_count;
+    u32 macro_prefix_map_count;
     u32 definition_count;
     u32 undefinition_count;
     u32 library_path_count;
@@ -308,9 +315,12 @@ struct CompilerDriverInvocation
     // -MD/-MMD enable depfile emission; the last one selects system filtering.
     bool dependency_file;
     bool dependency_exclude_system;
+    // Exact -Wp,-MD,PATH / -Wp,-MMD,PATH: one C input, also named native -S.
+    bool dependency_passthrough;
     // -MP emits phony rules for header prerequisites.
     bool dependency_phony_targets;
     bool verbose;
+    bool linker_verbose;
     // -w: the driver publishes no warning text or warning records.
     bool suppress_warnings;
     // -Werror, -Wno-error and the per-group spellings (see CompilerDriverWarningPolicy).
@@ -324,6 +334,10 @@ struct CompilerDriverInvocation
     // -working-directory: relative input paths resolve against it.
     String8 working_directory;
     bool debug_info;
+    // -ffreestanding controls __STDC_HOSTED__ in the C frontend.
+    bool freestanding;
+    // Accepted only for I386, where native artifact generation is refused.
+    bool no_asynchronous_unwind_tables;
     bool disable_direct_ssa;
     bool disable_local_promotion;
     bool disable_target_local_promotion;
@@ -334,8 +348,18 @@ struct CompilerDriverInvocation
     // the visibility of definitions that carry no attribute or pragma.
     u8 default_visibility;
     bool pinned_debug_locals_explicit;
+    // Effective optional pass mask: no-flag/positive -O use IR_FAST_ALL,
+    // explicit -O/-O0 use zero, and explicit pass controls override either.
     u32 fast_passes;
     bool measure_fast_passes;
+    // -fcanonical-fast-cse-strategy=window selects the CSE census's linear
+    // arm; =table, the default, selects the hash table (#3011).
+    bool fast_cse_window;
+    // Tiny direct-call inlining defaults off. An explicit optimization level
+    // above -O0 enables it; -O0 disables it. The last -O* or explicit
+    // -fcanonical-inline/-fno-canonical-inline option wins. always_inline
+    // requests remain semantic requirements when tiny is false.
+    IrInlineOptions inline_options;
     bool verify_codegen;
     bool sysv_unnamed_bitfields_integer;
     bool sysv_bitfield_abi_explicit;
@@ -388,6 +412,11 @@ struct CompilerDriverInvocation
     TimeDataType metrics_origin;
     // Where `ide cc` writes the records; the driver never writes it.
     String8 metrics_output_path;
+    // -fearly-exit (off by default; -fno-early-exit restores it): `ide cc`
+    // forks before any lane exists and reports its status once every
+    // artifact and report is out, leaving teardown to the child (#3686,
+    // os_early_exit_arm). The driver itself never reads it.
+    bool early_exit;
 };
 
 // Contiguous intervals of compiler_driver_execute_c_single, named after the
@@ -538,6 +567,14 @@ struct CompilerDriverCAstPilotResult
     // segments and hints read from the tree, and bodies left to the token
     // walk and why. Zero when the analysis had no tree to use.
     CAstStatementStatistics statements;
+    // The declaration specifier runs read from the tree (c_parse.c): runs
+    // answered, and runs left to the type machine and why. Zero when the
+    // analysis had no tree to use.
+    CAstSpecifierStatistics specifiers;
+    // The extent table lowering read controlled body ranges from
+    // (c_gen.c): bodies, entries and answers, and the queries the token
+    // walker answered and why. Zero when lowering had no tree to use.
+    CAstExtentStatistics extents;
     // What lowering read from the tree (CAstLowerStatistics). Zero for
     // -fsyntax-only and when lowering had no tree.
     CAstLowerStatistics lower;
@@ -548,6 +585,7 @@ struct CompilerDriverResult
 {
     IrLocalPromotionStatistics local_promotion;
     IrFastStatistics fast;
+    IrInlineStatistics inlining;
     CIRDirectSsaStatistics direct_ssa;
     CTypeLayoutStatistics type_layout;
     CompilerDriverCAstPilotResult c_ast;
@@ -558,6 +596,7 @@ struct CompilerDriverResult
     CompilerDiagnostic* diagnostics;
     u32 diagnostic_count;
     String8 output;
+    String8 linker_report;
     NativeExecutableLinkResult native_link;
     WasmArtifact wasm;
     // Compatibility mirror; both artifacts reference the same arena-owned
@@ -633,6 +672,7 @@ BUSTER_F_DECL String8 compiler_driver_c_ast_pilot_name(CompilerDriverCAstPilot p
 // The output of a parsed --version/-dumpversion/-dumpmachine query. The version
 // is the one the C frontend presents in __clang_major__/__clang_minor__/
 // __clang_patchlevel__; the machine is the invocation's effective target.
+// The linker query reports Buster's own identity, without a GNU/LLVM version.
 BUSTER_F_DECL String8 compiler_driver_query_text(Arena* arena, CompilerDriverInvocation const* invocation);
 // Resolves an input against -working-directory with the host's path rules, as
 // LLVM's make_absolute does. On Windows a rooted path without a drive ("\\x.c")
