@@ -182,6 +182,14 @@
 #include <buster/lib/arena_internal.h>
 #endif
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_assignment_chain_work;
+u64 c_test_assignment_chain_work(void)
+{
+    return c_assignment_chain_work;
+}
+#endif
+
 BUSTER_C_INTERNAL bool c_declaration_keyword(String8 spelling)
 {
     if (!c_declaration_keyword_slots_built)
@@ -7580,14 +7588,6 @@ BUSTER_C_INTERNAL bool c_parse_expression_next_conditional(CParseResult* result,
     *colon_out = colon;
     return found;
 }
-
-#if BUSTER_INCLUDE_TESTS
-BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_assignment_chain_work;
-u64 c_test_assignment_chain_work(void)
-{
-    return c_assignment_chain_work;
-}
-#endif
 
 BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
