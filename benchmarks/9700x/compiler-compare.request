@@ -169,3 +169,5 @@ request: issue #2761 first 9700X production-profile run after lld was installed 
 profile: production-profile-v1
 request: issue #2761 first 9700X wild-linker run after #3689 landed; request-only head over main a0857f47c; fresh compiler-compare-v1 plus wild-linker-v1 leg (report-only, host Wild vs mold on the head's own ide objects)
 profile: wild-linker-v1
+request: issue #2761 fresh 9700X wild-linker run after #3786 fixed the Wild identity check (46bca10b attempt 1 refused the host's 'Wild 0.10.0 non-git-build'; that receipt stays); request-only head over main edb379fbd; fresh compiler-compare-v1 plus wild-linker-v1 leg (report-only)
+profile: wild-linker-v1
