@@ -422,7 +422,17 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   actual native statuses versus launch errors, binary retention, held and
   escaped writers, cancellation and keeper failure, startup clock expiry,
   ignored/blocked signals, final protocol EOF, actual shim exit, generation
-  isolation and malformed receipt refusal. The signing fixture also requires
+  isolation and malformed receipt refusal. Named lifecycle fields use
+  `ios/lifecycle_receipt.sh` Bash builtins to verify one terminated text row,
+  unique fields and exact value patterns without per-field grep/wc processes.
+  `/bin/bash ios/lifecycle_receipt_test.sh` checks missing, duplicate, invalid,
+  multiple, unterminated and NUL-corrupted rows on system Bash. Extracted phase
+  controls still refuse malformed ownership/caller proof. Cleanup records
+  INT/TERM that arrive during an already-started shutdown, waits the existing
+  bounded invocation-owned phase, and retains 130/143 alongside its actual
+  shutdown result. Deterministic controls signal that real cleanup path during
+  successful and failed shutdowns after either an initial success or failure.
+  The signing fixture also requires
   empty or malformed capture receipts to prevent install/launch, including
   native-success cases. The Python lifecycle and caller-clock controls use
   owned handles or finite fixture release markers; they do not claim

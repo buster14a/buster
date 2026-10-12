@@ -43,6 +43,57 @@ flush (#2621) saved 7-8 ms of wall per object on a btrfs desktop. No caller
 needs durability today; one that does should flush explicitly with
 `os_file_flush` rather than make every artifact pay for it.
 
+Buster does not overwrite outputs in place as mold and wild do; #3687 records
+the measured gain and the downsides. Preallocating the staging file with
+`fallocate(2)` is measured but not adopted: it awaits qualified Zen 5 evidence
+(#3685).
+
+`-fearly-exit` (API field `early_exit`; off by default, and `-fno-early-exit`
+restores the default) is mold and wild's fork trick (#3686). It lives in
+`run_c_compiler` and `os_early_exit_*` in `src/buster/lib/os.c`.
+
+- **Arming.** After argument parsing, and before the first `lane_run` starts
+  the gang, `ide cc` forks. The parent only waits on a pipe. Arming is
+  skipped on Windows, Android and iOS, and when a tracked thread already
+  exists (`os_is_only_live_thread` does not see untracked threads; desktop
+  `ide cc` starts none before this point). It is also skipped when the
+  status pipe cannot be created through `os_process_spawn_pipe_create`
+  (close-on-exec, both ends moved above fd 2), or when `fork` fails. The
+  compile then simply runs in-process. Because the status pipe never lands
+  on fds 0-2, a process started with standard streams closed cannot write
+  compiler output into it.
+- **Release.** Once every artifact and report is out, the child calls
+  `os_early_exit_release`. It points its standard streams at `/dev/null`,
+  so a build system's pipes reach EOF, and sends its status. The parent
+  `_exit`s with that status, or with the child's own status if the child
+  died before reporting.
+- **Background work.** Destroying the 32 GiB translation-unit arena, then
+  `exit_mmap`, then the release of each output that publication replaced
+  then run in the background. While armed, `file_publish_slices_checked`
+  holds a read-only reference to a replaced destination across the
+  `rename(2)` and hands it to `os_early_exit_defer_close`, so the old
+  inode's blocks are freed after the report rather than inside the rename.
+  Atomic publication is unchanged.
+
+The costs are why it stays opt-in:
+
+- `time(1)`, `getrusage(RUSAGE_CHILDREN)` and `-fmetrics-out` wrappers that
+  measure the process see only the parent (about 5 MB RSS and no CPU time).
+- A debugger follows the parent.
+- A `make -j` or cgroup budget frees the job slot while the child still
+  holds its memory.
+- A failure after the release cannot change the exit status, and any later
+  child output is discarded.
+
+Do not use it for benchmarks, profiling, debugging or memory budgeting. The
+`compiler_driver_test_early_exit` regression checks byte-identical objects
+against the default path, a replaced output, `-E` output through the caller's
+pipe, and failure propagation. On desktop POSIX, it also runs both modes with
+fds 0-1 and 0-2 closed, with and without `-v`, and compares raw exit statuses
+and artifacts. It forces the setup-failure fallback through the test-build seam
+`BUSTER_TEST_EARLY_EXIT_PIPE_FAILURE=1`. That seam fails the pipe's
+configuration step and validates that the failure happened.
+
 Opt-in machine-readable records remain on stdout: `CODEGEN_VERIFY`,
 `CODEGEN_FALLBACK*`, `CODEGEN`, `IR_*`, `TARGET`, `GPU`, and the `-v` source
 statistics. The differential runner reads `CODEGEN_VERIFY` there and compares
@@ -333,6 +384,20 @@ publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
 the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
 not predefined at any level. `-mattr` overrides still refine the level.
 The psABI's LAHF-SAHF has no target feature and is implied by long mode.
+For 32-bit x86, the canonical target architecture is `i386`; `i386`, `i486`,
+`i586` and `i686` are accepted architecture spellings, while `-march=i386`
+and `-march=i686` select explicit CPU models. The I386 baseline models GCC's
+`-m32` default (i686 without MMX/SSE). `-m16` and `-m32` select I386 execution
+mode, with the last spelling winning independently of `--target` order;
+`-m16` also records the `code16` target environment. These modes support
+preprocessing (`-E`, including `-dM`) and frontend-only validation
+(`-fsyntax-only`). I386 artifact generation—including assembly, objects,
+LLVM output and links—is deliberately refused with an explicit #3654
+diagnostic. I386 is supported only for Linux and freestanding targets; an
+execution-mode option on an x86 target with another OS is refused using the
+pre-mode target triple in its diagnostic. `-m64` remains unsupported and is
+tracked separately by #3458.
+
 Without `-march`/`-mcpu` the CPU model is `baseline`, matching Clang's and
 GCC's portable `x86-64` default. A command with no `-target` compiles for the
 host's architecture and operating system (`target_native`,
@@ -380,14 +445,26 @@ left baseline code generation and no hint that the request was ignored.
 `-fno-strict-overflow` is accepted as `-fwrapv` (signed overflow already wraps;
 there is no `-fno-wrapv`, so `-fstrict-overflow` stays unsupported). `-w` is
 accepted and publishes no warning text or records and outranks every other
-warning option. `--version`, `-dumpversion`, `-dumpmachine` and
+warning option.
+`-ffreestanding` publishes `__STDC_HOSTED__` as zero and keeps the builtin
+`<limits.h>` from forwarding to a hosted system header. Buster does not
+implicitly builtinize or fold ordinary library calls such as `memcpy` or
+`strlen`; only explicit `__builtin_*` spellings are compiler builtins, so no
+ordinary-call suppression is needed. `-fomit-frame-pointer` grants permission
+to omit a frame pointer; it does not require one to be omitted. Default native
+objects currently contain `.eh_frame`, so `-fno-asynchronous-unwind-tables` is
+accepted only for I386, where artifact generation is refused.
+`-fcf-protection=none` is accepted because default output contains no
+`endbr32`/`endbr64` instructions and no IBT/SHSTK GNU property note.
+`--version`, `-dumpversion`, `-dumpmachine` and
 `-print-target-triple`/`-print-effective-triple` need no input and exit 0
 (`compiler_driver_query_text`):
 `-dumpversion` prints `18.0.0`, the `__clang_major__`/`__clang_minor__`/
 `__clang_patchlevel__` triple (`__clang_version__` is `18.0.0 (buster)`);
 `-dumpmachine` prints the effective target as `arch-os[-environment]` with the
 `gnu` environment on Linux and `msvc` on Windows (for example
-`x86_64-linux-gnu`); `--version` prints `Buster clang version 18.0.0 (buster)`,
+`x86_64-linux-gnu`, or `i386-linux-gnu` under `-m32`); `--version` prints
+`Buster clang version 18.0.0 (buster)`,
 `Target: <that triple>` and `Thread model: posix`. `-print-target-triple` and
 `-print-effective-triple` print Clang's normalized `arch-vendor-os[-environment]`
 form, with the vendor `apple` on macOS/iOS and `unknown` elsewhere (for example
@@ -415,7 +492,8 @@ vendor meaning. An excess component retains precedence over that refusal.
 Native x86-64 and AArch64 compilation uses the FAST register allocator at
 every optimization level, including the default and `-O0`. Callers may select
 `fast` or `quality`; both run canonical IR -> MIR -> placement ->
-metadata-backed native emission, and the last allocator-affecting option wins.
+metadata-backed native emission. Explicit allocator selection is independent
+of `-O`; the last allocator option wins.
 The stack-only mode is removed: `-fregister-allocator=none`,
 `-fregister-allocator=mir-stack` and `-fno-register-allocator` are argument errors.
 The allocators run on x86-64 under both System V and Win64, and on AArch64
@@ -477,10 +555,14 @@ width, as AT&T's unsuffixed spelling already does.
 spellings, including immediate boundaries, word prefixes and invalid register,
 memory, suffix-width and 64-bit neighbours. It never executes port I/O.
 
-The default `-fcanonical-fast` shared pipeline and independent
-`-fcanonical-fast-{fold,address,dce,parameters}` controls are described in
-[the FAST pipeline contract](../canonical-fast-pipeline.md). Timing is separate
-(`-ftime-canonical-fast -v`); register allocation selection is unchanged.
+Explicit `-O`/`-O0` skips optional canonical FAST cleanup; positive levels
+select the existing bounded `fold,address,dce,parameters` pipeline. Omission
+retains the adopted throughput recipe. Explicit whole-pipeline and per-pass
+controls override level defaults independently of option order; the last
+explicit control of each bit wins. Level/alias policy, fixed pass order and
+budgets are in [the FAST pipeline contract](../canonical-fast-pipeline.md#native-optimization-level-policy).
+Verbose output reports disabled as well as enabled passes. Timing is separate
+(`-ftime-canonical-fast -v`); register allocation selection is independent.
 
 Canonical inlining is separate from register allocation. Tiny direct-call
 inlining is opt-in at every optimization level: `-fcanonical-inline` enables
@@ -779,6 +861,17 @@ always emit the nonexecuting declaration. Native linking refuses an explicit
 request from assembly, an external ELF object or a selected archive member
 with a diagnostic naming that input; it publishes no image. Inputs with no
 note remain accepted as nonexecuting. See [object emission](../object-emission.md).
+
+Every section an assembly file declares is its own object section, in
+declaration order, on every format: thousands on ELF, up to 65,279 on COFF
+(`OBJECT_COFF_MAX_SECTIONS`) and 255 on Mach-O (`OBJECT_MACH_O_MAX_SECTIONS`).
+ELF and COFF keep each section's own name; the Mach-O writer spells each one
+by its kind (`__TEXT,__text`, `__TEXT,__const`, ...), so several sections may
+share a name there while keeping their own contents and relocations. Past a format's limit, `-c` refuses with the
+first section that does not fit (`section '.text$f255' is section 256 of 256;
+a mach-o64 object holds at most 255 sections`). Only a section whose kind is
+an initializer array takes COFF's `.CRT$XCU`/`.CRT$XTX` name.
+`compiler_driver_test_assembly_many_object_sections` covers this.
 
 The x86-64 instruction layer accepts the GNU spellings that GCC and Clang
 listings and Buster's own `-S` output use, encoding the same bytes as GNU as:
@@ -1216,10 +1309,24 @@ and COFF members count their forms of the same definitions -- external `N_ABS`,
 `N_INDR` and `IMAGE_SYM_ABSOLUTE` symbols, and commons (an undefined external with a
 non-zero value) -- the same way (#1243).
 
+An unindexed archive is accepted, unlike GNU ld's "archive has no index", but
+every member's symbol table must be readable. Selection walks members in archive
+order, so skipping an unreadable member could let a later member satisfy a symbol
+the skipped one defines first and silently change the link. One unreadable
+member therefore rejects the whole archive, even when the link would select only
+other members: `object_archive_read_link` sets `failed_member` and a diagnostic
+naming the member, and the driver reports `could not read archive <path>: member
+<name>: unreadable symbol table in an archive without a symbol index`. Running
+`ranlib` over the archive defers the member's validation to selection, as for any
+indexed archive (#1319).
+
 `compiler_driver_archive_test_lazy` exercises all three object formats, 32/64-bit
 GNU and BSD indexes, BSD extended names, unindexed input, transitive dependencies,
 no-selected-member archives, a required incompatible member, duplicate providers,
-weak references and repeated occurrences. A separate valid ELF `R_X86_64_SIZE64`
+weak references and repeated occurrences.
+`compiler_driver_archive_test_unindexed_unreadable_member` covers the unindexed
+refusal through the reader and both positional and `-l` driver inputs, with an
+indexed control that selects the valid member and leaves the bad one unread. A separate valid ELF `R_X86_64_SIZE64`
 control verifies that an irrelevant same-target unsupported relocation is deferred
 and its selected member still fails.
 
@@ -1316,6 +1423,15 @@ NUL are refused. Ambiguous duplicate identity fields
 and overlapping target-specific metadata are refused. `compiler_driver_test_mach_library_search` covers parser bounds,
 architecture selection, search order, versions, fallback, refusal and archive
 interaction on every host without running the cross-linked image.
+
+Dependency names passed through `-l NAME` or `-framework NAME` must be
+nonempty. An explicitly empty operand is a `driver.argument` error naming the
+option before any source is read or output is published; response files and
+embedding invocations follow the same rule. A missing operand retains its
+separate `missing argument after OPTION` diagnostic. Empty `-I`/`-L` path
+policy is independent. `compiler_driver_test_empty_dependency_names` covers
+macOS/iOS, single/multiple inputs, an empty request followed by a missing name,
+argv/response/API calls, and preservation of existing output.
 
 `-framework NAME` searches every explicit `-F` root in order, then
 `<sysroot>/System/Library/Frameworks`, or `/System/Library/Frameworks` when
@@ -1585,7 +1701,7 @@ are tracked on GitHub #1418.
 | `-nostdlib++`, `-nostdlibs`, `-nolibc` | `unsupported option` | Not spellings of the above. |
 | `-mfoo`, `-mno-foo` (no architecture has the feature) | `unsupported option: -mfoo` | `-m<feature>` takes only the names `-mattr` takes. |
 | `-mavx2` for a non-x86 target or a GPU target | `unsupported option: -mavx2` | The feature belongs to another architecture, or the GPU pipeline has no feature overrides. |
-| `-m32`, `-mred-zone`, `-mno-red-zone` | `unsupported option` | They name no target feature and have no implementation. |
+| `-mred-zone`, `-mno-red-zone` | `unsupported option` | They name no target feature and have no implementation. |
 | `-mAVX2`, `-mavx2=1`, `-m`, `-mno-` | `unsupported option` | Feature names are exact lower case; `=` forms belong to `-march=`, `-mcpu=`, `-mtune=`, `-mattr=`, `-masm=`. |
 | `-mno-sse2` | `unsupported option: -mno-sse2 (SSE2 is part of the x86-64 baseline)` | Every x86-64 target here requires SSE2. |
 | `-xc++` and other unknown joined `-x<lang>` | `unsupported language: c++` | Same language names as `-x <lang>`; C is the only source frontend. |
@@ -1763,10 +1879,50 @@ are refused. A SONAME operand named `--version` retains its ordinary meaning.
 The identity makes no GNU ld/LLD compatibility or invented version claim.
 Buster currently links in process and has no external-linker selector.
 
+For a native Linux x86-64 or AArch64 ELF link, raw linker `-v` from
+`-Wl,-v` or `-Xlinker -v` requests the native linker's identity while allowing
+the link to continue. It is consumed only in option position; operands to
+`-soname`, `--soname`, `-h`, `-z` or `--version-script` are preserved. Other targets and output
+modes continue to reject it. With driver `-v`, the driver also prints a
+` buster-native-ld` link-report line containing the output, explicit and
+target/sysroot library search roots in lookup order, command-line object,
+archive and shared-library inputs, and requested libraries. This is a report
+label for Buster's in-process link, not an executable name or linker choice;
+it does not claim GNU ld or LLD identity. CMake's
+`CMakeDetermineCompilerABI` / `CMakeParseImplicitLinkInfo` consume this
+link-line shape to discover Linux multiarch implicit library directories.
+
 Meson versions without a Buster linker detection/class implementation still
 reject this truthful identity. Native query support alone does not qualify
 Meson/QEMU configuration: upstream recognition and tests against unmodified
 Meson are required under [#3475](https://github.com/buster14a/buster/issues/3475).
+
+### Standalone CMake ABI discovery reduction
+
+`tools/cmake_abi_discovery/CMakeLists.txt` is a standalone reduction, not a CI
+test. Compare its `discovery.txt` output with Clang and Buster in separate
+build directories. For Clang:
+
+```sh
+cmake -S tools/cmake_abi_discovery -B out-clang -DCMAKE_C_COMPILER=clang
+cmake --build out-clang
+cat out-clang/discovery.txt
+```
+
+With CMake 3.29 or newer, point CMake directly at `ide` and make `cc` the
+compiler argument:
+
+```sh
+cmake -S tools/cmake_abi_discovery -B out-buster \
+  -DCMAKE_C_COMPILER=/path/to/ide -DCMAKE_C_COMPILER_ARG1=cc
+cmake --build out-buster
+cat out-buster/discovery.txt
+```
+
+For older CMake, use a wrapper whose contents are `exec /path/to/ide cc "$@"`,
+then configure with `-DCMAKE_C_COMPILER=/path/to/wrapper`. Compare pointer
+size, library architecture, implicit directories, linker identity, and the
+paths found for z and X11.
 
 ## Pass-through options
 
@@ -1821,6 +1977,38 @@ switches, runtime paths, and other `-z` modes are refused.
 supported; other pass-through requests, including macro/include operations,
 are refused. Direct `-D`, `-U`, and `-I` remain available.
 Standalone `-M`, `-MM`, and `-MG` remain unsupported.
+
+## Macro filename prefix maps
+
+`-fmacro-prefix-map=OLD=NEW` records literal, case-sensitive prefix
+substitutions for C and preprocessed assembly. Empty OLD or NEW is allowed;
+the last `=` separates them, and the last matching option wins once, following
+GCC. Matching is a byte prefix, without a directory-boundary requirement,
+canonicalization or repeated application to the replacement.
+
+The preprocessor applies the mapping when expanding `__FILE__` and
+`__BASE_FILE__`; `__FILE_NAME__` takes its basename first. Logical `#line`
+names can match too. GCC-style directive operands retain their original
+filenames, so mapping cannot redirect `#include __FILE__` or mutate a
+`#line __FILE__` operand. Diagnostics, source maps, include identity/lookup,
+dependency prerequisites, output paths and debug information retain their
+original names. GPU forwarding is explicitly refused. The independent
+`-ffile-prefix-map`, `-fdebug-prefix-map` and `-fcanon-prefix-map` options
+remain unsupported.
+
+GCC 15.2 [prefix-map implementation](https://github.com/gcc-mirror/gcc/blob/releases/gcc-15.2.0/gcc/file-prefix-map.cc)
+and [file builtins](https://github.com/gcc-mirror/gcc/blob/releases/gcc-15.2.0/libcpp/macro.cc)
+define the ordering, separator and directive policy.
+Clang 21.1 [language option parsing](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.0/clang/lib/Frontend/CompilerInvocation.cpp)
+and [mapping](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.0/clang/lib/Basic/LangOptions.cpp)
+agree for the single directory-to-empty Kbuild mapping, but select overlapping
+prefixes in reverse lexical order, retain the first duplicate prefix and split
+the first `=`. These differences
+are explicit oracle cases, not an assertion of universal GCC/Clang equivalence.
+The registered `compiler_driver_test_macro_prefix_map` and
+`compiler_driver_test_macro_prefix_map_files` cover the contract.
+Set `BUSTER_PREFIX_MAP_ORACLES=1` on hosted Linux to additionally require
+independent installed GCC and Clang preprocessing of the matrix and includes.
 
 ## Dependency files
 
@@ -1946,6 +2134,12 @@ one `hashTypeRecord` bucket per record modulo `0x3ffff` (`pdb_type_record_hash`)
 and a sparse type-index offset entry per 8 KiB of records. DbgHelp (cdb,
 WinDbg, `symchk`, `dbh`) faults with `0xc0000005` loading a PDB whose TPI
 stream names no hash stream (#3411). The regression is `pdb_test_tpi_hashes`.
+The globals and publics streams index each module's top-level procedures
+(`S_PROCREF`/`S_LPROCREF` naming the module-stream record) and data (copies of
+`S_GDATA32`/`S_LDATA32`); global ones also get an `S_PUB32` and an entry in the
+publics address map, sorted by section and offset (`pdb_gsi_emit`). With these
+empty, DbgHelp loads the PDB only as "public symbols & lines". The regression is
+`pdb_test_global_indexes`.
 
 CodeView names a frame-resident location with `S_DEFRANGE_REGISTER_REL`
 against RBP (x86-64) or X29 (AArch64), the base codegen normalizes FRAME offsets

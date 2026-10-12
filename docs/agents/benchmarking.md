@@ -534,7 +534,10 @@ captures (#2741).
   either a 9700X route with the consumer that checks its evidence, or an
   explicit `NOT VALIDATED` with a resolution and a `claim_route`: the existing
   9700X route a claim about it must use instead, or `none` for a visible gap
-  with no Zen 5 route yet. A tool that includes `<buster/...>` headers cannot
+  with no Zen 5 route yet. Native macOS and Windows timing is the one
+  exception: it is `native-informative` on route `hosted-native`, counted
+  separately, never covered and never Zen 5 evidence (see
+  [Native hosted timing](#native-hosted-timing)). A tool that includes `<buster/...>` headers cannot
   claim the direct-workload route, because each workload is compiled alone
   against system headers. `tools/bench_direct/performance_inventory_test.py`
   (part of the required benchmark policy check) discovers entry points from
@@ -735,6 +738,97 @@ captures (#2741).
   disassemble to the instruction immediately after a `call` to the callee the
   callchain names (`objdump -d --start-address=... --stop-address=...`).
 
+## Native hosted timing
+
+**These results are not Zen 5 evidence.** They never satisfy, replace or
+support a performance-validation claim, and they never fail a check. Zen 5
+measurements do not establish macOS or Windows performance, and the approved
+9700X cannot run either platform. The maintainer's decision on #2761
+(2026-10-11) is that native timing runs on the standard GitHub-hosted runners,
+is informative only, and stays visible through a warning and a tracking issue.
+
+The two rows in
+[`docs/performance-validation-v1.json`](../performance-validation-v1.json) are
+`native-informative` on route `hosted-native`:
+
+| Row | Measuring job | Comparison | Runs |
+|---|---|---|---|
+| `workflow:throughput-harness-macos.yml` | `timing` on `macos-26` | The existing `bench_throughput_ci` guard: two predeclared 20-pair rounds per case, with a case confirmed only when it crosses the margin in both rounds | Weekly schedule (main against its first-parent commit from 7 days earlier) and dispatch (optional `baseline`). Never on a pull request, so the scarce macOS runner is not held for every harness change |
+| `workflow:issue-708-benchmark.yml` | `benchmark` on `windows-2025` | Each of three trials times the baseline and candidate `test_all_combinations_ci` matrix on one VM. A trial crosses when the candidate exceeds the baseline by the guard's wall-time margins (15% and 2 ms); a majority of trials crossing is a regression, a minority is inconclusive | Dispatch with `baseline` and `candidate`; the `bench/708-baseline` pull-request route keeps its existing defaults |
+
+On macOS, `bench_throughput_ci` omits `--cpu auto`, because macOS has no CPU
+affinity API. The macOS samples are therefore unpinned.
+
+`tools/bench_direct/native_timing.c` reads each workflow's existing output. It
+is native C on the existing `ci_metrics` JSON parser and `gh` transport, and it
+is compiled in each job the way `lifecycle.c` is. A read-only `report` job on
+`ubuntu-26.04` downloads the measuring job's artifact and runs it with
+`--annotate`. For macOS this means the `macos-26` job only measures and
+uploads, and the verdict, warning and any failure appear in `report`.
+
+The report gives, in its step summary, the cell (case or trial), the
+candidate/baseline ratio, both commits and the run link. No new statistic is
+involved: the macOS ratio is the geometric mean of the two rounds' median
+paired ratios, as in the guard's `summary.md`, computed as
+`sqrt(r0) * sqrt(r1)` so large finite ratios cannot overflow. A number that is
+not representable as a finite double (a huge integer, an overflowing exponent)
+or a derived ratio that is not finite and positive is malformed evidence. On
+Windows the results are read whether PowerShell wrote them as UTF-16LE or
+UTF-8; any non-ASCII byte is refused.
+
+| Outcome | Check | Visibility |
+|---|---|---|
+| Regression | Passes | `::warning::` annotation, step-summary line, tracking issue (trusted runs only) |
+| Inconclusive | Passes | `::warning::` annotation and step-summary line; no issue |
+| No regression | Passes | Step-summary line |
+| Build failure, crash, failed or missing arm, malformed, partial or inconsistent samples, or any guard exit other than 0 or 1 consistent with its counted regressions | **Fails** (exit 2) | `::error::` annotation |
+
+### Alert path
+
+Each platform has one open tracking issue, titled
+`Native hosted timing regression: macOS (throughput-harness-macos.yml)` or
+`Native hosted timing regression: Windows (issue-708-benchmark.yml)`. It is
+authored by `github-actions[bot]` and carries the marker
+`<!-- native-hosted-timing platform=... -->`. The first regression opens it.
+Each later regression adds a comment with the run, commit, cells and ratios.
+Close the issue once the regression is explained or fixed; the next regression
+opens a new one.
+
+Only a separate `alert` job holds `issues: write`, alongside `contents: read`
+and `actions: read`. It runs only when all of these hold:
+
+- the measured verdict is `regression`;
+- the repository is `buster14a/buster`;
+- the ref is `refs/heads/main`;
+- the event is the macOS schedule or dispatch, or a Windows dispatch;
+- `demonstrate_regression` is not set.
+
+It checks out the trusted `main` revision and downloads only its own run's
+artifact. It then re-derives the verdict from the raw evidence before
+publishing. The measuring jobs, which compile and run both revisions, stay
+read-only. A pull-request run, including the Windows `bench/708-baseline` route,
+never files or updates an issue.
+
+The `demonstrate_regression` dispatch input exercises the warning path without
+a real regression. On Windows it doubles the candidate durations before the
+rule is applied. On macOS it confirms the case with the highest wall-time
+ratio. The report is labelled a demonstration, and the alert job never runs.
+
+`performance_inventory_test.py` accepts `native-informative` only for a macOS
+or Windows workflow row whose `job` runs on one literal GitHub-hosted `macos-*`
+or `windows-*` label matching its `platform`. A Linux, matrix-selected or
+self-hosted timing job cannot use the status to avoid the 9700X rule. The test
+also requires that:
+
+- a read-only job reports through `native_timing.c` with `--annotate`;
+- no step continues on error;
+- one separate main-gated job compiles the tool and publishes through it;
+- the row's `alert` links a heading in this guide.
+
+`native_timing --self-test`, which runs in the benchmark policy check, covers
+the analysis, the malformed and extreme-number refusals, the demonstration path
+and the issue publisher against synthetic `gh` responses.
+
 ## Benchmarking a compiler change (A/B)
 
 `tools/uarch_lab.py compare` answers "did this change make the stage-1
@@ -902,6 +996,54 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    descriptors' native dependencies (for Lua, the readline headers and
    library) and outbound HTTPS to `raw.githubusercontent.com`, `www.lua.org`
    and `www.sqlite.org`.
+
+   **Issue #2761 opt-in PGO/LTO production profile.** The same route accepts
+   one fresh exact line `profile: production-profile-v1`, selected by the same
+   every-parent freshness rule. It cannot be combined with an analyzer,
+   real-source or ast-pilot profile, so the leg fits the `compare-pull` job.
+   After the corpus leg, `measure_production_profile` makes a shared clone of
+   the head beside the base checkout, which stays untouched for the closure
+   checks. There the head's own
+   `./build.sh production_profile --no-benchmark --jobs 16 --build-lanes 4`
+   builds the seven trees and trains both profiles on the native corpus. It
+   then inspects the PGO+LTO compiler for debug sections and runs `test_all`
+   on it, exactly as [production-profile.md](../production-profile.md)
+   describes. The merge base's `bench_throughput run` then times that run's
+   `release` compiler (base) against its `pgo-lto` production compiler
+   (candidate). It uses the `throughput-corpus-v2` arguments plus
+   `--require-identical-output`, so sampling, rounds and decisions are those
+   of the ordinary corpus leg, and any object that differs between the two
+   compilers fails the run. It is report-only: a confirmed regression is
+   reported, never refused.
+
+   `compiler_publish.py` re-validates the receipt's `production_profile`
+   record against the evidence under `production_profile/`
+   (`validate_production_profile`). It refuses:
+   - a build exit other than 0;
+   - a `summary.txt` that is not `status=passed` for this head, or that lacks
+     `correctness=test_all` and `debug_sections=absent`, or that names a
+     production compiler hash other than the measured `pgo-lto` binary;
+   - a `BUSTER_PGO_PHASES_V1` ledger other than the 23 frozen phases
+     (`PRODUCTION_PROFILE_LEDGER_PHASES`), each passed exactly once in slot
+     order, so a duplicated, missing, substituted or reordered phase fails;
+   - identical release and PGO+LTO binaries;
+   - any corpus evidence the ordinary corpus validator refuses.
+
+   The receipt's observed host must be the Ryzen 7 9700X, as for every
+   comparison. The host needs `clang`, `ld.lld` (the LTO lanes link with
+   `-fuse-ld=lld`), `llvm-profdata`, `llvm-readobj` and Clang's profile
+   runtime (`libclang_rt.profile`). A missing tool on `PATH` fails the leg
+   before the build starts and the receipt names it; a missing runtime fails
+   the build leg with its log.
+
+   Cost: on a hosted 4-vCPU 2.8 GHz Xeon with three build lanes (diagnostic,
+   not Zen 5), `production_profile --no-benchmark` passed all 23 phases in
+   1200 s. Each of the seven tree builds took 300 to 480 s, both trainings
+   about 11 s each, and `test_all` 159 s. The corpus run on its two
+   compilers then took 55 s, with identical outputs. The build leg has its
+   own 40-minute timeout and the corpus run the ordinary 30-minute one, so
+   the leg fits inside the unchanged 90-minute `compare-pull` job next to the
+   roughly 14-minute ordinary comparison. No job timeout changed.
 
    **Without perf (#2768).** Before the first timed run the lab runs
    `perf stat -- true` once (`probe_counters`). If perf is missing, exits

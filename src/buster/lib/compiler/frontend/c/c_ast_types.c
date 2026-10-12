@@ -103,6 +103,18 @@
 // typedef name in the subtree resolves by spelling in the query's scope as
 // the binder bound it (c_ast_types_lookups_agree).
 //
+// Name checks. Repeating those lookups per query cost about 50 M Ir on the
+// unity self-host, so a region settles its marks once
+// (c_ast_types_lookups_settled). A mark whose symbol no entity outside the
+// file scope has (c_ast_types_locals_build) finds nothing in any scope before
+// the file scope, so from any query scope whose chain reaches the file scope
+// it resolves as it does from the file scope, where the settlement checks it
+// once against its binding. The settlement holds while the lookup generation
+// (c_parse_lookup_generation: entities added, rollbacks that take entities,
+// scopes or uses away) and the identifier use count are unchanged. A query
+// over a mark that a parameter or local also spells, or made after the
+// settlement stopped holding, walks its subtree as before.
+//
 // Accepted kinds and why each is exact (the machine paths are in c_parse.c;
 // the operator rules are the machine's own functions, shared through
 // c_internal.h, applied to operand types already held):
@@ -152,6 +164,10 @@
 //                checked-mode operand rule (c_ast_types_binary_safe).
 //   unary        `+ - ~ !`: promotion with the operand's bit-field width;
 //                complex and suitable vector operands keep their type.
+//   PRE_/POST_   `++` and `--`: the operand's own row, as the machine's UPDATE
+//   INCREMENT,   operation and its leaf's postfix update answer; checked-safe
+//   _DECREMENT   only where c_parse_update_operand_modifiable holds
+//                (c_ast_types_update).
 //   assignment   `=` and every compound form: the left operand's unqualified
 //                row, when it exists. The machine checks no constraint here.
 //   COMMA        the right operand's decayed row, when it exists.
@@ -210,7 +226,7 @@
 //   c_ast_types_member_lookup                    the pass's member memo
 //   c_ast_types_builtin_call                     void builtins, failing calls
 //   c_ast_types_binary, c_ast_types_unary,       stage-2 operator rules
-//   c_ast_types_conditional
+//   c_ast_types_update, c_ast_types_conditional
 //   c_ast_types_interned, c_ast_types_type_name,  stage-3 rules over interned
 //   c_ast_types_cast,                             rows
 //   c_ast_types_compound_literal,
@@ -219,6 +235,9 @@
 //   c_ast_types_decline                          declines, and the qualified
 //                                                member replay, out of line
 //   c_ast_types_lookups_agree                    query-scope name checks
+//   c_ast_types_locals_build,                    the settled name checks
+//   c_ast_types_mark_resolves_at_file,
+//   c_ast_types_lookups_settled
 //   c_ast_types_publish                          machine state after an answer
 //   c_ast_types_verify_*, c_test_*               the differential (tests builds),
 //                                                c_ast_types_verify_hold_replay
@@ -297,9 +316,44 @@ struct CAstTypeBodyIndex
     u32* declaration_nodes;
     u32 count;
     u32 declaration_count;
+    // Indexed by symbol: nonzero when some entity outside the file scope has
+    // that symbol, as of lookup generation `local_generation`
+    // (c_ast_types_locals_build). Null without a binding array.
+    u8* local_symbols;
+    u32 local_symbol_capacity;
+    // Indexed by scope, below `rooted_count`: nonzero when the scope's parent
+    // chain reaches the file scope, as of the same generation.
+    u8* rooted;
+    u32 rooted_capacity;
+    u32 rooted_count;
+    u64 local_generation;
+    // Nodes settled since the table was last built; a rebuild waits until
+    // they reach the entity count, so rebuilding costs no more than settling.
+    u64 settled_nodes;
+    bool locals_built;
     // Every scalar row is published (c_ast_types_scalars_published), so the
     // literal leaf cannot append one.
     bool scalars_published;
+};
+
+// A region's settled lookups (c_ast_types_lookups_settled).
+typedef enum CAstTypeLookups
+{
+    C_AST_TYPE_LOOKUPS_UNSETTLED,
+    // Every mark but the ones in CAstTypeBody.others resolves from any scope
+    // rooted at the file scope as it does from the file scope, and agrees
+    // there.
+    C_AST_TYPE_LOOKUPS_FILE,
+    // Checked per query (c_ast_types_lookups_agree).
+    C_AST_TYPE_LOOKUPS_EACH,
+} CAstTypeLookups;
+
+enum
+{
+    // The marks a settled region may hold that do not resolve as from the
+    // file scope; a query over one walks its subtree. A region with more is
+    // checked per query.
+    C_AST_TYPE_LOOKUP_OTHER_LIMIT = 16,
 };
 
 // One typed function body, or one file-scope object's initializer. Arrays are
@@ -344,6 +398,15 @@ struct CAstTypeBody
     // An initializer whose eager pass waits for its first query that the
     // literal fast path does not answer (c_ast_types_region_fill).
     bool waiting;
+    // CAstTypeLookups, settled at the first query that needs it, with the
+    // lookup generation and identifier use count it holds for.
+    u8 lookups;
+    u8 other_count;
+    u32 lookups_uses;
+    u64 lookups_generation;
+    // The marks, in increasing relative index, that do not resolve as from
+    // the file scope.
+    u32 others[C_AST_TYPE_LOOKUP_OTHER_LIMIT];
     CAstTypeStatistics local_statistics;
     // c_parse_member_type's answers during one eager pass
     // (c_ast_types_member_lookup), cleared when the pass starts.
@@ -425,6 +488,14 @@ BUSTER_C_SHARED void c_ast_types_bodies_prepare(CTypeParseMachine* machine, CPar
         index->declaration_nodes = arena_allocate(machine->scratch_arena, u32, declaration_count + 1);
         index->count = count;
         index->declaration_count = declaration_count;
+        index->local_symbol_capacity = result->binding_by_symbol ? result->binding_capacity : 0;
+        index->local_symbols = index->local_symbol_capacity ? arena_allocate(machine->scratch_arena, u8, index->local_symbol_capacity) : 0;
+        index->rooted_capacity = index->local_symbols ? result->scope_capacity : 0;
+        index->rooted = index->rooted_capacity ? arena_allocate(machine->scratch_arena, u8, index->rooted_capacity) : 0;
+        index->rooted_count = 0;
+        index->local_generation = 0;
+        index->settled_nodes = 0;
+        index->locals_built = false;
         index->scalars_published = c_ast_types_scalars_published(result);
         u32 slot = count;
         u32 declaration_slot = declaration_count;
@@ -1365,6 +1436,52 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_unary(CAstTypeBody* body, u32 node, u32 rel
     }
 }
 
+// `++` and `--`, prefix and postfix: the operand's own row, unpromoted. The
+// machine's prefix UPDATE operation keeps the operand's answer, and its leaf
+// answers a postfix update with the operand's type: checked, from a nested
+// run over the operand (the leaf's postfix_update); unchecked, from the direct
+// reader, which drops the operator. Neither appends a row. Checked, both test
+// the operand with c_parse_update_operand_modifiable and refuse a struct,
+// union or nullptr operand. For a lone bound identifier that test reduces to
+// the binding and the row, which the pass reads directly; any other operand
+// runs it over the operand's tokens.
+BUSTER_GLOBAL_LOCAL void c_ast_types_update(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node, u32 relative)
+{
+    CParseResult* result = body->result;
+    u32 operand_flags = body->flags[relative - 1];
+    if (operand_flags & C_AST_TYPE_FLAG_ACCEPTED)
+    {
+        CTypeId type = body->types[relative - 1];
+        u32 flags = c_ast_types_inherit(operand_flags, operand_flags);
+        if (flags & C_AST_TYPE_FLAG_SAFE)
+        {
+            CType const* value = result->types + type.value;
+            u32 operand_token = body->ast->tokens[node - 1];
+            CEntity const* entity = body->ast->kinds[node - 1] == C_AST_IDENTIFIER && !(operand_flags & C_AST_TYPE_FLAG_LOOKUP)
+                                        ? c_ast_types_bound_entity(result, operand_token)
+                                        : 0;
+            bool modifiable = false;
+            if (entity && value->kind != C_TYPE_ARRAY)
+            {
+                modifiable = (entity->kind == C_ENTITY_OBJECT || entity->kind == C_ENTITY_LOCAL || entity->kind == C_ENTITY_PARAMETER) &&
+                             !entity->is_constexpr && !value->is_const &&
+                             (c_parse_expression_real_kind(value->kind) || value->kind == C_TYPE_POINTER ||
+                              (body->gnu && c_type_kind_is_complex(value->kind)));
+            }
+            else
+            {
+                bool postfix = body->ast->kinds[node] == C_AST_POST_INCREMENT || body->ast->kinds[node] == C_AST_POST_DECREMENT;
+                u32 token = body->ast->tokens[node];
+                modifiable = c_parse_update_operand_modifiable(result, *preprocess, postfix ? body->first[relative] : token + 1,
+                                                               postfix ? token : body->end[relative], type, false);
+            }
+            bool refused = value->kind == C_TYPE_STRUCT || value->kind == C_TYPE_UNION || value->kind == C_TYPE_NULLPTR;
+            flags = modifiable && !refused ? flags : flags & ~(u32)C_AST_TYPE_FLAG_SAFE;
+        }
+        c_ast_types_accept(body, relative, type, flags);
+    }
+}
+
 // Simple and compound assignment: the machine's ASSIGN operation, the left
 // operand's unqualified type, when that row exists. It checks no constraint.
 BUSTER_GLOBAL_LOCAL void c_ast_types_assignment(CAstTypeBody* body, u32 node, u32 relative)
@@ -1786,6 +1903,14 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_node(CAstTypeBody* body, CTypeParseMac
         c_ast_types_unary(body, node, relative);
     }
     break;
+    case C_AST_PRE_INCREMENT:
+    case C_AST_PRE_DECREMENT:
+    case C_AST_POST_INCREMENT:
+    case C_AST_POST_DECREMENT:
+    {
+        c_ast_types_update(body, preprocess, node, relative);
+    }
+    break;
     case C_AST_SIZEOF_EXPRESSION:
     case C_AST_SIZEOF_TYPE:
     case C_AST_ALIGNOF_EXPRESSION:
@@ -2066,6 +2191,129 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_agree(CAstTypeBody const* body, CPr
     return agree;
 }
 
+// Marks the symbol of every entity outside the file scope, and every scope
+// whose parent chain reaches the file scope. Entities and scopes change only
+// with the lookup generation (c_parse_lookup_generation), so the tables hold
+// while that is `generation`. A scope is created after its parent, so one
+// forward pass settles each chain; a parent at or after its child is left
+// unrooted, and a query in that scope walks its subtree.
+BUSTER_GLOBAL_LOCAL void c_ast_types_locals_build(CAstTypeBodyIndex* index, CParseResult const* result, u64 generation)
+{
+    memset(index->local_symbols, 0, index->local_symbol_capacity);
+    for (u32 entity = 0; entity < result->entity_count; entity += 1)
+    {
+        u32 symbol = result->entities[entity].symbol;
+        if (result->entities[entity].scope.value && symbol < index->local_symbol_capacity)
+        {
+            index->local_symbols[symbol] = 1;
+        }
+    }
+    index->rooted_count = result->scope_count < index->rooted_capacity ? result->scope_count : index->rooted_capacity;
+    for (u32 scope = 0; scope < index->rooted_count; scope += 1)
+    {
+        u32 parent = result->scopes[scope].parent.value;
+        index->rooted[scope] = (u8)(!scope || !parent || (parent < scope && index->rooted[parent]));
+    }
+    index->local_generation = generation;
+    index->settled_nodes = 0;
+    index->locals_built = true;
+}
+
+// Whether a marked name resolves, by spelling in any scope whose chain reaches
+// the file scope, as c_ast_types_lookups_agree requires, without looking it up
+// there. A name whose symbol no entity outside the file scope has finds
+// nothing in any scope before the file scope, so it resolves as it does from
+// the file scope. Its binding must also be a file-scope entity or none, and
+// the file scope's answer must agree with it.
+BUSTER_GLOBAL_LOCAL bool c_ast_types_mark_resolves_at_file(CAstTypeBodyIndex const* index, CAstTypeBody const* body,
+                                                           CPreprocessResult const* preprocess, CParseResult* result, u32 relative)
+{
+    CAst const* ast = body->ast;
+    u32 node = body->begin + relative;
+    u32 kind = ast->kinds[node];
+    bool call = kind == C_AST_CALL;
+    u32 token = call ? ast->tokens[c_ast_types_first_child(ast, node)] : kind == C_AST_IDENTIFIER ? ast->tokens[node] : ast->tokens[node] + 1;
+    u32 symbol = preprocess->tokens[token].symbol;
+    CEntity const* bound = c_ast_types_bound_entity(result, token);
+    u32 expected = body->entities && !call ? body->entities[relative] : bound ? (u32)(bound - result->entities) : C_AST_TYPE_NONE;
+    bool file = symbol && symbol < index->local_symbol_capacity && !index->local_symbols[symbol] &&
+                (expected >= result->entity_count || !result->entities[expected].scope.value);
+    if (file)
+    {
+        CEntityId looked = c_parse_lookup_entity_token(result, preprocess->spelling_base, (CScopeId){0}, &preprocess->tokens[token]);
+        file = ((call || (body->flags[relative] & C_AST_TYPE_FLAG_FAILS)) && looked.value >= result->entity_count) ||
+               (expected < result->entity_count && looked.value == expected);
+    }
+    return file;
+}
+
+// Settles the region's marks once, at its first query that needs it
+// (c_ast_types_mark_resolves_at_file), and then answers whether every mark in
+// the query node's subtree resolves as from the file scope, so that the
+// query's scope, if its chain reaches the file scope, needs no lookup. The
+// settlement holds while the lookup generation and the identifier use count
+// are the ones it was made under (c_parse_lookup_generation). A query over
+// one of the region's other marks, or made after the settlement stopped
+// holding, walks its subtree (c_ast_types_lookups_agree), and so does every
+// query of a region with more other marks than it records.
+BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_settled(CAstTypeBodyIndex* index, CAstTypeBody* body, CPreprocessResult const* preprocess,
+                                                     CParseResult* result, CScopeId scope, u32 node)
+{
+    u64 generation = 0;
+    bool stamped = index && index->local_symbols && index->rooted && c_parse_lookup_generation(result, &generation);
+    if (stamped && body->lookups == C_AST_TYPE_LOOKUPS_UNSETTLED)
+    {
+        u32 count = body->node + 1 - body->begin;
+        if (!index->locals_built || (index->local_generation != generation && index->settled_nodes >= result->entity_count))
+        {
+            c_ast_types_locals_build(index, result, generation);
+        }
+        index->settled_nodes += count;
+        bool file = index->local_generation == generation;
+        // Eight flag bytes at a time: almost none carry the mark, and a group
+        // that holds one is read byte by byte.
+        u64 const lookup_bytes = 0x0101010101010101ull * C_AST_TYPE_FLAG_LOOKUP;
+        for (u32 group = 0; file && group < count; group += 8)
+        {
+            u32 width = count - group < 8 ? count - group : 8;
+            u64 word = lookup_bytes;
+            if (width == 8)
+            {
+                memcpy(&word, body->flags + group, 8);
+            }
+            for (u32 relative = group; file && (word & lookup_bytes) && relative < group + width; relative += 1)
+            {
+                if (body->flags[relative] & C_AST_TYPE_FLAG_LOOKUP)
+                {
+                    bool other = !c_ast_types_mark_resolves_at_file(index, body, preprocess, result, relative);
+                    file = !other || body->other_count < C_AST_TYPE_LOOKUP_OTHER_LIMIT;
+                    if (other && file)
+                    {
+                        body->others[body->other_count] = relative;
+                        body->other_count += 1;
+                    }
+                }
+            }
+        }
+        body->lookups = (u8)(file ? C_AST_TYPE_LOOKUPS_FILE : C_AST_TYPE_LOOKUPS_EACH);
+        body->lookups_generation = generation;
+        body->lookups_uses = result->identifier_use_count;
+    }
+    bool settled = stamped && body->lookups == C_AST_TYPE_LOOKUPS_FILE && body->lookups_generation == generation &&
+                   body->lookups_uses == result->identifier_use_count;
+    if (settled && body->other_count)
+    {
+        u32 floor = c_ast_subtree_begin(body->ast, node) - body->begin;
+        u32 last = node - body->begin;
+        for (u32 other = 0; settled && other < body->other_count; other += 1)
+        {
+            settled = body->others[other] < floor || body->others[other] > last;
+        }
+    }
+    // The query's scope chain must reach the file scope.
+    return settled && scope.value < index->rooted_count && index->rooted[scope.value];
+}
+
 // A `.` or `->` that the member rule declines only because its aggregate is
 // const or volatile, over a base it accepts.
 // The machine types that base as the tree does, then makes two calls,
@@ -2166,7 +2414,10 @@ BUSTER_C_SHARED CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CP
                            !c_parse_pending_enum_possible(result) && c_parse_type_identity_sites_absent(result, start, end);
             if (vouched && (flags & C_AST_TYPE_FLAG_LOOKUP_BELOW))
             {
-                vouched = c_ast_types_lookups_agree(body, preprocess, result, scope, node);
+                bool settled = c_ast_types_lookups_settled(machine->ast_bodies, body, preprocess, result, scope, node);
+                body->statistics->lookups_settled += settled;
+                body->statistics->lookups_walked += !settled;
+                vouched = settled || c_ast_types_lookups_agree(body, preprocess, result, scope, node);
             }
             answer.node_kind = body->ast->kinds[node];
             if (vouched)
