@@ -27,7 +27,7 @@ instruction work lands. The active volatile-store loop isolates the directive
 and is also untouched GCC `-O2 -S` output.
 
 Buster's first-party license remains unselected per
-[LICENSES/README.md](../../../../../../../LICENSES/README.md).
+[LICENSES/README.md](../../../../../../LICENSES/README.md).
 GCC and GNU binutils are oracle tools, licensed GPL-3.0-or-later as reported
 by the installed tools' version notices. No external implementation source or
 runtime code was imported; the fixture is generated from the adjacent input.
