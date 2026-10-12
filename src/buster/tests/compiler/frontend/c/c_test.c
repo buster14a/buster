@@ -64841,7 +64841,11 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 {
                     IrAbiValue argument_abi = ir_type_abi_value(artifact_ir.program, abi_types[type_index]->id,
                                                                  (IrAbiConvention)convention, IR_ABI_USE_ARGUMENT);
-                    BUSTER_TEST(arguments, argument_abi.part_count || argument_abi.indirect);
+                    // This corpus uses host-native types. Only Pair has an
+                    // i386-compatible baseline shape: i128, SIMD and the
+                    // host's wide va_list must not acquire x86-64 transport.
+                    bool supported = convention != IR_ABI_CONVENTION_SYSTEMV_I386 || abi_types[type_index] == pair_type;
+                    BUSTER_TEST(arguments, (argument_abi.part_count != 0 || argument_abi.indirect) == supported);
                     BUSTER_TEST(arguments, argument_abi.part_count <= IR_ABI_MAX_PARTS);
                 }
             }
@@ -64862,6 +64866,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, ir_validate_canonical_module(artifact_ir.program, module).error == IR_VALIDATION_NONE);
         }
         String8 abi_triples[] = {
+            S8("i386-unknown-linux-gnu"),
             S8("x86_64-unknown-linux-gnu"),
             S8("x86_64-pc-windows-msvc"),
             S8("aarch64-unknown-linux-gnu"),
@@ -64869,6 +64874,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             S8("aarch64-pc-windows-msvc"),
         };
         IrAbiConvention abi_conventions[] = {
+            IR_ABI_CONVENTION_SYSTEMV_I386,
             IR_ABI_CONVENTION_SYSTEMV_X86_64,
             IR_ABI_CONVENTION_WIN64_X86_64,
             IR_ABI_CONVENTION_AAPCS64,
