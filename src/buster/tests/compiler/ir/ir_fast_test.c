@@ -844,12 +844,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
             IrFoldMatchCase const* test_case = cases + index;
             TemporalArena match_temporary = arena_begin_temporal(arguments->arena);
             IrConstructionCounters before = ir_construction_counters();
-            CIRLowerResult lowered = ir_promotion_lower(arguments->arena, test_case->source, target_native);
-            if (BUSTER_REQUIRE(arguments, lowered.program && !lowered.diagnostic_count))
+            CIRLowerResult match_lowered = ir_promotion_lower(arguments->arena, test_case->source, target_native);
+            if (BUSTER_REQUIRE(arguments, match_lowered.program && !match_lowered.diagnostic_count))
             {
-                IrProgram* program = lowered.program;
-                program->fast_passes = IR_FAST_PASS_BIT(IR_FAST_FOLD);
-                IrValidationResult prepared = ir_prepare_canonical_module(program, program->modules, true);
+                IrProgram* match_program = match_lowered.program;
+                match_program->fast_passes = IR_FAST_PASS_BIT(IR_FAST_FOLD);
+                IrValidationResult prepared = ir_prepare_canonical_module(match_program, match_program->modules, true);
                 BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
                 IrConstructionCounters after = ir_construction_counters();
                 BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
