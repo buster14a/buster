@@ -103,7 +103,9 @@ from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE,
                               MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
                               check_name, classify, classify_scaling, classify_throughput, host_problem, number,
                               range_label, regression_policy, render, SCALING_PROFILE, scaling_digest, validate_inline_acceptance,
-                              THROUGHPUT_PROFILE, throughput_digest, validate_analyzer_bundle, covered_inventory_rows)
+                              THROUGHPUT_PROFILE, throughput_digest, validate_analyzer_bundle, covered_inventory_rows,
+                              HARNESS_ADMISSIONS, THROUGHPUT_HARNESS_FLOOR, THROUGHPUT_HISTORICAL_HARNESS_REVISION,
+                              THROUGHPUT_HISTORICAL_PROFILE, THROUGHPUT_HISTORICAL_REQUEST_LINE)
 
 ARTIFACT_PREFIX = "buster-9700x-compiler-"
 MEMBER_LIMIT = 8 * 1024 * 1024
@@ -395,8 +397,14 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
            expected_profile: str | None = None, expected_preparation_policy: str | None = None,
            require_owned_phases: bool = False, require_owned_preflight: bool = False,
            expected_phase_driver_sha256: str | None = None,
-           expected_measurement_revision: str | None = None) -> tuple[str, str, list[str]]:
+           expected_measurement_revision: str | None = None,
+           expected_throughput_profile: dict | None = None,
+           dispatch_refusal: str = "") -> tuple[str, str, list[str]]:
     """(conclusion, title, reasons) for one attempt; never consults the verdict's direction.
+
+    expected_throughput_profile is THROUGHPUT_PROFILE unless hosted pull authorization admitted
+    the named historical recipe (#3714); a receipt can never select it by itself. A non-empty
+    dispatch_refusal is that authorization's explicit unsupported disposition: no host ran.
 
     throughput is {"summary": ..., "metadata": ..., "scaling": {series: {"summary", "metadata"}}}
     from the evidence artifact. Scaling is checked whenever the receipt names
@@ -422,7 +430,10 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
         reasons.append("Main-owned publication requires trusted main profile, preparation policy and owned preflight")
     conclusion, title = "failure", "Not benchmarked"
     policy, problem = regression_policy(policy_value)
-    if not authorized:
+    if dispatch_refusal:
+        title = "Not benchmarked: unsupported historical harness"
+        reasons.append(dispatch_refusal)
+    elif not authorized:
         reasons.append("authorization refused or did not complete in this attempt; this candidate has a "
                        "benchmark coverage gap (see the authorize-compiler job)")
     elif not isinstance(receipt, dict):
@@ -492,8 +503,19 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                                                 expected_trusted_revision=expected_measurement_revision))
                 if require_throughput or "throughput_profile" in receipt:
                     corpus = throughput if isinstance(throughput, dict) else {}
-                    if receipt.get("throughput_profile") != THROUGHPUT_PROFILE:
+                    wanted = expected_throughput_profile or THROUGHPUT_PROFILE
+                    if receipt.get("throughput_profile") != wanted:
                         reasons.append("receipt throughput profile is not the frozen corpus profile")
+                    if wanted == THROUGHPUT_HISTORICAL_PROFILE:
+                        revision = THROUGHPUT_HISTORICAL_HARNESS_REVISION
+                        if expected.get("mode") != "pull":
+                            reasons.append(f"{wanted['name']} is valid only in pull mode")
+                        if receipt.get("throughput_historical") != {"harness_revision": revision,
+                                                                    "observed_revision": revision,
+                                                                    "status": "prepared"}:
+                            reasons.append(f"{wanted['name']} harness was not the prepared pinned revision {revision}")
+                    elif "throughput_historical" in receipt:
+                        reasons.append("receipt carries a historical corpus harness the route did not admit")
                     reasons.extend(classify_throughput(corpus.get("summary"), corpus.get("metadata"),
                                                        receipt.get("binaries")))
                 if "scaling_profile" in receipt:
@@ -5507,6 +5529,20 @@ def main() -> int:
                 authorized = False
                 problem = "Main route refused: " + str(error)
                 notes.append(problem)
+        # #3714: the hosted pre-dispatch corpus disposition. An unsupported base was never
+        # dispatched, so it has no evidence to read; only "historical" admits the named recipe.
+        admission = get("BQ_HARNESS_ADMISSION") if mode == "pull" and not recover else "admitted"
+        expected_corpus = THROUGHPUT_HISTORICAL_PROFILE if admission == "historical" else THROUGHPUT_PROFILE
+        refusal = ""
+        if authorized and admission not in HARNESS_ADMISSIONS:
+            authorized = False
+            notes.append(f"hosted harness admission {admission!r} is not a reviewed disposition")
+        elif authorized and admission == "unsupported":
+            authorized = False
+            refusal = (f"unsupported historical throughput harness: merge base {expected.get('base')} predates "
+                       f"{THROUGHPUT_HARNESS_FLOOR}, so its --mode all is not the {THROUGHPUT_PROFILE['name']} "
+                       f"FAST/QUALITY population; not dispatched to the 9700X. Only a fresh "
+                       f"`{THROUGHPUT_HISTORICAL_REQUEST_LINE}` request line can measure this base")
         if authorized:
             receipt, summary, problem, artifact, throughput = read_evidence(api, run_id, artifact_name(head, attempt),
                 trusted_main_route=route if route is not None and route["main_owned"] else None)
@@ -5533,7 +5569,9 @@ def main() -> int:
                                                 "require_owned_phases": True, "require_owned_preflight": True,
                                                 "expected_phase_driver_sha256": route["driver_sha256"],
                                                 "expected_measurement_revision": route["main_measurement_revision"]}
-                                               if route is not None and route["main_owned"] else {}))
+                                               if route is not None and route["main_owned"] else
+                                               {"expected_throughput_profile": expected_corpus,
+                                                "dispatch_refusal": refusal}))
         shown = dict(receipt) if isinstance(receipt, dict) else {"mode": mode, "identity": expected}
         # The authorized range, never the host's own account of it.
         shown.pop("coverage", None)
