@@ -1,9 +1,9 @@
 schema	buster-compiler-preparation-admission-v1
-state	disabled
-freeze_revision	-
-freeze_sha256	-
-protocol_sha256	-
-history_since	-
+state	qualify
+freeze_revision	c23a81f26a162d2c113e64bf69fb476c90c81e6e
+freeze_sha256	4c554c1c33436d9be95ed3cfe227011406bfdbc9d6c9eb502f75f0104195581c
+protocol_sha256	cf66ecb383454e3f65c051f2aa91f69d36409a55a8335ba3cc57f67ad9fcdaab
+history_since	2026-10-12T17:00:00Z
 repository	buster14a/buster
 owner_login	davidgmbb
 owner_id	39247043

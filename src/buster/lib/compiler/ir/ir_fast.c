@@ -2,7 +2,9 @@
 // ir_fast_function owns bounded scratch and the shared ir_rewrite_compact map.
 // ir_instruction_is_pure is the semantic DCE authority. ir_fast_fold performs
 // one forward pass; ir_fast_dce uses counts plus a deletion queue (no use CSR);
-// ir_fast_parameters has a hard sweep cap. ir_prepare_canonical_module owns
+// ir_fast_parameters has a hard sweep cap. The opt-in ir_fast_cse (#3011)
+// value-numbers admitted rows within each block through a bounded generation-
+// tagged table and runs between address and DCE. ir_prepare_canonical_module owns
 // input, inlining-output, promotion-output and FAST-output certification boundaries, then
 // publishes the final canonical CFG after all selected transformations.
 // ir_validate_promotion_output leaves out of the promotion-output check any
@@ -12,7 +14,8 @@
 
 String8 ir_fast_pass_name(IrFastPass pass)
 {
-    String8 names[] = {S8("fold"), S8("address"), S8("dce"), S8("parameters")};
+    String8 names[] = {S8("fold"), S8("address"), S8("dce"), S8("parameters"), S8("cse")};
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == IR_FAST_PASS_COUNT);
     String8 result = (u32)pass < BUSTER_ARRAY_LENGTH(names) ? names[pass] : S8("invalid");
     return result;
 }
@@ -331,6 +334,220 @@ BUSTER_GLOBAL_LOCAL void ir_fast_dce(IrProgram* program, IrFunction* function, u
     }
 }
 
+// Opt-in block-local value numbering (#3011). One forward walk of each
+// block's linked instruction chain keys the admitted rows -- wrapping unsigned
+// scalar add/subtract/multiply/and/or/xor whose operands and result share one
+// canonical type, and single-limb constants of such a type -- by operation,
+// type and resolved operand roots (or immediate bits), with commutative
+// operands ordered. A later exact match records its result as a
+// replacement of the earlier representative and is removed by the shared
+// compaction. Entries carry the block's generation tag, so no state crosses a
+// block boundary and no per-block clearing is needed. Within a block a keyed
+// operand's root is final: it is defined earlier in the block (already
+// decided) or in another block. A block walked later can still replace that
+// operand, but a replacement only joins equal values, so an earlier hit stays
+// sound and its entry has already expired. A full table or exhausted probe
+// sequence declines insertion; it never changes a result. The census's
+// linear arm (IrProgram.fast_cse_window) instead compares each candidate
+// with the block's previous IR_FAST_CSE_WINDOW keyed candidates, held in a
+// ring in the table's first slots. Every candidate takes the next slot,
+// recording its representative after a hit, so the arm never saturates.
+typedef struct IrFastCseEntry IrFastCseEntry;
+struct IrFastCseEntry
+{
+    u32 left;
+    u32 right;
+    u32 type;
+    u32 value;
+    u32 ordinal;
+    u32 generation;
+    u32 operation;
+};
+
+// One table serves a module preparation. Each block takes a fresh generation;
+// when the counter wraps, the table is cleared and generation 1 restarts.
+typedef struct IrFastCseTable IrFastCseTable;
+struct IrFastCseTable
+{
+    IrFastCseEntry* entries;
+    u32 generation;
+};
+
+BUSTER_GLOBAL_LOCAL IrFastCseTable ir_fast_cse_table(Arena* arena, u32 generation, IrFastCseStatistics* census)
+{
+    IrFastCseTable result = {.entries = arena_allocate(arena, IrFastCseEntry, IR_FAST_CSE_SLOTS), .generation = generation};
+    memset(result.entries, 0, sizeof(IrFastCseEntry) * IR_FAST_CSE_SLOTS);
+    census->table_bytes += sizeof(IrFastCseEntry) * IR_FAST_CSE_SLOTS;
+    return result;
+}
+
+// Key operation of a constant row; binary rows use their IrBinaryOperation.
+#define IR_FAST_CSE_CONSTANT ((u32)IR_BINARY_COUNT + 1u)
+
+// Returns the admitted key operation and sets its commutativity, or returns
+// IR_BINARY_COUNT for a row outside the domain. Signed, Boolean, enum, wider
+// than one limb, pointer, floating, place and volatile shapes are excluded.
+BUSTER_GLOBAL_LOCAL u32 ir_fast_cse_operation(IrProgram* program, IrFunction* function, IrInstruction const* row, bool* commutative)
+{
+    u32 result = IR_BINARY_COUNT;
+    if (!row->volatile_access && !row->target_count && row->result.value < function->value_count)
+    {
+        if (row->opcode == IR_OPCODE_CONSTANT_INTEGER && !row->operand_count && row->immediate_count == 1 && !row->immediate_is_negative)
+        {
+            *commutative = false;
+            result = IR_FAST_CSE_CONSTANT;
+        }
+        else if (row->opcode == IR_OPCODE_BINARY && row->operand_count == 2 && !row->immediate_count)
+        {
+            switch (row->binary_operation)
+            {
+            case IR_BINARY_INTEGER_ADD:
+            case IR_BINARY_INTEGER_MULTIPLY:
+            case IR_BINARY_INTEGER_BITWISE_AND:
+            case IR_BINARY_INTEGER_BITWISE_OR:
+            case IR_BINARY_INTEGER_BITWISE_XOR:
+                *commutative = true;
+                result = row->binary_operation;
+                break;
+            case IR_BINARY_INTEGER_SUBTRACT:
+                *commutative = false;
+                result = row->binary_operation;
+                break;
+            default: break;
+            }
+        }
+        IrType* type = result != IR_BINARY_COUNT ? ir_type_from_id(&program->types, row->canonical_type) : 0;
+        IrValue const* value = function->values + row->result.value;
+        if (!type || type->kind != IR_TYPE_INTEGER || type->is_signed || type->is_atomic || type->is_volatile ||
+            !type->bit_width || type->bit_width > 64 || value->category != IR_VALUE_VALUE || value->is_volatile ||
+            value->canonical_type.value != row->canonical_type.value) result = IR_BINARY_COUNT;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void ir_fast_cse(IrProgram* program, IrFunction* function, u32* replacements, u8* removed, IrFastCseTable* cse,
+                                     IrFastPassStatistics* statistics, IrFastCseStatistics* census)
+{
+    IrFastCseEntry* table = cse->entries;
+    bool window = program->fast_cse_window;
+    u32 mask = IR_FAST_CSE_SLOTS - 1;
+    u32 limit = IR_FAST_CSE_SLOTS - IR_FAST_CSE_SLOTS / 4;
+    for (u32 block = 0; block < function->block_count; block += 1)
+    {
+        // Slots tagged with any other generation are empty for this block.
+        cse->generation += 1;
+        if (!cse->generation)
+        {
+            memset(table, 0, sizeof(IrFastCseEntry) * IR_FAST_CSE_SLOTS);
+            census->table_bytes += sizeof(IrFastCseEntry) * IR_FAST_CSE_SLOTS;
+            cse->generation = 1;
+        }
+        u32 generation = cse->generation;
+        u32 entries = 0;
+        u32 ordinal = 0;
+        census->blocks += 1;
+        for (u32 index = function->blocks[block].first_instruction.value; index < function->instruction_count;
+             index = function->instructions[index].next.value)
+        {
+            IrInstruction* row = function->instructions + index;
+            bool commutative = false;
+            statistics->visits += 1;
+            u32 operation = removed[index] ? IR_BINARY_COUNT : ir_fast_cse_operation(program, function, row, &commutative);
+            u32 type = row->canonical_type.value;
+            u32 left = IR_PROMOTE_NONE, right = IR_PROMOTE_NONE;
+            bool keyed = operation == IR_FAST_CSE_CONSTANT;
+            if (keyed)
+            {
+                left = (u32)row->immediates[0];
+                right = (u32)(row->immediates[0] >> 32);
+            }
+            else if (operation != IR_BINARY_COUNT)
+            {
+                left = ir_promote_root(replacements, row->operands[0].value);
+                right = ir_promote_root(replacements, row->operands[1].value);
+                keyed = left < function->value_count && right < function->value_count && function->values[left].canonical_type.value == type &&
+                        function->values[right].canonical_type.value == type;
+            }
+            if (keyed)
+            {
+                bool commuted = commutative && right < left;
+                if (commuted)
+                {
+                    u32 swap = left;
+                    left = right;
+                    right = swap;
+                }
+                ordinal += 1;
+                census->candidates += 1;
+                IrFastCseEntry* match = 0;
+                IrFastCseEntry* empty = 0;
+                if (window)
+                {
+                    // Linear arm: compare against the block's previous
+                    // IR_FAST_CSE_WINDOW keyed candidates, newest first. Every
+                    // candidate, hit or miss, then takes the oldest slot.
+                    u32 previous = ordinal - 1;
+                    u32 live = BUSTER_MIN(previous, IR_FAST_CSE_WINDOW);
+                    for (u32 offset = 1; !match && offset <= live; offset += 1)
+                    {
+                        IrFastCseEntry* entry = table + ((previous - offset) % IR_FAST_CSE_WINDOW);
+                        census->probes += 1;
+                        if (entry->operation == operation && entry->type == type && entry->left == left && entry->right == right) match = entry;
+                    }
+                    empty = table + (previous % IR_FAST_CSE_WINDOW);
+                }
+                else
+                {
+                    u32 hash = left * 0x9E3779B1u ^ right * 0x85EBCA77u ^ type * 0xC2B2AE3Du ^ operation;
+                    hash ^= hash >> 15;
+                    for (u32 probe = 0; !match && !empty && probe < IR_FAST_CSE_PROBES; probe += 1)
+                    {
+                        IrFastCseEntry* entry = table + ((hash + probe) & mask);
+                        census->probes += 1;
+                        if (entry->generation != generation) empty = entry;
+                        else if (entry->operation == operation && entry->type == type && entry->left == left && entry->right == right) match = entry;
+                        else census->collisions += 1;
+                    }
+                }
+                // The window's slot for this candidate keeps the value it now
+                // stands for: the representative after a hit, itself otherwise.
+                u32 representative = row->result.value;
+                if (match)
+                {
+                    IrValue a = function->values[row->result.value];
+                    IrValue b = function->values[match->value];
+                    if (a.alignment == b.alignment && a.category == b.category && a.is_read_only == b.is_read_only &&
+                        a.points_to_read_only == b.points_to_read_only && a.is_volatile == b.is_volatile)
+                    {
+                        representative = match->value;
+                        replacements[row->result.value] = match->value;
+                        removed[index] = 1;
+                        statistics->changes += 1;
+                        census->hits += 1;
+                        census->window_hits += ordinal - match->ordinal <= IR_FAST_CSE_WINDOW;
+                        census->commuted_hits += commuted;
+                        census->constant_hits += operation == IR_FAST_CSE_CONSTANT;
+                    }
+                    else census->metadata_declines += 1;
+                }
+                if (window)
+                {
+                    *empty = (IrFastCseEntry){.left = left, .right = right, .type = type, .value = representative, .ordinal = ordinal,
+                        .generation = generation, .operation = operation};
+                }
+                else if (!match && empty && entries < limit)
+                {
+                    *empty = (IrFastCseEntry){.left = left, .right = right, .type = type, .value = representative, .ordinal = ordinal,
+                        .generation = generation, .operation = operation};
+                    entries += 1;
+                }
+                else if (!match) census->saturation_declines += 1;
+            }
+        }
+        census->max_block_candidates = BUSTER_MAX(census->max_block_candidates, ordinal);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void ir_fast_parameters(IrFunction* function, u32* replacements, IrFastStatistics* statistics)
 {
     IrFastPassStatistics* pass = statistics->passes + IR_FAST_PARAMETERS;
@@ -380,7 +597,7 @@ BUSTER_GLOBAL_LOCAL void ir_fast_parameters(IrFunction* function, u32* replaceme
     statistics->parameter_budget_hits += changed;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_fast_function(IrProgram* program, IrFunction* function, IrFastStatistics* statistics)
+BUSTER_GLOBAL_LOCAL void ir_fast_function(IrProgram* program, IrFunction* function, IrFastCseTable* cse, IrFastStatistics* statistics)
 {
     statistics->functions += 1;
     statistics->instructions_before += function->instruction_count;
@@ -442,15 +659,24 @@ BUSTER_GLOBAL_LOCAL void ir_fast_function(IrProgram* program, IrFunction* functi
         for (u32 value = 0; value < function->value_count; value += 1) replacements[value] = value;
         statistics->scratch_peak_bytes = BUSTER_MAX(statistics->scratch_peak_bytes, scratch_bytes);
         u64 changes = 0;
-        for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
+        // CSE consumes folded and address-collapsed roots; DCE then counts
+        // uses of the surviving representatives.
+        IrFastPass const order[] = {IR_FAST_FOLD, IR_FAST_ADDRESS, IR_FAST_CSE, IR_FAST_DCE, IR_FAST_PARAMETERS};
+        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(order) == IR_FAST_PASS_COUNT);
+        for (u32 step = 0; step < IR_FAST_PASS_COUNT; step += 1)
         {
+            IrFastPass pass = order[step];
             if (!(program->fast_passes & IR_FAST_PASS_BIT(pass))) continue;
             IrFastPassStatistics* measurement = statistics->passes + pass;
             u64 before = measurement->changes;
             TimeDataType start = program->measure_fast_passes ? timestamp_take() : (TimeDataType){0};
             if (pass == IR_FAST_FOLD || pass == IR_FAST_ADDRESS)
             {
-                ir_fast_fold(program, function, replacements, removed, (IrFastPass)pass, measurement);
+                ir_fast_fold(program, function, replacements, removed, pass, measurement);
+            }
+            else if (pass == IR_FAST_CSE)
+            {
+                ir_fast_cse(program, function, replacements, removed, cse, measurement, &statistics->cse);
             }
             else if (pass == IR_FAST_DCE)
             {
@@ -475,10 +701,21 @@ BUSTER_GLOBAL_LOCAL void ir_fast_function(IrProgram* program, IrFunction* functi
     statistics->instructions_after += function->instruction_count;
 }
 #if BUSTER_INCLUDE_TESTS
+IrFastStatistics ir_test_fast_cse_function(IrProgram* program, IrFunction* function, u32 generation)
+{
+    IrFastStatistics result = {0};
+    TemporalArena scratch = scratch_begin(&program->arena, 1);
+    IrFastCseTable cse = ir_fast_cse_table(scratch.arena, generation, &result.cse);
+    ir_fast_function(program, function, &cse, &result);
+    scratch_end(scratch);
+    return result;
+}
+
 IrFastStatistics ir_test_fast_function(IrProgram* program, IrFunction* function)
 {
     IrFastStatistics result = {0};
-    ir_fast_function(program, function, &result);
+    if (program->fast_passes & IR_FAST_PASS_BIT(IR_FAST_CSE)) result = ir_test_fast_cse_function(program, function, 0);
+    else ir_fast_function(program, function, 0, &result);
     return result;
 }
 #endif
@@ -656,6 +893,10 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             bool check_output = !input_certified || BUSTER_IR_TRANSFORM_CHECKS;
             u8* declined = 0;
             IrFastDecline* declines = 0;
+            // The CSE table is allocated before, and outlives, each function's
+            // own scratch region.
+            IrFastCseTable cse = {0};
+            if (program->fast_passes & IR_FAST_PASS_BIT(IR_FAST_CSE)) cse = ir_fast_cse_table(scratch.arena, 0, &module->fast.cse);
             // Callers whose optional splices skipped their own output check
             // (ir_inline_module) are proven here by the same per-function input
             // validation; one that fails is an inlining-output error, never a
@@ -712,7 +953,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                     else if (result.error == IR_VALIDATION_NONE)
                     {
                         IR_CONSTRUCTION_RECORD(PREPARATION_FAST_FUNCTIONS, 1);
-                        ir_fast_function(program, function, &module->fast);
+                        ir_fast_function(program, function, &cse, &module->fast);
                     }
                 }
             }

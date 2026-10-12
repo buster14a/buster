@@ -1,0 +1,1 @@
+IR_INLINE tiny=1 candidates=20655 inlined=3543 always_inlined=73 copied_instructions=33479 growth=33479 budget_skips=577 shape_skips=16089 linkage_skips=424 recursion_skips=22 visits=32636599

@@ -1,0 +1,8 @@
+build=0
+statement-extent peels shape=3 length=2048 peels=2096128 failed at /home/user/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_controlled_body_extents_linear:55354
+statement-extent peels shape=4 length=2048 peels=2096128 failed at /home/user/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_controlled_body_extents_linear:55354
+statement-extent peels shape=5 length=2048 peels=4190209 failed at /home/user/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_controlled_body_extents_linear:55354
+statement-extent peels shape=6 length=2048 peels=2096128 failed at /home/user/buster/src/buster/tests/compiler/frontend/c/c_test.c:c_test_controlled_body_extents_linear:55354
+[76/80] Unit tests (1 of 63 modules selected)
+
+[exited with code 0]

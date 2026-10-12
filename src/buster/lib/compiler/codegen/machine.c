@@ -5889,6 +5889,7 @@ MachineSelectionModule* machine_select_module_prepare(Arena* arena, IrProgram* p
     if (target.cpu_arch == CPU_ARCH_X86_64)
     {
         machine_x64_signature_plans_prepare(arena, program, module);
+        module->x64_vector_registers_supported = ir_simd_operation_supported(target, IR_SIMD_SPLAT_U8);
     }
     return module;
 }
