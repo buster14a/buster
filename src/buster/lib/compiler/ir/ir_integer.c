@@ -743,9 +743,20 @@ struct IrSemanticRangeSlot
 BUSTER_GLOBAL_LOCAL IrSemanticRangeSlot ir_semantic_range_slots[IR_SEMANTIC_RANGE_CAPACITY];
 BUSTER_GLOBAL_LOCAL u32 ir_semantic_range_count;
 
+// Set around a diagnostic probe (ir_construction_fold_census) that reuses
+// the semantic kernels without doing the compiler's semantic work.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool ir_semantic_suppressed;
+
+bool ir_semantic_suppress(bool suppressed)
+{
+    bool previous = ir_semantic_suppressed;
+    ir_semantic_suppressed = suppressed;
+    return previous;
+}
+
 void ir_semantic_record(IrSemanticCounter counter, u64 amount)
 {
-    if ((u32)counter < IR_SEMANTIC_COUNT)
+    if ((u32)counter < IR_SEMANTIC_COUNT && !ir_semantic_suppressed)
     {
         u64 before = ir_semantic_counter_values.values[counter];
         ir_semantic_counter_values.values[counter] = before + amount;

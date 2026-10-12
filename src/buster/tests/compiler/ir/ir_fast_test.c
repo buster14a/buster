@@ -445,5 +445,43 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
         for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
             BUSTER_TEST(arguments, skipped.passes[pass].changes == 0 && skipped.passes[pass].visits == 0);
     }
+#if BUSTER_BENCH_ALLOCATIONS
+    // #3010 census: `input+0` is committed with its zero already a constant
+    // row, so the construction probe sees the same right identity that FAST
+    // later applies without a replacement root. Probes record no semantic work.
+    {
+        TemporalArena census_temporary = arena_begin_temporal(arguments->arena);
+        IrConstructionCounters census_before = ir_construction_counters();
+        CIRLowerResult census_lowered = ir_promotion_lower(arguments->arena, S8("int test(int input){return input+0;}"), target_native);
+        IrConstructionCounters census_lowering = ir_construction_counters();
+        if (BUSTER_REQUIRE(arguments, census_lowered.program && !census_lowered.diagnostic_count))
+        {
+            u64 identities = census_lowering.values[IR_CONSTRUCTION_FOLD_BIRTH_BINARY_RIGHT_IDENTITY] -
+                             census_before.values[IR_CONSTRUCTION_FOLD_BIRTH_BINARY_RIGHT_IDENTITY];
+            u64 bytes = census_lowering.values[IR_CONSTRUCTION_FOLD_BIRTH_AVOIDABLE_BYTES] - census_before.values[IR_CONSTRUCTION_FOLD_BIRTH_AVOIDABLE_BYTES];
+            BUSTER_TEST(arguments, identities == 1 && bytes >= sizeof(IrInstruction) + sizeof(IrValue) + 2 * sizeof(IrValueId));
+            BUSTER_TEST(arguments, census_lowering.values[IR_CONSTRUCTION_FOLD_BIRTH_SCALAR_ROWS] > census_before.values[IR_CONSTRUCTION_FOLD_BIRTH_SCALAR_ROWS]);
+            IrProgram* census_program = census_lowered.program;
+            IrFunction* census_function = census_program->modules->functions;
+            IrSemanticCounters semantic_before = ir_semantic_counters();
+            for (u32 index = 0; index < census_function->instruction_count; index += 1)
+            {
+                ir_construction_fold_census(census_program, census_function, (IrInstructionId){.value = index});
+            }
+            IrSemanticCounters semantic_after = ir_semantic_counters();
+            BUSTER_TEST(arguments, memcmp(&semantic_before, &semantic_after, sizeof(semantic_before)) == 0);
+            IrConstructionCounters probed = ir_construction_counters();
+            BUSTER_TEST(arguments, probed.values[IR_CONSTRUCTION_FOLD_BIRTH_BINARY_RIGHT_IDENTITY] -
+                                       census_lowering.values[IR_CONSTRUCTION_FOLD_BIRTH_BINARY_RIGHT_IDENTITY] == 1);
+            census_program->fast_passes = IR_FAST_PASS_BIT(IR_FAST_FOLD);
+            IrFastStatistics folded = ir_test_fast_function(census_program, census_function);
+            IrConstructionCounters late = ir_construction_counters();
+            BUSTER_TEST(arguments, folded.passes[IR_FAST_FOLD].changes == 1);
+            BUSTER_TEST(arguments, late.values[IR_CONSTRUCTION_FOLD_LATE_BINARY_RIGHT_IDENTITY] - probed.values[IR_CONSTRUCTION_FOLD_LATE_BINARY_RIGHT_IDENTITY] == 1);
+            BUSTER_TEST(arguments, late.values[IR_CONSTRUCTION_FOLD_LATE_REPLACED_ROOTS] == probed.values[IR_CONSTRUCTION_FOLD_LATE_REPLACED_ROOTS]);
+        }
+        scratch_end(census_temporary);
+    }
+#endif
     return result;
 }
