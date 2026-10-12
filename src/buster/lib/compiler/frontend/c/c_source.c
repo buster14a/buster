@@ -8252,7 +8252,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         // eBPF also rejects floating-point operations. Operand type/width
         // restrictions remain the responsibility of semantic lowering.
         CSymbolBuiltin builtin = c_symbol_builtin_from_spelling(name);
-        bool native = cpu_arch == CPU_ARCH_X86_64 || cpu_arch == CPU_ARCH_AARCH64;
+        bool native = cpu_arch_is_x86(cpu_arch) || cpu_arch == CPU_ARCH_AARCH64;
         // __builtin_return_address reads the frame record of the System V and
         // Darwin native backends; Win64/Windows-AArch64 frames, Wasm64 and
         // eBPF refuse it, so those targets answer 0.
@@ -10962,7 +10962,7 @@ BUSTER_C_INTERNAL bool c_include_builtin(String8 name, String8* path_out, String
                     "#define INT_MIN (-2147483647 - 1)\n"
                     "#define INT_MAX 2147483647\n"
                     "#define UINT_MAX 4294967295U\n"
-                    "#if defined(_WIN64)\n"
+                    "#if __SIZEOF_LONG__ == 4\n"
                     "#define LONG_MIN INT_MIN\n"
                     "#define LONG_MAX INT_MAX\n"
                     "#define ULONG_MAX UINT_MAX\n"
@@ -12152,22 +12152,53 @@ struct CTargetFeatureMacro
     String8 name;
     TargetCpuFeature feature;
     CpuArch cpu_arch;
+    bool i386_only;
 };
 
-// Exactly the features `<buster/lib/simd.h>` tests, in the GNU spelling.  The
-// list is deliberately short: every entry is a promise that the frontend and
-// the canonical backend can compile code written behind it.
+// GNU feature macros mirror the selected target even where code generation is
+// not available for that target.
 BUSTER_C_INTERNAL CTargetFeatureMacro const c_target_feature_macros[] = {
-    { S8_INITIALIZER("__SSE2__"), TARGET_CPU_FEATURE_X86_SSE2, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX__"), TARGET_CPU_FEATURE_X86_AVX, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX2__"), TARGET_CPU_FEATURE_X86_AVX2, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512F__"), TARGET_CPU_FEATURE_X86_AVX512F, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512BW__"), TARGET_CPU_FEATURE_X86_AVX512BW, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512VL__"), TARGET_CPU_FEATURE_X86_AVX512VL, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512DQ__"), TARGET_CPU_FEATURE_X86_AVX512DQ, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512VBMI__"), TARGET_CPU_FEATURE_X86_AVX512VBMI, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512VBMI2__"), TARGET_CPU_FEATURE_X86_AVX512VBMI2, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__ARM_NEON"), TARGET_CPU_FEATURE_AARCH64_NEON, CPU_ARCH_AARCH64 },
+    { S8_INITIALIZER("__MMX__"), TARGET_CPU_FEATURE_X86_MMX, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSE__"), TARGET_CPU_FEATURE_X86_SSE, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSE2__"), TARGET_CPU_FEATURE_X86_SSE2, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__SSE3__"), TARGET_CPU_FEATURE_X86_SSE3, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSSE3__"), TARGET_CPU_FEATURE_X86_SSSE3, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSE4A__"), TARGET_CPU_FEATURE_X86_SSE4A, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSE4_1__"), TARGET_CPU_FEATURE_X86_SSE4_1, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSE4_2__"), TARGET_CPU_FEATURE_X86_SSE4_2, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX__"), TARGET_CPU_FEATURE_X86_AVX, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX2__"), TARGET_CPU_FEATURE_X86_AVX2, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512F__"), TARGET_CPU_FEATURE_X86_AVX512F, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512BW__"), TARGET_CPU_FEATURE_X86_AVX512BW, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512VL__"), TARGET_CPU_FEATURE_X86_AVX512VL, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512DQ__"), TARGET_CPU_FEATURE_X86_AVX512DQ, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512VBMI__"), TARGET_CPU_FEATURE_X86_AVX512VBMI, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512VBMI2__"), TARGET_CPU_FEATURE_X86_AVX512VBMI2, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512CD__"), TARGET_CPU_FEATURE_X86_AVX512CD, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512IFMA__"), TARGET_CPU_FEATURE_X86_AVX512IFMA, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512PF__"), TARGET_CPU_FEATURE_X86_AVX512PF, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512ER__"), TARGET_CPU_FEATURE_X86_AVX512ER, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512VNNI__"), TARGET_CPU_FEATURE_X86_AVX512VNNI, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512BITALG__"), TARGET_CPU_FEATURE_X86_AVX512BITALG, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512VPOPCNTDQ__"), TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX5124VNNIW__"), TARGET_CPU_FEATURE_X86_AVX5124VNNIW, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX5124FMAPS__"), TARGET_CPU_FEATURE_X86_AVX5124FMAPS, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512VP2INTERSECT__"), TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512BF16__"), TARGET_CPU_FEATURE_X86_AVX512BF16, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512FP16__"), TARGET_CPU_FEATURE_X86_AVX512FP16, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX10_1__"), TARGET_CPU_FEATURE_X86_AVX10_1, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__F16C__"), TARGET_CPU_FEATURE_X86_F16C, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__FMA__"), TARGET_CPU_FEATURE_X86_FMA, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__FMA4__"), TARGET_CPU_FEATURE_X86_FMA4, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AES__"), TARGET_CPU_FEATURE_X86_AES, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__PCLMUL__"), TARGET_CPU_FEATURE_X86_PCLMUL, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__POPCNT__"), TARGET_CPU_FEATURE_X86_POPCNT, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__LZCNT__"), TARGET_CPU_FEATURE_X86_LZCNT, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__BMI__"), TARGET_CPU_FEATURE_X86_BMI1, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__BMI2__"), TARGET_CPU_FEATURE_X86_BMI2, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__3dNOW__"), TARGET_CPU_FEATURE_X86_3DNOW, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__3dNOW_A__"), TARGET_CPU_FEATURE_X86_3DNOWA, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__ARM_NEON"), TARGET_CPU_FEATURE_AARCH64_NEON, CPU_ARCH_AARCH64, false },
 };
 
 // The preprocessor's end-of-phase boundary. Everything c_preprocess builds is
@@ -12792,12 +12823,20 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         "__CLANG_ATOMIC_CHAR32_T_LOCK_FREE", "__CLANG_ATOMIC_WCHAR_T_LOCK_FREE", "__CLANG_ATOMIC_SHORT_LOCK_FREE",   "__CLANG_ATOMIC_INT_LOCK_FREE",
         "__CLANG_ATOMIC_LONG_LOCK_FREE",     "__CLANG_ATOMIC_LLONG_LOCK_FREE",   "__CLANG_ATOMIC_POINTER_LOCK_FREE",
     };
+    bool i386_target = options.target.cpu_arch == CPU_ARCH_I386;
+    bool i386_i386 = i386_target && options.target.cpu_model == CPU_MODEL_X86_I386;
     CToken* lock_free_replacement = arena_allocate(arena, CToken, 1);
     lock_free_replacement[0] = c_space_token(space, S8("2"), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+    bool i386_cx8 = i386_target && options.target.cpu_model != CPU_MODEL_X86_I386 &&
+                    options.target.cpu_model != CPU_MODEL_AMD_I486;
+    CToken* non_lock_free_replacement = arena_allocate(arena, CToken, 1);
+    non_lock_free_replacement[0] = c_space_token(space, S8("1"), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
     for (u32 macro_index = 0; macro_index < BUSTER_ARRAY_LENGTH(lock_free_macro_names); macro_index += 1)
     {
-        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, string_from_pointer((char8*)lock_free_macro_names[macro_index]), lock_free_replacement, 1, 0, 0, false,
-                       false);
+        String8 name = string_from_pointer((char8*)lock_free_macro_names[macro_index]);
+        bool llong_lock_free = i386_target && !i386_cx8 && string_equal(name, S8("__CLANG_ATOMIC_LLONG_LOCK_FREE"));
+        CToken* replacement = llong_lock_free ? non_lock_free_replacement : lock_free_replacement;
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, name, replacement, 1, 0, 0, false, false);
     }
     static char const* gcc_lock_free_macro_names[] = {
         "__GCC_ATOMIC_BOOL_LOCK_FREE", "__GCC_ATOMIC_CHAR_LOCK_FREE", "__GCC_ATOMIC_CHAR16_T_LOCK_FREE", "__GCC_ATOMIC_CHAR32_T_LOCK_FREE",
@@ -12806,8 +12845,15 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     };
     for (u32 macro_index = 0; macro_index < BUSTER_ARRAY_LENGTH(gcc_lock_free_macro_names); macro_index += 1)
     {
-        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, string_from_pointer((char8*)gcc_lock_free_macro_names[macro_index]),
-                       lock_free_replacement, 1, 0, 0, false, false);
+        String8 name = string_from_pointer((char8*)gcc_lock_free_macro_names[macro_index]);
+        bool llong_lock_free = i386_target && !i386_cx8 && string_equal(name, S8("__GCC_ATOMIC_LLONG_LOCK_FREE"));
+        CToken* replacement = i386_i386 || llong_lock_free ? non_lock_free_replacement : lock_free_replacement;
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, name, replacement, 1, 0, 0, false, false);
+    }
+    if (i386_cx8)
+    {
+        c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro,
+                                   S8("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8"), S8("1"));
     }
     c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__GCC_ATOMIC_TEST_AND_SET_TRUEVAL"), S8("1"));
     String8* feature_parameters = arena_allocate(arena, String8, 1);
@@ -12902,8 +12948,9 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     }
     bool windows_target = options.target.os == OPERATING_SYSTEM_WINDOWS;
     bool short_wchar_target = target_uses_16_bit_wchar(options.target);
-    String8 signed_pointer_type = layout.long_integer.size == layout.pointer.size ? S8("long") : S8("long long");
-    String8 unsigned_pointer_type = layout.unsigned_long_integer.size == layout.pointer.size ? S8("unsigned long") : S8("unsigned long long");
+    String8 signed_pointer_type = i386_target ? S8("int") : layout.long_integer.size == layout.pointer.size ? S8("long") : S8("long long");
+    String8 unsigned_pointer_type = i386_target ? S8("unsigned int")
+                                 : layout.unsigned_long_integer.size == layout.pointer.size ? S8("unsigned long") : S8("unsigned long long");
     bool unsigned_wchar_target = target_uses_unsigned_wchar(options.target);
     bool unsigned_wint_target = !short_wchar_target && !apple_target && !wasm_target;
     // Equal widths do not select the platform's typedef identity. Darwin
@@ -12931,7 +12978,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
             C_DEFINE_TYPE_MACRO("__k8__", S8("1"));
         }
     }
-    if (options.target.cpu_arch == CPU_ARCH_X86_64 || apple_target)
+    if (cpu_arch_is_x86(options.target.cpu_arch) || apple_target)
     {
         C_DEFINE_TYPE_MACRO("__REGISTER_PREFIX__", S8(""));
     }
@@ -12999,11 +13046,17 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
             String8 signed_max_name = string_format(arena, S8("__INT_{S8}{S8}_MAX__"), family, integer_widths[width_index]);
             String8 unsigned_max_name = string_format(arena, S8("__UINT_{S8}{S8}_MAX__"), family, integer_widths[width_index]);
             String8 signed_width_name = string_format(arena, S8("__INT_{S8}{S8}_WIDTH__"), family, integer_widths[width_index]);
-            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_name, signed_integer_types[width_index]);
-            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, unsigned_name, unsigned_integer_types[width_index]);
-            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_max_name, signed_integer_maxima[width_index]);
-            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, unsigned_max_name, unsigned_integer_maxima[width_index]);
-            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_width_name, integer_widths[width_index]);
+            bool i386_fast16 = i386_target && kind_index && width_index == 1;
+            String8 signed_type = i386_fast16 ? S8("int") : signed_integer_types[width_index];
+            String8 unsigned_type = i386_fast16 ? S8("unsigned int") : unsigned_integer_types[width_index];
+            String8 signed_max = i386_fast16 ? S8("2147483647") : signed_integer_maxima[width_index];
+            String8 unsigned_max = i386_fast16 ? S8("4294967295U") : unsigned_integer_maxima[width_index];
+            String8 width = i386_fast16 ? S8("32") : integer_widths[width_index];
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_name, signed_type);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, unsigned_name, unsigned_type);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_max_name, signed_max);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, unsigned_max_name, unsigned_max);
+            c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, signed_width_name, width);
         }
     }
     C_DEFINE_TYPE_MACRO("__SIG_ATOMIC_TYPE__", wasm_target ? S8("long") : S8("int"));
@@ -13035,17 +13088,17 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     C_DEFINE_TYPE_MACRO("__PTRDIFF_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__INTPTR_TYPE__", signed_pointer_type);
     C_DEFINE_TYPE_MACRO("__UINTPTR_TYPE__", unsigned_pointer_type);
-    C_DEFINE_TYPE_MACRO("__INTMAX_TYPE__", signed_max_type);
-    C_DEFINE_TYPE_MACRO("__UINTMAX_TYPE__", unsigned_max_type);
+    C_DEFINE_TYPE_MACRO("__INTMAX_TYPE__", i386_target ? S8("long long int") : signed_max_type);
+    C_DEFINE_TYPE_MACRO("__UINTMAX_TYPE__", i386_target ? S8("unsigned long long int") : unsigned_max_type);
     C_DEFINE_TYPE_MACRO("__INT8_TYPE__", S8("signed char"));
     C_DEFINE_TYPE_MACRO("__UINT8_TYPE__", S8("unsigned char"));
     C_DEFINE_TYPE_MACRO("__INT16_TYPE__", S8("short"));
     C_DEFINE_TYPE_MACRO("__UINT16_TYPE__", S8("unsigned short"));
     C_DEFINE_TYPE_MACRO("__INT32_TYPE__", S8("int"));
     C_DEFINE_TYPE_MACRO("__UINT32_TYPE__", S8("unsigned int"));
-    C_DEFINE_TYPE_MACRO("__INT64_TYPE__", signed_64_type);
-    C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", unsigned_64_type);
-    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") : unsigned_wchar_target ? S8("unsigned int") : S8("int"));
+    C_DEFINE_TYPE_MACRO("__INT64_TYPE__", i386_target ? S8("long long int") : signed_64_type);
+    C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", i386_target ? S8("unsigned long long int") : unsigned_64_type);
+    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", i386_target ? S8("long int") : short_wchar_target ? S8("unsigned short") : unsigned_wchar_target ? S8("unsigned int") : S8("int"));
     C_DEFINE_TYPE_MACRO("__WINT_TYPE__", short_wchar_target ? S8("unsigned short") : unsigned_wint_target ? S8("unsigned int") : S8("int"));
     C_DEFINE_TYPE_MACRO("__SIZEOF_WCHAR_T__", short_wchar_target ? S8("2") : S8("4"));
     C_DEFINE_TYPE_MACRO("__SIZEOF_WINT_T__", short_wchar_target ? S8("2") : S8("4"));
@@ -13145,7 +13198,11 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     // binary32/64 on every hosted target here; the long double family
     // follows the target's layout below.
     // Supported targets evaluate float/double at their declared precision.
-    C_DEFINE_TYPE_MACRO("__FLT_EVAL_METHOD__", S8("0"));
+    C_DEFINE_TYPE_MACRO("__FLT_EVAL_METHOD__", i386_target ? S8("2") : S8("0"));
+    if (i386_target)
+    {
+        C_DEFINE_TYPE_MACRO("__FLT_EVAL_METHOD_TS_18661_3__", S8("2"));
+    }
     C_DEFINE_TYPE_MACRO("__FLT_RADIX__", S8("2"));
     C_DEFINE_TYPE_MACRO("__FLT_MANT_DIG__", S8("24"));
     C_DEFINE_TYPE_MACRO("__FLT_DIG__", S8("6"));
@@ -13380,12 +13437,91 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     {
         c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__APPLE_CC__"), S8("6000"));
     }
-    String8 architecture_macro = options.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("__aarch64__")
+    if (options.target.cpu_arch == CPU_ARCH_I386)
+    {
+        c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__LAHF_SAHF__"), S8("1"));
+        c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__code_model_32__"), S8("1"));
+    }
+    String8 architecture_macro = options.target.cpu_arch == CPU_ARCH_I386 ? S8("__i386__")
+                               : options.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("__aarch64__")
                                : options.target.cpu_arch == CPU_ARCH_WASM32  ? S8("__wasm32__")
                                : options.target.cpu_arch == CPU_ARCH_WASM64  ? S8("__wasm64__")
                                : options.target.cpu_arch == CPU_ARCH_BPFEL   ? S8("__bpfel__")
                                                                              : S8("__x86_64__");
     c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, architecture_macro, standard_replacement, 1, 0, 0, false, false);
+#define C_DEFINE_TYPE_MACRO(name, replacement) c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8(name), (replacement))
+    if (i386_target)
+    {
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__i386"), standard_replacement, 1, 0, 0, false, false);
+        if (c_preprocess_dialect_is_gnu(options.dialect))
+        {
+            c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("i386"), standard_replacement, 1, 0, 0, false, false);
+        }
+        if (options.target.cpu_model == CPU_MODEL_X86_I386)
+        {
+            C_DEFINE_TYPE_MACRO("__tune_i386__", S8("1"));
+        }
+        else if (options.target.cpu_model == CPU_MODEL_AMD_I486)
+        {
+            C_DEFINE_TYPE_MACRO("__i486", S8("1"));
+            C_DEFINE_TYPE_MACRO("__i486__", S8("1"));
+            C_DEFINE_TYPE_MACRO("__tune_i486__", S8("1"));
+        }
+        else if (options.target.cpu_model == CPU_MODEL_AMD_PENTIUM)
+        {
+            C_DEFINE_TYPE_MACRO("__i586", S8("1"));
+            C_DEFINE_TYPE_MACRO("__i586__", S8("1"));
+            C_DEFINE_TYPE_MACRO("__pentium", S8("1"));
+            C_DEFINE_TYPE_MACRO("__pentium__", S8("1"));
+            C_DEFINE_TYPE_MACRO("__tune_i586__", S8("1"));
+            C_DEFINE_TYPE_MACRO("__tune_pentium__", S8("1"));
+        }
+        else if (options.target.cpu_model == CPU_MODEL_AMD_K6 ||
+                 options.target.cpu_model == CPU_MODEL_AMD_K6_2 ||
+                 options.target.cpu_model == CPU_MODEL_AMD_K6_3)
+        {
+            C_DEFINE_TYPE_MACRO("__k6", S8("1"));
+            C_DEFINE_TYPE_MACRO("__k6__", S8("1"));
+            C_DEFINE_TYPE_MACRO("__tune_k6__", S8("1"));
+            if (options.target.cpu_model == CPU_MODEL_AMD_K6_2)
+            {
+                C_DEFINE_TYPE_MACRO("__tune_k6_2__", S8("1"));
+            }
+            else if (options.target.cpu_model == CPU_MODEL_AMD_K6_3)
+            {
+                C_DEFINE_TYPE_MACRO("__tune_k6_3__", S8("1"));
+            }
+        }
+        else if (options.target.cpu_model == CPU_MODEL_AMD_GEODE)
+        {
+            C_DEFINE_TYPE_MACRO("__tune_geode__", S8("1"));
+        }
+        else if (options.target.cpu_model == CPU_MODEL_AMD_ATHLON ||
+                 options.target.cpu_model == CPU_MODEL_AMD_ATHLON_XP)
+        {
+            C_DEFINE_TYPE_MACRO("__athlon", S8("1"));
+            C_DEFINE_TYPE_MACRO("__athlon__", S8("1"));
+            C_DEFINE_TYPE_MACRO("__tune_athlon__", S8("1"));
+            if (options.target.cpu_model == CPU_MODEL_AMD_ATHLON_XP)
+            {
+                C_DEFINE_TYPE_MACRO("__athlon_sse__", S8("1"));
+                C_DEFINE_TYPE_MACRO("__tune_athlon_sse__", S8("1"));
+            }
+        }
+        else if (options.target.cpu_model == CPU_MODEL_BASELINE || options.target.cpu_model == CPU_MODEL_X86_I686)
+        {
+            C_DEFINE_TYPE_MACRO("__i686", S8("1"));
+            C_DEFINE_TYPE_MACRO("__i686__", S8("1"));
+            C_DEFINE_TYPE_MACRO("__pentiumpro", S8("1"));
+            C_DEFINE_TYPE_MACRO("__pentiumpro__", S8("1"));
+            if (options.target.cpu_model == CPU_MODEL_X86_I686)
+            {
+                C_DEFINE_TYPE_MACRO("__tune_i686__", S8("1"));
+                C_DEFINE_TYPE_MACRO("__tune_pentiumpro__", S8("1"));
+            }
+        }
+    }
+#undef C_DEFINE_TYPE_MACRO
     if (options.target.cpu_arch == CPU_ARCH_WASM32 || options.target.cpu_arch == CPU_ARCH_WASM64)
     {
         c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__wasm__"), standard_replacement, 1, 0, 0, false, false);
@@ -13409,21 +13545,25 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     {
         c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__arm64__"), standard_replacement, 1, 0, 0, false, false);
     }
-    // The vector-extension macros the GNU family predefines from -march, so a
-    // header guarding an explicit SIMD kernel writes one condition that holds
-    // for clang, gcc, and the self-hosted stages alike.  Only the features the
-    // buster SIMD vocabulary can actually lower are published; announcing more
-    // would invite a host header down a path this frontend cannot compile.
     for (u32 feature_index = 0; feature_index < BUSTER_ARRAY_LENGTH(c_target_feature_macros); feature_index += 1)
     {
         CTargetFeatureMacro entry = c_target_feature_macros[feature_index];
-        if (entry.cpu_arch == options.target.cpu_arch && target_cpu_feature_has(options.target, entry.feature))
+        if ((!entry.i386_only || options.target.cpu_arch == CPU_ARCH_I386) &&
+            cpu_arch_is_x86(entry.cpu_arch) && cpu_arch_is_x86(options.target.cpu_arch) &&
+            !(entry.feature == TARGET_CPU_FEATURE_X86_MMX && options.target.cpu_arch == CPU_ARCH_X86_64) &&
+            target_cpu_feature_has(options.target, entry.feature))
         {
             c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, entry.name, standard_replacement, 1, 0, 0, false, false);
         }
     }
+    TargetCpuFeatures model_features = target_cpu_features_default(options.target.cpu_arch, options.target.cpu_model);
+    if (options.target.cpu_arch == CPU_ARCH_I386 &&
+        target_cpu_features_contains(model_features, TARGET_CPU_FEATURE_X86_SSE))
+    {
+        c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__FXSR__"), S8("1"));
+    }
     CToken hosted_replacement = standard_replacement[0];
-    if (options.target.os == OPERATING_SYSTEM_FREESTANDING || options.target.os == OPERATING_SYSTEM_UEFI ||
+    if (options.freestanding || options.target.os == OPERATING_SYSTEM_FREESTANDING || options.target.os == OPERATING_SYSTEM_UEFI ||
         options.target.cpu_arch == CPU_ARCH_BPFEL)
     {
         hosted_replacement.offset = C_SPELLING_ZERO;

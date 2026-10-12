@@ -43,6 +43,57 @@ flush (#2621) saved 7-8 ms of wall per object on a btrfs desktop. No caller
 needs durability today; one that does should flush explicitly with
 `os_file_flush` rather than make every artifact pay for it.
 
+Buster does not overwrite outputs in place as mold and wild do; #3687 records
+the measured gain and the downsides. Preallocating the staging file with
+`fallocate(2)` is measured but not adopted: it awaits qualified Zen 5 evidence
+(#3685).
+
+`-fearly-exit` (API field `early_exit`; off by default, and `-fno-early-exit`
+restores the default) is mold and wild's fork trick (#3686). It lives in
+`run_c_compiler` and `os_early_exit_*` in `src/buster/lib/os.c`.
+
+- **Arming.** After argument parsing, and before the first `lane_run` starts
+  the gang, `ide cc` forks. The parent only waits on a pipe. Arming is
+  skipped on Windows, Android and iOS, and when a tracked thread already
+  exists (`os_is_only_live_thread` does not see untracked threads; desktop
+  `ide cc` starts none before this point). It is also skipped when the
+  status pipe cannot be created through `os_process_spawn_pipe_create`
+  (close-on-exec, both ends moved above fd 2), or when `fork` fails. The
+  compile then simply runs in-process. Because the status pipe never lands
+  on fds 0-2, a process started with standard streams closed cannot write
+  compiler output into it.
+- **Release.** Once every artifact and report is out, the child calls
+  `os_early_exit_release`. It points its standard streams at `/dev/null`,
+  so a build system's pipes reach EOF, and sends its status. The parent
+  `_exit`s with that status, or with the child's own status if the child
+  died before reporting.
+- **Background work.** Destroying the 32 GiB translation-unit arena, then
+  `exit_mmap`, then the release of each output that publication replaced
+  then run in the background. While armed, `file_publish_slices_checked`
+  holds a read-only reference to a replaced destination across the
+  `rename(2)` and hands it to `os_early_exit_defer_close`, so the old
+  inode's blocks are freed after the report rather than inside the rename.
+  Atomic publication is unchanged.
+
+The costs are why it stays opt-in:
+
+- `time(1)`, `getrusage(RUSAGE_CHILDREN)` and `-fmetrics-out` wrappers that
+  measure the process see only the parent (about 5 MB RSS and no CPU time).
+- A debugger follows the parent.
+- A `make -j` or cgroup budget frees the job slot while the child still
+  holds its memory.
+- A failure after the release cannot change the exit status, and any later
+  child output is discarded.
+
+Do not use it for benchmarks, profiling, debugging or memory budgeting. The
+`compiler_driver_test_early_exit` regression checks byte-identical objects
+against the default path, a replaced output, `-E` output through the caller's
+pipe, and failure propagation. On desktop POSIX, it also runs both modes with
+fds 0-1 and 0-2 closed, with and without `-v`, and compares raw exit statuses
+and artifacts. It forces the setup-failure fallback through the test-build seam
+`BUSTER_TEST_EARLY_EXIT_PIPE_FAILURE=1`. That seam fails the pipe's
+configuration step and validates that the failure happened.
+
 Opt-in machine-readable records remain on stdout: `CODEGEN_VERIFY`,
 `CODEGEN_FALLBACK*`, `CODEGEN`, `IR_*`, `TARGET`, `GPU`, and the `-v` source
 statistics. The differential runner reads `CODEGEN_VERIFY` there and compares
@@ -333,6 +384,20 @@ publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
 the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
 not predefined at any level. `-mattr` overrides still refine the level.
 The psABI's LAHF-SAHF has no target feature and is implied by long mode.
+For 32-bit x86, the canonical target architecture is `i386`; `i386`, `i486`,
+`i586` and `i686` are accepted architecture spellings, while `-march=i386`
+and `-march=i686` select explicit CPU models. The I386 baseline models GCC's
+`-m32` default (i686 without MMX/SSE). `-m16` and `-m32` select I386 execution
+mode, with the last spelling winning independently of `--target` order;
+`-m16` also records the `code16` target environment. These modes support
+preprocessing (`-E`, including `-dM`) and frontend-only validation
+(`-fsyntax-only`). I386 artifact generation—including assembly, objects,
+LLVM output and links—is deliberately refused with an explicit #3654
+diagnostic. I386 is supported only for Linux and freestanding targets; an
+execution-mode option on an x86 target with another OS is refused using the
+pre-mode target triple in its diagnostic. `-m64` remains unsupported and is
+tracked separately by #3458.
+
 Without `-march`/`-mcpu` the CPU model is `baseline`, matching Clang's and
 GCC's portable `x86-64` default. A command with no `-target` compiles for the
 host's architecture and operating system (`target_native`,
@@ -380,14 +445,26 @@ left baseline code generation and no hint that the request was ignored.
 `-fno-strict-overflow` is accepted as `-fwrapv` (signed overflow already wraps;
 there is no `-fno-wrapv`, so `-fstrict-overflow` stays unsupported). `-w` is
 accepted and publishes no warning text or records and outranks every other
-warning option. `--version`, `-dumpversion`, `-dumpmachine` and
+warning option.
+`-ffreestanding` publishes `__STDC_HOSTED__` as zero and keeps the builtin
+`<limits.h>` from forwarding to a hosted system header. Buster does not
+implicitly builtinize or fold ordinary library calls such as `memcpy` or
+`strlen`; only explicit `__builtin_*` spellings are compiler builtins, so no
+ordinary-call suppression is needed. `-fomit-frame-pointer` grants permission
+to omit a frame pointer; it does not require one to be omitted. Default native
+objects currently contain `.eh_frame`, so `-fno-asynchronous-unwind-tables` is
+accepted only for I386, where artifact generation is refused.
+`-fcf-protection=none` is accepted because default output contains no
+`endbr32`/`endbr64` instructions and no IBT/SHSTK GNU property note.
+`--version`, `-dumpversion`, `-dumpmachine` and
 `-print-target-triple`/`-print-effective-triple` need no input and exit 0
 (`compiler_driver_query_text`):
 `-dumpversion` prints `18.0.0`, the `__clang_major__`/`__clang_minor__`/
 `__clang_patchlevel__` triple (`__clang_version__` is `18.0.0 (buster)`);
 `-dumpmachine` prints the effective target as `arch-os[-environment]` with the
 `gnu` environment on Linux and `msvc` on Windows (for example
-`x86_64-linux-gnu`); `--version` prints `Buster clang version 18.0.0 (buster)`,
+`x86_64-linux-gnu`, or `i386-linux-gnu` under `-m32`); `--version` prints
+`Buster clang version 18.0.0 (buster)`,
 `Target: <that triple>` and `Thread model: posix`. `-print-target-triple` and
 `-print-effective-triple` print Clang's normalized `arch-vendor-os[-environment]`
 form, with the vendor `apple` on macOS/iOS and `unknown` elsewhere (for example
@@ -1624,7 +1701,7 @@ are tracked on GitHub #1418.
 | `-nostdlib++`, `-nostdlibs`, `-nolibc` | `unsupported option` | Not spellings of the above. |
 | `-mfoo`, `-mno-foo` (no architecture has the feature) | `unsupported option: -mfoo` | `-m<feature>` takes only the names `-mattr` takes. |
 | `-mavx2` for a non-x86 target or a GPU target | `unsupported option: -mavx2` | The feature belongs to another architecture, or the GPU pipeline has no feature overrides. |
-| `-m32`, `-mred-zone`, `-mno-red-zone` | `unsupported option` | They name no target feature and have no implementation. |
+| `-mred-zone`, `-mno-red-zone` | `unsupported option` | They name no target feature and have no implementation. |
 | `-mAVX2`, `-mavx2=1`, `-m`, `-mno-` | `unsupported option` | Feature names are exact lower case; `=` forms belong to `-march=`, `-mcpu=`, `-mtune=`, `-mattr=`, `-masm=`. |
 | `-mno-sse2` | `unsupported option: -mno-sse2 (SSE2 is part of the x86-64 baseline)` | Every x86-64 target here requires SSE2. |
 | `-xc++` and other unknown joined `-x<lang>` | `unsupported language: c++` | Same language names as `-x <lang>`; C is the only source frontend. |
