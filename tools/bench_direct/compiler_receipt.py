@@ -59,6 +59,7 @@ import json
 import csv
 import hashlib
 import math
+import os
 import re
 import shlex
 import statistics
@@ -382,6 +383,16 @@ WILD_LINKER_LINKERS = ("comparator", "wild")
 # Every token of a retained Wild argv: inert inside double quotes and outside them, so the
 # canonical quoted join is one simple command whatever the shell.
 WILD_ARGV_TOKEN = re.compile(r"[A-Za-z0-9_./+=,:@%-]+\Z")
+# The complete grammar of the arguments after the linker in Clang's printed argv for these
+# cells: flags without operands, options with their admitted operands, system -L directories,
+# plain -l names and object or archive operands. Anything else, notably a response file
+# (`@file`, which Wild expands recursively, args.rs at e9a9b0cb) or an option that loads
+# another file (-T, --script, --plugin, --just-symbols), is refused.
+WILD_ARGV_FLAGS = frozenset({"--hash-style=gnu", "--hash-style=both", "--build-id", "--eh-frame-hdr", "-pie",
+                             "-no-pie", "--as-needed", "--no-as-needed", "--push-state", "--pop-state"})
+WILD_ARGV_OPERANDS = {"-z": frozenset({"relro", "now", "noexecstack"}), "-m": frozenset({"elf_x86_64"}),
+                      "-dynamic-linker": None, "-o": None}
+WILD_ARGV_LIBRARY = re.compile(r"-l[A-Za-z0-9_+.-]+\Z")
 WILD_LINKER_TREE_ARGUMENTS = ["--cc", "clang", "--linker", "DEFAULT", "--no-include-tests", "--no-fuzz", "--no-sanitize",
                               "--no-lto", "--", "-DBUSTER_DEBUG_INFO=ON", "-DBUSTER_FRAME_POINTERS=ON"]
 WILD_LINKER_PROFILE = {
@@ -1309,6 +1320,42 @@ def _shell_quote(text: str) -> str:
     return "'" + text.replace("'", "'\\''") + "'"
 
 
+def _system_path(path: str) -> bool:
+    """An absolute path that stays under /usr, /lib, /lib64 or /lib32 once `..` is resolved."""
+    normal = os.path.normpath(path)
+    roots = ("/usr", "/lib", "/lib64", "/lib32")
+    return path.startswith("/") and (normal in roots or normal.startswith(tuple(root + "/" for root in roots)))
+
+
+def _wild_argv_grammar_problems(cell: str, arguments: list[str], config: str) -> list[str]:
+    """Reasons the arguments after the linker are not the frozen Clang link grammar (WILD_ARGV_FLAGS and friends)."""
+    problems: list[str] = []
+    index = 0
+    while index < len(arguments) and not problems:
+        token = arguments[index]
+        if token.startswith("@"):
+            problems.append(f"wild-linker {cell} retained argv passes a response file {token!r}, which Wild would "
+                            "expand without it being hashed")
+        elif token in WILD_ARGV_OPERANDS:
+            operand = arguments[index + 1] if index + 1 < len(arguments) else None
+            allowed = WILD_ARGV_OPERANDS[token]
+            if operand is None or (allowed is not None and operand not in allowed) or \
+                    (token == "-dynamic-linker" and not _system_path(operand)) or \
+                    (token == "-o" and operand != f"{config}/ide"):
+                problems.append(f"wild-linker {cell} retained argv gives {token} the unadmitted operand {operand!r}")
+            index += 1
+        elif token.startswith("-L"):
+            if not _system_path(token[2:]):
+                problems.append(f"wild-linker {cell} retained argv searches {token[2:]!r}, which is not a system directory")
+        elif token.startswith("-"):
+            if token not in WILD_ARGV_FLAGS and not WILD_ARGV_LIBRARY.fullmatch(token):
+                problems.append(f"wild-linker {cell} retained argv passes the unadmitted option {token!r}")
+        elif not token.endswith((".o", ".a")):
+            problems.append(f"wild-linker {cell} retained argv passes {token!r}, which is not an object or archive")
+        index += 1
+    return problems
+
+
 def wild_linker_cell_commands(cell: str, argv: str, manifest: str, root: str, linkers: dict) -> tuple[dict, list[str]]:
     """({(role, default|threads1): command}, problems) for one cell, from its retained Wild argv.
 
@@ -1338,6 +1385,7 @@ def wild_linker_cell_commands(cell: str, argv: str, manifest: str, root: str, li
     if not tokens or not isinstance(wild, str) or tokens[0] != wild or not argv.startswith(f'"{wild}" '):
         problems.append(f"wild-linker {cell} retained argv does not start with the recorded Wild")
         tokens = tokens or []
+    problems.extend(_wild_argv_grammar_problems(cell, tokens[1:], config))
     outputs = [tokens[index + 1] for index, token in enumerate(tokens[:-1]) if token == "-o"]
     if outputs != [f"{config}/ide"]:
         problems.append(f"wild-linker {cell} retained argv does not write {config}/ide")
@@ -1347,7 +1395,7 @@ def wild_linker_cell_commands(cell: str, argv: str, manifest: str, root: str, li
         problems.append(f"wild-linker {cell} retained argv links no object of the head")
     for token in objects:
         path = token if token.startswith("/") else f"{directory}/{token}"
-        if token.startswith("/") and ((root and token.startswith(root + "/")) or not token.startswith(("/usr/", "/lib"))):
+        if token.startswith("/") and ((root and token.startswith(root + "/")) or not _system_path(token)):
             problems.append(f"wild-linker {cell} links {token!r}, which is neither a hashed input nor a system file")
             break
         if not token.startswith("/") and path not in listed:

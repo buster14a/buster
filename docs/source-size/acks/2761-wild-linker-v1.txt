@@ -1,4 +1,4 @@
 # Source-size acknowledgement; see docs/source-size.md.
 schema buster-source-size-ack-v1
-build 55478
+build 58491
 reason The wild-linker-v1 compare-pull leg, its link-only harness mode, publisher validation, seeded-replay checks and its Wild-identity and input-binding checks (#2761, #3689 review).

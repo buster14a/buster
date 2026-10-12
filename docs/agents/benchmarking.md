@@ -1083,10 +1083,16 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    - a cell whose retained Wild argv (`<cell>-argv.txt`) is not exactly
      Clang's form, one double-quoted word per argument drawn from
      `[A-Za-z0-9_./+=,:@%-]`, or does not start with the recorded Wild,
-     write `<config>/ide`, and take every relative object
+     write `<config>/ide`, follow the frozen Clang link grammar, and take
+     every relative object
      and archive from that cell's hashed input manifest. System startup
      objects must come from `/usr` or `/lib`, and nothing else may come from
-     the build root;
+     the build root. The grammar (`WILD_ARGV_FLAGS`, `WILD_ARGV_OPERANDS`)
+     admits only Clang's own flags, `-z`/`-m`/`-dynamic-linker`/`-o` with
+     admitted operands, `-L` system directories, plain `-l` names, and
+     object or archive operands. It refuses response files (`@file`, which
+     Wild expands recursively), linker scripts, plugins and any other option
+     that would read an input the manifest does not hash;
    - a timed, validated or repeated link command that is not exactly the
      command rebuilt from that argv's admitted tokens and the frozen options.
      No other input, linker or shell text can run, even in a packet that

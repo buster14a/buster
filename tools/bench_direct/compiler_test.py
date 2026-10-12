@@ -4879,6 +4879,41 @@ class WildLinkerTest(unittest.TestCase):
                                   "commands": bundle["commands"].replace(tail, tail + plain)})
         self.assertEqual(self.validate(changed, identity=record["identity"]), [])
 
+    def test_argv_grammar_refuses_unbound_linker_inputs(self) -> None:
+        """#3689 review: inputs Wild would read beyond the hashed manifest, forged into the argv and every
+        derived command row in lockstep, fail publication; Clang's own flags stay admitted."""
+        record, bundle = wild_linker_evidence()
+        tail = bundle["argv ide-debug"][len(WILD_PATH) + 2:]
+
+        def forged(suffix: str) -> dict:
+            return dict(bundle, **{"argv ide-debug": bundle["argv ide-debug"] + suffix,
+                                   "commands": bundle["commands"].replace(tail, tail + suffix)})
+
+        for name, suffix, reason in (
+                ("response file", ' "@/tmp/foreign.rsp"', "response file"),
+                ("relative response file", ' "@inputs.rsp"', "response file"),
+                ("linker script", ' "-T" "/tmp/x.ld"', "unadmitted option"),
+                ("joined script", ' "--script=/tmp/x.ld"', "unadmitted option"),
+                ("plugin", ' "--plugin" "/tmp/p.so"', "unadmitted option"),
+                ("just symbols", ' "--just-symbols=/tmp/x"', "unadmitted option"),
+                ("foreign search directory", ' "-L/tmp" "-lfoo"', "not a system directory"),
+                ("escaping search directory", ' "-L/usr/../tmp"', "not a system directory"),
+                ("foreign shared object", ' "/tmp/x.so"', "not an object or archive"),
+                ("relative shared object", ' "x.so"', "not an object or archive"),
+                ("library path as name", ' "-l/tmp/x"', "unadmitted option"),
+                ("unadmitted -z keyword", ' "-z" "muldefs"', "unadmitted operand"),
+                ("second output", ' "-o" "Debug/other"', "unadmitted operand"),
+                ("escaping system object", ' "/usr/../tmp/x.o"', "neither a hashed input nor a system file")):
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = self.publish(record, forged(suffix))
+                self.assertEqual(conclusion, "failure", reasons)
+                self.assertTrue(any(reason in item for item in reasons), reasons)
+        for name, suffix in (("as-needed libraries", ' "--as-needed" "-lm" "--no-as-needed"'),
+                             ("system search directory", ' "-L/usr/lib/../lib64"'),
+                             ("now", ' "-z" "now"')):
+            with self.subTest(positive=name):
+                self.assertEqual(self.publish(record, forged(suffix))[:3:2], ("success", []))
+
     def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
         record, bundle = wild_linker_evidence()
         self.assertEqual(self.publish(record, bundle), ("success", self.publish(record, bundle)[1], []))
