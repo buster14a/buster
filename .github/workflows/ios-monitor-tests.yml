@@ -143,6 +143,8 @@ jobs:
           } 2>&1 | tee "$RUNNER_TEMP/mobile-monitor-tool-versions.log"
       - name: Exercise native traces and stalled console transport
         shell: bash
+        env:
+          BUSTER_MOBILE_TEST_EVIDENCE_DIR: ${{ runner.temp }}/ios-launch-trace-evidence
         run: |
           set -euo pipefail
           {
@@ -162,6 +164,7 @@ jobs:
           name: ios-launch-trace-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/ios-launch-trace-monitor.log
+            ${{ runner.temp }}/ios-launch-trace-evidence/
             ${{ runner.temp }}/mobile-monitor-tool-versions.log
             ${{ runner.temp }}/machine-specifications/
           if-no-files-found: error

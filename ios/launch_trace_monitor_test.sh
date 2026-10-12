@@ -7,11 +7,26 @@ test_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-ios-monitor.XXXXXX")
 runner=
 collector=
 baseline_launcher=
+active_state=
+evidence_root=${BUSTER_MOBILE_TEST_EVIDENCE_DIR:-}
 collector_timeout_bin=$(python3 "$repo_root/ios/gnu_timeout.py")
 cleanup() {
     local status=$?
-    local path kind pid
+    local path kind pid file
     trap - EXIT INT TERM
+    if [[ -n $active_state && $status -ne 0 ]]; then
+        printf 'BUSTER_IOS_MONITOR_CASE event=failed status=%s runner=%s collector=%s elapsed_seconds=%s\n' "$status" "${runner:-none}" "${collector:-none}" "$SECONDS" >>"$active_state/case.log"
+        for pid in "$runner" "$collector"; do
+            [[ -n $pid ]] || continue
+            ps -p "$pid" -o pid=,ppid=,pgid=,stat=,comm= >>"$active_state/children.log" 2>&1 || true
+        done
+        if [[ -f $active_state/pids ]]; then
+            while read -r kind pid; do
+                printf 'role=%s pid=%s\n' "$kind" "$pid" >>"$active_state/children.log"
+                ps -p "$pid" -o pid=,ppid=,pgid=,stat=,comm= >>"$active_state/children.log" 2>&1 || true
+            done <"$active_state/pids"
+        fi
+    fi
     if [[ -n $runner ]]; then
         kill -TERM "$runner" 2>/dev/null || true
         wait "$runner" 2>/dev/null || true
@@ -33,6 +48,18 @@ cleanup() {
             fi
         done <"$path"
     done
+    if [[ -n $evidence_root ]]; then
+        mkdir -p "$evidence_root"
+        for path in "$test_root"/*; do
+            [[ -d $path && ${path##*/} != bin ]] || continue
+            mkdir -p "$evidence_root/${path##*/}"
+            # Retain ordinary evidence only; never open a stalled FIFO to copy it.
+            for file in "$path"/*; do
+                [[ -f $file ]] || continue
+                cp "$file" "$evidence_root/${path##*/}/" || true
+            done
+        done
+    fi
     rm -rf "$test_root"
     exit "$status"
 }
@@ -97,6 +124,8 @@ export PATH="$test_root/bin:$PATH"
 run_case() {
     local label=$1 outcome=$2 expected=$3 interrupt=$4 bundles=$5
     local state="$test_root/$label" status=0 deadline kind pid
+    active_state=$state
+    printf 'BUSTER_IOS_MONITOR_CASE event=start label=%s elapsed_seconds=%s\n' "$label" "$SECONDS" >&2
     mkdir -p "$state/Debug/ide.app" "$state/Release/ide.app"
     export RUNNER_TEMP="$state" FAKE_PIDS="$state/pids" FAKE_RESULT="$outcome"
     export BUSTER_IOS_SIMULATOR_UDID=FAKE-UDID
@@ -109,6 +138,7 @@ run_case() {
     if [[ $bundles == 2 ]]; then
         arguments+=(Release "$state/Release/ide.app")
     fi
+    printf 'BUSTER_IOS_MONITOR_CASE event=start label=%s elapsed_seconds=%s\n' "$label" "$SECONDS" >"$state/case.log"
     local output_path="$state/output"
     if [[ $outcome == backpressure ]]; then
         mkfifo "$state/actions-output"
@@ -117,12 +147,16 @@ run_case() {
         # Darwin's smaller pipe. Exercise actual app-output backpressure.
         # shellcheck disable=SC2016
         "$collector_timeout_bin" --kill-after=1s 20s /bin/bash -c '
+            printf "event=collector-start elapsed_seconds=%s pid=%s\n" "$SECONDS" "$" >>"$RUNNER_TEMP/collector.log"
             while IFS= read -r line; do
                 printf "%s\n" "$line"
                 if [[ $line == Launching\ * ]]; then break; fi
             done
+            printf "event=stall-start elapsed_seconds=%s\n" "$SECONDS" >>"$RUNNER_TEMP/collector.log"
             sleep 6
+            printf "event=drain-start elapsed_seconds=%s\n" "$SECONDS" >>"$RUNNER_TEMP/collector.log"
             cat
+            printf "event=eof elapsed_seconds=%s\n" "$SECONDS" >>"$RUNNER_TEMP/collector.log"
         ' <"$state/actions-output" >"$state/output" &
         collector=$!
         output_path="$state/actions-output"
@@ -142,10 +176,17 @@ run_case() {
         kill -TERM "$runner"
     fi
     wait "$runner" || status=$?
+    printf 'BUSTER_IOS_MONITOR_CASE event=launcher-exit status=%s elapsed_seconds=%s\n' "$status" "$SECONDS" >>"$state/case.log"
     runner=
     if [[ -n $collector ]]; then
-        wait "$collector"
+        local collector_status=0
+        wait "$collector" || collector_status=$?
+        printf 'BUSTER_IOS_MONITOR_CASE event=collector-exit status=%s elapsed_seconds=%s\n' "$collector_status" "$SECONDS" >>"$state/case.log"
         collector=
+        if [[ $collector_status -ne 0 ]]; then
+            cat "$state/case.log" "$state/collector.log" >&2
+            exit "$collector_status"
+        fi
     fi
     if [[ $outcome == backpressure ]]; then
         if [[ $expected == 0 ]]; then
@@ -202,7 +243,6 @@ run_case() {
         echo "$label leaked its FIFO directory" >&2
         exit 1
     fi
-    rm -f "$state/pids"
     printf 'iOS monitor cleanup passed: %s\n' "$label"
 }
 if [[ ${1:-} == --receipt-race-only ]]; then
