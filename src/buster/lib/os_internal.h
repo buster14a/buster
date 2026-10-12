@@ -149,6 +149,19 @@ BUSTER_F_DECL bool os_linux_proc_read_self_test(void);
 BUSTER_F_DECL bool os_linux_process_group_churn_self_test(Arena* arena);
 #endif
 
+// Calling-thread observation of advice, independent of kernel THP policy.
+typedef struct OsHugePageTestCounters OsHugePageTestCounters;
+struct OsHugePageTestCounters
+{
+    u64 requests;
+    u64 bytes;
+    void* last_address;
+    u64 last_size;
+    u64 forced_refusals;
+};
+BUSTER_F_DECL OsHugePageTestCounters os_huge_pages_test_counters(void);
+BUSTER_F_DECL void os_huge_pages_test_force_refusal(bool enabled);
+
 // Calling-thread census of the advisory prefault requests os_prefault
 // observed, however they were produced. It exists so a test can prove that a
 // request was issued, or that none was, without owning a privileged mapping
@@ -172,6 +185,20 @@ BUSTER_F_DECL void os_prefault_test_force_next(OsPrefaultResult result);
 BUSTER_F_DECL OsPrefaultTestCounters os_prefault_test_counters(void);
 
 #if BUSTER_INCLUDE_TESTS
+typedef struct OsImageRetentionCounters OsImageRetentionCounters;
+struct OsImageRetentionCounters
+{
+    u64 registered;
+    u64 retained_files;
+    u64 retained_directories;
+    u64 overflowed;
+};
+
+BUSTER_F_DECL bool os_image_retention_set_active(bool active);
+BUSTER_F_DECL bool os_image_retention_active(void);
+BUSTER_F_DECL void os_image_retention_register(String8 path);
+BUSTER_F_DECL OsImageRetentionCounters os_image_retention_counters(void);
+
 // The debugger-presence cache is one tri-state published after its probe:
 // 0 unprobed, 1 no debugger, 2 debugger. Reset returns it to unprobed so the
 // next is_debugger_present call probes again; State reads it without probing.

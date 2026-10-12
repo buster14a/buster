@@ -22,6 +22,13 @@ void __asan_unpoison_memory_region(void const volatile* address, size_t size);
 #define BUSTER_ARENA_POISON(pointer, size) ((void)(pointer), (void)(size))
 #define BUSTER_ARENA_UNPOISON(pointer, size) ((void)(pointer), (void)(size))
 #endif
+typedef enum ArenaHugePagePolicy
+{
+    ARENA_HUGE_PAGES_DEFAULT,
+    ARENA_HUGE_PAGES_DISABLED,
+    ARENA_HUGE_PAGES_ENABLED,
+} ArenaHugePagePolicy;
+
 typedef struct ArenaFlags ArenaFlags;
 struct ArenaFlags
 {
@@ -46,7 +53,12 @@ struct ArenaFlags
     // this for large transient peaks that must not accumulate in a thread's
     // small-arena reuse pool.
     u64 no_pool : 1;
-    u64 flags : 60;
+    // DEFAULT inherits the serial startup policy (off unless opted in).
+    // DISABLED suppresses our advice, not the host's existing THP policy.
+    // ENABLED requests best-effort advice; it can increase RSS and cause
+    // synchronous compaction. Pooled reuse preserves the resolved policy.
+    u64 huge_pages : 2;
+    u64 flags : 58;
 };
 
 typedef struct Arena Arena;
@@ -107,6 +119,9 @@ struct TemporalArena
 // wrap.
 #define ARENA_MAX_RESERVATION ((u64)1 << 48)
 
+// Serial startup only, before workers: exactly "1" enables the default
+// advice policy. Missing, empty, "0" and other values leave it disabled.
+BUSTER_F_DECL void arena_huge_pages_initialize(String8 value);
 BUSTER_F_DECL Arena* arena_create(ArenaCreation initialization);
 BUSTER_F_DECL bool arena_destroy(Arena* arena, u64 count);
 // Unmaps every otherwise-reusable arena parked in the calling OS thread's
