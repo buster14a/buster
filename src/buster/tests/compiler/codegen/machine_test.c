@@ -10791,8 +10791,15 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     slot_size = 24;
     BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
     // A MEMORY aggregate aligned past a sixteen-byte slot rounds the overflow
-    // area up to its alignment: any size from 32 bytes up, powers of two to the
-    // frame-copy limit, and only on x86-64 where the row copies it exactly.
+    // area up to its alignment: any size from 32 bytes up, powers of two no
+    // larger than the size, and only on x86-64 where the row copies it exactly.
+    va_arg.size = 256;
+    va_arg.stack_size = 256;
+    slot_size = 256;
+    va_arg.alignment = 128;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    va_arg.alignment = 256;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
     va_arg.size = 96;
     va_arg.stack_size = 96;
     slot_size = 96;
