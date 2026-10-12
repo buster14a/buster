@@ -458,7 +458,10 @@ unchanged.
   file scope.
   - A region settles its marks once, at its first query that needs the check
     (`c_ast_types_lookups_settled`). Each mark is checked at the file scope
-    against its binding, which must be a file-scope entity or none.
+    against its binding, which must be a file-scope entity or none. The file
+    scope's answer for a symbol is looked up once per lookup generation and
+    kept beside the symbol table (`CAstTypeSymbol`), and the scan visits only
+    the mark bytes of each flag word.
   - Up to 16 marks per region that a non-file-scope entity also spells are
     recorded. A query over one of them walks its subtree as before. A region
     with more walks for every query.
@@ -3352,5 +3355,18 @@ stage-2 input, flags and four Callgrind arms (A to D) on tests-off
 - **Performance acceptance.** Hosted counts are diagnostic. No 9700X
   comparison is requested, so Zen 5 validation stays incomplete (#2761) and
   the hook stays opt-in.
+
+The settlement's hosted census is
+[`2026-10-12T134656Z`](../../performance-audits/2026-10-12T134656Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. The typer's counters are identical in B and C,
+  and the objects of all four arms are identical at `-g0` and `-g`.
+- The settlement falls from 34.96 M to 24.28 M Ir (−30.5% with the eager
+  pass's +35 K charged), and the pilot's compile by 10.78 M (−0.120%). Lookups
+  in the settlement fall from 125,801 to 11,435, one per symbol.
+- The default path is −0.0027% on `-fsyntax-only` and −0.0001% on `-c`.
+- About 14 M remains, spread over the scan, the per-mark binding loads and the
+  query-time checks.
+- Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
