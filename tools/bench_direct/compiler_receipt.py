@@ -765,12 +765,10 @@ def validate_inline_acceptance(summary: object, expected_revision: str, expected
             if not isinstance(values.get(metric), dict):
                 problems.append(f"issue #48 {stage_name} metric {metric} is missing")
         wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
-        if not all(is_number(wall.get(key)) and math.isfinite(wall[key]) and wall[key] > 0
-                   for key in ("a_median", "b_median", "ratio")):
+        if not all(_finite_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio")):
             problems.append(f"issue #48 {stage_name} wall-time measurements are missing")
         code = values.get("code_bytes") if isinstance(values.get("code_bytes"), dict) else {}
-        if not all(is_number(code.get(key)) and math.isfinite(code[key]) and code[key] > 0
-                   for key in ("a_value", "b_value", "ratio")):
+        if not all(_finite_positive(code.get(key)) for key in ("a_value", "b_value", "ratio")):
             problems.append(f"issue #48 {stage_name} executable-section code-byte measurements are missing")
         instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else {}
         instruction_ratio = instructions.get("ratio")
@@ -778,16 +776,11 @@ def validate_inline_acceptance(summary: object, expected_revision: str, expected
         if instruction_ratio is None:
             if not isinstance(counters, dict) or counters.get("perf_stat") is not False or not counters.get("reason"):
                 problems.append(f"issue #48 {stage_name} retired-instruction NA has no unavailable-counter reason")
-        elif not is_number(instruction_ratio) or not math.isfinite(instruction_ratio) or instruction_ratio <= 0:
+        elif not _finite_positive(instruction_ratio):
             problems.append(f"issue #48 {stage_name} retired-instruction ratio is invalid")
-        elif not all(is_number(instructions.get(key)) and math.isfinite(instructions[key]) and instructions[key] > 0
-                     for key in ("a_median", "b_median")):
+        elif not all(_finite_positive(instructions.get(key)) for key in ("a_median", "b_median")):
             problems.append(f"issue #48 {stage_name} retired-instruction counts are missing")
     return problems
-
-
-def _positive(value: object) -> bool:
-    return is_number(value) and math.isfinite(value) and value > 0
 
 
 def ast_pilot_budget_verdict(cells: dict, retained_bytes: int, correctness: dict) -> dict:
@@ -1924,9 +1917,9 @@ def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expec
         wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
         rss = values.get("peak_rss") if isinstance(values.get("peak_rss"), dict) else {}
         instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else None
-        if not all(_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio", "ci_low", "ci_high")):
+        if not all(_finite_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio", "ci_low", "ci_high")):
             problems.append(f"{label} {cell} wall-time measurements are missing")
-        if not all(_positive(rss.get(key)) for key in ("a_median", "b_median")):
+        if not all(_finite_positive(rss.get(key)) for key in ("a_median", "b_median")):
             problems.append(f"{label} {cell} peak-RSS measurements are missing")
         if instructions is None:
             problems.append(f"{label} {cell} retired-instruction metric is missing")
@@ -1934,8 +1927,8 @@ def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expec
             counters = values.get("counter_availability")
             if not isinstance(counters, dict) or counters.get("perf_stat") is not False or not counters.get("reason"):
                 problems.append(f"{label} {cell} retired-instruction NA has no unavailable-counter reason")
-        elif not _positive(instructions.get("ratio")) or \
-                not all(_positive(instructions.get(key)) for key in ("a_median", "b_median")):
+        elif not _finite_positive(instructions.get("ratio")) or \
+                not all(_finite_positive(instructions.get(key)) for key in ("a_median", "b_median")):
             problems.append(f"{label} {cell} retired-instruction counts are invalid")
         for key in ("outputs_identical", "diagnostics_identical"):
             if type(row.get(key)) is not bool:
@@ -1943,7 +1936,9 @@ def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expec
         metrics[cell] = values
     tree = summary.get("tree")
     retained = tree.get("retained_bytes") if isinstance(tree, dict) else None
-    if type(retained) is not int or retained <= 0 or not isinstance(tree.get("nodes"), int) or tree["nodes"] <= 0 or \
+    # Bounded first: ast_pilot_budget_verdict multiplies retained bytes by a float.
+    if type(retained) is not int or not _finite_positive(retained) or not isinstance(tree.get("nodes"), int) or \
+            tree["nodes"] <= 0 or \
             tree.get("a_tree_lines") != 0:
         problems.append(f"{label} tree retained bytes are missing, or variant A built a tree")
     if problems:
@@ -3895,7 +3890,7 @@ def classify(summary: object, binaries: object, *, expected_profile: str | None 
         value = verdict.get(key)
         if not is_number(value):
             reasons.append(f"wall-time verdict has no numeric {key}")
-        elif not (math.isfinite(value) and value > 0):
+        elif not _finite_positive(value):
             reasons.append(f"wall-time verdict {key} {value!r} is not a finite positive ratio")
         elif wall and wall.get(key) != value:
             reasons.append(f"wall-time verdict {key} {value!r} contradicts the wall metric {wall.get(key)!r}")
@@ -3958,10 +3953,7 @@ def classify_throughput_exit(status: object, summary: object, metadata: object, 
     pairs, rounds = profile["pairs_per_round"], profile["rounds"]
 
     def finite(value: object, *, positive: bool = False) -> bool:
-        try:
-            return type(value) in (int, float) and math.isfinite(value) and (value > 0 if positive else value >= 0)
-        except OverflowError:
-            return False
+        return _number(value) and (value > 0 if positive else value >= 0)
 
     def integer(value: object, *, positive: bool = False) -> bool:
         return type(value) is int and (value > 0 if positive else value >= 0)
@@ -4149,7 +4141,8 @@ REPORT_METRICS = (("wall", "wall time (harness span)", "s"), ("task_clock", "tas
 
 
 def number(value: object, form: str) -> str:
-    return form % value if isinstance(value, (int, float)) and not isinstance(value, bool) else "NA"
+    # An out-of-range JSON integer renders as NA; a float format would raise OverflowError on it.
+    return form % value if type(value) is float or _number(value) else "NA"
 
 
 def render_analyzer(receipt: dict, summary: dict, conclusion: str, notes: list[str]) -> str:

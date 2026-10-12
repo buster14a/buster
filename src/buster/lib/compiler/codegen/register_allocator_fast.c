@@ -37,7 +37,10 @@
 // needs an occupied register, and a non-call row's clobber, moves the live
 // occupant to a free one (`machine_fast_vacate`) rather than storing it. A reload prefers the
 // register the value was first bound to (`MachineFastState.preferred_registers`),
-// so the copies that repair cross-path disagreement mostly vanish.
+// so the copies that repair cross-path disagreement mostly vanish. A free
+// pick for a value whose last use lies past any later call in layout order
+// (`machine_fast_crosses_call` over the function-wide `next_call`) prefers a
+// callee-saved register, so the value survives that call on every path.
 // `machine_fast_placement_build_pinned` then lays the frame out
 // for both scan modes: `machine_fast_close_live_ranges` widens selector slots
 // and proven direct-chain allocator homes to every row where their contents
@@ -211,9 +214,9 @@ struct MachineFastState
     u64 const* live_out_row;
     u64 const* live_in_row;
     u32 live_words;
-    // Index of the next call at or after each instruction within its own
-    // block, or UINT32_MAX: a value whose last use lies past it crosses
-    // the call and is worth a callee-saved binding.
+    // Index of the next call at or after each instruction in layout order,
+    // across block boundaries, or UINT32_MAX: a value whose last use lies
+    // past it crosses the call and is worth a callee-saved binding.
     u32* next_call;
     // Immediate index per vreg whose entire definition is one constant
     // materialization, MACHINE_FAST_REMATERIALIZE_FRAME for one frame
@@ -1451,8 +1454,10 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_source_dies_here(MachineFastState* state, 
     return !state->escapes[virtual_register] && state->last_use[virtual_register] == (state->current_point >> 2);
 }
 
-// True when the virtual register stays live past the next call in the
-// current block, making a callee-saved binding worth its push/pop pair.
+// True when the virtual register's last use lies past the next call in
+// layout order, in this block or a later one, making a callee-saved binding
+// worth its push/pop pair. The interval over-approximates on a sibling arm's
+// call and misses a loop body call past the value's last textual use.
 BUSTER_GLOBAL_LOCAL bool machine_fast_crosses_call(MachineFastState* state, u32 virtual_register)
 {
     u32 upcoming_call = state->next_call[state->current_point >> 2];
@@ -2766,16 +2771,17 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
         // next-call pass reads the call bit out of that word instead of
         // reloading the opcode and probing the descriptor table again. The
         // test is a select on a sequentially streamed u32, which leaves the
-        // loop with no data-dependent branch of its own.
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        // loop with no data-dependent branch of its own. The fill runs across
+        // block boundaries: a value whose last use lies past a call in a later
+        // block crosses it as surely as one in its own block, and a
+        // callee-saved binding keeps it in a register through every later
+        // call on every path, so no join loses it (#56).
         {
-            MachineBlock* block = function->blocks + block_index;
             u32 upcoming_call = UINT32_MAX;
-            for (u32 offset = block->instruction_count; offset > 0; offset -= 1)
+            for (u32 instruction_index = function->instruction_count; instruction_index > 0; instruction_index -= 1)
             {
-                u32 instruction_index = block->first_instruction + offset - 1;
-                upcoming_call = (prepass.operand_masks[instruction_index] & MACHINE_FAST_OPERAND_CALL_ROW) ? instruction_index : upcoming_call;
-                prepass.next_call[instruction_index] = upcoming_call;
+                upcoming_call = (prepass.operand_masks[instruction_index - 1] & MACHINE_FAST_OPERAND_CALL_ROW) ? instruction_index - 1 : upcoming_call;
+                prepass.next_call[instruction_index - 1] = upcoming_call;
             }
         }
         // A function with no vector virtual registers can never own a vector
@@ -3430,6 +3436,15 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_slot_touches(MachineFunction const* functio
         }
     }
     return count;
+}
+
+// A volatile-tainted slot and the fixed outgoing argument area keep storage of
+// their own whatever the rows do with them.
+BUSTER_GLOBAL_LOCAL bool machine_fast_slot_statically_fixed(MachineFunction const* function, u32 slot)
+{
+    bool volatile_slot = function->stack_slot_memory_flags && function->stack_slot_memory_flags[slot] != MACHINE_STACK_SLOT_MEMORY_NONVOLATILE;
+    bool outgoing_slot = function->outgoing_bytes && slot == function->outgoing_slot;
+    return volatile_slot || outgoing_slot;
 }
 
 // One row's proven touches. The placement census records them once and
@@ -5293,11 +5308,21 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         memset(slot_ends, 0, (u64)slot_axis * sizeof(*slot_ends));
         memset(slot_fixed, coalesce_slots ? 0 : 1, slot_axis);
         memset(slot_groups, 0xff, (u64)slot_axis * sizeof(*slot_groups));
+        // Certification already fixes every slot whose address escapes, and
+        // the census can only widen ranges and fix more slots. When no slot is
+        // left for it to decide it would walk every row for nothing: on a
+        // `-g0` SQLite compile that is every one of the 396 coalescing
+        // functions whose frames end up sharing nothing (#1722).
+        bool census_needed = false;
+        for (u32 slot_index = 0; coalesce_slots && slot_index < function->stack_slot_count; slot_index += 1)
+        {
+            census_needed |= !(slot_addressed[slot_index] && !address_safe[slot_index]) &&
+                             !machine_fast_slot_statically_fixed(function, slot_index);
+        }
         MachineFastTouchCensus touch_census = {
-            .rows = coalesce_slots ? arena_allocate(arena, MachineFastRowTouches, function->instruction_count ? function->instruction_count : 1u)
-                                   : 0,
+            .rows = census_needed ? arena_allocate(arena, MachineFastRowTouches, function->instruction_count ? function->instruction_count : 1u) : 0,
         };
-        for (u32 row = 0; coalesce_slots && row < function->instruction_count; row += 1)
+        for (u32 row = 0; coalesce_slots && census_needed && row < function->instruction_count; row += 1)
         {
             MachineInstruction const* instruction = function->instructions + row;
             bool addresses = instruction->opcode == description->frame_address_opcode;
@@ -5346,8 +5371,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         for (u32 slot_index = 0; coalesce_slots && slot_index < function->stack_slot_count; slot_index += 1)
         {
             slot_fixed[slot_index] |= (u8)(slot_addressed[slot_index] && !address_safe[slot_index]);
-            slot_fixed[slot_index] |= (u8)(function->stack_slot_memory_flags && function->stack_slot_memory_flags[slot_index] != MACHINE_STACK_SLOT_MEMORY_NONVOLATILE);
-            slot_fixed[slot_index] |= (u8)(function->outgoing_bytes && slot_index == function->outgoing_slot);
+            slot_fixed[slot_index] |= (u8)machine_fast_slot_statically_fixed(function, slot_index);
         }
         u32 shareable_slots = 0;
         for (u32 slot = 0; coalesce_slots && slot < function->stack_slot_count; slot += 1)

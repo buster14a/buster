@@ -131,7 +131,8 @@
 //   c_parse_types_compatible,                     compatibility
 //   c_parse_definition_parameter_count_*,         pre-C23 definition counts
 //   c_parse_prototype_parameter_count_record
-//   c_parse_type_identity_prepare                 retained C identity answers
+//   c_parse_type_identity_prepare,                retained C identity answers
+//   c_parse_type_identity_settle
 //   c_parse_validate_cleanup_attribute            __attribute__((cleanup))
 //   c_parse_name_symbol .. c_parse_lookup_*       symbol interning, scopes,
 //                                                 entity lookup
@@ -626,9 +627,11 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit_identifier(CPa
     else if (!token.symbol || !preprocess.symbols)
         builtin = c_symbol_builtin_from_spelling(c_token_spelling(preprocess.spelling_base, token));
     if (builtin == C_SYMBOL_BUILTIN_GENERIC || builtin == C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P ||
-        builtin == C_SYMBOL_BUILTIN_CLASSIFY_TYPE)
+        builtin == C_SYMBOL_BUILTIN_CLASSIFY_TYPE || builtin == C_SYMBOL_BUILTIN_CHOOSE_EXPR)
         c_parse_position_index_append(result->arena, &index->type_identity_positions, &index->type_identity_count,
             &index->type_identity_capacity, token_index);
+    if (c_parse_word_bits_token(preprocess, token) & (C_WORD_TYPEOF | C_WORD_TYPEOF_UNQUAL))
+        c_parse_position_index_append(result->arena, &index->typeof_positions, &index->typeof_count, &index->typeof_capacity, token_index);
     u8 token_class = c_parse_token_class(result, preprocess, token_index);
     if (token_class & C_TOKEN_CLASS_VECTOR_SIZE)
     {
@@ -5354,8 +5357,26 @@ BUSTER_C_SHARED CTypeId c_parse_add_type(CParseResult* result, CType type);
 BUSTER_C_INTERNAL CTypeId c_parse_unqualified_type(CParseResult* result, CTypeId type_id);
 BUSTER_C_INTERNAL CTypeId c_parse_auto_decay_type(CParseResult* result, CTypeId type);
 BUSTER_C_INTERNAL CTypeIdentityQuery* c_parse_type_identity_find(CParseResult* result, u32 start);
-BUSTER_C_INTERNAL void c_parse_type_identity_prepare(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
-                                                    CParseResult* result, CScopeId scope, u32 start, u32 end);
+BUSTER_C_INTERNAL void c_parse_type_identity_settle(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                   CParseResult* result, CScopeId scope, u32 start, u32 end);
+
+// Every type query calls this before its memo lookup, and almost no range
+// holds an identity site, so the test that the index lists none in
+// [start, end) is inline and the settling walk is not. Without a listed site
+// the walk's two lower bounds leave its loop no iteration, so the skipped call
+// is a no-op. A missing index, which makes the walk scan tokens, still calls it.
+BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_identity_prepare(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                                  CParseResult* result, CScopeId scope, u32 start, u32 end)
+{
+    CTokenPositionIndex const* positions = result->position_index;
+    u32 count = positions ? positions->type_identity_count : 0;
+    bool absent = positions && (!count || positions->type_identity_positions[count - 1] < start || positions->type_identity_positions[0] >= end);
+#if BUSTER_REFERENCE_CHECKS
+    BUSTER_CHECK(!absent || c_parse_position_lower_bound(positions->type_identity_positions, count, start) >=
+                                c_parse_position_lower_bound(positions->type_identity_positions, count, end));
+#endif
+    if (!absent) c_parse_type_identity_settle(machine, arena, preprocess, result, scope, start, end);
+}
 BUSTER_C_INTERNAL CTypeId c_parse_adjust_parameter_type(CParseResult* result, CTypeId type);
 BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                           CTypeId return_type, u32 open, u32 end, u32* index_out);
@@ -5568,9 +5589,11 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
         {
             continue;
         }
+        WORK_LEDGER_RECORD(REDERIVE_CALL_ARITY_CANDIDATES, 1);
         if (c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_NON_CALLEE_KEYWORDS))
         {
             C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_CALL_KEYWORDS_SKIPPED, 1);
+            WORK_LEDGER_RECORD(REDERIVE_CALL_ARITY_KEYWORDS_SKIPPED, 1);
             continue;
         }
         C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_CALL_LOOKUPS, 1);
@@ -7580,6 +7603,8 @@ BUSTER_C_INTERNAL bool c_parse_expression_next_conditional(CParseResult* result,
     return found;
 }
 
+BUSTER_C_INTERNAL u32 c_parse_identity_separator(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CPunctuator separator);
+
 BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     Arena* arena = frame->arena;
@@ -7810,6 +7835,19 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     last = c_parse_expression_scalar_type(result, C_TYPE_INT);
                     task_count -= 1;
                 }
+                continue;
+            }
+            // __builtin_constant_p(expression) is an int whatever its one
+            // operand is. The operand is never evaluated, and its value
+            // belongs to lowering, so only the type is answered here.
+            if (first.kind == C_TOKEN_IDENTIFIER && task->start + 3 < task->end &&
+                c_token_is_punctuator(&preprocess.tokens[task->start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                c_parse_matching_delimiter_indexed(result, preprocess, task->start + 1) == task->end - 1 &&
+                string_equal(c_token_spelling(preprocess.spelling_base, first), S8("__builtin_constant_p")) &&
+                c_parse_identity_separator(result, preprocess, task->start + 2, task->end - 1, C_PUNCTUATOR_COMMA) == task->end - 1)
+            {
+                last = c_parse_expression_scalar_type(result, C_TYPE_INT);
+                task_count -= 1;
                 continue;
             }
             u32 best_precedence = UINT32_MAX;
@@ -9338,11 +9376,15 @@ BUSTER_C_INTERNAL bool c_parse_classify_type_builtin(CTypeParseMachine* machine,
     return valid;
 }
 
+BUSTER_C_INTERNAL bool c_parse_choose_expr_builtin(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                   CParseResult* result, CScopeId scope, u32 start, u32 end);
+
 // Children have later token starts than their parents. This reverse work walk
 // settles every nested identity before expression/type queries consume it;
 // the active guard prevents a query from recursively starting another walk.
-BUSTER_C_INTERNAL void c_parse_type_identity_prepare(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
-                                                     CParseResult* result, CScopeId scope, u32 start, u32 end)
+// Callers reach it through c_parse_type_identity_prepare's gate.
+BUSTER_C_INTERNAL void c_parse_type_identity_settle(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                   CParseResult* result, CScopeId scope, u32 start, u32 end)
 {
     if (machine && !machine->type_identity_queries_active)
     {
@@ -9351,11 +9393,18 @@ BUSTER_C_INTERNAL void c_parse_type_identity_prepare(CTypeParseMachine* machine,
         u32 first = positions ? c_parse_position_lower_bound(positions->type_identity_positions, positions->type_identity_count, start) : start;
         u32 limit = positions ? c_parse_position_lower_bound(positions->type_identity_positions, positions->type_identity_count, end)
                               : BUSTER_MIN(end, (u32)preprocess.token_count);
+        // A site whose own row is retained is settled, which its slot's hint
+        // answers without the search c_parse_type_identity_find makes. Every
+        // query walks its whole range again, so a deep nest of sites reads
+        // each settled one per enclosing query and this keeps that read short.
+        u32 const* hints = positions && positions->built ? positions->type_identity_rows_plus_one : 0;
         for (u32 cursor = limit; cursor > first;)
         {
             u32 index = positions ? positions->type_identity_positions[--cursor] : --cursor;
+            u32 row = hints ? hints[cursor] - 1 : UINT32_MAX;
+            bool settled = row < result->type_identity_query_count && result->type_identity_queries[row].token_start == index;
             CToken token = preprocess.tokens[index];
-            if (token.kind == C_TOKEN_IDENTIFIER && index + 1 < end &&
+            if (!settled && token.kind == C_TOKEN_IDENTIFIER && index + 1 < end &&
                 c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                 !c_parse_type_identity_find(result, index))
             {
@@ -9375,13 +9424,17 @@ BUSTER_C_INTERNAL void c_parse_type_identity_prepare(CTypeParseMachine* machine,
                 {
                     c_parse_classify_type_builtin(machine, arena, preprocess, result, token_scope, index, end);
                 }
+                else if (string_equal(name, S8("__builtin_choose_expr")))
+                {
+                    c_parse_choose_expr_builtin(machine, arena, preprocess, result, token_scope, index, end);
+                }
             }
         }
         machine->type_identity_queries_active = false;
     }
 }
 
-// True when c_parse_type_identity_prepare would have nothing to settle for
+// True when c_parse_type_identity_settle would have nothing to settle for
 // [start, end): the position index lists no _Generic or
 // __builtin_types_compatible_p token there. The index being absent proves
 // nothing, so that answers false.
@@ -10080,6 +10133,40 @@ struct CParseConstant
 BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                          CParseResult* result, CScopeId scope, u32 start, u32 end);
 BUSTER_C_INTERNAL bool c_parse_constant_truth(CParseConstant value);
+
+// __builtin_choose_expr(condition, first, second) is the arm its integer
+// constant condition selects, with that arm's unconverted type and value, so
+// it is recorded as a selection like a _Generic answer and every consumer of
+// c_parse_type_identity_find follows the selected range. The condition is a
+// constant query, never a nested walk: c_parse_type_identity_prepare settles
+// the later-starting (inner) choices first, so a choice in the condition is
+// already a recorded selection by the time this one evaluates it. A condition
+// that is not an integer constant (a pointer or floating constant included),
+// or a wrong arity, records nothing.
+BUSTER_C_INTERNAL bool c_parse_choose_expr_builtin(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                   CParseResult* result, CScopeId scope, u32 start, u32 end)
+{
+    u32 close = c_parse_matching_delimiter_indexed(result, preprocess, start + 1);
+    u32 first = close < end ? c_parse_identity_separator(result, preprocess, start + 2, close, C_PUNCTUATOR_COMMA) : end;
+    u32 second = first < close ? c_parse_identity_separator(result, preprocess, first + 1, close, C_PUNCTUATOR_COMMA) : end;
+    bool valid = close < end && start + 2 < first && first + 1 < second && second + 1 < close &&
+                 c_parse_identity_separator(result, preprocess, second + 1, close, C_PUNCTUATOR_COMMA) == close;
+    CParseConstant condition = valid ? c_parse_typed_constant(machine, arena, preprocess, result, scope, start + 2, first)
+                                     : (CParseConstant){.type = C_TYPE_ID_INVALID};
+    // GNU requires an integer constant condition: the evaluator also answers
+    // a pointer constant such as `(void*)1`, which must select nothing.
+    valid = valid && condition.valid && !condition.is_float && !condition.imaginary &&
+            c_parse_expression_integer_kind(c_parse_expression_value_kind(result, condition.type));
+    if (valid)
+    {
+        bool selected = c_parse_constant_truth(condition);
+        valid = c_parse_type_identity_record(result, (CTypeIdentityQuery){
+            .token_start = start, .token_end = close + 1,
+            .result_start = selected ? first + 1 : second + 1, .result_end = selected ? second : close});
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL void c_parse_defer_static_assert(CPreprocessResult preprocess, CParseResult* result, CDeclaration declaration, CScopeId scope)
 {
     if (!result || result->deferred_static_assert_count >= result->deferred_static_assert_capacity)
@@ -19054,7 +19141,13 @@ BUSTER_C_INTERNAL bool c_parse_define_typeof_aggregates(CTypeParseMachine* machi
                                                           u32 start, u32 end)
 {
     bool defined = false;
-    for (u32 index = start; index + 1 < end; index += 1)
+    // A failed type-name attempt over a long expression range reaches here
+    // once per enclosing query, so a built index visits only the typeof
+    // words in the range instead of every token.
+    CTokenPositionIndex const* positions = result->position_index && result->position_index->built ? result->position_index : 0;
+    u32 slot = positions ? c_parse_position_lower_bound(positions->typeof_positions, positions->typeof_count, start) : 0;
+    u32 index = positions ? (slot < positions->typeof_count ? positions->typeof_positions[slot] : end) : start;
+    while (index + 1 < end)
     {
         String8 word = preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]) : (String8){0};
         bool is_typeof = string_equal(word, S8("typeof")) || string_equal(word, S8("__typeof__")) || string_equal(word, S8("__typeof")) ||
@@ -19086,6 +19179,18 @@ BUSTER_C_INTERNAL bool c_parse_define_typeof_aggregates(CTypeParseMachine* machi
                 }
                 index = close;
             }
+        }
+        if (positions)
+        {
+            while (slot < positions->typeof_count && positions->typeof_positions[slot] <= index)
+            {
+                slot += 1;
+            }
+            index = slot < positions->typeof_count ? positions->typeof_positions[slot] : end;
+        }
+        else
+        {
+            index += 1;
         }
     }
     return defined;
@@ -29552,6 +29657,7 @@ BUSTER_C_INTERNAL void c_parse_body_scopes_build(CParseResult* result, Arena* sc
         u32 low = pending[pending_count * 3 + 1];
         u32 high = pending[pending_count * 3 + 2];
         u32 limit = result->scope_children_offsets[parent + 1];
+        WORK_LEDGER_RECORD(REDERIVE_BODY_SCOPE_SHARE_TOKENS, high - low);
         // Siblings are ordered and their shares end at the next one's start, so
         // the shares ascend and `owned` is the first token no child has taken.
         u32 owned = low;
@@ -29568,6 +29674,7 @@ BUSTER_C_INTERNAL void c_parse_body_scopes_build(CParseResult* result, Arena* sc
                     scopes[token - start] = parent;
                 }
                 C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_BODY_SCOPE_STORES, share_start > owned ? share_start - owned : 0);
+                WORK_LEDGER_RECORD(REDERIVE_BODY_SCOPE_STORES, share_start > owned ? share_start - owned : 0);
                 owned = BUSTER_MAX(owned, share_end);
                 if (pending_count == capacity)
                 {
@@ -29593,6 +29700,7 @@ BUSTER_C_INTERNAL void c_parse_body_scopes_build(CParseResult* result, Arena* sc
             scopes[token - start] = parent;
         }
         C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_BODY_SCOPE_STORES, high > owned ? high - owned : 0);
+        WORK_LEDGER_RECORD(REDERIVE_BODY_SCOPE_STORES, high > owned ? high - owned : 0);
         pending_count = pending ? pending_count : 0;
     }
 }
@@ -33962,8 +34070,11 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 tasks[count++] = (CParseConstantTask){.start = begin + 1, .end = limit, .cast_type = C_TYPE_ID_INVALID};
                 continue;
             }
-            if (first.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, first), S8("_Generic")))
+            if (first.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(preprocess.spelling_base, first), S8("_Generic")) ||
+                                                     string_equal(c_token_spelling(preprocess.spelling_base, first), S8("__builtin_choose_expr"))))
             {
+                // A recorded __builtin_choose_expr selection reads exactly as
+                // a _Generic one (c_parse_choose_expr_builtin).
                 u32 selected_start = 0;
                 u32 selected_end = 0;
                 u32 consumed = 0;
