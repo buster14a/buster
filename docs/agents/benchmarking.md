@@ -625,7 +625,12 @@ captures (#2741).
   These ordinary compiler A/B paths run no profile steps and no A/A. The
   separately versioned [sampling qualification](../compiler-main-sampling.md)
   route (#3212) is staged disabled; its explicitly admitted, predeclared research
-  controls do not change either immutable ordinary profile. `native-retirement-performance-v1` remains blocked,
+  controls do not change either immutable ordinary profile. The single
+  [MAIN routing switch](../compiler-main-profile-routing-v1.md) stays
+  `disabled` until a reviewed certificate qualifies `compiler-main-40pairs-v1`;
+  it can route only the authenticated automatic post-merge comparison, keeps
+  the full FAST/QUALITY corpus, and rolls back to `compiler-compare-v1`.
+  Explicit pull-request and acceptance requests keep their requested profiles. `native-retirement-performance-v1` remains blocked,
   and the `zen5-calibration-v1` producer and its `zen5_*` analysis tools are
   removed (#2741; tag `bench-service-final` retains them). Use the local
   trusted capture methods above for ad-hoc profiling. Historical audit notes retain

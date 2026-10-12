@@ -1543,6 +1543,43 @@ def inventory_rows(shown: dict) -> str:
     return ", ".join(f"`{row}`" for row in rows) or "none"
 
 
+UNRESOLVED_OUTCOMES = ("no detectable difference", "below-floor", "inconclusive")
+
+
+def selected_profile(shown: dict, profile: dict) -> str:
+    """The profile a report measured and which trusted route selected it (#3212)."""
+    route = shown.get("main_route") if isinstance(shown.get("main_route"), dict) else None
+    if shown.get("mode") == "pull":
+        return f"`{profile.get('name', 'NA')}` (explicit pull-request request)"
+    if route is None:
+        return f"`{profile.get('name', 'NA')}` (Main route not resolved)"
+    policy = str(route.get("main_policy_revision", "NA"))[:12]
+    if route.get("main_owned") is True:
+        certificate = route.get("main_certificate_revision")
+        reviewed = f"certificate `{certificate[:12]}`" if isinstance(certificate, str) and certificate != "-" \
+            else "no short-profile certificate"
+        return f"`{route.get('main_profile', 'NA')}` (authenticated automatic Main route, policy `{policy}`, {reviewed})"
+    return f"`{route.get('main_profile', 'NA')}` (Main routing disabled at policy `{policy}`)"
+
+
+def achieved_uncertainty(verdict: dict) -> str:
+    """Half the 95% B/A interval in percent of the baseline, or NA when unmeasured."""
+    low, high = verdict.get("ci_low"), verdict.get("ci_high")
+    result = "NA (not measured)"
+    if type(low) in (int, float) and type(high) in (int, float) and 0 < low <= high < float("inf"):
+        result = "±%.2f%% (half-width of the 95%% CI of wall B/A)" % ((high - low) * 50.0)
+    return result
+
+
+def leg_costs(timings: dict) -> str:
+    """Per-leg host seconds as recorded; missing legs stay NA, never zero."""
+    builds = timings.get("build_seconds") if isinstance(timings.get("build_seconds"), dict) else {}
+    return "builds %s s, self-host measurement %s s, corpus %s s, total %s s; queue delay %s s" % (
+        " + ".join(number(builds.get(key), "%.0f") for key in ("baseline", "candidate")),
+        number(timings.get("measurement_seconds"), "%.0f"), number(timings.get("throughput_seconds"), "%.0f"),
+        number(timings.get("total_seconds"), "%.0f"), number(timings.get("queue_delay_seconds"), "%.0f"))
+
+
 def commit_report(shown: dict, summary: object, conclusion: str, title: str, notes: list[str],
                   link_line: str) -> str:
     """The commit-page report (#2804): verdict, scope, metrics with units, links; tables collapsed."""
@@ -1588,12 +1625,14 @@ def commit_report(shown: dict, summary: object, conclusion: str, title: str, not
     unit = wall.get("unit") if isinstance(wall.get("unit"), str) else "s"
     coverage = shown.get("coverage") if isinstance(shown.get("coverage"), dict) else {}
     baseline = range_label(coverage.get("range"), coverage.get("first_parent")) or "first parent or range baseline"
+    unresolved = " This outcome is unresolved at the achieved resolution: it is neither equivalence nor a " \
+        "performance pass." if verdict.get("outcome") in UNRESOLVED_OUTCOMES else ""
     lines = [
         f"### {check_name(shown.get('mode', 'main'))}: {conclusion}, {title}", "",
         (verdict.get("text") if isinstance(verdict.get("text"), str) else
          "No valid measurement: this commit was not benchmarked by this attempt.")
-        + " Performance policy: report-only. This never blocks merging, and a successful measurement is not by "
-        "itself a speedup or an equivalence.", "",
+        + unresolved + " Performance policy: report-only. This never blocks merging, and a successful measurement "
+        "is not by itself a speedup or an equivalence.", "",
         "| | |", "| --- | --- |",
         f"| Candidate | `{identity.get('head', 'NA')}` (this commit) |",
         f"| Baseline | `{identity.get('base', 'NA')}` ({baseline}) |",
@@ -1603,6 +1642,9 @@ def commit_report(shown: dict, summary: object, conclusion: str, title: str, not
         f"| Wall median A / B | {number(wall.get('a_median'), '%.6g')} {unit} / "
         f"{number(wall.get('b_median'), '%.6g')} {unit} |",
         f"| Complete pairs | {number(plan.get('complete_pairs'), '%d')} |",
+        f"| Achieved uncertainty | {achieved_uncertainty(verdict)} |",
+        f"| Selected profile | {selected_profile(shown, profile)} |",
+        f"| Host cost per leg | {leg_costs(timings)} |",
         f"| Host (observed) | `{host.get('cpu_model', 'NA')}` |",
         f"| Inventory rows discharged | {inventory_rows(shown)} |",
         f"| Scope | `{profile.get('name', 'NA')}`: {profile.get('workload', 'NA')}; corpus "
