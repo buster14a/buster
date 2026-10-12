@@ -54975,7 +54975,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_nested_loop_parameters(Unit
 // body, a case label inside a do-while, a goto back before the loop -- with a
 // local the loop never writes holding a different value on that path. The
 // volatile copy keeps every local in memory and is the reference.
-BUSTER_GLOBAL_LOCAL String8 c_test_loop_entry_source = S8(
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL String8 const c_test_loop_entry_source = S8_INITIALIZER(
     "#define GOTO_INTO(T) { T a = 1; T s = 0; T k; T pass = 0;\\\n"
     "    for (k = 0; k < n; k++) { s += a; inside: s += a * 10; }\\\n"
     "    if (!pass) { pass = 1; a = 7; k = 0; goto inside; }\\\n"
@@ -55009,6 +55010,7 @@ BUSTER_GLOBAL_LOCAL String8 c_test_loop_entry_source = S8(
     "    }\n"
     "    return failed;\n"
     "}\n");
+#endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_loop_entry_runtime(UnitTestArguments* arguments)
 {
