@@ -63527,9 +63527,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_identity_authority(UnitTestArgume
         "int p1(const char *p) { return _Generic(p, char *: 1, default: 2); }\n"
         "int l2(volatile int v) { return _Generic(v, int: 1, default: 2); }\n"
         "int f1(void) { return _Generic(take, void (*)(int *): 1, default: 2); }\n"
-        "int b1(void) { return __builtin_types_compatible_p(const char *, char *); }\n");
-    String8 names[] = {S8("p1"), S8("l2"), S8("f1"), S8("b1")};
-    u64 expected[] = {2, 1, 1, 0};
+        "int b1(void) { return __builtin_types_compatible_p(const char *, char *); }\n"
+        // c_parse_type_identity_prepare's gate: specifier, assertion and
+        // constant sites must still be settled, while the ranges before the
+        // first site (take) and after the last one (z1) skip the walk.
+        "typedef typeof(_Generic(1.0, double: (long)0, default: (char)0)) T;\n"
+        "_Static_assert(__builtin_types_compatible_p(T, long), \"settled in a specifier\");\n"
+        "int c1(void) { return __builtin_classify_type(1.0); }\n"
+        "_Static_assert(sizeof(T) == sizeof(long), \"read after the last site\");\n"
+        "int z1(void) { T t = 5; return sizeof t == sizeof(long) ? 5 : 0; }\n");
+    String8 names[] = {S8("p1"), S8("l2"), S8("f1"), S8("b1"), S8("c1"), S8("z1")};
+    u64 expected[] = {2, 1, 1, 0, 8, 5};
     for (u32 target_index = 0; target_index < 6; target_index += 1)
     {
         Target target = target_native;
