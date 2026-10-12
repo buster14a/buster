@@ -5989,6 +5989,9 @@ BUSTER_C_INTERNAL IrInstructionId c_ir_append_instruction(CIntegerIrBuilder* bui
         builder->previous_instruction = builder->last_instruction;
         builder->previous_instruction_known = true;
         builder->last_instruction = id;
+#if BUSTER_BENCH_ALLOCATIONS
+        ir_construction_fold_census(builder->program, builder->function, id);
+#endif
     }
     return id;
 }

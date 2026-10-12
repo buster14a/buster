@@ -208,6 +208,40 @@ inconclusive hosted result cannot enable the default. Self-hosting fixed point,
 all pass subsets, native mode matrix and non-native consumers remain correctness
 gates independently of performance acceptance.
 
+### Construction-time fold census (#3010)
+
+`BUSTER_BENCH_ALLOCATIONS` builds report under `ir_construction` in
+`-fsource-metrics` whether FAST's scalar folds could have happened when a row
+was first built. `ir_fast_fold_rule` is the only rule authority. The fold pass
+calls it, and `ir_construction_fold_census` also calls it with no replacement
+map on every row the C builder commits through `c_ir_append_instruction`:
+
+- `fold_birth_scalar_rows`: committed `CAST`, `UNARY` and `BINARY` rows probed.
+- `fold_birth_<rule>`: rows a rule already folds from the operands committed
+  before them. `fold_birth_metadata_mismatches` counts identities rejected by
+  the replacement metadata check. `fold_birth_avoidable_bytes` is logical
+  row/value/operand/source storage: an identity needs none of it, while a
+  constant still needs its row and immediate. This is not an arena-call or RSS
+  figure.
+- `fold_late_<rule>`: folds FAST actually applied. `fold_late_replaced_roots`
+  counts the folds whose operand had to be followed through the replacement map
+  (an earlier identity or a parameter sweep).
+
+The rules are `cast_identity`, `cast_constant`, `unary_constant`,
+`binary_constant`, `binary_right_identity` and `binary_left_identity`. Probes
+suppress `ir_semantics` recording, so those counters keep measuring only the
+compiler's own semantic work. Rows that SSA construction inserts behind a commit
+(`ir_block_insert_instruction_after`) are not probed, and neither is
+inlined-callee output.
+
+`fold_birth_*` and `fold_late_*` count independent populations. Birth counts
+include functions that FAST later skips or does not run (`-fno-canonical-fast`,
+budget and provenance skips) and rows that later passes delete. Late counts
+include rows that SSA insertion, promotion and inlining add after commit. No
+per-row birth classification reaches FAST, so neither a birth/late ratio nor
+late minus birth attributes or bounds the late folds that were available at
+commit; that needs a matched per-row association.
+
 ## Opt-in block-local CSE (#3011)
 
 `ir_fast_cse` is an experiment, outside every optimization level and outside

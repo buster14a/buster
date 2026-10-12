@@ -1530,6 +1530,12 @@ struct IrSemanticCounters
 };
 
 BUSTER_F_DECL void ir_semantic_record(IrSemanticCounter counter, u64 amount);
+// Returns the previous state; a suppressed thread records no semantic work.
+BUSTER_F_DECL bool ir_semantic_suppress(bool suppressed);
+// The construction side of the scalar-fold census (#3010), under
+// ir_construction.fold_birth_*: whether the row just committed as `id` would
+// already fold under ir_fast_fold's rules. Changes nothing.
+BUSTER_F_DECL void ir_construction_fold_census(IrProgram* program, IrFunction* function, IrInstructionId id);
 // One top-level evaluation of source range [start, end) of the token array at
 // `base`; a range any evaluator saw before counts as repeated work.
 BUSTER_F_DECL void ir_semantic_census_range(IrSemanticEvaluator evaluator, void const* base, u32 start, u32 end);
