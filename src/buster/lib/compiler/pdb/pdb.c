@@ -7,6 +7,8 @@
 // pdb_msf_build owns the checked periodic-FPM block layout;
 // pdb_emit_contribution writes both DBI descriptions from module-owned ranges.
 // pdb_type_record_hash supplies TPI lookup buckets in the final record walk.
+// pdb_gsi_order/pdb_gsi_emit build the global and public hash tables that
+// pdb_build fills from each module's top-level procedures and data.
 // ByteWriter supplies bounded writes; PDB owns stream allocation and MSF layout.
 
 #include <buster/lib/compiler/pdb/pdb_internal.h>
@@ -1048,6 +1050,185 @@ BUSTER_GLOBAL_LOCAL bool pdb_prepare_modules(Arena* arena, PdbInput input, PdbMo
     return valid;
 }
 
+// Global (GSI) and public symbol indexes. DbgHelp loads a PDB whose globals
+// and publics streams are empty only as "public symbols & lines"; a populated
+// index, as MS link and LLD write it, is what makes it a private PDB (#3411).
+// Layout follows the reference GSI: hash records (record offset + 1, one
+// reference) grouped into IPHR_HASH buckets by hashStringV1, a presence bitmap
+// of 4096 + 1 bits, then each present bucket's first record times 12 (the
+// in-memory HRFile stride readers rescale by).
+enum
+{
+    PDB_S_PUB32 = 0x110e,
+    PDB_S_PROCREF = 0x1125,
+    PDB_S_LPROCREF = 0x1127,
+    PDB_GSI_BUCKET_COUNT = 4096,
+    PDB_GSI_BITMAP_WORDS = (PDB_GSI_BUCKET_COUNT + 32) / 32,
+    PDB_GSI_HASH_RECORD_SIZE = 8,
+    PDB_GSI_BUCKET_OFFSET_UNIT = 12,
+    // CV_PUBSYMFLAGS fCode | fFunction.
+    PDB_PUBLIC_FUNCTION_FLAGS = 3,
+    // Field offsets from the start of a record, including its length prefix.
+    PDB_PROC_ADDRESS_OFFSET = 32,
+    PDB_PROC_NAME_OFFSET = 39,
+    PDB_DATA_ADDRESS_OFFSET = 8,
+    PDB_DATA_NAME_OFFSET = 14,
+};
+
+typedef struct PdbGsiEntry PdbGsiEntry;
+struct PdbGsiEntry
+{
+    String8 name;
+    u32 record_offset;
+    u32 bucket;
+};
+
+BUSTER_GLOBAL_LOCAL String8 pdb_record_name(ByteSlice symbols, u64 record, u64 name_offset, u64 size)
+{
+    String8 name = {0};
+    u64 start = record + name_offset;
+    u64 end = record + size;
+    if (start < end)
+    {
+        u64 cursor = start;
+        while (cursor < end && symbols.pointer[cursor])
+        {
+            cursor += 1;
+        }
+        if (cursor < end)
+        {
+            name = (String8){.pointer = (char8*)(symbols.pointer + start), .length = cursor - start};
+        }
+    }
+    return name;
+}
+
+// The reference GSI orders a bucket by name length, then case-insensitively
+// for ASCII names and bytewise otherwise; readers may rely on that order.
+BUSTER_GLOBAL_LOCAL bool pdb_gsi_name_less(String8 left, String8 right)
+{
+    bool less = left.length < right.length;
+    if (left.length == right.length)
+    {
+        bool ascii = true;
+        for (u64 index = 0; index < left.length; index += 1)
+        {
+            ascii = ascii && (u8)left.pointer[index] < 0x80 && (u8)right.pointer[index] < 0x80;
+        }
+        s32 order = 0;
+        for (u64 index = 0; index < left.length && !order; index += 1)
+        {
+            u8 a = (u8)left.pointer[index];
+            u8 b = (u8)right.pointer[index];
+            if (ascii)
+            {
+                a = (u8)(a >= 'A' && a <= 'Z' ? a + 32 : a);
+                b = (u8)(b >= 'A' && b <= 'Z' ? b + 32 : b);
+            }
+            order = (s32)a - (s32)b;
+        }
+        less = order < 0;
+    }
+    return less;
+}
+
+// Groups entries by bucket (counting sort) and orders each bucket; returns the
+// number of present buckets.
+BUSTER_GLOBAL_LOCAL u32 pdb_gsi_order(Arena* arena, PdbGsiEntry const* entries, u32 count, u32* order)
+{
+    u32* bucket_start = arena_allocate_zeroed(arena, u32, PDB_GSI_BUCKET_COUNT + 1);
+    for (u32 index = 0; index < count; index += 1)
+    {
+        bucket_start[entries[index].bucket + 1] += 1;
+    }
+    u32 present = 0;
+    for (u32 bucket = 0; bucket < PDB_GSI_BUCKET_COUNT; bucket += 1)
+    {
+        present += bucket_start[bucket + 1] != 0;
+        bucket_start[bucket + 1] += bucket_start[bucket];
+    }
+    u32* cursor = arena_allocate(arena, u32, PDB_GSI_BUCKET_COUNT);
+    memcpy(cursor, bucket_start, PDB_GSI_BUCKET_COUNT * sizeof(*cursor));
+    for (u32 index = 0; index < count; index += 1)
+    {
+        order[cursor[entries[index].bucket]++] = index;
+    }
+    for (u32 bucket = 0; bucket < PDB_GSI_BUCKET_COUNT; bucket += 1)
+    {
+        for (u32 position = bucket_start[bucket] + 1; position < bucket_start[bucket + 1]; position += 1)
+        {
+            u32 moving = order[position];
+            u32 slot = position;
+            while (slot > bucket_start[bucket] && pdb_gsi_name_less(entries[moving].name, entries[order[slot - 1]].name))
+            {
+                order[slot] = order[slot - 1];
+                slot -= 1;
+            }
+            order[slot] = moving;
+        }
+    }
+    return present;
+}
+
+BUSTER_GLOBAL_LOCAL u64 pdb_gsi_size(u32 count, u32 present)
+{
+    return PDB_GSI_HASH_HEADER_SIZE + (u64)count * PDB_GSI_HASH_RECORD_SIZE + PDB_GSI_BITMAP_WORDS * 4u + (u64)present * 4u;
+}
+
+BUSTER_GLOBAL_LOCAL void pdb_gsi_emit(ByteWriter* out, PdbGsiEntry const* entries, u32 count, u32 const* order, u32 present)
+{
+    byte_writer_emit_u32_le(out, 0xffffffff);
+    byte_writer_emit_u32_le(out, PDB_GSI_HASH_VERSION);
+    byte_writer_emit_u32_le(out, count * PDB_GSI_HASH_RECORD_SIZE);
+    byte_writer_emit_u32_le(out, PDB_GSI_BITMAP_WORDS * 4u + present * 4u);
+    u32 bitmap[PDB_GSI_BITMAP_WORDS] = {0};
+    for (u32 index = 0; index < count; index += 1)
+    {
+        PdbGsiEntry const* entry = entries + order[index];
+        byte_writer_emit_u32_le(out, entry->record_offset + 1);
+        byte_writer_emit_u32_le(out, 1);
+        bitmap[entry->bucket / 32] |= 1u << (entry->bucket % 32);
+    }
+    for (u32 word = 0; word < PDB_GSI_BITMAP_WORDS; word += 1)
+    {
+        byte_writer_emit_u32_le(out, bitmap[word]);
+    }
+    // `order` is grouped by ascending bucket, so each bucket's first record is
+    // where the bucket number changes.
+    u32 emitted = 0;
+    for (u32 index = 0; index < count; index += 1)
+    {
+        if (!index || entries[order[index]].bucket != entries[order[index - 1]].bucket)
+        {
+            byte_writer_emit_u32_le(out, index * PDB_GSI_BUCKET_OFFSET_UNIT);
+            emitted += 1;
+        }
+    }
+    out->overflow |= emitted != present;
+}
+
+// Stable bottom-up merge sort of `order` by `keys`, used for the publics
+// address map (section, then offset).
+BUSTER_GLOBAL_LOCAL void pdb_sort_by_key(u32* order, u32* scratch, u64 const* keys, u32 count)
+{
+    for (u64 width = 1; width < count; width *= 2)
+    {
+        for (u64 left = 0; left < count; left += 2 * width)
+        {
+            u64 middle = BUSTER_MIN(left + width, (u64)count);
+            u64 right = BUSTER_MIN(left + 2 * width, (u64)count);
+            u64 a = left;
+            u64 b = middle;
+            for (u64 out = left; out < right; out += 1)
+            {
+                bool take_left = a < middle && (b >= right || keys[order[a]] <= keys[order[b]]);
+                scratch[out] = take_left ? order[a++] : order[b++];
+            }
+        }
+        memcpy(order, scratch, (u64)count * sizeof(*order));
+    }
+}
+
 PdbResult pdb_build(Arena* arena, PdbInput input)
 {
     PdbResult result = {0};
@@ -1609,28 +1790,156 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         byte_writer_emit_u16_le(dbi, index == PDB_DBG_HEADER_SECTION_HEADERS ? (u16)PDB_STREAM_SECTION_HEADERS : (u16)0xffff);
     }
 
-    // Streams 5 and 6 hold no records yet, but readers still expect their
-    // hash headers to be present and well formed.
-    PDB_STREAM_BEGIN(PDB_STREAM_GLOBALS, PDB_GSI_HASH_HEADER_SIZE);
-    ByteWriter* globals = streams + PDB_STREAM_GLOBALS;
-    byte_writer_emit_u32_le(globals, 0xffffffff);
-    byte_writer_emit_u32_le(globals, PDB_GSI_HASH_VERSION);
-    byte_writer_emit_u32_le(globals, 0);
-    byte_writer_emit_u32_le(globals, 0);
-    PDB_STREAM_BEGIN(PDB_STREAM_PUBLICS, PDB_PUBLICS_HEADER_SIZE + PDB_GSI_HASH_HEADER_SIZE);
+    // Streams 5-7: the global and public indexes over the symbol-records
+    // stream. A top-level procedure gets a module reference (S_PROCREF or
+    // S_LPROCREF naming its module-stream offset) and, when global, an S_PUB32;
+    // top-level data is copied into the globals and, when global, gets an
+    // S_PUB32. The first pass sizes everything, the second writes it.
+    u64 symbol_record_bytes = 0;
+    u32 global_count = 0;
+    u32 public_count = 0;
+    PdbGsiEntry* global_entries = 0;
+    PdbGsiEntry* public_entries = 0;
+    u64* public_keys = 0;
+    bool symbols_valid = true;
+    for (u32 pass = 0; pass < 2 && symbols_valid; pass += 1)
+    {
+        if (pass)
+        {
+            symbols_valid = symbol_record_bytes < UINT32_MAX;
+            global_entries = arena_allocate(arena, PdbGsiEntry, global_count ? global_count : 1);
+            public_entries = arena_allocate(arena, PdbGsiEntry, public_count ? public_count : 1);
+            public_keys = arena_allocate(arena, u64, public_count ? public_count : 1);
+            PDB_STREAM_BEGIN(PDB_STREAM_SYMBOL_RECORDS, symbol_record_bytes);
+            global_count = 0;
+            public_count = 0;
+        }
+        ByteWriter* symbol_records = streams + PDB_STREAM_SYMBOL_RECORDS;
+        for (u32 module_index = 0; module_index < module_count && symbols_valid; module_index += 1)
+        {
+            ByteSlice symbols = splits[module_index].symbols;
+            u64 offset = 0;
+            u32 depth = 0;
+            while (offset < symbols.length && symbols_valid)
+            {
+                u16 length = 0;
+                u16 kind = 0;
+                symbols_valid = pdb_read_u16_checked(symbols, offset, &length) && pdb_read_u16_checked(symbols, offset + 2, &kind);
+                u64 size = 2 + (u64)length;
+                symbols_valid = symbols_valid && size <= symbols.length - offset;
+                bool procedure = kind == PDB_S_GPROC32 || kind == PDB_S_LPROC32;
+                bool data = kind == PDB_S_GDATA32 || kind == PDB_S_LDATA32;
+                String8 name = {0};
+                if (symbols_valid && !depth && (procedure || data))
+                {
+                    name = pdb_record_name(symbols, offset, procedure ? PDB_PROC_NAME_OFFSET : PDB_DATA_NAME_OFFSET, size);
+                }
+                if (name.length)
+                {
+                    bool global = kind == PDB_S_GPROC32 || kind == PDB_S_GDATA32;
+                    u64 reference_size = procedure ? align_forward(2 + 2 + 4 + 4 + 2 + name.length + 1, 4) : align_forward(size, 4);
+                    u64 public_size = align_forward(2 + 2 + 4 + 4 + 2 + name.length + 1, 4);
+                    symbols_valid = reference_size <= UINT16_MAX && public_size <= UINT16_MAX;
+                    if (!pass)
+                    {
+                        symbol_record_bytes += reference_size + (global ? public_size : 0);
+                        global_count += 1;
+                        public_count += global;
+                    }
+                    else if (symbols_valid)
+                    {
+                        u64 record = symbol_records->count;
+                        global_entries[global_count] = (PdbGsiEntry){
+                            .name = name,
+                            .record_offset = (u32)record,
+                            .bucket = pdb_hash_string_v1(name) % PDB_GSI_BUCKET_COUNT,
+                        };
+                        if (procedure)
+                        {
+                            byte_writer_emit_u16_le(symbol_records, (u16)(reference_size - 2));
+                            byte_writer_emit_u16_le(symbol_records, global ? PDB_S_PROCREF : PDB_S_LPROCREF);
+                            byte_writer_emit_u32_le(symbol_records, 0);
+                            byte_writer_emit_u32_le(symbol_records, (u32)(4 + offset));
+                            byte_writer_emit_u16_le(symbol_records, (u16)(module_index + 1));
+                            byte_writer_emit_bytes(symbol_records, name.pointer, name.length);
+                            byte_writer_emit_zero(symbol_records, 1);
+                        }
+                        else
+                        {
+                            byte_writer_emit_bytes(symbol_records, symbols.pointer + offset, size);
+                            byte_writer_patch_u16_le(symbol_records, record, (u16)(reference_size - 2));
+                        }
+                        byte_writer_align4(symbol_records);
+                        global_count += 1;
+                        if (global)
+                        {
+                            u64 address = offset + (procedure ? PDB_PROC_ADDRESS_OFFSET : PDB_DATA_ADDRESS_OFFSET);
+                            u32 section_offset = pdb_read_u32(symbols, address);
+                            u16 section = 0;
+                            memcpy(&section, symbols.pointer + address + 4, sizeof(section));
+                            u64 public_record = symbol_records->count;
+                            byte_writer_emit_u16_le(symbol_records, (u16)(public_size - 2));
+                            byte_writer_emit_u16_le(symbol_records, PDB_S_PUB32);
+                            byte_writer_emit_u32_le(symbol_records, procedure ? PDB_PUBLIC_FUNCTION_FLAGS : 0);
+                            byte_writer_emit_u32_le(symbol_records, section_offset);
+                            byte_writer_emit_u16_le(symbol_records, section);
+                            byte_writer_emit_bytes(symbol_records, name.pointer, name.length);
+                            byte_writer_emit_zero(symbol_records, 1);
+                            byte_writer_align4(symbol_records);
+                            public_entries[public_count] = (PdbGsiEntry){
+                                .name = name,
+                                .record_offset = (u32)public_record,
+                                .bucket = pdb_hash_string_v1(name) % PDB_GSI_BUCKET_COUNT,
+                            };
+                            public_keys[public_count] = (u64)section << 32 | section_offset;
+                            public_count += 1;
+                        }
+                    }
+                }
+                bool opens = procedure || kind == PDB_S_GPROC32_ID || kind == PDB_S_LPROC32_ID || kind == PDB_S_BLOCK32 ||
+                             kind == PDB_S_INLINESITE || kind == PDB_S_THUNK32;
+                bool closes = kind == PDB_S_END || kind == PDB_S_INLINESITE_END || kind == PDB_S_PROC_ID_END;
+                symbols_valid = symbols_valid && (!closes || depth);
+                depth = opens ? depth + 1 : closes && depth ? depth - 1 : depth;
+                offset += size;
+            }
+        }
+    }
+    if (!symbols_valid || streams[PDB_STREAM_SYMBOL_RECORDS].count != symbol_record_bytes)
+    {
+        return result;
+    }
+    u32* global_order = arena_allocate(arena, u32, global_count ? global_count : 1);
+    u32* public_order = arena_allocate(arena, u32, public_count ? public_count : 1);
+    u32 global_present = pdb_gsi_order(arena, global_entries, global_count, global_order);
+    u32 public_present = pdb_gsi_order(arena, public_entries, public_count, public_order);
+    u64 global_hash_size = pdb_gsi_size(global_count, global_present);
+    u64 public_hash_size = pdb_gsi_size(public_count, public_present);
+    PDB_STREAM_BEGIN(PDB_STREAM_GLOBALS, global_hash_size);
+    pdb_gsi_emit(streams + PDB_STREAM_GLOBALS, global_entries, global_count, global_order, global_present);
+    PDB_STREAM_BEGIN(PDB_STREAM_PUBLICS, PDB_PUBLICS_HEADER_SIZE + public_hash_size + (u64)public_count * 4);
     ByteWriter* publics = streams + PDB_STREAM_PUBLICS;
-    byte_writer_emit_u32_le(publics, PDB_GSI_HASH_HEADER_SIZE);
-    byte_writer_emit_u32_le(publics, 0);
+    byte_writer_emit_u32_le(publics, (u32)public_hash_size);
+    byte_writer_emit_u32_le(publics, public_count * 4);
     byte_writer_emit_u32_le(publics, 0);
     byte_writer_emit_u32_le(publics, 0);
     byte_writer_emit_u16_le(publics, 0);
     byte_writer_emit_u16_le(publics, 0);
     byte_writer_emit_u32_le(publics, 0);
     byte_writer_emit_u32_le(publics, 0);
-    byte_writer_emit_u32_le(publics, 0xffffffff);
-    byte_writer_emit_u32_le(publics, PDB_GSI_HASH_VERSION);
-    byte_writer_emit_u32_le(publics, 0);
-    byte_writer_emit_u32_le(publics, 0);
+    pdb_gsi_emit(publics, public_entries, public_count, public_order, public_present);
+    // The address map lists public record offsets by (section, offset).
+    u32* address_order = arena_allocate(arena, u32, public_count ? public_count : 1);
+    u32* address_scratch = arena_allocate(arena, u32, public_count ? public_count : 1);
+    for (u32 index = 0; index < public_count; index += 1)
+    {
+        address_order[index] = index;
+    }
+    pdb_sort_by_key(address_order, address_scratch, public_keys, public_count);
+    for (u32 index = 0; index < public_count; index += 1)
+    {
+        byte_writer_emit_u32_le(publics, public_entries[address_order[index]].record_offset);
+    }
     // Stream 10: the checked byte capacity also bounds the bucket count to u32.
     u32 names_bucket_count = (u32)names_bucket_capacity;
     PDB_STREAM_BEGIN(PDB_STREAM_NAMES, names_capacity);
@@ -1657,7 +1966,6 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         byte_writer_patch_u32_le(names, names_bucket_start + (u64)bucket * 4, unique_offsets[name_index]);
     }
     byte_writer_emit_u32_le(names, unique_name_count);
-    // Stream 7 stays empty: no symbol records are published yet.
     for (u32 index = 0; index < stream_count; index += 1)
     {
         if (streams[index].overflow)

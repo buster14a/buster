@@ -143,6 +143,19 @@ in both frontend forms.
   intmax arithmetic, pointer/void/aggregate neighbors and selected-arm effects.
   Its desktop runtime matrix covers FAST and QUALITY at O0/O2, with
   independent GCC/Clang execution on hosted Linux x86-64 (GitHub #2523).
+- **Conditional vector operands use type compatibility, not row identity.** SIMD
+  builtin calls and separately declared vector aliases can produce distinct
+  semantic rows with the same byte width and lane type. The conditional retains
+  their vector type; different widths or lane types and vector/scalar
+  pairs remain incompatible. The strict IR operand query resolves builtin SIMD
+  result shapes before conditional prediction, so a load call contributes its
+  vector result rather than the pointer argument found by the identifier fallback.
+  `c_test_simd_conditional_types` checks semantic-only
+  acceptance and canonical lowering for load/load, load/masked-load and alias
+  operands, with rejection controls. `c_test_simd_conditional_header` compiles the
+  production header for Zen 5 in syntax-only and object modes, then runs native
+  stored-lane checks in both allocators and frontend forms, including masked
+  tail lengths. Its source lives outside the frozen retirement corpus.
 - **A GNU vector subscript contributes its scalar lane type to surrounding type queries.** The strict type-only postfix walk recognizes a vector `[]` and returns its element type, as it already does for arrays and pointers. If it leaves the base vector type, `flag ? left[index] : right[index]` is mispredicted and a valid scalar conditional can be rejected before lowering. This change applies to type prediction only, so a vector-valued conditional retains its vector type. `c_test_vector_subscript_conditional_type` checks lane `sizeof` and `_Generic`, signed/unsigned conditional conversion, and a vector conditional across GNU11/GNU17/GNU23, six target layouts, and both frontend forms; hosted GNU11/GNU17 execution covers both allocators and frontend forms.
 - **A comma expression can be any value operand, including when its right side
   calls a function.** The lowering expression machine sequences the complete

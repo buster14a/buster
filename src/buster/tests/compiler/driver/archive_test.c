@@ -902,6 +902,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_tests(UnitTestArgumen
     UnitTestResult unused_payload = compiler_driver_archive_test_unused_size_relocation(arguments);
     result.test_count += unused_payload.test_count;
     result.succeeded_test_count += unused_payload.succeeded_test_count;
+    UnitTestResult unreadable = compiler_driver_archive_test_unindexed_unreadable_member(arguments);
+    result.test_count += unreadable.test_count;
+    result.succeeded_test_count += unreadable.succeeded_test_count;
     UnitTestResult transitions = compiler_driver_archive_test_transitions(arguments);
     result.test_count += transitions.test_count;
     result.succeeded_test_count += transitions.succeeded_test_count;

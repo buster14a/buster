@@ -8,6 +8,8 @@
 // combination authority both calls share, so an API-built invocation is refused
 // exactly as its argv spelling would be. The parser first replaces `@path` arguments through
 // compiler_driver_expand_response_files (bounded, one level, no nesting).
+// -fmacro-prefix-map retains ordered literal filename substitutions for
+// c_macro_builtin_token; physical source and dependency identities stay intact.
 // Comma-separated -Wl payloads become individual linker arguments;
 // compiler_driver_validate_linker_query handles the native identity query;
 // link_validate_linker_arguments owns the image-producing semantic subset.
@@ -63,6 +65,8 @@
 // The test-only compiler_driver_test_setup_order observer checks completed
 // setup against real serial unit boundaries without comparing wall times.
 // archive.c owns indexed archive extraction and its pass-ordered worklist.
+// compiler_driver_archive_read_failure formats archive read refusals with the
+// reader's member attribution.
 // compiler_driver_elf_library_roots and compiler_driver_mach_library_roots
 // share target/sysroot search roots with static-library lookup; explicit -L
 // roots come first. compiler_driver_mach_library_locate resolves Apple dylibs
@@ -1042,12 +1046,54 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_linker_query(CompilerDriverInv
     }
 }
 
+// Names must be nonempty independently of the missing-lookup name sentinel.
+// Embedding callers bypass argv parsing, so validate their lists here too.
+BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_names(Arena* arena, CompilerDriverInvocation* invocation)
+{
+    // Count admission precedes all array reads, including a linker query.
+    u64 library_count = (u64)invocation->library_count + invocation->framework_count;
+    u32 library_reserve = invocation->target.os == OPERATING_SYSTEM_WINDOWS ? 8u : invocation->target.os == OPERATING_SYSTEM_LINUX ? COMPILER_DRIVER_ELF_SCRIPT_MEMBERS + 3u : 0u;
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE &&
+        (library_count >= (u64)UINT32_MAX - library_reserve || invocation->library_path_count > UINT32_MAX - 9u))
+    {
+        invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation->diagnostic = S8("native library counts exceed driver limits");
+    }
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE &&
+        ((invocation->library_count && !invocation->libraries) || (invocation->framework_count && !invocation->frameworks)))
+    {
+        compiler_driver_argument_error(arena, invocation, S8("missing dependency name storage after {S8}"),
+                                       invocation->library_count && !invocation->libraries ? S8("-l") : S8("-framework"));
+    }
+    for (u32 index = 0; invocation->error == COMPILER_DRIVER_ERROR_NONE && index < invocation->library_count; index += 1)
+    {
+        if (!invocation->libraries[index].length)
+        {
+            compiler_driver_argument_error(arena, invocation, S8("empty dependency name after {S8}"), S8("-l"));
+        }
+    }
+    for (u32 index = 0; invocation->error == COMPILER_DRIVER_ERROR_NONE && index < invocation->framework_count; index += 1)
+    {
+        if (!invocation->frameworks[index].length)
+        {
+            compiler_driver_argument_error(arena, invocation, S8("empty dependency name after {S8}"), S8("-framework"));
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_request(Arena* arena, CompilerDriverInvocation* invocation)
 {
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE && invocation->macro_prefix_map_count &&
+        (!invocation->macro_prefix_maps || invocation->has_gpu_target))
+    {
+        compiler_driver_argument_error(arena, invocation, S8("invalid macro-prefix-map request: {S8}"),
+                                       invocation->has_gpu_target ? S8("GPU forwarding is unsupported") : S8("mapping array is missing"));
+    }
     if (invocation->error == COMPILER_DRIVER_ERROR_NONE && invocation->has_gpu_target)
     {
         compiler_driver_reject_gpu_native_options(arena, invocation, 0, 0);
     }
+    compiler_driver_validate_dependency_names(arena, invocation);
     compiler_driver_validate_codegen_request(invocation, false);
     compiler_driver_validate_dependency_request(arena, invocation);
     compiler_driver_validate_linker_query(invocation);
@@ -1960,9 +2006,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     // Windows INCLUDE entries reserve their own exact-sized array below.
     u64 default_include_capacity = 5;
     u64 linker_argument_capacity = arguments.length;
+    u64 macro_prefix_map_capacity = 0;
     for (u64 index = 0; index < arguments.length; index += 1)
     {
         String8 argument = arguments.pointer[index];
+        macro_prefix_map_capacity += string_starts_with_sequence(argument, S8("-fmacro-prefix-map="));
         if (string_starts_with_sequence(argument, S8("-Wl,")))
         {
             for (u64 offset = 4; offset < argument.length; offset += 1)
@@ -1984,6 +2032,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     invocation.system_include_paths = arena_allocate(arena, String8, arguments.length + default_include_capacity);
     invocation.forced_includes = arena_allocate(arena, String8, arguments.length);
     invocation.macro_operations = arena_allocate(arena, CPreprocessorOperation, arguments.length);
+    if (macro_prefix_map_capacity)
+    {
+        invocation.macro_prefix_maps = arena_allocate(arena, CMacroPrefixMap, macro_prefix_map_capacity);
+    }
     invocation.library_paths = arena_allocate(arena, String8, arguments.length);
     invocation.libraries = arena_allocate(arena, String8, arguments.length);
     invocation.framework_paths = arena_allocate(arena, String8, arguments.length);
@@ -2008,6 +2060,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     String8 position_independent_image_option = {0};
     bool common_storage_requested = false;
     bool static_link_requested = false;
+    // Explicit pass controls override level defaults in either option order.
+    u32 fast_override_mask = 0;
     String8 runtime_omission_option = {0};
     String8 dependency_option_without_mode = {0};
     bool direct_dependency_options = false;
@@ -2030,6 +2084,37 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (string_equal(argument, S8("--")))
         {
             options_ended = true;
+            continue;
+        }
+        if (string_starts_with_sequence(argument, S8("-fmacro-prefix-map=")))
+        {
+            String8 operand = string_slice(argument, S8("-fmacro-prefix-map=").length, argument.length);
+            u64 separator = operand.length;
+            // GCC separates at the last '=' so build roots may contain '='.
+            for (u64 offset = operand.length; offset; offset -= 1)
+            {
+                if (operand.pointer[offset - 1] == '=')
+                {
+                    separator = offset - 1;
+                    break;
+                }
+            }
+            if (separator == operand.length)
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("expected OLD=NEW in {S8}"), argument);
+            }
+            else if (!invocation.macro_prefix_maps || invocation.macro_prefix_map_count >= macro_prefix_map_capacity)
+            {
+                invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+                invocation.diagnostic = S8("macro prefix map storage is inconsistent");
+            }
+            else
+            {
+                invocation.macro_prefix_maps[invocation.macro_prefix_map_count++] = (CMacroPrefixMap){
+                    .old_prefix = string_slice(operand, 0, separator),
+                    .new_prefix = string_slice(operand, separator + 1, operand.length),
+                };
+            }
             continue;
         }
         if (string_equal(argument, S8("-MD")) || string_equal(argument, S8("-MMD")))
@@ -2317,6 +2402,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 break;
             }
             String8 value = arguments.pointer[++argument_index];
+            if (!value.length && (string_equal(argument, S8("-l")) || string_equal(argument, S8("-framework"))))
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("empty dependency name after {S8}"), argument);
+                break;
+            }
             if (string_equal(argument, S8("-o")))
             {
                 invocation.output_path = value;
@@ -2689,6 +2779,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (string_equal(argument, S8("-fcanonical-fast")) || string_equal(argument, S8("-fno-canonical-fast")))
         {
             invocation.fast_passes = string_equal(argument, S8("-fcanonical-fast")) ? IR_FAST_ALL : 0;
+            fast_override_mask = IR_FAST_ALL;
             continue;
         }
         if (string_equal(argument, S8("-ftime-canonical-fast")))
@@ -2706,6 +2797,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 String8 name = ir_fast_pass_name((IrFastPass)pass);
                 if (string_equal(fast_enable, name) || string_equal(fast_disable, name))
                 {
+                    fast_override_mask |= IR_FAST_PASS_BIT(pass);
                     if (fast_enable.length) invocation.fast_passes |= IR_FAST_PASS_BIT(pass);
                     else invocation.fast_passes &= ~IR_FAST_PASS_BIT(pass);
                     fast_option = true;
@@ -2791,8 +2883,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             {
                 if (string_equal(argument, levels[index].flag))
                 {
-                    invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST;
                     invocation.optimization_level = levels[index].level;
+                    // Debug levels skip optional cleanup. Positive levels use
+                    // the adopted bounded recipe; explicit masks stay final.
+                    u32 fast_policy = levels[index].level ? IR_FAST_ALL : 0;
+                    invocation.fast_passes = (invocation.fast_passes & fast_override_mask) | (fast_policy & ~fast_override_mask);
                     found = true;
                     break;
                 }
@@ -5855,6 +5950,15 @@ struct CompilerDriverCpuRuntime
     u32 reserved;
 };
 
+// An archive refused while reading its descriptors names the failing member
+// when the reader attributed one, such as an unindexed member whose symbol
+// table cannot be read.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_archive_read_failure(Arena* arena, String8 path, ObjectArchive* archive)
+{
+    return archive->diagnostic.length ? string_format(arena, S8("could not read archive {S8}: {S8}"), path, archive->diagnostic)
+                                      : string_format(arena, S8("could not read archive {S8}: error {u32}"), path, (u32)archive->error);
+}
+
 // Like `-lgcc` at the end of GCC's link line, but narrower: only a remaining
 // strong reference to the target's CPU-feature runtime reads libgcc.a, and
 // only the members defining those names are selected, so every other link and
@@ -5885,7 +5989,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverCpuRuntime compiler_driver_elf_cpu_runtime(Are
         else if (archive.error != OBJECT_ERROR_NONE || archive.object_count > UINT32_MAX - object_count)
         {
             result.symbol = missing;
-            result.diagnostic = string_format(arena, S8("could not read archive {S8}: error {u32}"), path, (u32)archive.error);
+            result.diagnostic = compiler_driver_archive_read_failure(arena, path, &archive);
         }
         else
         {
@@ -7542,7 +7646,21 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
     {
         metrics->function_symbol_limit = object.symbol_count;
     }
-    compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result, metrics);
+    // Every declared section is its own COFF or Mach-O section, so a file
+    // with more than the format can number is refused here, naming the first
+    // section past the limit, rather than by the writer's capacity check.
+    ObjectFormat format = object_format_for_target(invocation.target);
+    u32 section_limit = format == OBJECT_FORMAT_COFF ? OBJECT_COFF_MAX_SECTIONS : format == OBJECT_FORMAT_MACH_O64 ? OBJECT_MACH_O_MAX_SECTIONS : UINT32_MAX;
+    if (invocation.action == COMPILER_DRIVER_ACTION_OBJECT && unit.section_count > section_limit)
+    {
+        result.error = COMPILER_DRIVER_ERROR_OBJECT;
+        result.diagnostic = string_format(arena, S8("{S8}: section '{S8}' is section {u32} of {u32}; a {S8} object holds at most {u32} sections"), path,
+                                          unit.sections[section_limit].name, section_limit + 1, unit.section_count, object_format_name(format), section_limit);
+    }
+    else
+    {
+        compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result, metrics);
+    }
     return result;
 }
 
@@ -7643,6 +7761,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
     CPreprocessResult preprocess = c_preprocess(arena, (String8){.pointer = split, .length = split_length},
                                                 (CPreprocessOptions){
                                                     .macro_operations = invocation.macro_operations,
+                                                    .macro_prefix_maps = invocation.macro_prefix_maps,
+                                                    .macro_prefix_map_count = invocation.macro_prefix_map_count,
                                                     .definitions = definitions,
                                                     .undefinitions = invocation.undefinitions,
                                                     .include_paths = invocation.include_paths,
@@ -7886,6 +8006,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     preprocess = c_preprocess(arena, BYTE_SLICE_TO_STRING(8, bytes),
                                                 (CPreprocessOptions){
                                                     .macro_operations = invocation.macro_operations,
+                                                    .macro_prefix_maps = invocation.macro_prefix_maps,
+                                                    .macro_prefix_map_count = invocation.macro_prefix_map_count,
                                                     .definitions = definitions,
                                                     .undefinitions = invocation.undefinitions,
                                                     .include_paths = invocation.include_paths,
@@ -8035,8 +8157,11 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     .pin_debug_locals = invocation.debug_info &&
                                                                                         (!invocation.pinned_debug_locals_explicit ||
                                                                                          invocation.enable_pinned_debug_locals),
+                                                                    // Lowering reads root conditionals and statement extents
+                                                                    // from the pilot's tree; it is released at `end:`, after lowering.
                                                                     .syntax_tree = pilot_tree_built ? &pilot_tree : 0,
-                                                                    .ast_lower_statistics = pilot_tree_built ? &result.c_ast.lower : 0});
+                                                                    .ast_lower_statistics = pilot_tree_built ? &result.c_ast.lower : 0,
+                                                                    .syntax_tree_extent_statistics = pilot_tree_built ? &result.c_ast.extents : 0});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     result.type_layout = lowered.type_layout;
@@ -9435,16 +9560,6 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             goto finish;
         }
     }
-    // Count both explicit entries and the target's defaults before any source
-    // read, fast-path allocation or lookup; export maps also reserve libc.
-    u64 library_count = (u64)invocation.library_count + invocation.framework_count;
-    u32 library_reserve = invocation.target.os == OPERATING_SYSTEM_WINDOWS ? 8u : invocation.target.os == OPERATING_SYSTEM_LINUX ? COMPILER_DRIVER_ELF_SCRIPT_MEMBERS + 3u : 0u;
-    if (library_count >= (u64)UINT32_MAX - library_reserve || invocation.library_path_count > UINT32_MAX - 9u)
-    {
-        result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-        result.diagnostic = S8("native library counts exceed driver limits");
-        goto finish;
-    }
     // The digest covers every structured record, and function sizes are a
     // refinement of a measurement, so neither may be silently empty.
     if ((measure && invocation.suppress_diagnostic_records) || (invocation.collect_function_sizes && !measure))
@@ -9750,7 +9865,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         if (input_archives[input_index].error != OBJECT_ERROR_NONE || input_archives[input_index].object_count > UINT32_MAX - object_capacity)
         {
             compiler_driver_fail_input(&result, inputs, input_index, COMPILER_DRIVER_ERROR_OBJECT, input_archives[input_index].error,
-                                          string_format(arena, S8("could not read archive {S8}: error {u32}"), input_path, (u32)input_archives[input_index].error));
+                                          compiler_driver_archive_read_failure(arena, input_path, &input_archives[input_index]));
             goto finish;
         }
         object_capacity += input_archives[input_index].object_count;
@@ -9782,7 +9897,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             result.error = COMPILER_DRIVER_ERROR_OBJECT;
             result.object_error = archive.error;
-            result.diagnostic = string_format(arena, S8("could not read archive {S8}: error {u32}"), archive_path, (u32)archive.error);
+            result.diagnostic = compiler_driver_archive_read_failure(arena, archive_path, &archive);
             goto finish;
         }
         object_capacity += archive.object_count;
@@ -10086,6 +10201,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.types.declines += unit.c_ast.types.declines;
         result.c_ast.types.misses += unit.c_ast.types.misses;
         result.c_ast.types.gated += unit.c_ast.types.gated;
+        result.c_ast.types.lookups_settled += unit.c_ast.types.lookups_settled;
+        result.c_ast.types.lookups_walked += unit.c_ast.types.lookups_walked;
         result.c_ast.statements.bodies += unit.c_ast.statements.bodies;
         result.c_ast.statements.fallbacks += unit.c_ast.statements.fallbacks;
         for (u32 reason = 0; reason < C_AST_STATEMENT_FALLBACK_COUNT; reason += 1)
@@ -10123,6 +10240,20 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             result.c_ast.specifiers.reason = unit.c_ast.specifiers.reason;
             result.c_ast.specifiers.fallback_token = unit.c_ast.specifiers.fallback_token;
+        }
+        result.c_ast.extents.bodies += unit.c_ast.extents.bodies;
+        result.c_ast.extents.entries += unit.c_ast.extents.entries;
+        result.c_ast.extents.entry_declines += unit.c_ast.extents.entry_declines;
+        result.c_ast.extents.answers += unit.c_ast.extents.answers;
+        for (u32 reason = 0; reason < C_AST_EXTENT_FALLBACK_COUNT; reason += 1)
+        {
+            result.c_ast.extents.walked[reason] += unit.c_ast.extents.walked[reason];
+            result.c_ast.extents.body_fallbacks[reason] += unit.c_ast.extents.body_fallbacks[reason];
+        }
+        if (unit.c_ast.extents.reason)
+        {
+            result.c_ast.extents.reason = unit.c_ast.extents.reason;
+            result.c_ast.extents.fallback_token = unit.c_ast.extents.fallback_token;
         }
         result.c_ast.lower.bodies += unit.c_ast.lower.bodies;
         result.c_ast.lower.conditionals += unit.c_ast.lower.conditionals;
