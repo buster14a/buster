@@ -185,6 +185,20 @@ BUSTER_F_DECL void os_prefault_test_force_next(OsPrefaultResult result);
 BUSTER_F_DECL OsPrefaultTestCounters os_prefault_test_counters(void);
 
 #if BUSTER_INCLUDE_TESTS
+typedef struct OsImageRetentionCounters OsImageRetentionCounters;
+struct OsImageRetentionCounters
+{
+    u64 registered;
+    u64 retained_files;
+    u64 retained_directories;
+    u64 overflowed;
+};
+
+BUSTER_F_DECL bool os_image_retention_set_active(bool active);
+BUSTER_F_DECL bool os_image_retention_active(void);
+BUSTER_F_DECL void os_image_retention_register(String8 path);
+BUSTER_F_DECL OsImageRetentionCounters os_image_retention_counters(void);
+
 // The debugger-presence cache is one tri-state published after its probe:
 // 0 unprobed, 1 no debugger, 2 debugger. Reset returns it to unprobed so the
 // next is_debugger_present call probes again; State reads it without probing.
