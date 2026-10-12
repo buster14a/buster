@@ -4109,6 +4109,79 @@ the shipped one. Both are diagnostic only. There were two candidates:
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
 
+### Type-word test and label proof in lowering's classification
+
+After the [statement-keyword gate](#statement-keyword-gate-in-lowerings-classification),
+two pieces of `c_ir_lower_body_advance`'s first-token classification were
+left open: the type-word test (about 9.0 M Ir) and the label proof (about
+5.7 M). Those figures came from noinline census wrappers, so they include the
+wrappers' own calls.
+
+A throwaway census build of main `7bc92b2d` counted both on the unity
+self-host (`-g0 -c`, default flags, tests-off `-march=x86-64-v3` Release,
+Callgrind):
+- **The type-word test.** 103,554 calls spend 8.05 M Ir in
+  `c_parse_type_word_for_dialect`, about 78 Ir a call, matching the spelling
+  against a ladder of string compares.
+  - The declaration branch makes 98,569 calls. 86,724 are identifiers bound
+    to an entity, 6,990 are predefined symbols, and 6,876 answer true.
+  - The `declaration_statement` test makes 4,985 calls. All are bound
+    identifiers, and none answers true.
+  - `c_parse_type_word_for_dialect_token` answers every one of the 103,554
+    the same way. It reads the interned symbol's `word_bits`, which are
+    computed from the same spelling predicates, and every specifier spelling
+    is interned in the predefined range.
+- **The label proof.** Of 156,929 first tokens, 12 have the shape an
+  identifier followed by `:`. Only those 12 reach the out-of-line proof, and
+  all 12 are labels. The shape test is already inline and needs about two
+  token loads a statement, so there is nothing separate to gate. The
+  dead-code hop after a terminator, in the same function, calls
+  `c_ir_named_label_proven_at` 18,882 times (2.19 M). That is a different
+  question, and it is under the floor below.
+
+These budgets were declared before the measured runs. The input is the
+self-host unity input, at `-g0 -c` for the instruction counts and at
+`-g -c` for the objects. Four arms are counted with Callgrind
+(`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3` Release
+builds, with the driver built by Clang (no TCC on the host):
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `7bc92b2d`, which the candidate branches from. The budgets:
+- **Correctness.** Both type-word sites read the token form instead of the
+  spelling. Reference-check builds (Debug and sanitized) compare the two
+  answers for every identifier first token. The `-c` objects (`-g0` and
+  `-g`) must be byte-identical across the four arms. `test_self_host` must
+  keep its fixed point, and `test_all` must pass.
+- **The test (D against A).** `c_ir_lower_body_advance` makes no call to
+  `c_parse_type_word_for_dialect`.
+- **The whole compile.** `-c` (`-g0`) must fall by at least 3 M Ir, both D
+  against A and C against B. Below that floor the result is recorded as
+  negative and no code ships. `-fsyntax-only` runs no lowering, so it is not
+  measured.
+- **The label proof.** A cut is built only if it removes at least 3 M. The
+  census above leaves none, so the result is recorded as negative, with no
+  code.
+- **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
+  requested. The report-only main comparison runs after the merge, and Zen 5
+  validation stays incomplete (#2761).
+
+The hosted census is
+[`2026-10-12T220456Z`](../../performance-audits/2026-10-12T220456Z.md),
+diagnostic only:
+- **The type-word test ships on the token path.** Both arms fall by 8.98 M Ir
+  (−0.036% default, −0.039% pilot). `c_ir_lower_body_advance` makes no
+  spelling-ladder call, and the objects are byte-identical across the four
+  arms at `-g0` and `-g`.
+- **The label proof is negative.** No code ships for it.
+- **Leads, unclaimed:** the dead-code hop's proofs (2.19 M) and
+  `c_ir_query_execute`'s 48,392 spelling-ladder calls (4.98 M).
+- Zen 5 validation stays incomplete (#2761).
+
+Results are recorded in a performance audit (`tools/new_audit.py`), not here.
+
 ### Settling the name checks, second cut
 
 This section has its own anchor because other open AST branches append to
