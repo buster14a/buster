@@ -801,6 +801,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_default_arguments(Un
     String8 raw[] = {S8("--as-needed")};
     NativeExecutableLinkOptions options = {.linker_arguments = raw, .linker_argument_count = 1};
     BUSTER_TEST(arguments, !link_validate_linker_arguments(parsed.target, options, true, 0));
+    // Public invocations can be constructed without going through the parser.
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        String8 command[] = {S8("--target"), targets[target], S8("main.o"), S8("-lfirst")};
+        CompilerDriverInvocation api = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        if (BUSTER_REQUIRE(arguments, api.error == COMPILER_DRIVER_ERROR_NONE && api.link_operation_count == 2))
+        {
+            if (target) api.link_operations[1].as_needed = true;
+            else api.link_operations[0].as_needed = true;
+            BUSTER_TEST(arguments, compiler_driver_execute_invocation(arena, api).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        }
+    }
     scratch_end(temporary);
     return result;
 }
@@ -921,6 +933,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_default_images(UnitT
     String8 before[] = {S8("-g0"), defaults, string_format_z(arena, S8("-L{S8}"), root), S8("-lneeded"), main_source, S8("-o"), executable};
     CompilerDriverResult refused = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(before)));
     BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK);
+    String8 repeated[] = {S8("-g0"), defaults, string_format_z(arena, S8("-L{S8}"), root), S8("-lneeded"), main_source,
+        S8("-lneeded"), S8("-Wl,-rpath,$ORIGIN"), S8("-o"), executable};
+    CompilerDriverResult kept_later = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(repeated)));
+    BUSTER_TEST(arguments, kept_later.error == COMPILER_DRIVER_ERROR_NONE && compiler_driver_test_needed_tag(arena, executable, S8("libneeded.so")));
     BUSTER_TEST(arguments, file_write(main_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
     String8 trivial_command[] = {S8("-g0"), main_source, defaults, S8("-o"), executable};
     CompilerDriverResult trivial = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(trivial_command)));

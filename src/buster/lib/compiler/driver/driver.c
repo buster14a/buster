@@ -601,6 +601,11 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_link_operations_valid(CompilerDriverInv
             result = false;
             break;
         }
+        // API-built streams must obey the same policy bounds as parsed flags.
+        result = result && (!operation.as_needed ||
+                 (operation.kind == COMPILER_DRIVER_LINK_OPERATION_LIBRARY && invocation->action == COMPILER_DRIVER_ACTION_LINK &&
+                  !invocation->has_gpu_target && !invocation->emit_llvm_bitcode &&
+                  invocation->target.os == OPERATING_SYSTEM_LINUX && invocation->target.cpu_arch == CPU_ARCH_X86_64));
     }
     return result;
 }
@@ -7833,7 +7838,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
                                                         .runtime_data_symbol_count = dynamic_libraries.runtime.exported_data_symbol_count,
                                                         .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
                                                         .runtime_exports_known = dynamic_libraries.runtime.exports_known,
-                                                    .runtime_relr = dynamic_libraries.runtime.supports_relr,
+                                                        .runtime_relr = dynamic_libraries.runtime.supports_relr,
                                                         .debug_info = invocation.debug_info,
                                                         .image_kind = (u8)invocation.image_kind,
                                                     });
@@ -11062,7 +11067,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                                                     .runtime_data_symbol_count = dynamic_libraries.runtime.exported_data_symbol_count,
                                                     .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
                                                     .runtime_exports_known = dynamic_libraries.runtime.exports_known,
-                                                        .runtime_relr = dynamic_libraries.runtime.supports_relr,
+                                                    .runtime_relr = dynamic_libraries.runtime.supports_relr,
                                                     .debug_info = invocation.debug_info,
                                                     .image_kind = (u8)invocation.image_kind,
                                                 });
