@@ -60,6 +60,7 @@ import csv
 import hashlib
 import math
 import re
+import shlex
 import statistics
 from pathlib import Path
 
@@ -373,6 +374,10 @@ WILD_LINKER_COMPARATORS = {
     "bfd": {"command": "ld", "version": "GNU ld ", "policy": "", "threads1": ""},
 }
 WILD_LINKER_CELLS = ["ide-debug", "ide-unity-release", "ide-separate-release"]
+# What `wild --version` prints and what Wild writes into its output's .comment by default
+# (Args::linker_identity at wild e9a9b0cb, libwild/src/args.rs). Another linker installed as
+# `wild` is refused by both checks.
+WILD_IDENTITY = re.compile(r"Wild [0-9][0-9A-Za-z.+-]* \(compatible with GNU linkers\)\Z")
 WILD_LINKER_LINKERS = ("comparator", "wild")
 WILD_LINKER_TREE_ARGUMENTS = ["--cc", "clang", "--linker", "DEFAULT", "--no-include-tests", "--no-fuzz", "--no-sanitize",
                               "--no-lto", "--", "-DBUSTER_DEBUG_INFO=ON", "-DBUSTER_FRAME_POINTERS=ON"]
@@ -385,7 +390,10 @@ WILD_LINKER_PROFILE = {
               "build-wild-separate": [*WILD_LINKER_TREE_ARGUMENTS, "-DBUSTER_UNITY_BUILD=OFF"]},
     "builds": [["build-wild-unity", "Release"], ["build-wild-separate", "Debug"], ["build-wild-separate", "Release"]],
     "cells": WILD_LINKER_CELLS,
-    "wild": {"command": "wild", "policy": "--no-fork --icf=none", "threads1": "--threads=1"},
+    "cell_trees": {"ide-debug": ["build-wild-separate", "Debug"], "ide-unity-release": ["build-wild-unity", "Release"],
+                   "ide-separate-release": ["build-wild-separate", "Release"]},
+    "wild": {"command": "wild", "policy": "--no-fork --icf=none", "threads1": "--threads=1",
+             "identity": "Wild <version> (compatible with GNU linkers), from --version and its output's .comment"},
     "comparator": "mold, the audit's comparator; the host's default ld (GNU ld) only when mold is absent",
     "policy": f"Clang's printed Wild argv for each cell, identical for both linkers, plus --no-gc-sections and "
               f"--build-id={WILD_LINKER_BUILD_ID}; no LTO",
@@ -1018,8 +1026,10 @@ def wild_linker_bundle_files() -> dict[str, str]:
              "affinity": "affinity.txt", "completion": "completion.txt"}
     for cell in WILD_LINKER_CELLS:
         files[f"inputs {cell}"] = f"{cell}-inputs.sha256"
+        files[f"argv {cell}"] = f"{cell}-argv.txt"
         for linker in WILD_LINKER_LINKERS:
             files[f"output {cell} {linker}"] = f"{cell}-{linker}.output.sha256"
+            files[f"comment {cell} {linker}"] = f"{cell}-{linker}.comment.txt"
     return files
 
 
@@ -1173,6 +1183,8 @@ def _wild_linker_identity_problems(identity: object, head: str) -> tuple[dict, l
             problems.append(f"wild-linker {role} command or options are not the frozen ones for {kind!r}")
         elif role == "comparator" and not (isinstance(version, str) and version.startswith(frozen["version"])):
             problems.append(f"wild-linker comparator version {version!r} is not a {kind} version")
+        elif role == "wild" and not (isinstance(version, str) and WILD_IDENTITY.fullmatch(version)):
+            problems.append(f"wild-linker wild version {version!r} is not Wild's own identity")
         if role == "comparator" and linker.get("substituted") is not (kind != "mold"):
             problems.append("wild-linker comparator substitution flag does not match its kind")
         if not (isinstance(version, str) and version.strip()):
@@ -1186,6 +1198,9 @@ def _wild_linker_identity_problems(identity: object, head: str) -> tuple[dict, l
         usable[role] = linker
     if usable.get("wild", {}).get("sha256") == usable.get("comparator", {}).get("sha256"):
         problems.append("wild-linker Wild and its comparator are the same executable")
+    root = identity.get("build_root")
+    if not (isinstance(root, str) and root.startswith("/") and "'" not in root and "\n" not in root):
+        problems.append(f"wild-linker build root {root!r} is not a recorded absolute path")
     harness = identity.get("harness") if isinstance(identity.get("harness"), dict) else {}
     if sorted(harness) != ["wild_linker_acceptance.c", "wild_linker_bench.c"] or \
             not all(isinstance(value, str) and SHA256.fullmatch(value) for value in harness.values()):
@@ -1241,34 +1256,105 @@ def validate_wild_linker(status: object, files: object, head: str, expected_iden
     for name, count in counts.items():
         if [row.get("exit") for row in rows if row.get("cell") == name] != ["0"] * count:
             problems.append(f"wild-linker {name} did not pass {count} times")
-    # Each timed command runs the linker its slot names with the frozen options, nothing else.
+    root = identity.get("build_root") if isinstance(identity, dict) and isinstance(identity.get("build_root"), str) else ""
+    expected = {}
+    for cell in profile["cells"]:
+        commands, argv_problems = wild_linker_cell_commands(cell, files[f"argv {cell}"], files[f"inputs {cell}"],
+                                                            root, linkers)
+        expected[cell] = commands
+        problems.extend(argv_problems)
+        wild = linkers.get("wild", {}).get("version")
+        comments = {linker: files[f"comment {cell} {linker}"].splitlines() for linker in WILD_LINKER_LINKERS}
+        if not isinstance(wild, str) or wild not in comments["wild"]:
+            problems.append(f"wild-linker {cell} Wild output does not carry the recorded Wild identity in .comment")
+        if any(WILD_IDENTITY.fullmatch(line) for line in comments["comparator"]):
+            problems.append(f"wild-linker {cell} comparator output carries a Wild identity in .comment")
+    # Every timed command, and each validated and repeated link, is exactly the command derived from the
+    # cell's retained argv and the frozen options: no other input, linker or shell text can run.
     commands = {}
     for line in files["commands"].splitlines():
         fields = line.split("\t", 4)
         if len(fields) == 5:
             commands[fields[0]] = fields
-    roles = {cell: (first, second) for cell, _, first, second in wild_linker_population()}
-    common = f" --no-gc-sections --build-id={WILD_LINKER_BUILD_ID}"
+    timed = {}
+    for cell in profile["cells"]:
+        timed.update({name: (cell, first, second) for name, _, first, second in wild_linker_population()
+                      if name.startswith(cell + "-")})
+    current = None
     for row in rows:
-        cell = row.get("cell")
-        if cell not in roles or row.get("variant") not in ("A", "B"):
-            continue
-        role = roles[cell][0 if row["variant"] == "A" else 1]
-        linker = linkers.get(role, {})
+        name = row.get("cell")
         fields = commands.get(row.get("sequence"))
-        command = fields[4] if fields and fields[1:4] == [cell, row["variant"], row.get("round")] else ""
-        threads = cell.endswith("-threads1")
-        if role == "wild":
-            wanted = f"{common} {profile['wild']['policy']}" + (f" {profile['wild']['threads1']}" if threads else "")
-            invoked = f' && "{linker.get("path")}" '
+        command = fields[4] if fields and fields[1:4] == [name, row.get("variant"), row.get("round")] else None
+        if name in timed and row.get("variant") in ("A", "B"):
+            current, first, second = timed[name]
+            role = first if row["variant"] == "A" else second
+            threads = "threads1" if name.endswith("-threads1") else "default"
+            allowed = {(expected.get(current) or {}).get((role, threads))}
+        elif name in ("validated-link", "same-linker-repeat") and current is not None:
+            allowed = {(expected.get(current) or {}).get((role, "default")) for role in WILD_LINKER_LINKERS}
         else:
-            wanted = f"{common} {linker.get('policy')}" + (f" {linker.get('threads1')}" if threads else "")
-            invoked = f" && '{linker.get('path')}' "
-        if invoked not in command or not command.endswith(wanted) or WILD_LINKER_BUILD_ID not in command:
-            problems.append(f"wild-linker {cell} {row['variant']} round {row.get('round')} did not run the recorded "
-                            f"{role} with the frozen options")
+            continue
+        if command is None or command not in allowed:
+            problems.append(f"wild-linker {name} {row.get('variant')} round {row.get('round')} is not the command "
+                            "derived from the retained argv and the frozen options")
             break
     return problems
+
+
+def _shell_quote(text: str) -> str:
+    """The harness's quote(): one single-quoted shell word."""
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
+def wild_linker_cell_commands(cell: str, argv: str, manifest: str, root: str, linkers: dict) -> tuple[dict, list[str]]:
+    """({(role, default|threads1): command}, problems) for one cell, from its retained Wild argv.
+
+    The argv must start with the recorded Wild, write the cell's ide, and take every relative object or
+    archive from the cell's hashed input manifest; system startup objects must come from /usr or /lib.
+    """
+    profile = WILD_LINKER_PROFILE
+    tree, config = profile["cell_trees"][cell]
+    directory = f"{root}/{tree}"
+    problems: list[str] = []
+    wild = linkers.get("wild", {}).get("path")
+    comparator = linkers.get("comparator", {})
+    try:
+        tokens = shlex.split(argv) if "\n" not in argv.rstrip("\n") else None
+    except ValueError:
+        tokens = None
+    argv = argv.rstrip("\n")
+    listed = {line[66:] for line in manifest.splitlines() if len(line) > 66}
+    if not tokens or not isinstance(wild, str) or tokens[0] != wild or not argv.startswith(f'"{wild}" '):
+        problems.append(f"wild-linker {cell} retained argv does not start with the recorded Wild")
+        tokens = tokens or []
+    outputs = [tokens[index + 1] for index, token in enumerate(tokens[:-1]) if token == "-o"]
+    if outputs != [f"{config}/ide"]:
+        problems.append(f"wild-linker {cell} retained argv does not write {config}/ide")
+    objects = [token for token in tokens[1:] if token.endswith((".o", ".a"))]
+    local = [token for token in objects if not token.startswith("/")]
+    if not local:
+        problems.append(f"wild-linker {cell} retained argv links no object of the head")
+    for token in objects:
+        path = token if token.startswith("/") else f"{directory}/{token}"
+        if token.startswith("/") and ((root and token.startswith(root + "/")) or not token.startswith(("/usr/", "/lib"))):
+            problems.append(f"wild-linker {cell} links {token!r}, which is neither a hashed input nor a system file")
+            break
+        if not token.startswith("/") and path not in listed:
+            problems.append(f"wild-linker {cell} links {token!r}, which its input manifest does not hash")
+            break
+    if any(not path.startswith(directory + "/") for path in listed):
+        problems.append(f"wild-linker {cell} input manifest lists files outside {tree}")
+    common = f" --no-gc-sections --build-id={WILD_LINKER_BUILD_ID}"
+    prefix = f"cd {_shell_quote(directory)} && "
+    commands = {}
+    if isinstance(wild, str) and argv.startswith(f'"{wild}"') and isinstance(comparator.get("path"), str):
+        candidate = f"{prefix}{argv}{common} {profile['wild']['policy']}"
+        reference = (f"{prefix}{_shell_quote(comparator['path'])}{argv[len(wild) + 2:]}{common} "
+                     f"{comparator.get('policy')}")
+        commands = {("wild", "default"): candidate, ("wild", "threads1"): f"{candidate} {profile['wild']['threads1']}",
+                    ("comparator", "default"): reference,
+                    ("comparator", "threads1"): f"{reference} {comparator.get('threads1')}"}
+    return commands, problems
 
 
 def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expected_candidate_sha: str | None = None) -> list[str]:

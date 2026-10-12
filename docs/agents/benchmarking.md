@@ -1018,7 +1018,9 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
      and never downloads a linker. The comparator is the audit's, mold
      (`command -v mold`). Only when mold is not installed at all does it
      fall back to the host's default `ld`, which must report a GNU ld
-     version. The check then states the substitution. Each linker's
+     version. The check then states the substitution. Wild must report its
+     own identity, `Wild <version> (compatible with GNU linkers)`, which is
+     what `Args::linker_identity` prints at wild `e9a9b0cb`. Each linker's
      `command -v` path, resolved path, first `--version` line and SHA-256
      (before and after the leg) go into the receipt. A missing Wild, a
      missing comparator, a silent `--version`, or a `mold` that is not
@@ -1063,6 +1065,13 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    - a harness or input-build exit other than 0;
    - an observed CPU other than the Ryzen 7 9700X, or a harness affinity
      other than CPUs 2-5;
+   - a Wild whose `--version` is not Wild's own identity, a Wild output
+     whose `.comment` does not carry that same identity, or a comparator
+     output that does. Wild writes the identity into every executable it
+     links by default, so another linker installed as `wild` is refused
+     even when it imitates the version line. `compiler_compare` reads each
+     saved output's `.comment` itself, and only after checking that its
+     hash is the one the harness recorded;
    - a linker without an absolute path, a version or a SHA-256, a linker
      whose hash changed during the leg, an unsupported comparator kind, an
      unrecorded or false substitution, or Wild and comparator being the same
@@ -1071,8 +1080,14 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    - a population that is not exactly the eight comparisons in the seeded
      order. The generator is replayed in Python, each with every warmup and
      pair linked successfully;
-   - a timed command that does not run the recorded linker for its slot
-     with the frozen options;
+   - a cell whose retained Wild argv (`<cell>-argv.txt`) does not start with
+     the recorded Wild, write `<config>/ide`, and take every relative object
+     and archive from that cell's hashed input manifest. System startup
+     objects must come from `/usr` or `/lib`, and nothing else may come from
+     the build root;
+   - a timed, validated or repeated link command that is not exactly the
+     command derived from that argv and the frozen options, so no other
+     input, linker or shell text can run;
    - a failed byte-identity, probe or manifest check;
    - a summary median, paired ratio or bootstrap interval that the raw
      samples do not give. The report's cells are re-derived from `raw.csv`;

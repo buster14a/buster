@@ -67,6 +67,7 @@ import shutil
 import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -83,7 +84,8 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               FRONTEND_SELECTOR_PROFILE, FRONTEND_SELECTOR_REQUEST_LINE, FRONTEND_SELECTOR_SCHEMA,
                               frontend_selector_digest, validate_frontend_selector,
                               WILD_LINKER_PROFILE, WILD_LINKER_REQUEST_LINE, WILD_LINKER_SCHEMA, WILD_LINKER_COMPARATORS,
-                              wild_linker_bundle_files, wild_linker_digest, validate_wild_linker,
+                              wild_linker_bundle_files, wild_linker_digest, validate_wild_linker, WILD_IDENTITY,
+                              WILD_LINKER_LINKERS,
                               INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUEST_LINE,
                               ANALYZER_REQUEST_LINES,
                               ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, MAIN40_PROFILE, MAIN_PROFILES, named_main_profile, RECEIPT_SCHEMA, SCALING_PROFILE,
@@ -1675,6 +1677,46 @@ def host_linker(command: str, log: Path) -> tuple[dict | None, str, bool]:
     return identity, problem, absent
 
 
+def elf_comment(data: bytes) -> list[str] | None:
+    """The NUL-separated strings of a little-endian ELF64 image's .comment section, or None if it has none."""
+    strings = None
+    try:
+        if data[:4] == b"\x7fELF" and data[4] == 2 and data[5] == 1:
+            shoff, = struct.unpack_from("<Q", data, 0x28)
+            entsize, count, names = struct.unpack_from("<HHH", data, 0x3A)
+            sections = [struct.unpack_from("<IIQQQQ", data, shoff + index * entsize) for index in range(count)]
+            table = sections[names]
+            for name, _, _, _, offset, size in sections:
+                end = data.index(b"\0", table[4] + name)
+                if data[table[4] + name:end] == b".comment":
+                    strings = [item.decode("utf-8", "replace") for item in data[offset:offset + size].split(b"\0") if item]
+    except (struct.error, IndexError, ValueError):
+        strings = None
+    return strings
+
+
+def record_link_comment(tree: Path, output: Path, cell: str, linker: str) -> list[str]:
+    """Write the .comment strings of the harness's saved output for one cell and linker, after checking that the
+    saved image is the one whose hash the harness recorded; return the problems."""
+    problems: list[str] = []
+    image = tree / f"{cell}-{linker}.elf"
+    recorded = output / f"{cell}-{linker}.output.sha256"
+    try:
+        data = image.read_bytes()
+        expected = recorded.read_text(encoding="utf-8").strip()
+    except OSError as error:
+        data, expected = b"", None
+        problems.append(f"wild-linker {cell} {linker} output unreadable: {error.__class__.__name__}")
+    if expected is not None and hashlib.sha256(data).hexdigest() != expected:
+        problems.append(f"wild-linker {cell} {linker} saved output is not the image the harness hashed")
+    strings = elf_comment(data) if not problems else None
+    if strings is None and not problems:
+        problems.append(f"wild-linker {cell} {linker} output has no readable .comment section")
+    (output / f"{cell}-{linker}.comment.txt").write_text("".join(item + "\n" for item in strings or []),
+                                                        encoding="utf-8")
+    return problems
+
+
 def measure_wild_linker(candidate: Path, work: Path, evidence: Path, head: str, receipt: dict) -> None:
     """Build the head's ide link inputs in an isolated clone, then time the host's Wild against its comparator."""
     record = receipt["wild_linker"]
@@ -1685,6 +1727,8 @@ def measure_wild_linker(candidate: Path, work: Path, evidence: Path, head: str, 
     status = None
     linkers = {}
     wild, problem, _ = host_linker("wild", log)
+    if wild is not None and not WILD_IDENTITY.fullmatch(wild["version"]):
+        problem = f"the host's wild at {wild['path']} reports {wild['version']!r}, not Wild's own identity"
     if problem:
         errors.append(problem)
     else:
@@ -1749,9 +1793,11 @@ def measure_wild_linker(candidate: Path, work: Path, evidence: Path, head: str, 
             for cell in profile["cells"]:
                 manifest = output / f"{cell}-inputs.sha256"
                 inputs[cell] = sha256(manifest) if manifest.is_file() else None
+                for linker in WILD_LINKER_LINKERS if status == 0 else ():
+                    errors.extend(record_link_comment(source / profile["cell_trees"][cell][0], output, cell, linker))
             identity = {"schema": WILD_LINKER_SCHEMA, "profile": profile["name"], "head": head, "cpu_model": cpu_model(),
                         "cpus": profile["cpus"], "linkers": linkers, "harness": harness_sources, "inputs": inputs,
-                        "exit": status}
+                        "build_root": str(source), "exit": status}
             (output / "wild-linker.json").write_text(dumps(identity) + "\n", encoding="utf-8")
             record["identity"] = identity
             problems, record["evidence_omissions"] = export_tree(output, exported, evidence, WILD_LINKER_IGNORE,

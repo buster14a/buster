@@ -4569,6 +4569,9 @@ class FrontendSelectorTest(unittest.TestCase):
             self.assertTrue((root / "evidence" / "frontend_selector" / "ide_bench" / "ide-bench.json").is_file())
 
 WILD_PATH = "/usr/local/bin/wild"
+# Wild's own identity format (Args::linker_identity at wild e9a9b0cb): the positive control.
+WILD_VERSION = "Wild 0.10.0 (compatible with GNU linkers)"
+WILD_ROOT = "/work/wild-linker-source"
 
 
 def wild_linker_evidence(head: str = "a" * 40, kind: str = "mold") -> tuple[dict, dict]:
@@ -4576,7 +4579,7 @@ def wild_linker_evidence(head: str = "a" * 40, kind: str = "mold") -> tuple[dict
     profile = compiler_receipt.WILD_LINKER_PROFILE
     frozen = compiler_receipt.WILD_LINKER_COMPARATORS[kind]
     comparator_path = "/usr/bin/" + frozen["command"]
-    linkers = {"wild": {"command": "wild", "path": WILD_PATH, "realpath": WILD_PATH, "version": "Wild version 0.10.0",
+    linkers = {"wild": {"command": "wild", "path": WILD_PATH, "realpath": WILD_PATH, "version": WILD_VERSION,
                         "sha256": "7" * 64, "sha256_after": "7" * 64, "kind": "wild",
                         "policy": profile["wild"]["policy"], "threads1": profile["wild"]["threads1"]},
                "comparator": {"command": frozen["command"], "path": comparator_path, "realpath": comparator_path,
@@ -4598,15 +4601,18 @@ def wild_linker_evidence(head: str = "a" * 40, kind: str = "mold") -> tuple[dict
         row(cell, variant, -1, "exit 0", exit_status)
     orders, states = compiler_receipt.wild_linker_schedule()
     common = f"--no-gc-sections --build-id={compiler_receipt.WILD_LINKER_BUILD_ID}"
-    manifests = {}
+    manifests, argvs = {}, {}
     for cell in profile["cells"]:
-        directory = "'/work/wild-linker-source/build-wild-%s'" % ("unity" if "unity" in cell else "separate")
-        base = f'"-pie" "-o" "Release/ide" "ide.c.o" {common}'
-        wild = f'cd {directory} && "{WILD_PATH}" {base} {profile["wild"]["policy"]}'
-        reference = f"cd {directory} && '{comparator_path}' {base} {frozen['policy']}"
+        tree, config = profile["cell_trees"][cell]
+        directory = f"{WILD_ROOT}/{tree}"
+        objects = [f"CMakeFiles/ide.dir/{config}/src/{name}.c.o" for name in ("ide", "os", "arena")]
+        argvs[cell] = (f'"{WILD_PATH}" "-z" "relro" "-pie" "-o" "{config}/ide" "/lib/x86_64-linux-gnu/Scrt1.o" ' +
+                       " ".join(f'"{name}"' for name in objects) + ' "-lm" "/lib/x86_64-linux-gnu/crtn.o"')
+        manifests[cell] = "".join(f"{'3' * 64}  {directory}/{name}\n" for name in objects)
+        wild = f"cd '{directory}' && {argvs[cell]} {common} {profile['wild']['policy']}"
+        reference = f"cd '{directory}' && '{comparator_path}'{argvs[cell][len(WILD_PATH) + 2:]} {common} {frozen['policy']}"
         for name in ("capture-link-command", "capture-direct-linker", "freeze-object-manifest"):
             row(name, "setup", -1, "true")
-        manifests[cell] = f"{'3' * 64}  /work/wild-linker-source/build-wild/CMakeFiles/ide.dir/{cell}/ide.c.o\n"
         comparisons = [(f"{cell}-default", reference, wild, profile["pairs"]),
                        (f"{cell}-threads1", f"{reference} {frozen['threads1']}", f"{wild} {profile['wild']['threads1']}",
                         profile["pairs"])]
@@ -4635,14 +4641,18 @@ def wild_linker_evidence(head: str = "a" * 40, kind: str = "mold") -> tuple[dict
     identity = {"schema": compiler_receipt.WILD_LINKER_SCHEMA, "profile": profile["name"], "head": head, "cpu_model": ZEN5,
                 "cpus": list(profile["cpus"]), "linkers": linkers,
                 "harness": {"wild_linker_acceptance.c": "4" * 64, "wild_linker_bench.c": "5" * 64},
-                "inputs": {cell: hashlib.sha256(text.encode()).hexdigest() for cell, text in manifests.items()}, "exit": 0}
+                "inputs": {cell: hashlib.sha256(text.encode()).hexdigest() for cell, text in manifests.items()},
+                "build_root": WILD_ROOT, "exit": 0}
     bundle = {"identity": json.dumps(identity), "raw": "\n".join(raw) + "\n", "summary": "\n".join(summary) + "\n",
               "commands": "\n".join(commands) + "\n",
               "affinity": "affinity=%s\n" % ",".join(str(cpu) for cpu in profile["cpus"]), "completion": "link_only=PASS\n"}
     for cell in profile["cells"]:
         bundle[f"inputs {cell}"] = manifests[cell]
+        bundle[f"argv {cell}"] = argvs[cell]
         for linker in compiler_receipt.WILD_LINKER_LINKERS:
             bundle[f"output {cell} {linker}"] = ("9" if linker == "wild" else "6") * 64 + "\n"
+            bundle[f"comment {cell} {linker}"] = "clang version 21.1.8\n" + (
+                WILD_VERSION + "\n" if linker == "wild" else "mold 2.42.1 (compatible with GNU ld)\n" if kind == "mold" else "")
     record = {"requested": True, "request_line": compiler_receipt.WILD_LINKER_REQUEST_LINE,
               "profile": copy.deepcopy(profile), "status": "complete", "errors": [], "build_exit": 0, "exit": 0,
               "linkers": copy.deepcopy(linkers), "identity": copy.deepcopy(identity),
@@ -4663,7 +4673,10 @@ class WildLinkerTest(unittest.TestCase):
         self.assertIs(profile["report_only"], True)
         self.assertEqual(profile["cells"], ["ide-debug", "ide-unity-release", "ide-separate-release"])
         # The audit's link policy: no LTO, Wild never forks or folds code, one fixed benchmark build ID.
-        self.assertEqual(profile["wild"], {"command": "wild", "policy": "--no-fork --icf=none", "threads1": "--threads=1"})
+        self.assertEqual({key: profile["wild"][key] for key in ("command", "policy", "threads1")},
+                         {"command": "wild", "policy": "--no-fork --icf=none", "threads1": "--threads=1"})
+        self.assertTrue(compiler_receipt.WILD_IDENTITY.fullmatch(WILD_VERSION))
+        self.assertEqual(sorted(profile["cell_trees"]), sorted(profile["cells"]))
         self.assertEqual(compiler_receipt.WILD_LINKER_COMPARATORS["mold"]["policy"], profile["wild"]["policy"])
         for arguments in profile["trees"].values():
             self.assertIn("--no-lto", arguments)
@@ -4706,6 +4719,13 @@ class WildLinkerTest(unittest.TestCase):
             index = next(index for index, line in enumerate(lines) if match in line)
             lines[index] = mutate(lines[index])
             return dict(bundle, raw="\n".join(lines) + "\n")
+
+        def manifest(cell: str, mutate) -> dict:
+            """A changed manifest whose hash the identity also records, so only the binding predicates refuse it."""
+            changed = mutate(bundle[f"inputs {cell}"])
+            record = json.loads(bundle["identity"])
+            record["inputs"][cell] = hashlib.sha256(changed.encode()).hexdigest()
+            return dict(bundle, identity=json.dumps(record), **{f"inputs {cell}": changed})
 
         def without(key: str) -> dict:
             return {name: value for name, value in bundle.items() if name != key}
@@ -4778,6 +4798,33 @@ class WildLinkerTest(unittest.TestCase):
             "other build ID": (text("commands", lambda value: value.replace("0x2645", "0x1111", 1)), {}),
             "one-thread option dropped": (text("commands", lambda value: value.replace(" --threads=1", "", 1)), {}),
             "receipt identity differs": (bundle, {"identity": dict(record["identity"], cpus=[2, 3])}),
+            # #3689 review: an impostor installed as `wild` is refused by its version and by its output.
+            "impostor Wild version": (linker("wild", version="Ubuntu LLD 18.1.3 (compatible with GNU linkers)"), {}),
+            "Wild prefix only": (linker("wild", version="Wild version 0.10.0"), {}),
+            "Wild output without identity": (dict(bundle, **{"comment ide-unity-release wild": "Linker: LLD 18\n"}), {}),
+            "Wild output with another version": (dict(bundle, **{"comment ide-debug wild": (
+                "Wild 0.9.0 (compatible with GNU linkers)\n")}), {}),
+            "comparator output is Wild": (dict(bundle, **{"comment ide-debug comparator": WILD_VERSION + "\n"}), {}),
+            "missing comment": (without("comment ide-separate-release wild"), {}),
+            "no build root": (identity(lambda value: value.pop("build_root")), {}),
+            # #3689 review: the timed argv is bound to the hashed inputs and nothing else can run.
+            "missing argv": (without("argv ide-debug"), {}),
+            "unhashed object": (text("argv ide-debug", lambda value: value.replace("/src/os.c.o", "/src/other.c.o")), {}),
+            "object dropped from manifest": (manifest("ide-unity-release", lambda value: value.split("\n", 1)[1]), {}),
+            "foreign absolute object": (text("argv ide-separate-release", lambda value: value.replace(
+                '"/lib/x86_64-linux-gnu/crtn.o"', '"/tmp/payload.o"')), {}),
+            "object under the build root": (text("argv ide-debug", lambda value: value.replace(
+                '"/lib/x86_64-linux-gnu/crtn.o"', f'"{WILD_ROOT}/build-wild-unity/x.o"')), {}),
+            "manifest outside its tree": (manifest("ide-debug", lambda value: value.replace(
+                "build-wild-separate", "build-wild-unity", 1)), {}),
+            "argv writes elsewhere": (text("argv ide-debug", lambda value: value.replace('"Debug/ide"', '"Debug/other"')), {}),
+            "argv not Wild": (text("argv ide-debug", lambda value: value.replace(f'"{WILD_PATH}"', '"/usr/bin/ld.lld"')), {}),
+            "injected command": (text("commands", lambda value: value.replace(" --icf=none", " --icf=none; touch /tmp/x", 1)), {}),
+            "injected object": (text("commands", lambda value: value.replace(' "-lm"', ' "/tmp/payload.o" "-lm"', 1)), {}),
+            "identity comment disabled": (text("commands", lambda value: value.replace(
+                " --icf=none", " --icf=none --no-identity-comment")), {}),
+            "validated link replaced": (text("commands", lambda value: value.replace(
+                "\tvalidated-link\tsetup\t-1\tcd ", "\tvalidated-link\tsetup\t-1\ttrue; cd ", 1)), {}),
         }
         for name, (changed, options) in cases.items():
             with self.subTest(case=name):
@@ -4860,7 +4907,7 @@ class WildLinkerTest(unittest.TestCase):
                 self.assertEqual(self.publish(record, partial)[0], "failure")
         report = compiler_receipt.render(pull, summary(), "success", [])
         self.assertIn("Host Wild linker (wild-linker-v1): complete", report)
-        self.assertIn(f"wild `{WILD_PATH}` (Wild version 0.10.0, `777777777777`)", report)
+        self.assertIn(f"wild `{WILD_PATH}` ({WILD_VERSION}, `777777777777`)", report)
         self.assertRegex(report, r"\| ide-debug-default \| 21 \| 20\.\d{3} \| 15\.\d{3} \| 0\.\d{4} \| \[0\.\d{4}, 0\.\d{4}\] \|")
         self.assertNotIn("default ld", report)
         pull["wild_linker"] = substituted
@@ -4937,10 +4984,12 @@ class WildLinkerTest(unittest.TestCase):
     def test_leg_finds_installed_linkers_and_records_missing_ones(self) -> None:
         cases = {
             "no Wild": ({"mold": "mold 2.42.1"}, "the host has no installed wild"),
-            "no comparator": ({"wild": "Wild version 0.10.0"}, "comparator bfd: the host has no installed ld"),
-            "mold that is not mold": ({"wild": "Wild version 0.10.0", "mold": "LLD 18", "ld": "GNU ld 2.42"},
+            "no comparator": ({"wild": WILD_VERSION}, "comparator bfd: the host has no installed ld"),
+            "mold that is not mold": ({"wild": WILD_VERSION, "mold": "LLD 18", "ld": "GNU ld 2.42"},
                                       "not a mold version"),
             "silent Wild": ({"wild": ""}, "did not report a version"),
+            "impostor Wild": ({"wild": "Ubuntu LLD 18.1.3 (compatible with GNU linkers)", "mold": "mold 2.42.1"},
+                              "not Wild's own identity"),
         }
         for name, (tools, reason) in cases.items():
             with self.subTest(case=name), tempfile.TemporaryDirectory() as temporary:
@@ -4948,17 +4997,17 @@ class WildLinkerTest(unittest.TestCase):
                 self.assertEqual((record["status"], commands), ("failed", []))
                 self.assertTrue(any(reason in error for error in record["errors"]), record["errors"])
         with tempfile.TemporaryDirectory() as temporary:
-            record, commands = self.leg(Path(temporary), {"wild": "Wild version 0.10.0", "mold": "mold 2.42.1",
+            record, commands = self.leg(Path(temporary), {"wild": WILD_VERSION, "mold": "mold 2.42.1",
                                                           "ld": "GNU ld 2.42"})
             self.assertEqual(record["linkers"]["comparator"]["kind"], "mold")
             self.assertIs(record["linkers"]["comparator"]["substituted"], False)
             self.assertEqual(record["linkers"]["wild"]["sha256"],
-                             hashlib.sha256(b"#!/bin/sh\necho 'Wild version 0.10.0'\n").hexdigest())
+                             hashlib.sha256(f"#!/bin/sh\necho '{WILD_VERSION}'\n".encode()).hexdigest())
             # The input build failed, so nothing was timed; the failure is recorded.
             self.assertEqual((record["status"], record["build_exit"], len(commands)), ("failed", 1, 1))
             self.assertEqual(commands[0][:4], ["git", "-c", "core.hooksPath=/dev/null", "clone"])
         with tempfile.TemporaryDirectory() as temporary:
-            record, commands = self.leg(Path(temporary), {"wild": "Wild version 0.10.0", "ld": "GNU ld 2.42"}, 0)
+            record, commands = self.leg(Path(temporary), {"wild": WILD_VERSION, "ld": "GNU ld 2.42"}, 0)
             self.assertEqual((record["linkers"]["comparator"]["kind"], record["linkers"]["comparator"]["substituted"]),
                              ("bfd", True))
             generates = [command for command in commands if command[:2] == ["./build.sh", "generate"]]
