@@ -393,6 +393,25 @@ BUSTER_GLOBAL_LOCAL int lcn_test(unsigned *count)
             result.foreign == cases[i].foreign && result.unavailable == cases[i].unavailable &&
             transport.fixture_cursor == cases[i].count && transport.requests <= 13;
         failures += !pass;
+        if (i < 25)
+        {
+            // Independently assert the computed verdict; transport fixtures
+            // cannot make a neutral PATCH response stand in for its request body.
+            CmTransport probe = {0}; probe.deadline = cm_clock() + 180; probe.request_limit = 60;
+            probe.fixture = cases[i].fixture; probe.fixture_count = cases[i].count;
+            LcIdentity pending = {0};
+            int bound = lc_bind(&probe, cases[i].run, cases[i].attempt, &pending);
+            probe.fixture_cursor = 4;
+            CmJson queued = cm_json_parse(cases[i].fixture[3].content, strlen(cases[i].fixture[3].content));
+            pending.superseded = bound && lc_pending_superseded(&probe, &pending,
+                cm_get(&queued, cm_member(&queued, 1, "output"), "summary"));
+            int verdict = pending.superseded == (i == 0) &&
+                cm_equal(lc_conclusion(&pending), i == 0 ? "neutral" :
+                    i == 20 || i == 21 || i == 22 || i == 23 ? "failure" : "cancelled");
+            failures += !verdict;
+            printf("{\"fixture\":\"independent pending verdict %u\",\"status\":\"%s\"}\n", i, verdict ? "pass" : "fail");
+            cm_json_free(&queued);
+        }
         printf("{\"fixture\":"); cm_quote(stdout, cases[i].label);
         printf(",\"status\":\"%s\",\"valid\":%d,\"closed\":%u,\"terminal\":%u,\"foreign\":%u,\"unavailable\":%u,\"requests\":%u,\"consumed\":%u,\"expected\":%u}\n",
             pass ? "pass" : "fail", valid, result.closed, result.terminal, result.foreign, result.unavailable,
@@ -426,7 +445,7 @@ BUSTER_GLOBAL_LOCAL int lcn_test(unsigned *count)
     id.request_only = 1; failures += !cm_equal(lc_conclusion(&id), "cancelled"); id.request_only = 0;
     id.attempt = 2; failures += !cm_equal(lc_conclusion(&id), "cancelled"); id.attempt = 1;
     cm_copy(id.outcome, sizeof(id.outcome), "failure"); failures += !cm_equal(lc_conclusion(&id), "failure");
-    *count = (unsigned)BUSTER_ARRAY_LENGTH(cases) + 7;
+    *count = (unsigned)BUSTER_ARRAY_LENGTH(cases) + 32;
     int result = (int)failures;
     return result;
 }

@@ -5,6 +5,7 @@ on:
 permissions:
   contents: read
   actions: read
+  checks: read
 jobs:
   validate:
     runs-on: ubuntu-24.04
@@ -17,6 +18,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+          fetch-depth: 4
       - name: Record actual checkout identity
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
         with:
@@ -39,3 +41,10 @@ jobs:
           gcc -std=c11 -Isrc -O1 -g -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char -fsanitize=address,undefined -fno-sanitize-recover=all tools/bench_direct/lifecycle.c -lm -o "$RUNNER_TEMP/lifecycle-sanitized"
           "$RUNNER_TEMP/lifecycle-sanitized" --self-test
           git diff --check b7354cef71648dd842c7c25d2f436d97ac4ccd32..HEAD
+      - name: Read-only replay of the incident's actual evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          clang -std=c11 -I. -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/issue_3885_read_test.c -lm -o "$RUNNER_TEMP/3885-read"
+          "$RUNNER_TEMP/3885-read"
