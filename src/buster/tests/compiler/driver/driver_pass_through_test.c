@@ -650,6 +650,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_runtime_path_arguments(U
         BUSTER_TEST(arguments, parsed.error == COMPILER_DRIVER_ERROR_NONE && parsed.linker_verbose && parsed.linker_argument_count == 2);
         if (parsed.linker_argument_count == 2) BUSTER_STRING_TEST(arguments, parsed.linker_arguments[1], operands[operand]);
     }
+    String8 literal_equals[] = {S8("-Wl,-rpath=/tmp/runtime="), S8("-Wl,--rpath=/tmp/runtime="),
+        S8("-Wl,-rpath=="), S8("-Wl,--rpath=="), S8("-Wl,-rpath,/tmp/runtime="), S8("-Wl,--rpath,=")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(literal_equals); index += 1)
+    {
+        String8 command[] = {S8("--target=x86_64-linux-gnu"), literal_equals[index], S8("main.o")};
+        BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)).error == COMPILER_DRIVER_ERROR_NONE);
+    }
     String8 malformed[] = {S8("-Wl,-rpath"), S8("-Wl,--rpath"), S8("-Wl,-rpath="), S8("-Wl,--rpath="), S8("-Wl,-rpath,,/opt")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(malformed); index += 1)
     {
@@ -753,6 +760,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_runtime_path_images(Unit
     if (BUSTER_REQUIRE(arguments, simple.error == COMPILER_DRIVER_ERROR_NONE))
     {
         BUSTER_TEST(arguments, compiler_driver_test_runtime_path_tag(arena, executable, S8("$ORIGIN/lib"), 29));
+    }
+    String8 literal_flags[] = {S8("-Wl,-rpath=/tmp/runtime="), S8("-Wl,--rpath=/tmp/runtime="),
+        S8("-Wl,-rpath=="), S8("-Wl,--rpath=="), S8("-Wl,-rpath,/tmp/runtime="), S8("-Wl,--rpath,=")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(literal_flags); index += 1)
+    {
+        String8 command[] = {S8("-g0"), main_source, literal_flags[index], S8("-o"), executable};
+        CompilerDriverResult literal = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        if (BUSTER_REQUIRE(arguments, literal.error == COMPILER_DRIVER_ERROR_NONE))
+        {
+            String8 expected = index == 2 || index == 3 || index == 5 ? S8("=") : S8("/tmp/runtime=");
+            BUSTER_TEST(arguments, compiler_driver_test_runtime_path_tag(arena, executable, expected, 29));
+        }
     }
     os_file_delete(leaf_source);
     os_file_delete(wrapper_source);
