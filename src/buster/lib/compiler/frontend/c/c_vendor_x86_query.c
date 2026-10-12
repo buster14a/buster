@@ -10,7 +10,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_x86_query(CIntegerIrBuilder* builde
 {
     IrValueId result = IR_VALUE_ID_INVALID;
     bool known = string_equal(name, S8("__builtin_ia32_xgetbv"));
-    bool valid = known && builder->target.cpu_arch == CPU_ARCH_X86_64 && args && count == 1 &&
+    bool valid = known && cpu_arch_is_x86(builder->target.cpu_arch) && args && count == 1 &&
                  args[0].value < builder->function->value_count;
     IrSourceRange source = c_ir_token_source_range(builder, token);
     IrTypeId word_type = IR_TYPE_ID_INVALID;

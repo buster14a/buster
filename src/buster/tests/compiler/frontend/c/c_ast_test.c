@@ -2294,6 +2294,15 @@ enum
     // own sources.
     C_AST_CORPUS_EXTENT_ANSWER_FLOOR = 2400,
     C_AST_CORPUS_HOSTED_EXTENT_ANSWER_FLOOR = 15000,
+    // Type-name runs skipped as no type name, each checked against the
+    // machine in verify mode, and type-name runs read from the tree, in the
+    // same analyses: about 1,250 skipped and 2,270 read from the fixtures on
+    // Linux x86-64, and about 18,300 and 13,300 in all with the frontend's
+    // own sources.
+    C_AST_CORPUS_TYPE_NAME_SKIP_FLOOR = 900,
+    C_AST_CORPUS_TYPE_NAME_ANSWER_FLOOR = 1600,
+    C_AST_CORPUS_HOSTED_TYPE_NAME_SKIP_FLOOR = 15000,
+    C_AST_CORPUS_HOSTED_TYPE_NAME_ANSWER_FLOOR = 11000,
 };
 
 BUSTER_GLOBAL_LOCAL bool c_ast_corpus_in(String8 const* paths, u32 count, String8 path)
@@ -2373,6 +2382,11 @@ struct CAstCorpusTally
     u64 extent_compared;
     u64 extent_walked[C_AST_EXTENT_FALLBACK_COUNT];
     u64 extent_refused;
+    // The type-name runs over the same inputs: runs skipped as no type name,
+    // and checked against the machine in verify mode; runs read from the tree.
+    u64 type_name_skips;
+    u64 type_name_checked;
+    u64 type_name_answers;
 };
 
 // c_parse_ast_from_tree on one input whose tree is complete, held to
@@ -2482,6 +2496,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
         tally->specifier_answers += specifiers.primitive_answers + specifiers.typedef_answers;
         tally->specifier_fallbacks += specifiers.fallbacks;
         tally->specifier_compared += typed.type_count;
+        tally->type_name_skips += specifiers.type_name_skips;
+        tally->type_name_answers += specifiers.type_name_primitive_answers + specifiers.type_name_typedef_answers;
         tally->statement_bodies += statements.bodies;
         tally->statement_segments += statements.segments;
         tally->statement_segment_tokens += statements.segment_tokens;
@@ -2505,10 +2521,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
             verified_syntax.ast = ast;
             verified_syntax.type_interning = true;
             c_test_ast_type_verify_take();
+            c_test_ast_type_names_verify_take();
             c_test_ast_type_verify_set(true);
+            c_test_ast_type_names_verify_set(true);
             c_analyze_semantics_only(arena, preprocess, verified_syntax);
             c_test_ast_type_verify_set(false);
+            c_test_ast_type_names_verify_set(false);
             CTestAstTypeVerify verify = c_test_ast_type_verify_take();
+            // Every type-name run the tree skipped as no type name ran through
+            // the machine's attempt too, which must have failed silently.
+            CTestAstTypeNameVerify names = c_test_ast_type_names_verify_take();
+            BUSTER_TEST_RAW(arguments, names.checked == specifiers.type_name_skips,
+                            string_format(arguments->arena, S8("{S8}: {u64} type names skipped, {u64} verified"), label, specifiers.type_name_skips,
+                                          names.checked));
+            BUSTER_TEST_RAW(arguments, names.answered == 0 && names.appended == 0 && names.diagnosed == 0,
+                            string_format(arguments->arena,
+                                          S8("{S8}: of {u64} type-name runs skipped, the machine answered {u64}, kept rows for {u64} and diagnosed {u64}"),
+                                          label, names.checked, names.answered, names.appended, names.diagnosed));
+            tally->type_name_checked += names.checked;
             BUSTER_TEST_RAW(arguments, verify.compared == statistics.answers,
                             string_format(arguments->arena, S8("{S8}: {u64} tree answers, {u64} verified"), label, statistics.answers, verify.compared));
             for (u32 index = 0; index < verify.first_count; index += 1)
@@ -2930,6 +2960,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_sources(UnitTestArguments* argum
     BUSTER_TEST(arguments, !hosted || tally->specifier_answers >= C_AST_CORPUS_HOSTED_SPECIFIER_ANSWER_FLOOR);
     BUSTER_TEST(arguments, !hosted || tally->statement_braced >= C_AST_CORPUS_HOSTED_STATEMENT_BRACED_FLOOR);
     BUSTER_TEST(arguments, !hosted || tally->extent_answers >= C_AST_CORPUS_HOSTED_EXTENT_ANSWER_FLOOR);
+    BUSTER_TEST(arguments, !hosted || (tally->type_name_skips >= C_AST_CORPUS_HOSTED_TYPE_NAME_SKIP_FLOOR &&
+                                       tally->type_name_checked == tally->type_name_skips &&
+                                       tally->type_name_answers >= C_AST_CORPUS_HOSTED_TYPE_NAME_ANSWER_FLOOR));
     return result;
 }
 #endif
@@ -2974,6 +3007,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
     BUSTER_TEST(arguments, tally.specifier_answers >= C_AST_CORPUS_SPECIFIER_ANSWER_FLOOR && tally.specifier_compared);
     BUSTER_TEST(arguments, tally.statement_braced >= C_AST_CORPUS_STATEMENT_BRACED_FLOOR);
     BUSTER_TEST(arguments, tally.extent_answers >= C_AST_CORPUS_EXTENT_ANSWER_FLOOR && tally.extent_compared == tally.extent_answers);
+    BUSTER_TEST(arguments, tally.type_name_skips >= C_AST_CORPUS_TYPE_NAME_SKIP_FLOOR && tally.type_name_checked == tally.type_name_skips &&
+                               tally.type_name_answers >= C_AST_CORPUS_TYPE_NAME_ANSWER_FLOOR);
 #if BUSTER_LINUX && !BUSTER_ANDROID
     c_ast_test_merge(&result, c_ast_corpus_sources(arguments, &tally));
 #endif
@@ -3983,6 +4018,15 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
      7, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
     {S8_INITIALIZER("struct S { struct { long inner; }; }; long f(struct S* p) { return p->inner + p->inner; }"), S8_INITIALIZER("p"), 1, 7,
      C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    // A pass remembers the usual arithmetic conversions (c_ast_types_arithmetic)
+    // by both operand rows and both bit-field widths: the same typedef row
+    // gives unsigned int without a width and int with a narrow one, and the
+    // right operand's row is part of the key.
+    {S8_INITIALIZER("typedef unsigned U; struct S { U bits : 3; U whole; }; int f(struct S* p) { return (p->whole + p->whole) + (p->bits + p->bits); }"),
+     S8_INITIALIZER("p"), 3, 7, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("typedef unsigned U; struct S { U bits : 3; U whole; }; U f(struct S* p) { return (p->bits + p->bits) + (p->whole + p->whole); }"),
+     S8_INITIALIZER("p"), 3, 7, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
+    {S8_INITIALIZER("long f(int a, long b) { return (a + a) + (a + b); }"), S8_INITIALIZER("a"), 3, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
     {S8_INITIALIZER("int f(int* items) { return items[2]; }"), S8_INITIALIZER("items"), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
     {S8_INITIALIZER("unsigned char table[4]; unsigned char f(int i) { return table[i]; }"), S8_INITIALIZER("table"), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
      C_TYPE_UNSIGNED_CHAR},
@@ -5229,6 +5273,158 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_specifiers(UnitTestArguments* argu
     return result;
 }
 
+// The type-name runs (c_parse_type_name_specifiers, #3102) on chosen units, in
+// every layout: runs skipped as no type name, one of them holding a `typeof`
+// aggregate whose body the failure path's scan finds already defined (no
+// input tried defines one there, so none is retried), runs read from the
+// tree, and one
+// shape per CAstSpecifierFallback a type name reaches -- a tag, `_Atomic`
+// among the words, storage-class words and a type word the tree claims where
+// the source holds others, and a restrict-qualified typedef under a
+// qualifier. Each analysis with the tree must equal the analysis without it,
+// model and diagnostics alike, and verify mode must find the machine silent
+// on every skipped run. The last case is the mutation check: a tree whose
+// type name's list is moved off its first token makes the skip wrong, and
+// verify mode must catch the machine answering there.
+typedef enum CAstTypeNameTamper
+{
+    C_AST_TYPE_NAME_TAMPER_NONE,
+    // Move the type name's DECL_SPECIFIERS node off its first token.
+    C_AST_TYPE_NAME_TAMPER_TOKEN,
+    // Call the type name's first two words `static` and `extern`.
+    C_AST_TYPE_NAME_TAMPER_STORAGE,
+    // Make the type name's TYPEDEF_NAME the word `int`.
+    C_AST_TYPE_NAME_TAMPER_KIND,
+} CAstTypeNameTamper;
+
+typedef struct CAstTypeNameCase CAstTypeNameCase;
+struct CAstTypeNameCase
+{
+    String8 source;
+    CAstTypeNameTamper tamper;
+    // The reason of the one run handed to the machine, or NONE when none is.
+    CAstSpecifierFallback reason;
+    u32 skips;
+    u32 retries;
+    u32 primitive_answers;
+    u32 typedef_answers;
+    // Skipped runs verify mode finds the machine answering: only a tampered
+    // tree has any.
+    u32 answered;
+};
+
+BUSTER_GLOBAL_LOCAL CAstTypeNameCase const c_ast_type_name_cases[] = {
+    {S8_INITIALIZER("typedef unsigned long U;\n"
+                    "unsigned long f(void)\n"
+                    "{\n"
+                    "    return sizeof (U) + sizeof (const U) + sizeof (unsigned int) + _Alignof (U) + (U){1};\n"
+                    "}\n"),
+     C_AST_TYPE_NAME_TAMPER_NONE, C_AST_SPECIFIER_FALLBACK_NONE, 0, 0, 1, 4, 0},
+    {S8_INITIALIZER("unsigned long f(int a)\n"
+                    "{\n"
+                    "    if (!a)\n"
+                    "    {\n"
+                    "        return sizeof (a + 1);\n"
+                    "    }\n"
+                    "    return 0;\n"
+                    "}\n"),
+     C_AST_TYPE_NAME_TAMPER_NONE, C_AST_SPECIFIER_FALLBACK_NONE, 2, 0, 0, 0, 0},
+    {S8_INITIALIZER("unsigned long f(void)\n"
+                    "{\n"
+                    "    return sizeof ((__typeof__(struct { int a; }) *)0);\n"
+                    "}\n"),
+     C_AST_TYPE_NAME_TAMPER_NONE, C_AST_SPECIFIER_FALLBACK_NONE, 1, 0, 0, 0, 0},
+    {S8_INITIALIZER("struct S { int x; };\nunsigned long f(void)\n{\n    return sizeof (struct S);\n}\n"), C_AST_TYPE_NAME_TAMPER_NONE,
+     C_AST_SPECIFIER_FALLBACK_INPUT, 0, 0, 0, 0, 0},
+    {S8_INITIALIZER("unsigned long f(void)\n{\n    return sizeof (_Atomic int);\n}\n"), C_AST_TYPE_NAME_TAMPER_NONE,
+     C_AST_SPECIFIER_FALLBACK_SPECIFIERS, 0, 0, 0, 0, 0},
+    {S8_INITIALIZER("unsigned long f(void)\n{\n    return sizeof (const volatile int);\n}\n"), C_AST_TYPE_NAME_TAMPER_STORAGE,
+     C_AST_SPECIFIER_FALLBACK_STORAGE, 0, 0, 0, 0, 0},
+    {S8_INITIALIZER("typedef int T;\nunsigned long f(void)\n{\n    return sizeof (const T);\n}\n"), C_AST_TYPE_NAME_TAMPER_KIND,
+     C_AST_SPECIFIER_FALLBACK_PRIMITIVE, 0, 0, 0, 0, 0},
+    {S8_INITIALIZER("typedef int *restrict RP;\nunsigned long f(void)\n{\n    return sizeof (const RP);\n}\n"), C_AST_TYPE_NAME_TAMPER_NONE,
+     C_AST_SPECIFIER_FALLBACK_TYPEDEF, 0, 0, 0, 0, 0},
+    {S8_INITIALIZER("typedef unsigned long U;\nunsigned long f(void)\n{\n    return sizeof (U);\n}\n"), C_AST_TYPE_NAME_TAMPER_TOKEN,
+     C_AST_SPECIFIER_FALLBACK_NONE, 1, 0, 0, 0, 1},
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_type_names(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ast_type_name_cases); index += 1)
+    {
+        CAstTypeNameCase const* name_case = &c_ast_type_name_cases[index];
+        for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 label = string_format(temporary.arena, S8("type-name case {u32}, layout {u32}"), index, layout);
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, name_case->source, C_PREPROCESS_DIALECT_GNU17);
+            CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
+            if (BUSTER_REQUIRE(arguments, preprocess.error_count == 0 && built.complete))
+            {
+                CAst tree = c_ast_test_copy(temporary.arena, &built.ast);
+                u32 type_name = c_ast_test_find_kind(&tree, C_AST_TYPE_NAME);
+                u32 specifiers = type_name != C_AST_NODE_INVALID ? c_ast_child_at(&tree, type_name, 0) : C_AST_NODE_INVALID;
+                if (name_case->tamper != C_AST_TYPE_NAME_TAMPER_NONE &&
+                    BUSTER_REQUIRE(arguments, specifiers != C_AST_NODE_INVALID && tree.kinds[specifiers] == C_AST_DECL_SPECIFIERS))
+                {
+                    u32 first = c_ast_subtree_begin(&tree, specifiers);
+                    if (name_case->tamper == C_AST_TYPE_NAME_TAMPER_TOKEN)
+                    {
+                        tree.tokens[specifiers] += 1;
+                    }
+                    else if (name_case->tamper == C_AST_TYPE_NAME_TAMPER_STORAGE && BUSTER_REQUIRE(arguments, first + 2 < specifiers))
+                    {
+                        tree.data[first] = C_AST_WORD_STATIC;
+                        tree.data[first + 1] = C_AST_WORD_EXTERN;
+                    }
+                    else if (name_case->tamper == C_AST_TYPE_NAME_TAMPER_KIND && BUSTER_REQUIRE(arguments, tree.kinds[specifiers - 1] == C_AST_TYPEDEF_NAME))
+                    {
+                        tree.kinds[specifiers - 1] = C_AST_SPECIFIER_WORD;
+                        tree.data[specifiers - 1] = C_AST_WORD_INT;
+                    }
+                }
+                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, c_parse_ast(temporary.arena, preprocess));
+                CAstSpecifierStatistics statistics = {0};
+                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                syntax.ast = &tree;
+                syntax.ast_specifier_statistics = &statistics;
+                CAnalysisResult read = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                BUSTER_TEST_RAW(arguments, plain.diagnostic_count == 0, label);
+                String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &read);
+                difference = difference.length ? difference : c_ast_corpus_model_differ(temporary.arena, &plain, &read);
+                difference = difference.length ? difference : c_ast_corpus_bindings_differ(temporary.arena, &plain, &read);
+                BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(temporary.arena, S8("{S8}: {S8}"), label, difference));
+                bool handed = name_case->reason != C_AST_SPECIFIER_FALLBACK_NONE;
+                BUSTER_TEST_RAW(arguments,
+                                statistics.type_name_skips == name_case->skips && statistics.type_name_retries == name_case->retries &&
+                                    statistics.type_name_primitive_answers == name_case->primitive_answers &&
+                                    statistics.type_name_typedef_answers == name_case->typedef_answers &&
+                                    statistics.type_name_fallbacks == (u64)handed && (!handed || statistics.type_name_fallback_counts[name_case->reason] == 1),
+                                string_format(temporary.arena,
+                                              S8("{S8}: {u64} skips ({u64} retried), {u64} primitive and {u64} typedef answers, {u64} fallbacks"), label,
+                                              statistics.type_name_skips, statistics.type_name_retries, statistics.type_name_primitive_answers,
+                                              statistics.type_name_typedef_answers, statistics.type_name_fallbacks));
+                CParserResult verified = c_parse_ast(temporary.arena, preprocess);
+                verified.ast = &tree;
+                c_test_ast_type_names_verify_take();
+                c_test_ast_type_names_verify_set(true);
+                c_analyze_semantics_only(temporary.arena, preprocess, verified);
+                c_test_ast_type_names_verify_set(false);
+                CTestAstTypeNameVerify verify = c_test_ast_type_names_verify_take();
+                BUSTER_TEST_RAW(arguments,
+                                verify.checked == name_case->skips && verify.answered == name_case->answered && verify.appended == 0 &&
+                                    verify.diagnosed == 0,
+                                string_format(temporary.arena, S8("{S8}: verify checked {u64}, answered {u64}, appended {u64}, diagnosed {u64}"), label,
+                                              verify.checked, verify.answered, verify.appended, verify.diagnosed));
+            }
+            c_ast_release(&built.ast);
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult c_ast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -5257,6 +5453,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_AST_TEST_FIXTURE(arguments, c_ast_test_statements);
     C_AST_TEST_FIXTURE(arguments, c_ast_test_extents);
     C_AST_TEST_FIXTURE(arguments, c_ast_test_specifiers);
+    C_AST_TEST_FIXTURE(arguments, c_ast_test_type_names);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     C_AST_TEST_FIXTURE(arguments, c_ast_test_fixture_sweep);
     C_AST_TEST_FIXTURE(arguments, c_ast_test_corpus);

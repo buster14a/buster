@@ -961,7 +961,14 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_codegen_request(CompilerDriver
                           (invocation->target.cpu_arch == CPU_ARCH_X86_64 || invocation->target.cpu_arch == CPU_ARCH_AARCH64);
     if (invocation->error == COMPILER_DRIVER_ERROR_NONE)
     {
-        if (invocation->emit_llvm_bitcode &&
+        if (invocation->target.cpu_arch == CPU_ARCH_I386 && invocation->query == COMPILER_DRIVER_QUERY_NONE &&
+            native_codegen_action)
+        {
+            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation->diagnostic =
+                S8("i386 code generation is not implemented (-m16/-m32 support -E, -dM and -fsyntax-only only; see #3654)");
+        }
+        else if (invocation->emit_llvm_bitcode &&
             (invocation->action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation->action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
              invocation->action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY))
         {
@@ -1430,7 +1437,12 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_resolve_native_target(Arena* arena, Com
         {
             CompilerDriverFeatureOverride override = feature_overrides[override_index];
             TargetCpuFeature feature = target_cpu_feature_from_string(invocation->target.cpu_arch, override.name);
-            if (feature == TARGET_CPU_FEATURE_NONE && override.option.length)
+            if (feature == TARGET_CPU_FEATURE_X86_MMX && override.option.length &&
+                     invocation->target.cpu_arch == CPU_ARCH_X86_64)
+            {
+                compiler_driver_argument_error(arena, invocation, S8("unsupported option: {S8}"), override.option);
+            }
+            else if (feature == TARGET_CPU_FEATURE_NONE && override.option.length)
             {
                 compiler_driver_argument_error(arena, invocation, S8("unsupported option: {S8}"), override.option);
             }
@@ -1438,12 +1450,16 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_resolve_native_target(Arena* arena, Com
             {
                 compiler_driver_argument_error(arena, invocation, S8("unsupported target feature: {S8}"), override.name);
             }
-            else if (override.option.length && invocation->target.cpu_arch == CPU_ARCH_X86_64)
+            else if (override.option.length && cpu_arch_is_x86(invocation->target.cpu_arch))
             {
                 // The -m<feature> spellings follow GCC: the prerequisites come along
                 // with an enabled feature, and the dependents go with a disabled one.
                 // -mattr stays exact.
-                if (!override.enable && feature == TARGET_CPU_FEATURE_X86_SSE2)
+                if (!override.enable && feature == TARGET_CPU_FEATURE_X86_SSE && invocation->target.cpu_arch == CPU_ARCH_X86_64)
+                {
+                    compiler_driver_argument_error(arena, invocation, S8("unsupported option: {S8} (SSE is part of the x86-64 baseline)"), override.option);
+                }
+                else if (!override.enable && feature == TARGET_CPU_FEATURE_X86_SSE2 && invocation->target.cpu_arch == CPU_ARCH_X86_64)
                 {
                     compiler_driver_argument_error(arena, invocation, S8("unsupported option: {S8} (SSE2 is part of the x86-64 baseline)"), override.option);
                 }
@@ -2111,6 +2127,13 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     CompilerDriverFeatureOverride* feature_overrides = arena_allocate(arena, CompilerDriverFeatureOverride, feature_override_capacity);
     u64 feature_override_count = 0;
     String8 architecture_option = {0};
+    String8 x86_execution_mode_option = {0};
+    String8 x86_regparm_value = {0};
+    String8 x86_preferred_stack_boundary_value = {0};
+    u32 x86_execution_mode = 0;
+    bool x86_execution_mode_seen = false;
+    bool x86_regparm_seen = false;
+    bool x86_preferred_stack_boundary_seen = false;
     bool options_ended = false;
     bool action_seen = false;
     // Whether the code model in force came from -fPIE/-fpie, which is what
@@ -2145,6 +2168,13 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (string_equal(argument, S8("--")))
         {
             options_ended = true;
+            continue;
+        }
+        if (string_equal(argument, S8("-m16")) || string_equal(argument, S8("-m32")))
+        {
+            x86_execution_mode_option = argument;
+            x86_execution_mode = string_equal(argument, S8("-m16")) ? 16 : 32;
+            x86_execution_mode_seen = true;
             continue;
         }
         if (string_starts_with_sequence(argument, S8("-fmacro-prefix-map=")))
@@ -2800,6 +2830,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.keep_going = string_equal(argument, S8("-fkeep-going"));
             continue;
         }
+        if (string_equal(argument, S8("-fearly-exit")) || string_equal(argument, S8("-fno-early-exit")))
+        {
+            invocation.early_exit = string_equal(argument, S8("-fearly-exit"));
+            continue;
+        }
         if (string_equal(argument, S8("-fno-frontend-ssa")) || string_equal(argument, S8("-ffrontend-ssa")))
         {
             invocation.disable_direct_ssa = string_equal(argument, S8("-fno-frontend-ssa"));
@@ -3047,6 +3082,19 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             continue;
         }
+        if (string_starts_with_sequence(argument, S8("-mregparm=")))
+        {
+            x86_regparm_value = string_slice(argument, S8("-mregparm=").length, argument.length);
+            x86_regparm_seen = true;
+            continue;
+        }
+        if (string_starts_with_sequence(argument, S8("-mpreferred-stack-boundary=")))
+        {
+            x86_preferred_stack_boundary_value =
+                string_slice(argument, S8("-mpreferred-stack-boundary=").length, argument.length);
+            x86_preferred_stack_boundary_seen = true;
+            continue;
+        }
         // -m<feature> and -mno-<feature> are -mattr=+feature and -mattr=-feature
         // in command-line order with the -mattr items, plus GCC's implied
         // features on x86-64 (applied where the overrides resolve).
@@ -3263,11 +3311,22 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.linker_arguments[invocation.linker_argument_count++] = S8("-export-dynamic");
             continue;
         }
+        if (string_equal(argument, S8("-ffreestanding")))
+        {
+            invocation.freestanding = true;
+            continue;
+        }
+        if (string_equal(argument, S8("-fno-asynchronous-unwind-tables")))
+        {
+            invocation.no_asynchronous_unwind_tables = true;
+            continue;
+        }
         bool compatible_codegen_option =
             string_equal(argument, S8("-pipe")) || string_equal(argument, S8("-pthread")) ||
             string_equal(argument, S8("-fno-pie")) || string_equal(argument, S8("-fno-builtin")) ||
+            string_equal(argument, S8("-fomit-frame-pointer")) ||
             string_equal(argument, S8("-fwrapv")) || string_equal(argument, S8("-fno-strict-overflow")) || string_equal(argument, S8("-fno-strict-aliasing")) || string_equal(argument, S8("-funsigned-char")) ||
-            string_equal(argument, S8("-fsigned-char")) ||
+            string_equal(argument, S8("-fsigned-char")) || string_equal(argument, S8("-fcf-protection=none")) ||
             // Buster emits no stack-protector prologue, so the disabling
             // spelling is already what it does. A libc asks for it on the
             // translation units that run before thread-local storage exists,
@@ -3326,7 +3385,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     compiler_driver_validate_dependency_request(arena, &invocation);
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE)
     {
-        if (invocation.has_gpu_target)
+        if (x86_execution_mode_seen && invocation.has_gpu_target)
+        {
+            compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for this target"),
+                                           x86_execution_mode_option);
+        }
+        else if (invocation.has_gpu_target)
         {
             compiler_driver_reject_gpu_native_options(arena, &invocation, feature_overrides, feature_override_count);
             if (invocation.error == COMPILER_DRIVER_ERROR_NONE)
@@ -3340,8 +3404,91 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         else
         {
-            compiler_driver_resolve_native_target(arena, &invocation, architecture_option, feature_overrides, feature_override_count);
+            if (x86_execution_mode_seen)
+            {
+                if (!cpu_arch_is_x86(invocation.target.cpu_arch))
+                {
+                    compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for this target"),
+                                                   x86_execution_mode_option);
+                }
+                else
+                {
+                    Target x86_mode_target = invocation.target;
+                    if (x86_mode_target.cpu_model == CPU_MODEL_NATIVE)
+                    {
+                        x86_mode_target.cpu_model = CPU_MODEL_BASELINE;
+                    }
+                    x86_mode_target.cpu_arch = CPU_ARCH_I386;
+                    x86_mode_target.x86_code16 = x86_execution_mode == 16;
+                    if (!target_os_supports_arch(x86_mode_target.cpu_arch, x86_mode_target.os))
+                    {
+                        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+                        invocation.diagnostic = string_format(
+                            arena, S8("unsupported option: {S8} for target {S8}"), x86_execution_mode_option,
+                            target_to_string(arena, invocation.target));
+                    }
+                    else
+                    {
+                        invocation.target = x86_mode_target;
+                    }
+                }
+            }
+            if (invocation.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                compiler_driver_resolve_native_target(arena, &invocation, architecture_option, feature_overrides, feature_override_count);
+            }
+            if (invocation.error == COMPILER_DRIVER_ERROR_NONE && x86_regparm_seen)
+            {
+                IntegerParsingU64 parsed = string8_parse_u64_decimal(x86_regparm_value);
+                if (invocation.target.cpu_arch != CPU_ARCH_I386)
+                {
+                    compiler_driver_argument_error(arena, &invocation, S8("unsupported option: -mregparm={S8} for this target"),
+                                                   x86_regparm_value);
+                }
+                else if (parsed.status != INTEGER_PARSING_SUCCESS || parsed.length != x86_regparm_value.length)
+                {
+                    compiler_driver_argument_error(arena, &invocation, S8("invalid value for -mregparm: {S8}"), x86_regparm_value);
+                }
+                else if (parsed.value > 3)
+                {
+                    compiler_driver_argument_error(arena, &invocation, S8("-mregparm={S8} is not between 0 and 3"), x86_regparm_value);
+                }
+                else
+                {
+                    invocation.target.x86_register_parameter_count = (u8)parsed.value;
+                }
+            }
+            if (invocation.error == COMPILER_DRIVER_ERROR_NONE && x86_preferred_stack_boundary_seen)
+            {
+                IntegerParsingU64 parsed = string8_parse_u64_decimal(x86_preferred_stack_boundary_value);
+                if (invocation.target.cpu_arch != CPU_ARCH_I386)
+                {
+                    compiler_driver_argument_error(arena, &invocation, S8("unsupported option: -mpreferred-stack-boundary={S8} for this target"),
+                                                   x86_preferred_stack_boundary_value);
+                }
+                else if (parsed.status != INTEGER_PARSING_SUCCESS || parsed.length != x86_preferred_stack_boundary_value.length)
+                {
+                    compiler_driver_argument_error(arena, &invocation, S8("invalid value for -mpreferred-stack-boundary: {S8}"),
+                                                   x86_preferred_stack_boundary_value);
+                }
+                else if (parsed.value < 2 || parsed.value > 4)
+                {
+                    compiler_driver_argument_error(arena, &invocation,
+                                                   S8("-mpreferred-stack-boundary={S8} is not between 2 and 4"),
+                                                   x86_preferred_stack_boundary_value);
+                }
+                else
+                {
+                    invocation.target.x86_preferred_stack_boundary = (u8)parsed.value;
+                }
+            }
         }
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.no_asynchronous_unwind_tables &&
+        invocation.target.cpu_arch != CPU_ARCH_I386)
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for this target"),
+                                       S8("-fno-asynchronous-unwind-tables"));
     }
     // No canonical object field carries common-storage intent. Reject only an
     // effective request when this invocation will emit a code-generation artifact;
@@ -7188,6 +7335,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_llvm_data_layout(Target target)
         return S8("e-m:e-p:64:64-p10:8:8-p20:8:8-i64:64-n32:64-S128-ni:1:10:20");
     case CPU_ARCH_BPFEL:
         return S8("e-m:e-p:64:64-i64:64-i128:128-n32:64-S128");
+    case CPU_ARCH_I386:
     case CPU_ARCH_SPIRV_COMPUTE:
     case CPU_ARCH_COUNT:
         break;
@@ -7954,6 +8102,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
                                                     .trigraph_mode = invocation.trigraph_mode,
                                                     .position_independent_level = invocation.position_independent_level,
                                                     .position_independent_executable = invocation.position_independent_executable,
+                                                    .freestanding = invocation.freestanding,
                                                     .macro_operation_count = invocation.macro_operation_count,
                                                     .definition_count = invocation.definition_count,
                                                     .undefinition_count = invocation.undefinition_count,
@@ -8199,6 +8348,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .trigraph_mode = invocation.trigraph_mode,
                                                     .position_independent_level = invocation.position_independent_level,
                                                     .position_independent_executable = invocation.position_independent_executable,
+                                                    .freestanding = invocation.freestanding,
                                                     .macro_operation_count = invocation.macro_operation_count,
                                                     .definition_count = invocation.definition_count,
                                                     .undefinition_count = invocation.undefinition_count,
@@ -10413,9 +10563,15 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.specifiers.primitive_answers += unit.c_ast.specifiers.primitive_answers;
         result.c_ast.specifiers.typedef_answers += unit.c_ast.specifiers.typedef_answers;
         result.c_ast.specifiers.fallbacks += unit.c_ast.specifiers.fallbacks;
+        result.c_ast.specifiers.type_name_skips += unit.c_ast.specifiers.type_name_skips;
+        result.c_ast.specifiers.type_name_retries += unit.c_ast.specifiers.type_name_retries;
+        result.c_ast.specifiers.type_name_primitive_answers += unit.c_ast.specifiers.type_name_primitive_answers;
+        result.c_ast.specifiers.type_name_typedef_answers += unit.c_ast.specifiers.type_name_typedef_answers;
+        result.c_ast.specifiers.type_name_fallbacks += unit.c_ast.specifiers.type_name_fallbacks;
         for (u32 reason = 0; reason < C_AST_SPECIFIER_FALLBACK_COUNT; reason += 1)
         {
             result.c_ast.specifiers.fallback_counts[reason] += unit.c_ast.specifiers.fallback_counts[reason];
+            result.c_ast.specifiers.type_name_fallback_counts[reason] += unit.c_ast.specifiers.type_name_fallback_counts[reason];
         }
         if (unit.c_ast.specifiers.fallbacks)
         {

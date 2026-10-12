@@ -16321,6 +16321,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_string_literal_range_shape(CPreprocess
         bool short_wchar = target_uses_16_bit_wchar(target);
         width = short_wchar ? 2 : 4;
         element_kind = short_wchar ? C_TYPE_UNSIGNED_SHORT :
+                       target.cpu_arch == CPU_ARCH_I386 ? C_TYPE_LONG :
                        target_uses_unsigned_wchar(target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
     }
     *shape_out = (CIrDecodedString){
@@ -16631,6 +16632,7 @@ BUSTER_C_SHARED bool c_ir_decode_character_value(Arena* arena, char8 const* spel
         case 'L':
             width = target_uses_16_bit_wchar(target) ? 2 : 4;
             kind = target_uses_16_bit_wchar(target) ? C_TYPE_UNSIGNED_SHORT :
+                   target.cpu_arch == CPU_ARCH_I386 ? C_TYPE_LONG :
                    target_uses_unsigned_wchar(target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
             break;
         default:
@@ -34259,6 +34261,7 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_classify(CIntegerIrBu
             kind = c_token_spelling(builder->preprocess.spelling_base, first).pointer[0] == 'u'                 ? C_TYPE_UNSIGNED_SHORT
                    : c_token_spelling(builder->preprocess.spelling_base, first).pointer[0] == 'U'               ? C_TYPE_UNSIGNED_INT
                    : target_uses_16_bit_wchar(builder->target) ? C_TYPE_UNSIGNED_SHORT
+                   : builder->target.cpu_arch == CPU_ARCH_I386 ? C_TYPE_LONG
                                                                : target_uses_unsigned_wchar(builder->target) ? C_TYPE_UNSIGNED_INT
                                                                : C_TYPE_INT;
         }
@@ -40590,6 +40593,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
                 kind = c_token_spelling(builder->preprocess.spelling_base, token).pointer[0] == 'u'                 ? C_TYPE_UNSIGNED_SHORT
                        : c_token_spelling(builder->preprocess.spelling_base, token).pointer[0] == 'U'               ? C_TYPE_UNSIGNED_INT
                        : target_uses_16_bit_wchar(builder->target) ? C_TYPE_UNSIGNED_SHORT
+                       : builder->target.cpu_arch == CPU_ARCH_I386 ? C_TYPE_LONG
                                                                    : target_uses_unsigned_wchar(builder->target) ? C_TYPE_UNSIGNED_INT
                                                                    : C_TYPE_INT;
             }
@@ -45251,20 +45255,20 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint_class_supported(CIntegerI
     }
     else if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_R)
     {
-        result = builder->target.cpu_arch == CPU_ARCH_X86_64 || builder->target.cpu_arch == CPU_ARCH_AARCH64;
+        result = cpu_arch_is_x86(builder->target.cpu_arch) || builder->target.cpu_arch == CPU_ARCH_AARCH64;
     }
     else if (IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
     {
-        result = builder->target.cpu_arch == CPU_ARCH_X86_64 || builder->target.cpu_arch == CPU_ARCH_AARCH64;
+        result = cpu_arch_is_x86(builder->target.cpu_arch) || builder->target.cpu_arch == CPU_ARCH_AARCH64;
     }
     else if (IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) ||
              IR_INLINE_ASSEMBLY_CONSTRAINT_IS_X87(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
     {
-        result = builder->target.cpu_arch == CPU_ARCH_X86_64;
+        result = cpu_arch_is_x86(builder->target.cpu_arch);
     }
     else
     {
-        result = builder->target.cpu_arch == CPU_ARCH_X86_64 &&
+        result = cpu_arch_is_x86(builder->target.cpu_arch) &&
                  IR_INLINE_ASSEMBLY_CONSTRAINT_IS_FIXED(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
     }
 
@@ -45375,7 +45379,7 @@ BUSTER_C_SHARED u64 c_semantic_asm_register_alternative(String8 text, bool outpu
     return result;
 }
 
-// The x86-64 register names a local register variable may bind, paired with the
+// The x86 register names a local register variable may bind, paired with the
 // operand class that pins an asm operand to them. The set is the emitter's
 // caller-saved asm pool; rbx and r12-r15 are callee-saved and are left out
 // because pinning them would need the prologue preservation only the B class
@@ -45388,9 +45392,12 @@ struct CIrBoundRegisterName
 };
 
 BUSTER_C_INTERNAL CIrBoundRegisterName const c_ir_bound_register_names[] = {
-    {S8_INITIALIZER("rax"), IR_INLINE_ASSEMBLY_CONSTRAINT_A},   {S8_INITIALIZER("rcx"), IR_INLINE_ASSEMBLY_CONSTRAINT_C},
-    {S8_INITIALIZER("rdx"), IR_INLINE_ASSEMBLY_CONSTRAINT_D},   {S8_INITIALIZER("rsi"), IR_INLINE_ASSEMBLY_CONSTRAINT_SI},
-    {S8_INITIALIZER("rdi"), IR_INLINE_ASSEMBLY_CONSTRAINT_DI},  {S8_INITIALIZER("r8"), IR_INLINE_ASSEMBLY_CONSTRAINT_R8},
+    {S8_INITIALIZER("rax"), IR_INLINE_ASSEMBLY_CONSTRAINT_A},   {S8_INITIALIZER("eax"), IR_INLINE_ASSEMBLY_CONSTRAINT_A},
+    {S8_INITIALIZER("rcx"), IR_INLINE_ASSEMBLY_CONSTRAINT_C},   {S8_INITIALIZER("ecx"), IR_INLINE_ASSEMBLY_CONSTRAINT_C},
+    {S8_INITIALIZER("rdx"), IR_INLINE_ASSEMBLY_CONSTRAINT_D},   {S8_INITIALIZER("edx"), IR_INLINE_ASSEMBLY_CONSTRAINT_D},
+    {S8_INITIALIZER("rsi"), IR_INLINE_ASSEMBLY_CONSTRAINT_SI},  {S8_INITIALIZER("esi"), IR_INLINE_ASSEMBLY_CONSTRAINT_SI},
+    {S8_INITIALIZER("rdi"), IR_INLINE_ASSEMBLY_CONSTRAINT_DI},  {S8_INITIALIZER("edi"), IR_INLINE_ASSEMBLY_CONSTRAINT_DI},
+    {S8_INITIALIZER("r8"), IR_INLINE_ASSEMBLY_CONSTRAINT_R8},
     {S8_INITIALIZER("r9"), IR_INLINE_ASSEMBLY_CONSTRAINT_R9},   {S8_INITIALIZER("r10"), IR_INLINE_ASSEMBLY_CONSTRAINT_R10},
     {S8_INITIALIZER("r11"), IR_INLINE_ASSEMBLY_CONSTRAINT_R11},
 };
@@ -45419,7 +45426,10 @@ BUSTER_C_SHARED u64 c_semantic_asm_bound_register(Target target, String8 label)
     u64 result = IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ir_bound_register_names); index += 1)
     {
-        if (target.cpu_arch == CPU_ARCH_X86_64 && string_equal(c_ir_bound_register_names[index].name, label))
+        String8 name = c_ir_bound_register_names[index].name;
+        bool x86_64_register = name.length && name.pointer[0] == 'r';
+        if (cpu_arch_is_x86(target.cpu_arch) && (target.cpu_arch == CPU_ARCH_X86_64 || !x86_64_register) &&
+            string_equal(name, label))
         {
             result = c_ir_bound_register_names[index].constraint;
         }
@@ -45476,7 +45486,7 @@ BUSTER_C_INTERNAL bool c_ir_declaration_asm_label(CIntegerIrBuilder* builder, u3
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_bound_register(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, u64* constraint_out)
 {
     if (state->operand_close != state->constraint_index + 3 ||
-        (builder->target.cpu_arch != CPU_ARCH_X86_64 && builder->target.cpu_arch != CPU_ARCH_AARCH64))
+        (!cpu_arch_is_x86(builder->target.cpu_arch) && builder->target.cpu_arch != CPU_ARCH_AARCH64))
     {
         return false;
     }
@@ -45720,7 +45730,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
     // scalar SSE instructions operate on.
     if (!matching && IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
     {
-        if (builder->target.cpu_arch != CPU_ARCH_X86_64)
+        if (!cpu_arch_is_x86(builder->target.cpu_arch))
         {
             builder->failure_message = S8("unsupported asm constraint for target");
             return false;
@@ -45737,7 +45747,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
     // which is not something an operand does.
     if (!matching && IR_INLINE_ASSEMBLY_CONSTRAINT_IS_X87(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
     {
-        if (builder->target.cpu_arch != CPU_ARCH_X86_64)
+        if (!cpu_arch_is_x86(builder->target.cpu_arch))
         {
             builder->failure_message = S8("unsupported asm constraint for target");
             return false;
@@ -45824,7 +45834,9 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
 BUSTER_C_SHARED String8 c_semantic_asm_clobber_name(Target target, String8 clobber)
 {
     // GNU x86 register number zero denotes AX, independently of operand ties.
-    String8 result = target.cpu_arch == CPU_ARCH_X86_64 && string_equal(clobber, S8("0")) ? S8("rax") : clobber;
+    String8 result = cpu_arch_is_x86(target.cpu_arch) && string_equal(clobber, S8("0"))
+                         ? target.cpu_arch == CPU_ARCH_X86_64 ? S8("rax") : S8("eax")
+                         : clobber;
     return result;
 }
 
@@ -45836,13 +45848,15 @@ BUSTER_C_SHARED bool c_semantic_asm_clobber_valid(Target target, String8 clobber
     {
         result = true;
     }
-    else if (target.cpu_arch == CPU_ARCH_X86_64)
+    else if (cpu_arch_is_x86(target.cpu_arch))
     {
         if (clobber.length >= 4 && clobber.pointer[0] == 'x' && clobber.pointer[1] == 'm' && clobber.pointer[2] == 'm')
         {
             u64 number = 0;
             String8 suffix = string_slice(clobber, 3, clobber.length);
-            result = c_conditional_number(suffix, &number) && number <= 15 &&
+            result = (target.cpu_arch == CPU_ARCH_X86_64 ||
+                      target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_SSE2)) &&
+                     c_conditional_number(suffix, &number) && number <= 15 &&
                      (suffix.length == 1 || (suffix.length == 2 && suffix.pointer[0] == '1'));
         }
         else if (!target_uses_llp64_data_model(target) ||
@@ -45864,9 +45878,12 @@ BUSTER_C_SHARED bool c_semantic_asm_clobber_valid(Target target, String8 clobber
             };
             for (u32 name_index = 0; !result && name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
             {
-                result = string_equal(clobber, names[name_index]);
+                bool x86_64_register = (names[name_index].length && names[name_index].pointer[0] == 'r') ||
+                                       string_equal(names[name_index], S8("sil")) || string_equal(names[name_index], S8("dil"));
+                result = (target.cpu_arch == CPU_ARCH_X86_64 || !x86_64_register) &&
+                         string_equal(clobber, names[name_index]);
             }
-            if (!result && clobber.length >= 2 && clobber.pointer[0] == 'r')
+            if (!result && target.cpu_arch == CPU_ARCH_X86_64 && clobber.length >= 2 && clobber.pointer[0] == 'r')
             {
                 u64 number = 0;
                 String8 suffix = clobber;
@@ -46394,7 +46411,7 @@ BUSTER_C_SHARED String8 c_semantic_asm_special_operands_message(Target target, S
     String8 message = {0};
     bool cpuid = string_equal(assembly, S8("cpuid"));
     bool xgetbv = string_equal(assembly, S8("xgetbv"));
-    if ((cpuid || xgetbv) && target.cpu_arch == CPU_ARCH_X86_64)
+    if ((cpuid || xgetbv) && cpu_arch_is_x86(target.cpu_arch))
     {
         String8 failure = cpuid ? S8("cpuid inline assembly requires fixed register operands")
                                : S8("xgetbv inline assembly requires fixed register operands");
@@ -46456,7 +46473,7 @@ BUSTER_C_SHARED String8 c_semantic_asm_special_operands_message(Target target, S
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_special_literal_operands_valid(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, String8 assembly)
 {
     bool valid = true;
-    if (builder && state && builder->target.cpu_arch == CPU_ARCH_X86_64 &&
+    if (builder && state && cpu_arch_is_x86(builder->target.cpu_arch) &&
         (string_equal(assembly, S8("cpuid")) || string_equal(assembly, S8("xgetbv"))))
     {
         CSemanticAsmOperand* operands = arena_allocate(builder->temporary_arena, CSemanticAsmOperand, state->operand_count);
