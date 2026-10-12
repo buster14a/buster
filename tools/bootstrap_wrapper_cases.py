@@ -3,12 +3,11 @@
 
 run_cases owns a persistent bounded worker gang and ordered result slots.
 CaseProcess adds cancellation ownership and timing to the existing child owner.
-WindowsFixtureTree runs the native capture in tools/windows_process_tree.c.
+On Windows, tools/windows_process_tree.c owns each case's job: launch and drain.
 The six-writer publication scenario runs alone after the independent cases.
-No test assertions, fake compiler, shell selection or deadlines live here.
+No test assertions, fake compiler, shell selection or case deadlines live here.
 """
 import argparse
-import atexit
 import io
 import json
 import os
@@ -18,10 +17,10 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import unittest
+import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 import bootstrap_wrapper_test as bootstrap
@@ -75,86 +74,51 @@ class CaseOwnership:
 
 
 
-class TreeHelper:
-    """Native Windows descendant capture, built once per process before lanes start."""
-    SOURCE = Path(__file__).resolve().parent / "windows_process_tree.c"
-    # Helper exit and record publication after its own shared wait deadline.
-    EXIT_GRACE_SECONDS = 5
-    lock = threading.Lock()
-    command = None
+PROCESS_TREE_ENVIRONMENT = "BUSTER_WINDOWS_PROCESS_TREE"
+# Time for the drain record to arrive after the helper's own budget. A record
+# that arrives after the cleanup deadline is still a failure.
+DRAIN_RECORD_GRACE_SECONDS = 1
+# windows_process_tree.c: the drain found no job, and a finished command's
+# job could not be emptied.
+DRAIN_ABSENT_EXIT = 3
+LAUNCH_DRAIN_FAILED_EXIT = 125
 
 
-def tree_helper():
-    with TreeHelper.lock:
-        if TreeHelper.command is None:
-            compiler = shutil.which("clang") or shutil.which("gcc")
-            if not compiler:
-                raise RuntimeError("bootstrap descendant capture requires a C compiler")
-            directory = Path(tempfile.mkdtemp(prefix="buster-process-tree-"))
-            atexit.register(shutil.rmtree, directory, True)
-            executable = directory / ("windows_process_tree" + (".exe" if os.name == "nt" else ""))
-            result = subprocess.run([compiler, "-I" + str(TreeHelper.SOURCE.parents[1] / "src"), "-Wall", "-Werror",
-                                     "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", "-O1",
-                                     str(TreeHelper.SOURCE), "-o", str(executable)],
-                                    capture_output=True, text=True, timeout=90)
-            if result.returncode:
-                raise RuntimeError("bootstrap descendant capture helper build failed: " +
-                                   result.stdout + result.stderr)
-            TreeHelper.command = [str(executable)]
-        return list(TreeHelper.command)
+def process_tree_command():
+    path = os.environ.get(PROCESS_TREE_ENVIRONMENT)
+    if not path or not os.path.isfile(path):
+        raise RuntimeError("bootstrap case ownership requires " + PROCESS_TREE_ENVIRONMENT +
+                           ", the executable built from tools/windows_process_tree.c")
+    return [path]
 
 
-class WindowsFixtureTree:
-    """Retain descendant identities before taskkill; wait for termination, not its request.
-
-    windows_process_tree.c owns the snapshot walk, identity checks and native
-    handles. Excluded stale-parent links are published, never silently dropped.
-    """
-    def __init__(self, pid, deadline):
-        self.deadline = deadline
-        self.captured = []
-        self.excluded = []
-        budget = max(0, int((deadline - time.monotonic()) * 1000))
-        self.helper = subprocess.Popen(tree_helper() + ["capture", str(pid), str(budget)],
-                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+def drain_job(name, deadline):
+    """Terminate every member of a case job and wait for each; doubt fails."""
+    budget = max(0, int((deadline - time.monotonic()) * 1000))
+    try:
+        result = subprocess.run(process_tree_command() + ["drain", name, str(budget)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                timeout=budget / 1000 + DRAIN_RECORD_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("bootstrap job drain exceeded its deadline: " + name) from None
+    late = time.monotonic() > deadline
+    record = None
+    if result.stdout.endswith("\n") and len(result.stdout.splitlines()) == 1:
         try:
-            line = self.helper.stdout.readline()
-            record = json.loads(line) if line.strip() else {"failure": "no capture record"}
-            if "failure" in record:
-                kind = ("identity changed during capture" if record["failure"] == "replacement"
-                        else "capture failed")
-                raise RuntimeError("bootstrap descendant " + kind + ": " + json.dumps(record))
-            self.captured = [row["pid"] for row in record["captured"]]
-            self.excluded = record["excluded"]
-        except BaseException:
-            self.close()
-            raise
-
-    def wait(self):
-        # The termination request has been made; the helper waits on every
-        # retained handle within the shared deadline it received at launch.
-        try:
-            output, _ = self.helper.communicate("\n", timeout=max(0.0, self.deadline - time.monotonic()) +
-                                                TreeHelper.EXIT_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("bootstrap descendant wait exceeded its deadline") from None
-        record = json.loads(output) if output.strip() else {}
-        if (self.helper.returncode or record.get("pending") != [] or record.get("failed") != [] or
-                record.get("close_failed") != []):
-            raise RuntimeError("bootstrap descendant termination incomplete: " +
-                               repr({"exit": self.helper.returncode, "record": output.strip()}))
-
-    def close(self):
-        # Ending the helper releases any handle it still holds.
-        if self.helper.poll() is None:
-            self.helper.kill()
-            self.helper.wait()
-        for stream in (self.helper.stdin, self.helper.stdout):
-            if stream is not None and not stream.closed:
-                try:
-                    stream.close()
-                except OSError:
-                    pass
+            record = json.loads(result.stdout)
+        except ValueError:
+            pass
+    diagnostic = repr({"job": name, "exit": result.returncode, "late": late,
+                       "stdout": result.stdout, "stderr": result.stderr})
+    if not isinstance(record, dict):
+        raise RuntimeError("bootstrap job drain record malformed: " + diagnostic)
+    absent = result.returncode == DRAIN_ABSENT_EXIT and record.get("absent") is True
+    complete = (result.returncode == 0 and record.get("complete") is True and
+                isinstance(record.get("waited"), list) and record.get("pending") == [] and
+                record.get("failed") == [])
+    if late or not (absent or complete):
+        raise RuntimeError("bootstrap descendant termination incomplete: " + diagnostic)
+    return record
 
 
 class CaseProcess(bootstrap.WrapperProcess):
@@ -166,7 +130,15 @@ class CaseProcess(bootstrap.WrapperProcess):
         self.cleanup_seconds = 0.0
         self.descendant_cleanup_error = None
         self.descendant_waited_pids = []
-        self.descendant_excluded = []
+        self.job_drain = None
+        self.job_name = None
+        if os.name == "nt":
+            # The launcher joins a fresh job before it starts the command, so
+            # every descendant is a kernel-tracked member from birth (#3690).
+            self.job_name = "Local\\buster-bootstrap-case-%d-%s" % (os.getpid(), uuid.uuid4().hex)
+            command = process_tree_command() + [
+                "launch", self.job_name, str(int(bootstrap.CLEANUP_TIMEOUT_SECONDS * 1000)),
+                subprocess.list2cmdline(command)]
         with self.ownership.lock:
             if self.ownership.cancelled.is_set():
                 raise RuntimeError("bootstrap case execution cancelled before launch")
@@ -175,7 +147,7 @@ class CaseProcess(bootstrap.WrapperProcess):
             self.ownership.peak_live_children = max(self.ownership.peak_live_children,
                 sum(child.process.poll() is None for child in self.ownership.children))
         print("BOOTSTRAP_LAUNCH " + json.dumps({
-            "test": self.test_id, "pid": self.process.pid,
+            "test": self.test_id, "pid": self.process.pid, "job": self.job_name,
             "elapsed_seconds": time.monotonic() - self.started,
         }), flush=True)
 
@@ -187,46 +159,40 @@ class CaseProcess(bootstrap.WrapperProcess):
             if self.descendant_cleanup_error is not None:
                 raise self.descendant_cleanup_error
             started = time.monotonic()
-            tree = None
-            capture_error = None
+            drain_error = None
             try:
-                # taskkill requests descendant termination. Waiting only for
-                # the direct child can remove fixtures while a descendant still
-                # holds its inherited Windows current-directory handle (#2985).
-                # Capture native handles first; no new PID signal target is added.
-                # The unreaped direct child's open Popen handle keeps its PID
-                # from being reused while the helper opens it by number.
+                # Waiting only for the direct child can remove fixtures while a
+                # descendant still holds its inherited Windows current-directory
+                # handle (#2985). Drain the whole job first: the launcher is a
+                # member, so draining also ends the direct child.
                 if not self.cleaned and os.name == "nt" and self.process.poll() is None:
                     try:
-                        tree = WindowsFixtureTree(self.process.pid, started + bootstrap.CLEANUP_TIMEOUT_SECONDS)
-                        self.descendant_excluded.extend(tree.excluded)
+                        self.job_drain = drain_job(self.job_name, started + bootstrap.CLEANUP_TIMEOUT_SECONDS)
+                        if self.job_drain.get("absent") and self.process.poll() is None:
+                            raise RuntimeError("bootstrap case job is missing while its launcher runs: " +
+                                               self.job_name)
+                        self.descendant_waited_pids.extend(self.job_drain.get("waited", ()))
                     except Exception as error:
-                        capture_error = error
+                        drain_error = error
                 try:
                     super().cleanup()
-                finally:
-                    if tree is not None:
-                        tree.wait()
-                        self.descendant_waited_pids.extend(tree.captured)
-                if capture_error is not None:
-                    raise capture_error
+                except Exception as error:
+                    if drain_error is not None:
+                        error = RuntimeError("bootstrap descendant cleanup failures: " +
+                                             repr([drain_error, error]))
+                    drain_error = error
+                if (drain_error is None and os.name == "nt" and
+                        self.process.returncode == LAUNCH_DRAIN_FAILED_EXIT):
+                    drain_error = RuntimeError("bootstrap case job kept members after its command exited: " +
+                                               self.job_name)
+                if drain_error is not None:
+                    raise drain_error
             except Exception as error:
                 self.descendant_cleanup_error = error
                 self.cleaned = False
                 raise
             finally:
-                try:
-                    if tree is not None:
-                        tree.close()
-                except Exception as error:
-                    if self.descendant_cleanup_error is not None:
-                        error = RuntimeError("bootstrap descendant cleanup failures: " +
-                                             repr([self.descendant_cleanup_error, error]))
-                    self.descendant_cleanup_error = error
-                    self.cleaned = False
-                    raise error
-                finally:
-                    self.cleanup_seconds += time.monotonic() - started
+                self.cleanup_seconds += time.monotonic() - started
 
     def finish(self, timeout_seconds=None):
         started = time.monotonic()
@@ -237,7 +203,7 @@ class CaseProcess(bootstrap.WrapperProcess):
                 "test": self.test_id, "pid": self.process.pid,
                 "elapsed_seconds": time.monotonic() - started,
                 "cleanup_seconds": self.cleanup_seconds,
-                "descendant_excluded": self.descendant_excluded,
+                "job_drain": self.job_drain,
             }), flush=True)
         return result
 
@@ -253,7 +219,7 @@ def run_cases(cases, jobs=1, stream=None, ownership=None):
     if not cases or len({case.id() for case in cases}) != len(cases):
         raise ValueError("bootstrap cases must be nonempty and unique")
     if os.name == "nt":
-        tree_helper()  # Build serially before any lane can need cleanup.
+        process_tree_command()  # Refuse before any lane launches a case.
     stream = sys.stdout if stream is None else stream
     ownership = CaseOwnership() if ownership is None else ownership
     independent = [i for i, case in enumerate(cases) if case._testMethodName != EXCLUSIVE_TEST]
@@ -371,9 +337,7 @@ def run_cases(cases, jobs=1, stream=None, ownership=None):
                "worker_errors": worker_errors, "cleanup_errors": cleanup_errors,
                "owned_children": len(ownership.children),
                "peak_live_children": ownership.peak_live_children,
-               "unreaped_children": sum(child.process.poll() is None for child in ownership.children),
-               "excluded_descendants": [dict(row, test=child.test_id) for child in ownership.children
-                                        for row in child.descendant_excluded]}
+               "unreaped_children": sum(child.process.poll() is None for child in ownership.children)}
     # Release the registry cycle and native Popen handles between repeated
     # suite runs; all timing/cleanup facts above have already been collected.
     ownership.children.clear()

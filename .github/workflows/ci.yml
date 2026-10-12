@@ -596,6 +596,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Native case-job owner for the bootstrap scheduler and its controls;
+          # see docs/ci-bootstrap-wrapper.md. Python only receives its path.
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          "$(command -v clang || command -v gcc)" -Isrc -Wall -Werror -fwrapv -fno-strict-aliasing -funsigned-char \
+            tools/windows_process_tree.c -o "$RUNNER_TEMP/buster-ci/windows_process_tree.exe"
+          export BUSTER_WINDOWS_PROCESS_TREE="$RUNNER_TEMP/buster-ci/windows_process_tree.exe"
           # Independent suites share three lanes, slowest first (#2021).
           suites=(
             tools/ci_vs_dev_shell_test.py=vs-dev-shell-test.log
@@ -644,7 +650,12 @@ jobs:
             printf 'BOOTSTRAP_WRAPPERS owned-by-release-shard\n'
             exit 0
           fi
+          # Native case-job owner for the bootstrap scheduler and its controls;
+          # see docs/ci-bootstrap-wrapper.md. Python only receives its path.
           mkdir -p "$RUNNER_TEMP/buster-ci"
+          "$(command -v clang || command -v gcc)" -Isrc -Wall -Werror -fwrapv -fno-strict-aliasing -funsigned-char \
+            tools/windows_process_tree.c -o "$RUNNER_TEMP/buster-ci/windows_process_tree.exe"
+          export BUSTER_WINDOWS_PROCESS_TREE="$RUNNER_TEMP/buster-ci/windows_process_tree.exe"
           if [[ "$RUNNER_OS" == Windows ]]; then
             "$BUSTER_CI_PYTHON" tools/bootstrap_wrapper_cases.py --jobs 2 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
           else

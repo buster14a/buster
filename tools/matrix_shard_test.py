@@ -409,6 +409,12 @@ class WorkflowSetupTests(unittest.TestCase):
                                 RUNNER_TEMP=self.root.as_posix(), BUSTER_MATRIX_SHARD="checks",
                                 ZIG_TARGET="fixture", FIXTURE_EXIT="0", RUNNER_OS="Linux")
 
+    def copy_process_tree_source(self):
+        # Both bootstrap steps build the native case-job owner first.
+        for relative in ("tools/windows_process_tree.c", "src/buster/lib/base.h", "src/buster/lib/system_headers.h"):
+            (self.root / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, self.root / relative)
+
     def run_step(self, name):
         body = self.steps[name].split("        run: |\n", 1)[1]
         script = "\n".join(line[10:] for line in body.splitlines() if line.startswith("          "))
@@ -452,6 +458,7 @@ class WorkflowSetupTests(unittest.TestCase):
         runner = self.root / "tools/ci_workflow_tools.py"
         runner.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / "tools/ci_workflow_tools.py", runner)
+        self.copy_process_tree_source()
         for suite, _ in expected:
             path = self.root / suite
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -498,6 +505,7 @@ class WorkflowSetupTests(unittest.TestCase):
             "sys.exit(int(os.environ['FIXTURE_EXIT']))\n")
         (tests / "bootstrap_wrapper_test.py").write_text(fixture)
         (tools / "bootstrap_wrapper_cases.py").write_text(fixture)
+        self.copy_process_tree_source()
         selections = (("Linux", "bootstrap_wrapper_test.py", "BootstrapWrapperTests"),
                       ("Windows", "bootstrap_wrapper_cases.py", "--jobs"))
         for platform, entry, argument in selections:

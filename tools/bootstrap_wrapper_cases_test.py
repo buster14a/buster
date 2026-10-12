@@ -258,154 +258,105 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(summary["owned_children"], 0)
 
 
-    def test_windows_cleanup_waits_for_descendant_handles_before_fixture_removal(self):
+    def test_windows_cleanup_drains_the_job_before_fixture_removal(self):
         self.check_windows_cleanup_order()
 
-    def test_windows_descendant_wait_failure_is_not_success(self):
-        self.check_windows_cleanup_order(wait_error=RuntimeError("descendant-wait-marker"))
+    def test_windows_job_drain_failure_still_reaps_direct_child(self):
+        self.check_windows_cleanup_order(drain_error=RuntimeError("job-drain-marker"))
 
-    def test_windows_tree_capture_failure_still_reaps_direct_child(self):
-        self.check_windows_cleanup_order(capture_error=RuntimeError("tree-capture-marker"))
+    def test_windows_direct_cleanup_failure_keeps_the_drain_failure(self):
+        self.check_windows_cleanup_order(drain_error=RuntimeError("job-drain-marker"),
+                                         direct_error=RuntimeError("direct-cleanup-marker"))
 
-    def test_windows_handle_close_failure_keeps_the_owner_failed(self):
-        self.check_windows_cleanup_order(close_error=RuntimeError("handle-close-marker"))
+    def test_windows_missing_job_with_a_live_launcher_fails(self):
+        self.check_windows_cleanup_order(record={"complete": False, "absent": True, "error": 2})
 
-    def check_windows_cleanup_order(self, wait_error=None, capture_error=None, close_error=None):
+    def test_windows_launcher_drain_failure_after_command_exit_fails(self):
+        self.check_windows_cleanup_order(launcher_status=scheduler.LAUNCH_DRAIN_FAILED_EXIT)
+
+    def check_windows_cleanup_order(self, drain_error=None, direct_error=None, record=None, launcher_status=0):
         events = []
-        tree = mock.Mock()
-        tree.captured = [24]
-        tree.excluded = [{"pid": 30, "parent": 123, "created": 50, "parent_created": 100}]
-        tree.wait.side_effect = lambda: events.append(("wait",))
-        if wait_error is not None:
-            def failed_wait():
-                events.append(("wait",))
-                raise wait_error
-            tree.wait.side_effect = failed_wait
-        def close_tree():
-            events.append(("close",))
-            if close_error is not None:
-                raise close_error
-        tree.close.side_effect = close_tree
+        record = record or {"complete": True, "waited": [24, 123], "foreign": [], "pending": [], "failed": []}
+
+        def drain(name, deadline):
+            events.append(("drain", name, deadline))
+            if drain_error is not None:
+                raise drain_error
+            return record
+
         child = scheduler.CaseProcess.__new__(scheduler.CaseProcess)
         child.cleanup_lock = threading.RLock()
         child.cleanup_seconds = 0.0
         child.descendant_cleanup_error = None
         child.descendant_waited_pids = []
-        child.descendant_excluded = []
+        child.job_drain = None
+        child.job_name = "job-marker"
         child.cleaned = False
-        child.process = mock.Mock(pid=123)
+        child.process = mock.Mock(pid=123, returncode=None)
         child.process.poll.return_value = None
 
         def direct_cleanup(_child):
             events.append(("direct",))
+            _child.process.returncode = launcher_status
+            if direct_error is not None:
+                raise direct_error
             _child.cleaned = True
 
-        factory = mock.Mock(side_effect=capture_error, return_value=tree)
         with mock.patch.object(scheduler.os, "name", "nt"), \
-             mock.patch.object(scheduler, "WindowsFixtureTree", factory), \
+             mock.patch.object(scheduler, "drain_job", drain), \
              mock.patch.object(scheduler.bootstrap.WrapperProcess, "cleanup", direct_cleanup), \
              mock.patch.object(scheduler.time, "monotonic", return_value=100):
-            error = wait_error or capture_error or close_error
-            if error is not None:
-                with self.assertRaisesRegex(RuntimeError, str(error)):
+            expected_error = drain_error or direct_error
+            failed = expected_error is not None or record.get("absent") or launcher_status
+            if failed:
+                with self.assertRaises(RuntimeError) as raised:
                     child.cleanup()
+                for marker in (drain_error, direct_error):
+                    if marker is not None:
+                        self.assertIn(str(marker), str(raised.exception))
+                events.append(("fixture",))
+                with self.assertRaises(RuntimeError):
+                    child.cleanup()  # A failed owner stays failed.
             else:
                 child.cleanup()
-            events.append(("fixture",))
-            if error is not None:
-                self.assertFalse(child.cleaned)
-                with self.assertRaisesRegex(RuntimeError, str(error)):
-                    child.cleanup()
-            else:
-                child.cleanup()  # Already cleaned; do not recapture stale numeric PIDs.
-        factory.assert_called_once_with(123, 100 + scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS)
-        self.assertEqual(child.descendant_waited_pids, [] if wait_error or capture_error else [24])
-        self.assertEqual(child.descendant_excluded, [] if capture_error else tree.excluded)
-        expected = [("direct",)]
-        if capture_error is None:
-            expected += [("wait",), ("close",)]
-        expected += [("fixture",)]
-        if error is None:
-            expected += [("direct",)]
-        self.assertEqual(events, expected)
+                events.append(("fixture",))
+                child.cleanup()  # Already cleaned; nothing is drained twice.
+        deadline = 100 + scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS
+        succeeded = not failed
+        # A cleaned owner only repeats the frozen direct-child reap, never a drain.
+        self.assertEqual(events, [("drain", "job-marker", deadline), ("direct",), ("fixture",)] +
+                         ([("direct",)] if succeeded else []))
+        self.assertEqual(child.descendant_waited_pids, [24, 123] if succeeded else
+                         ([] if drain_error or record.get("absent") else [24, 123]))
 
-    def walk(self, *entries, root_created=100, cutoff=200):
-        # The native admission over a synthetic snapshot; root PID is 1.
-        command = scheduler.tree_helper() + ["walk", "1", str(root_created), str(cutoff)] + list(entries)
-        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
-        return result.returncode, json.loads(result.stdout)
+    def drain_with(self, *fixture, budget=0.2):
+        # Run the real caller against a deliberately broken native drain.
+        command = [os.environ[scheduler.PROCESS_TREE_ENVIRONMENT], "fixture"] + list(fixture)
+        with mock.patch.object(scheduler, "process_tree_command", return_value=command):
+            return scheduler.drain_job("job-marker", time.monotonic() + budget)
 
-    def test_windows_walk_checks_each_edge_against_its_own_parent(self):
-        # 30 is an older unrelated process whose dead parent's PID now names
-        # the fixture (#3690); neither it nor its children are opened. 27 is
-        # older than its own recorded parent 24, though newer than the root.
-        status, record = self.walk("1:0:100", "23:1:110", "24:23:120", "25:23:exited", "26:24:130",
-                                   "27:24:115", "30:1:50", "31:30:150", "40:9:10", "1023:40:160")
-        self.assertEqual(status, 0, record)
-        self.assertNotIn("failure", record)
-        self.assertEqual(sorted(row["pid"] for row in record["captured"]), [23, 24, 26])
-        self.assertEqual(sorted((row["pid"], row["parent"], row["created"], row["parent_created"])
-                                for row in record["excluded"]), [(27, 24, 115, 120), (30, 1, 50, 100)])
-        self.assertEqual([row["pid"] for row in record["exited"]], [25])
+    @unittest.skipUnless(os.environ.get(scheduler.PROCESS_TREE_ENVIRONMENT),
+                         "CI builds tools/windows_process_tree.c and exports its path")
+    def test_drain_accepts_only_one_complete_timely_record(self):
+        self.assertEqual(self.drain_with("late", "0")["waited"], [])
+        for fixture, message in ((("silent",), "record malformed"),
+                                 (("partial",), "record malformed"),
+                                 (("malformed",), "record malformed"),
+                                 (("late", "600"), "termination incomplete.*'late': True"),
+                                 (("sleep", "5000"), "exceeded its deadline")):
+            with self.subTest(fixture=fixture):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    self.drain_with(*fixture)
 
-    def test_windows_walk_fails_replacement_and_open_failures(self):
-        # A PID replaced after the pre-snapshot cutoff, or an identity that
-        # cannot be queried, fails capture instead of being waited on.
-        for entries, failure, pid in (
-                (("23:1:110", "24:23:201"), "replacement", 24),
-                (("23:1:110", "24:23:error"), "open", 24)):
-            with self.subTest(failure=failure):
-                status, record = self.walk(*entries)
-                self.assertEqual(status, 1, record)
-                self.assertEqual((record["failure"], record["pid"]), (failure, pid))
-                self.assertEqual([row["pid"] for row in record["captured"]], [23])
-                self.assertEqual(record["excluded"], [])
-
-    def test_windows_walk_bounds_children_of_exited_parents_by_nearest_ancestor(self):
-        # 23 exited before it could be opened: its children are checked
-        # against the root, so ambiguity adds waits instead of exclusions.
-        status, record = self.walk("23:1:exited", "24:23:105", "25:23:90")
-        self.assertEqual(status, 0, record)
-        self.assertEqual([row["pid"] for row in record["captured"]], [24])
-        self.assertEqual([(row["pid"], row["parent_created"]) for row in record["excluded"]], [(25, 100)])
-
-    def fake_tree(self, capture, wait="", exit_code=0):
-        # Script the helper protocol: one capture record, then a wait record
-        # after the termination line arrives on stdin.
-        script = ("import sys\n"
-                  "print(%r, flush=True)\n"
-                  "sys.stdin.readline()\n"
-                  "print(%r, flush=True)\n"
-                  "sys.exit(%d)\n") % (capture, wait, exit_code)
-        with mock.patch.object(scheduler, "tree_helper", return_value=[sys.executable, "-c", script]):
-            return scheduler.WindowsFixtureTree(123, time.monotonic() + 10)
-
-    def test_windows_capture_publishes_exclusions_and_waits(self):
-        excluded = {"pid": 30, "parent": 123, "created": 50, "parent_created": 100, "image": "old.exe"}
-        tree = self.fake_tree(json.dumps({"captured": [{"pid": 24}], "excluded": [excluded], "exited": []}),
-                              json.dumps({"pending": [], "failed": [], "close_failed": []}))
-        try:
-            self.assertEqual((tree.captured, tree.excluded), ([24], [excluded]))
-            tree.wait()
-        finally:
-            tree.close()
-
-    def test_windows_capture_failure_and_incomplete_wait_are_errors(self):
-        with self.assertRaisesRegex(RuntimeError, "identity changed during capture.*replacement"):
-            self.fake_tree(json.dumps({"failure": "replacement", "pid": 24, "captured": []}))
-        with self.assertRaisesRegex(RuntimeError, "capture failed.*no capture record"):
-            self.fake_tree("")
-        for wait, exit_code in ((json.dumps({"pending": [24], "failed": [], "close_failed": []}), 1),
-                                (json.dumps({"pending": [], "failed": [], "close_failed": [24]}), 1),
-                                (json.dumps({"pending": [], "failed": [], "close_failed": []}), 3),
-                                ("", 0)):
-            with self.subTest(wait=wait, exit_code=exit_code):
-                tree = self.fake_tree(json.dumps({"captured": [{"pid": 24}], "excluded": []}), wait, exit_code)
-                try:
-                    with self.assertRaisesRegex(RuntimeError, "termination incomplete"):
-                        tree.wait()
-                finally:
-                    tree.close()
+    @unittest.skipUnless(os.name == "nt", "Windows job objects")
+    def test_windows_job_membership_never_admits_an_outside_process(self):
+        # The reused-PID control: a live process outside the job is never
+        # treated as a member, waited on or terminated by a drain.
+        result = subprocess.run(scheduler.process_tree_command() + ["selftest"],
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"selftest": True, "member": True, "outsider_member": False,
+                                                     "outsider_alive": True, "member_waited": True})
 
     def test_cleanup_error_cannot_be_a_success(self):
         cleanup = scheduler.CaseProcess.cleanup
@@ -499,6 +450,9 @@ sys.exit(0 if summary['success'] else 1)
         self.assertIn("set -euo pipefail", wrappers)
         self.assertIn("timeout-minutes: ${{ matrix.platform == 'windows' && 20 || 2 }}", wrappers)
         self.assertNotIn("continue-on-error", wrappers)
+        for step in (policy, wrappers):
+            self.assertIn("tools/windows_process_tree.c", step)
+            self.assertIn("export BUSTER_WINDOWS_PROCESS_TREE=", step)
 
 
 def load_tests(loader, tests, pattern):

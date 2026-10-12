@@ -1,103 +1,48 @@
-// Native Windows descendant capture for the bootstrap case scheduler (#3690).
+// Native Windows case-tree ownership for the bootstrap case scheduler (#3690).
 //
-// Owner: tools/bootstrap_wrapper_cases.py launches this helper before the
-// direct child's `taskkill /T /F`, so descendant identities are retained as
-// native handles before termination is requested (#2985).
+// Owner: tools/bootstrap_wrapper_cases.py runs every Windows case command
+// through `launch`, and drains its job before fixture removal (#2985). CI
+// builds this file; the scheduler only receives its path.
 // Entry points:
-// - `capture <root-pid> <budget-ms>` (Windows): admit the root's snapshot
-//   descendants, print one capture record, wait for a line or EOF on stdin
-//   (the caller's termination request), then wait for every retained handle
-//   within the budget measured from helper start and print one wait record.
-// - `walk <root-pid> <root-created> <cutoff> <pid>:<parent>:<created>...`
-//   (every host): run the same admission over a synthetic snapshot; `exited`
-//   or `error` replaces a creation time. This is the portable control seam.
-// Map: tree_admit walks parent edges; tree_open_* supply identities;
-// tree_print_capture/tree_wait_print publish records.
+// - `launch <job-name> <budget-ms> <command-line>` (Windows): create the named
+//   job with kill-on-close, join it, run the command line, then terminate and
+//   wait for any remaining member within the budget. Exit with the command's
+//   status, or TREE_EXIT_DRAIN_FAILED when members survive the budget.
+// - `drain <job-name> <budget-ms>` (Windows): terminate every member of the
+//   named job and wait for each one within the budget; print one record.
+// - `selftest` (Windows): membership controls with a real non-member process.
+// - `fixture <silent|partial|malformed|late <ms>|sleep <ms>>` (every host):
+//   deliberately broken drain records for the scheduler's caller controls.
+// Map: tree_drain owns verification and waiting; tree_member is the only
+// identity test; tree_launch/tree_drain_main/tree_selftest are the modes.
 //
-// Windows keeps a dead parent's PID in th32ParentProcessID, and PIDs are
-// reused. A link therefore proves descent only when the child is no older
-// than the parent it names: an older process is excluded and published, and
-// nothing beneath it is opened. A process created after the pre-snapshot
-// cutoff is a PID replacement (or a late spawn) and fails capture, as does any
-// open, time query or snapshot failure. An exited intermediate passes its
-// nearest verified ancestor's creation time to its children, so ambiguity
-// only adds waits. The root PID is stable: the caller holds an open handle to
-// the unreaped root, so Windows cannot reuse that number during capture.
+// Ownership is established before the command starts: the launcher joins the
+// job first, so every descendant is a member regardless of PID reuse, parent
+// links or clock adjustments. A listed PID is waited on only after
+// IsProcessInJob confirms that the opened handle belongs to this job; a reused
+// PID naming another process is never waited on or terminated. Wait timeouts,
+// wait failures, open/query failures and capacity limits fail the drain.
 #include <buster/lib/base.h>
 #include <buster/lib/system_headers.h>
 #include <stdio.h>
 #include <string.h>
 #if BUSTER_WINDOWS
-#include <tlhelp32.h>
+#include <shellapi.h>
+#if defined(_MSC_VER)
+#pragma comment(lib, "shell32") // CommandLineToArgvW.
+#endif
 #endif
 
-#define TREE_PROCESS_CAPACITY 16384
-#define TREE_IMAGE_CAPACITY 256
-#define TREE_ACCESS_WAIT_QUERY 0x101000 // SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION.
-#define TREE_WAIT_TIMEOUT 258
-#define TREE_ERROR_INVALID_PARAMETER 87 // OpenProcess on an exited PID.
-
-typedef enum TreeIdentity
-{
-    TREE_IDENTITY_OPENED,
-    TREE_IDENTITY_EXITED,
-    TREE_IDENTITY_ERROR,
-} TreeIdentity;
-
-typedef enum TreeFailure
-{
-    TREE_FAILURE_NONE,
-    TREE_FAILURE_USAGE,
-    TREE_FAILURE_CAPACITY,
-    TREE_FAILURE_ROOT,
-    TREE_FAILURE_SNAPSHOT,
-    TREE_FAILURE_OPEN,
-    TREE_FAILURE_REPLACEMENT,
-    TREE_FAILURE_CLOSE,
-} TreeFailure;
-
-typedef enum TreeMark
-{
-    TREE_MARK_UNSEEN,
-    TREE_MARK_CAPTURED,
-    TREE_MARK_EXCLUDED,
-    TREE_MARK_EXITED,
-    TREE_MARK_ROOT,
-    TREE_MARK_FAILED,
-} TreeMark;
-
-typedef struct Tree Tree;
-struct Tree
-{
-    u32 pid[TREE_PROCESS_CAPACITY];
-    u32 parent[TREE_PROCESS_CAPACITY];
-    // Synthetic identities for `walk`; capture queries the live process.
-    u64 synthetic_created[TREE_PROCESS_CAPACITY];
-    u8 synthetic_identity[TREE_PROCESS_CAPACITY];
-    u8 mark[TREE_PROCESS_CAPACITY];
-    u64 created[TREE_PROCESS_CAPACITY];
-    u64 bound[TREE_PROCESS_CAPACITY];
-#if BUSTER_WINDOWS
-    HANDLE handle[TREE_PROCESS_CAPACITY];
-    u32 wait_result[TREE_PROCESS_CAPACITY];
-    char image[TREE_PROCESS_CAPACITY][TREE_IMAGE_CAPACITY];
-#endif
-    // Each entry enters once after the root.
-    u32 frontier_pid[TREE_PROCESS_CAPACITY + 1];
-    u64 frontier_bound[TREE_PROCESS_CAPACITY + 1];
-    u32 count;
-    u32 root;
-    u64 root_created;
-    u64 cutoff;
-    bool live;
-    TreeFailure failure;
-    u32 failure_pid;
-    u32 failure_parent;
-    u64 failure_created;
-    u32 failure_code;
-};
-
-BUSTER_GLOBAL_LOCAL Tree tree;
+#define TREE_EXIT_USAGE 2
+#define TREE_EXIT_INCOMPLETE 1
+#define TREE_EXIT_ABSENT 3
+// A launcher whose command finished but whose job could not be emptied.
+#define TREE_EXIT_DRAIN_FAILED 125
+// Status given to members terminated by `drain`.
+#define TREE_EXIT_TERMINATED 0xC000013A
+#define TREE_MEMBER_CAPACITY 4096
+#define TREE_COMMAND_CAPACITY 32768
+#define TREE_POLL_MILLISECONDS 10
 
 BUSTER_GLOBAL_LOCAL bool tree_decimal(char const* text, u64* output)
 {
@@ -120,496 +65,441 @@ BUSTER_GLOBAL_LOCAL bool tree_decimal(char const* text, u64* output)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool tree_pid(char const* text, u32* output)
+BUSTER_GLOBAL_LOCAL void tree_sleep(u64 milliseconds)
 {
-    u64 value = 0;
-    bool result = tree_decimal(text, &value) && value <= UINT32_MAX;
-    if (result)
-    {
-        *output = (u32)value;
-    }
-    return result;
+#if BUSTER_WINDOWS
+    Sleep((DWORD)milliseconds);
+#else
+    struct timespec duration = {.tv_sec = (time_t)(milliseconds / 1000), .tv_nsec = (long)(milliseconds % 1000) * 1000000};
+    nanosleep(&duration, 0);
+#endif
 }
 
-// Parse `<pid>:<parent>:<created|exited|error>` without modifying argv.
-BUSTER_GLOBAL_LOCAL bool tree_synthetic_entry(char const* text, u32 index)
+// Broken drain records: the caller must reject each one.
+BUSTER_GLOBAL_LOCAL int tree_fixture(int argc, char** argv)
 {
-    char field[3][24] = {{0}};
-    u32 field_index = 0;
-    u32 length = 0;
-    bool result = true;
-    for (char const* cursor = text; result && *cursor; cursor += 1)
+    int result = 0;
+    u64 milliseconds = 0;
+    if (argc >= 3 && strcmp(argv[2], "silent") == 0)
     {
-        if (*cursor == ':')
-        {
-            field_index += 1;
-            length = 0;
-            result = field_index < 3;
-        }
-        else
-        {
-            result = length + 1 < sizeof(field[0]);
-            if (result)
-            {
-                field[field_index][length] = *cursor;
-                length += 1;
-            }
-        }
     }
-    result = result && field_index == 2 && tree_pid(field[0], &tree.pid[index]) && tree_pid(field[1], &tree.parent[index]);
-    if (result)
+    else if (argc >= 3 && strcmp(argv[2], "partial") == 0)
     {
-        if (strcmp(field[2], "exited") == 0)
-        {
-            tree.synthetic_identity[index] = TREE_IDENTITY_EXITED;
-        }
-        else if (strcmp(field[2], "error") == 0)
-        {
-            tree.synthetic_identity[index] = TREE_IDENTITY_ERROR;
-        }
-        else
-        {
-            tree.synthetic_identity[index] = TREE_IDENTITY_OPENED;
-            result = tree_decimal(field[2], &tree.synthetic_created[index]);
-        }
+        printf("{\"complete\":true,\"waited\":[");
     }
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL void tree_fail(TreeFailure failure, u32 index, u32 code)
-{
-    if (tree.failure == TREE_FAILURE_NONE)
+    else if (argc >= 3 && strcmp(argv[2], "malformed") == 0)
     {
-        tree.failure = failure;
-        tree.failure_pid = index < tree.count ? tree.pid[index] : tree.root;
-        tree.failure_parent = index < tree.count ? tree.parent[index] : 0;
-        tree.failure_created = index < tree.count ? tree.created[index] : 0;
-        tree.failure_code = code;
+        printf("{\"complete\":true}\n{\"complete\":true}\n");
     }
-}
-
-BUSTER_GLOBAL_LOCAL TreeIdentity tree_open_synthetic(u32 index)
-{
-    TreeIdentity result = (TreeIdentity)tree.synthetic_identity[index];
-    if (result == TREE_IDENTITY_OPENED)
+    else if (argc >= 4 && strcmp(argv[2], "late") == 0 && tree_decimal(argv[3], &milliseconds))
     {
-        tree.created[index] = tree.synthetic_created[index];
+        tree_sleep(milliseconds);
+        printf("{\"complete\":true,\"waited\":[],\"foreign\":[],\"pending\":[],\"failed\":[]}\n");
     }
-    else if (result == TREE_IDENTITY_ERROR)
+    else if (argc >= 4 && strcmp(argv[2], "sleep") == 0 && tree_decimal(argv[3], &milliseconds))
     {
-        tree_fail(TREE_FAILURE_OPEN, index, 5);
+        tree_sleep(milliseconds);
     }
+    else
+    {
+        result = TREE_EXIT_USAGE;
+    }
+    fflush(stdout);
     return result;
 }
 
 #if BUSTER_WINDOWS
-BUSTER_GLOBAL_LOCAL u64 tree_filetime(FILETIME time)
+typedef struct TreeMembers TreeMembers;
+struct TreeMembers
 {
-    return ((u64)time.dwHighDateTime << 32) | time.dwLowDateTime;
+    DWORD assigned;
+    DWORD listed;
+    ULONG_PTR pid[TREE_MEMBER_CAPACITY];
+};
+
+typedef struct TreeDrain TreeDrain;
+struct TreeDrain
+{
+    u32 waited[TREE_MEMBER_CAPACITY];
+    u32 foreign[TREE_MEMBER_CAPACITY];
+    u32 pending[TREE_MEMBER_CAPACITY];
+    u32 failed[TREE_MEMBER_CAPACITY];
+    u32 failed_code[TREE_MEMBER_CAPACITY];
+    u32 waited_count;
+    u32 foreign_count;
+    u32 pending_count;
+    u32 failed_count;
+    bool complete;
+};
+
+BUSTER_GLOBAL_LOCAL TreeMembers tree_members;
+BUSTER_GLOBAL_LOCAL TreeDrain tree_result;
+
+BUSTER_GLOBAL_LOCAL void tree_record_failure(u32 pid, u32 code)
+{
+    if (tree_result.failed_count < TREE_MEMBER_CAPACITY)
+    {
+        tree_result.failed[tree_result.failed_count] = pid;
+        tree_result.failed_code[tree_result.failed_count] = code;
+        tree_result.failed_count += 1;
+    }
+    tree_result.complete = false;
 }
 
-BUSTER_GLOBAL_LOCAL bool tree_creation_time(HANDLE handle, u64* output)
+// The kernel's job membership is the identity: a PID listed by the job and
+// then reused by another process is not a member of this job.
+BUSTER_GLOBAL_LOCAL bool tree_member(HANDLE process, HANDLE job, bool* member)
 {
-    FILETIME created, exited, kernel_time, user_time;
-    bool result = GetProcessTimes(handle, &created, &exited, &kernel_time, &user_time) != 0;
-    if (result)
-    {
-        *output = tree_filetime(created);
-    }
+    BOOL in_job = FALSE;
+    bool result = IsProcessInJob(process, job, &in_job) != 0;
+    *member = result && in_job;
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL TreeIdentity tree_open_live(u32 index)
+BUSTER_GLOBAL_LOCAL void tree_record(u32* list, u32* count, u32 pid)
 {
-    // Query creation identity as well as waiting: a numeric snapshot PID can
-    // be reused before OpenProcess acquires a native handle.
-    TreeIdentity result = TREE_IDENTITY_ERROR;
-    HANDLE handle = OpenProcess(TREE_ACCESS_WAIT_QUERY, FALSE, tree.pid[index]);
-    if (handle)
+    bool present = false;
+    for (u32 i = 0; i < *count; i += 1)
     {
-        if (tree_creation_time(handle, &tree.created[index]))
-        {
-            tree.handle[index] = handle;
-            result = TREE_IDENTITY_OPENED;
-        }
-        else
-        {
-            tree_fail(TREE_FAILURE_OPEN, index, (u32)GetLastError());
-            if (!CloseHandle(handle))
-            {
-                tree_fail(TREE_FAILURE_CLOSE, index, (u32)GetLastError());
-            }
-        }
+        present = present || list[i] == pid;
     }
-    else
+    if (!present && *count < TREE_MEMBER_CAPACITY)
     {
-        u32 error = (u32)GetLastError();
-        if (error == TREE_ERROR_INVALID_PARAMETER)
-        {
-            result = TREE_IDENTITY_EXITED;
-        }
-        else
-        {
-            tree_fail(TREE_FAILURE_OPEN, index, error);
-        }
-    }
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL void tree_release(u32 index)
-{
-    if (tree.handle[index])
-    {
-        if (!CloseHandle(tree.handle[index]))
-        {
-            tree_fail(TREE_FAILURE_CLOSE, index, (u32)GetLastError());
-        }
-        tree.handle[index] = 0;
+        list[*count] = pid;
+        *count += 1;
     }
 }
 
-BUSTER_GLOBAL_LOCAL void tree_snapshot(void)
+// Terminate (when asked) and wait for every member except `self` until the
+// job's active-process count shows no other live member, or the deadline
+// passes. An exited member may stay listed while handles to it remain open;
+// its wait then succeeds immediately, so liveness comes from the job count.
+BUSTER_GLOBAL_LOCAL void tree_drain(HANDLE job, DWORD self, bool terminate, u64 deadline)
 {
-    HANDLE root = OpenProcess(TREE_ACCESS_WAIT_QUERY, FALSE, tree.root);
-    if (!root)
+    bool members_remain = true;
+    tree_result = (TreeDrain){.complete = true};
+    while (members_remain && tree_result.complete)
     {
-        tree_fail(TREE_FAILURE_ROOT, UINT32_MAX, (u32)GetLastError());
-    }
-    else
-    {
-        if (!tree_creation_time(root, &tree.root_created))
+        tree_members = (TreeMembers){0};
+        if (!QueryInformationJobObject(job, JobObjectBasicProcessIdList, &tree_members, sizeof(tree_members), 0))
         {
-            tree_fail(TREE_FAILURE_ROOT, UINT32_MAX, (u32)GetLastError());
+            tree_record_failure(0, (u32)GetLastError());
         }
-        if (!CloseHandle(root))
+        else if (tree_members.assigned > tree_members.listed)
         {
-            tree_fail(TREE_FAILURE_CLOSE, UINT32_MAX, (u32)GetLastError());
+            tree_record_failure(0, ERROR_MORE_DATA);
         }
-    }
-    if (tree.failure == TREE_FAILURE_NONE)
-    {
-        FILETIME cutoff;
-        GetSystemTimePreciseAsFileTime(&cutoff);
-        tree.cutoff = tree_filetime(cutoff);
-        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (snapshot == INVALID_HANDLE_VALUE)
+        for (DWORD i = 0; tree_result.complete && i < tree_members.listed; i += 1)
         {
-            tree_fail(TREE_FAILURE_SNAPSHOT, UINT32_MAX, (u32)GetLastError());
-        }
-        else
-        {
-            PROCESSENTRY32W entry = {.dwSize = sizeof(entry)};
-            BOOL present = Process32FirstW(snapshot, &entry);
-            while (present && tree.failure == TREE_FAILURE_NONE)
+            u32 pid = (u32)tree_members.pid[i];
+            if (pid != self)
             {
-                if (tree.count == TREE_PROCESS_CAPACITY)
+                HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, FALSE, pid);
+                if (!process)
                 {
-                    tree_fail(TREE_FAILURE_CAPACITY, UINT32_MAX, 0);
+                    u32 error = (u32)GetLastError();
+                    if (error != ERROR_INVALID_PARAMETER) // Otherwise the listed PID has exited.
+                    {
+                        tree_record_failure(pid, error);
+                    }
                 }
                 else
                 {
-                    tree.pid[tree.count] = entry.th32ProcessID;
-                    tree.parent[tree.count] = entry.th32ParentProcessID;
-                    if (!WideCharToMultiByte(CP_UTF8, 0, entry.szExeFile, -1, tree.image[tree.count], TREE_IMAGE_CAPACITY, 0, 0))
+                    bool member = false;
+                    if (!tree_member(process, job, &member))
                     {
-                        tree.image[tree.count][0] = 0;
+                        tree_record_failure(pid, (u32)GetLastError());
                     }
-                    tree.count += 1;
-                    present = Process32NextW(snapshot, &entry);
-                }
-            }
-            if (tree.failure == TREE_FAILURE_NONE && GetLastError() != ERROR_NO_MORE_FILES)
-            {
-                tree_fail(TREE_FAILURE_SNAPSHOT, UINT32_MAX, (u32)GetLastError());
-            }
-            if (!CloseHandle(snapshot))
-            {
-                tree_fail(TREE_FAILURE_CLOSE, UINT32_MAX, (u32)GetLastError());
-            }
-        }
-    }
-}
-#endif
-
-BUSTER_GLOBAL_LOCAL TreeIdentity tree_open(u32 index)
-{
-    TreeIdentity result;
-#if BUSTER_WINDOWS
-    if (tree.live)
-    {
-        result = tree_open_live(index);
-    }
-    else
-    {
-        result = tree_open_synthetic(index);
-    }
-#else
-    result = tree_open_synthetic(index);
-#endif
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL void tree_admit(void)
-{
-    u32 frontier = 1;
-    tree.frontier_pid[0] = tree.root;
-    tree.frontier_bound[0] = tree.root_created;
-    for (u32 i = 0; i < tree.count; i += 1)
-    {
-        if (tree.pid[i] == tree.root)
-        {
-            tree.mark[i] = TREE_MARK_ROOT; // The caller owns the root's handle.
-        }
-    }
-    while (frontier && tree.failure == TREE_FAILURE_NONE)
-    {
-        frontier -= 1;
-        u32 parent = tree.frontier_pid[frontier];
-        u64 bound = tree.frontier_bound[frontier];
-        for (u32 i = 0; i < tree.count && tree.failure == TREE_FAILURE_NONE; i += 1)
-        {
-            if (tree.mark[i] == TREE_MARK_UNSEEN && tree.parent[i] == parent && tree.pid[i] != parent)
-            {
-                TreeIdentity identity = tree_open(i);
-                tree.bound[i] = bound;
-                switch (identity)
-                {
-                    case TREE_IDENTITY_EXITED:
+                    else if (!member)
                     {
-                        tree.mark[i] = TREE_MARK_EXITED;
-                        tree.frontier_pid[frontier] = tree.pid[i];
-                        tree.frontier_bound[frontier] = bound;
-                        frontier += 1;
-                    } break;
-                    case TREE_IDENTITY_OPENED:
+                        tree_record(tree_result.foreign, &tree_result.foreign_count, pid);
+                    }
+                    else
                     {
-                        if (tree.created[i] < bound)
+                        if (terminate && !TerminateProcess(process, TREE_EXIT_TERMINATED) && GetLastError() != ERROR_ACCESS_DENIED)
                         {
-                            // Stale parent link: provably not that parent's child.
-                            tree.mark[i] = TREE_MARK_EXCLUDED;
-#if BUSTER_WINDOWS
-                            tree_release(i);
-#endif
+                            // ACCESS_DENIED is returned for a member that is already exiting.
+                            tree_record_failure(pid, (u32)GetLastError());
                         }
-                        else if (tree.created[i] > tree.cutoff)
+                        u64 now = GetTickCount64();
+                        DWORD wait = WaitForSingleObject(process, now < deadline ? (DWORD)(deadline - now) : 0);
+                        if (wait == WAIT_OBJECT_0)
                         {
-                            tree.mark[i] = TREE_MARK_EXCLUDED;
-                            tree_fail(TREE_FAILURE_REPLACEMENT, i, 0);
-#if BUSTER_WINDOWS
-                            tree_release(i);
-#endif
+                            // WAIT_OBJECT_0 alone certifies termination.
+                            tree_record(tree_result.waited, &tree_result.waited_count, pid);
+                        }
+                        else if (wait == WAIT_TIMEOUT)
+                        {
+                            tree_record(tree_result.pending, &tree_result.pending_count, pid);
+                            tree_result.complete = false;
                         }
                         else
                         {
-                            tree.mark[i] = TREE_MARK_CAPTURED;
-                            tree.frontier_pid[frontier] = tree.pid[i];
-                            tree.frontier_bound[frontier] = tree.created[i];
-                            frontier += 1;
+                            tree_record_failure(pid, wait == WAIT_FAILED ? (u32)GetLastError() : (u32)wait);
                         }
-                    } break;
-                    case TREE_IDENTITY_ERROR:
+                    }
+                    if (!CloseHandle(process))
                     {
-                        tree.mark[i] = TREE_MARK_FAILED;
-                    } break;
+                        tree_record_failure(pid, (u32)GetLastError());
+                    }
                 }
             }
         }
-    }
-}
-
-BUSTER_GLOBAL_LOCAL void tree_print_image(u32 index)
-{
-#if BUSTER_WINDOWS
-    printf(",\"image\":\"");
-    for (char const* cursor = tree.live ? tree.image[index] : ""; *cursor; cursor += 1)
-    {
-        u8 byte = (u8)*cursor;
-        if (byte == '"' || byte == '\\')
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {0};
+        if (tree_result.complete && !QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), 0))
         {
-            printf("\\%c", byte);
+            tree_record_failure(0, (u32)GetLastError());
         }
-        else if (byte < 0x20)
+        members_remain = accounting.ActiveProcesses > (self ? 1u : 0u);
+        if (members_remain && tree_result.complete)
         {
-            printf("\\u%04x", byte);
-        }
-        else
-        {
-            putchar(byte);
-        }
-    }
-    putchar('"');
-#else
-    (void)index;
-#endif
-}
-
-BUSTER_GLOBAL_LOCAL void tree_print_capture(void)
-{
-    static char const* const failure_names[] = {
-        [TREE_FAILURE_NONE] = "none",
-        [TREE_FAILURE_USAGE] = "usage",
-        [TREE_FAILURE_CAPACITY] = "capacity",
-        [TREE_FAILURE_ROOT] = "root",
-        [TREE_FAILURE_SNAPSHOT] = "snapshot",
-        [TREE_FAILURE_OPEN] = "open",
-        [TREE_FAILURE_REPLACEMENT] = "replacement",
-        [TREE_FAILURE_CLOSE] = "close",
-    };
-    printf("{\"root\":%u,\"root_created\":%llu,\"cutoff\":%llu", tree.root,
-           (unsigned long long)tree.root_created, (unsigned long long)tree.cutoff);
-    if (tree.failure != TREE_FAILURE_NONE)
-    {
-        printf(",\"failure\":\"%s\",\"pid\":%u,\"parent\":%u,\"created\":%llu,\"code\":%u",
-               failure_names[tree.failure], tree.failure_pid, tree.failure_parent,
-               (unsigned long long)tree.failure_created, tree.failure_code);
-    }
-    char const* const lists[] = {"captured", "excluded", "exited"};
-    u8 const marks[] = {TREE_MARK_CAPTURED, TREE_MARK_EXCLUDED, TREE_MARK_EXITED};
-    for (u32 list = 0; list < BUSTER_ARRAY_LENGTH(lists); list += 1)
-    {
-        char const* separator = "";
-        printf(",\"%s\":[", lists[list]);
-        for (u32 i = 0; i < tree.count; i += 1)
-        {
-            bool replacement = tree.failure == TREE_FAILURE_REPLACEMENT && tree.pid[i] == tree.failure_pid;
-            if (tree.mark[i] == marks[list] && !replacement)
+            // An exiting member stays listed briefly after it signals.
+            if (GetTickCount64() >= deadline)
             {
-                printf("%s{\"pid\":%u,\"parent\":%u", separator, tree.pid[i], tree.parent[i]);
-                if (marks[list] != TREE_MARK_EXITED)
-                {
-                    printf(",\"created\":%llu,\"parent_created\":%llu", (unsigned long long)tree.created[i],
-                           (unsigned long long)tree.bound[i]);
-                }
-                tree_print_image(i);
-                putchar('}');
-                separator = ",";
+                tree_result.complete = false;
             }
-        }
-        putchar(']');
-    }
-    printf("}\n");
-    fflush(stdout);
-}
-
-#if BUSTER_WINDOWS
-// Shared deadline: every retained handle waits within the original budget.
-BUSTER_GLOBAL_LOCAL bool tree_wait_print(u64 deadline)
-{
-    char const* pending_separator = "";
-    char const* failed_separator = "";
-    bool result = true;
-    printf("{\"pending\":[");
-    for (u32 i = 0; i < tree.count; i += 1)
-    {
-        if (tree.handle[i])
-        {
-            u64 now = GetTickCount64();
-            DWORD wait = WaitForSingleObject(tree.handle[i], now < deadline ? (DWORD)(deadline - now) : 0);
-            if (wait == TREE_WAIT_TIMEOUT)
+            else
             {
-                printf("%s%u", pending_separator, tree.pid[i]);
-                pending_separator = ",";
-                result = false;
-            }
-            else if (wait != WAIT_OBJECT_0)
-            {
-                // WAIT_OBJECT_0 alone certifies termination; keep the error code.
-                tree.wait_result[i] = wait == WAIT_FAILED ? (u32)GetLastError() : (u32)wait;
-                tree.mark[i] = TREE_MARK_FAILED;
-                result = false;
+                Sleep(TREE_POLL_MILLISECONDS);
             }
         }
     }
-    printf("],\"failed\":[");
-    for (u32 i = 0; i < tree.count; i += 1)
+}
+
+BUSTER_GLOBAL_LOCAL void tree_print_list(char const* name, u32 const* list, u32 count)
+{
+    printf(",\"%s\":[", name);
+    for (u32 i = 0; i < count; i += 1)
     {
-        if (tree.handle[i] && tree.mark[i] == TREE_MARK_FAILED)
-        {
-            printf("%s[%u,%u]", failed_separator, tree.pid[i], tree.wait_result[i]);
-            failed_separator = ",";
-        }
+        printf("%s%u", i ? "," : "", list[i]);
     }
-    printf("],\"close_failed\":[");
-    char const* close_separator = "";
-    for (u32 i = 0; i < tree.count; i += 1)
+    putchar(']');
+}
+
+BUSTER_GLOBAL_LOCAL void tree_print_drain(void)
+{
+    printf("{\"complete\":%s", tree_result.complete ? "true" : "false");
+    tree_print_list("waited", tree_result.waited, tree_result.waited_count);
+    tree_print_list("foreign", tree_result.foreign, tree_result.foreign_count);
+    tree_print_list("pending", tree_result.pending, tree_result.pending_count);
+    printf(",\"failed\":[");
+    for (u32 i = 0; i < tree_result.failed_count; i += 1)
     {
-        if (tree.handle[i] && !CloseHandle(tree.handle[i]))
-        {
-            printf("%s%u", close_separator, tree.pid[i]);
-            close_separator = ",";
-            result = false;
-        }
-        tree.handle[i] = 0;
+        printf("%s[%u,%u]", i ? "," : "", tree_result.failed[i], tree_result.failed_code[i]);
     }
     printf("]}\n");
     fflush(stdout);
+}
+
+BUSTER_GLOBAL_LOCAL HANDLE tree_owned_job(WCHAR const* name)
+{
+    HANDLE result = CreateJobObjectW(0, name);
+    if (result && GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        CloseHandle(result);
+        result = 0;
+    }
+    if (result)
+    {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(result, JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
+        {
+            CloseHandle(result);
+            result = 0;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int tree_launch(WCHAR const* name, u64 budget, WCHAR const* command_line)
+{
+    int result = TREE_EXIT_DRAIN_FAILED;
+    static WCHAR command[TREE_COMMAND_CAPACITY];
+    HANDLE job = tree_owned_job(name);
+    if (!job)
+    {
+        fprintf(stderr, "windows_process_tree: job creation failed: %lu\n", GetLastError());
+    }
+    else if (!AssignProcessToJobObject(job, GetCurrentProcess()))
+    {
+        fprintf(stderr, "windows_process_tree: job assignment failed: %lu\n", GetLastError());
+    }
+    else if (wcslen(command_line) >= TREE_COMMAND_CAPACITY)
+    {
+        fprintf(stderr, "windows_process_tree: command line exceeds %u characters\n", TREE_COMMAND_CAPACITY);
+    }
+    else
+    {
+        STARTUPINFOW startup = {.cb = sizeof(startup), .dwFlags = STARTF_USESTDHANDLES};
+        startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+        startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        PROCESS_INFORMATION child = {0};
+        memcpy(command, command_line, (wcslen(command_line) + 1) * sizeof(WCHAR));
+        if (!CreateProcessW(0, command, 0, 0, TRUE, 0, 0, 0, &startup, &child))
+        {
+            fprintf(stderr, "windows_process_tree: launch failed: %lu\n", GetLastError());
+        }
+        else
+        {
+            DWORD status = TREE_EXIT_DRAIN_FAILED;
+            CloseHandle(child.hThread);
+            if (WaitForSingleObject(child.hProcess, INFINITE) == WAIT_OBJECT_0 && GetExitCodeProcess(child.hProcess, &status))
+            {
+                // Remaining members are leftovers of a finished command.
+                tree_drain(job, GetCurrentProcessId(), true, GetTickCount64() + budget);
+                if (tree_result.complete)
+                {
+                    result = (int)status;
+                }
+                else
+                {
+                    fprintf(stderr, "windows_process_tree: job drain incomplete after command exit: ");
+                    fflush(stderr);
+                    tree_print_drain();
+                }
+            }
+            CloseHandle(child.hProcess);
+        }
+    }
+    // Kill-on-close ends any member left by a failure above.
+    if (job)
+    {
+        CloseHandle(job);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int tree_drain_main(WCHAR const* name, u64 budget)
+{
+    int result = TREE_EXIT_INCOMPLETE;
+    u64 deadline = GetTickCount64() + budget;
+    HANDLE job = OpenJobObjectW(JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE, FALSE, name);
+    if (!job)
+    {
+        u32 error = (u32)GetLastError();
+        printf("{\"complete\":false,\"absent\":%s,\"error\":%u}\n", error == ERROR_FILE_NOT_FOUND ? "true" : "false", error);
+        fflush(stdout);
+        result = error == ERROR_FILE_NOT_FOUND ? TREE_EXIT_ABSENT : TREE_EXIT_INCOMPLETE;
+    }
+    else
+    {
+        // The launcher is a member, so this also ends the direct child.
+        bool terminated = TerminateJobObject(job, TREE_EXIT_TERMINATED) != 0;
+        u32 error = (u32)GetLastError();
+        tree_drain(job, 0, false, deadline);
+        if (!terminated)
+        {
+            tree_record_failure(0, error);
+        }
+        tree_print_drain();
+        result = tree_result.complete ? 0 : TREE_EXIT_INCOMPLETE;
+        CloseHandle(job);
+    }
+    return result;
+}
+
+// A real process outside the job must never be treated as a member, and
+// draining the job must neither wait on nor terminate it.
+BUSTER_GLOBAL_LOCAL int tree_selftest(void)
+{
+    int result = TREE_EXIT_INCOMPLETE;
+    static WCHAR const arguments[] = L"\" fixture sleep 30000";
+    static WCHAR command[2][MAX_PATH + BUSTER_ARRAY_LENGTH(arguments) + 1];
+    PROCESS_INFORMATION child[2] = {0};
+    HANDLE job = CreateJobObjectW(0, 0);
+    DWORD length = GetModuleFileNameW(0, command[0] + 1, MAX_PATH);
+    bool valid = job && length && length < MAX_PATH;
+    if (valid)
+    {
+        command[0][0] = L'"';
+        memcpy(command[0] + 1 + length, arguments, sizeof(arguments));
+        memcpy(command[1], command[0], sizeof(command[0]));
+    }
+    for (u32 i = 0; valid && i < 2; i += 1)
+    {
+        STARTUPINFOW startup = {.cb = sizeof(startup)};
+        valid = CreateProcessW(0, command[i], 0, 0, FALSE, CREATE_SUSPENDED, 0, 0, &startup, &child[i]) != 0;
+    }
+    valid = valid && AssignProcessToJobObject(job, child[0].hProcess);
+    for (u32 i = 0; valid && i < 2; i += 1)
+    {
+        valid = ResumeThread(child[i].hThread) != (DWORD)-1;
+    }
+    bool inside = false;
+    bool outside = true;
+    valid = valid && tree_member(child[0].hProcess, job, &inside) && tree_member(child[1].hProcess, job, &outside);
+    if (valid)
+    {
+        TerminateJobObject(job, TREE_EXIT_TERMINATED);
+        tree_drain(job, 0, false, GetTickCount64() + 10000);
+    }
+    bool outsider_alive = valid && WaitForSingleObject(child[1].hProcess, 0) == WAIT_TIMEOUT;
+    bool member_waited = valid && tree_result.waited_count == 1 && tree_result.waited[0] == child[0].dwProcessId;
+    printf("{\"selftest\":%s,\"member\":%s,\"outsider_member\":%s,\"outsider_alive\":%s,\"member_waited\":%s}\n",
+           valid ? "true" : "false", inside ? "true" : "false", outside ? "true" : "false",
+           outsider_alive ? "true" : "false", member_waited ? "true" : "false");
+    fflush(stdout);
+    for (u32 i = 0; i < 2; i += 1)
+    {
+        if (child[i].hProcess)
+        {
+            TerminateProcess(child[i].hProcess, TREE_EXIT_TERMINATED);
+            WaitForSingleObject(child[i].hProcess, 10000);
+            CloseHandle(child[i].hProcess);
+            CloseHandle(child[i].hThread);
+        }
+    }
+    if (job)
+    {
+        CloseHandle(job);
+    }
+    result = valid && inside && !outside && outsider_alive && member_waited && tree_result.complete ? 0 : TREE_EXIT_INCOMPLETE;
     return result;
 }
 #endif
 
 int main(int argc, char** argv)
 {
-    int result = 2;
-    u64 budget = 0;
-    bool capture = argc == 4 && strcmp(argv[1], "capture") == 0 && tree_pid(argv[2], &tree.root) && tree_decimal(argv[3], &budget);
-    bool walk = argc >= 5 && strcmp(argv[1], "walk") == 0 && (u64)(argc - 5) < TREE_PROCESS_CAPACITY &&
-        tree_pid(argv[2], &tree.root) && tree_decimal(argv[3], &tree.root_created) && tree_decimal(argv[4], &tree.cutoff);
-    if (walk)
+    int result = TREE_EXIT_USAGE;
+    if (argc >= 3 && strcmp(argv[1], "fixture") == 0)
     {
-        for (int i = 5; walk && i < argc; i += 1)
-        {
-            walk = tree_synthetic_entry(argv[i], tree.count);
-            tree.count += 1;
-        }
+        result = tree_fixture(argc, argv);
     }
 #if BUSTER_WINDOWS
-    if (capture)
+    else
     {
-        u64 deadline = GetTickCount64() + budget;
-        tree.live = true;
-        tree_snapshot();
-        if (tree.failure == TREE_FAILURE_NONE)
+        // Job names and command lines stay UTF-16 end to end.
+        u64 budget = 0;
+        int wide_count = 0;
+        WCHAR** wide = CommandLineToArgvW(GetCommandLineW(), &wide_count);
+        if (!wide || wide_count != argc)
         {
-            tree_admit();
+            fprintf(stderr, "windows_process_tree: command line decoding failed\n");
         }
-        if (tree.failure != TREE_FAILURE_NONE)
+        else if (argc == 5 && strcmp(argv[1], "launch") == 0 && tree_decimal(argv[3], &budget))
         {
-            for (u32 i = 0; i < tree.count; i += 1)
-            {
-                tree_release(i);
-            }
+            result = tree_launch(wide[2], budget, wide[4]);
         }
-        tree_print_capture();
-        if (tree.failure == TREE_FAILURE_NONE)
+        else if (argc == 4 && strcmp(argv[1], "drain") == 0 && tree_decimal(argv[3], &budget))
         {
-            // Hold the handles while the caller requests termination.
-            int byte = getchar();
-            while (byte != EOF && byte != '\n')
-            {
-                byte = getchar();
-            }
-            result = tree_wait_print(deadline) ? 0 : 1;
+            result = tree_drain_main(wide[2], budget);
+        }
+        else if (argc == 2 && strcmp(argv[1], "selftest") == 0)
+        {
+            result = tree_selftest();
+        }
+        if (wide)
+        {
+            LocalFree(wide);
         }
     }
-    else
-#else
-    (void)budget;
-    if (capture)
-    {
-        fprintf(stderr, "windows_process_tree: capture requires Windows\n");
-    }
-    else
 #endif
-    if (walk)
+    if (result == TREE_EXIT_USAGE)
     {
-        tree_admit();
-        tree_print_capture();
-        result = tree.failure == TREE_FAILURE_NONE ? 0 : 1;
-    }
-    else
-    {
-        fprintf(stderr, "usage: windows_process_tree capture <root-pid> <budget-ms> | "
-                        "walk <root-pid> <root-created> <cutoff> <pid>:<parent>:<created|exited|error>...\n");
+        fprintf(stderr, "usage: windows_process_tree launch <job> <budget-ms> <command-line> | drain <job> <budget-ms> | "
+                        "selftest | fixture <silent|partial|malformed|late <ms>|sleep <ms>>\n");
     }
     return result;
 }

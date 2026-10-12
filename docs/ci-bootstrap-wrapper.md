@@ -131,44 +131,44 @@ cleanup immediately, before another launch or assertion, and cleanup precedes
 fixture removal.
 
 The scheduler adds a cancellation registry. Registration and cancellation share
-a lock, and each child's cleanup is serialized against normal collection. Windows
-captures native descendant process handles before the original system
-`taskkill /T /F`, then waits for those processes to signal termination before
-fixture removal. A successful termination request alone is insufficient: a
-descendant can still hold its inherited current-directory handle while exiting
-(#2985). All descendant waits share the original ten-second cleanup deadline;
-expired/failed waits and snapshot failures remain errors, and later cleanup
-cannot relabel that owner as clean. Snapshot capture adds no PID signal targets.
+a lock, and each child's cleanup is serialized against normal collection.
 
-Capture is native: `tools/windows_process_tree.c` is built once per scheduler
-process, before any lane starts, with the host `clang` (or `gcc`). A missing
-compiler or a failed build fails the run. The helper opens the direct child by
-PID; the scheduler's open `Popen` handle to that unreaped child keeps the
-number from being reused. It walks the Toolhelp snapshot one parent edge at a
-time and holds the native handles while the scheduler runs `taskkill`, then
-waits on all of them within the shared deadline.
+On Windows, ownership is fixed before a case command starts (#3690). The
+scheduler runs every case through `tools/windows_process_tree.c launch`. The
+launcher creates a fresh named Job Object with kill-on-close, joins it itself,
+then starts the command, so every descendant is a kernel-tracked member from
+birth. No membership decision uses PID parent links or wall-clock creation
+times, which PID reuse and clock adjustment make unreliable.
 
-Windows keeps a dead parent's PID in `th32ParentProcessID`, and PID numbers
-are reused (#3690). A snapshot link therefore proves descent only when the
-child was created no earlier than the parent it names:
+Before fixture removal, cleanup runs `drain` with the remaining part of the
+original ten-second cleanup deadline:
 
-- A process older than its recorded parent is a stale link, not a
-  descendant. It is excluded, its handle is closed, and nothing beneath it is
-  opened. Every exclusion (PID, parent, both creation times and image) is
-  published as `descendant_excluded` in `BOOTSTRAP_COLLECTION` and as
-  `excluded_descendants` in `BOOTSTRAP_CASE_SUMMARY`.
-- A process created after the pre-snapshot UTC cutoff is a PID replacement, or
-  a late spawn, and fails capture without a wait. So does a failure to snapshot,
-  to open the root or a descendant, or to query its creation time.
-- An intermediate that exited before it could be opened passes its nearest
-  verified ancestor's creation time to its children. Ambiguity can only add
-  waits, never exclusions.
+- `drain` terminates the job, including the launcher, and waits on each
+  member. A listed PID is waited on only after `IsProcessInJob` confirms that
+  the opened handle belongs to this job, so a reused PID naming another process
+  is never waited on or terminated.
+- It finishes only when the job's active-process count shows no live member;
+  `WAIT_OBJECT_0` alone certifies each termination. A successful termination
+  request is insufficient: a descendant can still hold its inherited
+  current-directory handle while exiting (#2985).
+- The caller accepts exactly one complete, newline-terminated record that
+  arrives by the deadline, with no pending or failed member. Silence, a partial
+  or repeated record, a late record, a timeout, any open/query/wait failure, and
+  a missing job while the launcher still runs all fail the owner. The frozen
+  direct-child reap still runs afterwards, and later cleanup cannot relabel a
+  failed owner as clean. The record is published as `job_drain` in
+  `BOOTSTRAP_COLLECTION`.
+- When the command exits by itself, the launcher drains the rest of its job
+  before exiting. Members that outlive the budget make it exit with 125, which
+  also fails the owner.
 
-These are stable, readiness-published fixture trees; they do not admit new
-descendant spawning during cleanup. Clock or identity ambiguity fails the owner
-instead of authorizing a numeric-PID wait. The helper's `walk` mode runs the
-same admission over a synthetic snapshot, so the edge rules are controlled on
-every host.
+CI builds the helper with the host Clang (GCC where Clang is absent) in the
+workflow-tools and bootstrap-wrapper steps, and exports its path as
+`BUSTER_WINDOWS_PROCESS_TREE`. Python only receives that path; Windows case
+execution refuses to start without it. Native `fixture` modes supply silent,
+partial, repeated and late drain records for the caller controls on every
+host, and `selftest` checks on Windows that a live non-member process is
+neither admitted, waited on, nor terminated.
 Unix uses isolated process groups. Direct children retain the ten-second cleanup
 deadline. Workers finish before
 module state is restored; the registry releases native handles between runs.
