@@ -26820,11 +26820,10 @@ BUSTER_GLOBAL_LOCAL u32 c_parse_plan_terminator(CAst const* ast, CPreprocessResu
 // states it. Compound statements, and the statements whose last child is a
 // statement, are transparent: the chain runs node, node - 1, ... to a
 // statement whose last token an anchor gives, and each compound on the way
-// adds its `}`. `lasts` memoizes the answer per node - `begin` (last + 1,
+// adds its `}`. Lowering's extent table (c_gen.c) shares it. `lasts` memoizes the answer per node - `begin` (last + 1,
 // UINT32_MAX for none, 0 for not yet known), so nested statements share one
 // descent. `limit` is the body's `}`.
-BUSTER_GLOBAL_LOCAL u32 c_parse_plan_statement_last(CAst const* ast, CPreprocessResult const* preprocess, u32* lasts, u32 begin, u32 node,
-                                                    u32 limit)
+BUSTER_C_SHARED u32 c_parse_plan_statement_last(CAst const* ast, CPreprocessResult const* preprocess, u32* lasts, u32 begin, u32 node, u32 limit)
 {
     u32 cursor = node;
     u32 last = UINT32_MAX;
