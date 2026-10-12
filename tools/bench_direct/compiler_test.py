@@ -5563,6 +5563,39 @@ class WildLinkerTest(unittest.TestCase):
             with self.subTest(positive=name):
                 self.assertEqual(self.publish(record, forged(suffix))[:3:2], ("success", []))
 
+    def test_traversal_out_of_the_cell_tree_fails_publication(self) -> None:
+        """#3689 review: an object operand and its manifest entry rewritten in lockstep to a path that leaves the
+        cell's tree once normalised, with the manifest hash recomputed in the export and the receipt."""
+        record, bundle = wild_linker_evidence()
+        original = "CMakeFiles/ide.dir/Debug/src/ide.c.o"
+        directory = f"{WILD_ROOT}/build-wild-separate"
+
+        def forged(operand: str | None, extra: str = "") -> tuple[dict, dict]:
+            changed = dict(bundle)
+            manifest = bundle["inputs ide-debug"]
+            if operand is not None:
+                changed["argv ide-debug"] = bundle["argv ide-debug"].replace(f'"{original}"', f'"{operand}"')
+                changed["commands"] = bundle["commands"].replace(f'"{original}"', f'"{operand}"')
+                manifest = manifest.replace(f"{directory}/{original}", f"{directory}/{operand}")
+            changed["inputs ide-debug"] = manifest + extra
+            identity = json.loads(bundle["identity"])
+            identity["inputs"]["ide-debug"] = hashlib.sha256(changed["inputs ide-debug"].encode()).hexdigest()
+            changed["identity"] = json.dumps(identity)
+            return dict(copy.deepcopy(record), identity=identity), changed
+
+        self.assertEqual(self.publish(*forged(original))[0], "success")
+        for name, operand, extra, reason in (
+                ("reviewer's traversal", "../../tmp/foreign.o", "", "leaves build-wild-separate"),
+                ("deep traversal", "CMakeFiles/ide.dir/../../../../tmp/x.o", "", "leaves build-wild-separate"),
+                ("dot component", "./CMakeFiles/ide.dir/Debug/src/ide.c.o", "", "leaves build-wild-separate"),
+                ("empty component", "CMakeFiles//ide.dir/Debug/src/ide.c.o", "", "leaves build-wild-separate"),
+                ("manifest-only traversal", None, f"{'3' * 64}  {directory}/../../tmp/foreign.o\n",
+                 "lists files outside build-wild-separate")):
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = self.publish(*forged(operand, extra))
+                self.assertEqual(conclusion, "failure", reasons)
+                self.assertTrue(any(reason in item for item in reasons), reasons)
+
     def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
         record, bundle = wild_linker_evidence()
         self.assertEqual(self.publish(record, bundle), ("success", self.publish(record, bundle)[1], []))

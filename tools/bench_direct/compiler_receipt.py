@@ -1451,7 +1451,8 @@ def _wild_linker_identity_problems(identity: object, head: str) -> tuple[dict, l
     if usable.get("wild", {}).get("sha256") == usable.get("comparator", {}).get("sha256"):
         problems.append("wild-linker Wild and its comparator are the same executable")
     root = identity.get("build_root")
-    if not (isinstance(root, str) and root.startswith("/") and "'" not in root and "\n" not in root):
+    if not (isinstance(root, str) and root.startswith("/") and "'" not in root and "\n" not in root and
+            os.path.normpath(root) == root):
         problems.append(f"wild-linker build root {root!r} is not a recorded absolute path")
     harness = identity.get("harness") if isinstance(identity.get("harness"), dict) else {}
     if sorted(harness) != ["wild_linker_acceptance.c", "wild_linker_bench.c"] or \
@@ -1565,6 +1566,13 @@ def _system_path(path: str) -> bool:
     return path.startswith("/") and (normal in roots or normal.startswith(tuple(root + "/" for root in roots)))
 
 
+def _contained(path: str, directory: str) -> bool:
+    """Whether path is already canonical (no `..`, `.` or empty component) and lies strictly inside directory,
+    so a raw-string prefix or membership match cannot hide a traversal out of the cell's tree."""
+    return os.path.normpath(path) == path and os.path.normpath(directory) == directory and \
+        path.startswith(directory + "/")
+
+
 def _wild_argv_grammar_problems(cell: str, arguments: list[str], config: str) -> list[str]:
     """Reasons the arguments after the linker are not the frozen Clang link grammar (WILD_ARGV_FLAGS and friends)."""
     problems: list[str] = []
@@ -1636,10 +1644,13 @@ def wild_linker_cell_commands(cell: str, argv: str, manifest: str, root: str, li
         if token.startswith("/") and ((root and token.startswith(root + "/")) or not _system_path(token)):
             problems.append(f"wild-linker {cell} links {token!r}, which is neither a hashed input nor a system file")
             break
+        if not token.startswith("/") and not _contained(path, directory):
+            problems.append(f"wild-linker {cell} links {token!r}, which leaves {tree} once normalised")
+            break
         if not token.startswith("/") and path not in listed:
             problems.append(f"wild-linker {cell} links {token!r}, which its input manifest does not hash")
             break
-    if any(not path.startswith(directory + "/") for path in listed):
+    if any(not _contained(path, directory) for path in listed):
         problems.append(f"wild-linker {cell} input manifest lists files outside {tree}")
     common = f" --no-gc-sections --build-id={WILD_LINKER_BUILD_ID}"
     prefix = f"cd {_shell_quote(directory)} && "
