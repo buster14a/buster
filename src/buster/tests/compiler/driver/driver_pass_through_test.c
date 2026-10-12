@@ -188,7 +188,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pass_through_arguments(U
     }
     String8 malformed[] = {S8("-Wl,"), S8("-Wl,,--export-dynamic"), S8("-Wl,--export-dynamic,"),
                            S8("-Wl,--export-dynamic,,--no-undefined"), S8("-Wl,-soname"), S8("-Wl,--soname="),
-                           S8("-Wl,-z"), S8("-Wl,-z,now"), S8("-Wl,-z,relro"), S8("-Wl,-z,execstack"), S8("-Wl,-z,noexecstack")};
+                           S8("-Wl,-z"), S8("-Wl,-z,execstack"), S8("-Wl,-z,bogus")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(malformed); index += 1)
     {
         String8 command[] = {S8("--target=x86_64-unknown-linux"), S8("-shared"), malformed[index], S8("tests/basic_c_multi_main.c")};
@@ -762,6 +762,176 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_runtime_path_images(Unit
     os_file_delete(executable);
     BUSTER_TEST(arguments, os_directory_delete(dependencies));
     BUSTER_TEST(arguments, os_directory_delete(libraries));
+    BUSTER_TEST(arguments, os_directory_delete(root));
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_default_arguments(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    Arena* arena = temporary.arena;
+    String8 targets[] = {S8("x86_64-linux-gnu"), S8("aarch64-linux-gnu"), S8("x86_64-linux-android"),
+                         S8("x86_64-windows"), S8("aarch64-apple-macos")};
+    String8 flags[] = {S8("-Wl,-O1"), S8("-Wl,--sort-common"), S8("-Wl,--as-needed"), S8("-Wl,--no-as-needed"),
+                       S8("-Wl,-z,relro"), S8("-Wl,-z,now"), S8("-Wl,-z,noexecstack"), S8("-Wl,-z,pack-relative-relocs")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 flag = 0; flag < BUSTER_ARRAY_LENGTH(flags); flag += 1)
+        {
+            String8 command[] = {S8("--target"), targets[target], flags[flag], S8("main.o")};
+            CompilerDriverInvocation parsed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            BUSTER_TEST(arguments, (parsed.error == COMPILER_DRIVER_ERROR_NONE) == (target == 0));
+        }
+    }
+    String8 ordered[] = {S8("--target=x86_64-linux-gnu"), S8("-Wl,--as-needed"), S8("-lfirst"), S8("main.o"),
+        S8("-Xlinker"), S8("--no-as-needed"), S8("-lsecond"), S8("-Wl,-rpath,--as-needed"), S8("-lthird")};
+    CompilerDriverInvocation parsed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(ordered));
+    if (BUSTER_REQUIRE(arguments, parsed.error == COMPILER_DRIVER_ERROR_NONE && parsed.link_operation_count == 4))
+    {
+        BUSTER_TEST(arguments, parsed.link_operations[0].as_needed && !parsed.link_operations[2].as_needed && !parsed.link_operations[3].as_needed);
+        BUSTER_TEST(arguments, parsed.linker_argument_count == 2);
+    }
+    String8 compile[] = {S8("--target=x86_64-linux-gnu"), S8("-c"), S8("-Wl,--as-needed"), S8("main.c")};
+    BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    String8 raw[] = {S8("--as-needed")};
+    NativeExecutableLinkOptions options = {.linker_arguments = raw, .linker_argument_count = 1};
+    BUSTER_TEST(arguments, !link_validate_linker_arguments(parsed.target, options, true, 0));
+    scratch_end(temporary);
+    return result;
+}
+
+#if BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_needed_tag(Arena* arena, String8 file, String8 name)
+{
+    ByteSlice image = file_read(arena, file, (FileReadOptions){0});
+    ByteSlice dynamic = compiler_driver_test_elf_section(image, S8(".dynamic"));
+    ByteSlice strings = compiler_driver_test_elf_section(image, S8(".dynstr"));
+    bool found = false;
+    for (u64 index = 0; index + 16 <= dynamic.length; index += 16)
+    {
+        u64 tag = 0, value = 0;
+        memcpy(&tag, dynamic.pointer + index, 8);
+        memcpy(&value, dynamic.pointer + index + 8, 8);
+        found |= tag == 1 && value < strings.length && strings.length - value > name.length &&
+                 !memcmp(strings.pointer + value, name.pointer, name.length) && strings.pointer[value + name.length] == 0;
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_hardened_image(Arena* arena, String8 file)
+{
+    ByteSlice image = file_read(arena, file, (FileReadOptions){0});
+    ByteSlice dynamic = compiler_driver_test_elf_section(image, S8(".dynamic"));
+    bool now = false, now1 = false, stack = false, relro = false;
+    u64 got_offset = 0, got_size = 0, got_address = 0;
+    bool got_found = compiler_driver_test_elf_section_find(image, S8(".got.plt"), &got_offset, &got_size, &got_address);
+    for (u64 index = 0; index + 16 <= dynamic.length; index += 16)
+    {
+        u64 tag = 0, value = 0;
+        memcpy(&tag, dynamic.pointer + index, 8);
+        memcpy(&value, dynamic.pointer + index + 8, 8);
+        now |= tag == 30 && (value & 8) != 0;
+        now1 |= tag == UINT64_C(0x6ffffffb) && (value & 1) != 0;
+    }
+    u64 headers = 0;
+    u16 count = 0;
+    if (image.length >= 64)
+    {
+        memcpy(&headers, image.pointer + 32, 8);
+        memcpy(&count, image.pointer + 56, 2);
+        for (u16 index = 0; index < count && headers <= image.length && image.length - headers >= 56; index += 1, headers += 56)
+        {
+            u32 type = 0, flags = 0;
+            u64 size = 0, start = 0;
+            memcpy(&start, image.pointer + headers + 16, 8);
+            memcpy(&type, image.pointer + headers, 4);
+            memcpy(&flags, image.pointer + headers + 4, 4);
+            memcpy(&size, image.pointer + headers + 40, 8);
+            stack |= type == UINT32_C(0x6474e551) && !(flags & 1);
+            bool got_covered = !got_size || (got_address >= start && got_address - start <= size && got_size <= size - (got_address - start));
+            relro |= type == UINT32_C(0x6474e552) && size != 0 && got_found && got_covered;
+        }
+    }
+    return now && now1 && stack && relro;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_default_images(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    Arena* arena = temporary.arena;
+    String8 root = buster_test_temporary_path(arena, S8("buster-default-flags"), S8(""));
+    BUSTER_TEST(arguments, os_make_directory_attempt(root));
+    String8 provider = string_format_z(arena, S8("{S8}/provider.c"), root);
+    String8 unused_source = string_format_z(arena, S8("{S8}/unused.c"), root);
+    String8 main_source = string_format_z(arena, S8("{S8}/main.c"), root);
+    String8 weak_source = string_format_z(arena, S8("{S8}/weak.c"), root);
+    String8 library = string_format_z(arena, S8("{S8}/libneeded.so"), root);
+    String8 unused = string_format_z(arena, S8("{S8}/libunused.so"), root);
+    String8 executable = string_format_z(arena, S8("{S8}/main"), root);
+    String8 defaults = S8("-Wl,-O1,--sort-common,--as-needed,-z,relro,-z,now,-z,noexecstack,-z,pack-relative-relocs");
+    BUSTER_TEST(arguments, file_write(provider, BUSTER_SLICE_TO_BYTE_SLICE(S8("static int value = 7; int *p[] = {&value,&value,&value,&value,&value}; int answer(void) { return (*p[0]+*p[1]+*p[2]+*p[3]+*p[4])/5; }\n"))));
+    BUSTER_TEST(arguments, file_write(unused_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int unrelated(void) { return 9; }\n"))));
+    BUSTER_TEST(arguments, file_write(main_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("extern int answer(void); int main(void) { return answer() - 7; }\n"))));
+    BUSTER_TEST(arguments, file_write(weak_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("extern int answer(void) __attribute__((weak)); int main(void) { return answer ? answer() - 7 : 0; }\n"))));
+    String8 sources[] = {provider, unused_source};
+    String8 outputs[] = {library, unused};
+    String8 sonames[] = {S8("-Wl,-soname,libneeded.so"), S8("-Wl,-soname,libunused.so")};
+    for (u32 index = 0; index < 2; index += 1)
+    {
+        String8 command[] = {S8("-g0"), S8("-shared"), sources[index], defaults, sonames[index], S8("-o"), outputs[index]};
+        CompilerDriverResult linked = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+        if (linked.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, compiler_driver_test_hardened_image(arena, outputs[index]));
+    }
+    ByteSlice packed = file_read(arena, library, (FileReadOptions){0});
+    ByteSlice relr = compiler_driver_test_elf_section(packed, S8(".relr.dyn"));
+    BUSTER_TEST(arguments, relr.length && relr.length < 5 * 8);
+    ByteSlice strings = compiler_driver_test_elf_section(packed, S8(".dynstr"));
+    BUSTER_TEST(arguments, compiler_driver_test_string_contains((String8){.pointer = (char8*)strings.pointer, .length = strings.length}, S8("GLIBC_ABI_DT_RELR")));
+    String8 modes[] = {S8("-no-pie"), S8("-pie")};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    {
+        for (u32 keep = 0; keep < 2; keep += 1)
+        {
+            String8 command[] = {S8("-g0"), modes[mode], main_source, defaults, string_format_z(arena, S8("-L{S8}"), root),
+                S8("-lneeded"), keep ? S8("-Wl,--no-as-needed") : S8("-Wl,--as-needed"), S8("-lunused"), S8("-Wl,-rpath,$ORIGIN"), S8("-o"), executable};
+            CompilerDriverResult linked = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            if (BUSTER_REQUIRE(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE))
+            {
+                BUSTER_TEST(arguments, compiler_driver_test_needed_tag(arena, executable, S8("libneeded.so")));
+                BUSTER_TEST(arguments, compiler_driver_test_needed_tag(arena, executable, S8("libunused.so")) == (keep != 0));
+                BUSTER_TEST(arguments, compiler_driver_test_hardened_image(arena, executable));
+                String8 run[] = {executable};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){0});
+                BUSTER_TEST(arguments, child.handle && os_process_wait_sync(arena, child).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+    }
+    String8 weak_command[] = {S8("-g0"), weak_source, defaults, string_format_z(arena, S8("-L{S8}"), root), S8("-lneeded"), S8("-o"), executable};
+    CompilerDriverResult weak = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(weak_command)));
+    BUSTER_TEST(arguments, weak.error == COMPILER_DRIVER_ERROR_NONE && !compiler_driver_test_needed_tag(arena, executable, S8("libneeded.so")));
+    String8 before[] = {S8("-g0"), defaults, string_format_z(arena, S8("-L{S8}"), root), S8("-lneeded"), main_source, S8("-o"), executable};
+    CompilerDriverResult refused = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(before)));
+    BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK);
+    BUSTER_TEST(arguments, file_write(main_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int main(void) { return 0; }\n"))));
+    String8 trivial_command[] = {S8("-g0"), main_source, defaults, S8("-o"), executable};
+    CompilerDriverResult trivial = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(trivial_command)));
+    BUSTER_TEST(arguments, trivial.error == COMPILER_DRIVER_ERROR_NONE && compiler_driver_test_hardened_image(arena, executable));
+    os_file_delete(provider);
+    os_file_delete(unused_source);
+    os_file_delete(main_source);
+    os_file_delete(weak_source);
+    os_file_delete(library);
+    os_file_delete(unused);
+    os_file_delete(executable);
     BUSTER_TEST(arguments, os_directory_delete(root));
     scratch_end(temporary);
 #else

@@ -1250,8 +1250,8 @@ The parser reserves one operation record per expanded argument; the native
 consumer walks it without another allocation. API-built invocations with a
 zero `link_operation_count` retain the explicit legacy order of all inputs
 followed by all libraries. Non-link output actions retain their prior order.
-Group/whole-archive and dynamic-library as-needed/interposition policy are
-unchanged.
+Group and whole-archive requests remain unsupported. Shared-symbol
+interposition retains its existing behavior.
 
 Provider state changes are monotonic: an edge is revisited at most three times.
 Selection work is expected O(S + A + D log(M + 1)), with S visited selected
@@ -1939,6 +1939,34 @@ The supported subset is:
 - Linux and Android ELF links: `--no-undefined`, `-no-undefined`, and the
   two arguments `-z defs` require strong references to resolve. Executables
   already enforce this rule; on a shared object it overrides loader resolution.
+- x86-64 Linux driver links: `--as-needed` and `--no-as-needed` select
+  subsequent `-l` requests in input order (the default is no-as-needed). A DSO
+  is retained when it satisfies a strong unresolved reference from preceding
+  objects or a previously retained DSO. Later objects and weak references do
+  not keep it. The driver consumes these switches before the native image API,
+  which receives the selected library list and still refuses raw policy flags
+  without an ordered driver request. GNU linker-script `AS_NEEDED` remains
+  unsupported.
+- x86-64 Linux ELF links: `-O1` permits the native writer's existing layout and
+  hash policy; it does not request generated-code optimization. `--sort-common`
+  is accepted because there are no admitted common symbols to sort: the object
+  reader continues to refuse `SHN_COMMON`, and assembly `.comm` definitions
+  are already ordinary zero-filled definitions.
+- x86-64 Linux executables, PIEs and shared objects: `-z relro`, `-z now` and
+  `-z noexecstack` request RELRO, eager binding and a non-executable stack.
+  The fixed-address dynamic writer already seals its GOT and binds eagerly.
+  `-z now` extends a PIE/shared object's sealed range to include its PLT GOT
+  and emits both NOW flags. These requests select a dynamic executable even
+  without source imports, so their metadata is present on trivial programs.
+- x86-64 Linux ELF links: `-z pack-relative-relocs` converts eligible PIE/shared
+  `R_X86_64_RELATIVE` relocations to `DT_RELR` with direct addresses and bitmaps,
+  storing their implicit addends in the target words. Unaligned and zero-fill
+  locations retain RELA, as do symbolic, TLS, COPY and IRELATIVE relocations.
+  glibc's `GLIBC_ABI_DT_RELR` version dependency is recorded and must be present
+  in the selected libc's version definitions; an incompatible libc is refused.
+  Fixed-address executables have no load-bias-relative relocations to pack.
+  The existing layout reservation stays as padding; this promises RELR
+  semantics, not a smaller artifact or a compiler-throughput improvement.
 - x86-64 Linux executables, PIEs and shared objects: `-rpath DIR`,
   `--rpath DIR`, `-rpath=DIR` and `--rpath=DIR` write a runtime search path.
   Repeated paths are joined with `:` in command-line order. The default and

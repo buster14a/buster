@@ -131,12 +131,16 @@ struct NativeDynamicLibrary
     u32 exported_data_symbol_count;
     u32 versioned_symbol_count;
     u32 referenced_symbol_count;
+    // Strong references occupy this leading prefix; weak references follow.
+    u32 strong_referenced_symbol_count;
     // Whether the driver read this library at all.  An empty export list is
     // not evidence that the library defines nothing: a library that was never
     // found on disk exports whatever it happens to export, so only a link
     // whose libraries were all read may read an absent name as absent.
     bool exports_known;
-    u8 reserved[7];
+    // The version-definition table contains GLIBC_ABI_DT_RELR.
+    bool supports_relr;
+    u8 reserved[2];
 };
 
 struct NativeExecutableLinkOptions
@@ -164,10 +168,12 @@ struct NativeExecutableLinkOptions
     u32 runtime_data_symbol_count;
     u32 runtime_versioned_symbol_count;
     bool runtime_exports_known;
+    // The selected libc advertises GLIBC_ABI_DT_RELR support.
+    bool runtime_relr;
     bool debug_info;
     // A NativeImageKind; zero is the fixed-address executable.
     u8 image_kind;
-    u8 reserved[5];
+    u8 reserved[4];
 };
 
 typedef struct NativeExecutableLinkResult NativeExecutableLinkResult;
