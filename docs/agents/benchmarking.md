@@ -526,9 +526,12 @@ captures (#2741).
   retained FAST and QUALITY modes on the same
   two binaries. A base revision whose history lacks
   `compiler_receipt.THROUGHPUT_HARNESS_FLOOR` still runs the retired none and
-  mir-stack modes under `--mode all`; the non-owned routes reject it as an
-  unsupported historical harness before any build or lab (#3714), and only a
-  new named historical recipe could measure such a base. The publisher re-checks the corpus's own summary and metadata
+  mir-stack modes under `--mode all`. On the pull route hosted authorization
+  turns it away before dispatch with an explicit unsupported check, and the
+  non-owned host routes re-derive that refusal before any build or lab
+  (#3714). Only the named `throughput-corpus-historical-v1` recipe measures
+  such a base: the pinned `afe67cbe` harness on the v2 arguments and
+  population, discharging its own inventory row. The publisher re-checks the corpus's own summary and metadata
   and binds its compiler hashes to the measured binaries. A corpus exit 1
   (confirmed regression) with a complete exported report is a measured,
   report-only result on both the main and pull-request routes, so a regressing

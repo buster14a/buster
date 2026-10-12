@@ -91,14 +91,19 @@ class SchedulerTests(unittest.TestCase):
             def test_launch(self):
                 scheduler.bootstrap.WrapperProcess(self, [sys.executable, "-c", "import time; time.sleep(60)"],
                                                    Path.cwd(), os.environ.copy())
-                scheduler.bootstrap.WrapperProcess(self, ["buster-missing-executable-2034"],
-                                                   Path.cwd(), os.environ.copy())
+                missing = scheduler.bootstrap.WrapperProcess(self, ["buster-missing-executable-2034"],
+                                                             Path.cwd(), os.environ.copy())
+                # Observe launch failure before cleanup can cancel the native
+                # broker during startup without attempting the missing payload.
+                missing.finish()
 
         summary, output = self.run_control([Control("test_launch")])
         self.assertFalse(summary["success"])
-        self.assertEqual(summary["owned_children"], 1)
+        # Windows first owns the native launcher, whose certificate then
+        # reports the missing payload; POSIX Popen rejects it immediately.
+        self.assertEqual(summary["owned_children"], 2 if os.name == "nt" else 1)
         self.assertEqual(summary["unreaped_children"], 0)
-        self.assertIn("FileNotFoundError", output)
+        self.assertIn("native launch did not certify completion" if os.name == "nt" else "FileNotFoundError", output)
 
     def test_cancellation_cleans_tree_before_fixture_removal(self):
         self.check_cancellation_tree()
@@ -120,6 +125,15 @@ class SchedulerTests(unittest.TestCase):
         directories = []
         children = []
         descendants = []
+        descendant_handles = []
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+            kernel.OpenProcess.restype = wintypes.HANDLE
+            kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+            kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
 
         class Control(unittest.TestCase):
             def test_child(self):
@@ -147,7 +161,15 @@ class SchedulerTests(unittest.TestCase):
                     if not marker.exists():
                         result = child.finish(timeout_seconds=0)
                         self.fail("child readiness failed: " + repr(result))
-                    descendants.append(int(marker.read_text()))
+                    pid = int(marker.read_text())
+                    descendants.append(pid)
+                    if os.name == "nt":
+                        # Retain the live witness before permitting cancellation.
+                        # A completed job can already have an empty PID list.
+                        handle = kernel.OpenProcess(0x100000, False, pid)
+                        self.assertTrue(handle, ctypes.get_last_error())
+                        descendant_handles.append(handle)
+                        self.assertEqual(kernel.WaitForSingleObject(handle, 0), 258)
                     launched.set()
                 finally:
                     # Setup failure also releases the coordinator; it must not
@@ -172,6 +194,15 @@ class SchedulerTests(unittest.TestCase):
             # failed before reaching the readiness try/finally.
             readiness_complete.set()
             thread.join(timeout=scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS)
+            if os.name == "nt":
+                try:
+                    for handle in descendant_handles:
+                        # Check before fixture assertions, and close even when
+                        # a later scheduler assertion fails.
+                        self.assertEqual(kernel.WaitForSingleObject(handle, 0), 0)
+                finally:
+                    for handle in descendant_handles:
+                        kernel.CloseHandle(handle)
         diagnostics = json.dumps(summary) + "\n" + output
         self.assertFalse(thread.is_alive())
         self.assertEqual(cancellation_errors, [], diagnostics)
@@ -187,22 +218,9 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(len(descendants), 1)
         pid = descendants[0]
         if os.name == "nt":
-            self.assertIn(pid, children[0].descendant_waited_pids, diagnostics)
-            import ctypes
-            from ctypes import wintypes
-            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-            kernel.OpenProcess.restype = wintypes.HANDLE
-            kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-            kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
-            handle = kernel.OpenProcess(0x100000, False, pid)
-            if handle:
-                try:
-                    self.assertEqual(kernel.WaitForSingleObject(handle, 5000), 0)
-                finally:
-                    kernel.CloseHandle(handle)
-            else:
-                self.assertEqual(ctypes.get_last_error(), 87)  # Exited PID.
+            self.assertEqual(len(descendant_handles), 1, diagnostics)
+            self.assertTrue(children[0].launch_terminal_record["complete"], diagnostics)
+            self.assertTrue(children[0].launch_terminal_record["cancelled"], diagnostics)
         else:
             try:
                 os.kill(pid, 0)
@@ -258,115 +276,190 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(summary["owned_children"], 0)
 
 
-    def test_windows_cleanup_waits_for_descendant_handles_before_fixture_removal(self):
+    def test_windows_cleanup_drains_the_job_before_fixture_removal(self):
         self.check_windows_cleanup_order()
 
-    def test_windows_descendant_wait_failure_is_not_success(self):
-        self.check_windows_cleanup_order(wait_error=RuntimeError("descendant-wait-marker"))
+    def test_windows_job_drain_failure_still_reaps_direct_child(self):
+        self.check_windows_cleanup_order(drain_error=RuntimeError("job-drain-marker"))
 
-    def test_windows_tree_capture_failure_still_reaps_direct_child(self):
-        self.check_windows_cleanup_order(capture_error=RuntimeError("tree-capture-marker"))
+    def test_windows_direct_cleanup_failure_keeps_the_drain_failure(self):
+        self.check_windows_cleanup_order(drain_error=RuntimeError("job-drain-marker"),
+                                         direct_error=RuntimeError("direct-cleanup-marker"))
 
-    def test_windows_handle_close_failure_keeps_the_owner_failed(self):
-        self.check_windows_cleanup_order(close_error=RuntimeError("handle-close-marker"))
+    def test_windows_missing_job_with_a_live_launcher_fails(self):
+        self.check_windows_cleanup_order(record={"complete": False, "absent": True, "error": 2})
 
-    def check_windows_cleanup_order(self, wait_error=None, capture_error=None, close_error=None):
+    def test_windows_launcher_drain_failure_after_command_exit_fails(self):
+        self.check_windows_cleanup_order(launcher_status=scheduler.LAUNCH_DRAIN_FAILED_EXIT)
+
+    def check_windows_cleanup_order(self, drain_error=None, direct_error=None, record=None, launcher_status=0):
         events = []
-        tree = mock.Mock()
-        tree.handles = [(24, "owned-descendant")]
-        tree.wait_until.side_effect = lambda deadline: events.append(("wait", deadline))
-        if wait_error is not None:
-            def failed_wait(deadline):
-                events.append(("wait", deadline))
-                raise wait_error
-            tree.wait_until.side_effect = failed_wait
-        def close_tree():
-            events.append(("close",))
-            if close_error is not None:
-                raise close_error
-        tree.close.side_effect = close_tree
+        record = record or {"complete": True, "waited": [24, 123], "foreign": [], "pending": [], "failed": []}
+
+        # Preserve the failure inventory as cancellation moves into the native
+        # owner, which acknowledges even before job creation or assignment.
+        def certificate():
+            events.append(("certificate",))
+            if drain_error is not None:
+                raise drain_error
+            if record.get("absent") or launcher_status:
+                raise RuntimeError("native owner did not certify cancellation")
+            return record
+
         child = scheduler.CaseProcess.__new__(scheduler.CaseProcess)
         child.cleanup_lock = threading.RLock()
         child.cleanup_seconds = 0.0
         child.descendant_cleanup_error = None
         child.descendant_waited_pids = []
+        child.job_drain = None
+        child.job_name = "job-marker"
+        child.launch_status_path = mock.Mock(name="terminal-path")
+        child.launch_status_path.name = "terminal.json"
+        child.launch_status_path.with_name.return_value.touch.side_effect = lambda **_kwargs: events.append(("cancel",))
         child.cleaned = False
-        child.process = mock.Mock(pid=123)
+        child.process = mock.Mock(pid=123, returncode=None)
         child.process.poll.return_value = None
 
-        def direct_cleanup(_child):
-            events.append(("direct",))
-            _child.cleaned = True
+        waits = 0
+        def wait(timeout):
+            nonlocal waits
+            waits += 1
+            events.append(("wait", timeout))
+            child.process.returncode = launcher_status
+            child.process.poll.return_value = launcher_status
+            if direct_error is not None and waits % 2 == 0:
+                raise direct_error
+            return launcher_status
+        child.process.wait.side_effect = wait
 
-        factory = mock.Mock(side_effect=capture_error, return_value=tree)
         with mock.patch.object(scheduler.os, "name", "nt"), \
-             mock.patch.object(scheduler, "WindowsFixtureTree", factory), \
-             mock.patch.object(scheduler.bootstrap.WrapperProcess, "cleanup", direct_cleanup), \
+             mock.patch.object(child, "launch_status", side_effect=certificate), \
              mock.patch.object(scheduler.time, "monotonic", return_value=100):
-            error = wait_error or capture_error or close_error
-            if error is not None:
-                with self.assertRaisesRegex(RuntimeError, str(error)):
+            expected_error = drain_error or direct_error
+            failed = expected_error is not None or record.get("absent") or launcher_status
+            if failed:
+                with self.assertRaises(RuntimeError) as raised:
                     child.cleanup()
+                for marker in (drain_error, direct_error):
+                    if marker is not None:
+                        self.assertIn(str(marker), str(raised.exception))
+                events.append(("fixture",))
+                with self.assertRaises(RuntimeError):
+                    child.cleanup()  # A failed owner stays failed.
             else:
                 child.cleanup()
-            events.append(("fixture",))
-            if error is not None:
-                self.assertFalse(child.cleaned)
-                with self.assertRaisesRegex(RuntimeError, str(error)):
-                    child.cleanup()
-            else:
-                child.cleanup()  # Already cleaned; do not recapture stale numeric PIDs.
-        factory.assert_called_once_with(123, child.process._handle)
-        self.assertEqual(child.descendant_waited_pids, [] if wait_error or capture_error else [24])
-        expected = [("direct",)]
-        if capture_error is None:
-            expected += [("wait", 100 + scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS), ("close",)]
-        expected += [("fixture",)]
-        if error is None:
-            expected += [("direct",)]
-        self.assertEqual(events, expected)
+                events.append(("fixture",))
+                child.cleanup()  # Already cleaned; nothing is drained twice.
+        sequence = [("cancel",), ("wait", scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS),
+                    ("certificate",), ("wait", scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS), ("fixture",)]
+        if not failed:
+            sequence.extend([("wait", scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS),
+                             ("certificate",), ("wait", scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS)])
+        self.assertEqual(events, sequence)
+        self.assertFalse(child.process.kill.called)
 
+    def drain_with(self, *fixture, budget=0.2):
+        # Run the real caller against a deliberately broken native drain.
+        command = [os.environ[scheduler.PROCESS_TREE_ENVIRONMENT], "fixture"] + list(fixture)
+        with mock.patch.object(scheduler, "process_tree_command", return_value=command):
+            return scheduler.drain_job("job-marker", time.monotonic() + budget)
 
-    def test_windows_descendant_wait_shares_deadline_and_keeps_all_identities(self):
-        tree = scheduler.WindowsFixtureTree.__new__(scheduler.WindowsFixtureTree)
-        tree.kernel = mock.Mock()
-        tree.handles = [(23, "first-handle"), (24, "second-handle")]
-        tree.kernel.WaitForSingleObject.side_effect = [258, 0]
-        with mock.patch.object(scheduler.time, "monotonic", side_effect=[105, 111]):
-            with self.assertRaisesRegex(RuntimeError, "pending_pids.*23"):
-                tree.wait_until(110)
-        self.assertEqual(tree.kernel.WaitForSingleObject.call_args_list,
-                         [mock.call("first-handle", 5000), mock.call("second-handle", 0)])
-        tree.close()
-        self.assertEqual(tree.kernel.CloseHandle.call_args_list,
-                         [mock.call("first-handle"), mock.call("second-handle")])
-        self.assertEqual(tree.handles, [])
+    @unittest.skipUnless(os.environ.get(scheduler.PROCESS_TREE_ENVIRONMENT),
+                         "CI builds tools/windows_process_tree.c and exports its path")
+    def test_drain_accepts_only_one_complete_timely_record(self):
+        self.assertEqual(self.drain_with("late", "0")["waited"], [])
+        for fixture, message in ((("silent",), "record malformed"),
+                                 (("partial",), "record malformed"),
+                                 (("malformed",), "record malformed"),
+                                 (("repeated",), "record malformed"),
+                                 (("late", "600"), "termination incomplete.*'late': True"),
+                                 (("partial-late", "5000"), "exceeded its deadline"),
+                                 (("sleep", "5000"), "exceeded its deadline")):
+            with self.subTest(fixture=fixture):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    self.drain_with(*fixture)
 
+    @unittest.skipUnless(os.name == "nt", "Windows job objects")
+    def test_windows_job_membership_never_admits_an_outside_process(self):
+        # The reused-PID control: a live process outside the job is never
+        # treated as a member, waited on or terminated by a drain.
+        result = subprocess.run(scheduler.process_tree_command() + ["selftest"],
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"selftest": True, "member": True, "outsider_member": False,
+                                                     "outsider_alive": True, "member_waited": True})
 
-    def test_windows_capture_refuses_reused_and_stale_parent_identities(self):
-        tree = scheduler.WindowsFixtureTree.__new__(scheduler.WindowsFixtureTree)
-        tree.kernel = mock.Mock()
-        tree.handles = []
-        tree.parent_created = 100
-        tree.snapshot_started = 200
-        for created in (99, 201):
-            with self.subTest(created=created):
-                with self.assertRaisesRegex(RuntimeError, "identity changed"):
-                    tree.retain_handle(23, "replacement-handle", created)
-                self.assertEqual(tree.handles, [])
-        self.assertEqual(tree.kernel.CloseHandle.call_count, 2)
-        tree.retain_handle(24, "original-handle", 150)
-        self.assertEqual(tree.handles, [(24, "original-handle")])
+    def test_native_launch_sidecar_rejects_missing_malformed_and_late_evidence(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            child = scheduler.CaseProcess.__new__(scheduler.CaseProcess)
+            child.launch_status_path = Path(directory) / "terminal.json"
+            child.runtime_deadline_ns = 10_000_000_000
+            child.launch_terminal_record = None
+            child.process = mock.Mock(returncode=0)
+            valid = {"complete": True, "runtime_timed_out": False, "cancelled": False, "root_returncode": 17,
+                     "root_pid": 123, "runtime_deadline_ns": child.runtime_deadline_ns,
+                     "root_finished_ns": 9_000_000_000, "cleanup_started_ns": 9_000_000_000,
+                     "cleanup_finished_ns": 9_500_000_000}
+            with self.assertRaisesRegex(RuntimeError, "missing or malformed"):
+                child.launch_status()
+            for malformed in ("{partial", json.dumps(valid) + "\n" + json.dumps(valid)):
+                child.launch_status_path.write_text(malformed)
+                with self.assertRaisesRegex(RuntimeError, "missing or malformed"):
+                    child.launch_status()
+            for changes in ({"complete": False}, {"runtime_deadline_ns": 1}, {"root_pid": True},
+                            {"cleanup_finished_ns": 20_000_000_000}, {"root_finished_ns": 11_000_000_000}):
+                with self.subTest(changes=changes):
+                    child.launch_status_path.write_text(json.dumps(valid | changes))
+                    with self.assertRaises(RuntimeError):
+                        child.launch_status()
+            child.launch_status_path.write_text(json.dumps(valid))
+            child.require_terminal_observation = True
+            child.terminal_deadline_ns = 20_000_000_000
+            with mock.patch.object(scheduler.time, "monotonic_ns", return_value=20_000_000_001):
+                with self.assertRaisesRegex(RuntimeError, "observed after its deadline"):
+                    child.launch_status()
+            child.require_terminal_observation = False
+            child.process.returncode = scheduler.LAUNCH_DRAIN_FAILED_EXIT
+            with self.assertRaisesRegex(RuntimeError, "disagrees with its exit"):
+                child.launch_status()
 
-    def test_windows_handle_close_failure_is_not_ignored(self):
-        tree = scheduler.WindowsFixtureTree.__new__(scheduler.WindowsFixtureTree)
-        tree.kernel = mock.Mock()
-        tree.handles = [(23, "first-handle"), (24, "second-handle")]
-        tree.kernel.CloseHandle.side_effect = [False, True]
-        with self.assertRaisesRegex(RuntimeError, "closure failed.*23"):
-            tree.close()
-        self.assertEqual(tree.kernel.CloseHandle.call_count, 2)
-        self.assertEqual(tree.handles, [])
+    def test_native_broker_status_is_distinct_from_payload_status(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            child = scheduler.CaseProcess.__new__(scheduler.CaseProcess)
+            child.launch_status_path = Path(directory) / "terminal.json"
+            child.runtime_deadline_ns = 10_000_000_000
+            child.process = mock.Mock(returncode=0, pid=456, args=["native-owner"])
+            child.job_name = "native-job"
+            child.started = child.runtime_deadline_ns / 1_000_000_000 - scheduler.bootstrap.WRAPPER_TIMEOUT_SECONDS
+            child.test_id = self.id()
+            child.cleanup_seconds = 0
+            child.job_drain = None
+            valid = {"complete": True, "runtime_timed_out": False, "cancelled": False, "root_returncode": 17,
+                     "root_pid": 123, "runtime_deadline_ns": child.runtime_deadline_ns,
+                     "root_finished_ns": 9_000_000_000, "cleanup_started_ns": 9_000_000_000,
+                     "cleanup_finished_ns": 9_500_000_000}
+            for status in (124, 125):
+                with self.subTest(payload=status):
+                    child.launch_terminal_record = None
+                    child.launch_status_path.write_text(json.dumps(valid | {"root_returncode": status}))
+                    broker_result = subprocess.CompletedProcess(["native-owner"], 0, "stdout", "stderr")
+                    with mock.patch.object(scheduler.bootstrap.WrapperProcess, "finish", return_value=broker_result), \
+                         mock.patch.object(scheduler.time, "monotonic_ns", return_value=9_500_000_000), \
+                         contextlib.redirect_stdout(io.StringIO()):
+                        result = child.finish()
+                    self.assertEqual((result.returncode, result.stdout, result.stderr), (status, "stdout", "stderr"))
+            child.launch_terminal_record = None
+            child.process.returncode = scheduler.LAUNCH_RUNTIME_TIMEOUT_EXIT
+            child.launch_status_path.write_text(json.dumps(valid | {
+                "runtime_timed_out": True, "root_finished_ns": 0,
+                "cleanup_started_ns": 10_000_000_000, "cleanup_finished_ns": 10_100_000_000}))
+            with mock.patch.object(scheduler.bootstrap.WrapperProcess, "finish", return_value=broker_result), \
+                 mock.patch.object(scheduler.time, "monotonic_ns", return_value=10_100_000_000), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(AssertionError, "bootstrap child timed out"):
+                    child.finish()
 
     def test_cleanup_error_cannot_be_a_success(self):
         cleanup = scheduler.CaseProcess.cleanup
@@ -460,6 +553,11 @@ sys.exit(0 if summary['success'] else 1)
         self.assertIn("set -euo pipefail", wrappers)
         self.assertIn("timeout-minutes: ${{ matrix.platform == 'windows' && 20 || 2 }}", wrappers)
         self.assertNotIn("continue-on-error", wrappers)
+        for step in (policy, wrappers):
+            self.assertIn("build.c", step)
+            self.assertIn("bootstrap_process_owner", step)
+            self.assertNotIn("tools/windows_process_tree.c", step)
+            self.assertIn("export BUSTER_WINDOWS_PROCESS_TREE=", step)
 
 
 def load_tests(loader, tests, pattern):

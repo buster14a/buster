@@ -1139,7 +1139,15 @@ retain relocations because a linker can replace their addresses.
 Text alignment without an explicit fill uses x86-64 NOP bytes or complete
 little-endian AArch64 NOP instructions. A partial AArch64 instruction boundary
 is zero-filled before the NOPs; explicit fills remain repeated bytes on both
-targets. Data alignment defaults to zero fill.
+targets. Data alignment defaults to zero fill. `.p2align`, `.balign`, and
+`.align` accept `alignment[, fill[, maximum_skip]]`, including an omitted
+fill (`.p2align 4,,10`). A nonzero maximum suppresses the gap when the required
+padding exceeds it; equality permits padding and zero means unlimited. The
+section retains its requested alignment even when padding is suppressed.
+Maximum-skip expressions must be absolute and in 0..4294967295; malformed or
+out-of-range operands are diagnosed. Every branch-relaxation layout replay
+recomputes the gap and limit. `.align` keeps its target-specific interpretation:
+bytes on x86-64 ELF, a power of two on AArch64.
 
 Three things that layer owns rather than the instruction layer. Local numeric
 labels: `1:` becomes a generated name and `1f`/`1b` resolve to the nearest
@@ -1291,8 +1299,8 @@ The parser reserves one operation record per expanded argument; the native
 consumer walks it without another allocation. API-built invocations with a
 zero `link_operation_count` retain the explicit legacy order of all inputs
 followed by all libraries. Non-link output actions retain their prior order.
-Group/whole-archive and dynamic-library as-needed/interposition policy are
-unchanged.
+Group and whole-archive requests remain unsupported. Shared-symbol
+interposition retains its existing behavior.
 
 Provider state changes are monotonic: an edge is revisited at most three times.
 Selection work is expected O(S + A + D log(M + 1)), with S visited selected
@@ -2005,6 +2013,47 @@ The supported subset is:
 - Linux and Android ELF links: `--no-undefined`, `-no-undefined`, and the
   two arguments `-z defs` require strong references to resolve. Executables
   already enforce this rule; on a shared object it overrides loader resolution.
+- x86-64 Linux driver links: `--as-needed` and `--no-as-needed` select
+  subsequent `-l` requests and automatic-language direct `.so` / `.so.N`
+  operands in input order (the default is no-as-needed). Explicit `-x` source
+  inputs retain their selected language. A DSO
+  is retained when it satisfies a strong unresolved reference from preceding
+  objects, or from a previously retained DSO when the candidate is absent
+  from every retained DSO's DT_NEEDED list (matched by SONAME identity).
+  DSO-only dependencies already named there remain indirect; a regular-object
+  demand still keeps them. Later objects and weak references do not keep it. The driver consumes these switches before the native image API,
+  which receives the selected library list and still refuses raw policy flags
+  without an ordered driver request. GNU linker-script `AS_NEEDED` remains
+  unsupported.
+- x86-64 Linux ELF links: `-O1` permits the native writer's existing layout and
+  hash policy; it does not request generated-code optimization. `--sort-common`
+  is accepted because there are no admitted common symbols to sort: the object
+  reader continues to refuse `SHN_COMMON`, and assembly `.comm` definitions
+  are already ordinary zero-filled definitions.
+- x86-64 Linux executables, PIEs and shared objects: `-z relro`, `-z now` and
+  `-z noexecstack` request RELRO, eager binding and a non-executable stack.
+  The fixed-address dynamic writer already seals its GOT and binds eagerly.
+  `-z now` extends a PIE/shared object's sealed range to include its PLT GOT
+  and emits both NOW flags. These requests select a dynamic executable even
+  without source imports, so their metadata is present on trivial programs.
+- x86-64 Linux ELF links: `-z pack-relative-relocs` converts eligible PIE/shared
+  `R_X86_64_RELATIVE` relocations to `DT_RELR` with direct addresses and bitmaps,
+  storing their implicit addends in the target words. Unaligned and zero-fill
+  locations retain RELA, as do symbolic, TLS, COPY and IRELATIVE relocations.
+  glibc's `GLIBC_ABI_DT_RELR` version dependency is recorded and must be present
+  in the selected libc's version definitions; an incompatible libc is refused.
+  Fixed-address executables have no load-bias-relative relocations to pack.
+  The existing layout reservation stays as padding; this promises RELR
+  semantics, not a smaller artifact or a compiler-throughput improvement.
+- x86-64 Linux executables, PIEs and shared objects: `-rpath DIR`,
+  `--rpath DIR`, `-rpath=DIR` and `--rpath=DIR` write a runtime search path.
+  Repeated paths are joined with `:` in command-line order. The default and
+  `--enable-new-dtags` write `DT_RUNPATH`; `--disable-new-dtags` writes
+  `DT_RPATH`, and the last dtag switch wins. Loader tokens such as `$ORIGIN`
+  are preserved literally (quote them in the shell). Each image's loader
+  expands `$ORIGIN` relative to that image. This is a runtime path, separate
+  from `-L` library discovery at link time; `-rpath-link` remains refused.
+  Missing or empty operands and unsupported targets fail before publication.
 - x86-64 Linux shared objects: `-soname NAME`, `--soname NAME`, `-h NAME`,
   `-soname=NAME`, and `--soname=NAME` set `DT_SONAME`.
 
@@ -2082,7 +2131,11 @@ independent installed GCC and Clang preprocessing of the matrix and includes.
 depfile path comes from the object path by removing only the basename's last
 extension and appending `.d`; `-MF` overrides it. `-MT` adds a raw target,
 `-MQ` adds an escaped target, and the default target is the escaped object path.
-Multiple target options retain command-line order. `-MP` adds phony rules for
+Multiple target options retain command-line order, including repeats and empty
+fragments. Parsing retains raw/quoted fragments and joins them once with checked
+sizing; target storage and copying grow linearly with argument and output bytes.
+`compiler_driver_test_dependency_target_scaling` bounds actual parser arena growth
+at 128 and 2,048 targets, directly and through response files. `-MP` adds phony rules for
 header prerequisites. `-MF`, `-MT`, `-MQ`, and `-MP` require `-MD` or `-MMD`;
 explicit `-MF`/target options cannot be used with multiple inputs.
 
@@ -2205,7 +2258,15 @@ The globals and publics streams index each module's top-level procedures
 `S_GDATA32`/`S_LDATA32`); global ones also get an `S_PUB32` and an entry in the
 publics address map, sorted by section and offset (`pdb_gsi_emit`). With these
 empty, DbgHelp loads the PDB only as "public symbols & lines". The regression is
-`pdb_test_global_indexes`.
+`pdb_test_global_indexes`. Bucket ordering retains the format hash and name
+comparison, with stable insertion sort capped at 16 entries and stable bottom-up
+merge sort for larger buckets (#3737). One scratch array sized to the largest
+bucket is reused, bounding comparisons to O(N log N) even for repeated-hash
+names. `pdb_test_gsi_sorting` checks comparison bounds and stable ties;
+`pdb_test_gsi_colliding_indexes` checks both emitted indexes. The existing
+mixed ASCII/non-ASCII comparator can be non-transitive (#3752); for such inputs the
+large-bucket merge order is deterministic but may differ from insertion order.
+No comparator or on-disk format change is made.
 
 CodeView names a frame-resident location with `S_DEFRANGE_REGISTER_REL`
 against RBP (x86-64) or X29 (AArch64), the base codegen normalizes FRAME offsets

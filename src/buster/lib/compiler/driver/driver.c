@@ -13,6 +13,8 @@
 // Comma-separated -Wl payloads become individual linker arguments;
 // compiler_driver_validate_linker_query handles the native identity query;
 // link_validate_linker_arguments owns the image-producing semantic subset.
+// compiler_driver_elf_requested_libraries consumes ordered as-needed policy
+// against input prefixes before the native writer receives its DSO list.
 // compiler_driver_execute_invocation then runs the
 // selected pipeline: compiler_driver_execute_c_single carries a C input
 // through preprocess, parse (the opt-in -fc-ast-pilot syntax-tree build,
@@ -52,6 +54,8 @@
 // Dependency output follows successful C object or bounded -Wp assembly
 // publication: the preprocessor contributes identity-deduplicated prerequisites
 // and this driver renders their Makefile after the artifact writer succeeds.
+// The parser retains ordered -MT/-MQ fragments and joins them once, so
+// dependency target storage grows with argument and output bytes.
 // Every unit enters through compiler_driver_execute_unit. With
 // collect_input_metrics, compiler_driver_prime_arenas and the prewarm run
 // first, CompilerDriverUnitMetrics (compiler_driver_phase_begin marks the
@@ -573,6 +577,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverLanguage compiler_driver_input_language(Compil
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_shared_library_input(CompilerDriverInvocation invocation, u32 input_index);
+
 // Parsed streams cover both indexed arrays in their original order. A legacy
 // API invocation omits the stream and retains its file-then-library placement.
 BUSTER_GLOBAL_LOCAL bool compiler_driver_link_operations_valid(CompilerDriverInvocation const* invocation)
@@ -599,6 +605,13 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_link_operations_valid(CompilerDriverInv
             result = false;
             break;
         }
+        // API-built streams must obey the same policy bounds as parsed flags.
+        result = result && (!operation.as_needed ||
+                 ((operation.kind == COMPILER_DRIVER_LINK_OPERATION_LIBRARY ||
+                   (operation.kind == COMPILER_DRIVER_LINK_OPERATION_FILE && compiler_driver_native_shared_library_input(*invocation, operation.index))) &&
+                  invocation->action == COMPILER_DRIVER_ACTION_LINK &&
+                  !invocation->has_gpu_target && !invocation->emit_llvm_bitcode &&
+                  invocation->target.os == OPERATING_SYSTEM_LINUX && invocation->target.cpu_arch == CPU_ARCH_X86_64));
     }
     return result;
 }
@@ -1069,8 +1082,42 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_linker_argument_takes_operand(String8 a
 {
     bool result = string_equal(argument, S8("-soname")) || string_equal(argument, S8("--soname")) ||
                   string_equal(argument, S8("-h")) || string_equal(argument, S8("-z")) ||
-                  string_equal(argument, S8("--version-script"));
+                  string_equal(argument, S8("--version-script")) || string_equal(argument, S8("-rpath")) ||
+                  string_equal(argument, S8("--rpath"));
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_linker_policy_argument(String8 argument, bool* as_needed, bool* operand)
+{
+    if (!*operand)
+    {
+        if (string_equal(argument, S8("--as-needed"))) *as_needed = true;
+        else if (string_equal(argument, S8("--no-as-needed"))) *as_needed = false;
+    }
+    *operand = !*operand && compiler_driver_linker_argument_takes_operand(argument);
+}
+
+// These flags are consumed by the ordered driver selection, before the
+// native writer receives its already-selected DT_NEEDED list. Direct native
+// linker API requests still fail closed because that API has no input order.
+BUSTER_GLOBAL_LOCAL void compiler_driver_consume_linker_as_needed(CompilerDriverInvocation* invocation)
+{
+    bool operand = false;
+    u32 count = 0;
+    for (u32 index = 0; index < invocation->linker_argument_count; index += 1)
+    {
+        String8 argument = invocation->linker_arguments[index];
+        bool policy = !operand && (string_equal(argument, S8("--as-needed")) || string_equal(argument, S8("--no-as-needed")));
+        if (policy && invocation->error == COMPILER_DRIVER_ERROR_NONE &&
+            (!compiler_driver_native_linux_elf_link(*invocation) || invocation->target.cpu_arch != CPU_ARCH_X86_64))
+        {
+            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation->diagnostic = S8("--as-needed/--no-as-needed require an x86-64 Linux native link");
+        }
+        if (!policy) invocation->linker_arguments[count++] = argument;
+        operand = !operand && compiler_driver_linker_argument_takes_operand(argument);
+    }
+    invocation->linker_argument_count = count;
 }
 
 BUSTER_GLOBAL_LOCAL void compiler_driver_consume_linker_verbose(Arena* arena, CompilerDriverInvocation* invocation)
@@ -2081,15 +2128,20 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     arguments = compiler_driver_expand_response_files(arena, &invocation, arguments);
     // At most one resource directory plus four sysroot directories. Native
     // Windows INCLUDE entries reserve their own exact-sized array below.
+    bool linker_as_needed = false;
+    bool linker_operand = false;
     u64 default_include_capacity = 5;
     u64 linker_argument_capacity = arguments.length;
     u64 macro_prefix_map_capacity = 0;
     u64 after_include_capacity = 0;
+    u64 dependency_target_capacity = 0;
     for (u64 index = 0; index < arguments.length; index += 1)
     {
         String8 argument = arguments.pointer[index];
         macro_prefix_map_capacity += string_starts_with_sequence(argument, S8("-fmacro-prefix-map="));
         after_include_capacity += string_starts_with_sequence(argument, S8("-idirafter"));
+        dependency_target_capacity += string_starts_with_sequence(argument, S8("-MT")) ||
+                                      string_starts_with_sequence(argument, S8("-MQ"));
         if (string_starts_with_sequence(argument, S8("-Wl,")))
         {
             for (u64 offset = 4; offset < argument.length; offset += 1)
@@ -2153,7 +2205,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     String8 runtime_omission_option = {0};
     String8 dependency_option_without_mode = {0};
     bool direct_dependency_options = false;
-    u32 dependency_target_count = 0;
+    // The prepass may count option values too, but never undercounts targets.
+    // arguments.length is bounded above, so two fragments per target fit.
+    String8* dependency_fragments = dependency_target_capacity ? arena_allocate(arena, String8, 2 * dependency_target_capacity) : 0;
+    u64 dependency_fragment_count = 0;
     for (u64 argument_index = 0; argument_index < arguments.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; argument_index += 1)
     {
         String8 argument = arguments.pointer[argument_index];
@@ -2166,6 +2221,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.input_language_count = invocation.input_count;
             invocation.link_operations[invocation.link_operation_count++] = (CompilerDriverLinkOperation){
                 .index = input_index, .kind = COMPILER_DRIVER_LINK_OPERATION_FILE,
+                .as_needed = linker_as_needed && compiler_driver_native_shared_library_input(invocation, input_index),
             };
             continue;
         }
@@ -2279,9 +2335,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                     CompilerDriverDependencyQuoteResult quoted = compiler_driver_dependency_quote(arena, value);
                     target = quoted.representable ? quoted.text : value;
                 }
-                invocation.dependency_targets =
-                    dependency_target_count ? string_format(arena, S8("{S8} {S8}"), invocation.dependency_targets, target) : target;
-                dependency_target_count += 1;
+                if (dependency_fragment_count)
+                {
+                    dependency_fragments[dependency_fragment_count++] = S8(" ");
+                }
+                dependency_fragments[dependency_fragment_count++] = target;
             }
             continue;
         }
@@ -2549,7 +2607,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 u32 library_index = invocation.library_count++;
                 invocation.libraries[library_index] = value;
                 invocation.link_operations[invocation.link_operation_count++] = (CompilerDriverLinkOperation){
-                    .index = library_index, .kind = COMPILER_DRIVER_LINK_OPERATION_LIBRARY,
+                    .index = library_index, .kind = COMPILER_DRIVER_LINK_OPERATION_LIBRARY, .as_needed = linker_as_needed,
                 };
             }
             else if (string_equal(argument, S8("-F")))
@@ -2655,6 +2713,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             else
             {
+                compiler_driver_linker_policy_argument(value, &linker_as_needed, &linker_operand);
                 invocation.linker_arguments[invocation.linker_argument_count++] = value;
             }
             continue;
@@ -3146,7 +3205,9 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                     }
                     else
                     {
-                        invocation.linker_arguments[invocation.linker_argument_count++] = string_slice(argument, start, end);
+                        String8 linker_argument = string_slice(argument, start, end);
+                        compiler_driver_linker_policy_argument(linker_argument, &linker_as_needed, &linker_operand);
+                        invocation.linker_arguments[invocation.linker_argument_count++] = linker_argument;
                     }
                     start = end + 1;
                 }
@@ -3233,7 +3294,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             u32 library_index = invocation.library_count++;
             invocation.libraries[library_index] = value;
             invocation.link_operations[invocation.link_operation_count++] = (CompilerDriverLinkOperation){
-                .index = library_index, .kind = COMPILER_DRIVER_LINK_OPERATION_LIBRARY,
+                .index = library_index, .kind = COMPILER_DRIVER_LINK_OPERATION_LIBRARY, .as_needed = linker_as_needed,
             };
             continue;
         }
@@ -3356,6 +3417,20 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), argument);
         break;
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && dependency_fragment_count)
+    {
+        if (dependency_fragment_count == 1)
+        {
+            invocation.dependency_targets = dependency_fragments[0];
+        }
+        else if (!string_join_arena_attempt(arena,
+                                           (SliceString8){.pointer = dependency_fragments, .length = dependency_fragment_count},
+                                           false, &invocation.dependency_targets))
+        {
+            invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation.diagnostic = S8("dependency targets exceed supported size");
+        }
     }
     // Standard input has no suffix to classify, so, as for Clang, it needs an
     // explicit C language or -E, which reads it as C source. It is one stream
@@ -3592,6 +3667,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
     }
     compiler_driver_validate_linker_query(&invocation);
+    compiler_driver_consume_linker_as_needed(&invocation);
     compiler_driver_consume_linker_verbose(arena, &invocation);
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && !invocation.no_standard_includes && !invocation.has_gpu_target &&
         invocation.target.os != OPERATING_SYSTEM_UEFI && invocation.target.cpu_arch != CPU_ARCH_SPIRV_COMPUTE)
@@ -4105,48 +4181,59 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
     // supplies loader identity independently of the filename used to find it.
     String8 soname = {0};
     bool identity_valid = true;
-    for (u16 section_index = 0; header_valid && identity_valid && section_index < section_count; section_index += 1)
+    String8* needed_names = 0;
+    u32 needed_count = 0;
+    u32 needed_written = 0;
+    for (u32 pass = 0; pass < 2 && header_valid && identity_valid; pass += 1)
     {
-        u64 section = section_table + (u64)section_index * DRIVER_ELF_SECTION_HEADER_SIZE;
-        u32 section_type = 0;
-        u32 strings_index = 0;
-        u64 offset = 0;
-        u64 size = 0;
-        u64 strings_offset = 0;
-        u64 strings_size = 0;
-        compiler_driver_read_u32(bytes, section + 4, &section_type);
-        if (section_type == 6)
+        for (u16 section_index = 0; header_valid && identity_valid && section_index < section_count; section_index += 1)
         {
-            identity_valid = compiler_driver_read_u64(bytes, section + 24, &offset) &&
-                             compiler_driver_read_u64(bytes, section + 32, &size) &&
-                             compiler_driver_read_u32(bytes, section + 40, &strings_index) && strings_index < section_count &&
-                             offset <= bytes.length && size <= bytes.length - offset && size % 16 == 0;
-            u64 strings = section_table + (u64)strings_index * DRIVER_ELF_SECTION_HEADER_SIZE;
-            identity_valid = identity_valid && compiler_driver_read_u64(bytes, strings + 24, &strings_offset) &&
-                             compiler_driver_read_u64(bytes, strings + 32, &strings_size) &&
-                             strings_offset <= bytes.length && strings_size <= bytes.length - strings_offset;
-            for (u64 entry = 0; identity_valid && entry < size; entry += 16)
+            u64 section = section_table + (u64)section_index * DRIVER_ELF_SECTION_HEADER_SIZE;
+            u32 section_type = 0;
+            u32 strings_index = 0;
+            u64 offset = 0;
+            u64 size = 0;
+            u64 strings_offset = 0;
+            u64 strings_size = 0;
+            compiler_driver_read_u32(bytes, section + 4, &section_type);
+            if (section_type == 6)
             {
-                u64 tag = 0;
-                u64 name = 0;
-                compiler_driver_read_u64(bytes, offset + entry, &tag);
-                if (!tag) { break; }
-                if (tag == 14)
+                identity_valid = compiler_driver_read_u64(bytes, section + 24, &offset) &&
+                                 compiler_driver_read_u64(bytes, section + 32, &size) &&
+                                 compiler_driver_read_u32(bytes, section + 40, &strings_index) && strings_index < section_count &&
+                                 offset <= bytes.length && size <= bytes.length - offset && size % 16 == 0;
+                u64 strings = section_table + (u64)strings_index * DRIVER_ELF_SECTION_HEADER_SIZE;
+                identity_valid = identity_valid && compiler_driver_read_u64(bytes, strings + 24, &strings_offset) &&
+                                 compiler_driver_read_u64(bytes, strings + 32, &strings_size) &&
+                                 strings_offset <= bytes.length && strings_size <= bytes.length - strings_offset;
+                for (u64 entry = 0; identity_valid && entry < size; entry += 16)
                 {
-                    compiler_driver_read_u64(bytes, offset + entry + 8, &name);
-                    u64 length = 0;
-                    while (name < strings_size && length < strings_size - name && bytes.pointer[strings_offset + name + length])
+                    u64 tag = 0;
+                    u64 name = 0;
+                    compiler_driver_read_u64(bytes, offset + entry, &tag);
+                    if (!tag) { break; }
+                    if (tag == 1 || (tag == 14 && !pass))
                     {
-                        length += 1;
-                    }
-                    identity_valid = name < strings_size && length && length < strings_size - name && !soname.length;
-                    if (identity_valid)
-                    {
-                        soname = (String8){.pointer = (char8*)bytes.pointer + strings_offset + name, .length = length};
+                        compiler_driver_read_u64(bytes, offset + entry + 8, &name);
+                        u64 length = 0;
+                        while (name < strings_size && length < strings_size - name && bytes.pointer[strings_offset + name + length])
+                        {
+                            length += 1;
+                        }
+                        identity_valid = name < strings_size && length && length < strings_size - name &&
+                                         (tag != 14 || !soname.length) && (tag != 1 || pass || needed_count < UINT32_MAX);
+                        if (identity_valid)
+                        {
+                            String8 spelling = {.pointer = (char8*)bytes.pointer + strings_offset + name, .length = length};
+                            if (tag == 14) { soname = spelling; }
+                            else if (pass) { needed_names[needed_written++] = spelling; }
+                            else { needed_count += 1; }
+                        }
                     }
                 }
             }
         }
+        if (!pass && identity_valid) { needed_names = arena_allocate(arena, String8, needed_count); }
     }
     // .gnu.version_d as an index-keyed table.  The definitions form a linked
     // list whose entries carry their own index, so the highest index decides
@@ -4202,6 +4289,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
             memset(version_names, 0, (u64)version_name_count * sizeof(*version_names));
         }
     }
+    for (u32 index = 0; index < version_name_count; index += 1)
+    {
+        library->supports_relr |= string_equal(version_names[index], S8("GLIBC_ABI_DT_RELR"));
+    }
     // Export arrays use u32 counts and the link indexes reserve UINT32_MAX
     // as an empty entry. Check before allocating or narrowing the ELF count.
     if (identity_valid && symbol_size && symbol_size / DRIVER_ELF_SYMBOL_SIZE < UINT32_MAX && !version_symbols_invalid &&
@@ -4213,6 +4304,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
         library->exported_data_symbols = collect_data ? arena_allocate(arena, NativeDynamicDataSymbol, symbol_count) : 0;
         library->versioned_symbols = arena_allocate(arena, NativeDynamicVersionedSymbol, symbol_count);
         library->referenced_symbols = arena_allocate(arena, String8, symbol_count);
+        u32 weak_references = 0;
         for (u64 symbol_index = 0; symbol_index < symbol_count; symbol_index += 1)
         {
             u64 symbol = symbol_offset + symbol_index * DRIVER_ELF_SYMBOL_SIZE;
@@ -4248,7 +4340,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
             // module -- possibly this executable -- to define.
             if (!section)
             {
-                library->referenced_symbols[library->referenced_symbol_count++] = spelling;
+                if (binding == 1) library->referenced_symbols[library->strong_referenced_symbol_count++] = spelling;
+                else library->referenced_symbols[symbol_count - 1 - weak_references++] = spelling;
                 continue;
             }
             u16 version = 0;
@@ -4277,6 +4370,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
                 };
             }
         }
+        memmove(library->referenced_symbols + library->strong_referenced_symbol_count,
+                library->referenced_symbols + symbol_count - weak_references, (u64)weak_references * sizeof(String8));
+        library->referenced_symbol_count = library->strong_referenced_symbol_count + weak_references;
         // Every name this library defines is now recorded, so the linker may
         // read the absence of a name from `versioned_symbols` as the library
         // not defining it -- which is what makes an undefined weak reference
@@ -4285,6 +4381,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
         // than a second copy of the same names in `exported_symbols`, which
         // stays the PE side's.
         if (soname.length) { library->name = string_duplicate_arena(arena, soname, true); }
+        library->needed_names = needed_names;
+        library->needed_name_count = needed_count;
         library->exports_known = true;
         result = true;
     }
@@ -5911,8 +6009,63 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
             library->versioned_symbol_count = 0;
             library->referenced_symbols = 0;
             library->referenced_symbol_count = 0;
+            library->needed_names = 0;
+            library->needed_name_count = 0;
             file_map_unmap(file);
         }
+    }
+}
+
+typedef struct CompilerDriverElfNeededInput CompilerDriverElfNeededInput;
+struct CompilerDriverElfNeededInput
+{
+    ObjectFile* objects;
+    u32* prefix_counts;
+};
+
+// Reuse the incremental archive name index for a separate DSO-selection
+// view. Only already-seen objects and retained libraries can demand a DSO;
+// later inputs and undefined weak references cannot retroactively keep it.
+enum { COMPILER_DRIVER_ELF_NEEDED_DSO_REFERENCE = 16 };
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_library_needed(CompilerDriverArchiveState* state, NativeDynamicLibrary* library,
+                                                           NativeDynamicLibrary* retained, u32 retained_count)
+{
+    bool indirect = false;
+    for (u32 index = 0; !indirect && index < retained_count; index += 1)
+    {
+        for (u32 dependency = 0; !indirect && dependency < retained[index].needed_name_count; dependency += 1)
+        {
+            indirect = string_equal(retained[index].needed_names[dependency], library->name);
+        }
+    }
+    bool needed = false;
+    for (u32 index = 0; !needed && state->capacity && index < library->versioned_symbol_count; index += 1)
+    {
+        NativeDynamicVersionedSymbol* symbol = library->versioned_symbols + index;
+        if (symbol->has_default)
+        {
+            CompilerDriverArchiveSymbol* entry = compiler_driver_archive_slot(state, symbol->name);
+            // Regular-object demand always counts. DSO-only demand counts
+            // only when no retained DSO already names this loader identity.
+            needed = !(entry->flags & COMPILER_DRIVER_ARCHIVE_DEFINED) &&
+                     ((entry->flags & COMPILER_DRIVER_ARCHIVE_STRONG) ||
+                      (!indirect && (entry->flags & COMPILER_DRIVER_ELF_NEEDED_DSO_REFERENCE)));
+        }
+    }
+    return needed;
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_elf_needed_library_add(CompilerDriverArchiveState* state, NativeDynamicLibrary* library)
+{
+    for (u32 index = 0; index < library->versioned_symbol_count; index += 1)
+    {
+        NativeDynamicVersionedSymbol* symbol = library->versioned_symbols + index;
+        if (symbol->has_default) compiler_driver_archive_symbol(state, symbol->name)->flags |= COMPILER_DRIVER_ARCHIVE_DEFINED;
+    }
+    for (u32 index = 0; index < library->strong_referenced_symbol_count; index += 1)
+    {
+        compiler_driver_archive_symbol(state, library->referenced_symbols[index])->flags |= COMPILER_DRIVER_ELF_NEEDED_DSO_REFERENCE;
     }
 }
 
@@ -5920,11 +6073,15 @@ typedef struct CompilerDriverDynamicRequest CompilerDriverDynamicRequest;
 struct CompilerDriverDynamicRequest
 {
     String8 name;
+    // Prefix and policy belong to this original -l/direct-path occurrence.
+    u32 object_prefix;
     bool path;
+    bool as_needed;
 };
 
 BUSTER_GLOBAL_LOCAL void compiler_driver_elf_requested_libraries(Arena* arena, CompilerDriverInvocation invocation, bool imports_data,
                                                                  NativeDynamicLibrary* seeds, CompilerDriverDynamicRequest* requests, u32 seed_count,
+                                                                 CompilerDriverElfNeededInput* needed_input,
                                                                  CompilerDriverDynamicLibraries* result)
 {
     NativeDynamicLibrary* libraries = seeds;
@@ -5934,8 +6091,18 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_requested_libraries(Arena* arena, C
     CompilerDriverElfScriptWork* stack = 0;
     String8* members = 0;
     u32 expanded_members = 0;
+    CompilerDriverArchiveState needed_state = {.arena = arena};
     for (u32 seed_index = 0; !result->missing_request.length && !result->missing_path.length && seed_index < seed_count; seed_index += 1)
     {
+        bool as_needed = requests[seed_index].as_needed;
+        if (needed_input)
+        {
+            u32 prefix = requests[seed_index].object_prefix;
+            while (needed_state.processed_objects < prefix)
+            {
+                compiler_driver_archive_add_object(&needed_state, 0, needed_input->objects + needed_state.processed_objects++);
+            }
+        }
         CompilerDriverElfScriptWork seed = {.name = seeds[seed_index].name, .literal = requests[seed_index].path};
         CompilerDriverElfScriptWork* work = stack ? stack : &seed;
         work[0] = seed;
@@ -6032,7 +6199,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_requested_libraries(Arena* arena, C
             {
                 bool duplicate = false;
                 for (u32 index = 0; !duplicate && index < count; index += 1) { duplicate = string_equal(libraries[index].name, library.name); }
-                if (duplicate)
+                if (duplicate || (as_needed && !compiler_driver_elf_library_needed(&needed_state, &library, libraries, count)))
                 {
                     file_map_unmap(map);
                 }
@@ -6042,6 +6209,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_requested_libraries(Arena* arena, C
                     // path (bare members keep their original spelling).
                     libraries[count++] = library;
                     maps[map_count++] = map;
+                    if (needed_input) compiler_driver_elf_needed_library_add(&needed_state, &library);
                 }
             }
         }
@@ -6512,7 +6680,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_compiler_runtime(Arena* arena, Comp
 }
 
 BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libraries(Arena* arena, CompilerDriverInvocation invocation, bool* static_libraries,
-                                                                                    bool imports_data, ObjectFile const* linked)
+                                                                                    bool imports_data, ObjectFile const* linked, CompilerDriverElfNeededInput* needed_input)
 {
     CompilerDriverDynamicLibraries result = {0};
     static String8 const windows_system_libraries[] = {
@@ -6560,7 +6728,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
             {
                 // Read exactly the caller's path, retaining its spelling when
                 // the ELF has no SONAME. Dedupe after reading its identity.
-                requests[count] = (CompilerDriverDynamicRequest){.name = path, .path = true};
+                requests[count] = (CompilerDriverDynamicRequest){.name = path, .path = true, .as_needed = operation.as_needed,
+                    .object_prefix = needed_input ? needed_input->prefix_counts[operation_index] : 0};
                 libraries[count++] = (NativeDynamicLibrary){.name = path};
             }
             continue;
@@ -6650,9 +6819,10 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         {
             duplicate |= string_equal(libraries[previous].name, name);
         }
-        if (!duplicate)
+        if (!duplicate || needed_input)
         {
-            requests[count].name = requested;
+            requests[count] = (CompilerDriverDynamicRequest){.name = requested, .as_needed = operation.as_needed,
+                .object_prefix = needed_input ? needed_input->prefix_counts[operation_index] : 0};
             libraries[count++] = (NativeDynamicLibrary){
                 .name = name,
                 .mach_current_version = mach_current_version,
@@ -6727,7 +6897,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         FileMapRead* export_map = result.export_maps + result.export_map_count;
         compiler_driver_elf_library_exports(arena, invocation, imports_data, &result.runtime, export_map, 0, (String8){0}, false, false);
         result.export_map_count += export_map->bytes.pointer != 0;
-        compiler_driver_elf_requested_libraries(arena, invocation, imports_data, libraries, requests, count, &result);
+        compiler_driver_elf_requested_libraries(arena, invocation, imports_data, libraries, requests, count, needed_input, &result);
         libraries = result.pointer;
         count = result.count;
     }
@@ -6741,7 +6911,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
 }
 
 BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_target_dynamic_libraries(Arena* arena, CompilerDriverInvocation invocation,
-                                                                                              bool* static_libraries, ObjectFile* linked)
+                                                                                              bool* static_libraries, ObjectFile* linked, CompilerDriverElfNeededInput* needed_input)
 {
     CompilerDriverDynamicLibraries result;
     if (invocation.target.os == OPERATING_SYSTEM_UEFI)
@@ -6750,7 +6920,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_target_dynami
     }
     else
     {
-        result = compiler_driver_dynamic_libraries(arena, invocation, static_libraries, compiler_driver_object_imports_data(linked), linked);
+        result = compiler_driver_dynamic_libraries(arena, invocation, static_libraries, compiler_driver_object_imports_data(linked), linked, needed_input);
     }
 
     return result;
@@ -7783,7 +7953,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
     else
     {
         String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
-        CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, 0, &linked.object);
+        CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, 0, &linked.object, 0);
         if (dynamic_libraries.missing_request.length || dynamic_libraries.missing_path.length || dynamic_libraries.missing_framework.length)
         {
             result->error = COMPILER_DRIVER_ERROR_LINK;
@@ -7836,6 +8006,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
                                                         .runtime_data_symbol_count = dynamic_libraries.runtime.exported_data_symbol_count,
                                                         .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
                                                         .runtime_exports_known = dynamic_libraries.runtime.exports_known,
+                                                        .runtime_relr = dynamic_libraries.runtime.supports_relr,
                                                         .debug_info = invocation.debug_info,
                                                         .image_kind = (u8)invocation.image_kind,
                                                     });
@@ -10365,7 +10536,16 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         object_capacity += runtime_object_capacity;
     }
+    CompilerDriverElfNeededInput needed_input = {0};
+    for (u32 index = 0; index < invocation.link_operation_count; index += 1)
+    {
+        if (invocation.link_operations[index].as_needed && !needed_input.prefix_counts)
+        {
+            needed_input.prefix_counts = arena_allocate_zeroed(arena, u32, invocation.link_operation_count);
+        }
+    }
     ObjectFile* objects = arena_allocate(arena, ObjectFile, object_capacity);
+    needed_input.objects = objects;
     String8* preprocessed = arena_allocate(arena, String8, invocation.input_count);
     u32 object_count = 0;
     u32 unit_task_capacity = compiler_driver_unit_worker_limit(invocation);
@@ -10377,6 +10557,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     for (u64 operation_index = 0; operation_index < link_operation_count; operation_index += 1)
     {
         CompilerDriverLinkOperation operation = compiler_driver_link_operation(&invocation, operation_index);
+        if (needed_input.prefix_counts) needed_input.prefix_counts[operation_index] = object_count;
         if (operation.kind == COMPILER_DRIVER_LINK_OPERATION_LIBRARY)
         {
             u32 library_index = operation.index;
@@ -11024,7 +11205,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         goto finish;
     }
     String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
-    CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, static_libraries, &linked.object);
+    CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, static_libraries, &linked.object, needed_input.prefix_counts ? &needed_input : 0);
     if (dynamic_libraries.missing_request.length || dynamic_libraries.missing_path.length || dynamic_libraries.missing_framework.length)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
@@ -11082,6 +11263,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                                                     .runtime_data_symbol_count = dynamic_libraries.runtime.exported_data_symbol_count,
                                                     .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
                                                     .runtime_exports_known = dynamic_libraries.runtime.exports_known,
+                                                    .runtime_relr = dynamic_libraries.runtime.supports_relr,
                                                     .debug_info = invocation.debug_info,
                                                     .image_kind = (u8)invocation.image_kind,
                                                 });

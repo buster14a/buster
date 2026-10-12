@@ -458,6 +458,14 @@ consumes the producer's one-shot integrity-checked compiler/tool/cache/graph/
 environment provenance record before validating and snapshotting the artifact,
 runs the existing direct fixed-point workflow without starting an inner Ninja
 process, and remains disabled for the direct scheduler and unsupported platforms.
+The worker deletes its private bootstrap executable after stage-one linking.
+Only Windows sharing/access deletion errors get a bounded cleanup retry (at most
+500 ms and 51 attempts, matching generated-test executable cleanup); permanent
+locks, read-only files and other native errors still fail. Any initial failure
+records the path, first/final native errors, attempts and elapsed cleanup time.
+Artifact-fanout preflight covers actual Windows held/released handles, read-only
+files and invalid names; the released-handle control is explicitly skipped in a
+single-lane bootstrap. Self-host and CI timeouts are unchanged.
 Each self-host stage and the stage-2 benchmark are bounded at ten minutes
 (`SELF_HOST_TIMEOUT_SECONDS`): the work is fixed and costs seconds, so a stage
 that does not finish is a compiler that never will, and waiting on one wedges
