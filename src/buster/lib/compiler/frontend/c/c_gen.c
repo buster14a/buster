@@ -18395,6 +18395,10 @@ struct CIrLowerFrame
             u32 end;
             u32 task_count;
             u32 task_capacity;
+            // The assignment's RHS remains in the comma-free range that
+            // was scanned before its place was lowered.
+            u32 comma_free_start;
+            u32 comma_free_end;
             u32 pending_assignment;
             CConditionalOperator pending_operation;
             IrBlockId pending_true_block;
@@ -40280,6 +40284,14 @@ BUSTER_C_INTERNAL void c_ir_lower_logical_value_step(CIntegerIrBuilder* builder)
 
 // The scan behind c_ir_root_conditional: find the root `?:` of [start, end)
 // after peeling redundant parentheses.
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_assignment_lower_work;
+u64 c_test_assignment_lower_work(void)
+{
+    return c_assignment_lower_work;
+}
+#endif
+
 BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question,
                                                     u32* colon, u32* expression_end)
 {
@@ -40296,9 +40308,11 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u3
     }
     u32 found_question = UINT32_MAX;
     u32 nested_questions = 0;
-    bool root_assignment = false;
     for (u32 index = start; index < end; index += 1)
     {
+#if BUSTER_INCLUDE_TESTS
+        c_assignment_lower_work += 1;
+#endif
         u32 punctuator = builder->preprocess.tokens[index].punctuator;
         CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
         if (scan == C_IR_GROUP_SCAN_SKIPPED)
@@ -40315,15 +40329,6 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u3
         }
         if (punctuator == C_PUNCTUATOR_QUESTION)
         {
-            // `lhs = condition ? true_value : false_value` has a
-            // conditional operator in the assignment's right operand, not
-            // at the root of the expression.  Treating it as a root
-            // conditional loses the assignment completion (the Lua
-            // luaV_fastgeti macro relies on this exact precedence).
-            if (root_assignment)
-            {
-                return false;
-            }
             if (found_question == UINT32_MAX)
             {
                 found_question = index;
@@ -40355,7 +40360,12 @@ BUSTER_C_INTERNAL bool c_ir_root_conditional_scan(CIntegerIrBuilder* builder, u3
         }
         else if (found_question == UINT32_MAX && c_ir_assignment_operator(builder->preprocess.tokens[index]))
         {
-            root_assignment = true;
+            // `lhs = condition ? true_value : false_value` has a
+            // conditional operator in the assignment's right operand, not
+            // at the root of the expression.  Treating it as a root
+            // conditional loses the assignment completion (the Lua
+            // luaV_fastgeti macro relies on this exact precedence).
+            break;
         }
     }
     return false;
@@ -42541,6 +42551,8 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
             return;
         }
         frame->as.expression.start = assignment + 1;
+        frame->as.expression.comma_free_start = assignment + 1;
+        frame->as.expression.comma_free_end = frame->as.expression.end;
         frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
     }
     else
@@ -43018,8 +43030,12 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         // `f(g(h(...)))` quadratic.
         u32 last_comma = UINT32_MAX;
         u32 comma_conditionals = 0;
-        for (u32 index = start; index < end; index += 1)
+        bool comma_free = frame->as.expression.comma_free_end == end && start >= frame->as.expression.comma_free_start;
+        for (u32 index = start; !comma_free && index < end; index += 1)
         {
+#if BUSTER_INCLUDE_TESTS
+            c_assignment_lower_work += 1;
+#endif
             CToken token = builder->preprocess.tokens[index];
             CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
             if (scan == C_IR_GROUP_SCAN_UNCLOSED)
@@ -43067,6 +43083,9 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
         CConditionalOperator assignment_operation = C_CONDITIONAL_OPERATOR_COUNT;
         for (u32 index = start; index < end && assignment == end; index += 1)
         {
+#if BUSTER_INCLUDE_TESTS
+            c_assignment_lower_work += 1;
+#endif
             CToken token = builder->preprocess.tokens[index];
             CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
             if (scan == C_IR_GROUP_SCAN_UNCLOSED)

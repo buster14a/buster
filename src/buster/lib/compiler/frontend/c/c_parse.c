@@ -63,6 +63,7 @@
 //   c_parse_position_index_build                  classification, the
 //                                                 bidirectional delimiter index
 //   c_parse_body_scratch_allocate,                per-body validation scratch
+//   c_parse_body_expression_ends_build            bounded body expression ends
 //   c_parse_body_scratch_model_begin,             guard (#1256), its query model
 //   c_parse_message                               arena and message forming
 //   c_parse_builtin_type_layout,                  target-dependent type
@@ -7580,6 +7581,14 @@ BUSTER_C_INTERNAL bool c_parse_expression_next_conditional(CParseResult* result,
     return found;
 }
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_assignment_chain_work;
+u64 c_test_assignment_chain_work(void)
+{
+    return c_assignment_chain_work;
+}
+#endif
+
 BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     Arena* arena = frame->arena;
@@ -7628,6 +7637,9 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             frame->expression_tasks = machine->expression_tasks + machine->expression_task_count;
             machine->expression_task_count += frame->task_capacity;
         }
+        frame->definition_type_start = result->type_count;
+        frame->diagnostic_start = result->diagnostic_count;
+        frame->mutation_mark = machine->mutation_count;
         frame->task_count = 1;
         frame->expression_tasks[0] = (CParseExpressionTypeTask){
             .start = start,
@@ -7654,6 +7666,9 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
     bool nonplace_projection = frame->expression_nonplace_projection;
     while (task_count)
     {
+#if BUSTER_INCLUDE_TESTS
+        c_assignment_chain_work += 1;
+#endif
         CParseExpressionTypeTask* task = tasks + task_count - 1;
         if (!task->state)
         {
@@ -7677,6 +7692,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     task->end -= 1;
                     task->operators_checked = false;
                     task->conditional_hinted = false;
+                    task->assignment_rhs = false;
                     stripped = true;
                 }
             }
@@ -7745,6 +7761,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     task->end = tail_end;
                     task->operators_checked = false;
                     task->conditional_hinted = false;
+                    task->assignment_rhs = false;
                 }
                 else
                 {
@@ -7787,6 +7804,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     task->end = identity->result_end;
                     task->operators_checked = false;
                     task->conditional_hinted = false;
+                    task->assignment_rhs = false;
                 }
                 else
                 {
@@ -7818,6 +7836,9 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             for (u32 index = task->start; !hinted && !task->operators_checked && index < task->end; index += 1)
             {
                 CToken token = preprocess.tokens[index];
+#if BUSTER_INCLUDE_TESTS
+                c_assignment_chain_work += 1;
+#endif
                 if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
                     c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
                 {
@@ -7898,6 +7919,10 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                     }
                     best_precedence = precedence;
                     best_operator = index;
+                    // The parent's assignment scan proved that this suffix
+                    // has no comma. Its first assignment is therefore its
+                    // root; a preceding conditional keeps the full scan.
+                    if (right_associative && task->assignment_rhs && question == task->end) break;
                 }
             }
             if (cast_prefix_close != UINT32_MAX)
@@ -8268,6 +8293,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 .split = next_conditional ? next_question : 0,
                 .colon = next_conditional ? next_colon : 0,
                 .conditional_hinted = next_conditional,
+                .assignment_rhs = task->operation == C_PARSE_EXPRESSION_TYPE_ASSIGN,
             };
             continue;
         }
@@ -8372,6 +8398,23 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
         case C_PARSE_EXPRESSION_TYPE_ASSIGN:
         {
             last = c_parse_unqualified_type(result, left);
+            // Publish completed suffixes only from a non-speculative root
+            // that added no type rows, mutations or diagnostics. A failed
+            // enclosing query can then roll back without invalidating them.
+            u32 slot = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL && machine->expression_queries &&
+                machine->expression_query_result == result && machine->expression_query_tokens == preprocess.tokens &&
+                machine->frame_count == 1 && !machine->mutation_count && !frame->mutation_mark &&
+                result->type_count == frame->definition_type_start && result->diagnostic_count == frame->diagnostic_start &&
+                !machine->expression_constraint.length && task->start >= machine->expression_query_start && task->end <= machine->expression_query_end
+                    ? task->start - machine->expression_query_start : UINT32_MAX;
+            if (slot != UINT32_MAX)
+            {
+                u32 flags = C_PARSE_EXPRESSION_QUERY_VALID |
+                    (machine->validate_expression_constraints ? C_PARSE_EXPRESSION_QUERY_CHECKED : 0u) |
+                    (machine->runtime_expression_constraints ? C_PARSE_EXPRESSION_QUERY_RUNTIME : 0u) |
+                    (machine->semantic_constant_queries ? C_PARSE_EXPRESSION_QUERY_CONSTANT : 0u);
+                c_parse_expression_query_publish(machine, slot, task->end, scope, last, flags);
+            }
         }
         break;
         case C_PARSE_EXPRESSION_TYPE_COMPARE:
@@ -34901,12 +34944,41 @@ BUSTER_C_INTERNAL u32 c_parse_constraint_expression_start(CParseResult* result, 
     return cursor;
 }
 
+BUSTER_GLOBAL_LOCAL void c_parse_body_expression_ends_build(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 count, u32* ends)
+{
+    u32 end = start + count;
+    for (u32 index = end; index > start;)
+    {
+        index -= 1;
+#if BUSTER_INCLUDE_TESTS
+        c_assignment_chain_work += 1;
+#endif
+        CToken token = preprocess.tokens[index];
+        u32 next = index + 1;
+        bool boundary = token.kind == C_TOKEN_PUNCTUATOR &&
+            (c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE) ||
+             token.punctuator == C_PUNCTUATOR_COMMA || token.punctuator == C_PUNCTUATOR_SEMICOLON);
+        if (token.kind == C_TOKEN_PUNCTUATOR && c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
+        {
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
+            next = close < end ? close + 1 : end;
+        }
+        ends[index - start] = boundary ? index : next < end ? ends[next - start] : end;
+    }
+}
+
 BUSTER_C_SHARED u32 c_parse_constraint_expression_end(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
 {
-    u32 cursor = start;
-    bool done = false;
+    CTokenPositionIndex* positions = result->position_index;
+    bool indexed = start < end && positions && positions->body_expression_ends &&
+        start - positions->body_expression_start < positions->body_expression_count;
+    u32 cursor = indexed ? BUSTER_MIN(end, positions->body_expression_ends[start - positions->body_expression_start]) : start;
+    bool done = indexed;
     while (cursor < end && !done)
     {
+#if BUSTER_INCLUDE_TESTS
+        c_assignment_chain_work += 1;
+#endif
         CToken token = preprocess.tokens[cursor];
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
             c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
@@ -34927,6 +34999,32 @@ BUSTER_C_SHARED u32 c_parse_constraint_expression_end(CParseResult* result, CPre
     }
     return cursor;
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_constraint_expression_ends_agree(Arena* arena, CPreprocessResult preprocess, CParseResult* result, u32 start, u32 count)
+{
+    CParseResult model = *result;
+    CTokenPositionIndex positions = *result->position_index;
+    model.position_index = &positions;
+    u32* ends = arena_allocate(arena, u32, count);
+    c_parse_body_expression_ends_build(&model, preprocess, start, count, ends);
+    positions.body_expression_start = start;
+    positions.body_expression_count = count;
+    bool agree = true;
+    for (u32 first = start; first < start + count; first += 1)
+    {
+        for (u32 end = first; end <= start + count; end += 1)
+        {
+            positions.body_expression_ends = ends;
+            u32 indexed = c_parse_constraint_expression_end(&model, preprocess, first, end);
+            positions.body_expression_ends = 0;
+            u32 walked = c_parse_constraint_expression_end(&model, preprocess, first, end);
+            agree &= indexed == walked;
+        }
+    }
+    return agree;
+}
+#endif
 
 // A prefix update consumes one unary expression. In `++x + y`, the `+ y`
 // is outside the place; delimiter-indexed groups keep calls, subscripts and
@@ -41761,11 +41859,21 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         CTokenPositionIndex* body_scope_index =
             result->position_index && result->scope_children_offsets && declaration->scope.value < result->scope_count ? result->position_index : 0;
         u32* body_scopes = body_scope_index ? C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, u32, declaration->body_token_count) : 0;
-        bool prepared = machine->expression_queries && machine->expression_query_flags && skipped && (!body_scope_index || body_scopes);
+        CTokenPositionIndex* expression_index = result->position_index && !result->position_index->delimiter_mismatch_count ? result->position_index : 0;
+        u32* expression_ends = expression_index ? C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, u32, declaration->body_token_count) : 0;
+        bool prepared = machine->expression_queries && machine->expression_query_flags && skipped && (!body_scope_index || body_scopes) &&
+            (!expression_index || expression_ends);
         if (prepared)
         {
             memset(machine->expression_query_flags, 0, declaration->body_token_count);
             memset(skipped, 0, declaration->body_token_count);
+            if (expression_index)
+            {
+                c_parse_body_expression_ends_build(result, preprocess, declaration->body_start, declaration->body_token_count, expression_ends);
+                expression_index->body_expression_ends = expression_ends;
+                expression_index->body_expression_start = declaration->body_start;
+                expression_index->body_expression_count = declaration->body_token_count;
+            }
         }
         if (prepared && body_scope_index)
         {
@@ -41829,6 +41937,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         {
             body_scope_index->body_scopes = 0;
         }
+        if (expression_index) expression_index->body_expression_ends = 0;
         bool exhausted = c_parse_body_scratch_guard_end();
         arena_set_position(machine->scratch_arena, validation_mark);
         if (exhausted)

@@ -2311,6 +2311,138 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_address_prefix_indexed_paths(Uni
 // Count the production cast-proof and checked-call reference work, rather
 // than timing the fixture. Retain the original deep fixture separately.
 // The named label also exercises the semantic label-value cast proof.
+// Observe the actual task and token walks, including semantic validation
+// and lowering, so timing noise cannot hide assignment-suffix rescans.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_assignment_chain_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_text = S8(
+        "static int calls; int value(void){calls++;return 300;} int slot(void){calls++;return 0;} "
+        "int main(void){unsigned char narrow=0; long wide=0; int x=0,y=0,z=1; int a[3]={1,2,3}; "
+        "long t=(wide=narrow=value()); if(t!=44||wide!=44||narrow!=44||calls!=1)return 1; "
+        "x=y=z=7; if(x!=7||y!=7||z!=7)return 2; "
+        "a[slot()]+=a[1]*=a[2]-=1; if(a[0]!=5||a[1]!=4||a[2]!=2||calls!=2)return 3; "
+        "x=y=(z?11:13); if(x!=11||y!=11)return 4; "
+        "x=y=2,z=4; if(x!=2||y!=2||z!=4)return 5; "
+        "x=y=(z=0,9); if(x!=9||y!=9||z!=0)return 6; "
+        "x=y=((z=3,z+1)); if(x!=4||y!=4||z!=3)return 7; "
+        "struct S{int v;}; struct S p,q,r; p=q=r=(struct S){17}; "
+        "if(p.v!=17||q.v!=17||r.v!=17)return 8; int *u,*v; u=v=&x; "
+        "if(u!=&x||v!=&x)return 9; return 0;}");
+    String8 source = buster_test_temporary_path(arguments->arena, S8("assignment-chain-runtime"), S8(".c"));
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("assignment-chain-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("assignment runtime mode={u32} form={u32} exit={u32}"), mode, form, execution.platform_status));
+                    }
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_assignment_chain_boundaries(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = S8("int g(int, int); int f(int x){int a[2]={0,1}; int b,c; "
+        "b=c=g(x,(x,2)); a[x&1]+=b+=c; b=(x?g(1,2):3); "
+        "for(b=0;b<2;b++) {a[b]=c;} return (b=c=x,b)+a[0];}");
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target_native});
+    CParseResult parsed = c_parse(temporary.arena, preprocess);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && parsed.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, parsed.position_index != 0))
+        BUSTER_TEST(arguments, c_test_constraint_expression_ends_agree(temporary.arena, preprocess, &parsed, 0, (u32)preprocess.token_count));
+    c_test_scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_assignment_chain_work_growth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 depths[] = {256, 512, 1024};
+    for (u32 shape = 0; shape < 4; shape += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            u64 previous_parse = 0;
+            u64 previous_lower = 0;
+            for (u32 size = 0; size < BUSTER_ARRAY_LENGTH(depths); size += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                u32 depth = depths[size];
+                u64 capacity = (u64)depth * 48 + 256;
+                char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+                u64 length = 0;
+                c_test_append_source(bytes, capacity, &length, S8("int f(int x){"));
+                if (shape == 0 || shape == 3) c_test_append_source(bytes, capacity, &length, S8("int a;"));
+                if (shape == 2) c_test_append_source(bytes, capacity, &length, S8("int a[1]={0};"));
+                for (u32 link = 0; shape == 1 && link < depth; link += 1)
+                    c_test_append_source(bytes, capacity, &length, string_format(temporary.arena, S8("int a{u32};"), link));
+                for (u32 link = 0; link < depth; link += 1)
+                {
+                    String8 operand = shape == 0 || shape == 3 ? S8("a=") : shape == 2 ? S8("a[0]+=")
+                        : string_format(temporary.arena, S8("a{u32}="), link);
+                    c_test_append_source(bytes, capacity, &length, operand);
+                }
+                c_test_append_source(bytes, capacity, &length, shape == 3 ? S8("x?x+1:x-1;return a;}") : shape == 0 ? S8("x;return a;}")
+                    : shape == 1 ? S8("x;return a0;}") : S8("x;return a[0];}"));
+                u64 parse_start = c_test_assignment_chain_work();
+                u64 lower_start = c_test_assignment_lower_work();
+                CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){.pointer = bytes, .length = length},
+                    (CPreprocessOptions){.source_path = S8("assignment-chain.c"), .target = target_native});
+                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                CParseResult parsed = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("assignment-chain.c"), preprocess, parsed, target_native,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                u64 parse_work = c_test_assignment_chain_work() - parse_start;
+                u64 lower_work = c_test_assignment_lower_work() - lower_start;
+                BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && parsed.diagnostic_count == 0);
+                BUSTER_TEST(arguments, lowered.canonical_ir_certified && lowered.diagnostic_count == 0);
+                BUSTER_TEST_RAW(arguments, parse_work >= depth && parse_work <= 128 * (u64)depth &&
+                    (!size || parse_work <= 3 * previous_parse),
+                    string_format(temporary.arena, S8("assignment parse shape={u32} form={u32} depth={u32} work={u64} previous={u64}"),
+                        shape, form, depth, parse_work, previous_parse));
+                BUSTER_TEST_RAW(arguments, lower_work >= depth && lower_work <= 64 * (u64)depth &&
+                    (!size || lower_work <= 3 * previous_lower),
+                    string_format(temporary.arena, S8("assignment lower shape={u32} form={u32} depth={u32} work={u64} previous={u64}"),
+                        shape, form, depth, lower_work, previous_lower));
+                previous_parse = parse_work;
+                previous_lower = lower_work;
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_logical_chain_work_growth(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -64319,6 +64451,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_local_static_aggregates);
     C_TEST_FIXTURE(arguments, c_test_local_tls);
     C_TEST_FIXTURE(arguments, c_test_local_typedef_for_declaration);
+    C_TEST_FIXTURE(arguments, c_test_assignment_chain_runtime);
+    C_TEST_FIXTURE(arguments, c_test_assignment_chain_boundaries);
+    C_TEST_FIXTURE(arguments, c_test_assignment_chain_work_growth);
     C_TEST_FIXTURE(arguments, c_test_logical_chain_work_growth);
     C_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
     C_TEST_FIXTURE(arguments, c_test_lowering_nested_calls_and_wide_switch);

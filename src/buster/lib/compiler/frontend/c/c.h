@@ -1860,6 +1860,11 @@ struct CTokenPositionIndex
     u32 brace_identifier_count;
     u32 statement_expression_count;
     u32 label_address_count;
+    // Natural expression endpoints, built backwards for one validated body.
+    // A query with an earlier bound clamps the endpoint to that bound.
+    u32* body_expression_ends;
+    u32 body_expression_start;
+    u32 body_expression_count;
     // c_parse_scope_for_token's answer for every token of one function body
     // under one root scope (c_parse_body_scopes_build), installed while that
     // body's lowering constraints are checked so each query inside it is one

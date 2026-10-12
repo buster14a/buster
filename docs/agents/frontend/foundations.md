@@ -4,6 +4,37 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+## Assignment-chain traversal
+
+The token expression typer keeps the right-associative assignment split in
+`CParseExpressionTypeTask.assignment_rhs`. An assignment's initial operator
+scan proves that its suffix has no top-level comma; the suffix can stop at
+its first assignment. A preceding conditional retains the complete scan,
+and opening a parenthesized range drops the hint.
+
+`c_type_parse_sizeof_step` publishes completed assignment suffix types to the
+existing per-body expression memo only from a non-speculative root that added
+no type rows, mutations or diagnostics and has no expression constraint.
+The normal checked/runtime/constant flags, endpoint and scope still gate reuse.
+Consequently failed queries can roll back safely, and typing that creates rows
+still runs through the original path.
+
+During body validation, `c_parse_body_expression_ends_build` computes natural
+expression endpoints backwards, using the existing delimiter index. Queries
+clamp that endpoint to their own bound. The table uses guarded body scratch,
+is detached before the arena rewinds, and malformed delimiter streams retain
+the scalar walk. The private boundary regression compares every subrange with
+that walk, including bounds inside delimiter groups.
+
+Lowering's assignment continuation retains the comma-free suffix range that
+its parent scanned. Moving into a group changes the endpoint and requires a
+new scan. `c_ir_root_conditional_scan` stops once an assignment proves that a
+later conditional belongs to its right operand. Assignment completions keep
+their original order, conversions and stores. Counted chain regressions cover
+simple, distinct-local and compound assignments through both frontend SSA
+forms; executable controls cover narrowing, mixed compound operators, comma
+and conditional operands, aggregate/pointer values and single evaluation.
+
 ## Logical constant eligibility
 
 `c_ir_constant_apply_binary` preserves unknownness for the necessarily evaluated
