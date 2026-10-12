@@ -2887,6 +2887,112 @@ class HarnessTest(unittest.TestCase):
         self.assertIn("unsupported historical throughput harness",
                       compiler_compare.throughput_harness_problem(root, historical))
 
+    def historical_fixture(self, extra_lines: tuple[str, ...] = ()) -> tuple[str, str, str]:
+        """(pinned harness commit, head commit, head tree) for the #3714 historical recipe.
+
+        The pinned commit's fake corpus also writes pinned.txt, so the export shows which harness ran.
+        """
+        git = lambda *arguments: fixture_git(self.repo, *arguments)  # noqa: E731
+        git("checkout", "-q", "--detach", self.base)
+        marker = "open(os.path.join(output, 'pinned.txt'), 'w').write('pinned harness')\nsys.exit("
+        self.assertEqual(FAKE_THROUGHPUT.count("\nsys.exit("), 1)
+        (self.repo / "throughput_fake.py").write_text(FAKE_THROUGHPUT.replace("\nsys.exit(", "\n" + marker))
+        git("commit", "-qam", "pinned harness")
+        pinned = git("rev-parse", "HEAD")
+        git("checkout", "-q", "--detach", self.pull_head)
+        request = self.repo / compiler_receipt.ANALYZER_REQUEST_PATH
+        request.parent.mkdir(parents=True, exist_ok=True)
+        request.write_text("".join(line + "\n" for line in (compiler_receipt.THROUGHPUT_HISTORICAL_REQUEST_LINE,
+                                                            *extra_lines)))
+        git("add", compiler_receipt.ANALYZER_REQUEST_PATH)
+        git("commit", "-qm", "request the historical corpus")
+        return pinned, git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+
+    def run_historical(self, pinned: str, head: str, tree: str, admission: str = "historical",
+                       floor: str | None = None) -> tuple[int, dict, Path]:
+        # The pull head stands in for a floor the base predates.
+        with mock.patch.object(compiler_compare, "THROUGHPUT_HISTORICAL_HARNESS_REVISION", pinned):
+            return self.run_harness(head, mode="pull", ref="refs/pull/7/head", head=head, floor=floor or self.pull_head,
+                                    **{"head-tree": tree, "pull-head": head, "harness-admission": admission})
+
+    def test_historical_recipe_measures_the_corpus_with_the_pinned_harness(self) -> None:
+        pinned, head, tree = self.historical_fixture()
+        code, result, evidence = self.run_historical(pinned, head, tree)
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertEqual(result["throughput_profile"], compiler_receipt.THROUGHPUT_HISTORICAL_PROFILE)
+        self.assertEqual(result["throughput_historical"],
+                         {"harness_revision": pinned, "observed_revision": pinned, "status": "prepared"})
+        # The corpus ran from the pinned worktree; the candidate checkout kept the base tree.
+        self.assertEqual((evidence / "throughput" / "pinned.txt").read_text(), "pinned harness")
+        self.assertEqual((self.repo / "compiler.txt").read_text(), "base compiler\n")
+        summary = json.loads((evidence / "lab" / "summary.json").read_text())
+        expected = dict(result["identity"])
+        historical = compiler_receipt.THROUGHPUT_HISTORICAL_PROFILE
+        with mock.patch.object(compiler_publish, "THROUGHPUT_HISTORICAL_HARNESS_REVISION", pinned):
+            decided = compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence),
+                                              expected_throughput_profile=historical)
+            self.assertEqual(decided[0], "success", decided[2])
+            # It discharges only its own inventory row, never the v2 corpus row.
+            rows = compiler_receipt.covered_inventory_rows(result, "success", "pull")["rows"]
+            self.assertEqual(rows["build:bench_throughput@throughput-corpus-historical"], "discharged")
+            self.assertEqual(rows["build:bench_throughput"], "not discharged: not requested")
+            # Without the hosted historical admission the same receipt never publishes.
+            self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "",
+                                                     retained(evidence))[0], "failure")
+        # Nor does a receipt whose harness was not the pinned revision.
+        decided = compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence),
+                                          expected_throughput_profile=historical)
+        self.assertEqual(decided[0], "failure")
+        self.assertTrue(any("pinned revision" in reason for reason in decided[2]), decided[2])
+
+    def test_historical_recipe_refusals_happen_before_any_build(self) -> None:
+        pinned, head, tree = self.historical_fixture()
+        cases = (
+            # The recipe on a base that already carries the floor.
+            ({"floor": self.base}, "already carries"),
+            # The host and the hosted disposition disagree.
+            ({"admission": "admitted"}, "hosted harness admission 'admitted'"),
+        )
+        for change, reason in cases:
+            with self.subTest(reason=reason):
+                code, result, evidence = self.run_historical(pinned, head, tree, **change)
+                self.assert_unadmitted(code, result, evidence, reason)
+        # An unpreparable pinned revision fails before any build.
+        code, result, evidence = self.run_historical("f" * 40, head, tree)
+        self.assert_unadmitted(code, result, evidence, "historical corpus harness worktree exited")
+        self.assertEqual(result["throughput_historical"]["status"], "failed")
+
+    def test_historical_recipe_refuses_every_other_opt_in_leg_before_preparation(self) -> None:
+        # Each fresh opt-in selector beside the historical one would still run the base's own harness.
+        for line in (compiler_receipt.WILD_LINKER_REQUEST_LINE, compiler_receipt.THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
+                     compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE, compiler_receipt.COMPILER_PROBES_REQUEST_LINE,
+                     compiler_receipt.FRONTEND_SELECTOR_REQUEST_LINE,
+                     compiler_receipt.AST_PILOT_ACCEPTANCE_REQUEST_LINE):
+            with self.subTest(line=line):
+                fixture_git(self.repo, "checkout", "-q", "main")
+                pinned, head, tree = self.historical_fixture((line,))
+                with mock.patch.object(compiler_compare, "prepare_historical_harness",
+                                       side_effect=AssertionError("prepared beside another opt-in leg")):
+                    code, result, evidence = self.run_historical(pinned, head, tree)
+                self.assertEqual((code, result["state"]), (1, "failed"))
+                self.assertTrue(any("cannot be combined" in reason for reason in result["reasons"]), result["reasons"])
+                self.assertEqual((result["timings"]["build_seconds"], result["binaries"], result["lab"]), ({}, {}, {}))
+                self.assertNotIn("throughput_historical", result)
+
+    def test_hosted_historical_admission_without_the_request_is_refused(self) -> None:
+        pull_tree = fixture_git(self.repo, "rev-parse", self.pull_head + "^{tree}")
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.pull_head)
+        code, result, evidence = self.run_harness(self.pull_head, mode="pull", ref="refs/pull/7/head",
+                                                  head=self.pull_head, **{"head-tree": pull_tree,
+                                                                          "harness-admission": "historical"})
+        self.assert_unadmitted(code, result, evidence, "hosted harness admission 'historical'")
+
+    def test_publisher_reports_an_undispatched_unsupported_base_explicitly(self) -> None:
+        conclusion, title, reasons = compiler_publish.decide({}, False, "skipped", None, None, "",
+                                                             dispatch_refusal="unsupported historical throughput harness")
+        self.assertEqual((conclusion, title, reasons), ("failure", "Not benchmarked: unsupported historical harness",
+                                                        ["unsupported historical throughput harness"]))
+
     def scaling_head(self) -> tuple[str, str]:
         """A pull request head that adds the scaling request on top of the candidate; (commit, tree)."""
         git = lambda *arguments: fixture_git(self.repo, *arguments)  # noqa: E731
@@ -5271,8 +5377,9 @@ class FrontendSelectorTest(unittest.TestCase):
             self.assertTrue((root / "evidence" / "frontend_selector" / "ide_bench" / "ide-bench.json").is_file())
 
 WILD_PATH = "/usr/local/bin/wild"
-# Wild's own identity format (Args::linker_identity at wild e9a9b0cb): the positive control.
-WILD_VERSION = "Wild 0.10.0 (compatible with GNU linkers)"
+# Wild's own identity format (Args::linker_identity at wild e9a9b0cb): the positive control, in the
+# form the 9700X host's distribution Wild reports (run 38242826849).
+WILD_VERSION = "Wild 0.10.0 non-git-build (compatible with GNU linkers)"
 WILD_ROOT = "/work/wild-linker-source"
 
 
@@ -5388,6 +5495,21 @@ class WildLinkerTest(unittest.TestCase):
         # Both bounds together stay inside the unchanged 90-minute compare-pull job with its ordinary comparison.
         self.assertLessEqual(compiler_compare.WILD_LINKER_BUILD_TIMEOUT_SECONDS +
                              compiler_compare.WILD_LINKER_HARNESS_TIMEOUT_SECONDS, 40 * 60)
+
+    def test_identity_accepts_every_version_form_wild_builds(self) -> None:
+        # wild/build.rs at e9a9b0cb: release tag, merge-base hash, modified checkout, no git. The
+        # 9700X host's distribution Wild reports the last form (run 38242826849).
+        merge_base = "e9a9b0cb6fd63a23cc7b93aafc931aadd5746be6"
+        for version in ("0.10.0", merge_base, f"0.10.0 {merge_base}-modified", "0.10.0 non-git-build"):
+            with self.subTest(version=version):
+                self.assertTrue(compiler_receipt.WILD_IDENTITY.fullmatch(
+                    f"Wild {version} (compatible with GNU linkers)"))
+        for line in ("Ubuntu LLD 18.1.3 (compatible with GNU linkers)", "Wild (compatible with GNU linkers)",
+                     "Wild 0.10.0 dirty (compatible with GNU linkers)", "Wild 0.10.0 non-git-build",
+                     f"Wild {merge_base[:12]} (compatible with GNU linkers)",
+                     "Wild 0.10.0 non-git-build (compatible with GNU linkers)\nmold 2.42.1"):
+            with self.subTest(line=line):
+                self.assertIsNone(compiler_receipt.WILD_IDENTITY.fullmatch(line))
 
     def test_schedule_replays_the_harness_generator(self) -> None:
         """The seeded xorshift order and bootstrap match the C harness's random_u32 (seed 2645)."""

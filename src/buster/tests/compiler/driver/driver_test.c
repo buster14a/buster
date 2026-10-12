@@ -34978,6 +34978,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_batch);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_shapes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_arguments);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_runtime_path_arguments);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_default_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_depfiles);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_dependency_target_scaling);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_dependency_files);
@@ -34985,6 +34987,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_macro_prefix_map);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_macro_prefix_map_files);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_images);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_runtime_path_images);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_default_images);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_include_population);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_tables);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
@@ -37302,8 +37306,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
             BUSTER_TEST(arguments, !default_got_found && default_external_call_plt && default_external_address_pc32 && default_definition_call_pc32);
             // A call-only function value must not leave an unrelated PC32
-            // address relocation beside its call. Keep both forms visible:
-            // an import gets PLT32, while a module-local call stays PC32.
+            // address relocation beside its call (#1038). Keep both forms
+            // visible: an import gets PLT32, while a module-local call stays
+            // PC32. A function whose address is also taken, compared and
+            // called indirectly must still materialize that address.
             String8 direct_call_source_path =
                 buster_test_temporary_path(pic_model_arena, S8("buster-c-pie-direct-call-source"), S8(".c"));
             String8 direct_call_host_source_path =
@@ -37311,10 +37317,23 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 direct_call_source = S8(
                 "extern int abs(int value);\n"
                 "__attribute__((noinline)) static int buster_pie_local_increment(int value) { return value + 1; }\n"
-                "int buster_pie_call_import(int value) { return abs(buster_pie_local_increment(value)); }\n");
+                "__attribute__((noinline)) static int buster_pie_local_negate(int value) { return -value; }\n"
+                "int buster_pie_call_import(int value) { return abs(buster_pie_local_increment(value)); }\n"
+                "int buster_pie_call_through(int (*target)(int), int value)\n"
+                "{\n"
+                "    return target == buster_pie_local_negate ? buster_pie_local_negate(value) : target(value);\n"
+                "}\n"
+                "int (*buster_pie_negate_address(void))(int) { return buster_pie_local_negate; }\n");
             String8 direct_call_host_source = S8(
                 "int buster_pie_call_import(int value);\n"
-                "int main(void) { return buster_pie_call_import(-40) != 39; }\n");
+                "int buster_pie_call_through(int (*target)(int), int value);\n"
+                "int (*buster_pie_negate_address(void))(int);\n"
+                "static int buster_pie_host_double(int value) { return value * 2; }\n"
+                "int main(void)\n"
+                "{\n"
+                "    return buster_pie_call_import(-40) != 39 || buster_pie_call_through(buster_pie_negate_address(), 7) != -7 ||\n"
+                "           buster_pie_call_through(buster_pie_host_double, 4) != 8;\n"
+                "}\n");
             bool direct_call_fixtures_written =
                 file_write(direct_call_source_path, BUSTER_SLICE_TO_BYTE_SLICE(direct_call_source)) &&
                 file_write(direct_call_host_source_path, BUSTER_SLICE_TO_BYTE_SLICE(direct_call_host_source));
@@ -37342,6 +37361,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 bool import_pc32 = false;
                 bool local_pc32 = false;
                 u32 import_relocation_count = 0;
+                u32 local_relocation_count = 0;
+                u32 address_relocation_count = 0;
                 for (u32 relocation_index = 0; relocation_index < direct_call_object.object.relocation_count; relocation_index += 1)
                 {
                     ObjectRelocation* relocation = direct_call_object.object.relocations + relocation_index;
@@ -37358,10 +37379,18 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     }
                     if (string_equal(name, S8("buster_pie_local_increment")))
                     {
+                        local_relocation_count += 1;
                         local_pc32 = local_pc32 || relocation->kind == OBJECT_RELOCATION_X86_64_PC32;
                     }
+                    if (string_equal(name, S8("buster_pie_local_negate")))
+                    {
+                        address_relocation_count += 1;
+                    }
                 }
-                bool direct_call_relocations_valid = import_relocation_count == 1 && import_plt32 && !import_pc32 && local_pc32;
+                // buster_pie_local_negate: the returned address, the compared
+                // address and the direct call each carry one relocation.
+                bool direct_call_relocations_valid = import_relocation_count == 1 && import_plt32 && !import_pc32 && local_relocation_count == 1 &&
+                                                     local_pc32 && address_relocation_count == 3;
                 BUSTER_TEST(arguments, direct_call_relocations_valid);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && BUSTER_LINUX && !BUSTER_ANDROID && !BUSTER_IOS
                 if (BUSTER_REQUIRE(arguments, direct_call_relocations_valid))
