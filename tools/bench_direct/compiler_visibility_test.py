@@ -389,6 +389,21 @@ class CheckLifecycleTest(unittest.TestCase):
         self.assertEqual(displaced["conclusion"], "neutral")
         self.assertIn(f"inside the range comparison of `{HEAD}` against `{OLDER}`", displaced["output"]["summary"])
 
+    def test_unchanged_range_reconciliation_never_promises_a_comparison(self) -> None:
+        # #3923: a skipped range has no comparison to cover the displaced commit.
+        api = FakeGitHub()
+        api.commits = [{"sha": HEAD, "parents": [{"sha": PARENT}]}, {"sha": PARENT, "parents": [{"sha": OLDER}]},
+                       {"sha": OLDER, "parents": [{"sha": "e" * 40}]}]
+        displaced = api.add_check(PARENT, marker(PARENT, request="80"))
+        chain = compiler_github.first_parent_chain(api, HEAD)
+        closed = compiler_github.reconcile_main(api, HEAD, OLDER, "run", "2026-10-06T16:00:00Z", chain, True)
+        self.assertEqual(closed, [displaced["id"]])
+        summary = displaced["output"]["summary"]
+        self.assertEqual(displaced["conclusion"], "neutral")
+        self.assertIn(f"from `{OLDER}`, the last actual measurement, to `{HEAD}`", summary)
+        self.assertIn("is not measured", summary)
+        self.assertNotIn("range comparison", summary)
+
     def test_pull_reconciliation_supersedes_only_earlier_heads_of_that_pull_request(self) -> None:
         api = FakeGitHub()
         api.pull_commits = [OLDER, PARENT, HEAD]

@@ -618,7 +618,10 @@ captures (#2741).
   custom check does not prove that the physical job has not started. During merge bursts only
   the newest pending commit is measured; the others' checks read
   **Not measured** and name the range comparison that covers their change.
-  A range result does not isolate one commit. See the
+  A range result does not isolate one commit. A range since the last actual
+  measurement that changes only reviewed prose is completed as neutral
+  **Not measured** without allocating the 9700X
+  ([unchanged-input skip](../compiler-main-unchanged-skip.md), #3923). See the
   [admission guide](../../benchmarks/9700x/ADMISSION.md#main-compiler-comparison).
   An explicitly requested owner experiment can compare a pull request head
   with its merge base before merging by adding a fresh request line to
