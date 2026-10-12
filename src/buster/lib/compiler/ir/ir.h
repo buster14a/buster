@@ -887,10 +887,14 @@ struct IrFastPassStatistics
 typedef struct IrFastDecline IrFastDecline;
 typedef struct IrFastStatistics IrFastStatistics;
 // Census of the opt-in CSE pass (#3011). Candidates are admitted rows
-// (constants included; constant_hits is the share of hits that are constants); a
-// window hit's representative is at most IR_FAST_CSE_WINDOW candidates
-// earlier in its block, so a linear recent-expression window would also
-// capture it. Declines leave the row unchanged: metadata means an exact key
+// (constants included; constant_hits is the share of hits that are constants).
+// A window hit is a hit at most IR_FAST_CSE_WINDOW candidates after the
+// matched entry's recorded ordinal. Units differ by strategy. A table entry
+// keeps its insertion ordinal, so the distance runs from the representative's
+// first occurrence. A window slot is rewritten by every matching occurrence,
+// so the distance runs from the previous one, and the representative itself
+// can be older. Neither counter bounds a representative's age or live range.
+// Declines leave the row unchanged: metadata means an exact key
 // match whose result facts differ, saturation a full table or probe budget.
 // table_bytes counts every table byte initialized; the block maximum is a max.
 typedef struct IrFastCseStatistics IrFastCseStatistics;

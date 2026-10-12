@@ -233,8 +233,13 @@ scratch, recorded as `table_bytes`, not to the per-function bound.
 `-fcanonical-fast-cse -v` prints an `IR_FAST_CSE` record. It reports blocks,
 candidates, hits, commuted, constant and window hits, probes, collisions,
 metadata and saturation declines, initialized table bytes and the largest
-block candidate count. A window hit's representative is at most eight
-candidates earlier.
+block candidate count. A window hit is a hit at most eight candidates after
+its matched entry's recorded ordinal. The two strategies record that ordinal
+differently. A table entry keeps the representative's first occurrence. A
+window slot is refreshed by every matching occurrence, so its distance runs
+from the previous occurrence, and the representative can be older; for ten
+repeats of one key, the last hit has distance 1. Neither count bounds a
+representative's age or live range.
 
 `-fcanonical-fast-cse-strategy=window` replaces the table lookup with the
 issue's linear arm. Each candidate is compared, newest first, with the
@@ -246,7 +251,8 @@ changes nothing unless `cse` is selected.
 
 ### Three-arm census (diagnostic, not performance evidence)
 
-These results come from a hosted 4-vCPU container, using a Clang-built Release
+These historical results were measured at `c29b794b`, before the merge of
+main. They come from a hosted 4-vCPU container, using a Clang-built Release
 `ide` with the default four passes, alone or plus `cse` in either strategy.
 The self-host input is `ide.c` with tests off and `-g -march=native`, using
 `-ftime-canonical-fast -v`. Each arm ran 7 times, interleaved; the table
