@@ -110,6 +110,8 @@ record per declined body, with numeric `IrValidationError` values and invalid
 IDs for unavailable locations. Multi-input records retain source order and
 own their names after per-unit arenas are released. Ordinary valid input
 allocates no decline records; a previously validated module needs no new scan.
+The [pinned decline census](canonical-fast-decline-census.md) records the
+observed source shapes, compile failures and follow-up owners for #1602.
 
 When preparation has already run that validator over the module in exactly
 its current state -- the promotion-output scan of a Debug/test/sanitizer/
