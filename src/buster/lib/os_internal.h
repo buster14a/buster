@@ -149,6 +149,19 @@ BUSTER_F_DECL bool os_linux_proc_read_self_test(void);
 BUSTER_F_DECL bool os_linux_process_group_churn_self_test(Arena* arena);
 #endif
 
+// Calling-thread observation of advice, independent of kernel THP policy.
+typedef struct OsHugePageTestCounters OsHugePageTestCounters;
+struct OsHugePageTestCounters
+{
+    u64 requests;
+    u64 bytes;
+    void* last_address;
+    u64 last_size;
+    u64 forced_refusals;
+};
+BUSTER_F_DECL OsHugePageTestCounters os_huge_pages_test_counters(void);
+BUSTER_F_DECL void os_huge_pages_test_force_refusal(bool enabled);
+
 // Calling-thread census of the advisory prefault requests os_prefault
 // observed, however they were produced. It exists so a test can prove that a
 // request was issued, or that none was, without owning a privileged mapping

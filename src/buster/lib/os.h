@@ -760,6 +760,11 @@ BUSTER_F_DECL bool os_commit_diagnose(void* address, u64 size, ProtectionFlags p
                                      OsCommitFailureContext* failure_context);
 BUSTER_F_DECL bool os_commit(void* address, u64 size, ProtectionFlags protection, bool prefault);
 BUSTER_F_DECL OsPrefaultResult os_prefault(void* address, u64 size);
+// Requests transparent huge pages for a reserved range. Advisory on every
+// target: refusal leaves the range usable. Explicit advice can increase RSS
+// and cause synchronous compaction even under an existing `always` policy.
+// It is a no-op where the target has no such facility.
+BUSTER_F_DECL void os_advise_huge_pages(void* address, u64 size);
 BUSTER_F_DECL bool os_protect(void* address, u64 size, ProtectionFlags protection);
 BUSTER_F_DECL bool os_decommit(void* address, u64 size);
 BUSTER_F_DECL bool os_unreserve(void* address, u64 size);
