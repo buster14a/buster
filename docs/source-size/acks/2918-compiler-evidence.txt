@@ -1,4 +1,4 @@
 # Source-size acknowledgement; see docs/source-size.md.
 schema buster-source-size-ack-v1
-build 36015
+build 36340
 reason Native sealed raw-evidence manifest, seal and v1 required-inventory verifier for 9700X compiler bundles, exposed as build.sh compiler_evidence (#2918).
