@@ -173,3 +173,5 @@ request: issue #2761 fresh 9700X wild-linker run after #3786 fixed the Wild iden
 profile: wild-linker-v1
 request: issue #2761 fresh 9700X wild-linker run after #3817 (Wild's 'Linker: ' .comment prefix and CMake's link.d dependency file); attempts 46bca10b and bb13d2ac stay as recorded; request-only head over main bc3ac2eaa; fresh compiler-compare-v1 plus wild-linker-v1 leg (report-only)
 profile: wild-linker-v1
+request: issue #2761 refresh of ast-pilot-acceptance-v1 through the joined inventory consumer (#3656) and machine record (#3634); request-only head over main bc3ac2eaa; A/A, report-only
+profile: ast-pilot-acceptance-v1
