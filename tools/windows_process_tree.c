@@ -445,7 +445,10 @@ BUSTER_GLOBAL_LOCAL int tree_selftest(void)
         tree_drain(job, GetTickCount64() + 10000);
     }
     bool outsider_alive = valid && WaitForSingleObject(child[1].hProcess, 0) == WAIT_TIMEOUT;
-    bool member_waited = valid && tree_result.waited_count == 1 && tree_result.waited[0] == child[0].dwProcessId;
+    // Termination can remove a member from the job's PID list before the
+    // first query. Retain its identity from creation and wait that handle;
+    // the drain's accounting independently certifies that the job is empty.
+    bool member_waited = valid && WaitForSingleObject(child[0].hProcess, 0) == WAIT_OBJECT_0;
     printf("{\"selftest\":%s,\"member\":%s,\"outsider_member\":%s,\"outsider_alive\":%s,\"member_waited\":%s}\n",
            valid ? "true" : "false", inside ? "true" : "false", outside ? "true" : "false",
            outsider_alive ? "true" : "false", member_waited ? "true" : "false");

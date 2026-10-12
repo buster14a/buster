@@ -120,6 +120,15 @@ class SchedulerTests(unittest.TestCase):
         directories = []
         children = []
         descendants = []
+        descendant_handles = []
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+            kernel.OpenProcess.restype = wintypes.HANDLE
+            kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+            kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
 
         class Control(unittest.TestCase):
             def test_child(self):
@@ -147,7 +156,15 @@ class SchedulerTests(unittest.TestCase):
                     if not marker.exists():
                         result = child.finish(timeout_seconds=0)
                         self.fail("child readiness failed: " + repr(result))
-                    descendants.append(int(marker.read_text()))
+                    pid = int(marker.read_text())
+                    descendants.append(pid)
+                    if os.name == "nt":
+                        # Retain the live witness before permitting cancellation.
+                        # A completed job can already have an empty PID list.
+                        handle = kernel.OpenProcess(0x100000, False, pid)
+                        self.assertTrue(handle, ctypes.get_last_error())
+                        descendant_handles.append(handle)
+                        self.assertEqual(kernel.WaitForSingleObject(handle, 0), 258)
                     launched.set()
                 finally:
                     # Setup failure also releases the coordinator; it must not
@@ -172,6 +189,15 @@ class SchedulerTests(unittest.TestCase):
             # failed before reaching the readiness try/finally.
             readiness_complete.set()
             thread.join(timeout=scheduler.bootstrap.CLEANUP_TIMEOUT_SECONDS)
+            if os.name == "nt":
+                try:
+                    for handle in descendant_handles:
+                        # Check before fixture assertions, and close even when
+                        # a later scheduler assertion fails.
+                        self.assertEqual(kernel.WaitForSingleObject(handle, 0), 0)
+                finally:
+                    for handle in descendant_handles:
+                        kernel.CloseHandle(handle)
         diagnostics = json.dumps(summary) + "\n" + output
         self.assertFalse(thread.is_alive())
         self.assertEqual(cancellation_errors, [], diagnostics)
@@ -187,22 +213,7 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(len(descendants), 1)
         pid = descendants[0]
         if os.name == "nt":
-            self.assertIn(pid, children[0].descendant_waited_pids, diagnostics)
-            import ctypes
-            from ctypes import wintypes
-            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-            kernel.OpenProcess.restype = wintypes.HANDLE
-            kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-            kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
-            handle = kernel.OpenProcess(0x100000, False, pid)
-            if handle:
-                try:
-                    self.assertEqual(kernel.WaitForSingleObject(handle, 5000), 0)
-                finally:
-                    kernel.CloseHandle(handle)
-            else:
-                self.assertEqual(ctypes.get_last_error(), 87)  # Exited PID.
+            self.assertEqual(len(descendant_handles), 1, diagnostics)
         else:
             try:
                 os.kill(pid, 0)
