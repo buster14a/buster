@@ -149,7 +149,19 @@ jobs:
           set -euo pipefail
           {
             python3 ios/launch_trace_test.py -v
-            /bin/bash ios/launch_trace_monitor_test.sh
+            old_launcher=$(mktemp ios/launcher-3638.XXXXXX)
+            trap 'rm -f "$old_launcher"' EXIT
+            curl --fail --silent --show-error --max-time 30 \
+              https://raw.githubusercontent.com/buster14a/buster/3b83f5c35b6ebe1fcb10982dc3267230737e6441/ios/launch_simulator.sh \
+              >"$old_launcher"
+            printf 'baseline_launcher_blob=%s\n' "$(git hash-object "$old_launcher")"
+            baseline_status=0
+            BUSTER_MOBILE_TEST_EVIDENCE_DIR="$RUNNER_TEMP/ios-launch-trace-evidence/old" \
+              BUSTER_IOS_TEST_LAUNCHER="$PWD/$old_launcher" \
+              /bin/bash ios/launch_trace_monitor_test.sh || baseline_status=$?
+            printf 'BUSTER_3638_REPLAY baseline_status=%s\n' "$baseline_status"
+            BUSTER_MOBILE_TEST_EVIDENCE_DIR="$RUNNER_TEMP/ios-launch-trace-evidence/current" \
+              /bin/bash ios/launch_trace_monitor_test.sh
           } 2>&1 | tee "$RUNNER_TEMP/ios-launch-trace-monitor.log"
       - name: Retain machine records in existing evidence
         if: ${{ !cancelled() }}

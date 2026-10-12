@@ -73,6 +73,7 @@ REAL_GREP=$(command -v grep)
 cat >"$test_root/bin/grep" <<'TOOL'
 #!/usr/bin/env bash
 set -eu
+printf 'grep\n' >>"$RUNNER_TEMP/grep-invocations.log"
 # Model bytes arriving between the launcher's empty size check and its first
 # app-record scan. The fake producer owns the FIFO but emits its marker later.
 if [[ $FAKE_RESULT == receipt-race && ${1:-} == -q && ${2:-} == '^BUSTER_IOS_LAUNCH_V1 ' && ! -e $RUNNER_TEMP/trace-written ]]; then
@@ -243,7 +244,13 @@ run_case() {
         echo "$label leaked its FIFO directory" >&2
         exit 1
     fi
+    cp "$state/pids" "$state/children-pids.log"
+    rm -f "$state/pids"
+    cat "$state/case.log"
+    if [[ -f $state/collector.log ]]; then cat "$state/collector.log"; fi
+    printf 'BUSTER_IOS_MONITOR_CASE event=verified label=%s grep_invocations=%s elapsed_seconds=%s\n' "$label" "$(wc -l <"$state/grep-invocations.log" | tr -d ' ')" "$SECONDS"
     printf 'iOS monitor cleanup passed: %s\n' "$label"
+    active_state=
 }
 if [[ ${1:-} == --receipt-race-only ]]; then
     run_case receipt-race receipt-race 0 0 1
