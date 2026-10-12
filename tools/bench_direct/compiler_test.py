@@ -2764,7 +2764,7 @@ class HarnessTest(unittest.TestCase):
         self.directory.cleanup()
 
     def run_harness(self, live: object, cpu: str = HOST["cpu_model"], corpus_behavior: str = "",
-                    scaling_behavior: str = "", **change) -> tuple[int, dict, Path]:
+                    scaling_behavior: str = "", floor: str | None = None, **change) -> tuple[int, dict, Path]:
         values = {"mode": "main", "candidate": str(self.repo), "lab": str(self.lab), "work": str(self.root / "work"),
                   "evidence": str(self.root / "evidence"), "summary": str(self.root / "step.md"),
                   "repository": "buster14a/buster", "ref": "refs/heads/main",
@@ -2773,8 +2773,10 @@ class HarnessTest(unittest.TestCase):
                   "request-run-id": "91", "run-id": "92", "run-attempt": "1"}
         values.update(change)
         argv = [item for key, value in values.items() for item in ("--" + key, value)]
+        # The fixture's own base stands in for the real harness floor unless a test names another.
         with mock.patch.object(compiler_compare, "queue_head", return_value=live), \
                 mock.patch.object(compiler_compare, "cpu_model", return_value=cpu), \
+                mock.patch.object(compiler_compare, "THROUGHPUT_HARNESS_FLOOR", floor or self.base), \
                 mock.patch.dict(os.environ, {"PATH": os.environ.get("PATH", ""), "FAKE_THROUGHPUT": corpus_behavior,
                                              "FAKE_SCALING": scaling_behavior}):
             code = compiler_compare.main(argv)
@@ -2833,6 +2835,44 @@ class HarnessTest(unittest.TestCase):
         # A main-mode publisher never accepts a pull-mode receipt.
         self.assertEqual(compiler_publish.decide(dict(expected, mode="main"), True, "success", result, summary, "", retained(evidence))[0],
                          "failure")
+
+    def assert_unadmitted(self, code: int, result: dict, evidence: Path, reason: str) -> None:
+        self.assertEqual((code, result["state"]), (1, "failed"))
+        self.assertEqual(len(result["reasons"]), 1, result["reasons"])
+        self.assertIn(reason, result["reasons"][0])
+        # Rejected before the expensive work: nothing built, no lab and no corpus.
+        self.assertEqual((result["timings"]["build_seconds"], result["binaries"], result["lab"]), ({}, {}, {}))
+        self.assertNotIn("throughput", result)
+        self.assertFalse((evidence / "lab").exists())
+        self.assertFalse((evidence / "throughput").exists())
+
+    def test_base_predating_the_harness_floor_is_rejected_before_measurement(self) -> None:
+        # #3714: the floor (here the pull head) is not in the base's history, as #3406's base lacks
+        # the FAST/QUALITY retirement, so its --mode all cannot produce the v2 population.
+        pull_tree = fixture_git(self.repo, "rev-parse", self.pull_head + "^{tree}")
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.pull_head)
+        code, result, evidence = self.run_harness(self.pull_head, mode="pull", ref="refs/pull/7/head", head=self.pull_head,
+                                                  floor=self.pull_head, **{"head-tree": pull_tree})
+        self.assert_unadmitted(code, result, evidence, "unsupported historical throughput harness")
+        self.assertIn(compiler_receipt.THROUGHPUT_PROFILE["name"], result["reasons"][0])
+
+    def test_unplaceable_harness_floor_fails_closed(self) -> None:
+        code, result, evidence = self.run_harness(self.head, floor="f" * 40)
+        self.assert_unadmitted(code, result, evidence, "throughput harness admission could not place")
+
+    def test_harness_floor_is_the_fast_quality_retirement(self) -> None:
+        # #3406's historical base 3bf9d004 predates the floor; current history contains it.
+        floor = compiler_receipt.THROUGHPUT_HARNESS_FLOOR
+        self.assertRegex(floor, "^[0-9a-f]{40}$")
+        historical = "3bf9d004f2d1f6b4312e02825f17c56d7f3da14c"
+        root = Path(__file__).resolve().parents[2]
+        present = [subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{commit}^{{commit}}"],
+                                  capture_output=True, check=False).returncode == 0 for commit in (floor, historical)]
+        if not all(present):
+            self.skipTest("this checkout lacks the floor or #3406's base commit")
+        self.assertEqual(compiler_compare.throughput_harness_problem(root, "HEAD"), "")
+        self.assertIn("unsupported historical throughput harness",
+                      compiler_compare.throughput_harness_problem(root, historical))
 
     def scaling_head(self) -> tuple[str, str]:
         """A pull request head that adds the scaling request on top of the candidate; (commit, tree)."""

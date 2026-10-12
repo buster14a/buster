@@ -521,7 +521,11 @@ captures (#2741).
   routes below cover the stage-1 self-host compile and, as profile
   `throughput-corpus-v2`, the default `bench_throughput` corpus under both
   retained FAST and QUALITY modes on the same
-  two binaries; the publisher re-checks the corpus's own summary and metadata
+  two binaries. A base revision whose history lacks
+  `compiler_receipt.THROUGHPUT_HARNESS_FLOOR` still runs the retired none and
+  mir-stack modes under `--mode all`; the non-owned routes reject it as an
+  unsupported historical harness before any build or lab (#3714), and only a
+  new named historical recipe could measure such a base. The publisher re-checks the corpus's own summary and metadata
   and binds its compiler hashes to the measured binaries. A corpus exit 1
   (confirmed regression) with a complete exported report is a measured,
   report-only result on both the main and pull-request routes, so a regressing

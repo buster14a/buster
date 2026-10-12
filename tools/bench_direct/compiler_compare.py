@@ -47,7 +47,8 @@ under the direct path's owner-only trust boundary, not a sealed result.
 
 Map: queue_head (pull-mode supersession), build (one ide), toolchain, export_tree (bounded evidence export),
 read_exported_json (classification reads the export, #2929), collect_evidence,
-measure_throughput (corpus leg), scaling_requested and measure_scaling (scaling leg),
+throughput_harness_problem (#3714 base-harness admission), measure_throughput (corpus leg),
+scaling_requested and measure_scaling (scaling leg),
 ast_pilot_request_selection and measure_ast_pilot (#3397 opt-in flag pair),
 real_source_request_selection and measure_real_source (#2761 real-source leg),
 production_profile_request_selection and measure_production_profile (#2761 PGO/LTO leg),
@@ -89,7 +90,7 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUEST_LINE,
                               ANALYZER_REQUEST_LINES,
                               ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, MAIN40_PROFILE, MAIN_PROFILES, named_main_profile, RECEIPT_SCHEMA, SCALING_PROFILE,
-                              SCALING_REQUEST, SHA, THROUGHPUT_PROFILE, classify, classify_scaling,
+                              SCALING_REQUEST, SHA, THROUGHPUT_HARNESS_FLOOR, THROUGHPUT_PROFILE, classify, classify_scaling,
                               classify_throughput, classify_throughput_exit, dumps, host_problem, inline_acceptance_requested,
                               render, scaling_digest, throughput_digest, validate_inline_acceptance,
                               analyzer_bootstrap_provenance, analyzer_profile_summary)
@@ -853,6 +854,25 @@ def scaling_requested(candidate: Path, base: str, head: str) -> bool:
     present = captured_run(["git", "-C", str(candidate), "cat-file", "-e", f"{head}:{SCALING_REQUEST}"],
                              capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode == 0
     return bool(changed) and present
+
+
+def throughput_harness_problem(candidate: Path, base: str) -> str:
+    """Why the base revision's corpus harness cannot run THROUGHPUT_PROFILE; '' when admitted (#3714).
+
+    Only the commit graph is read, so the blob-less checkout fetches nothing. A floor git cannot
+    place fails closed, like a base that predates it.
+    """
+    status = captured_run(["git", "-C", str(candidate), "merge-base", "--is-ancestor", THROUGHPUT_HARNESS_FLOOR, base],
+                          capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode
+    problem = ""
+    if status == 1:
+        problem = (f"unsupported historical throughput harness: base {base} predates {THROUGHPUT_HARNESS_FLOOR}, "
+                   f"so its --mode all is not the {THROUGHPUT_PROFILE['name']} FAST/QUALITY population; "
+                   "not measured")
+    elif status != 0:
+        problem = (f"throughput harness admission could not place {THROUGHPUT_HARNESS_FLOOR} before base {base} "
+                   f"(git exited {status}); not measured")
+    return problem
 
 
 def request_selector_count(candidate: Path, revision: str, selector: str) -> int | None:
@@ -2098,6 +2118,12 @@ def main(argv: list[str] | None = None) -> int:
     expected = (arguments.head, arguments.base, arguments.pull_head, arguments.head_tree, arguments.base_tree)
     if observed is not None and observed != expected:
         reasons.append(f"candidate checkout {observed} does not match the authorized identity {expected}")
+    # Admit the base revision's corpus harness before any build or lab (#3714). The
+    # MAIN-owned routes replay a sealed preflight and measure only main commits past the floor.
+    if not reasons and not early_owned and not analyzer_requested:
+        problem = throughput_harness_problem(candidate, arguments.base)
+        if problem:
+            reasons.append(problem)
 
     # Skip a pull request whose head already moved; an unknown answer measures.
     # A main commit stays on main as main moves on, so it is always measured.

@@ -41,6 +41,7 @@ Map (searchable symbols):
     APPROVED_HOST, observed_cpu_model, host_problem        observed Zen 5 host
     MEASURED_OUTCOMES, MIN_PAIRS, classify                 core validity
     THROUGHPUT_PROFILE, classify_throughput, throughput_digest   corpus (#2761)
+    THROUGHPUT_HARNESS_FLOOR                               base-harness admission (#3714)
     SCALING_REQUEST, SCALING_PROFILE, classify_scaling, scaling_digest   multi-TU scaling (#424)
     INLINE_ACCEPTANCE_PROFILE, validate_inline_acceptance  issue #48 same-candidate inliner pair
     AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_BUDGET, ast_pilot_budget_verdict,
@@ -136,6 +137,14 @@ THROUGHPUT_PROFILE = {
     "warmups": 2,
     "cpu": 2,
 }
+# Admission floor for THROUGHPUT_PROFILE's base-revision harness (#3714). Before
+# this commit, `bench_throughput run --mode all` also selected the retired none
+# and mir-stack allocators, so a base without it runs 24 cells at alpha
+# 0.01/48 and can never satisfy the 12-cell v2 population. compiler_compare
+# rejects such a base before any build or lab, as an unsupported historical
+# harness; this is a necessary condition only, and classify_throughput stays
+# the full check of the exported corpus.
+THROUGHPUT_HARNESS_FLOOR = "293132e418cb2449b36e3b92ae38aaa487813e43"
 # The multi-TU scaling leg (#424), frozen per name like PROFILE. Each series
 # is one `bench_throughput scale` bundle on the candidate binary, with the
 # --compiler/--output that compiler_compare supplies. "cores" leaves CPU 0's
