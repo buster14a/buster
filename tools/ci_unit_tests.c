@@ -579,9 +579,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_unit_schedule_run(Arena* arena, String8 pat
             if (work->order[batch] == index)
             {
                 CiUnitChild* child = work->children + batch;
+                bool union_valid = child->clean && ci_unit_union_take(&work->inventory, &child->proof, covered);
                 bool replayed = child->arena && ci_unit_replay(child->wait);
                 bool destroyed = child->arena && arena_destroy(child->arena, 1);
-                bool clean = child->clean && replayed && destroyed && ci_unit_union_take(&work->inventory, &child->proof, covered);
+                bool clean = union_valid && replayed && destroyed;
                 valid = valid && clean && UINT64_MAX - assertions >= child->proof.assertions &&
                     UINT64_MAX - external >= child->proof.external;
                 modules += clean ? child->proof.selected : 0;
