@@ -528,7 +528,7 @@ sys.exit(m.main(['--keeper',*sys.argv[5:]]))
 
     def test_shell_gate_refuses_missing_malformed_or_conflicting_supervisor_receipts(self):
         launcher = HELPER.with_name("launch_simulator.sh").read_text()
-        phase_function = launcher[launcher.index("run_lifecycle_phase() {"):
+        phase_function = HELPER.with_name("lifecycle_receipt.sh").read_text() + "\n" + launcher[launcher.index("run_lifecycle_phase() {"):
                                   launcher.index("simulator_udid_is_valid() {")]
         modes = ("valid", "missing-fields", "missing-named", "extra-field",
                  "named-mismatch", "duplicate-key", "duplicate-eof", "duplicate-native-reap",
@@ -645,7 +645,7 @@ sys.exit(70 if mode=='wrong-helper' else cleanup)
 
     def test_caller_receipt_requires_unique_typed_coherent_terminal_facts(self):
         launcher = HELPER.with_name("launch_simulator.sh").read_text()
-        phase = launcher[launcher.index("run_lifecycle_phase() {"):launcher.index("simulator_udid_is_valid() {")]
+        phase = HELPER.with_name("lifecycle_receipt.sh").read_text() + "\n" + launcher[launcher.index("run_lifecycle_phase() {"):launcher.index("simulator_udid_is_valid() {")]
         keys = ("version", "generation", "admission", "helper_status", "invocation_status", "command_monitor_status", "reason")
         compact_keys = ("admission", "helper_status", "invocation_status", "generation", "command_monitor_status", "reason")
         modes = ("valid", "missing-named", "missing-fields", "extra-fields") \

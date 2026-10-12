@@ -13,6 +13,9 @@ on:
       - 'tools/native_retirement_integration.py'
       - 'tools/native_retirement_merge_gate.py'
       - 'tools/merge_conflict_preflight.py'
+      - 'tools/main_push_maintenance*.py'
+      - 'tools/main_push_inventory.c'
+      - 'tools/ci_metrics_json.h'
   workflow_dispatch:
 
 permissions:
@@ -43,6 +46,8 @@ jobs:
           mode: source
           source-directory: .
           source-repository: ${{ github.repository }}
+      - name: Build native maintenance discovery
+        run: clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/main_push_inventory.c -o tools/main_push_inventory
       - name: Test request provenance, revocation, deduplication and recovery
         run: |
           python3 tools/native_retirement_automation_test.py -v
