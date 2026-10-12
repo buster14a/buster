@@ -185,6 +185,7 @@
 
 #include "c_internal.h"
 #include <buster/lib/compiler/frontend/c/c_ast.h>
+#include <buster/lib/compiler/frontend/c/c_parse_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 
 BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out);
@@ -4121,6 +4122,29 @@ BUSTER_C_INTERNAL CScopeId c_ir_current_scope(CIntegerIrBuilder* builder)
     return result;
 }
 
+#if BUSTER_INCLUDE_TESTS
+// Reports the resolver's `sizeof` answer for the operand [start, end) to the
+// handoff comparison (c_test_sizeof_handoff_set). The keyword is the token
+// before the operand, or before its `(` when the operand fills that group;
+// the comparison ignores any other token.
+BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
+BUSTER_C_INTERNAL void c_ir_sizeof_handoff_report(CIntegerIrBuilder* builder, u32 start, u32 end, bool answered, u64 size)
+{
+    CToken const* tokens = builder->preprocess.tokens;
+    u32 keyword = UINT32_MAX;
+    if (start >= 1 && start < end && tokens[start - 1].kind == C_TOKEN_IDENTIFIER)
+    {
+        keyword = start - 1;
+    }
+    else if (start >= 2 && start < end && end < builder->preprocess.token_count && c_token_is_punctuator(&tokens[start - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+             c_ir_matching_delimiter_cached(builder, start - 1, end + 1, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end)
+    {
+        keyword = start - 2;
+    }
+    c_sizeof_handoff_compare(&builder->parse, &builder->preprocess, keyword, answered, size, C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER);
+}
+#endif
+
 BUSTER_C_INTERNAL bool c_ir_label_address_prefix(CIntegerIrBuilder* builder, u32 expression_start, u32 index)
 {
     CScopeId scope = c_ir_current_scope(builder);
@@ -4275,6 +4299,12 @@ BUSTER_C_INTERNAL bool c_ir_query_execute(CIntegerIrBuilder* builder, CIrQueryFr
             break;
         case C_IR_QUERY_FRAME_SIZEOF:
             frame->success = c_ir_sizeof_expression_attempt(builder, frame->start, frame->end, &frame->integer, &frame->alignment);
+#if BUSTER_INCLUDE_TESTS
+            if (c_sizeof_handoff_enabled() && !machine->has_request)
+            {
+                c_ir_sizeof_handoff_report(builder, frame->start, frame->end, frame->success, frame->integer);
+            }
+#endif
             break;
         case C_IR_QUERY_FRAME_COMPOUND_ELEMENT_COUNT:
             frame->success = c_ir_compound_literal_element_count_attempt(builder, frame->start, frame->end, &frame->integer);
@@ -37203,6 +37233,12 @@ c_ir_expression_core_loop:
                     return;
                 }
                 value = is_sizeof ? expression->layout.size : c_ir_sizeof_operand_alignment(expression);
+#if BUSTER_INCLUDE_TESTS
+                if (is_sizeof && c_sizeof_handoff_enabled())
+                {
+                    c_sizeof_handoff_compare(&builder->parse, &builder->preprocess, index, true, value, C_TEST_SIZEOF_HANDOFF_PATH_PREDICTION);
+                }
+#endif
             }
             u32 object_alignment = (u32)value;
             if (!is_sizeof && !(operand && operand->layout.resolved) &&

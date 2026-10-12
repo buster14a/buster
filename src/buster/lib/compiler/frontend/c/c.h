@@ -1923,6 +1923,37 @@ struct CTypeIdentityQuery
     u32 result_end;
 };
 
+#if BUSTER_INCLUDE_TESTS
+// A semantic answer for one scalar-integer `sizeof` expression operand, kept
+// only while the test-only handoff comparison is on (c_test_sizeof_handoff_set,
+// GitHub #2531). The key is the `sizeof` keyword's token; `scope` is the
+// scope the producer typed the operand in. The answer is the unqualified kind
+// (an enum's underlying kind) and its size, never a CTypeId, so no row can
+// name a type a rollback truncated.
+typedef enum CSizeofOperandProducer
+{
+    // c_parse_typed_constant folding a constant context (static assertion,
+    // array bound, case label, static initializer) in the normal mode.
+    C_SIZEOF_OPERAND_PRODUCER_CONSTANT,
+    // c_parse_validate_sizeof_operands, which asks for the operand's type
+    // only for this comparison.
+    C_SIZEOF_OPERAND_PRODUCER_VALIDATION,
+    C_SIZEOF_OPERAND_PRODUCER_COUNT,
+} CSizeofOperandProducer;
+
+typedef struct CSizeofOperandType CSizeofOperandType;
+struct CSizeofOperandType
+{
+    u32 keyword;
+    u32 operand_end;
+    CScopeId scope;
+    u8 kind;
+    u8 producer;
+    u8 size;
+    u8 reserved;
+};
+#endif
+
 typedef struct CParseResult CParseResult;
 struct CParseResult
 {
@@ -1942,6 +1973,13 @@ struct CParseResult
     CTypeIdentityQuery* type_identity_queries;
     u32 type_identity_query_count;
     u32 type_identity_query_capacity;
+#if BUSTER_INCLUDE_TESTS
+    // Append-only like type_identity_queries, so a rollback drops the rows a
+    // speculative query added. Null unless the handoff comparison is on.
+    CSizeofOperandType* sizeof_operand_types;
+    u32 sizeof_operand_type_count;
+    u32 sizeof_operand_type_capacity;
+#endif
     CParameter* parameters;
     CMember* members;
     CEnumMember* enum_members;

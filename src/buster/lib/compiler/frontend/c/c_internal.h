@@ -1804,6 +1804,16 @@ BUSTER_C_EXTERN u32 c_parse_plan_statement_last(CAst const* ast, CPreprocessResu
 typedef struct CAstTypePending CAstTypePending;
 
 #if BUSTER_INCLUDE_TESTS
+// The sizeof handoff comparison (c_test_sizeof_handoff_set, c_parse.c).
+// Lowering asks whether it is on before it does any work for it, then reports
+// each `sizeof` size it settles (or its resolver's refusal) for one keyword
+// token: `path` is a C_TEST_SIZEOF_HANDOFF_PATH_* value.
+BUSTER_C_EXTERN bool c_sizeof_handoff_enabled(void);
+BUSTER_C_EXTERN void c_sizeof_handoff_compare(CParseResult* result, CPreprocessResult const* preprocess, u32 keyword, bool answered, u64 size,
+                                              u32 path);
+#endif
+
+#if BUSTER_INCLUDE_TESTS
 // Verify mode (c_test_ast_type_verify_set): every tree answer is also computed
 // without the tree and compared. The mark records the model's table sizes
 // before that run.

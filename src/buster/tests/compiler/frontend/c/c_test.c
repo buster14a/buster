@@ -44105,6 +44105,135 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_builtin_operand_types(UnitTestArgument
     return result;
 }
 
+// The sizeof handoff comparison (c_test_sizeof_handoff_set, GitHub #2531):
+// semantic analysis keeps the scalar-integer type of every `sizeof` operand it
+// answers and lowering holds each size it settles to it. The source has the
+// 64-operator cast operand from the issue, a qualified, a promoted, an enum, a
+// bit-field-promoted, a conditional, a comma, a _Generic and a cast-to-typeof
+// operand, a block that shadows `i`, an aggregate operand outside the
+// population and two static assertions. It is analysed the way -fsyntax-only
+// and -c analyse it and lowered in both frontend forms, with the comparison
+// off and on; the output must not change and the two analyses keep the same
+// rows. A protected constant query copies the rows on its first append, so
+// the caller's rows are unchanged after it.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_semantic_handoff(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source_text = S8(
+        "#define T4(x) x + x + x + x\n"
+        "#define T16(x) T4(x) + T4(x) + T4(x) + T4(x)\n"
+        "#define T64(x) T16(x) + T16(x) + T16(x) + T16(x)\n"
+        "enum E { A = 1 };\n"
+        "struct S { int bf : 3; unsigned ubf : 5; long tail; };\n"
+        "unsigned long f(int i, unsigned long u, const short cs, char c, enum E e, struct S s, int k)\n"
+        "{\n"
+        "    unsigned long n = 0;\n"
+        "    n += sizeof(T64(i) + (int)u);\n"
+        "    n += sizeof cs;\n"
+        "    n += sizeof(+c);\n"
+        "    n += sizeof e;\n"
+        "    n += sizeof(s.bf + 0);\n"
+        "    n += sizeof(s.ubf + 0u);\n"
+        "    n += sizeof(k ? i : u);\n"
+        "    n += sizeof(i, c);\n"
+        "    n += sizeof(_Generic(i, int: c, default: u));\n"
+        "    n += sizeof((__typeof__(u))i);\n"
+        "    n += sizeof s;\n"
+        "    {\n"
+        "        long i = 0;\n"
+        "        n += sizeof i;\n"
+        "        n += sizeof(i + 0);\n"
+        "    }\n"
+        "    _Static_assert(sizeof(T64(i) + (int)u) == sizeof(int), \"int\");\n"
+        "    _Static_assert(sizeof(cs) == sizeof(short), \"short\");\n"
+        "    return n;\n"
+        "}\n");
+    // The validation producer's kinds in source order, and the constant
+    // producer's: the static assertions' operands.
+    CTypeKind validation_kinds[] = {
+        C_TYPE_INT, C_TYPE_SHORT, C_TYPE_INT, C_TYPE_UNSIGNED_INT, C_TYPE_INT, C_TYPE_UNSIGNED_INT, C_TYPE_UNSIGNED_LONG,
+        C_TYPE_CHAR, C_TYPE_CHAR, C_TYPE_UNSIGNED_LONG, C_TYPE_LONG, C_TYPE_LONG, C_TYPE_INT, C_TYPE_SHORT,
+    };
+    CTypeKind constant_kinds[] = {C_TYPE_INT, C_TYPE_SHORT};
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source_text, (CPreprocessOptions){0});
+        CIRLowerOptions options = {.disable_direct_ssa = form != 0};
+        c_test_sizeof_handoff_take();
+        CAnalysisResult off = c_analyze_semantics_only(temporary.arena, tokens, c_parse_ast(temporary.arena, tokens));
+        CIRLowerResult off_lowered = c_lower_to_ir_with_options(temporary.arena, S8("sizeof-handoff.c"), tokens, off, target_native, options);
+        CTestSizeofHandoff idle = c_test_sizeof_handoff_take();
+        CTestSizeofHandoff zero = {0};
+        BUSTER_TEST(arguments, off.sizeof_operand_types == 0 && off.sizeof_operand_type_count == 0 && memcmp(&idle, &zero, sizeof(idle)) == 0);
+        c_test_sizeof_handoff_set(true);
+        CParserResult syntax_only_syntax = c_parse_ast(temporary.arena, tokens);
+        syntax_only_syntax.string_literal_lengths_only = true;
+        CAnalysisResult syntax_only = c_analyze_semantics_only(temporary.arena, tokens, syntax_only_syntax);
+        CTestSizeofHandoff syntax_only_counts = c_test_sizeof_handoff_take();
+        CAnalysisResult on = c_analyze_semantics_only(temporary.arena, tokens, c_parse_ast(temporary.arena, tokens));
+        CIRLowerResult on_lowered = c_lower_to_ir_with_options(temporary.arena, S8("sizeof-handoff.c"), tokens, on, target_native, options);
+        c_test_sizeof_handoff_set(false);
+        CTestSizeofHandoff seen = c_test_sizeof_handoff_take();
+        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !off.diagnostic_count && !on.diagnostic_count && !syntax_only.diagnostic_count &&
+                                          off_lowered.program && on_lowered.program && !off_lowered.diagnostic_count && !on_lowered.diagnostic_count))
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(on_lowered.program, on_lowered.program->modules).error == IR_VALIDATION_NONE);
+            // The comparison changes no output.
+            IrFunction const* off_function = off_lowered.program->modules[0].functions;
+            IrFunction const* on_function = on_lowered.program->modules[0].functions;
+            BUSTER_TEST(arguments, off_lowered.program->modules[0].function_count == 1 && on_lowered.program->modules[0].function_count == 1 &&
+                                       off_function->instruction_count == on_function->instruction_count &&
+                                       off_function->block_count == on_function->block_count);
+            // -fsyntax-only and -c keep the same rows.
+            BUSTER_TEST(arguments, syntax_only.sizeof_operand_type_count == on.sizeof_operand_type_count &&
+                                       memcmp(syntax_only.sizeof_operand_types, on.sizeof_operand_types,
+                                              on.sizeof_operand_type_count * sizeof(CSizeofOperandType)) == 0);
+            BUSTER_TEST(arguments, syntax_only_counts.rows[C_SIZEOF_OPERAND_PRODUCER_VALIDATION] == seen.rows[C_SIZEOF_OPERAND_PRODUCER_VALIDATION] &&
+                                       syntax_only_counts.rows[C_SIZEOF_OPERAND_PRODUCER_CONSTANT] == seen.rows[C_SIZEOF_OPERAND_PRODUCER_CONSTANT]);
+            u32 validation_seen = 0;
+            u32 constant_seen = 0;
+            for (u32 index = 0; index < on.sizeof_operand_type_count; index += 1)
+            {
+                CSizeofOperandType row = on.sizeof_operand_types[index];
+                bool validation = row.producer == C_SIZEOF_OPERAND_PRODUCER_VALIDATION;
+                u32 position = validation ? validation_seen++ : constant_seen++;
+                CTypeKind expected = validation ? (position < BUSTER_ARRAY_LENGTH(validation_kinds) ? validation_kinds[position] : C_TYPE_INVALID)
+                                                : (position < BUSTER_ARRAY_LENGTH(constant_kinds) ? constant_kinds[position] : C_TYPE_INVALID);
+                BUSTER_TEST_RAW(arguments, row.kind == expected && string_equal(c_token_spelling(tokens.spelling_base, tokens.tokens[row.keyword]), S8("sizeof")),
+                                string_format(temporary.arena, S8("sizeof handoff row {u32}: producer {u32}, kind {u32}, expected {u32}"), index,
+                                              (u32)row.producer, (u32)row.kind, (u32)expected));
+            }
+            BUSTER_TEST(arguments, validation_seen == BUSTER_ARRAY_LENGTH(validation_kinds) && constant_seen == BUSTER_ARRAY_LENGTH(constant_kinds));
+            // `sizeof s` is typed but outside the population.
+            BUSTER_TEST(arguments, seen.outside_population >= 1 && seen.conflicts == 0 && seen.scope_differs == 0);
+            u64 agree = seen.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER][C_TEST_SIZEOF_HANDOFF_AGREE] +
+                        seen.outcomes[C_TEST_SIZEOF_HANDOFF_PATH_PREDICTION][C_TEST_SIZEOF_HANDOFF_AGREE];
+            BUSTER_TEST_RAW(arguments, seen.first_count == 0 && agree >= BUSTER_ARRAY_LENGTH(validation_kinds),
+                            string_format(temporary.arena, S8("sizeof handoff: {u32} disagreements, {u64} agreeing answers"), seen.first_count, agree));
+            for (u32 index = 0; index < seen.first_count; index += 1)
+            {
+                CTestSizeofHandoffMismatch mismatch = seen.first[index];
+                BUSTER_TEST_RAW(arguments, false,
+                                string_format(temporary.arena, S8("sizeof at token {u32}: semantic size {u32}, lowering size {u64}, path {u32}"),
+                                              mismatch.keyword, (u32)mismatch.semantic_size, mismatch.lowering_size, (u32)mismatch.path));
+            }
+            // A protected constant query leaves the caller's rows untouched.
+            CScopeId scope = on.declarations[on.declaration_count - 1].scope;
+            u32 start = on.sizeof_operand_types[0].keyword;
+            u32 end = on.sizeof_operand_types[0].operand_end + 1;
+            u32 rows_before = on.sizeof_operand_type_count;
+            c_test_sizeof_handoff_set(true);
+            CTestTypeConstantQuery query = c_test_type_integer_constant(temporary.arena, tokens, &on, scope, start, end);
+            c_test_sizeof_handoff_set(false);
+            c_test_sizeof_handoff_take();
+            BUSTER_TEST(arguments, query.model_unchanged && on.sizeof_operand_type_count == rows_before);
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // Lua's userdata accessor combines nested pointer-cast macros, a
 // builtin-offsetof ternary, and a switch whose other arm returns void *.  The
 // strict expression-type walk must preserve the pointer result instead of
@@ -64357,6 +64486,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_sizeof_long_shallow_operand);
     C_TEST_FIXTURE(arguments, c_test_tall_expression_types);
     C_TEST_FIXTURE(arguments, c_test_builtin_operand_types);
+    C_TEST_FIXTURE(arguments, c_test_sizeof_semantic_handoff);
     C_TEST_FIXTURE(arguments, c_test_nested_offsetof_pointer_prediction);
     C_TEST_FIXTURE(arguments, c_test_nonvoid_falloff);
     C_TEST_FIXTURE(arguments, c_test_noreturn_call_expression_statements);
