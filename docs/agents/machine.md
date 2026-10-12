@@ -520,8 +520,22 @@ hosts execute its independent expected-value fixture.
   the row's reservations (`row_reserved_mask`), active pins, unpaid
   callee-saved registers, and physical registers an earlier row wrote that no
   row has read yet (`physical_live_mask`: staged call arguments). A value
-  crossing the next call moves only into a paid callee-saved register. Dead,
+  crossing a later call moves only into a paid callee-saved register. Dead,
   rematerializable, or unplaceable occupants keep the eviction.
+- FAST/QUALITY decide whether a value crosses a call
+  (`machine_fast_crosses_call`) against the prepass's `next_call`, which runs
+  across block boundaries in layout order: a value whose last textual use lies
+  past any later call, in its own block or a later one, prefers a callee-saved
+  register at its definition, at every free reload pick, and when vacated.
+  Once there it survives every later call on every path, so joins stop losing
+  it. On unity `ide.c` this removed 4k–5.5k spills and 6k–9.5k reloads in each
+  mode and target, lowered boundary spills, boundary reloads, copies and code
+  bytes, and added about 3k callee-saved saves (from about 1.0 to 1.5 per
+  function) ([#56 census](https://github.com/buster14a/buster/issues/56#issuecomment-6123628660)).
+  The layout interval over-approximates through a sibling arm's call and
+  misses a loop-body call past the value's last textual use. Incoming argument
+  and call-result captures still bind in their ABI register; moving them to a
+  callee-saved register at entry was measured and deferred.
 - FAST/QUALITY remember the register each value was first bound to
   (`MachineFastState.preferred_registers`). A free pick for a reload
   (`machine_fast_ensure` with no fixed target) takes that register while it is
