@@ -7,6 +7,14 @@ name: Compiler throughput macOS harness
 # -DBUSTER_BENCH_ALLOCATIONS=1) and of tools/throughput/{tests,shared}.c,
 # widened to whole directories so macOS-only includes stay covered. Keep the
 # harness step identical to compiler-throughput.yml's Unix step.
+#
+# Job `timing` is informative native macOS timing (#2761): the existing paired
+# bench_throughput_ci guard on the hosted macos-26 runner, on the weekly
+# schedule and on dispatch only, never on a pull request. A confirmed
+# regression is a warning and never fails a check; a build failure, crash or
+# incomplete or invalid samples still fail. Job `alert` files or updates the
+# macOS tracking issue only for a trusted main run. Not Zen 5 evidence; see
+# docs/agents/benchmarking.md#native-hosted-timing.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -22,6 +30,17 @@ on:
       - 'tools/throughput/**'
       - '.github/workflows/throughput-harness-macos.yml'
   workflow_dispatch:
+    inputs:
+      baseline:
+        description: Baseline full commit SHA (default the first-parent commit from 7 days before this run)
+        required: false
+        default: ''
+        type: string
+      demonstrate_regression:
+        description: Force a regression through the warning path; never files an issue
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: '23 4 * * 1'
 
@@ -81,3 +100,153 @@ jobs:
             build/allocation-census-report
           retention-days: 7
           if-no-files-found: warn
+
+  timing:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    name: informative timing (macos-26)
+    runs-on: macos-26
+    timeout-minutes: 60
+    outputs:
+      baseline: ${{ steps.baseline.outputs.sha }}
+      verdict: ${{ steps.report.outputs.verdict }}
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            macos-26
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate
+          source-repository: ${{ github.repository }}
+      - name: Select the baseline
+        id: baseline
+        shell: bash
+        env:
+          INPUT_BASELINE: ${{ inputs.baseline }}
+        run: |
+          set -euo pipefail
+          # The weekly comparison covers every commit since the previous one.
+          baseline=${INPUT_BASELINE:-$(git -C candidate rev-list -n 1 --first-parent --before=7.days.ago HEAD)}
+          if [[ ! "$baseline" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::The baseline must be a full lowercase commit SHA.'
+            exit 1
+          fi
+          printf 'sha=%s\n' "$baseline" >> "$GITHUB_OUTPUT"
+          printf 'BUSTER_THROUGHPUT_BASE_SHA=%s\n' "$baseline" >> "$GITHUB_ENV"
+          printf 'BUSTER_THROUGHPUT_HEAD_SHA=%s\n' "$(git -C candidate rev-parse HEAD)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ steps.baseline.outputs.sha }}
+          path: baseline
+          persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: baseline
+          source-repository: ${{ github.repository }}
+      - name: Build and compare on this runner
+        id: compare
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build
+          # Exit 1 is the guard's confirmed regression; the report step decides
+          # whether the status is a complete measurement. GITHUB_ACTIONS is
+          # unset so the guard's own ::error annotation does not appear.
+          status=0
+          env -u GITHUB_ACTIONS ./build/build bench_throughput_ci ../baseline || status=$?
+          printf '%s\n' "$status" > build/throughput-ci-driver-exit.txt
+      - name: Report timing (informative, never a gate)
+        id: report
+        if: ${{ !cancelled() && steps.compare.outcome == 'success' }}
+        shell: bash
+        env:
+          DEMONSTRATE: ${{ inputs.demonstrate_regression == true && '--demonstrate' || '' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          # Exit 2 (missing, partial or failed evidence) fails the job; a
+          # regression is a warning and a summary line only.
+          python3 -B candidate/tools/bench_direct/native_timing.py macos --summary candidate/build/throughput-ci-results/summary.json \
+            --driver-exit candidate/build/throughput-ci-driver-exit.txt --baseline "$BUSTER_THROUGHPUT_BASE_SHA" \
+            --candidate "$BUSTER_THROUGHPUT_HEAD_SHA" --run-url "$RUN_URL" --annotate ${DEMONSTRATE:+"$DEMONSTRATE"} \
+            --step-summary "$GITHUB_STEP_SUMMARY" --github-output "$GITHUB_OUTPUT"
+      - name: Publish comparison
+        if: always()
+        shell: bash
+        run: |
+          if test -f candidate/build/throughput-ci-results/summary.md; then
+            cat candidate/build/throughput-ci-results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'Benchmark incomplete. Inspect the build and compiler logs; no timing verdict was produced.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Retain machine records in existing evidence
+        if: always()
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: candidate/build/throughput-ci-results
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: throughput-timing-macos-26-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            candidate/build/throughput-ci-results
+            candidate/build/throughput-ci-driver-exit.txt
+          retention-days: 14
+          if-no-files-found: warn
+
+  alert:
+    # Only trusted main code reaches the write token, in its own job: the
+    # timing job above holds read-only permissions while it runs both revisions.
+    needs: timing
+    if: ${{ needs.timing.outputs.verdict == 'regression' && github.repository == 'buster14a/buster' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && inputs.demonstrate_regression != true }}
+    name: file or update the macOS timing issue
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - name: Read only this run's timing artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh run download "$GITHUB_RUN_ID" --name "throughput-timing-macos-26-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --dir "$RUNNER_TEMP/timing"
+      - name: Re-derive the verdict and file or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_SHA: ${{ needs.timing.outputs.baseline }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          python3 -B tools/bench_direct/native_timing.py macos --summary "$RUNNER_TEMP/timing/throughput-ci-results/summary.json" \
+            --driver-exit "$RUNNER_TEMP/timing/throughput-ci-driver-exit.txt" --baseline "$BASELINE_SHA" --candidate "$GITHUB_SHA" \
+            --publish-issue --repository "$GITHUB_REPOSITORY" --run-url "$RUN_URL" --step-summary "$GITHUB_STEP_SUMMARY"

@@ -1,6 +1,12 @@
 name: Windows paired matrix benchmark
 
 # Each trial runs both revisions on one VM. Ordinary PRs do not run benchmarks.
+#
+# Native Windows timing is informative only (#2761): job `report` pairs each
+# trial's baseline/candidate matrix durations, warns on a regression and never
+# fails a check for one; a failed, missing or incomplete arm still fails. Job
+# `alert` files or updates the Windows tracking issue only for a trusted main
+# dispatch. Not Zen 5 evidence; see docs/agents/benchmarking.md#native-hosted-timing.
 on:
   workflow_dispatch:
     inputs:
@@ -12,12 +18,21 @@ on:
         description: Candidate full commit SHA
         required: true
         type: string
+      demonstrate_regression:
+        description: Force a regression through the warning path; never files an issue
+        required: false
+        default: false
+        type: boolean
   pull_request:
     paths:
       - '.github/workflows/issue-708-benchmark.yml'
 
 permissions:
   contents: read
+
+env:
+  BASELINE_SHA: ${{ inputs.baseline || 'f7c4e868d6c90d6b4331a8be84fbfb2d8ae02a47' }}
+  CANDIDATE_SHA: ${{ inputs.candidate || 'b03bdf762f5271076fdf5ff485c4870a2e88bfea' }}
 
 concurrency:
   group: issue-708-benchmark-${{ github.event.pull_request.number || github.run_id }}
@@ -36,9 +51,6 @@ jobs:
     name: Windows paired benchmark trial ${{ matrix.trial }}
     runs-on: windows-2025
     timeout-minutes: 300
-    env:
-      BASELINE_SHA: ${{ inputs.baseline || 'f7c4e868d6c90d6b4331a8be84fbfb2d8ae02a47' }}
-      CANDIDATE_SHA: ${{ inputs.candidate || 'b03bdf762f5271076fdf5ff485c4870a2e88bfea' }}
     steps:
       - name: Machine specifications
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
@@ -236,3 +248,92 @@ jobs:
           path: ${{ runner.temp }}/issue-708/
           if-no-files-found: warn
           retention-days: 14
+
+  report:
+    needs: benchmark
+    if: ${{ !cancelled() && needs.benchmark.result == 'success' }}
+    name: Informative Windows timing report
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      verdict: ${{ steps.report.outputs.verdict }}
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - name: Read only this run's paired evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh run download "$GITHUB_RUN_ID" --pattern "issue-708-pair-*-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --dir "$RUNNER_TEMP/issue-708-evidence"
+      - name: Report timing (informative, never a gate)
+        id: report
+        shell: bash
+        env:
+          DEMONSTRATE: ${{ inputs.demonstrate_regression == true && '--demonstrate' || '' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          # Exit 2 (missing, partial or failed evidence) fails the job; a
+          # regression is a warning and a summary line only.
+          python3 -B tools/bench_direct/native_timing.py windows --evidence "$RUNNER_TEMP/issue-708-evidence" \
+            --baseline "$BASELINE_SHA" --candidate "$CANDIDATE_SHA" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --trials 3 --run-url "$RUN_URL" --annotate ${DEMONSTRATE:+"$DEMONSTRATE"} \
+            --step-summary "$GITHUB_STEP_SUMMARY" --github-output "$GITHUB_OUTPUT"
+
+  alert:
+    # Only a trusted main dispatch reaches the write token, in its own job;
+    # the benchmark matrix that runs both revisions stays read-only.
+    needs: report
+    if: ${{ needs.report.outputs.verdict == 'regression' && github.repository == 'buster14a/buster' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.demonstrate_regression != true }}
+    name: File or update the Windows timing issue
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - name: Read only this run's paired evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh run download "$GITHUB_RUN_ID" --pattern "issue-708-pair-*-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --dir "$RUNNER_TEMP/issue-708-evidence"
+      - name: Re-derive the verdict and file or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          python3 -B tools/bench_direct/native_timing.py windows --evidence "$RUNNER_TEMP/issue-708-evidence" \
+            --baseline "$BASELINE_SHA" --candidate "$CANDIDATE_SHA" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --trials 3 --publish-issue --repository "$GITHUB_REPOSITORY" --run-url "$RUN_URL" --step-summary "$GITHUB_STEP_SUMMARY"

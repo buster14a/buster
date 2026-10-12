@@ -27,13 +27,24 @@ route cannot count as covered through a consumer that never checks hardware. Dia
 and policy rows are `not applicable` with a reason. The summary line reports
 how many performance entries are covered; the inventory never claims more.
 
+Native macOS and Windows timing, which no Zen 5 route can measure, may instead
+be `native-informative` on route `hosted-native` (maintainer decision on
+#2761, 2026-10-11). Such a row is never covered and is counted separately. It
+must be a macOS or Windows workflow whose named `job` runs on a literal
+GitHub-hosted `macos-*` or `windows-*` label matching its `platform`, so a
+Linux, matrix-selected or self-hosted timing job cannot use it to avoid the
+9700X rule. The workflow must run the `consumer` for that platform, and hold
+`issues: write` only in a separate job that publishes through it and is gated
+to this repository's `main`. Its `alert` must link an existing documented
+heading.
+
 Each owner-requested fixed profile on the pull-compare route (PROFILE_ROWS)
 needs its own covered `<entry>@<profile>` row (`uarch_lab:compare@...`, or
 `build:bench_throughput@...` for a harness profile) whose consumer
 validates that exact frozen profile, so a flag-pair profile cannot be added,
 or its validation dropped, without the inventory noticing.
 
-Map: discover, check_rows, check_profile_rows, main.
+Map: discover, check_rows, check_native_row, check_profile_rows, main.
 """
 
 from __future__ import annotations
@@ -54,12 +65,34 @@ BUSTER_INCLUDE = re.compile(r"^\s*#\s*include\s*<buster/", re.MULTILINE)
 HOST_CHECK = re.compile(r"\b(?:APPROVED_HOST|host_problem)\b")
 WORKFLOW = re.compile(r"bench|throughput|profile|lab\b|perf|708|^external-projects\.yml$", re.IGNORECASE)
 RECEIPT = ROOT / "tools" / "bench_direct" / "compiler_receipt.py"
+NATIVE_ROUTE, NATIVE_STATUS = "hosted-native", "native-informative"
+NATIVE_CONSUMER = "tools/bench_direct/native_timing.py"
+NATIVE_RUNNERS = {"macos": re.compile(r"macos-[0-9a-z.-]+"), "windows": re.compile(r"windows-[0-9a-z.-]+")}
+NATIVE_ALERT_GATE = ("github.repository == 'buster14a/buster'", "github.ref == 'refs/heads/main'")
 # Inventory row -> the compiler_receipt profile constant its consumer must validate.
 PROFILE_ROWS = {
     "uarch_lab:compare@canonical-inline-self-host": "INLINE_ACCEPTANCE_PROFILE",
     "uarch_lab:compare@ast-pilot-acceptance": "AST_PILOT_ACCEPTANCE_PROFILE",
     "build:bench_throughput@throughput-real-source": "THROUGHPUT_REAL_SOURCE_PROFILE",
 }
+
+
+# A minimal native hosted timing workflow for the self-checks.
+NATIVE_WORKFLOW = """jobs:
+  timing:
+    runs-on: macos-26
+    steps:
+      - run: python3 -B tools/bench_direct/native_timing.py macos --annotate
+  alert:
+    needs: timing
+    if: ${{ needs.timing.outputs.verdict == 'regression' && github.repository == 'buster14a/buster' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - run: python3 -B tools/bench_direct/native_timing.py macos --publish-issue
+"""
 
 
 def discover(root: Path) -> set[str]:
@@ -98,7 +131,64 @@ def read_tool(name: object) -> str:
     return path.read_text(encoding="utf-8") if path is not None and path.is_file() else ""
 
 
-def check_rows(data: object, discovered: set[str], bench_workflow: str) -> tuple[list[str], dict]:
+def read_root(path: str) -> str:
+    """A repository file's text, or empty when it does not exist."""
+    file = ROOT / path
+    return file.read_text(encoding="utf-8") if file.is_file() else ""
+
+
+def job_blocks(workflow: str) -> dict[str, list[str]]:
+    """Map each top-level job to its lines (as in workflow_policy_test.job_blocks)."""
+    lines = workflow.splitlines()
+    start = lines.index("jobs:") + 1 if "jobs:" in lines else len(lines)
+    jobs: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for line in lines[start:]:
+        header = re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)
+        if header:
+            current = jobs.setdefault(header.group(1), [])
+        elif line.strip() and not line.startswith("   "):
+            current = None
+        elif current is not None:
+            current.append(line)
+    return jobs
+
+
+def heading_anchors(markdown: str) -> set[str]:
+    """GitHub-style anchors of a document's headings."""
+    return {re.sub(r"[^a-z0-9 _-]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
+            for line in markdown.splitlines() if re.match(r"#{1,6} ", line)}
+
+
+def check_native_row(name: str, zen5: dict, read) -> list[str]:
+    """A native-informative row names a hosted macOS/Windows job and a main-only documented alert."""
+    errors: list[str] = []
+    platform, job_name, alert = zen5.get("platform"), zen5.get("job"), zen5.get("alert")
+    workflow = read(".github/workflows/" + name[len("workflow:"):]) if isinstance(name, str) and name.startswith("workflow:") else ""
+    jobs = job_blocks(workflow)
+    job = jobs.get(job_name, []) if isinstance(job_name, str) else []
+    runs_on = [line.split(":", 1)[1].strip() for line in job if line.startswith("    runs-on:")]
+    command = f"{NATIVE_CONSUMER} {platform}"
+    alerts = [lines for lines in jobs.values() if "      issues: write" in lines]
+    anchor = alert.split("#", 1) if isinstance(alert, str) and alert.count("#") == 1 else ["", ""]
+    if zen5.get("route") != NATIVE_ROUTE or zen5.get("status") != NATIVE_STATUS or not zen5.get("resolution"):
+        errors.append(f"{name}: a native hosted row is {NATIVE_STATUS} on {NATIVE_ROUTE} with a resolution")
+    elif platform not in NATIVE_RUNNERS or not workflow:
+        errors.append(f"{name}: only an existing macOS or Windows workflow can be {NATIVE_STATUS}")
+    elif not job or len(runs_on) != 1 or not NATIVE_RUNNERS[platform].fullmatch(runs_on[0]):
+        errors.append(f"{name}: job {job_name!r} must run on one literal GitHub-hosted {platform} label")
+    elif zen5.get("consumer") != NATIVE_CONSUMER or not read(NATIVE_CONSUMER) or command not in workflow:
+        errors.append(f"{name}: the workflow must report through {command}")
+    elif len(alerts) != 1 or alerts[0] is job or not any(command in line for line in alerts[0]) or \
+            "--publish-issue" not in "\n".join(alerts[0]) or \
+            not all(any(line.startswith("    if:") and gate in line for line in alerts[0]) for gate in NATIVE_ALERT_GATE):
+        errors.append(f"{name}: issues: write belongs only to one separate main-gated job publishing through {command}")
+    elif not anchor[1] or anchor[1] not in heading_anchors(read(anchor[0])):
+        errors.append(f"{name}: alert {alert!r} is not a documented heading")
+    return errors
+
+
+def check_rows(data: object, discovered: set[str], bench_workflow: str, read=read_root) -> tuple[list[str], dict]:
     """(errors, counts) for the inventory against the discovered entry points."""
     errors: list[str] = []
     entries = data.get("entries") if isinstance(data, dict) else None
@@ -113,7 +203,7 @@ def check_rows(data: object, discovered: set[str], bench_workflow: str) -> tuple
         errors.append(f"unregistered performance entry point: {missing}")
     for stale in sorted(bases - discovered):
         errors.append(f"inventory row names no current entry point: {stale}")
-    counts = {"covered": 0, "not_validated": 0, "no_route": 0, "not_applicable": 0}
+    counts = {"covered": 0, "not_validated": 0, "no_route": 0, "native_informative": 0, "not_applicable": 0}
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -126,6 +216,10 @@ def check_rows(data: object, discovered: set[str], bench_workflow: str) -> tuple
             if (route, status) != ("none", "not applicable") or not zen5.get("reason"):
                 errors.append(f"{name}: a {entry['validation']} row is not applicable with a reason and no route")
             counts["not_applicable"] += 1
+        elif route == NATIVE_ROUTE or status == NATIVE_STATUS:
+            problems = check_native_row(name, zen5, read)
+            errors.extend(problems)
+            counts["native_informative"] += not problems
         elif route == "none":
             claim = zen5.get("claim_route")
             if status != "NOT VALIDATED" or not zen5.get("resolution"):
@@ -210,6 +304,42 @@ def main() -> int:
     ):
         if (not check_rows(inventory, found, bench)[0]) != expected:
             errors.append("self-check failed: " + label)
+    native_files = {
+        ".github/workflows/native.yml": NATIVE_WORKFLOW,
+        ".github/workflows/linux.yml": NATIVE_WORKFLOW.replace("runs-on: macos-26", "runs-on: ubuntu-26.04"),
+        ".github/workflows/matrix.yml": NATIVE_WORKFLOW.replace("runs-on: macos-26", "runs-on: ${{ matrix.os }}"),
+        ".github/workflows/selfhosted.yml": NATIVE_WORKFLOW.replace("runs-on: macos-26", "runs-on: [self-hosted, macos-26]"),
+        ".github/workflows/open-alert.yml": NATIVE_WORKFLOW.replace(" && github.ref == 'refs/heads/main'", ""),
+        ".github/workflows/writer.yml": NATIVE_WORKFLOW.replace("    runs-on: macos-26\n",
+                                                                 "    runs-on: macos-26\n    permissions:\n      issues: write\n"),
+        ".github/workflows/silent.yml": NATIVE_WORKFLOW.replace(" --publish-issue", ""),
+        NATIVE_CONSUMER: "consumer", "docs/guide.md": "# Guide\n\n## Native hosted timing\n",
+    }
+    native = {"route": NATIVE_ROUTE, "status": NATIVE_STATUS, "platform": "macos", "job": "timing",
+              "consumer": NATIVE_CONSUMER, "alert": "docs/guide.md#native-hosted-timing", "resolution": "r"}
+    workflow_row = {"id": "workflow:native.yml", "validation": "performance", "measures": "m", "zen5": native}
+    for label, zen5, workflow, expected in (
+        ("a native hosted macOS row passes", native, "native.yml", True),
+        ("a Linux timing job cannot be native-informative", native, "linux.yml", False),
+        ("a matrix-selected runner cannot be native-informative", native, "matrix.yml", False),
+        ("a self-hosted runner cannot be native-informative", native, "selfhosted.yml", False),
+        ("a Linux platform cannot be native-informative", dict(native, platform="linux"), "native.yml", False),
+        ("the platform must match the runner", dict(native, platform="windows"), "native.yml", False),
+        ("a missing job fails", dict(native, job="absent"), "native.yml", False),
+        ("a missing workflow fails", native, "absent.yml", False),
+        ("an alert job not gated to main fails", native, "open-alert.yml", False),
+        ("issues: write in the timing job fails", native, "writer.yml", False),
+        ("an alert job that publishes nothing fails", native, "silent.yml", False),
+        ("an undocumented alert fails", dict(native, alert="docs/guide.md#missing"), "native.yml", False),
+        ("another consumer fails", dict(native, consumer="tools/bench_direct/authorize.py"), "native.yml", False),
+        ("the native status needs its route", dict(native, route="none"), "native.yml", False),
+        ("the native route needs its status", dict(native, status="covered"), "native.yml", False),
+    ):
+        inventory = {"schema": "buster-performance-validation-v1",
+                     "entries": [dict(workflow_row, id="workflow:" + workflow, zen5=zen5)]}
+        problems, tallies = check_rows(inventory, {"workflow:" + workflow}, bench, lambda path: native_files.get(path, ""))
+        if (not problems) != expected or (expected and (tallies["covered"], tallies["native_informative"]) != (0, 1)):
+            errors.append("self-check failed: " + label)
     profile_rows = [{"id": name, "validation": "performance", "measures": "m",
                      "zen5": {"route": "pull-compare", "status": "covered", "consumer": "publisher.py"}}
                     for name in PROFILE_ROWS]
@@ -235,7 +365,8 @@ def main() -> int:
         print("PERFORMANCE_INVENTORY_FAIL " + error, file=sys.stderr)
     if not errors:
         print("PERFORMANCE_INVENTORY_PASS covered={covered} not_validated={not_validated} no_route={no_route} "
-              "not_applicable={not_applicable}; performance validation is complete only for covered entries".format(**counts))
+              "native_informative={native_informative} not_applicable={not_applicable}; performance validation is "
+              "complete only for covered entries, and native-informative timing is never Zen 5 evidence".format(**counts))
     return 1 if errors else 0
 
 

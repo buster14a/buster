@@ -534,7 +534,10 @@ captures (#2741).
   either a 9700X route with the consumer that checks its evidence, or an
   explicit `NOT VALIDATED` with a resolution and a `claim_route`: the existing
   9700X route a claim about it must use instead, or `none` for a visible gap
-  with no Zen 5 route yet. A tool that includes `<buster/...>` headers cannot
+  with no Zen 5 route yet. Native macOS and Windows timing is the one
+  exception: it is `native-informative` on route `hosted-native`, counted
+  separately, never covered and never Zen 5 evidence (see
+  [Native hosted timing](#native-hosted-timing)). A tool that includes `<buster/...>` headers cannot
   claim the direct-workload route, because each workload is compiled alone
   against system headers. `tools/bench_direct/performance_inventory_test.py`
   (part of the required benchmark policy check) discovers entry points from
@@ -734,6 +737,80 @@ captures (#2741).
   same process. Confirm the extracted return addresses too — each one must
   disassemble to the instruction immediately after a `call` to the callee the
   callchain names (`objdump -d --start-address=... --stop-address=...`).
+
+## Native hosted timing
+
+**These results are not Zen 5 evidence.** They never satisfy, replace or
+support a performance-validation claim, and they never fail a check. Zen 5
+measurements do not establish macOS or Windows performance, and the approved
+9700X cannot run either platform. The maintainer's decision on #2761
+(2026-10-11) is that native timing runs on the standard GitHub-hosted runners,
+is informative only, and stays visible through a warning and a tracking issue.
+
+The two rows in
+[`docs/performance-validation-v1.json`](../performance-validation-v1.json) are
+`native-informative` on route `hosted-native`:
+
+| Row | Measuring job | Comparison | Runs |
+|---|---|---|---|
+| `workflow:throughput-harness-macos.yml` | `timing` on `macos-26` | The existing `bench_throughput_ci` guard: two predeclared 20-pair rounds per case, with a case confirmed only when it crosses the margin in both rounds | Weekly schedule (main against its first-parent commit from 7 days earlier) and dispatch (optional `baseline`). Never on a pull request, so the scarce macOS runner is not held for every harness change |
+| `workflow:issue-708-benchmark.yml` | `benchmark` on `windows-2025` | Each of three trials times the baseline and candidate `test_all_combinations_ci` matrix on one VM. A trial crosses when the candidate exceeds the baseline by the guard's wall-time margins (15% and 2 ms); a majority of trials crossing is a regression, a minority is inconclusive | Dispatch with `baseline` and `candidate`; the `bench/708-baseline` pull-request route keeps its existing defaults |
+
+On macOS, `bench_throughput_ci` omits `--cpu auto`, because macOS has no CPU
+affinity API. The macOS samples are therefore unpinned.
+
+`tools/bench_direct/native_timing.py` reads each workflow's existing output.
+It reports, in its step summary, the cell (case or trial), the
+candidate/baseline ratio, both commits and the run link. No new statistic is
+involved: the macOS ratio is the geometric mean of the two rounds' median
+paired ratios, as in the guard's `summary.md`.
+
+| Outcome | Check | Visibility |
+|---|---|---|
+| Regression | Passes | `::warning::` annotation, step-summary line, tracking issue (trusted runs only) |
+| Inconclusive | Passes | `::warning::` annotation and step-summary line; no issue |
+| No regression | Passes | Step-summary line |
+| Build failure, crash, failed or missing arm, malformed, partial or inconsistent samples, or any guard exit other than 0 or 1 consistent with its counted regressions | **Fails** (exit 2) | `::error::` annotation |
+
+### Alert path
+
+Each platform has one open tracking issue, titled
+`Native hosted timing regression: macOS (throughput-harness-macos.yml)` or
+`Native hosted timing regression: Windows (issue-708-benchmark.yml)`. It is
+authored by `github-actions[bot]` and carries the marker
+`<!-- native-hosted-timing platform=... -->`. The first regression opens it.
+Each later regression adds a comment with the run, commit, cells and ratios.
+Close the issue once the regression is explained or fixed; the next regression
+opens a new one.
+
+Only a separate `alert` job holds `issues: write`, alongside `contents: read`
+and `actions: read`. It runs only when all of these hold:
+
+- the measured verdict is `regression`;
+- the repository is `buster14a/buster`;
+- the ref is `refs/heads/main`;
+- the event is the macOS schedule or dispatch, or a Windows dispatch;
+- `demonstrate_regression` is not set.
+
+It checks out the trusted `main` revision and downloads only its own run's
+artifact. It then re-derives the verdict from the raw evidence before
+publishing. The measuring jobs, which compile and run both revisions, stay
+read-only. A pull-request run, including the Windows `bench/708-baseline` route,
+never files or updates an issue.
+
+The `demonstrate_regression` dispatch input exercises the warning path without
+a real regression. On Windows it doubles the candidate durations before the
+rule is applied. On macOS it confirms the case with the highest wall-time
+ratio. The report is labelled a demonstration, and the alert job never runs.
+
+`performance_inventory_test.py` accepts `native-informative` only for a macOS
+or Windows workflow row whose `job` runs on one literal GitHub-hosted `macos-*`
+or `windows-*` label matching its `platform`. A Linux, matrix-selected or
+self-hosted timing job cannot use the status to avoid the 9700X rule. The test
+also requires that the workflow report through `native_timing.py`, that one
+separate main-gated job publish through it, and that the row's `alert` link a
+heading in this guide. `native_timing_test.py` pins the analysis, the issue
+publisher and both workflows' report-only and alert steps.
 
 ## Benchmarking a compiler change (A/B)
 
