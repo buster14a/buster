@@ -41,6 +41,12 @@
 #include <buster/lib/string.h>
 #include <buster/lib/integer.h>
 
+// A System V stack aggregate capture emits two MIR rows and one temporary
+// per eightbyte, outside the canonical-IR scratch estimate. Bound the combined
+// entry expansion to 131072 rows / 65536 temporaries before building MIR.
+// Larger signatures need a bounded block-copy lowering instead (#3677).
+#define MACHINE_X64_INCOMING_AGGREGATE_PART_LIMIT 65536u
+
 // The register shape of one argument or result under the subset: scalar
 // values occupy one integer register; small integer-class aggregates occupy
 // one or two, with the part offsets taken from the IR-owned System V
@@ -8044,6 +8050,18 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_canonical_layout_block(u32 const* layout, u3
     return layout ? layout[layout_index] : layout_index;
 }
 
+// Count every direct aggregate conservatively before register assignment;
+// register-passed aggregates consume the same small budget even if they need
+// no stack capture. Indirect and vector images use separate bounded MIR rows.
+BUSTER_GLOBAL_LOCAL bool machine_x64_incoming_aggregate_fits(MachineX64ValueShape const* shape, u64* parts)
+{
+    if (shape->aggregate && !shape->indirect && !shape->vector)
+    {
+        *parts += shape->byte_size / 8u;
+    }
+    return *parts <= MACHINE_X64_INCOMING_AGGREGATE_PART_LIMIT;
+}
+
 MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                               bool position_independent, bool assume_validated,
                                                               bool preserve_debug_values, MachineSelectionModule* module)
@@ -8076,11 +8094,13 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     u32 signature_integer_count = signature_return_shape.indirect ? 1 : 0;
     u32 signature_float_count = signature_return_shape.indirect && windows_abi ? 1 : 0;
     u32 signature_stack_count = 0;
+    u64 signature_aggregate_parts = 0;
     for (u32 parameter_index = 0; parameter_index < function_type->parameter_count; parameter_index += 1)
     {
         if (!machine_x64_value_shape(program, function_type->parameter_types[parameter_index], IR_ABI_USE_ARGUMENT, target,
                                      signature_parameter_shapes + parameter_index) ||
-            !machine_x64_argument_area_fits(signature_parameter_shapes + parameter_index, signature_stack_count))
+            !machine_x64_argument_area_fits(signature_parameter_shapes + parameter_index, signature_stack_count) ||
+            !machine_x64_incoming_aggregate_fits(signature_parameter_shapes + parameter_index, &signature_aggregate_parts))
         {
             return result;
         }

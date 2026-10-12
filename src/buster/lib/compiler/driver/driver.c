@@ -65,6 +65,8 @@
 // The test-only compiler_driver_test_setup_order observer checks completed
 // setup against real serial unit boundaries without comparing wall times.
 // archive.c owns indexed archive extraction and its pass-ordered worklist.
+// compiler_driver_archive_read_failure formats archive read refusals with the
+// reader's member attribution.
 // compiler_driver_elf_library_roots and compiler_driver_mach_library_roots
 // share target/sysroot search roots with static-library lookup; explicit -L
 // roots come first. compiler_driver_mach_library_locate resolves Apple dylibs
@@ -1104,6 +1106,41 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_consume_linker_verbose(Arena* arena, Co
     }
 }
 
+// Names must be nonempty independently of the missing-lookup name sentinel.
+// Embedding callers bypass argv parsing, so validate their lists here too.
+BUSTER_GLOBAL_LOCAL void compiler_driver_validate_dependency_names(Arena* arena, CompilerDriverInvocation* invocation)
+{
+    // Count admission precedes all array reads, including a linker query.
+    u64 library_count = (u64)invocation->library_count + invocation->framework_count;
+    u32 library_reserve = invocation->target.os == OPERATING_SYSTEM_WINDOWS ? 8u : invocation->target.os == OPERATING_SYSTEM_LINUX ? COMPILER_DRIVER_ELF_SCRIPT_MEMBERS + 3u : 0u;
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE &&
+        (library_count >= (u64)UINT32_MAX - library_reserve || invocation->library_path_count > UINT32_MAX - 9u))
+    {
+        invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation->diagnostic = S8("native library counts exceed driver limits");
+    }
+    if (invocation->error == COMPILER_DRIVER_ERROR_NONE &&
+        ((invocation->library_count && !invocation->libraries) || (invocation->framework_count && !invocation->frameworks)))
+    {
+        compiler_driver_argument_error(arena, invocation, S8("missing dependency name storage after {S8}"),
+                                       invocation->library_count && !invocation->libraries ? S8("-l") : S8("-framework"));
+    }
+    for (u32 index = 0; invocation->error == COMPILER_DRIVER_ERROR_NONE && index < invocation->library_count; index += 1)
+    {
+        if (!invocation->libraries[index].length)
+        {
+            compiler_driver_argument_error(arena, invocation, S8("empty dependency name after {S8}"), S8("-l"));
+        }
+    }
+    for (u32 index = 0; invocation->error == COMPILER_DRIVER_ERROR_NONE && index < invocation->framework_count; index += 1)
+    {
+        if (!invocation->frameworks[index].length)
+        {
+            compiler_driver_argument_error(arena, invocation, S8("empty dependency name after {S8}"), S8("-framework"));
+        }
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_request(Arena* arena, CompilerDriverInvocation* invocation)
 {
     if (invocation->error == COMPILER_DRIVER_ERROR_NONE && invocation->macro_prefix_map_count &&
@@ -1116,6 +1153,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_request(Arena* arena, Compiler
     {
         compiler_driver_reject_gpu_native_options(arena, invocation, 0, 0);
     }
+    compiler_driver_validate_dependency_names(arena, invocation);
     compiler_driver_validate_codegen_request(invocation, false);
     compiler_driver_validate_dependency_request(arena, invocation);
     compiler_driver_validate_linker_query(invocation);
@@ -2425,6 +2463,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 break;
             }
             String8 value = arguments.pointer[++argument_index];
+            if (!value.length && (string_equal(argument, S8("-l")) || string_equal(argument, S8("-framework"))))
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("empty dependency name after {S8}"), argument);
+                break;
+            }
             if (string_equal(argument, S8("-o")))
             {
                 invocation.output_path = value;
@@ -6086,6 +6129,15 @@ struct CompilerDriverCpuRuntime
     u32 reserved;
 };
 
+// An archive refused while reading its descriptors names the failing member
+// when the reader attributed one, such as an unindexed member whose symbol
+// table cannot be read.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_archive_read_failure(Arena* arena, String8 path, ObjectArchive* archive)
+{
+    return archive->diagnostic.length ? string_format(arena, S8("could not read archive {S8}: {S8}"), path, archive->diagnostic)
+                                      : string_format(arena, S8("could not read archive {S8}: error {u32}"), path, (u32)archive->error);
+}
+
 // Like `-lgcc` at the end of GCC's link line, but narrower: only a remaining
 // strong reference to the target's CPU-feature runtime reads libgcc.a, and
 // only the members defining those names are selected, so every other link and
@@ -6116,7 +6168,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverCpuRuntime compiler_driver_elf_cpu_runtime(Are
         else if (archive.error != OBJECT_ERROR_NONE || archive.object_count > UINT32_MAX - object_count)
         {
             result.symbol = missing;
-            result.diagnostic = string_format(arena, S8("could not read archive {S8}: error {u32}"), path, (u32)archive.error);
+            result.diagnostic = compiler_driver_archive_read_failure(arena, path, &archive);
         }
         else
         {
@@ -7773,7 +7825,21 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
     {
         metrics->function_symbol_limit = object.symbol_count;
     }
-    compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result, metrics);
+    // Every declared section is its own COFF or Mach-O section, so a file
+    // with more than the format can number is refused here, naming the first
+    // section past the limit, rather than by the writer's capacity check.
+    ObjectFormat format = object_format_for_target(invocation.target);
+    u32 section_limit = format == OBJECT_FORMAT_COFF ? OBJECT_COFF_MAX_SECTIONS : format == OBJECT_FORMAT_MACH_O64 ? OBJECT_MACH_O_MAX_SECTIONS : UINT32_MAX;
+    if (invocation.action == COMPILER_DRIVER_ACTION_OBJECT && unit.section_count > section_limit)
+    {
+        result.error = COMPILER_DRIVER_ERROR_OBJECT;
+        result.diagnostic = string_format(arena, S8("{S8}: section '{S8}' is section {u32} of {u32}; a {S8} object holds at most {u32} sections"), path,
+                                          unit.sections[section_limit].name, section_limit + 1, unit.section_count, object_format_name(format), section_limit);
+    }
+    else
+    {
+        compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result, metrics);
+    }
     return result;
 }
 
@@ -8269,8 +8335,11 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                     .pin_debug_locals = invocation.debug_info &&
                                                                                         (!invocation.pinned_debug_locals_explicit ||
                                                                                          invocation.enable_pinned_debug_locals),
+                                                                    // Lowering reads root conditionals and statement extents
+                                                                    // from the pilot's tree; it is released at `end:`, after lowering.
                                                                     .syntax_tree = pilot_tree_built ? &pilot_tree : 0,
-                                                                    .ast_lower_statistics = pilot_tree_built ? &result.c_ast.lower : 0});
+                                                                    .ast_lower_statistics = pilot_tree_built ? &result.c_ast.lower : 0,
+                                                                    .syntax_tree_extent_statistics = pilot_tree_built ? &result.c_ast.extents : 0});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     result.type_layout = lowered.type_layout;
@@ -9670,16 +9739,6 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             goto finish;
         }
     }
-    // Count both explicit entries and the target's defaults before any source
-    // read, fast-path allocation or lookup; export maps also reserve libc.
-    u64 library_count = (u64)invocation.library_count + invocation.framework_count;
-    u32 library_reserve = invocation.target.os == OPERATING_SYSTEM_WINDOWS ? 8u : invocation.target.os == OPERATING_SYSTEM_LINUX ? COMPILER_DRIVER_ELF_SCRIPT_MEMBERS + 3u : 0u;
-    if (library_count >= (u64)UINT32_MAX - library_reserve || invocation.library_path_count > UINT32_MAX - 9u)
-    {
-        result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-        result.diagnostic = S8("native library counts exceed driver limits");
-        goto finish;
-    }
     // The digest covers every structured record, and function sizes are a
     // refinement of a measurement, so neither may be silently empty.
     if ((measure && invocation.suppress_diagnostic_records) || (invocation.collect_function_sizes && !measure))
@@ -9986,7 +10045,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         if (input_archives[input_index].error != OBJECT_ERROR_NONE || input_archives[input_index].object_count > UINT32_MAX - object_capacity)
         {
             compiler_driver_fail_input(&result, inputs, input_index, COMPILER_DRIVER_ERROR_OBJECT, input_archives[input_index].error,
-                                          string_format(arena, S8("could not read archive {S8}: error {u32}"), input_path, (u32)input_archives[input_index].error));
+                                          compiler_driver_archive_read_failure(arena, input_path, &input_archives[input_index]));
             goto finish;
         }
         object_capacity += input_archives[input_index].object_count;
@@ -10018,7 +10077,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             result.error = COMPILER_DRIVER_ERROR_OBJECT;
             result.object_error = archive.error;
-            result.diagnostic = string_format(arena, S8("could not read archive {S8}: error {u32}"), archive_path, (u32)archive.error);
+            result.diagnostic = compiler_driver_archive_read_failure(arena, archive_path, &archive);
             goto finish;
         }
         object_capacity += archive.object_count;
@@ -10346,6 +10405,20 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             result.c_ast.statements.reason = unit.c_ast.statements.reason;
             result.c_ast.statements.fallback_token = unit.c_ast.statements.fallback_token;
+        }
+        result.c_ast.extents.bodies += unit.c_ast.extents.bodies;
+        result.c_ast.extents.entries += unit.c_ast.extents.entries;
+        result.c_ast.extents.entry_declines += unit.c_ast.extents.entry_declines;
+        result.c_ast.extents.answers += unit.c_ast.extents.answers;
+        for (u32 reason = 0; reason < C_AST_EXTENT_FALLBACK_COUNT; reason += 1)
+        {
+            result.c_ast.extents.walked[reason] += unit.c_ast.extents.walked[reason];
+            result.c_ast.extents.body_fallbacks[reason] += unit.c_ast.extents.body_fallbacks[reason];
+        }
+        if (unit.c_ast.extents.reason)
+        {
+            result.c_ast.extents.reason = unit.c_ast.extents.reason;
+            result.c_ast.extents.fallback_token = unit.c_ast.extents.fallback_token;
         }
         result.c_ast.lower.bodies += unit.c_ast.lower.bodies;
         result.c_ast.lower.conditionals += unit.c_ast.lower.conditionals;

@@ -785,6 +785,17 @@ request from assembly, an external ELF object or a selected archive member
 with a diagnostic naming that input; it publishes no image. Inputs with no
 note remain accepted as nonexecuting. See [object emission](../object-emission.md).
 
+Every section an assembly file declares is its own object section, in
+declaration order, on every format: thousands on ELF, up to 65,279 on COFF
+(`OBJECT_COFF_MAX_SECTIONS`) and 255 on Mach-O (`OBJECT_MACH_O_MAX_SECTIONS`).
+ELF and COFF keep each section's own name; the Mach-O writer spells each one
+by its kind (`__TEXT,__text`, `__TEXT,__const`, ...), so several sections may
+share a name there while keeping their own contents and relocations. Past a format's limit, `-c` refuses with the
+first section that does not fit (`section '.text$f255' is section 256 of 256;
+a mach-o64 object holds at most 255 sections`). Only a section whose kind is
+an initializer array takes COFF's `.CRT$XCU`/`.CRT$XTX` name.
+`compiler_driver_test_assembly_many_object_sections` covers this.
+
 The x86-64 instruction layer accepts the GNU spellings that GCC and Clang
 listings and Buster's own `-S` output use, encoding the same bytes as GNU as:
 register-immediate `movabs`/`movabsq`; AT&T `retq` and `callq`; `endbr32` and
@@ -1221,10 +1232,24 @@ and COFF members count their forms of the same definitions -- external `N_ABS`,
 `N_INDR` and `IMAGE_SYM_ABSOLUTE` symbols, and commons (an undefined external with a
 non-zero value) -- the same way (#1243).
 
+An unindexed archive is accepted, unlike GNU ld's "archive has no index", but
+every member's symbol table must be readable. Selection walks members in archive
+order, so skipping an unreadable member could let a later member satisfy a symbol
+the skipped one defines first and silently change the link. One unreadable
+member therefore rejects the whole archive, even when the link would select only
+other members: `object_archive_read_link` sets `failed_member` and a diagnostic
+naming the member, and the driver reports `could not read archive <path>: member
+<name>: unreadable symbol table in an archive without a symbol index`. Running
+`ranlib` over the archive defers the member's validation to selection, as for any
+indexed archive (#1319).
+
 `compiler_driver_archive_test_lazy` exercises all three object formats, 32/64-bit
 GNU and BSD indexes, BSD extended names, unindexed input, transitive dependencies,
 no-selected-member archives, a required incompatible member, duplicate providers,
-weak references and repeated occurrences. A separate valid ELF `R_X86_64_SIZE64`
+weak references and repeated occurrences.
+`compiler_driver_archive_test_unindexed_unreadable_member` covers the unindexed
+refusal through the reader and both positional and `-l` driver inputs, with an
+indexed control that selects the valid member and leaves the bad one unread. A separate valid ELF `R_X86_64_SIZE64`
 control verifies that an irrelevant same-target unsupported relocation is deferred
 and its selected member still fails.
 
@@ -1321,6 +1346,15 @@ NUL are refused. Ambiguous duplicate identity fields
 and overlapping target-specific metadata are refused. `compiler_driver_test_mach_library_search` covers parser bounds,
 architecture selection, search order, versions, fallback, refusal and archive
 interaction on every host without running the cross-linked image.
+
+Dependency names passed through `-l NAME` or `-framework NAME` must be
+nonempty. An explicitly empty operand is a `driver.argument` error naming the
+option before any source is read or output is published; response files and
+embedding invocations follow the same rule. A missing operand retains its
+separate `missing argument after OPTION` diagnostic. Empty `-I`/`-L` path
+policy is independent. `compiler_driver_test_empty_dependency_names` covers
+macOS/iOS, single/multiple inputs, an empty request followed by a missing name,
+argv/response/API calls, and preservation of existing output.
 
 `-framework NAME` searches every explicit `-F` root in order, then
 `<sysroot>/System/Library/Frameworks`, or `/System/Library/Frameworks` when
