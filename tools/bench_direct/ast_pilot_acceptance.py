@@ -28,7 +28,7 @@ import sys
 import time
 
 from compiler_receipt import (AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_ACCEPTANCE_SCHEMA, AST_PILOT_CELLS,
-                              AST_PILOT_COMPILE, AST_PILOT_FLAG, ast_pilot_budget_verdict)
+                              AST_PILOT_COMPILE, AST_PILOT_FLAG, _finite_positive, ast_pilot_budget_verdict)
 from inline_acceptance import git, hash_inputs, sha256
 
 PAIRS = AST_PILOT_ACCEPTANCE_PROFILE["pairs"]
@@ -93,7 +93,7 @@ def validate_probe(probe: object) -> dict:
 
 
 def _positive_number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value and 0 < value < float("inf")
+    return _finite_positive(value)
 
 
 def validate_documents(cell: str, summary: dict, meta: dict, labs: dict, expected_sha: str) -> dict:

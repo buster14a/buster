@@ -2942,8 +2942,15 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         if (string_equal(argument, S8("-fcanonical-fast")) || string_equal(argument, S8("-fno-canonical-fast")))
         {
+            // The whole-pipeline controls select the adopted recipe or nothing;
+            // they also clear an earlier opt-in -fcanonical-fast-cse.
             invocation.fast_passes = string_equal(argument, S8("-fcanonical-fast")) ? IR_FAST_ALL : 0;
-            fast_override_mask = IR_FAST_ALL;
+            fast_override_mask = IR_FAST_PASS_MASK;
+            continue;
+        }
+        if (string_equal(argument, S8("-fcanonical-fast-cse-strategy=window")) || string_equal(argument, S8("-fcanonical-fast-cse-strategy=table")))
+        {
+            invocation.fast_cse_window = string_equal(argument, S8("-fcanonical-fast-cse-strategy=window"));
             continue;
         }
         if (string_equal(argument, S8("-ftime-canonical-fast")))
@@ -8826,6 +8833,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion || lowered.program->pin_debug_locals;
     lowered.program->fast_passes = invocation.fast_passes;
     lowered.program->measure_fast_passes = invocation.measure_fast_passes;
+    lowered.program->fast_cse_window = invocation.fast_cse_window;
     lowered.program->inline_options = invocation.inline_options;
     WORK_LEDGER_PHASE(PREPARE);
     IrValidationResult validation = ir_prepare_canonical_module(lowered.program, module,
@@ -11005,6 +11013,18 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.fast.passes[pass].visits += unit.fast.passes[pass].visits;
             result.fast.passes[pass].changes += unit.fast.passes[pass].changes;
         }
+        result.fast.cse.blocks += unit.fast.cse.blocks;
+        result.fast.cse.candidates += unit.fast.cse.candidates;
+        result.fast.cse.hits += unit.fast.cse.hits;
+        result.fast.cse.window_hits += unit.fast.cse.window_hits;
+        result.fast.cse.commuted_hits += unit.fast.cse.commuted_hits;
+        result.fast.cse.constant_hits += unit.fast.cse.constant_hits;
+        result.fast.cse.probes += unit.fast.cse.probes;
+        result.fast.cse.collisions += unit.fast.cse.collisions;
+        result.fast.cse.metadata_declines += unit.fast.cse.metadata_declines;
+        result.fast.cse.saturation_declines += unit.fast.cse.saturation_declines;
+        result.fast.cse.table_bytes += unit.fast.cse.table_bytes;
+        result.fast.cse.max_block_candidates = BUSTER_MAX(result.fast.cse.max_block_candidates, unit.fast.cse.max_block_candidates);
         result.fast.functions += unit.fast.functions;
         result.fast.validation_skips += unit.fast.validation_skips;
         compiler_driver_merge_fast_declines(arena, &result.fast, &unit.fast, invocation.input_paths[input_index], &fast_decline_capacity);
@@ -11026,6 +11046,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.inlining.linkage_skips += unit.inlining.linkage_skips;
         result.inlining.recursion_skips += unit.inlining.recursion_skips;
         result.inlining.visits += unit.inlining.visits;
+        result.inlining.released_bytes += unit.inlining.released_bytes;
         if (result.inlining.required_budget_reason == IR_INLINE_BUDGET_NONE &&
             unit.inlining.required_budget_reason != IR_INLINE_BUDGET_NONE)
         {

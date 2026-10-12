@@ -2887,6 +2887,18 @@ class HarnessTest(unittest.TestCase):
         self.assertIn("unsupported historical throughput harness",
                       compiler_compare.throughput_harness_problem(root, historical))
 
+    def test_native_evidence_inventory_matches_the_receipt_contract(self) -> None:
+        # tools/compiler_evidence.c derives required raw members from the same admitted profiles (#2918).
+        import re
+        source = (Path(__file__).resolve().parents[2] / "tools" / "compiler_evidence.c").read_text()
+        table = re.search(r"compiler_evidence_workloads\[\] = \{(.*?)\};", source, re.S)
+        self.assertIsNotNone(table)
+        self.assertEqual(re.findall(r'S8_INITIALIZER\("([^"]+)"\)', table.group(1)), compiler_receipt.THROUGHPUT_PROFILE["workloads"])
+        self.assertIn(f'#define COMPILER_EVIDENCE_HARNESS_REVISION "{compiler_receipt.THROUGHPUT_HISTORICAL_HARNESS_REVISION}"', source)
+        for name in (compiler_receipt.PROFILE["name"], compiler_receipt.THROUGHPUT_PROFILE["name"],
+                     compiler_receipt.THROUGHPUT_HISTORICAL_PROFILE["name"]):
+            self.assertIn(f'S8("{name}")', source)
+
     def historical_fixture(self, extra_lines: tuple[str, ...] = ()) -> tuple[str, str, str]:
         """(pinned harness commit, head commit, head tree) for the #3714 historical recipe.
 
@@ -5946,6 +5958,463 @@ class WildLinkerTest(unittest.TestCase):
             # The mocked harness wrote nothing, so publication evidence is refused.
             self.assertEqual(record["status"], "failed")
             self.assertTrue(any("wild-linker evidence lacks" in error for error in record["errors"]), record["errors"])
+
+
+class OutOfRangeEvidenceNumberTest(unittest.TestCase):
+    """#3675: a JSON integer past the float range fails the check instead of raising OverflowError."""
+
+    HUGE = 10 ** 309
+
+    def inline_summary(self, **wall: object) -> dict:
+        stage = {"metrics": {
+            "wall": {"a_median": 1.0, "b_median": 1.0, "ratio": 1.0, **wall},
+            "instructions": {"a_median": 10.0, "b_median": 10.0, "ratio": 1.0},
+            "counter_availability": {"perf_stat": True, "reason": "usable"},
+            "peak_rss": {"ratio": 1.0},
+            "code_bytes": {"a_value": 100, "b_value": 100, "ratio": 1.0}}}
+        return {"schema": compiler_receipt.INLINE_ACCEPTANCE_SCHEMA, "status": "complete", "source_revision": "a" * 40,
+                "profile": {**compiler_receipt.INLINE_ACCEPTANCE_PROFILE, "source_sha256": "b" * 64, "cpu": 2},
+                "candidate_compiler": {"sha256": "c" * 64, "size_bytes": 1},
+                "fixed_point": {"off": True, "on": True}, "stage1": stage, "selfhost_runtime": copy.deepcopy(stage)}
+
+    def test_predicates_refuse_out_of_range_integers_and_accept_normal_values(self) -> None:
+        huge = self.HUGE
+        for predicate in (compiler_receipt._finite_positive, inline_acceptance._positive_number,
+                          ast_pilot_acceptance._positive_number):
+            with self.subTest(predicate=predicate.__module__):
+                self.assertFalse(predicate(huge))
+                self.assertFalse(predicate(-huge))
+                self.assertTrue(predicate(1))
+                self.assertTrue(predicate(0.5))
+        self.assertEqual(compiler_receipt.number(huge, "%.4f"), "NA")
+        self.assertEqual(compiler_receipt.number(1.25, "%.4f"), "1.2500")
+        self.assertEqual(compiler_receipt.number(3, "%.1f"), "3.0")
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            compiler_publish.campaign_ppm(1, huge)
+        self.assertEqual(compiler_publish.campaign_ppm(1.0, 1.0)[:2], (0, 0))
+
+        self.assertEqual(compiler_receipt.validate_inline_acceptance(self.inline_summary(), "a" * 40, "c" * 64), [])
+        for key in ("a_median", "b_median", "ratio"):
+            with self.subTest(inline=key):
+                problems = compiler_receipt.validate_inline_acceptance(self.inline_summary(**{key: huge}), "a" * 40, "c" * 64)
+                self.assertTrue(any("wall-time measurements are missing" in problem for problem in problems), problems)
+        changed = self.inline_summary()
+        changed["stage1"]["metrics"]["code_bytes"]["ratio"] = huge
+        self.assertTrue(compiler_receipt.validate_inline_acceptance(changed, "a" * 40, "c" * 64))
+        changed = self.inline_summary()
+        changed["stage1"]["metrics"]["instructions"]["ratio"] = huge
+        self.assertTrue(compiler_receipt.validate_inline_acceptance(changed, "a" * 40, "c" * 64))
+
+        unused_record, unused_bundle, acceptance = ast_pilot_evidence()
+        self.assertEqual(compiler_receipt.validate_ast_pilot_acceptance(acceptance, "a" * 40, "c" * 64), [])
+        for metric, key in (("wall", "ratio"), ("peak_rss", "b_median"), ("instructions", "a_median")):
+            changed = copy.deepcopy(acceptance)
+            changed["cells"]["object"]["metrics"][metric][key] = huge
+            with self.subTest(ast_pilot=metric):
+                self.assertTrue(compiler_receipt.validate_ast_pilot_acceptance(changed, "a" * 40, "c" * 64))
+        changed = copy.deepcopy(acceptance)
+        changed["tree"]["retained_bytes"] = huge
+        problems = compiler_receipt.validate_ast_pilot_acceptance(changed, "a" * 40, "c" * 64)
+        self.assertTrue(any("tree retained bytes are missing" in problem for problem in problems), problems)
+
+        self.assertEqual(compiler_receipt.classify(summary(), BINARIES), [])
+        for key in ("ratio", "ci_low", "ci_high"):
+            lab = summary()
+            lab["verdict"][key] = huge
+            lab["metrics"]["wall"][key] = huge
+            with self.subTest(verdict=key):
+                reasons = compiler_receipt.classify(lab, BINARIES)
+                self.assertTrue(any("not a finite positive ratio" in reason for reason in reasons), reasons)
+
+        good = corpus()
+        self.assertNotIn("throughput report-only family_alpha does not match the original gate",
+                         compiler_receipt.classify_throughput_exit(0, good["summary"], good["metadata"], BINARIES))
+        good["summary"]["family_alpha"] = huge
+        self.assertIn("throughput report-only family_alpha does not match the original gate",
+                      compiler_receipt.classify_throughput_exit(0, good["summary"], good["metadata"], BINARIES))
+
+    def publish(self, pull: dict, lab: dict, bundle: dict | None = None) -> tuple:
+        """ZIP -> read_evidence -> decide (then render), as the ordinary publisher runs it."""
+        members = {"receipt.json": json.dumps(pull), "lab/summary.json": json.dumps(lab),
+                   "throughput/summary.json": json.dumps(corpus()["summary"]),
+                   "throughput/metadata.json": json.dumps(corpus()["metadata"])}
+        for key, value in (bundle or {}).items():
+            members[compiler_publish.AST_PILOT_BUNDLE_FILES[key]] = json.dumps(value)
+        read, summary_read, problem, unused_artifact, throughput = compiler_publish.read_evidence(
+            FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+        self.assertEqual(problem, "")
+        decision = compiler_publish.decide(dict(EXPECTED, mode=pull["mode"]), True, "success", read, summary_read, "",
+                                           throughput)
+        compiler_receipt.render(read, summary_read, decision[0], decision[2])
+        return decision
+
+    def test_out_of_range_lab_summary_fails_through_publication(self) -> None:
+        main = receipt()
+        self.assertEqual(self.publish(main, summary())[0], "success")
+        verdict = summary()
+        verdict["verdict"]["ratio"] = self.HUGE
+        verdict["metrics"]["wall"]["ratio"] = self.HUGE
+        metric = summary()
+        metric["verdict"]["ci_high"] = self.HUGE
+        for name, lab in (("verdict ratio", verdict), ("wall ci_high", metric)):
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = self.publish(main, lab)
+                self.assertEqual(conclusion, "failure", reasons)
+                self.assertTrue(any("not a finite positive ratio" in reason for reason in reasons), reasons)
+
+    def test_out_of_range_ast_pilot_receipt_fails_through_publication(self) -> None:
+        record, bundle, unused_acceptance = ast_pilot_evidence("a" * 40, B256)
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["ast_pilot_acceptance"] = record
+        self.assertEqual(self.publish(pull, summary(), bundle)[:3:2], ("success", []))
+
+        def changed(path: tuple, raw: bool) -> tuple[dict, dict]:
+            current, documents = copy.deepcopy(pull), copy.deepcopy(bundle)
+            targets = [current["ast_pilot_acceptance"]["summary"], documents["acceptance"]]
+            if raw:
+                targets = [documents]
+            for target in targets:
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = self.HUGE
+            return current, documents
+        cases = {
+            "acceptance wall ratio": (("cells", "syntax-only", "metrics", "wall", "ratio"), False),
+            "acceptance instruction median": (("cells", "object", "metrics", "instructions", "b_median"), False),
+            "acceptance peak RSS": (("cells", "object", "metrics", "peak_rss", "a_median"), False),
+            "acceptance tree retained bytes": (("tree", "retained_bytes"), False),
+            "raw cell wall median": (("object_summary", "metrics", "wall", "a_median"), True),
+        }
+        for name, (path, raw) in cases.items():
+            with self.subTest(case=name):
+                current, documents = changed(path, raw)
+                conclusion, unused_title, reasons = self.publish(current, summary(), documents)
+                self.assertEqual(conclusion, "failure", reasons)
+                self.assertTrue(reasons)
+
+
+LINK_TLS_TOOL = Path(__file__).resolve().parents[1] / "link_tls_bench.py"
+
+
+def load_link_tls_bench():
+    """Import the trusted tools/link_tls_bench.py by path, as compiler_compare runs it."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("link_tls_bench", LINK_TLS_TOOL)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def link_tls_invocation(wall: int) -> dict:
+    return {"exit": 0, "wall_ns": wall, "cpu_ns": wall - 1000}
+
+
+def link_tls_evidence(binaries: dict | None = None) -> tuple[dict, dict]:
+    """A complete synthetic link-tls-v1 record and bundle: the candidate links 10% faster in every cell."""
+    profile = compiler_receipt.LINK_TLS_PROFILE
+    binaries = copy.deepcopy(BINARIES) if binaries is None else binaries
+    walls = {"baseline": 1_000_000, "candidate": 900_000}
+    cells = []
+    for index, cell in enumerate(profile["cells"]):
+        image = {"exit": 0, "sha256": f"{index:x}" * 64, "size_bytes": 100 + index, "run_exit": 0,
+                 "stdout": cell["stdout"]}
+        cells.append({"name": cell["name"], "arguments": list(cell["arguments"]),
+                      "identity": {role: dict(image) for role in walls},
+                      "warmups": {role: [link_tls_invocation(walls[role]) for unused in range(profile["warmups"])]
+                                  for role in walls},
+                      "pairs": [dict({"order": ["baseline", "candidate"] if pair % 2 == 0 else ["candidate", "baseline"]},
+                                     **{role: link_tls_invocation(walls[role]) for role in walls})
+                                for pair in range(profile["pairs"])]})
+    summary = {"schema": compiler_receipt.LINK_TLS_SCHEMA, "profile": profile["name"], "cpu": profile["cpu"],
+               "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor",
+               "binaries": {role: binaries[role]["sha256"] for role in ("baseline", "candidate")},
+               "toolchain": {"clang": "clang version 21.1.8", "ar": "GNU ar (GNU Binutils) 2.45"},
+               "inputs": {name: "5" * 64 for name in profile["inputs"]}, "cells": cells, "status": "complete",
+               "errors": []}
+    summary = json.loads(json.dumps(summary))
+    record = {"requested": True, "request_line": compiler_receipt.LINK_TLS_REQUEST_LINE,
+              "profile": copy.deepcopy(profile), "status": "complete", "exit": 0, "errors": [],
+              "harness_sha256": "6" * 64, "cells": compiler_receipt.link_tls_digest(summary)}
+    return record, {"summary": summary}
+
+
+class LinkTlsTest(unittest.TestCase):
+    """#1915: the fixed link-tls-v1 whole-link TLS companion profile on the pull-compare route."""
+
+    def test_profile_is_frozen_report_only_and_its_outputs_follow_the_sources(self) -> None:
+        profile = compiler_receipt.LINK_TLS_PROFILE
+        self.assertEqual(profile["name"], "link-tls-v1")
+        self.assertEqual(compiler_receipt.LINK_TLS_REQUEST_LINE, "profile: " + profile["name"])
+        self.assertIs(profile["report_only"], True)
+        self.assertEqual((profile["cpu"], profile["warmups"], profile["pairs"]), (2, 2, 20))
+        self.assertLessEqual(compiler_compare.LINK_TLS_TIMEOUT_SECONDS, 20 * 60)
+        printed = subprocess.run([sys.executable, "-I", str(LINK_TLS_TOOL), "--profile"], capture_output=True,
+                                 text=True, check=True).stdout
+        self.assertEqual(json.loads(printed), json.loads(json.dumps(profile)))
+        bench = load_link_tls_bench()
+        for cell in profile["cells"]:
+            with self.subTest(cell=cell["name"]):
+                operands = [item for item in cell["arguments"][1:] if not item.startswith("-")]
+                self.assertEqual(operands[0], "main.o")
+                self.assertTrue(set(operands) <= set(profile["inputs"]))
+                recipe = profile["inputs"][operands[1]]
+                kind = profile["inputs"][recipe["archive"][0]]["source"] if "archive" in recipe else recipe["source"]
+                # The image runs sum_all twice: the frozen output is what that source computes.
+                source = bench.source_text(kind)
+                if kind.startswith("tls:"):
+                    count = int(kind[4:])
+                    self.assertEqual(source.count("__thread long v"), count)
+                    values = list(range(count))
+                    first = sum(values)
+                    second = sum(value + 1 for value in values)
+                else:
+                    first = second = sum(range(bench.PLAIN_FUNCTIONS))
+                self.assertEqual(cell["stdout"], f"{first} {second}\n")
+
+    def test_complete_evidence_validates_and_every_gap_fails(self) -> None:
+        record, bundle = link_tls_evidence()
+        summary = bundle["summary"]
+        self.assertEqual(compiler_receipt.validate_link_tls(0, summary, BINARIES), [])
+        results = compiler_receipt.link_tls_digest(summary)
+        self.assertEqual([row["name"] for row in results], [cell["name"] for cell in compiler_receipt.LINK_TLS_PROFILE["cells"]])
+        self.assertTrue(all(row["ratio"] == 0.9 and row["candidate_faster"] == 20 for row in results))
+
+        def changed(edit) -> dict:
+            value = copy.deepcopy(summary)
+            edit(value)
+            return value
+
+        def timed(edit, cell: int = 2, pair: int = 3, role: str = "candidate") -> dict:
+            return changed(lambda value: edit(value["cells"][cell]["pairs"][pair][role]))
+
+        same = {"baseline": {"sha256": A256}, "candidate": {"sha256": A256}}
+        cases = {
+            "failed run": (summary, {"status": 1}),
+            "cancelled run": (summary, {"status": None}),
+            "missing summary": (None, {}),
+            "other schema": (changed(lambda value: value.update(schema="other")), {}),
+            "changed profile": (changed(lambda value: value.update(profile="link-tls-v2")), {}),
+            "other CPU": (changed(lambda value: value.update(cpu=3)), {}),
+            "failed status": (changed(lambda value: value.update(status="failed")), {}),
+            "reported error": (changed(lambda value: value.update(errors=["tls-gd-2048: a timed link failed"])), {}),
+            "other binaries": (summary, {"binaries": {"baseline": {"sha256": B256}, "candidate": {"sha256": A256}}}),
+            "same binary": (changed(lambda value: value.update(binaries={"baseline": A256, "candidate": A256})),
+                            {"binaries": same}),
+            "no measured binaries": (summary, {"binaries": {}}),
+            "missing input": (changed(lambda value: value["inputs"].pop("m16384.a")), {}),
+            "unhashed input": (changed(lambda value: value["inputs"].update({"main.o": "5"})), {}),
+            "extra input": (changed(lambda value: value["inputs"].update({"other.o": "5" * 64})), {}),
+            "unrecorded toolchain": (changed(lambda value: value["toolchain"].pop("ar")), {}),
+            "missing cell": (changed(lambda value: value["cells"].pop()), {}),
+            "reordered cells": (changed(lambda value: value["cells"].reverse()), {}),
+            "changed arguments": (changed(lambda value: value["cells"][0].update(
+                arguments=["cc", "-pie", "main.o", "m1024.o"])), {}),
+            "different images": (changed(lambda value: value["cells"][3]["identity"]["candidate"].update(
+                sha256="f" * 64)), {}),
+            "different image sizes": (changed(lambda value: value["cells"][3]["identity"]["candidate"].update(
+                size_bytes=1)), {}),
+            "wrong output": (changed(lambda value: [value["cells"][4]["identity"][role].update(stdout="0 0\n")
+                                                    for role in ("baseline", "candidate")]), {}),
+            "image did not run": (changed(lambda value: value["cells"][1]["identity"]["baseline"].update(
+                run_exit="TimeoutExpired")), {}),
+            "failed identity link": (changed(lambda value: value["cells"][1]["identity"]["candidate"].update(exit=1)), {}),
+            "malformed identity": (changed(lambda value: value["cells"][1]["identity"]["candidate"].pop("stdout")), {}),
+            "missing pair": (changed(lambda value: value["cells"][2]["pairs"].pop()), {}),
+            "pair out of order": (changed(lambda value: value["cells"][2]["pairs"][1].update(
+                order=["baseline", "candidate"])), {}),
+            "failed timed link": (timed(lambda value: value.update(exit=1)), {}),
+            "timed-out link": (timed(lambda value: value.update(exit=124)), {}),
+            "zero wall time": (timed(lambda value: value.update(wall_ns=0)), {}),
+            "float wall time": (timed(lambda value: value.update(wall_ns=1.5)), {}),
+            "wall time past the invocation timeout": (timed(lambda value: value.update(
+                wall_ns=compiler_receipt.LINK_TLS_SAMPLE_LIMIT_NS + 1)), {}),
+            "overflowing wall time": (timed(lambda value: value.update(wall_ns=10 ** 309)), {}),
+            "missing CPU time": (timed(lambda value: value.pop("cpu_ns")), {}),
+            "missing warmup": (changed(lambda value: value["cells"][5]["warmups"]["baseline"].pop()), {}),
+            "failed warmup": (changed(lambda value: value["cells"][5]["warmups"]["candidate"][0].update(exit=2)), {}),
+        }
+        for name, (value, options) in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(compiler_receipt.validate_link_tls(options.get("status", 0), value,
+                                                                   options.get("binaries", BINARIES)), name)
+                # Malformed evidence is refused with reasons, never raised.
+                self.assertIsInstance(compiler_receipt.link_tls_digest(value), list)
+
+    def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
+        record, bundle = link_tls_evidence()
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["link_tls"] = record
+        values = {"expected": dict(EXPECTED, mode="pull"), "authorized": True, "compare_result": "success",
+                  "receipt": pull, "summary": summary(), "policy_value": "",
+                  "throughput": dict(corpus(), link_tls_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        stale = copy.deepcopy(record)
+        stale["cells"][0]["ratio"] = 0.5
+        widened = copy.deepcopy(record)
+        widened["profile"]["pairs"] = 5
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "empty bundle": {"throughput": dict(corpus(), link_tls_bundle={})},
+            "failed run": {"receipt": dict(pull, link_tls=dict(record, status="failed", exit=1))},
+            "cancelled run": {"receipt": dict(pull, link_tls=dict(record, status="pending", exit=None))},
+            "stale cells": {"receipt": dict(pull, link_tls=stale)},
+            "changed profile": {"receipt": dict(pull, link_tls=widened)},
+            "other selector": {"receipt": dict(pull, link_tls=dict(record, request_line="profile: other"))},
+            "not a request": {"receipt": dict(pull, link_tls=dict(record, requested=False))},
+            "other binaries": {"receipt": dict(pull, binaries={"baseline": {"sha256": B256},
+                                                               "candidate": {"sha256": A256}})},
+            "with the compiler probes": {"receipt": dict(pull, compiler_probes=compiler_probes_evidence()[0]),
+                                         "throughput": dict(corpus(), link_tls_bundle=bundle,
+                                                            compiler_probes_bundle=compiler_probes_evidence()[1])},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("TLS companion links (link-tls-v1): complete", report)
+        self.assertIn("| tls-gd-32768 | 1.000 | 0.900 | 0.9000 [0.9000, 0.9000] | 20/20 |", report)
+
+    def test_artifact_is_read_and_decided_end_to_end(self) -> None:
+        record, bundle = link_tls_evidence()
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["link_tls"] = record
+
+        def decided(link_tls: object, drop: bool = False) -> tuple:
+            members = {"receipt.json": json.dumps(pull), "lab/summary.json": json.dumps(summary()),
+                       "throughput/summary.json": json.dumps(corpus()["summary"]),
+                       "throughput/metadata.json": json.dumps(corpus()["metadata"])}
+            if not drop:
+                members["link_tls/summary.json"] = link_tls if isinstance(link_tls, str) else json.dumps(link_tls)
+            got = compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+            return compiler_publish.decide(dict(EXPECTED, mode="pull"), True, "success", got[0], got[1], "",
+                                           got[4], extra_reasons=[got[2]] if got[2] else [])
+
+        self.assertEqual(decided(bundle["summary"])[::2], ("success", []))
+        changed = copy.deepcopy(bundle["summary"])
+        for pair in changed["cells"][2]["pairs"]:
+            pair["candidate"]["wall_ns"] = 2_000_000
+        for name, (value, drop) in {"missing member": (None, True), "malformed member": ("{", False),
+                                    "duplicate key": ('{"schema": 1, "schema": 2}', False),
+                                    "samples that disagree with the receipt": (changed, False)}.items():
+            with self.subTest(case=name):
+                self.assertEqual(decided(value, drop)[0], "failure")
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Link TLS Test")
+            fixture_git(repo, "config", "user.email", "link-tls@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            fixture_git(repo, "add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            fixture_git(repo, "commit", "-qm", "seed")
+            line = compiler_receipt.LINK_TLS_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                fixture_git(repo, "commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.link_tls_request_selection(
+                        repo, fixture_git(repo, "rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            fixture_git(repo, "commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.link_tls_request_selection(repo, fixture_git(repo, "rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.LINK_TLS_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", link_tls=link_tls_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("link_tls")
+        self.assertIn("no link-tls record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+
+    def test_leg_runs_the_trusted_harness_on_both_binaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("work", "evidence", "work/bin"):
+                (root / name).mkdir(exist_ok=True)
+            pull = {"timings": {}, "binaries": copy.deepcopy(BINARIES),
+                    "link_tls": {"requested": True, "status": "pending"}}
+            with mock.patch.object(compiler_compare, "run", return_value=1) as run:
+                compiler_compare.measure_link_tls(root / "work/bin", root / "work", root / "evidence", pull)
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[1:3], ["-I", str(LINK_TLS_TOOL)])
+            self.assertEqual(argv[3:5], [str(root / "work/bin/ide-base"), str(root / "work/bin/ide-cand")])
+            self.assertEqual(pull["link_tls"]["harness_sha256"], hashlib.sha256(LINK_TLS_TOOL.read_bytes()).hexdigest())
+            # The mocked harness exited 1 and wrote nothing, so the leg is refused.
+            self.assertEqual(pull["link_tls"]["status"], "failed")
+            self.assertTrue(any("exited 1" in error for error in pull["link_tls"]["errors"]), pull["link_tls"]["errors"])
+
+    def test_harness_links_real_inputs_and_records_complete_evidence(self) -> None:
+        """A reduced profile, fake ide binaries that link with clang: identity, timing and validation end to end."""
+        bench = load_link_tls_bench()
+        profile = copy.deepcopy(compiler_receipt.LINK_TLS_PROFILE)
+        profile["inputs"] = {name: profile["inputs"][name] for name in ("main.o", "m1024.o", "plain.o")}
+        profile["cells"] = [cell for cell in profile["cells"] if cell["name"] in ("tls-gd-2048", "no-tls-control")]
+        profile.update(warmups=1, pairs=2, cpu=0)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binaries = {}
+            for role in ("baseline", "candidate"):
+                binaries[role] = root / f"ide-{role}"
+                binaries[role].write_text(f"#!/bin/sh\n# {role}\nshift\nexec clang \"$@\"\n", encoding="utf-8")
+                binaries[role].chmod(0o755)
+            with mock.patch.object(bench, "LINK_TLS_PROFILE", profile), \
+                    mock.patch.object(compiler_receipt, "LINK_TLS_PROFILE", profile):
+                status = bench.main([str(binaries["baseline"]), str(binaries["candidate"]), str(root / "work"),
+                                     str(root / "out")])
+                written = json.loads((root / "out/summary.json").read_text(encoding="utf-8"))
+                hashes = {role: {"sha256": hashlib.sha256(path.read_bytes()).hexdigest()} for role, path in binaries.items()}
+                self.assertEqual((status, written["errors"]), (0, []))
+                self.assertEqual(compiler_receipt.validate_link_tls(status, written, hashes), [])
+                self.assertEqual(len(compiler_receipt.link_tls_digest(written)), 2)
+            self.assertEqual(sorted(written["inputs"]), ["m1024.o", "main.o", "plain.o"])
+            # A candidate that links differently is refused before anything is timed.
+            binaries["candidate"].write_text("#!/bin/sh\nshift\nexec clang -Wl,--defsym=link_tls_test_marker=1 \"$@\"\n",
+                                             encoding="utf-8")
+            with mock.patch.object(bench, "LINK_TLS_PROFILE", profile):
+                status = bench.main([str(binaries["baseline"]), str(binaries["candidate"]), str(root / "work2"),
+                                     str(root / "out2")])
+            written = json.loads((root / "out2/summary.json").read_text(encoding="utf-8"))
+            self.assertEqual((status, written["status"]), (1, "failed"))
+            self.assertTrue(all(cell["pairs"] == [] for cell in written["cells"]))
+            self.assertTrue(any("images differ" in error for error in written["errors"]), written["errors"])
 
 
 if __name__ == "__main__":

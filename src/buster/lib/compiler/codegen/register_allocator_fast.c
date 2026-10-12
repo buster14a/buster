@@ -37,13 +37,18 @@
 // needs an occupied register, and a non-call row's clobber, moves the live
 // occupant to a free one (`machine_fast_vacate`) rather than storing it. A reload prefers the
 // register the value was first bound to (`MachineFastState.preferred_registers`),
-// so the copies that repair cross-path disagreement mostly vanish.
+// so the copies that repair cross-path disagreement mostly vanish. A free
+// pick for a value whose last use lies past any later call in layout order
+// (`machine_fast_crosses_call` over the function-wide `next_call`) prefers a
+// callee-saved register, so the value survives that call on every path.
 // `machine_fast_placement_build_pinned` then lays the frame out
 // for both scan modes: `machine_fast_close_live_ranges` widens selector slots
 // and proven direct-chain allocator homes to every row where their contents
 // may still be read — `machine_fast_close_slot_ranges` and
 // `machine_fast_close_home_ranges` hand it dense indexes of only the objects
-// that can share storage — and `machine_fast_color_homes` and
+// that can share storage, the former replaying the slot touches the
+// placement's row census recorded (`MachineFastTouchCensus`) — and
+// `machine_fast_color_homes` and
 // `machine_fast_color_slots` give one storage per simultaneously live object
 // instead of one per object.
 
@@ -156,7 +161,6 @@ struct MachineFastState
     // sentinel, maintained by every site that binds or releases a register,
     // and `dirty_mask` is a subset of it.
     u64 held_mask;
-    u64 dirty_mask;
     // Current register per vreg, or UINT32_MAX when the slot is the home.
     u32* virtual_register_locations;
     // Stage-5 liveness: the instruction index of each vreg's last textual
@@ -165,6 +169,11 @@ struct MachineFastState
     // hazards live only across blocks); a non-escaping value strictly past
     // its last use is dead and its spill store is dropped.
     u32* last_use;
+    // Not adjacent to `held_mask`: both often take the same lane update, and
+    // as neighbours the vectorizer fuses them into one 16-byte
+    // read-modify-write whose load spans an earlier 8-byte store to either
+    // mask, which cannot be store-forwarded.
+    u64 dirty_mask;
     u8* escapes;
     // Registers the row being scanned reserves (clobbers, fixed and physical
     // operands, constrained scratches); `machine_fast_vacate` never moves a
@@ -205,9 +214,9 @@ struct MachineFastState
     u64 const* live_out_row;
     u64 const* live_in_row;
     u32 live_words;
-    // Index of the next call at or after each instruction within its own
-    // block, or UINT32_MAX: a value whose last use lies past it crosses
-    // the call and is worth a callee-saved binding.
+    // Index of the next call at or after each instruction in layout order,
+    // across block boundaries, or UINT32_MAX: a value whose last use lies
+    // past it crosses the call and is worth a callee-saved binding.
     u32* next_call;
     // Immediate index per vreg whose entire definition is one constant
     // materialization, MACHINE_FAST_REMATERIALIZE_FRAME for one frame
@@ -1445,8 +1454,10 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_source_dies_here(MachineFastState* state, 
     return !state->escapes[virtual_register] && state->last_use[virtual_register] == (state->current_point >> 2);
 }
 
-// True when the virtual register stays live past the next call in the
-// current block, making a callee-saved binding worth its push/pop pair.
+// True when the virtual register's last use lies past the next call in
+// layout order, in this block or a later one, making a callee-saved binding
+// worth its push/pop pair. The interval over-approximates on a sibling arm's
+// call and misses a loop body call past the value's last textual use.
 BUSTER_GLOBAL_LOCAL bool machine_fast_crosses_call(MachineFastState* state, u32 virtual_register)
 {
     u32 upcoming_call = state->next_call[state->current_point >> 2];
@@ -2760,16 +2771,17 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
         // next-call pass reads the call bit out of that word instead of
         // reloading the opcode and probing the descriptor table again. The
         // test is a select on a sequentially streamed u32, which leaves the
-        // loop with no data-dependent branch of its own.
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        // loop with no data-dependent branch of its own. The fill runs across
+        // block boundaries: a value whose last use lies past a call in a later
+        // block crosses it as surely as one in its own block, and a
+        // callee-saved binding keeps it in a register through every later
+        // call on every path, so no join loses it (#56).
         {
-            MachineBlock* block = function->blocks + block_index;
             u32 upcoming_call = UINT32_MAX;
-            for (u32 offset = block->instruction_count; offset > 0; offset -= 1)
+            for (u32 instruction_index = function->instruction_count; instruction_index > 0; instruction_index -= 1)
             {
-                u32 instruction_index = block->first_instruction + offset - 1;
-                upcoming_call = (prepass.operand_masks[instruction_index] & MACHINE_FAST_OPERAND_CALL_ROW) ? instruction_index : upcoming_call;
-                prepass.next_call[instruction_index] = upcoming_call;
+                upcoming_call = (prepass.operand_masks[instruction_index - 1] & MACHINE_FAST_OPERAND_CALL_ROW) ? instruction_index - 1 : upcoming_call;
+                prepass.next_call[instruction_index - 1] = upcoming_call;
             }
         }
         // A function with no vector virtual registers can never own a vector
@@ -3060,13 +3072,16 @@ BUSTER_GLOBAL_LOCAL void machine_fast_solve_liveness_reference(u32 block_count, 
 // depth times blocks times words, and the reverse-CFG order converges in one
 // pass, so the work stays within two visits per block. The second is a
 // seeded pseudo-random graph with irreducible regions, several exits, an
-// exitless cycle and live-out seeds, which only has to agree with the oracle.
+// exitless cycle and live-out seeds, which only has to agree with the oracle;
+// it spans several `pending_words` summary words, so re-pending a rank below
+// the current summary word is exercised too.
 bool machine_fast_solve_liveness_test(Arena* arena)
 {
     enum
     {
         MACHINE_FAST_SOLVE_TEST_DEPTH = 320,
-        MACHINE_FAST_SOLVE_TEST_RANDOM_BLOCKS = 97,
+        MACHINE_FAST_SOLVE_TEST_RANDOM_BLOCKS = 2u * MACHINE_FAST_LIVENESS_SUMMARY_SPAN + 808u,
+        MACHINE_FAST_SOLVE_TEST_EXITLESS_FIRST = MACHINE_FAST_SOLVE_TEST_RANDOM_BLOCKS - 7u,
         MACHINE_FAST_SOLVE_TEST_RANDOM_VALUES = 150,
     };
     u64 arena_position = arena->position;
@@ -3126,19 +3141,21 @@ bool machine_fast_solve_liveness_test(Arena* arena)
         else
         {
             // Up to two successors per block, mostly forward with some
-            // backward and cross edges; blocks 90 and up form an exitless
-            // cycle, and 13, 41 and 89 are extra exits.
+            // backward and cross edges; the last seven blocks form an
+            // exitless cycle, and 13, 41 and the block before them are exits.
             u64 random = 0x9e3779b97f4a7c15ull;
             for (u32 block_index = 0; block_index < block_count; block_index += 1)
             {
-                bool exit = block_index == 13u || block_index == 41u || block_index == 89u;
+                bool exit = block_index == 13u || block_index == 41u || block_index + 1u == MACHINE_FAST_SOLVE_TEST_EXITLESS_FIRST;
                 u32 successors = exit ? 0 : 1u + (u32)((random >> 33) & 1u);
                 for (u32 successor_index = 0; successor_index < successors; successor_index += 1)
                 {
                     random = random * 6364136223846793005ull + 1442695040888963407ull;
                     u32 target = (u32)((random >> 40) % block_count);
-                    target = block_index >= 90u ? 90u + (u32)((random >> 40) % (block_count - 90u)) : target;
-                    target = successor_index == 0 && block_index + 1u < 90u ? block_index + 1u : target;
+                    target = block_index >= MACHINE_FAST_SOLVE_TEST_EXITLESS_FIRST
+                                 ? MACHINE_FAST_SOLVE_TEST_EXITLESS_FIRST + (u32)((random >> 40) % (block_count - MACHINE_FAST_SOLVE_TEST_EXITLESS_FIRST))
+                                 : target;
+                    target = successor_index == 0 && block_index + 1u < MACHINE_FAST_SOLVE_TEST_EXITLESS_FIRST ? block_index + 1u : target;
                     edge_sources[edge_count] = block_index;
                     edge_targets[edge_count++] = target;
                 }
@@ -3421,6 +3438,63 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_slot_touches(MachineFunction const* functio
     return count;
 }
 
+// A volatile-tainted slot and the fixed outgoing argument area keep storage of
+// their own whatever the rows do with them.
+BUSTER_GLOBAL_LOCAL bool machine_fast_slot_statically_fixed(MachineFunction const* function, u32 slot)
+{
+    bool volatile_slot = function->stack_slot_memory_flags && function->stack_slot_memory_flags[slot] != MACHINE_STACK_SLOT_MEMORY_NONVOLATILE;
+    bool outgoing_slot = function->outgoing_bytes && slot == function->outgoing_slot;
+    return volatile_slot || outgoing_slot;
+}
+
+// One row's proven touches. The placement census records them once and
+// `machine_fast_close_slot_ranges` replays them: they depend only on the
+// function, the row and the certified addresses, none of which changes
+// between the census and the closure.
+typedef struct MachineFastRowTouches MachineFastRowTouches;
+struct MachineFastRowTouches
+{
+    u32 row;
+    u32 count;
+    MachineFastSlotTouch touches[2];
+};
+
+// Rows with at least one touch, ascending by row.
+typedef struct MachineFastTouchCensus MachineFastTouchCensus;
+struct MachineFastTouchCensus
+{
+    MachineFastRowTouches* rows;
+    u32 count;
+};
+
+// The census needs room for every row: a record without touches is
+// overwritten by the next row's.
+BUSTER_GLOBAL_LOCAL MachineFastRowTouches const* machine_fast_census_record(MachineFunction const* function,
+                                                                           MachineFastFrameAddresses const* addresses, u32 row,
+                                                                           MachineFastTouchCensus* census)
+{
+    MachineFastRowTouches* record = census->rows + census->count;
+    record->row = row;
+    record->count = machine_fast_slot_touches(function, function->instructions + row, addresses, record->touches);
+    census->count += record->count != 0;
+    return record;
+}
+
+// First record whose row is at least `row`.
+BUSTER_GLOBAL_LOCAL u32 machine_fast_census_lower_bound(MachineFastTouchCensus const* census, u32 row)
+{
+    u32 low = 0;
+    u32 high = census->count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2u;
+        bool before = census->rows[middle].row < row;
+        low = before ? middle + 1u : low;
+        high = before ? high : middle;
+    }
+    return low;
+}
+
 // A frame address can join ordinary slot coloring only when every use of its
 // SSA value is a bounded scalar access through that exact address. Any copy,
 // edge transfer, call argument, arithmetic, or unproved memory form may retain
@@ -3435,6 +3509,9 @@ BUSTER_GLOBAL_LOCAL MachineFastFrameAddresses machine_fast_certify_frame_address
     memset(value_offsets, 0xff, (u64)value_axis * sizeof(*value_offsets));
     memset(addressed, 0, function->stack_slot_count);
     memset(safe, 1, function->stack_slot_count);
+    // Copies, uses and edge sources only refine values a frame address row
+    // certifies here; without one the remaining walks change nothing.
+    bool certified = false;
     for (u32 row = 0; row < function->instruction_count; row += 1)
     {
         MachineInstruction const* instruction = function->instructions + row;
@@ -3456,6 +3533,7 @@ BUSTER_GLOBAL_LOCAL MachineFastFrameAddresses machine_fast_certify_frame_address
                 {
                     value_slots[value] = slot;
                     value_offsets[value] = instruction->payload;
+                    certified = true;
                 }
                 else
                 {
@@ -3468,7 +3546,7 @@ BUSTER_GLOBAL_LOCAL MachineFastFrameAddresses machine_fast_certify_frame_address
             }
         }
     }
-    for (u32 row = 0; row < function->instruction_count; row += 1)
+    for (u32 row = 0; certified && row < function->instruction_count; row += 1)
     {
         MachineInstruction const* instruction = function->instructions + row;
         if (instruction->opcode == MACHINE_X64_MOV_RR || instruction->opcode == MACHINE_A64_MOV_RR)
@@ -3499,10 +3577,9 @@ BUSTER_GLOBAL_LOCAL MachineFastFrameAddresses machine_fast_certify_frame_address
             }
         }
     }
-    for (u32 row = 0; row < function->instruction_count; row += 1)
+    for (u32 row = 0; certified && row < function->instruction_count; row += 1)
     {
         MachineInstruction const* instruction = function->instructions + row;
-        MachineScheduleMemoryAccess access = machine_schedule_frame_access(function, instruction);
         bool load_pointer = instruction->opcode == MACHINE_X64_LOAD_PTR8 || instruction->opcode == MACHINE_X64_LOAD_PTR16 ||
                             instruction->opcode == MACHINE_X64_LOAD_PTR32 || instruction->opcode == MACHINE_X64_LOAD_PTR64 ||
                             instruction->opcode == MACHINE_A64_LOAD_PTR8 || instruction->opcode == MACHINE_A64_LOAD_PTR16 ||
@@ -3530,6 +3607,9 @@ BUSTER_GLOBAL_LOCAL MachineFastFrameAddresses machine_fast_certify_frame_address
                                    value_offsets[machine_ref_payload(instruction->operands[0])] == value_offsets[value];
                 u32 width = machine_fast_pointer_width(instruction->opcode);
                 bool pointer_use = (load_pointer && operand == 1) || (store_pointer && operand == 0);
+                // Only a pointer use reads the row's frame access.
+                MachineScheduleMemoryAccess access = pointer_use ? machine_schedule_frame_access(function, instruction)
+                                                                 : (MachineScheduleMemoryAccess){0};
                 bool bounded = pointer_use && value_offsets[value] <= function->stack_slot_sizes[slot] &&
                                instruction->payload <= function->stack_slot_sizes[slot] - value_offsets[value] &&
                                width <= function->stack_slot_sizes[slot] - value_offsets[value] - instruction->payload &&
@@ -3538,7 +3618,7 @@ BUSTER_GLOBAL_LOCAL MachineFastFrameAddresses machine_fast_certify_frame_address
             }
         }
     }
-    for (u32 source = 0; source < function->edge_copy_source_count; source += 1)
+    for (u32 source = 0; certified && source < function->edge_copy_source_count; source += 1)
     {
         MachineRef reference = function->edge_copy_sources[source];
         u32 value = machine_ref_payload(reference);
@@ -3561,10 +3641,11 @@ BUSTER_GLOBAL_LOCAL MachineFastFrameAddresses machine_fast_certify_frame_address
 // blocks times the shareable ones. Every plane operation is per object and the
 // worklist climbs from empty sets to the least fixed point, so an object's
 // bits, and a shareable slot's range, do not depend on which other objects are
-// closed alongside it. Returns the number of objects closed over.
+// closed alongside it. Returns the number of objects closed over. The touches
+// come from the census the caller took over every row.
 BUSTER_GLOBAL_LOCAL u32 machine_fast_close_slot_ranges(Arena* arena, MachineFunction const* function, MachineFastPrepass const* prepass,
                                                        u8 const* slot_fixed, u32* slot_starts, u32* slot_ends,
-                                                       MachineFastFrameAddresses const* addresses, MachineFastBlockObjects* block_objects)
+                                                       MachineFastTouchCensus const* census, MachineFastBlockObjects* block_objects)
 {
     u32 slot_count = function->stack_slot_count;
     u32 object_count = 0;
@@ -3609,13 +3690,12 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_close_slot_ranges(Arena* arena, MachineFunc
         // A narrow store can therefore define the entire useful contents of
         // a wider slot. Escaping or otherwise unproved objects are fixed and
         // excluded above.
-        for (u32 row = 0; row < function->instruction_count; row += 1)
+        for (u32 record_index = 0; record_index < census->count; record_index += 1)
         {
-            MachineFastSlotTouch touches[2];
-            u32 count = machine_fast_slot_touches(function, function->instructions + row, addresses, touches);
-            for (u32 touch = 0; touch < count; touch += 1)
+            MachineFastRowTouches const* record = census->rows + record_index;
+            for (u32 touch = 0; touch < record->count; touch += 1)
             {
-                MachineFastSlotTouch access = touches[touch];
+                MachineFastSlotTouch access = record->touches[touch];
                 u32 named = slot_objects[access.slot];
                 if (named != UINT32_MAX && !access.writes && function->stack_slot_sizes[access.slot] <= 64)
                 {
@@ -3639,15 +3719,17 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_close_slot_ranges(Arena* arena, MachineFunc
             u64* block_writes = writes + (u64)block_index * words;
             // Backward through the block: the last touch of a slot
             // decides, and a read below a covering store is what keeps
-            // the slot live into the block.
-            for (u32 offset = block->instruction_count; offset; offset -= 1)
+            // the slot live into the block. Touches within a row stay in
+            // forward order, so a frame copy's source read is applied after
+            // its destination write.
+            u32 first_record = machine_fast_census_lower_bound(census, block->first_instruction);
+            u32 end_record = machine_fast_census_lower_bound(census, block->first_instruction + block->instruction_count);
+            for (u32 record_index = end_record; record_index > first_record; record_index -= 1)
             {
-                MachineInstruction const* instruction = function->instructions + block->first_instruction + offset - 1u;
-                MachineFastSlotTouch touches[2];
-                u32 touch_count = machine_fast_slot_touches(function, instruction, addresses, touches);
-                for (u32 touch = 0; touch < touch_count; touch += 1)
+                MachineFastRowTouches const* record = census->rows + record_index - 1u;
+                for (u32 touch = 0; touch < record->count; touch += 1)
                 {
-                    MachineFastSlotTouch const* access = touches + touch;
+                    MachineFastSlotTouch const* access = record->touches + touch;
                     u32 named = slot_objects[access->slot];
                     if (named != UINT32_MAX)
                     {
@@ -3807,9 +3889,11 @@ bool machine_fast_close_slot_ranges_test(Arena* arena)
     // The row census the placement takes: every touch widens its slot. The
     // leading LEA rows are what would fix the slots below `fixed_count`; the
     // fixed flags are set from that below.
+    MachineFastTouchCensus census = {.rows = arena_allocate(arena, MachineFastRowTouches, function.instruction_count)};
     for (u32 row = 0; row < function.instruction_count; row += 1)
     {
         MachineInstruction const* instruction = function.instructions + row;
+        machine_fast_census_record(&function, 0, row, &census);
         for (u32 operand_index = 0; operand_index < MACHINE_INSTRUCTION_OPERAND_COUNT; operand_index += 1)
         {
             MachineRef operand = instruction->operands[operand_index];
@@ -3827,8 +3911,8 @@ bool machine_fast_close_slot_ranges_test(Arena* arena)
         actual_starts[slot] = reference_starts[slot];
         actual_ends[slot] = reference_ends[slot];
     }
-    u32 reference_objects = machine_fast_close_slot_ranges(arena, &function, &prepass, no_fixed, reference_starts, reference_ends, 0, 0);
-    u32 actual_objects = machine_fast_close_slot_ranges(arena, &function, &prepass, slot_fixed, actual_starts, actual_ends, 0, 0);
+    u32 reference_objects = machine_fast_close_slot_ranges(arena, &function, &prepass, no_fixed, reference_starts, reference_ends, &census, 0);
+    u32 actual_objects = machine_fast_close_slot_ranges(arena, &function, &prepass, slot_fixed, actual_starts, actual_ends, &census, 0);
     result = result && reference_objects == slot_count && actual_objects == MACHINE_FAST_SLOT_RANGE_TEST_SHAREABLE_COUNT;
     for (u32 slot = fixed_count; slot < slot_count; slot += 1)
     {
@@ -5206,10 +5290,11 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         u32* group_sizes = arena_allocate(arena, u32, slot_axis);
         u32* group_alignments = arena_allocate(arena, u32, slot_axis);
         u32* group_offsets = arena_allocate(arena, u32, slot_axis);
-        // A frame without selector slots has nothing to share. The address
-        // certification and the touch census below are four row walks, two
-        // of them decoding every row's frame access, and on a `-g0` SQLite
-        // compile 1,893 of 2,620 functions had no slot at all (#1722).
+        // A frame without selector slots has nothing to share. Otherwise the
+        // address certification walks every row once, and twice more when it
+        // certifies an address, and the touch census below decodes every
+        // row's frame access once for the slot closure to replay; on a `-g0`
+        // SQLite compile 1,893 of 2,620 functions had no slot at all (#1722).
         bool coalesce_slots = reuse_frame_storage && description->frame_address_opcode != 0 && !function->distinct_frame_objects &&
                               function->stack_slot_count != 0;
         u8* slot_addressed = arena_allocate(arena, u8, slot_axis);
@@ -5223,12 +5308,27 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         memset(slot_ends, 0, (u64)slot_axis * sizeof(*slot_ends));
         memset(slot_fixed, coalesce_slots ? 0 : 1, slot_axis);
         memset(slot_groups, 0xff, (u64)slot_axis * sizeof(*slot_groups));
-        for (u32 row = 0; coalesce_slots && row < function->instruction_count; row += 1)
+        // Certification already fixes every slot whose address escapes, and
+        // the census can only widen ranges and fix more slots. When no slot is
+        // left for it to decide it would walk every row for nothing: on a
+        // `-g0` SQLite compile that is every one of the 396 coalescing
+        // functions whose frames end up sharing nothing (#1722).
+        bool census_needed = false;
+        for (u32 slot_index = 0; coalesce_slots && slot_index < function->stack_slot_count; slot_index += 1)
+        {
+            census_needed |= !(slot_addressed[slot_index] && !address_safe[slot_index]) &&
+                             !machine_fast_slot_statically_fixed(function, slot_index);
+        }
+        MachineFastTouchCensus touch_census = {
+            .rows = census_needed ? arena_allocate(arena, MachineFastRowTouches, function->instruction_count ? function->instruction_count : 1u) : 0,
+        };
+        for (u32 row = 0; coalesce_slots && census_needed && row < function->instruction_count; row += 1)
         {
             MachineInstruction const* instruction = function->instructions + row;
             bool addresses = instruction->opcode == description->frame_address_opcode;
-            MachineFastSlotTouch touches[2];
-            u32 touch_count = machine_fast_slot_touches(function, instruction, &frame_addresses, touches);
+            MachineFastRowTouches const* recorded = machine_fast_census_record(function, &frame_addresses, row, &touch_census);
+            MachineFastSlotTouch const* touches = recorded->touches;
+            u32 touch_count = recorded->count;
             for (u32 touch = 0; touch < touch_count; touch += 1)
             {
                 u32 named = touches[touch].slot;
@@ -5271,8 +5371,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         for (u32 slot_index = 0; coalesce_slots && slot_index < function->stack_slot_count; slot_index += 1)
         {
             slot_fixed[slot_index] |= (u8)(slot_addressed[slot_index] && !address_safe[slot_index]);
-            slot_fixed[slot_index] |= (u8)(function->stack_slot_memory_flags && function->stack_slot_memory_flags[slot_index] != MACHINE_STACK_SLOT_MEMORY_NONVOLATILE);
-            slot_fixed[slot_index] |= (u8)(function->outgoing_bytes && slot_index == function->outgoing_slot);
+            slot_fixed[slot_index] |= (u8)machine_fast_slot_statically_fixed(function, slot_index);
         }
         u32 shareable_slots = 0;
         for (u32 slot = 0; coalesce_slots && slot < function->stack_slot_count; slot += 1)
@@ -5288,7 +5387,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         MachineFastBlockObjects slot_blocks = {0};
         if (coalesce_slots)
         {
-            machine_fast_close_slot_ranges(arena, function, prepass, slot_fixed, slot_starts, slot_ends, &frame_addresses,
+            machine_fast_close_slot_ranges(arena, function, prepass, slot_fixed, slot_starts, slot_ends, &touch_census,
                                            block_color_slots ? &slot_blocks : 0);
         }
         // Closure preserves the final eligibility count. An empty population

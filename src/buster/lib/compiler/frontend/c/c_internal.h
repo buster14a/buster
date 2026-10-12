@@ -1245,7 +1245,8 @@ struct CParseExpressionTypeTask
     // The false arm of a conditional whose own top-level `?` and `:` its
     // parent already found sits in `split` and `colon`; it skips the scan.
     bool conditional_hinted;
-    u8 reserved[1];
+    // The parent proved this assignment suffix has no top-level comma.
+    bool assignment_rhs;
 };
 
 struct CTypeParseFrame
@@ -1308,6 +1309,7 @@ struct CTypeParseFrame
     // own range holds it.
     u32 shared_specifier_end;
     u32 mutation_mark;
+    // SIZEOF frames also use this as the type-row count at query entry.
     u32 definition_type_start;
     // PARAMETER frames: the diagnostic count at entry, so a failed type
     // specifier that said nothing can be named.

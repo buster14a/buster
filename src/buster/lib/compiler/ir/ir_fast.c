@@ -1,8 +1,13 @@
 // Compact canonical FAST pipeline, included by ir.c after ir_promote.c.
 // ir_fast_function owns bounded scratch and the shared ir_rewrite_compact map.
 // ir_instruction_is_pure is the semantic DCE authority. ir_fast_fold performs
-// one forward pass; ir_fast_dce uses counts plus a deletion queue (no use CSR);
-// ir_fast_parameters has a hard sweep cap. ir_prepare_canonical_module owns
+// one forward pass and takes each scalar rule from ir_fast_fold_rule, which
+// the diagnostic-only ir_construction_fold_census also asks at C-builder
+// commit (#3010; ir_construction.fold_birth_*/fold_late_*); ir_fast_dce uses
+// counts plus a deletion queue (no use CSR); ir_fast_parameters has a hard
+// sweep cap. The opt-in ir_fast_cse (#3011) value-numbers admitted rows within
+// each block through a bounded generation-tagged table and runs between address
+// and DCE. ir_prepare_canonical_module owns
 // input, inlining-output, promotion-output and FAST-output certification boundaries, then
 // publishes the final canonical CFG after all selected transformations.
 // ir_validate_promotion_output leaves out of the promotion-output check any
@@ -12,7 +17,8 @@
 
 String8 ir_fast_pass_name(IrFastPass pass)
 {
-    String8 names[] = {S8("fold"), S8("address"), S8("dce"), S8("parameters")};
+    String8 names[] = {S8("fold"), S8("address"), S8("dce"), S8("parameters"), S8("cse")};
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == IR_FAST_PASS_COUNT);
     String8 result = (u32)pass < BUSTER_ARRAY_LENGTH(names) ? names[pass] : S8("invalid");
     return result;
 }
@@ -155,6 +161,142 @@ BUSTER_GLOBAL_LOCAL bool ir_fast_binary(u32 operation, u64 left, u64 right, u32 
     return result;
 }
 
+// The scalar rules ir_fast_fold_rule can apply, in the order of the
+// FOLD_BIRTH_* and FOLD_LATE_* counters in ir_construction.h.
+typedef enum IrFastFoldRule
+{
+    IR_FAST_FOLD_RULE_NONE,
+    IR_FAST_FOLD_RULE_CAST_IDENTITY,
+    IR_FAST_FOLD_RULE_CAST_CONSTANT,
+    IR_FAST_FOLD_RULE_UNARY_CONSTANT,
+    IR_FAST_FOLD_RULE_BINARY_CONSTANT,
+    IR_FAST_FOLD_RULE_BINARY_RIGHT_IDENTITY,
+    IR_FAST_FOLD_RULE_BINARY_LEFT_IDENTITY,
+    IR_FAST_FOLD_RULE_COUNT,
+} IrFastFoldRule;
+
+#if BUSTER_BENCH_ALLOCATIONS
+// The FOLD_BIRTH_* and FOLD_LATE_* counters follow IrFastFoldRule.
+BUSTER_CT_CHECK(IR_CONSTRUCTION_FOLD_BIRTH_BINARY_LEFT_IDENTITY - IR_CONSTRUCTION_FOLD_BIRTH_CAST_IDENTITY ==
+                IR_FAST_FOLD_RULE_BINARY_LEFT_IDENTITY - IR_FAST_FOLD_RULE_CAST_IDENTITY);
+BUSTER_CT_CHECK(IR_CONSTRUCTION_FOLD_LATE_BINARY_LEFT_IDENTITY - IR_CONSTRUCTION_FOLD_LATE_CAST_IDENTITY ==
+                IR_FAST_FOLD_RULE_BINARY_LEFT_IDENTITY - IR_FAST_FOLD_RULE_CAST_IDENTITY);
+
+BUSTER_GLOBAL_LOCAL void ir_fast_fold_census_late(IrFastFoldRule rule, bool replaced_roots)
+{
+    if (rule != IR_FAST_FOLD_RULE_NONE)
+    {
+        ir_construction_record((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_LATE_CAST_IDENTITY + (rule - IR_FAST_FOLD_RULE_CAST_IDENTITY)), 1);
+        IR_CONSTRUCTION_RECORD(FOLD_LATE_REPLACED_ROOTS, replaced_roots);
+    }
+}
+#define IR_FAST_FOLD_CENSUS_LATE(rule, replaced_roots) ir_fast_fold_census_late(rule, replaced_roots)
+#else
+#define IR_FAST_FOLD_CENSUS_LATE(rule, replaced_roots) ((void)0)
+#endif
+
+// The scalar rule ir_fast_fold applies to one CAST, UNARY or BINARY row whose
+// operands resolve to `first` and `second`. An identity names the existing
+// value in *replacement; a constant leaves the folded immediate in *bits. The
+// caller still owns the replacement metadata check, so the diagnostic
+// construction census can ask the same question of a row at commit.
+BUSTER_GLOBAL_LOCAL IrFastFoldRule ir_fast_fold_rule(IrProgram* program, IrFunction* function, IrInstruction const* row, u32 first, u32 second,
+                                                     u32* replacement, u64* bits)
+{
+    IrFastFoldRule rule = IR_FAST_FOLD_RULE_NONE;
+    u32 width = ir_fast_width(program, row->canonical_type);
+    u64 left = 0, right = 0, folded_bits = 0;
+    bool constant = false;
+    bool left_constant = first != IR_PROMOTE_NONE && ir_fast_constant(program, function, first, &left);
+    bool right_constant = second != IR_PROMOTE_NONE && ir_fast_constant(program, function, second, &right);
+    if (row->opcode == IR_OPCODE_CAST && first != IR_PROMOTE_NONE)
+    {
+        if (row->canonical_type.value == function->values[first].canonical_type.value && ir_instruction_is_pure(program, function, row))
+        {
+            *replacement = first;
+            rule = IR_FAST_FOLD_RULE_CAST_IDENTITY;
+        }
+        else if (width && left_constant)
+        {
+            u32 source_width = ir_fast_width(program, function->values[first].canonical_type);
+            if (row->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND ||
+                row->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND ||
+                row->conversion_operation == IR_CONVERSION_INTEGER_TRUNCATE ||
+                row->conversion_operation == IR_CONVERSION_INTEGER_REINTERPRET)
+            {
+                IrIntegerResult converted = ir_integer_convert((IrConversionOperation)row->conversion_operation, (IrInteger){.low = left},
+                                                               source_width, width);
+                constant = source_width && !(converted.faults & IR_INTEGER_FAULT_UNSUPPORTED);
+                folded_bits = converted.bits.low;
+                rule = constant ? IR_FAST_FOLD_RULE_CAST_CONSTANT : rule;
+                IR_SEMANTIC_RECORD(FAST_FOLD_ATTEMPTS, 1);
+                IR_SEMANTIC_RECORD(FAST_FOLD_REJECTED, !constant);
+            }
+        }
+    }
+    else if (width && row->opcode == IR_OPCODE_UNARY && left_constant)
+    {
+        u32 source_width = ir_fast_width(program, function->values[first].canonical_type);
+        if (source_width && (row->unary_operation == IR_UNARY_INTEGER_NEGATE || row->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT ||
+                             row->unary_operation == IR_UNARY_BOOLEAN_NOT))
+        {
+            IrIntegerResult folded = ir_integer_unary((IrUnaryOperation)row->unary_operation, (IrInteger){.low = left}, source_width);
+            constant = !(folded.faults & IR_FAST_UNFOLDABLE_FAULTS);
+            folded_bits = folded.bits.low;
+            rule = constant ? IR_FAST_FOLD_RULE_UNARY_CONSTANT : rule;
+            IR_SEMANTIC_RECORD(FAST_FOLD_ATTEMPTS, 1);
+            IR_SEMANTIC_RECORD(FAST_FOLD_REJECTED, !constant);
+        }
+    }
+    else if (width && row->opcode == IR_OPCODE_BINARY && second != IR_PROMOTE_NONE)
+    {
+        u32 source_width = ir_fast_width(program, function->values[first].canonical_type);
+        u32 right_width = ir_fast_width(program, function->values[second].canonical_type);
+        if (source_width && right_width && left_constant && right_constant)
+        {
+            constant = ir_fast_binary(row->binary_operation, left, right, source_width, right_width, &folded_bits);
+            rule = constant ? IR_FAST_FOLD_RULE_BINARY_CONSTANT : rule;
+            IR_SEMANTIC_RECORD(FAST_FOLD_ATTEMPTS, 1);
+            IR_SEMANTIC_RECORD(FAST_FOLD_REJECTED, !constant);
+        }
+        if (!constant && right_constant)
+        {
+            bool zero_identity = row->binary_operation == IR_BINARY_INTEGER_ADD || row->binary_operation == IR_BINARY_INTEGER_SUBTRACT ||
+                                 row->binary_operation == IR_BINARY_INTEGER_BITWISE_OR || row->binary_operation == IR_BINARY_INTEGER_BITWISE_XOR ||
+                                 row->binary_operation == IR_BINARY_SHIFT_LEFT || row->binary_operation == IR_BINARY_SIGNED_SHIFT_RIGHT ||
+                                 row->binary_operation == IR_BINARY_UNSIGNED_SHIFT_RIGHT;
+            if ((right == 0 && zero_identity) || (right == 1 && row->binary_operation == IR_BINARY_INTEGER_MULTIPLY) ||
+                (right == ir_integer_mask((IrInteger){.low = UINT64_MAX}, width).low && row->binary_operation == IR_BINARY_INTEGER_BITWISE_AND))
+            {
+                *replacement = first;
+                rule = IR_FAST_FOLD_RULE_BINARY_RIGHT_IDENTITY;
+            }
+        }
+        if (!constant && left_constant && ((left == 0 && (row->binary_operation == IR_BINARY_INTEGER_ADD ||
+             row->binary_operation == IR_BINARY_INTEGER_BITWISE_OR || row->binary_operation == IR_BINARY_INTEGER_BITWISE_XOR)) ||
+            (left == 1 && row->binary_operation == IR_BINARY_INTEGER_MULTIPLY)))
+        {
+            *replacement = second;
+            rule = IR_FAST_FOLD_RULE_BINARY_LEFT_IDENTITY;
+        }
+    }
+    if (constant)
+    {
+        *bits = ir_integer_from_u64(folded_bits, width).low;
+    }
+    return rule;
+}
+
+// A row may be replaced by an existing value only when the two values are
+// indistinguishable to every later reader.
+BUSTER_GLOBAL_LOCAL bool ir_fast_replacement_compatible(IrFunction const* function, u32 value, u32 replacement)
+{
+    IrValue a = function->values[value];
+    IrValue b = function->values[replacement];
+    return a.canonical_type.value == b.canonical_type.value && a.category == b.category && a.alignment == b.alignment &&
+           a.is_read_only == b.is_read_only && a.points_to_read_only == b.points_to_read_only && a.is_volatile == b.is_volatile;
+}
+
 BUSTER_GLOBAL_LOCAL void ir_fast_fold(IrProgram* program, IrFunction* function, u32* replacements, u8* removed,
                                       IrFastPass pass, IrFastPassStatistics* statistics)
 {
@@ -171,14 +313,11 @@ BUSTER_GLOBAL_LOCAL void ir_fast_fold(IrProgram* program, IrFunction* function, 
         u32 replacement = IR_PROMOTE_NONE;
         u32 first = row->operand_count ? ir_promote_root(replacements, row->operands[0].value) : IR_PROMOTE_NONE;
         u32 second = !address && row->operand_count > 1 ? ir_promote_root(replacements, row->operands[1].value) : IR_PROMOTE_NONE;
-        u32 width = address ? 0 : ir_fast_width(program, row->canonical_type);
-        u64 left = 0, right = 0, bits = 0;
-        bool constant = false;
-        bool left_constant = !address && first != IR_PROMOTE_NONE && ir_fast_constant(program, function, first, &left);
-        bool right_constant = second != IR_PROMOTE_NONE && ir_fast_constant(program, function, second, &right);
+        u64 bits = 0;
+        IrFastFoldRule rule = IR_FAST_FOLD_RULE_NONE;
         if (address)
         {
-            if ((row->opcode == IR_OPCODE_ADDRESS_OF || row->opcode == IR_OPCODE_DEREFERENCE) && first != IR_PROMOTE_NONE)
+            if (first != IR_PROMOTE_NONE)
             {
                 u32 definition = function->values[first].definition.value;
                 if (definition < function->instruction_count)
@@ -193,92 +332,81 @@ BUSTER_GLOBAL_LOCAL void ir_fast_fold(IrProgram* program, IrFunction* function, 
                 }
             }
         }
-        else if (row->opcode == IR_OPCODE_CAST && first != IR_PROMOTE_NONE)
+        else
         {
-            if (row->canonical_type.value == function->values[first].canonical_type.value && ir_instruction_is_pure(program, function, row))
-            {
-                replacement = first;
-            }
-            else if (width && left_constant)
-            {
-                u32 source_width = ir_fast_width(program, function->values[first].canonical_type);
-                if (row->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND ||
-                    row->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND ||
-                    row->conversion_operation == IR_CONVERSION_INTEGER_TRUNCATE ||
-                    row->conversion_operation == IR_CONVERSION_INTEGER_REINTERPRET)
-                {
-                    IrIntegerResult converted = ir_integer_convert((IrConversionOperation)row->conversion_operation, (IrInteger){.low = left},
-                                                                   source_width, width);
-                    constant = source_width && !(converted.faults & IR_INTEGER_FAULT_UNSUPPORTED);
-                    bits = converted.bits.low;
-                    IR_SEMANTIC_RECORD(FAST_FOLD_ATTEMPTS, 1);
-                    IR_SEMANTIC_RECORD(FAST_FOLD_REJECTED, !constant);
-                }
-            }
+            rule = ir_fast_fold_rule(program, function, row, first, second, &replacement, &bits);
         }
-        else if (width && row->opcode == IR_OPCODE_UNARY && left_constant)
-        {
-            u32 source_width = ir_fast_width(program, function->values[first].canonical_type);
-            if (source_width && (row->unary_operation == IR_UNARY_INTEGER_NEGATE || row->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT ||
-                                 row->unary_operation == IR_UNARY_BOOLEAN_NOT))
-            {
-                IrIntegerResult folded = ir_integer_unary((IrUnaryOperation)row->unary_operation, (IrInteger){.low = left}, source_width);
-                constant = !(folded.faults & IR_FAST_UNFOLDABLE_FAULTS);
-                bits = folded.bits.low;
-                IR_SEMANTIC_RECORD(FAST_FOLD_ATTEMPTS, 1);
-                IR_SEMANTIC_RECORD(FAST_FOLD_REJECTED, !constant);
-            }
-        }
-        else if (width && row->opcode == IR_OPCODE_BINARY && second != IR_PROMOTE_NONE)
-        {
-            u32 source_width = ir_fast_width(program, function->values[first].canonical_type);
-            u32 right_width = ir_fast_width(program, function->values[second].canonical_type);
-            if (source_width && right_width && left_constant && right_constant)
-            {
-                constant = ir_fast_binary(row->binary_operation, left, right, source_width, right_width, &bits);
-                IR_SEMANTIC_RECORD(FAST_FOLD_ATTEMPTS, 1);
-                IR_SEMANTIC_RECORD(FAST_FOLD_REJECTED, !constant);
-            }
-            if (!constant && right_constant)
-            {
-                bool zero_identity = row->binary_operation == IR_BINARY_INTEGER_ADD || row->binary_operation == IR_BINARY_INTEGER_SUBTRACT ||
-                                     row->binary_operation == IR_BINARY_INTEGER_BITWISE_OR || row->binary_operation == IR_BINARY_INTEGER_BITWISE_XOR ||
-                                     row->binary_operation == IR_BINARY_SHIFT_LEFT || row->binary_operation == IR_BINARY_SIGNED_SHIFT_RIGHT ||
-                                     row->binary_operation == IR_BINARY_UNSIGNED_SHIFT_RIGHT;
-                if ((right == 0 && zero_identity) || (right == 1 && row->binary_operation == IR_BINARY_INTEGER_MULTIPLY) ||
-                    (right == ir_integer_mask((IrInteger){.low = UINT64_MAX}, width).low && row->binary_operation == IR_BINARY_INTEGER_BITWISE_AND))
-                    replacement = first;
-            }
-            if (!constant && left_constant && ((left == 0 && (row->binary_operation == IR_BINARY_INTEGER_ADD ||
-                 row->binary_operation == IR_BINARY_INTEGER_BITWISE_OR || row->binary_operation == IR_BINARY_INTEGER_BITWISE_XOR)) ||
-                (left == 1 && row->binary_operation == IR_BINARY_INTEGER_MULTIPLY))) replacement = second;
-        }
+#if BUSTER_BENCH_ALLOCATIONS
+        // A late fold needed a replacement-map root when an operand no longer
+        // names the value it was committed with: an earlier identity in this
+        // scan or a parameter sweep supplied the fact. Read before a constant
+        // rewrite clears the operands.
+        bool replaced_roots = (first != IR_PROMOTE_NONE && first != row->operands[0].value) ||
+                              (second != IR_PROMOTE_NONE && second != row->operands[1].value);
+#endif
         if (replacement != IR_PROMOTE_NONE)
         {
-            IrValue a = function->values[row->result.value];
-            IrValue b = function->values[replacement];
-            if (a.canonical_type.value == b.canonical_type.value && a.category == b.category && a.alignment == b.alignment &&
-                a.is_read_only == b.is_read_only && a.points_to_read_only == b.points_to_read_only && a.is_volatile == b.is_volatile)
+            if (ir_fast_replacement_compatible(function, row->result.value, replacement))
             {
                 replacements[row->result.value] = replacement;
                 removed[index] = 1;
                 statistics->changes += 1;
+                IR_FAST_FOLD_CENSUS_LATE(rule, replaced_roots);
             }
         }
-        else if (constant)
+        else if (rule != IR_FAST_FOLD_RULE_NONE)
         {
             IR_SEMANTIC_RECORD(FAST_FOLD_ACCEPTED, 1);
             row->opcode = IR_OPCODE_CONSTANT_INTEGER;
             row->operands = 0;
             row->operand_count = 0;
             row->immediates = arena_allocate(program->arena, u64, 1);
-            row->immediates[0] = ir_integer_from_u64(bits, width).low;
+            row->immediates[0] = bits;
             row->immediate_count = 1;
             row->immediate_is_negative = false;
             statistics->changes += 1;
+            IR_FAST_FOLD_CENSUS_LATE(rule, replaced_roots);
         }
     }
 }
+
+#if BUSTER_BENCH_ALLOCATIONS
+// The construction half of the #3010 census: asks ir_fast_fold_rule, with no
+// replacement map, whether a row the C builder just committed would already
+// fold from the operands committed before it. Probes neither change the row
+// nor count as semantic work. The bytes are logical row/value/operand storage
+// a birth fold would not have filled (an identity needs none of them; a
+// constant still needs its row and immediate), not arena calls or RSS.
+void ir_construction_fold_census(IrProgram* program, IrFunction* function, IrInstructionId id)
+{
+    IrInstruction const* row = id.value < function->instruction_count ? function->instructions + id.value : 0;
+    if (row && row->result.value < function->value_count && row->operand_count && row->operands &&
+        (row->opcode == IR_OPCODE_CAST || row->opcode == IR_OPCODE_UNARY || row->opcode == IR_OPCODE_BINARY))
+    {
+        u32 replacement = IR_PROMOTE_NONE;
+        u64 bits = 0;
+        u32 second = row->operand_count > 1 ? row->operands[1].value : IR_PROMOTE_NONE;
+        bool suppressed = ir_semantic_suppress(true);
+        IrFastFoldRule rule = ir_fast_fold_rule(program, function, row, row->operands[0].value, second, &replacement, &bits);
+        ir_semantic_suppress(suppressed);
+        IR_CONSTRUCTION_RECORD(FOLD_BIRTH_SCALAR_ROWS, 1);
+        if (replacement != IR_PROMOTE_NONE && !ir_fast_replacement_compatible(function, row->result.value, replacement))
+        {
+            IR_CONSTRUCTION_RECORD(FOLD_BIRTH_METADATA_MISMATCHES, 1);
+            rule = IR_FAST_FOLD_RULE_NONE;
+        }
+        if (rule != IR_FAST_FOLD_RULE_NONE)
+        {
+            u64 operand_bytes = (u64)row->operand_count * sizeof(IrValueId);
+            u64 source_bytes = function->instruction_canonical_sources ? sizeof(IrSourceRange) : 0;
+            ir_construction_record((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_BIRTH_CAST_IDENTITY + (rule - IR_FAST_FOLD_RULE_CAST_IDENTITY)), 1);
+            IR_CONSTRUCTION_RECORD(FOLD_BIRTH_AVOIDABLE_BYTES, replacement != IR_PROMOTE_NONE
+                                                                   ? sizeof(IrInstruction) + sizeof(IrValue) + operand_bytes + source_bytes
+                                                                   : operand_bytes);
+        }
+    }
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL void ir_fast_dce(IrProgram* program, IrFunction* function, u32* replacements, u8* removed,
                                      u32* uses, u32* queue, IrFastPassStatistics* statistics)
@@ -331,6 +459,220 @@ BUSTER_GLOBAL_LOCAL void ir_fast_dce(IrProgram* program, IrFunction* function, u
     }
 }
 
+// Opt-in block-local value numbering (#3011). One forward walk of each
+// block's linked instruction chain keys the admitted rows -- wrapping unsigned
+// scalar add/subtract/multiply/and/or/xor whose operands and result share one
+// canonical type, and single-limb constants of such a type -- by operation,
+// type and resolved operand roots (or immediate bits), with commutative
+// operands ordered. A later exact match records its result as a
+// replacement of the earlier representative and is removed by the shared
+// compaction. Entries carry the block's generation tag, so no state crosses a
+// block boundary and no per-block clearing is needed. Within a block a keyed
+// operand's root is final: it is defined earlier in the block (already
+// decided) or in another block. A block walked later can still replace that
+// operand, but a replacement only joins equal values, so an earlier hit stays
+// sound and its entry has already expired. A full table or exhausted probe
+// sequence declines insertion; it never changes a result. The census's
+// linear arm (IrProgram.fast_cse_window) instead compares each candidate
+// with the block's previous IR_FAST_CSE_WINDOW keyed candidates, held in a
+// ring in the table's first slots. Every candidate takes the next slot,
+// recording its representative after a hit, so the arm never saturates.
+typedef struct IrFastCseEntry IrFastCseEntry;
+struct IrFastCseEntry
+{
+    u32 left;
+    u32 right;
+    u32 type;
+    u32 value;
+    u32 ordinal;
+    u32 generation;
+    u32 operation;
+};
+
+// One table serves a module preparation. Each block takes a fresh generation;
+// when the counter wraps, the table is cleared and generation 1 restarts.
+typedef struct IrFastCseTable IrFastCseTable;
+struct IrFastCseTable
+{
+    IrFastCseEntry* entries;
+    u32 generation;
+};
+
+BUSTER_GLOBAL_LOCAL IrFastCseTable ir_fast_cse_table(Arena* arena, u32 generation, IrFastCseStatistics* census)
+{
+    IrFastCseTable result = {.entries = arena_allocate(arena, IrFastCseEntry, IR_FAST_CSE_SLOTS), .generation = generation};
+    memset(result.entries, 0, sizeof(IrFastCseEntry) * IR_FAST_CSE_SLOTS);
+    census->table_bytes += sizeof(IrFastCseEntry) * IR_FAST_CSE_SLOTS;
+    return result;
+}
+
+// Key operation of a constant row; binary rows use their IrBinaryOperation.
+#define IR_FAST_CSE_CONSTANT ((u32)IR_BINARY_COUNT + 1u)
+
+// Returns the admitted key operation and sets its commutativity, or returns
+// IR_BINARY_COUNT for a row outside the domain. Signed, Boolean, enum, wider
+// than one limb, pointer, floating, place and volatile shapes are excluded.
+BUSTER_GLOBAL_LOCAL u32 ir_fast_cse_operation(IrProgram* program, IrFunction* function, IrInstruction const* row, bool* commutative)
+{
+    u32 result = IR_BINARY_COUNT;
+    if (!row->volatile_access && !row->target_count && row->result.value < function->value_count)
+    {
+        if (row->opcode == IR_OPCODE_CONSTANT_INTEGER && !row->operand_count && row->immediate_count == 1 && !row->immediate_is_negative)
+        {
+            *commutative = false;
+            result = IR_FAST_CSE_CONSTANT;
+        }
+        else if (row->opcode == IR_OPCODE_BINARY && row->operand_count == 2 && !row->immediate_count)
+        {
+            switch (row->binary_operation)
+            {
+            case IR_BINARY_INTEGER_ADD:
+            case IR_BINARY_INTEGER_MULTIPLY:
+            case IR_BINARY_INTEGER_BITWISE_AND:
+            case IR_BINARY_INTEGER_BITWISE_OR:
+            case IR_BINARY_INTEGER_BITWISE_XOR:
+                *commutative = true;
+                result = row->binary_operation;
+                break;
+            case IR_BINARY_INTEGER_SUBTRACT:
+                *commutative = false;
+                result = row->binary_operation;
+                break;
+            default: break;
+            }
+        }
+        IrType* type = result != IR_BINARY_COUNT ? ir_type_from_id(&program->types, row->canonical_type) : 0;
+        IrValue const* value = function->values + row->result.value;
+        if (!type || type->kind != IR_TYPE_INTEGER || type->is_signed || type->is_atomic || type->is_volatile ||
+            !type->bit_width || type->bit_width > 64 || value->category != IR_VALUE_VALUE || value->is_volatile ||
+            value->canonical_type.value != row->canonical_type.value) result = IR_BINARY_COUNT;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void ir_fast_cse(IrProgram* program, IrFunction* function, u32* replacements, u8* removed, IrFastCseTable* cse,
+                                     IrFastPassStatistics* statistics, IrFastCseStatistics* census)
+{
+    IrFastCseEntry* table = cse->entries;
+    bool window = program->fast_cse_window;
+    u32 mask = IR_FAST_CSE_SLOTS - 1;
+    u32 limit = IR_FAST_CSE_SLOTS - IR_FAST_CSE_SLOTS / 4;
+    for (u32 block = 0; block < function->block_count; block += 1)
+    {
+        // Slots tagged with any other generation are empty for this block.
+        cse->generation += 1;
+        if (!cse->generation)
+        {
+            memset(table, 0, sizeof(IrFastCseEntry) * IR_FAST_CSE_SLOTS);
+            census->table_bytes += sizeof(IrFastCseEntry) * IR_FAST_CSE_SLOTS;
+            cse->generation = 1;
+        }
+        u32 generation = cse->generation;
+        u32 entries = 0;
+        u32 ordinal = 0;
+        census->blocks += 1;
+        for (u32 index = function->blocks[block].first_instruction.value; index < function->instruction_count;
+             index = function->instructions[index].next.value)
+        {
+            IrInstruction* row = function->instructions + index;
+            bool commutative = false;
+            statistics->visits += 1;
+            u32 operation = removed[index] ? IR_BINARY_COUNT : ir_fast_cse_operation(program, function, row, &commutative);
+            u32 type = row->canonical_type.value;
+            u32 left = IR_PROMOTE_NONE, right = IR_PROMOTE_NONE;
+            bool keyed = operation == IR_FAST_CSE_CONSTANT;
+            if (keyed)
+            {
+                left = (u32)row->immediates[0];
+                right = (u32)(row->immediates[0] >> 32);
+            }
+            else if (operation != IR_BINARY_COUNT)
+            {
+                left = ir_promote_root(replacements, row->operands[0].value);
+                right = ir_promote_root(replacements, row->operands[1].value);
+                keyed = left < function->value_count && right < function->value_count && function->values[left].canonical_type.value == type &&
+                        function->values[right].canonical_type.value == type;
+            }
+            if (keyed)
+            {
+                bool commuted = commutative && right < left;
+                if (commuted)
+                {
+                    u32 swap = left;
+                    left = right;
+                    right = swap;
+                }
+                ordinal += 1;
+                census->candidates += 1;
+                IrFastCseEntry* match = 0;
+                IrFastCseEntry* empty = 0;
+                if (window)
+                {
+                    // Linear arm: compare against the block's previous
+                    // IR_FAST_CSE_WINDOW keyed candidates, newest first. Every
+                    // candidate, hit or miss, then takes the oldest slot.
+                    u32 previous = ordinal - 1;
+                    u32 live = BUSTER_MIN(previous, IR_FAST_CSE_WINDOW);
+                    for (u32 offset = 1; !match && offset <= live; offset += 1)
+                    {
+                        IrFastCseEntry* entry = table + ((previous - offset) % IR_FAST_CSE_WINDOW);
+                        census->probes += 1;
+                        if (entry->operation == operation && entry->type == type && entry->left == left && entry->right == right) match = entry;
+                    }
+                    empty = table + (previous % IR_FAST_CSE_WINDOW);
+                }
+                else
+                {
+                    u32 hash = left * 0x9E3779B1u ^ right * 0x85EBCA77u ^ type * 0xC2B2AE3Du ^ operation;
+                    hash ^= hash >> 15;
+                    for (u32 probe = 0; !match && !empty && probe < IR_FAST_CSE_PROBES; probe += 1)
+                    {
+                        IrFastCseEntry* entry = table + ((hash + probe) & mask);
+                        census->probes += 1;
+                        if (entry->generation != generation) empty = entry;
+                        else if (entry->operation == operation && entry->type == type && entry->left == left && entry->right == right) match = entry;
+                        else census->collisions += 1;
+                    }
+                }
+                // The window's slot for this candidate keeps the value it now
+                // stands for: the representative after a hit, itself otherwise.
+                u32 representative = row->result.value;
+                if (match)
+                {
+                    IrValue a = function->values[row->result.value];
+                    IrValue b = function->values[match->value];
+                    if (a.alignment == b.alignment && a.category == b.category && a.is_read_only == b.is_read_only &&
+                        a.points_to_read_only == b.points_to_read_only && a.is_volatile == b.is_volatile)
+                    {
+                        representative = match->value;
+                        replacements[row->result.value] = match->value;
+                        removed[index] = 1;
+                        statistics->changes += 1;
+                        census->hits += 1;
+                        census->window_hits += ordinal - match->ordinal <= IR_FAST_CSE_WINDOW;
+                        census->commuted_hits += commuted;
+                        census->constant_hits += operation == IR_FAST_CSE_CONSTANT;
+                    }
+                    else census->metadata_declines += 1;
+                }
+                if (window)
+                {
+                    *empty = (IrFastCseEntry){.left = left, .right = right, .type = type, .value = representative, .ordinal = ordinal,
+                        .generation = generation, .operation = operation};
+                }
+                else if (!match && empty && entries < limit)
+                {
+                    *empty = (IrFastCseEntry){.left = left, .right = right, .type = type, .value = representative, .ordinal = ordinal,
+                        .generation = generation, .operation = operation};
+                    entries += 1;
+                }
+                else if (!match) census->saturation_declines += 1;
+            }
+        }
+        census->max_block_candidates = BUSTER_MAX(census->max_block_candidates, ordinal);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void ir_fast_parameters(IrFunction* function, u32* replacements, IrFastStatistics* statistics)
 {
     IrFastPassStatistics* pass = statistics->passes + IR_FAST_PARAMETERS;
@@ -380,7 +722,7 @@ BUSTER_GLOBAL_LOCAL void ir_fast_parameters(IrFunction* function, u32* replaceme
     statistics->parameter_budget_hits += changed;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_fast_function(IrProgram* program, IrFunction* function, IrFastStatistics* statistics)
+BUSTER_GLOBAL_LOCAL void ir_fast_function(IrProgram* program, IrFunction* function, IrFastCseTable* cse, IrFastStatistics* statistics)
 {
     statistics->functions += 1;
     statistics->instructions_before += function->instruction_count;
@@ -442,15 +784,24 @@ BUSTER_GLOBAL_LOCAL void ir_fast_function(IrProgram* program, IrFunction* functi
         for (u32 value = 0; value < function->value_count; value += 1) replacements[value] = value;
         statistics->scratch_peak_bytes = BUSTER_MAX(statistics->scratch_peak_bytes, scratch_bytes);
         u64 changes = 0;
-        for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
+        // CSE consumes folded and address-collapsed roots; DCE then counts
+        // uses of the surviving representatives.
+        IrFastPass const order[] = {IR_FAST_FOLD, IR_FAST_ADDRESS, IR_FAST_CSE, IR_FAST_DCE, IR_FAST_PARAMETERS};
+        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(order) == IR_FAST_PASS_COUNT);
+        for (u32 step = 0; step < IR_FAST_PASS_COUNT; step += 1)
         {
+            IrFastPass pass = order[step];
             if (!(program->fast_passes & IR_FAST_PASS_BIT(pass))) continue;
             IrFastPassStatistics* measurement = statistics->passes + pass;
             u64 before = measurement->changes;
             TimeDataType start = program->measure_fast_passes ? timestamp_take() : (TimeDataType){0};
             if (pass == IR_FAST_FOLD || pass == IR_FAST_ADDRESS)
             {
-                ir_fast_fold(program, function, replacements, removed, (IrFastPass)pass, measurement);
+                ir_fast_fold(program, function, replacements, removed, pass, measurement);
+            }
+            else if (pass == IR_FAST_CSE)
+            {
+                ir_fast_cse(program, function, replacements, removed, cse, measurement, &statistics->cse);
             }
             else if (pass == IR_FAST_DCE)
             {
@@ -475,10 +826,21 @@ BUSTER_GLOBAL_LOCAL void ir_fast_function(IrProgram* program, IrFunction* functi
     statistics->instructions_after += function->instruction_count;
 }
 #if BUSTER_INCLUDE_TESTS
+IrFastStatistics ir_test_fast_cse_function(IrProgram* program, IrFunction* function, u32 generation)
+{
+    IrFastStatistics result = {0};
+    TemporalArena scratch = scratch_begin(&program->arena, 1);
+    IrFastCseTable cse = ir_fast_cse_table(scratch.arena, generation, &result.cse);
+    ir_fast_function(program, function, &cse, &result);
+    scratch_end(scratch);
+    return result;
+}
+
 IrFastStatistics ir_test_fast_function(IrProgram* program, IrFunction* function)
 {
     IrFastStatistics result = {0};
-    ir_fast_function(program, function, &result);
+    if (program->fast_passes & IR_FAST_PASS_BIT(IR_FAST_CSE)) result = ir_test_fast_cse_function(program, function, 0);
+    else ir_fast_function(program, function, 0, &result);
     return result;
 }
 #endif
@@ -656,6 +1018,10 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             bool check_output = !input_certified || BUSTER_IR_TRANSFORM_CHECKS;
             u8* declined = 0;
             IrFastDecline* declines = 0;
+            // The CSE table is allocated before, and outlives, each function's
+            // own scratch region.
+            IrFastCseTable cse = {0};
+            if (program->fast_passes & IR_FAST_PASS_BIT(IR_FAST_CSE)) cse = ir_fast_cse_table(scratch.arena, 0, &module->fast.cse);
             // Callers whose optional splices skipped their own output check
             // (ir_inline_module) are proven here by the same per-function input
             // validation; one that fails is an inlining-output error, never a
@@ -712,7 +1078,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                     else if (result.error == IR_VALIDATION_NONE)
                     {
                         IR_CONSTRUCTION_RECORD(PREPARATION_FAST_FUNCTIONS, 1);
-                        ir_fast_function(program, function, &module->fast);
+                        ir_fast_function(program, function, &cse, &module->fast);
                     }
                 }
             }
