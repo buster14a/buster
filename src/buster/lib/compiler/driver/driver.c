@@ -3417,8 +3417,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 x86_mode_target.x86_code16 = x86_execution_mode == 16;
                 if (!target_os_supports_arch(x86_mode_target.cpu_arch, x86_mode_target.os))
                 {
-                    compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for target {S8}"),
-                                                   x86_execution_mode_option, target_to_string(arena, invocation.target));
+                    invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+                    invocation.diagnostic = string_format(
+                        arena, S8("unsupported option: {S8} for target {S8}"), x86_execution_mode_option,
+                        target_to_string(arena, invocation.target));
                 }
                 else
                 {
