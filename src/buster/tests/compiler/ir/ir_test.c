@@ -2751,10 +2751,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_i386_abi(UnitTestArguments* arguments
                                    returned.parts[part].size == size && returned.parts[part].value_offset == part * 4);
         }
     }
-    IrTypeId f32 = ir_program_add_type(&program, (IrType){
+    IrTypeId float32_type = ir_program_add_type(&program, (IrType){
         .kind = IR_TYPE_FLOAT, .bit_width = 32, .layout = {.size = 4, .alignment = 4, .resolved = true}});
     IrTypeId elements[] = {
-        f32,
+        float32_type,
         ir_program_add_type(&program, (IrType){.kind = IR_TYPE_FLOAT, .bit_width = 64,
             .layout = {.size = 8, .alignment = 4, .resolved = true}}),
         ir_program_add_type(&program, (IrType){.kind = IR_TYPE_FLOAT, .bit_width = 80,
@@ -2794,7 +2794,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_i386_abi(UnitTestArguments* arguments
     // The three scalar elements were only used as members before this loop.
     BUSTER_TEST(arguments, program.abi_contexts[convention].classified_values == classified + BUSTER_ARRAY_LENGTH(elements));
     ir_program_invalidate_abi(&program);
-    IrAbiValue after_invalidate = ir_type_abi_value(&program, f32, convention, IR_ABI_USE_RESULT);
+    IrAbiValue after_invalidate = ir_type_abi_value(&program, float32_type, convention, IR_ABI_USE_RESULT);
     BUSTER_TEST(arguments, after_invalidate.part_count == 1 && after_invalidate.parts[0].abi_class == IR_ABI_CLASS_X87);
     IrType unsupported[] = {
         {.kind = IR_TYPE_VOID, .layout = {.resolved = true}},
