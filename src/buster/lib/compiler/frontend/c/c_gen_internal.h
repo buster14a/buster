@@ -40,6 +40,9 @@ struct CIrExt80Big
 };
 
 #if BUSTER_INCLUDE_TESTS
+// Calling-thread reference lookups plus scanned rows, and scanned rows alone.
+BUSTER_F_DECL u64 c_test_logical_call_reference_work(void);
+BUSTER_F_DECL u64 c_test_logical_call_reference_rows(void);
 BUSTER_F_DECL void c_test_ir_initializer_context_fail_next(bool commit);
 BUSTER_F_DECL bool c_test_ir_initializer_context_buffer_budget(void);
 // Smaller logical budgets exercise the production preflights without
