@@ -89,6 +89,19 @@ class MacosTest(unittest.TestCase):
         with self.assertRaises(native_timing.EvidenceError):
             native_timing.analyze_macos(guard_summary(guard_case("ok")), 0, "main", HEAD)
 
+    def test_extreme_numbers_are_refused_not_raised(self):
+        huge = guard_case("macros/fast", (10 ** 400, 1.0))
+        for label, case in (("401-digit integer ratio", huge),
+                            ("infinite ratio", guard_case("macros/fast", (float("inf"), 1.0)))):
+            with self.subTest(label), self.assertRaises(native_timing.EvidenceError):
+                native_timing.analyze_macos(guard_summary(case), 0, BASE, HEAD)
+
+    def test_large_finite_ratios_do_not_overflow_their_geometric_mean(self):
+        case = guard_case("macros/fast", (1e308, 1e308), (True, True), "regression")
+        report = native_timing.analyze_macos(guard_summary(case), 1, BASE, HEAD)
+        self.assertEqual(report["cells"][0]["ratio"], 1e308)
+        json.dumps(report, allow_nan=False)
+
     def test_demonstration_forces_the_warning_path(self):
         report = native_timing.analyze_macos(guard_summary(guard_case("a", (1.0, 1.0)), guard_case("b", (1.1, 1.0))),
                                              0, BASE, HEAD, demonstrate=True)
@@ -114,9 +127,9 @@ class WindowsTest(unittest.TestCase):
                 path.write_bytes(("﻿" + text).encode("utf-16-le") if utf16 else text.encode("utf-8"))
             (pair / "pair-validation.txt").write_text("Both arms succeeded.\n", encoding="utf-8")
 
-    def analyze(self, durations, demonstrate=False, override=None) -> dict:
+    def analyze(self, durations, demonstrate=False, override=None, utf16=True) -> dict:
         with tempfile.TemporaryDirectory() as directory:
-            self.evidence(Path(directory), durations, override=override)
+            self.evidence(Path(directory), durations, utf16=utf16, override=override)
             return native_timing.analyze_windows(Path(directory), BASE, HEAD, "7", "1", 3, demonstrate)
 
     def test_majority_of_trials_crossing_is_a_regression(self):
@@ -135,6 +148,20 @@ class WindowsTest(unittest.TestCase):
             self.evidence(Path(directory), {1: (1.0, 1.0), 2: (1.0, 1.0), 3: (1.0, 1.0)}, utf16=False)
             report = native_timing.analyze_windows(Path(directory), BASE, HEAD, "7", "1", 3)
         self.assertEqual(report["verdict"], "no regression")
+
+    def test_extreme_durations_are_refused_not_raised(self):
+        for label, durations, demonstrate in (
+            ("401-digit integer duration", {1: (10 ** 400, 1.0), 2: (1.0, 1.0), 3: (1.0, 1.0)}, False),
+            ("overflowing ratio", {1: (1e-308, 1e308), 2: (1.0, 1.0), 3: (1.0, 1.0)}, False),
+            ("overflowing demonstration", {1: (1.0, 1e308), 2: (1.0, 1.0), 3: (1.0, 1.0)}, True),
+        ):
+            with self.subTest(label), self.assertRaises(native_timing.EvidenceError):
+                self.analyze(durations, demonstrate=demonstrate, utf16=False)
+
+    def test_large_finite_durations_are_valid(self):
+        report = self.analyze({1: (1e300, 1e300), 2: (1e300, 1e300), 3: (1e300, 1e300)})
+        self.assertEqual(report["verdict"], "no regression")
+        json.dumps(report, allow_nan=False)
 
     def test_demonstration_doubles_the_candidate(self):
         report = self.analyze({1: (600.0, 600.0), 2: (600.0, 600.0), 3: (600.0, 600.0)}, demonstrate=True)
@@ -238,6 +265,21 @@ class CommandTest(unittest.TestCase):
         self.assertIn("::warning title=Native macOS timing regression (informative)::", output)
         self.assertIn("verdict=regression\n", (directory / "output.txt").read_text(encoding="utf-8"))
         self.assertIn("**regression**", (directory / "step.md").read_text(encoding="utf-8"))
+
+    def test_report_is_strict_json(self):
+        status, _, directory = self.run_macos(guard_summary(REGRESSING), "1")
+        report = directory / "report.json"
+        with contextlib.redirect_stdout(io.StringIO()):
+            status = native_timing.main(["macos", "--summary", str(directory / "summary.json"), "--driver-exit",
+                                         str(directory / "exit.txt"), "--baseline", BASE, "--candidate", HEAD,
+                                         "--report", str(report)])
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(report.read_text(encoding="utf-8"))["verdict"], "regression")
+
+    def test_huge_integer_exits_two(self):
+        status, output, _ = self.run_macos(guard_summary(guard_case("macros/fast", (10 ** 400, 1.0))), "0")
+        self.assertEqual(status, 2)
+        self.assertIn("::error title=Native macOS timing incomplete::", output)
 
     def test_incomplete_evidence_exits_two(self):
         status, output, _ = self.run_macos(dict(guard_summary(REGRESSING), valid=False), "1", "--annotate")

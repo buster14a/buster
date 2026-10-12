@@ -72,7 +72,14 @@ class EvidenceError(ValueError):
 
 
 def _finite(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    """A JSON number representable as a finite float; a huge integer is refused, never raised."""
+    result = False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            result = math.isfinite(float(value))
+        except OverflowError:
+            result = False
+    return result
 
 
 def _sha(value: str, label: str) -> str:
@@ -118,7 +125,10 @@ def analyze_macos(summary: object, driver_exit: int, baseline: str, candidate: s
         if (decision == "regression") != bool(confirmed):
             raise EvidenceError(f"{name}: decision {decision!r} disagrees with its per-round results")
         metric = confirmed[0] if confirmed else "wall_seconds"
-        ratio = math.sqrt(rounds[(metric, 0)]["median_ratio"] * rounds[(metric, 1)]["median_ratio"])
+        # Split the geometric mean so two large finite ratios cannot overflow their product.
+        ratio = math.sqrt(rounds[(metric, 0)]["median_ratio"]) * math.sqrt(rounds[(metric, 1)]["median_ratio"])
+        if not math.isfinite(ratio) or ratio <= 0:
+            raise EvidenceError(f"{name}: the {metric} ratio is not a representable positive number")
         cells.append({"cell": name, "metric": metric, "ratio": ratio, "regression": bool(confirmed),
                       "inconclusive": decision == "inconclusive"})
     counted = sum(cell["regression"] for cell in cells)
@@ -170,6 +180,8 @@ def analyze_windows(evidence: Path, baseline: str, candidate: str, run_id: str, 
         if demonstrate:
             durations["candidate"] *= 2.0
         ratio = durations["candidate"] / durations["baseline"]
+        if not math.isfinite(ratio) or ratio <= 0:
+            raise EvidenceError(f"trial {trial}: the candidate/baseline ratio is not a representable positive number")
         crossed = ratio > 1.0 + WALL_RELATIVE_MARGIN and durations["candidate"] - durations["baseline"] > WALL_ABSOLUTE_SECONDS
         cells.append({"cell": f"test_all_combinations_ci trial {trial}", "metric": "wall_seconds", "ratio": ratio,
                       "baseline_seconds": durations["baseline"], "candidate_seconds": durations["candidate"],
@@ -325,7 +337,8 @@ def main(argv: list[str] | None = None) -> int:
             with open(args.github_output, "a", encoding="utf-8") as stream:
                 stream.write(f"verdict={report['verdict']}\n")
         if args.report:
-            Path(args.report).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            Path(args.report).write_text(json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
+                                         encoding="utf-8")
     except EvidenceError as error:
         print(f"::error title=Native {PLATFORMS[args.platform]['name']} timing incomplete::{error}")
         status = 2
