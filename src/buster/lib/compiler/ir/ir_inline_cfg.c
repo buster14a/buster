@@ -32,6 +32,57 @@ BUSTER_GLOBAL_LOCAL IrInlineCfgReserve ir_inline_cfg_reserve(IrFunction const* c
     };
     return result;
 }
+// Grow the caller's block, instruction, value and extra tables once, to the
+// planned final counts, before its first splice. A frontend-built caller's
+// tables are exactly sized, so the first append would otherwise double each
+// one and leave both the original and the doubling slack in the arena (#48).
+// Counts that exceed a target still grow through the ordinary appenders.
+BUSTER_GLOBAL_LOCAL void ir_inline_cfg_reserve_tables(Arena* arena, IrFunction* caller, u64 blocks, u64 instructions,
+                                                      u64 values, u64 extras)
+{
+    if (blocks > caller->block_capacity && blocks <= UINT32_MAX)
+    {
+        IrBlock* rows = arena_allocate(arena, IrBlock, blocks);
+        if (caller->block_count) memcpy(rows, caller->blocks, sizeof(*rows) * caller->block_count);
+        caller->blocks = rows;
+        caller->block_capacity = (u32)blocks;
+    }
+    if (instructions > caller->instruction_capacity && instructions <= UINT32_MAX)
+    {
+        IrInstruction* rows = arena_allocate(arena, IrInstruction, instructions);
+        IrSourceRange* sources = arena_allocate(arena, IrSourceRange, instructions);
+        memset(sources, 0, sizeof(*sources) * instructions);
+        if (caller->instruction_count) memcpy(rows, caller->instructions, sizeof(*rows) * caller->instruction_count);
+        if (caller->instruction_canonical_sources)
+        {
+            memcpy(sources, caller->instruction_canonical_sources, sizeof(*sources) * caller->instruction_count);
+        }
+        caller->instructions = rows;
+        caller->instruction_canonical_sources = sources;
+        caller->instruction_capacity = (u32)instructions;
+    }
+    if (values > caller->value_capacity && values <= UINT32_MAX)
+    {
+        IrValue* rows = arena_allocate(arena, IrValue, values);
+        if (caller->value_count) memcpy(rows, caller->values, sizeof(*rows) * caller->value_count);
+        caller->values = rows;
+        caller->value_capacity = (u32)values;
+    }
+    if (extras > caller->extra_capacity && extras <= UINT32_MAX)
+    {
+        IrInstructionId* rows = arena_allocate(arena, IrInstructionId, extras);
+        IrInstructionExtra* payloads = arena_allocate(arena, IrInstructionExtra, extras);
+        if (caller->extra_count)
+        {
+            memcpy(rows, caller->extra_instructions, sizeof(*rows) * caller->extra_count);
+            memcpy(payloads, caller->extras, sizeof(*payloads) * caller->extra_count);
+        }
+        caller->extra_instructions = rows;
+        caller->extras = payloads;
+        caller->extra_capacity = (u32)extras;
+    }
+}
+
 BUSTER_GLOBAL_LOCAL IrLocalId ir_inline_cfg_local(IrLocalId id, u32 base)
 {
     return id.value == IR_ID_UNDERLYING_INVALID ? id : (IrLocalId){.value = base + id.value};
@@ -263,8 +314,11 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_cfg_table_growth_bytes(IrFunction const* calle
     return valid ? cost : UINT64_MAX;
 }
 
+// `caller_checked` means the pass has already proven, once for the caller,
+// that every caller block ends in a terminator and that the caller's projected
+// edge count fits in u32; the per-site scans below then skip the caller.
 BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_supported(IrProgram* program, IrFunction* caller, IrBlockId call_block,
-                                    IrInstructionId call_id, IrFunction const* callee,
+                                    IrInstructionId call_id, IrFunction const* callee, bool caller_checked,
                                     u32* copied_rows_out, u32* growth_out)
 {
     u32 copied = 0;
@@ -335,7 +389,7 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_supported(IrProgram* program, IrFunction*
     // operands below.
     if (valid)
     {
-        for (u32 b = 0; b < caller->block_count; b += 1)
+        for (u32 b = 0; !caller_checked && b < caller->block_count; b += 1)
         {
             IrBlock const* block = caller->blocks + b;
             IrInstruction const* tail = block->last_instruction.value < caller->instruction_count
@@ -407,7 +461,7 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_supported(IrProgram* program, IrFunction*
     if (valid)
     {
         u64 edges = (u64)return_count + 1;
-        for (u32 b = 0; b < caller->block_count; b += 1)
+        for (u32 b = 0; !caller_checked && b < caller->block_count; b += 1)
             edges += caller->instructions[caller->blocks[b].last_instruction.value].target_count;
         for (u32 b = 0; b < callee->block_count; b += 1)
             edges += callee->instructions[callee->blocks[b].last_instruction.value].target_count;
@@ -551,13 +605,16 @@ BUSTER_GLOBAL_LOCAL IrValueId* ir_inline_cfg_local_values(Arena* arena, IrFuncti
     return result;
 }
 
+// Called only for a site ir_inline_module planned: the planner checked the
+// caller's block tails and projected edge count, and earlier splices into the
+// same caller keep every tail terminated.
 BUSTER_GLOBAL_LOCAL bool ir_inline_cfg_call(Arena* arena, IrProgram* program, IrFunction* caller, IrBlockId call_block,
                                IrInstructionId call_id, IrFunction const* callee, IrInlineCfgReserve* reserve,
                                u32* copied_rows_out)
 {
     u32 copied = 0;
     u32 growth = 0;
-    bool valid = arena && reserve && ir_inline_cfg_supported(program, caller, call_block, call_id, callee, &copied, &growth);
+    bool valid = arena && reserve && ir_inline_cfg_supported(program, caller, call_block, call_id, callee, true, &copied, &growth);
     if (valid)
     {
     IrInstruction call = caller->instructions[call_id.value];

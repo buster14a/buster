@@ -34,6 +34,7 @@
 //                                                coverage and lane policy
 //   xed_import_*, assembly_import_*              x86 metadata importer (XED)
 //   aarch64_import_*, aarch64_generated_*        Arm A64 XML importer
+//   bootstrap_process_owner_*                  native bootstrap case helper build
 //   bench_throughput_add                        reproducible compiler benchmarks
 //   native_retirement_census_main                frozen native coverage inventory
 //   gpu_tools_main                               real GPU toolchain acceptance
@@ -44,6 +45,7 @@
 //   tools/ci_unit_tests.c                       isolated test-module partitions
 //   tools/qemu_compat.c                         opt-in pinned QEMU TCG blocker census
 //   tools/clang_suite.c                         pinned external Clang source ledger and preprocessing probes
+//   tools/userspace_qualification.c             pinned musl + BusyBox input controls and diagnostic cells
 //   compat_ide_select, compat_ide_resolve       compatibility harness compiler selection
 //                                                and compatibility_ide_selection_self_test
 //   compatibility_spawn_self_test              harness environment/script contracts
@@ -107,6 +109,8 @@
 typedef enum BuildCommand
 {
     BUILD_COMMAND_NONE,
+    BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER,
+    BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST,
     BUILD_COMMAND_BENCH_THROUGHPUT,
     BUILD_COMMAND_BENCH_THROUGHPUT_CI,
     BUILD_COMMAND_COMPILER_CLOSURE,
@@ -149,6 +153,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_DOOM,
     BUILD_COMMAND_TEST_QUICKJS,
     BUILD_COMMAND_TEST_MUSL,
+    BUILD_COMMAND_TEST_USERSPACE,
     BUILD_COMMAND_TEST_CPYTHON,
     BUILD_COMMAND_TEST_RADDEBUGGER,
     BUILD_COMMAND_TEST_CURL,
@@ -25607,6 +25612,8 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
     bool result = false;
     switch (command)
     {
+        case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER:
+        case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST:
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
         case BUILD_COMMAND_TEST_UNITS_PARTITIONED:
         case BUILD_COMMAND_COMPILER_CLOSURE:
@@ -25620,6 +25627,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS:
         case BUILD_COMMAND_TEST_QEMU:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
+        case BUILD_COMMAND_TEST_USERSPACE:
         case BUILD_COMMAND_TEST_CURL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
@@ -25658,6 +25666,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
         {.command = BUILD_COMMAND_TEST_QEMU, .owns_arguments = true},
         {.command = BUILD_COMMAND_QEMU_INPUT_SELF_TEST, .owns_arguments = false},
         {.command = BUILD_COMMAND_TEST_CLANG_SUITE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_TEST_USERSPACE, .owns_arguments = true},
         {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
         {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
         {.command = BUILD_COMMAND_SOURCE_SIZE, .owns_arguments = true},
@@ -39499,6 +39508,136 @@ BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 argumen
                             .spawn_options = {.use_process_environment = 1}};
 }
 
+// Build ownership for the bootstrap regression broker stays here, including
+// compiler qualification, flags, private output paths and process deadlines.
+// Always compile: there is no cache entry whose freshness Python must infer.
+enum
+{
+    BOOTSTRAP_PROCESS_OWNER_TIMEOUT_SECONDS = 60,
+    BOOTSTRAP_PROCESS_OWNER_CAPTURE_BYTES = 65536,
+};
+
+BUSTER_GLOBAL_LOCAL bool bootstrap_process_owner_run(Arena* arena, SliceString8 arguments, u64 timeout_seconds)
+{
+    ProcessSpawnResult spawn = os_process_spawn(arguments, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){
+        .use_process_environment = 1,
+        .new_process_group = 1,
+        .capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
+        .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BOOTSTRAP_PROCESS_OWNER_CAPTURE_BYTES,
+                                         [STANDARD_STREAM_ERROR] = BOOTSTRAP_PROCESS_OWNER_CAPTURE_BYTES},
+                           .total = 2 * BOOTSTRAP_PROCESS_OWNER_CAPTURE_BYTES},
+        .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_TRUNCATE,
+    });
+    ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
+    if (spawn.handle)
+    {
+        wait = os_process_wait_deadline(arena, spawn, timeout_seconds * 1000000);
+    }
+    string_print(S8("{S8}{S8}"), BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]),
+                 BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_ERROR]));
+    bool result = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out && !wait.output_truncated &&
+                  !wait.capture_failed && !build_compiler_query_cleanup_failed(wait);
+    if (!result)
+    {
+        string_print(S8("error: bootstrap process owner command failed result={S8} status={u32} timeout={u32} capture={u32} cleanup={u32}: {[]S8}\n"),
+                     build_compiler_query_process_result_name(wait.result), wait.platform_status, (u32)wait.timed_out,
+                     (u32)(wait.output_truncated || wait.capture_failed), (u32)build_compiler_query_cleanup_failed(wait), arguments);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult bootstrap_process_owner_main(Arena* arena, SliceString8 arguments, bool run_tests)
+{
+    bool success = arguments.length == 0;
+    if (!success)
+    {
+        string_print(S8("error: bootstrap_process_owner and bootstrap_process_owner_test accept no arguments\n"));
+    }
+    MatrixCoverageCapability compiler = {0};
+    if (success)
+    {
+        success = matrix_coverage_probe(arena, matrix_coverage_target_current(), BUILD_COMPILER_CLANG,
+                                       cmake_cc(arena, BUILD_COMPILER_CLANG), &compiler);
+        if (!success)
+        {
+            string_print(S8("error: bootstrap process owner requires qualified native Clang: {S8}\n"), compiler.reason);
+        }
+    }
+    String8 directory = {0};
+    if (success)
+    {
+        // Separate from generate's disposable trees and never overwrite an
+        // existing session, including after PID reuse or concurrent calls.
+        make_directory_recursive(arena, S8(".cache/bootstrap-process-owner"));
+        u64 timestamp = os_now_microseconds();
+        for (u32 attempt = 0; attempt < 32 && !directory.length; attempt += 1)
+        {
+            String8 candidate = string_format_z(arena, S8(".cache/bootstrap-process-owner/{u64}-{u64}-{u32}"),
+                                                os_get_current_process_id(), timestamp, attempt);
+            OsDirectoryCreateResult created = os_make_directory_exclusive(candidate);
+            if (created.created)
+            {
+                directory = os_path_absolute(arena, candidate, true);
+            }
+            else if (!created.existing_directory)
+            {
+                break;
+            }
+        }
+        success = directory.length != 0;
+        if (!success)
+        {
+            string_print(S8("error: cannot claim a private bootstrap process owner output directory\n"));
+        }
+    }
+#if BUSTER_WINDOWS
+    String8 names[] = {S8("windows_process_tree.exe"), S8("windows_process_tree_test.exe")};
+#else
+    String8 names[] = {S8("windows_process_tree"), S8("windows_process_tree_test")};
+#endif
+    String8 sources[] = {S8("tools/windows_process_tree.c"), S8("tools/windows_process_tree_test.c")};
+    String8 executables[2] = {0};
+    for (u32 i = 0; i < (run_tests ? 2u : 1u) && success; i += 1)
+    {
+        executables[i] = path_join(arena, directory, names[i]);
+        String8 compile[] = {compiler.path, S8("-std=c11"), S8("-O1"), S8("-Wall"), S8("-Wextra"), S8("-Werror"),
+                             S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char"), S8("-Isrc"),
+                             sources[i],
+#if BUSTER_WINDOWS
+                             S8("-Wno-microsoft-enum-forward-reference"), S8("-lshell32"),
+#endif
+                             S8("-o"), executables[i]};
+        // One bounded attempt. Never publish an incomplete executable or
+        // reuse an earlier helper after a compiler/cleanup failure.
+        success = bootstrap_process_owner_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile), BOOTSTRAP_PROCESS_OWNER_TIMEOUT_SECONDS);
+        if (success && !path_exists(arena, executables[i]))
+        {
+            string_print(S8("error: native compiler did not produce bootstrap process owner output: {S8}\n"), executables[i]);
+            success = false;
+        }
+    }
+#if BUSTER_WINDOWS
+    if (success)
+    {
+        String8 selftest[] = {executables[0], S8("selftest")};
+        success = bootstrap_process_owner_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(selftest), BOOTSTRAP_PROCESS_OWNER_TIMEOUT_SECONDS);
+    }
+#endif
+    if (success && run_tests)
+    {
+        String8 tests[] = {executables[1]};
+        success = bootstrap_process_owner_run(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(tests), BOOTSTRAP_PROCESS_OWNER_TIMEOUT_SECONDS);
+    }
+    if (success)
+    {
+        // The adapter forwards the path without owning compiler/cache policy.
+        // Retain this private binary for the invoking test process's lifetime.
+        string_print(S8("BOOTSTRAP_PROCESS_OWNER {S8}\n"), executables[0]);
+    }
+    ProcessResult result = success ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    return result;
+}
+
 // A same-runner CI comparison. A separately checked-out baseline is required;
 // the generated workload and flags are owned by the candidate harness, shared
 // byte-for-byte by both compiler executables. Never restore timing baselines or
@@ -39595,6 +39734,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 #include "tools/qemu_compat.c"
 #include "tools/clang_suite.c"
 #include "tools/compiler_profile_qualification.c"
+#include "tools/userspace_qualification.c"
 #include "tools/curl_compat.c"
 
 ProcessResult process_arguments(void)
@@ -39610,6 +39750,8 @@ ProcessResult process_arguments(void)
 
 BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_NONE] = S8_INITIALIZER("none"),
+        [BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER] = S8_INITIALIZER("bootstrap_process_owner"),
+        [BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST] = S8_INITIALIZER("bootstrap_process_owner_test"),
         [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
         [BUILD_COMMAND_BENCH_THROUGHPUT_CI] = S8_INITIALIZER("bench_throughput_ci"),
         [BUILD_COMMAND_COMPILER_CLOSURE] = S8_INITIALIZER("compiler_closure"),
@@ -39652,6 +39794,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_DOOM] = S8_INITIALIZER("test_doom"),
         [BUILD_COMMAND_TEST_QUICKJS] = S8_INITIALIZER("test_quickjs"),
         [BUILD_COMMAND_TEST_MUSL] = S8_INITIALIZER("test_musl"),
+        [BUILD_COMMAND_TEST_USERSPACE] = S8_INITIALIZER("test_userspace"),
         [BUILD_COMMAND_TEST_CPYTHON] = S8_INITIALIZER("test_cpython"),
         [BUILD_COMMAND_TEST_RADDEBUGGER] = S8_INITIALIZER("test_raddebugger"),
         [BUILD_COMMAND_TEST_CURL] = S8_INITIALIZER("test_curl"),
@@ -39760,6 +39903,9 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         SliceString8 owned_arguments = {.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i};
         switch (command)
         {
+            case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER:
+            case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST:
+                result = bootstrap_process_owner_main(arena, owned_arguments, command == BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST); break;
             case BUILD_COMMAND_MATRIX_PHASE_RUN: result = matrix_phase_run(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UNITS_PARTITIONED: result = ci_unit_tests_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_COMPILER_CLOSURE: result = compiler_closure_main(arena, owned_arguments); break;
@@ -39773,6 +39919,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS: result = aarch64_assembly_census_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_TEST_QEMU: result = qemu_compat_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_CLANG_SUITE: result = clang_suite_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_TEST_USERSPACE: result = userspace_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_TEST_CURL: result = curl_compat_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS: result = native_retirement_census_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UEFI: result = uefi_boot_main(arena, owned_arguments, arguments.pointer[0]); break;
@@ -40773,6 +40920,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             build_add(arena, build_directory, string8_list_to_slice(arena, build_targets), string8_list_to_slice(arena, native_arguments), options);
         }
         break;
+        case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER:
+        case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST:
         case BUILD_COMMAND_COMPILER_CLOSURE:
         case BUILD_COMMAND_PRODUCTION_PROFILE:
         case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
@@ -41010,6 +41159,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_TEST_AARCH64_ASSEMBLY_CENSUS:
         case BUILD_COMMAND_TEST_QEMU:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
+        case BUILD_COMMAND_TEST_USERSPACE:
         case BUILD_COMMAND_TEST_CURL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:

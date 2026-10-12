@@ -2887,6 +2887,112 @@ class HarnessTest(unittest.TestCase):
         self.assertIn("unsupported historical throughput harness",
                       compiler_compare.throughput_harness_problem(root, historical))
 
+    def historical_fixture(self, extra_lines: tuple[str, ...] = ()) -> tuple[str, str, str]:
+        """(pinned harness commit, head commit, head tree) for the #3714 historical recipe.
+
+        The pinned commit's fake corpus also writes pinned.txt, so the export shows which harness ran.
+        """
+        git = lambda *arguments: fixture_git(self.repo, *arguments)  # noqa: E731
+        git("checkout", "-q", "--detach", self.base)
+        marker = "open(os.path.join(output, 'pinned.txt'), 'w').write('pinned harness')\nsys.exit("
+        self.assertEqual(FAKE_THROUGHPUT.count("\nsys.exit("), 1)
+        (self.repo / "throughput_fake.py").write_text(FAKE_THROUGHPUT.replace("\nsys.exit(", "\n" + marker))
+        git("commit", "-qam", "pinned harness")
+        pinned = git("rev-parse", "HEAD")
+        git("checkout", "-q", "--detach", self.pull_head)
+        request = self.repo / compiler_receipt.ANALYZER_REQUEST_PATH
+        request.parent.mkdir(parents=True, exist_ok=True)
+        request.write_text("".join(line + "\n" for line in (compiler_receipt.THROUGHPUT_HISTORICAL_REQUEST_LINE,
+                                                            *extra_lines)))
+        git("add", compiler_receipt.ANALYZER_REQUEST_PATH)
+        git("commit", "-qm", "request the historical corpus")
+        return pinned, git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+
+    def run_historical(self, pinned: str, head: str, tree: str, admission: str = "historical",
+                       floor: str | None = None) -> tuple[int, dict, Path]:
+        # The pull head stands in for a floor the base predates.
+        with mock.patch.object(compiler_compare, "THROUGHPUT_HISTORICAL_HARNESS_REVISION", pinned):
+            return self.run_harness(head, mode="pull", ref="refs/pull/7/head", head=head, floor=floor or self.pull_head,
+                                    **{"head-tree": tree, "pull-head": head, "harness-admission": admission})
+
+    def test_historical_recipe_measures_the_corpus_with_the_pinned_harness(self) -> None:
+        pinned, head, tree = self.historical_fixture()
+        code, result, evidence = self.run_historical(pinned, head, tree)
+        self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
+        self.assertEqual(result["throughput_profile"], compiler_receipt.THROUGHPUT_HISTORICAL_PROFILE)
+        self.assertEqual(result["throughput_historical"],
+                         {"harness_revision": pinned, "observed_revision": pinned, "status": "prepared"})
+        # The corpus ran from the pinned worktree; the candidate checkout kept the base tree.
+        self.assertEqual((evidence / "throughput" / "pinned.txt").read_text(), "pinned harness")
+        self.assertEqual((self.repo / "compiler.txt").read_text(), "base compiler\n")
+        summary = json.loads((evidence / "lab" / "summary.json").read_text())
+        expected = dict(result["identity"])
+        historical = compiler_receipt.THROUGHPUT_HISTORICAL_PROFILE
+        with mock.patch.object(compiler_publish, "THROUGHPUT_HISTORICAL_HARNESS_REVISION", pinned):
+            decided = compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence),
+                                              expected_throughput_profile=historical)
+            self.assertEqual(decided[0], "success", decided[2])
+            # It discharges only its own inventory row, never the v2 corpus row.
+            rows = compiler_receipt.covered_inventory_rows(result, "success", "pull")["rows"]
+            self.assertEqual(rows["build:bench_throughput@throughput-corpus-historical"], "discharged")
+            self.assertEqual(rows["build:bench_throughput"], "not discharged: not requested")
+            # Without the hosted historical admission the same receipt never publishes.
+            self.assertEqual(compiler_publish.decide(expected, True, "success", result, summary, "",
+                                                     retained(evidence))[0], "failure")
+        # Nor does a receipt whose harness was not the pinned revision.
+        decided = compiler_publish.decide(expected, True, "success", result, summary, "", retained(evidence),
+                                          expected_throughput_profile=historical)
+        self.assertEqual(decided[0], "failure")
+        self.assertTrue(any("pinned revision" in reason for reason in decided[2]), decided[2])
+
+    def test_historical_recipe_refusals_happen_before_any_build(self) -> None:
+        pinned, head, tree = self.historical_fixture()
+        cases = (
+            # The recipe on a base that already carries the floor.
+            ({"floor": self.base}, "already carries"),
+            # The host and the hosted disposition disagree.
+            ({"admission": "admitted"}, "hosted harness admission 'admitted'"),
+        )
+        for change, reason in cases:
+            with self.subTest(reason=reason):
+                code, result, evidence = self.run_historical(pinned, head, tree, **change)
+                self.assert_unadmitted(code, result, evidence, reason)
+        # An unpreparable pinned revision fails before any build.
+        code, result, evidence = self.run_historical("f" * 40, head, tree)
+        self.assert_unadmitted(code, result, evidence, "historical corpus harness worktree exited")
+        self.assertEqual(result["throughput_historical"]["status"], "failed")
+
+    def test_historical_recipe_refuses_every_other_opt_in_leg_before_preparation(self) -> None:
+        # Each fresh opt-in selector beside the historical one would still run the base's own harness.
+        for line in (compiler_receipt.WILD_LINKER_REQUEST_LINE, compiler_receipt.THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
+                     compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE, compiler_receipt.COMPILER_PROBES_REQUEST_LINE,
+                     compiler_receipt.FRONTEND_SELECTOR_REQUEST_LINE,
+                     compiler_receipt.AST_PILOT_ACCEPTANCE_REQUEST_LINE):
+            with self.subTest(line=line):
+                fixture_git(self.repo, "checkout", "-q", "main")
+                pinned, head, tree = self.historical_fixture((line,))
+                with mock.patch.object(compiler_compare, "prepare_historical_harness",
+                                       side_effect=AssertionError("prepared beside another opt-in leg")):
+                    code, result, evidence = self.run_historical(pinned, head, tree)
+                self.assertEqual((code, result["state"]), (1, "failed"))
+                self.assertTrue(any("cannot be combined" in reason for reason in result["reasons"]), result["reasons"])
+                self.assertEqual((result["timings"]["build_seconds"], result["binaries"], result["lab"]), ({}, {}, {}))
+                self.assertNotIn("throughput_historical", result)
+
+    def test_hosted_historical_admission_without_the_request_is_refused(self) -> None:
+        pull_tree = fixture_git(self.repo, "rev-parse", self.pull_head + "^{tree}")
+        fixture_git(self.repo, "checkout", "-q", "--detach", self.pull_head)
+        code, result, evidence = self.run_harness(self.pull_head, mode="pull", ref="refs/pull/7/head",
+                                                  head=self.pull_head, **{"head-tree": pull_tree,
+                                                                          "harness-admission": "historical"})
+        self.assert_unadmitted(code, result, evidence, "hosted harness admission 'historical'")
+
+    def test_publisher_reports_an_undispatched_unsupported_base_explicitly(self) -> None:
+        conclusion, title, reasons = compiler_publish.decide({}, False, "skipped", None, None, "",
+                                                             dispatch_refusal="unsupported historical throughput harness")
+        self.assertEqual((conclusion, title, reasons), ("failure", "Not benchmarked: unsupported historical harness",
+                                                        ["unsupported historical throughput harness"]))
+
     def scaling_head(self) -> tuple[str, str]:
         """A pull request head that adds the scaling request on top of the candidate; (commit, tree)."""
         git = lambda *arguments: fixture_git(self.repo, *arguments)  # noqa: E731
@@ -5271,8 +5377,9 @@ class FrontendSelectorTest(unittest.TestCase):
             self.assertTrue((root / "evidence" / "frontend_selector" / "ide_bench" / "ide-bench.json").is_file())
 
 WILD_PATH = "/usr/local/bin/wild"
-# Wild's own identity format (Args::linker_identity at wild e9a9b0cb): the positive control.
-WILD_VERSION = "Wild 0.10.0 (compatible with GNU linkers)"
+# Wild's own identity format (Args::linker_identity at wild e9a9b0cb): the positive control, in the
+# form the 9700X host's distribution Wild reports (run 38242826849).
+WILD_VERSION = "Wild 0.10.0 non-git-build (compatible with GNU linkers)"
 WILD_ROOT = "/work/wild-linker-source"
 
 
@@ -5308,7 +5415,8 @@ def wild_linker_evidence(head: str = "a" * 40, kind: str = "mold") -> tuple[dict
         tree, config = profile["cell_trees"][cell]
         directory = f"{WILD_ROOT}/{tree}"
         objects = [f"CMakeFiles/ide.dir/{config}/src/{name}.c.o" for name in ("ide", "os", "arena")]
-        argvs[cell] = (f'"{WILD_PATH}" "-z" "relro" "-pie" "-o" "{config}/ide" "/lib/x86_64-linux-gnu/Scrt1.o" ' +
+        argvs[cell] = (f'"{WILD_PATH}" "-z" "relro" "-pie" "-o" "{config}/ide" '
+                       f'"--dependency-file=CMakeFiles/ide.dir/{config}/link.d" "/lib/x86_64-linux-gnu/Scrt1.o" ' +
                        " ".join(f'"{name}"' for name in objects) + ' "-lm" "/lib/x86_64-linux-gnu/crtn.o"')
         manifests[cell] = "".join(f"{'3' * 64}  {directory}/{name}\n" for name in objects)
         wild = f"cd '{directory}' && {argvs[cell]} {common} {profile['wild']['policy']}"
@@ -5354,7 +5462,8 @@ def wild_linker_evidence(head: str = "a" * 40, kind: str = "mold") -> tuple[dict
         for linker in compiler_receipt.WILD_LINKER_LINKERS:
             bundle[f"output {cell} {linker}"] = ("9" if linker == "wild" else "6") * 64 + "\n"
             bundle[f"comment {cell} {linker}"] = "clang version 21.1.8\n" + (
-                WILD_VERSION + "\n" if linker == "wild" else "mold 2.42.1 (compatible with GNU ld)\n" if kind == "mold" else "")
+                "Linker: " + WILD_VERSION + "\n" if linker == "wild" else
+                "mold 2.42.1 (compatible with GNU ld)\n" if kind == "mold" else "")
     record = {"requested": True, "request_line": compiler_receipt.WILD_LINKER_REQUEST_LINE,
               "profile": copy.deepcopy(profile), "status": "complete", "errors": [], "build_exit": 0, "exit": 0,
               "linkers": copy.deepcopy(linkers), "identity": copy.deepcopy(identity),
@@ -5388,6 +5497,21 @@ class WildLinkerTest(unittest.TestCase):
         # Both bounds together stay inside the unchanged 90-minute compare-pull job with its ordinary comparison.
         self.assertLessEqual(compiler_compare.WILD_LINKER_BUILD_TIMEOUT_SECONDS +
                              compiler_compare.WILD_LINKER_HARNESS_TIMEOUT_SECONDS, 40 * 60)
+
+    def test_identity_accepts_every_version_form_wild_builds(self) -> None:
+        # wild/build.rs at e9a9b0cb: release tag, merge-base hash, modified checkout, no git. The
+        # 9700X host's distribution Wild reports the last form (run 38242826849).
+        merge_base = "e9a9b0cb6fd63a23cc7b93aafc931aadd5746be6"
+        for version in ("0.10.0", merge_base, f"0.10.0 {merge_base}-modified", "0.10.0 non-git-build"):
+            with self.subTest(version=version):
+                self.assertTrue(compiler_receipt.WILD_IDENTITY.fullmatch(
+                    f"Wild {version} (compatible with GNU linkers)"))
+        for line in ("Ubuntu LLD 18.1.3 (compatible with GNU linkers)", "Wild (compatible with GNU linkers)",
+                     "Wild 0.10.0 dirty (compatible with GNU linkers)", "Wild 0.10.0 non-git-build",
+                     f"Wild {merge_base[:12]} (compatible with GNU linkers)",
+                     "Wild 0.10.0 non-git-build (compatible with GNU linkers)\nmold 2.42.1"):
+            with self.subTest(line=line):
+                self.assertIsNone(compiler_receipt.WILD_IDENTITY.fullmatch(line))
 
     def test_schedule_replays_the_harness_generator(self) -> None:
         """The seeded xorshift order and bootstrap match the C harness's random_u32 (seed 2645)."""
@@ -5505,8 +5629,15 @@ class WildLinkerTest(unittest.TestCase):
             "Wild prefix only": (linker("wild", version="Wild version 0.10.0"), {}),
             "Wild output without identity": (dict(bundle, **{"comment ide-unity-release wild": "Linker: LLD 18\n"}), {}),
             "Wild output with another version": (dict(bundle, **{"comment ide-debug wild": (
-                "Wild 0.9.0 (compatible with GNU linkers)\n")}), {}),
-            "comparator output is Wild": (dict(bundle, **{"comment ide-debug comparator": WILD_VERSION + "\n"}), {}),
+                "Linker: Wild 0.9.0 (compatible with GNU linkers)\n")}), {}),
+            "Wild identity without Wild's prefix": (dict(bundle, **{"comment ide-debug wild": WILD_VERSION + "\n"}), {}),
+            "comparator output is Wild": (dict(bundle, **{"comment ide-debug comparator": "Linker: " + WILD_VERSION + "\n"}),
+                                          {}),
+            "comparator output is bare Wild": (dict(bundle, **{"comment ide-debug comparator": WILD_VERSION + "\n"}), {}),
+            "dependency file elsewhere": (text("argv ide-debug", lambda value: value.replace(
+                "CMakeFiles/ide.dir/Debug/link.d", "/tmp/link.d")), {}),
+            "dependency file of another config": (text("argv ide-debug", lambda value: value.replace(
+                "CMakeFiles/ide.dir/Debug/link.d", "CMakeFiles/ide.dir/Release/link.d")), {}),
             "missing comment": (without("comment ide-separate-release wild"), {}),
             "no build root": (identity(lambda value: value.pop("build_root")), {}),
             # #3689 review: the timed argv is bound to the hashed inputs and nothing else can run.
@@ -5815,6 +5946,328 @@ class WildLinkerTest(unittest.TestCase):
             # The mocked harness wrote nothing, so publication evidence is refused.
             self.assertEqual(record["status"], "failed")
             self.assertTrue(any("wild-linker evidence lacks" in error for error in record["errors"]), record["errors"])
+
+
+LINK_TLS_TOOL = Path(__file__).resolve().parents[1] / "link_tls_bench.py"
+
+
+def load_link_tls_bench():
+    """Import the trusted tools/link_tls_bench.py by path, as compiler_compare runs it."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("link_tls_bench", LINK_TLS_TOOL)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def link_tls_invocation(wall: int) -> dict:
+    return {"exit": 0, "wall_ns": wall, "cpu_ns": wall - 1000}
+
+
+def link_tls_evidence(binaries: dict | None = None) -> tuple[dict, dict]:
+    """A complete synthetic link-tls-v1 record and bundle: the candidate links 10% faster in every cell."""
+    profile = compiler_receipt.LINK_TLS_PROFILE
+    binaries = copy.deepcopy(BINARIES) if binaries is None else binaries
+    walls = {"baseline": 1_000_000, "candidate": 900_000}
+    cells = []
+    for index, cell in enumerate(profile["cells"]):
+        image = {"exit": 0, "sha256": f"{index:x}" * 64, "size_bytes": 100 + index, "run_exit": 0,
+                 "stdout": cell["stdout"]}
+        cells.append({"name": cell["name"], "arguments": list(cell["arguments"]),
+                      "identity": {role: dict(image) for role in walls},
+                      "warmups": {role: [link_tls_invocation(walls[role]) for unused in range(profile["warmups"])]
+                                  for role in walls},
+                      "pairs": [dict({"order": ["baseline", "candidate"] if pair % 2 == 0 else ["candidate", "baseline"]},
+                                     **{role: link_tls_invocation(walls[role]) for role in walls})
+                                for pair in range(profile["pairs"])]})
+    summary = {"schema": compiler_receipt.LINK_TLS_SCHEMA, "profile": profile["name"], "cpu": profile["cpu"],
+               "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor",
+               "binaries": {role: binaries[role]["sha256"] for role in ("baseline", "candidate")},
+               "toolchain": {"clang": "clang version 21.1.8", "ar": "GNU ar (GNU Binutils) 2.45"},
+               "inputs": {name: "5" * 64 for name in profile["inputs"]}, "cells": cells, "status": "complete",
+               "errors": []}
+    summary = json.loads(json.dumps(summary))
+    record = {"requested": True, "request_line": compiler_receipt.LINK_TLS_REQUEST_LINE,
+              "profile": copy.deepcopy(profile), "status": "complete", "exit": 0, "errors": [],
+              "harness_sha256": "6" * 64, "cells": compiler_receipt.link_tls_digest(summary)}
+    return record, {"summary": summary}
+
+
+class LinkTlsTest(unittest.TestCase):
+    """#1915: the fixed link-tls-v1 whole-link TLS companion profile on the pull-compare route."""
+
+    def test_profile_is_frozen_report_only_and_its_outputs_follow_the_sources(self) -> None:
+        profile = compiler_receipt.LINK_TLS_PROFILE
+        self.assertEqual(profile["name"], "link-tls-v1")
+        self.assertEqual(compiler_receipt.LINK_TLS_REQUEST_LINE, "profile: " + profile["name"])
+        self.assertIs(profile["report_only"], True)
+        self.assertEqual((profile["cpu"], profile["warmups"], profile["pairs"]), (2, 2, 20))
+        self.assertLessEqual(compiler_compare.LINK_TLS_TIMEOUT_SECONDS, 20 * 60)
+        printed = subprocess.run([sys.executable, "-I", str(LINK_TLS_TOOL), "--profile"], capture_output=True,
+                                 text=True, check=True).stdout
+        self.assertEqual(json.loads(printed), json.loads(json.dumps(profile)))
+        bench = load_link_tls_bench()
+        for cell in profile["cells"]:
+            with self.subTest(cell=cell["name"]):
+                operands = [item for item in cell["arguments"][1:] if not item.startswith("-")]
+                self.assertEqual(operands[0], "main.o")
+                self.assertTrue(set(operands) <= set(profile["inputs"]))
+                recipe = profile["inputs"][operands[1]]
+                kind = profile["inputs"][recipe["archive"][0]]["source"] if "archive" in recipe else recipe["source"]
+                # The image runs sum_all twice: the frozen output is what that source computes.
+                source = bench.source_text(kind)
+                if kind.startswith("tls:"):
+                    count = int(kind[4:])
+                    self.assertEqual(source.count("__thread long v"), count)
+                    values = list(range(count))
+                    first = sum(values)
+                    second = sum(value + 1 for value in values)
+                else:
+                    first = second = sum(range(bench.PLAIN_FUNCTIONS))
+                self.assertEqual(cell["stdout"], f"{first} {second}\n")
+
+    def test_complete_evidence_validates_and_every_gap_fails(self) -> None:
+        record, bundle = link_tls_evidence()
+        summary = bundle["summary"]
+        self.assertEqual(compiler_receipt.validate_link_tls(0, summary, BINARIES), [])
+        results = compiler_receipt.link_tls_digest(summary)
+        self.assertEqual([row["name"] for row in results], [cell["name"] for cell in compiler_receipt.LINK_TLS_PROFILE["cells"]])
+        self.assertTrue(all(row["ratio"] == 0.9 and row["candidate_faster"] == 20 for row in results))
+
+        def changed(edit) -> dict:
+            value = copy.deepcopy(summary)
+            edit(value)
+            return value
+
+        def timed(edit, cell: int = 2, pair: int = 3, role: str = "candidate") -> dict:
+            return changed(lambda value: edit(value["cells"][cell]["pairs"][pair][role]))
+
+        same = {"baseline": {"sha256": A256}, "candidate": {"sha256": A256}}
+        cases = {
+            "failed run": (summary, {"status": 1}),
+            "cancelled run": (summary, {"status": None}),
+            "missing summary": (None, {}),
+            "other schema": (changed(lambda value: value.update(schema="other")), {}),
+            "changed profile": (changed(lambda value: value.update(profile="link-tls-v2")), {}),
+            "other CPU": (changed(lambda value: value.update(cpu=3)), {}),
+            "failed status": (changed(lambda value: value.update(status="failed")), {}),
+            "reported error": (changed(lambda value: value.update(errors=["tls-gd-2048: a timed link failed"])), {}),
+            "other binaries": (summary, {"binaries": {"baseline": {"sha256": B256}, "candidate": {"sha256": A256}}}),
+            "same binary": (changed(lambda value: value.update(binaries={"baseline": A256, "candidate": A256})),
+                            {"binaries": same}),
+            "no measured binaries": (summary, {"binaries": {}}),
+            "missing input": (changed(lambda value: value["inputs"].pop("m16384.a")), {}),
+            "unhashed input": (changed(lambda value: value["inputs"].update({"main.o": "5"})), {}),
+            "extra input": (changed(lambda value: value["inputs"].update({"other.o": "5" * 64})), {}),
+            "unrecorded toolchain": (changed(lambda value: value["toolchain"].pop("ar")), {}),
+            "missing cell": (changed(lambda value: value["cells"].pop()), {}),
+            "reordered cells": (changed(lambda value: value["cells"].reverse()), {}),
+            "changed arguments": (changed(lambda value: value["cells"][0].update(
+                arguments=["cc", "-pie", "main.o", "m1024.o"])), {}),
+            "different images": (changed(lambda value: value["cells"][3]["identity"]["candidate"].update(
+                sha256="f" * 64)), {}),
+            "different image sizes": (changed(lambda value: value["cells"][3]["identity"]["candidate"].update(
+                size_bytes=1)), {}),
+            "wrong output": (changed(lambda value: [value["cells"][4]["identity"][role].update(stdout="0 0\n")
+                                                    for role in ("baseline", "candidate")]), {}),
+            "image did not run": (changed(lambda value: value["cells"][1]["identity"]["baseline"].update(
+                run_exit="TimeoutExpired")), {}),
+            "failed identity link": (changed(lambda value: value["cells"][1]["identity"]["candidate"].update(exit=1)), {}),
+            "malformed identity": (changed(lambda value: value["cells"][1]["identity"]["candidate"].pop("stdout")), {}),
+            "missing pair": (changed(lambda value: value["cells"][2]["pairs"].pop()), {}),
+            "pair out of order": (changed(lambda value: value["cells"][2]["pairs"][1].update(
+                order=["baseline", "candidate"])), {}),
+            "failed timed link": (timed(lambda value: value.update(exit=1)), {}),
+            "timed-out link": (timed(lambda value: value.update(exit=124)), {}),
+            "zero wall time": (timed(lambda value: value.update(wall_ns=0)), {}),
+            "float wall time": (timed(lambda value: value.update(wall_ns=1.5)), {}),
+            "wall time past the invocation timeout": (timed(lambda value: value.update(
+                wall_ns=compiler_receipt.LINK_TLS_SAMPLE_LIMIT_NS + 1)), {}),
+            "overflowing wall time": (timed(lambda value: value.update(wall_ns=10 ** 309)), {}),
+            "missing CPU time": (timed(lambda value: value.pop("cpu_ns")), {}),
+            "missing warmup": (changed(lambda value: value["cells"][5]["warmups"]["baseline"].pop()), {}),
+            "failed warmup": (changed(lambda value: value["cells"][5]["warmups"]["candidate"][0].update(exit=2)), {}),
+        }
+        for name, (value, options) in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(compiler_receipt.validate_link_tls(options.get("status", 0), value,
+                                                                   options.get("binaries", BINARIES)), name)
+                # Malformed evidence is refused with reasons, never raised.
+                self.assertIsInstance(compiler_receipt.link_tls_digest(value), list)
+
+    def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
+        record, bundle = link_tls_evidence()
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["link_tls"] = record
+        values = {"expected": dict(EXPECTED, mode="pull"), "authorized": True, "compare_result": "success",
+                  "receipt": pull, "summary": summary(), "policy_value": "",
+                  "throughput": dict(corpus(), link_tls_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        stale = copy.deepcopy(record)
+        stale["cells"][0]["ratio"] = 0.5
+        widened = copy.deepcopy(record)
+        widened["profile"]["pairs"] = 5
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "empty bundle": {"throughput": dict(corpus(), link_tls_bundle={})},
+            "failed run": {"receipt": dict(pull, link_tls=dict(record, status="failed", exit=1))},
+            "cancelled run": {"receipt": dict(pull, link_tls=dict(record, status="pending", exit=None))},
+            "stale cells": {"receipt": dict(pull, link_tls=stale)},
+            "changed profile": {"receipt": dict(pull, link_tls=widened)},
+            "other selector": {"receipt": dict(pull, link_tls=dict(record, request_line="profile: other"))},
+            "not a request": {"receipt": dict(pull, link_tls=dict(record, requested=False))},
+            "other binaries": {"receipt": dict(pull, binaries={"baseline": {"sha256": B256},
+                                                               "candidate": {"sha256": A256}})},
+            "with the compiler probes": {"receipt": dict(pull, compiler_probes=compiler_probes_evidence()[0]),
+                                         "throughput": dict(corpus(), link_tls_bundle=bundle,
+                                                            compiler_probes_bundle=compiler_probes_evidence()[1])},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("TLS companion links (link-tls-v1): complete", report)
+        self.assertIn("| tls-gd-32768 | 1.000 | 0.900 | 0.9000 [0.9000, 0.9000] | 20/20 |", report)
+
+    def test_artifact_is_read_and_decided_end_to_end(self) -> None:
+        record, bundle = link_tls_evidence()
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["link_tls"] = record
+
+        def decided(link_tls: object, drop: bool = False) -> tuple:
+            members = {"receipt.json": json.dumps(pull), "lab/summary.json": json.dumps(summary()),
+                       "throughput/summary.json": json.dumps(corpus()["summary"]),
+                       "throughput/metadata.json": json.dumps(corpus()["metadata"])}
+            if not drop:
+                members["link_tls/summary.json"] = link_tls if isinstance(link_tls, str) else json.dumps(link_tls)
+            got = compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+            return compiler_publish.decide(dict(EXPECTED, mode="pull"), True, "success", got[0], got[1], "",
+                                           got[4], extra_reasons=[got[2]] if got[2] else [])
+
+        self.assertEqual(decided(bundle["summary"])[::2], ("success", []))
+        changed = copy.deepcopy(bundle["summary"])
+        for pair in changed["cells"][2]["pairs"]:
+            pair["candidate"]["wall_ns"] = 2_000_000
+        for name, (value, drop) in {"missing member": (None, True), "malformed member": ("{", False),
+                                    "duplicate key": ('{"schema": 1, "schema": 2}', False),
+                                    "samples that disagree with the receipt": (changed, False)}.items():
+            with self.subTest(case=name):
+                self.assertEqual(decided(value, drop)[0], "failure")
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Link TLS Test")
+            fixture_git(repo, "config", "user.email", "link-tls@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            fixture_git(repo, "add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            fixture_git(repo, "commit", "-qm", "seed")
+            line = compiler_receipt.LINK_TLS_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                fixture_git(repo, "commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.link_tls_request_selection(
+                        repo, fixture_git(repo, "rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            fixture_git(repo, "commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.link_tls_request_selection(repo, fixture_git(repo, "rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.LINK_TLS_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", link_tls=link_tls_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("link_tls")
+        self.assertIn("no link-tls record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+
+    def test_leg_runs_the_trusted_harness_on_both_binaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("work", "evidence", "work/bin"):
+                (root / name).mkdir(exist_ok=True)
+            pull = {"timings": {}, "binaries": copy.deepcopy(BINARIES),
+                    "link_tls": {"requested": True, "status": "pending"}}
+            with mock.patch.object(compiler_compare, "run", return_value=1) as run:
+                compiler_compare.measure_link_tls(root / "work/bin", root / "work", root / "evidence", pull)
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[1:3], ["-I", str(LINK_TLS_TOOL)])
+            self.assertEqual(argv[3:5], [str(root / "work/bin/ide-base"), str(root / "work/bin/ide-cand")])
+            self.assertEqual(pull["link_tls"]["harness_sha256"], hashlib.sha256(LINK_TLS_TOOL.read_bytes()).hexdigest())
+            # The mocked harness exited 1 and wrote nothing, so the leg is refused.
+            self.assertEqual(pull["link_tls"]["status"], "failed")
+            self.assertTrue(any("exited 1" in error for error in pull["link_tls"]["errors"]), pull["link_tls"]["errors"])
+
+    def test_harness_links_real_inputs_and_records_complete_evidence(self) -> None:
+        """A reduced profile, fake ide binaries that link with clang: identity, timing and validation end to end."""
+        bench = load_link_tls_bench()
+        profile = copy.deepcopy(compiler_receipt.LINK_TLS_PROFILE)
+        profile["inputs"] = {name: profile["inputs"][name] for name in ("main.o", "m1024.o", "plain.o")}
+        profile["cells"] = [cell for cell in profile["cells"] if cell["name"] in ("tls-gd-2048", "no-tls-control")]
+        profile.update(warmups=1, pairs=2, cpu=0)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binaries = {}
+            for role in ("baseline", "candidate"):
+                binaries[role] = root / f"ide-{role}"
+                binaries[role].write_text(f"#!/bin/sh\n# {role}\nshift\nexec clang \"$@\"\n", encoding="utf-8")
+                binaries[role].chmod(0o755)
+            with mock.patch.object(bench, "LINK_TLS_PROFILE", profile), \
+                    mock.patch.object(compiler_receipt, "LINK_TLS_PROFILE", profile):
+                status = bench.main([str(binaries["baseline"]), str(binaries["candidate"]), str(root / "work"),
+                                     str(root / "out")])
+                written = json.loads((root / "out/summary.json").read_text(encoding="utf-8"))
+                hashes = {role: {"sha256": hashlib.sha256(path.read_bytes()).hexdigest()} for role, path in binaries.items()}
+                self.assertEqual((status, written["errors"]), (0, []))
+                self.assertEqual(compiler_receipt.validate_link_tls(status, written, hashes), [])
+                self.assertEqual(len(compiler_receipt.link_tls_digest(written)), 2)
+            self.assertEqual(sorted(written["inputs"]), ["m1024.o", "main.o", "plain.o"])
+            # A candidate that links differently is refused before anything is timed.
+            binaries["candidate"].write_text("#!/bin/sh\nshift\nexec clang -Wl,--defsym=link_tls_test_marker=1 \"$@\"\n",
+                                             encoding="utf-8")
+            with mock.patch.object(bench, "LINK_TLS_PROFILE", profile):
+                status = bench.main([str(binaries["baseline"]), str(binaries["candidate"]), str(root / "work2"),
+                                     str(root / "out2")])
+            written = json.loads((root / "out2/summary.json").read_text(encoding="utf-8"))
+            self.assertEqual((status, written["status"]), (1, "failed"))
+            self.assertTrue(all(cell["pairs"] == [] for cell in written["cells"]))
+            self.assertTrue(any("images differ" in error for error in written["errors"]), written["errors"])
 
 
 if __name__ == "__main__":

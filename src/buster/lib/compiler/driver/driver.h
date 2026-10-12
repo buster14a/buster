@@ -144,6 +144,8 @@ struct CompilerDriverLinkOperation
 {
     u32 index;
     CompilerDriverLinkOperationKind kind;
+    // Linux ELF driver policy for this library occurrence.
+    bool as_needed;
 };
 
 // The -W<name> groups that name a warning the driver publishes today. Other
@@ -350,6 +352,9 @@ struct CompilerDriverInvocation
     // explicit -O/-O0 use zero, and explicit pass controls override either.
     u32 fast_passes;
     bool measure_fast_passes;
+    // -fcanonical-fast-cse-strategy=window selects the CSE census's linear
+    // arm; =table, the default, selects the hash table (#3011).
+    bool fast_cse_window;
     // Tiny direct-call inlining defaults off. An explicit optimization level
     // above -O0 enables it; -O0 disables it. The last -O* or explicit
     // -fcanonical-inline/-fno-canonical-inline option wins. always_inline

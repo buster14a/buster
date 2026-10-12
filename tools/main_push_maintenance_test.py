@@ -30,14 +30,27 @@ class InventoryApi:
         self.jobs = jobs or {}
         self.reads = 0
 
-    def request(self, path, **_query):
+    def request(self, path, **query):
         if path.startswith("actions/workflows/") and path.endswith("/runs"):
-            index = min(self.reads, len(self.inventories) - 1)
-            self.reads += 1
-            return {"workflow_runs": self.inventories[index]}
-        match = M.re.fullmatch(r"actions/runs/([1-9][0-9]*)/jobs", path)
+            if query.get("status") == "queued" or "head_sha" in query:
+                self.reads += 1
+            index = min(max(0, self.reads - 1), len(self.inventories) - 1)
+            rows = self.inventories[index]
+            rows = [row for row in rows if
+                    ("status" not in query or row["status"] == query["status"]) and
+                    ("head_sha" not in query or row["head_sha"] == query["head_sha"])]
+            start = (query.get("page", 1) - 1) * 100
+            return {"total_count": len(rows), "workflow_runs": rows[start:start + 100]}
+        match = M.re.fullmatch(r"actions/runs/([1-9][0-9]*)/attempts/([1-9][0-9]*)/jobs", path)
         if match:
-            return {"jobs": self.jobs.get(int(match.group(1)), [])}
+            run_id, attempt = map(int, match.groups())
+            rows = [dict(job, id=200 + i, run_id=run_id, run_attempt=attempt)
+                    for i, job in enumerate(self.jobs.get(run_id, []))]
+            return {"total_count": len(rows), "jobs": rows}
+        match = M.re.fullmatch(r"actions/runs/([1-9][0-9]*)", path)
+        if match:
+            index = min(max(0, self.reads - 1), len(self.inventories) - 1)
+            return next(row for row in self.inventories[index] if row["id"] == int(match.group(1)))
         raise AssertionError(path)
 
 
@@ -65,7 +78,7 @@ class MainApi:
 
 def workflow_run(run_id, number, sha, status="in_progress"):
     return {
-        "id": run_id, "run_number": number, "event": "push",
+        "id": run_id, "run_number": number, "run_attempt": 1, "event": "push",
         "head_branch": "main", "head_sha": sha, "status": status,
     }
 
@@ -227,6 +240,43 @@ class IntegrationTests(unittest.TestCase):
                 self.assertTrue((reports / "attempt/refresh.json").exists())
                 self.assertEqual("attempt summary" in summary.read_text(), not moved)
 
+    def test_discovery_failure_is_retained_before_action(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            api = InventoryApi()
+            with mock.patch.object(api, "request", side_effect=OSError("secret response")), \
+                    mock.patch.object(M.refresh, "refresh_event") as action:
+                status = M.refresh_push(root, api, {}, self.A, root / "reports",
+                    root / "summary.md", M.preflight.STATUS_CONTEXT,
+                    "merge-conflict-preflight.yml", 1, "target", 30)
+            action.assert_not_called()
+            self.assertEqual(status, 2)
+            text = (root / "reports/main-push-maintenance.json").read_text()
+            report = json.loads(text)
+            self.assertEqual(report["status"], "failed")
+            self.assertEqual(report["failing_phase"], "predecessor-discovery")
+            self.assertFalse(report["action_attempted"])
+            self.assertFalse(report["discovery"]["inventory_complete"])
+            self.assertEqual(report["discovery"]["requests"], 1)
+            self.assertNotIn("secret response", text)
+            self.assertIn("failed", (root / "summary.md").read_text())
+
+    def test_cli_startup_failure_retains_report_and_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(M.preflight, "GitHubApi", side_effect=OSError("secret")), \
+                    mock.patch("sys.stderr"):
+                status = M.main(["refresh-merge-conflicts", "--event-path", str(root / "event.json"),
+                    "--repository", "buster14a/buster", "--event-main", self.A,
+                    "--report-dir", str(root / "reports"), "--summary", str(root / "summary.md"),
+                    "--workflow", "test.yml", "--run-number", "1", "--predecessor-job", "target",
+                    "--wait-seconds", "30"])
+            self.assertEqual(status, 2)
+            text = (root / "reports/main-push-maintenance.json").read_text()
+            self.assertEqual(json.loads(text)["status"], "failed")
+            self.assertNotIn("secret", text)
+            self.assertTrue((root / "summary.md").exists())
+
     def test_invalidation_blocks_a_stale_write_and_noops_when_superseded(self):
         api = MainApi([self.A, self.C, self.C])
 
@@ -288,6 +338,11 @@ class WorkflowTests(unittest.TestCase):
         ).hexdigest()
         self.assertIn("MAIN_PUSH_MAINTENANCE_SHA256: " + digest, api)
         self.assertIn("sha256sum --check --strict", api)
+        for path, variable in (("tools/main_push_inventory.c", "MAIN_PUSH_INVENTORY_SHA256"),
+                               ("tools/ci_metrics_json.h", "MAIN_PUSH_JSON_SHA256")):
+            native_digest = hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
+            self.assertIn(variable + ": " + native_digest, api)
+            self.assertIn(path + " | sha256sum --check --strict", api)
 
 
 if __name__ == "__main__":
