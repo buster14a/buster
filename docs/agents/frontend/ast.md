@@ -1185,7 +1185,9 @@ each case:
   `c_type_parse_root_finish` checks again.
 
 The machine remains the default path and the fallback for every run that is
-not read from the tree. Members' plain runs are read too ([members](#members));
+not read from the tree. A census of the root runs it hands back found no
+shape a read clears the gate with ([root specifier fallbacks](#root-specifier-fallbacks)).
+Members' plain runs are read too ([members](#members));
 the rest of a tag definition, declarator derivations and the type names typed
 inside machine frames (casts among them) still go through the machine.
 
@@ -3902,5 +3904,23 @@ the base:
 - **Performance acceptance.** Hosted counts are diagnostic. No 9700X
   comparison is requested, so Zen 5 validation stays incomplete (#2761). The
   pilot-default switch stays on hold.
+
+The result is
+[`2026-10-12T210633Z`](../../performance-audits/2026-10-12T210633Z.md),
+hosted and diagnostic only. It is **negative**, and no code ships:
+- **Coverage.** Each of six layouts read 1,333 of the 1,334 tag references,
+  with `-c` objects identical to the base's at `-g0` and `-g` where checked.
+- **What the read removes.** About 6.9 M of machine self cost disappears.
+- **What it costs.** Every layout pays at least 4.4 M back in code generation:
+  around the 124,934 plain reads, in their callers, or in the index pass.
+  - The best layout, with the tag path out of line, reached C − B of
+    **−2.54 M**, against the **5 M** gate.
+  - Keeping the plain read's source unchanged was worse: −1.48 M and −1.75 M.
+    One layout rose by 1.80 M once the index's append stopped being inlined.
+- **What was not run.** Verify mode and the model differential were not run,
+  since no candidate passed the gate.
+
+Tag definitions, attributes, `typeof` and the other rows stay below the gate,
+so all 2,259 runs stay with the machine.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
