@@ -364,6 +364,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_work_ledger(UnitTestArgu
     BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_INITIALIZER_ELEMENTS] >= delta[WORK_LEDGER_REDERIVE_INITIALIZER_LITERAL_ELEMENTS] &&
                                delta[WORK_LEDGER_REDERIVE_INITIALIZER_LITERAL_ELEMENTS] >= 5);
     BUSTER_TEST(arguments, delta[WORK_LEDGER_POPULATION_MEMBER_PROMOTED_SEARCHES] != 0);
+    // `sizeof (struct Outer)` is a call-shaped candidate the arity check skips.
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_CALL_ARITY_KEYWORDS_SKIPPED] != 0 &&
+                               delta[WORK_LEDGER_REDERIVE_CALL_ARITY_CANDIDATES] >= delta[WORK_LEDGER_REDERIVE_CALL_ARITY_KEYWORDS_SKIPPED]);
+    // Each body token is stored once; the visited shares cover at least that.
+    BUSTER_TEST(arguments, delta[WORK_LEDGER_REDERIVE_BODY_SCOPE_STORES] != 0 &&
+                               delta[WORK_LEDGER_REDERIVE_BODY_SCOPE_SHARE_TOKENS] >= delta[WORK_LEDGER_REDERIVE_BODY_SCOPE_STORES]);
     BUSTER_TEST(arguments, delta[WORK_LEDGER_LITERAL_NUMBER_CONVERSIONS] != 0);
     BUSTER_TEST(arguments, delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERNS] != 0 &&
                                delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERN_PROBES] >= delta[WORK_LEDGER_LOOKUP_SYMBOL_INTERNS]);

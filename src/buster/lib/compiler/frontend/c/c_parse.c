@@ -5587,9 +5587,11 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
         {
             continue;
         }
+        WORK_LEDGER_RECORD(REDERIVE_CALL_ARITY_CANDIDATES, 1);
         if (c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_NON_CALLEE_KEYWORDS))
         {
             C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_CALL_KEYWORDS_SKIPPED, 1);
+            WORK_LEDGER_RECORD(REDERIVE_CALL_ARITY_KEYWORDS_SKIPPED, 1);
             continue;
         }
         C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_CALL_LOOKUPS, 1);
@@ -29572,6 +29574,7 @@ BUSTER_C_INTERNAL void c_parse_body_scopes_build(CParseResult* result, Arena* sc
         u32 low = pending[pending_count * 3 + 1];
         u32 high = pending[pending_count * 3 + 2];
         u32 limit = result->scope_children_offsets[parent + 1];
+        WORK_LEDGER_RECORD(REDERIVE_BODY_SCOPE_SHARE_TOKENS, high - low);
         // Siblings are ordered and their shares end at the next one's start, so
         // the shares ascend and `owned` is the first token no child has taken.
         u32 owned = low;
@@ -29588,6 +29591,7 @@ BUSTER_C_INTERNAL void c_parse_body_scopes_build(CParseResult* result, Arena* sc
                     scopes[token - start] = parent;
                 }
                 C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_BODY_SCOPE_STORES, share_start > owned ? share_start - owned : 0);
+                WORK_LEDGER_RECORD(REDERIVE_BODY_SCOPE_STORES, share_start > owned ? share_start - owned : 0);
                 owned = BUSTER_MAX(owned, share_end);
                 if (pending_count == capacity)
                 {
@@ -29613,6 +29617,7 @@ BUSTER_C_INTERNAL void c_parse_body_scopes_build(CParseResult* result, Arena* sc
             scopes[token - start] = parent;
         }
         C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_BODY_SCOPE_STORES, high > owned ? high - owned : 0);
+        WORK_LEDGER_RECORD(REDERIVE_BODY_SCOPE_STORES, high > owned ? high - owned : 0);
         pending_count = pending ? pending_count : 0;
     }
 }
