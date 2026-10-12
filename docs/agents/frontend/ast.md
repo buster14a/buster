@@ -3734,7 +3734,10 @@ The budgets:
 
 The replay's census is
 [`2026-10-12T210727Z`](../../performance-audits/2026-10-12T210727Z.md),
-diagnostic only. Every budget passes, and the candidate ships:
+diagnostic only. Its raw Callgrind outputs, patches and logs are kept under
+`evidence/2026-10-12T210727Z/`. The measuring session reported them, and
+nobody has reproduced them independently. By that evidence, every budget
+passes, and the candidate ships:
 - `-fsyntax-only` falls by 140.9 M Ir on the default path (−1.264%) and by
   141.3 M under the pilot (−1.522%). `-c` falls by 139.8 M (−0.555%) and
   140.2 M (−0.600%).
