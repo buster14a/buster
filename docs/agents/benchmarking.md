@@ -1152,6 +1152,65 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    merge base (for example after an allocator API change) fails the leg with
    its build log; land the probe change first.
 
+   **Issue #2761 opt-in frontend and selector probes.** The same route
+   accepts one fresh exact line `profile: frontend-selector-v1`, selected by
+   the same every-parent freshness rule. It cannot be combined with an
+   analyzer, real-source, ast-pilot or production profile. That refusal is not
+   needed for the budget; it keeps one opt-in leg per attempt so a report
+   is never shared between two profiles. After the corpus leg,
+   `measure_frontend_selector` runs three probes on the already-built
+   `ide-base` and `ide-cand`. All three use CPU 2 and run from the base
+   checkout, so the tools are the merge base's:
+   - `tools/benchmark_frontend_scaling.py --suite all --warmups 1
+     --repetitions 11 --cpu 2` covers 54 generated `-fsyntax-only` and `-c`
+     cells. It alternates the order of the binaries, and any `-c` object that
+     differs between them fails the run.
+   - `tools/selection_benchmark.py --samples 15 --allocators fast quality
+     --check --cpu 2` runs on its three generated workloads. Within each
+     sample, `bench-select` and `-O2 -c` run under both allocators. `--check`
+     executes the programs and exercises the failure paths. The target, the
+     selected work counts and the object bytes must be identical across every
+     sample of both binaries.
+   - `ide bench` runs in 20 pairs of fresh processes under `taskset -c 2`.
+     Even pairs run the base first, odd pairs the head first. Each run must
+     exit 0 and print one 30-iteration `BENCH_C_FRONTEND` line for
+     `tests/basic_c_operations.c` of the base checkout, and every run must
+     report the same byte count.
+
+   The frontend tool records its pinned affinity, the observed CPU model and
+   a final `complete` marker in `provenance.json`. Its generated sources stay
+   out of the artifact; their hashes are in `results.json`. Every timing is
+   report-only.
+
+   `compiler_publish.py` re-validates the receipt's `frontend_selector`
+   record against the evidence under `frontend_selector/`
+   (`validate_frontend_selector`). It refuses:
+   - a tool exit other than 0;
+   - any record whose binary hashes differ from the measured binaries, or
+     that differ before and after the `ide bench` runs;
+   - any record whose observed CPU is not the Ryzen 7 9700X;
+   - affinity other than CPU 2;
+   - a population that is not exactly the 54 frontend cells, three selection
+     workloads and 40 `ide bench` runs, each with its full sample count;
+   - a malformed sample: a missing or wrongly typed target, work count,
+     timing or object hash fails closed before any comparison;
+   - a fallback sample, or differing work counts, targets or objects;
+   - a tool's reported median that its own retained samples do not give.
+     The report's cells are re-derived from the raw samples, never taken
+     from a tool's summary;
+   - a frozen profile or cell digest that changed.
+
+   Cost: on a hosted 4-vCPU 2.1 GHz Xeon (diagnostic, not Zen 5), the whole
+   leg took 57 s on two distinct locally built Release `ide` binaries: 45 s
+   of frontend scaling, 6 s of selection and 7 s for the 40 `ide bench` runs.
+   It exported 484 KB of evidence, and its largest member is 153 KB. Each
+   tool has its own timeout: 20 minutes for
+   frontend scaling, 10 minutes for selection and 30 seconds per `ide bench`
+   run, 50 minutes in all even if every bound were reached. The leg
+   therefore stays inside the unchanged 90-minute
+   `compare-pull` job next to the roughly 14-minute ordinary comparison. No
+   job timeout changed.
+
    **Without perf (#2768).** Before the first timed run the lab runs
    `perf stat -- true` once (`probe_counters`). If perf is missing, exits
    nonzero (for example under a strict `perf_event_paranoid`), or writes no
