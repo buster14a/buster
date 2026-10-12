@@ -185,3 +185,5 @@ request: issue #2761 refresh of throughput-real-source-v1 through the joined inv
 profile: throughput-real-source-v1
 request: issue #2761 refresh of throughput-real-source-v1, re-requested because the ff53347e request never started (PR was conflicted with main); request-only head over main 1287d5523; A/A, report-only
 profile: throughput-real-source-v1
+request: issue #2761 refresh of clang-analyze-full-v2 through the joined inventory consumer (#3656); real-source refresh d1049342 succeeded (run 38295250409); request-only head over main 7d0762e59; A/A, report-only
+profile: clang-analyze-full-v2
