@@ -170,6 +170,8 @@
 //                                                the syntax tree, and its probe
 //                                                and fallbacks to the walker
 //   c_analyze_semantics_only                     complete validation without canonical IR
+//   c_analyze_with_options, c_analyze            validation then canonical IR lowering
+//                                                (one definition for unity and split builds)
 
 #include "c_internal.h"
 #include <buster/lib/compiler/frontend/c/c_ast.h>
@@ -42603,7 +42605,6 @@ CParseResult c_parse(Arena* arena, CPreprocessResult preprocess)
     return c_analyze_semantics(arena, preprocess, syntax);
 }
 
-#if !BUSTER_UNITY_BUILD
 CIRLowerResult c_analyze_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target,
                                      CIRLowerOptions options)
 {
@@ -42630,4 +42631,3 @@ CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult pr
 {
     return c_analyze_with_options(arena, source_path, preprocess, syntax, target, (CIRLowerOptions){0});
 }
-#endif

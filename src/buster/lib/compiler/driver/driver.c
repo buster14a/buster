@@ -3824,54 +3824,6 @@ struct CompilerDriverDynamicLibraries
     String8 runtime_failure_library;
 };
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_read_u16(ByteSlice bytes, u64 offset, u16* value)
-{
-    bool result;
-    if (offset > bytes.length || sizeof(*value) > bytes.length - offset)
-    {
-        result = false;
-    }
-    else
-    {
-        memcpy(value, bytes.pointer + offset, sizeof(*value));
-        result = true;
-    }
-
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool compiler_driver_read_u32(ByteSlice bytes, u64 offset, u32* value)
-{
-    bool result;
-    if (offset > bytes.length || sizeof(*value) > bytes.length - offset)
-    {
-        result = false;
-    }
-    else
-    {
-        memcpy(value, bytes.pointer + offset, sizeof(*value));
-        result = true;
-    }
-
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool compiler_driver_read_u64(ByteSlice bytes, u64 offset, u64* value)
-{
-    bool result;
-    if (offset > bytes.length || sizeof(*value) > bytes.length - offset)
-    {
-        result = false;
-    }
-    else
-    {
-        memcpy(value, bytes.pointer + offset, sizeof(*value));
-        result = true;
-    }
-
-    return result;
-}
-
 BUSTER_GLOBAL_LOCAL bool compiler_driver_pe_rva_offset(ByteSlice bytes, u64 section_table, u16 section_count, u32 rva, u64* offset_out)
 {
     for (u16 section_index = 0; section_index < section_count; section_index += 1)
@@ -3881,8 +3833,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_pe_rva_offset(ByteSlice bytes, u64 sect
         u32 virtual_address = 0;
         u32 raw_size = 0;
         u32 raw_offset = 0;
-        if (!compiler_driver_read_u32(bytes, section + 8, &virtual_size) || !compiler_driver_read_u32(bytes, section + 12, &virtual_address) ||
-            !compiler_driver_read_u32(bytes, section + 16, &raw_size) || !compiler_driver_read_u32(bytes, section + 20, &raw_offset))
+        if (!byte_slice_read_u32(bytes, section + 8, &virtual_size) || !byte_slice_read_u32(bytes, section + 12, &virtual_address) ||
+            !byte_slice_read_u32(bytes, section + 16, &raw_size) || !byte_slice_read_u32(bytes, section + 20, &raw_offset))
         {
             return false;
         }
@@ -3949,23 +3901,23 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_pe_library_exports(Arena* arena, Compil
     u32 pe_offset = 0;
     u16 section_count = 0;
     u16 optional_size = 0;
-    if (!bytes.pointer || bytes.length < 0x40 || bytes.pointer[0] != 'M' || bytes.pointer[1] != 'Z' || !compiler_driver_read_u32(bytes, 0x3c, &pe_offset) ||
+    if (!bytes.pointer || bytes.length < 0x40 || bytes.pointer[0] != 'M' || bytes.pointer[1] != 'Z' || !byte_slice_read_u32(bytes, 0x3c, &pe_offset) ||
         pe_offset > bytes.length || bytes.length - pe_offset < 24 || memcmp(bytes.pointer + pe_offset, "PE\0\0", 4) != 0 ||
-        !compiler_driver_read_u16(bytes, pe_offset + 6, &section_count) || !compiler_driver_read_u16(bytes, pe_offset + 20, &optional_size))
+        !byte_slice_read_u16(bytes, pe_offset + 6, &section_count) || !byte_slice_read_u16(bytes, pe_offset + 20, &optional_size))
     {
         file_map_unmap(file);
         return;
     }
     u64 optional = pe_offset + 24;
     u16 magic = 0;
-    if (!compiler_driver_read_u16(bytes, optional, &magic))
+    if (!byte_slice_read_u16(bytes, optional, &magic))
     {
         file_map_unmap(file);
         return;
     }
     u64 directory = optional + (magic == 0x20b ? 112 : 96);
     u32 export_rva = 0;
-    if ((magic != 0x20b && magic != 0x10b) || directory + 8 > optional + optional_size || !compiler_driver_read_u32(bytes, directory, &export_rva))
+    if ((magic != 0x20b && magic != 0x10b) || directory + 8 > optional + optional_size || !byte_slice_read_u32(bytes, directory, &export_rva))
     {
         file_map_unmap(file);
         return;
@@ -3981,7 +3933,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_pe_library_exports(Arena* arena, Compil
     u32 name_count = 0;
     u32 names_rva = 0;
     if (!compiler_driver_pe_rva_offset(bytes, section_table, section_count, export_rva, &export_offset) ||
-        !compiler_driver_read_u32(bytes, export_offset + 24, &name_count) || !compiler_driver_read_u32(bytes, export_offset + 32, &names_rva) ||
+        !byte_slice_read_u32(bytes, export_offset + 24, &name_count) || !byte_slice_read_u32(bytes, export_offset + 32, &names_rva) ||
         name_count > (bytes.length / sizeof(u32)))
     {
         file_map_unmap(file);
@@ -3999,7 +3951,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_pe_library_exports(Arena* arena, Compil
     {
         u32 name_rva = 0;
         u64 name_offset = 0;
-        if (!compiler_driver_read_u32(bytes, names_offset + (u64)name_index * sizeof(u32), &name_rva) ||
+        if (!byte_slice_read_u32(bytes, names_offset + (u64)name_index * sizeof(u32), &name_rva) ||
             !compiler_driver_pe_rva_offset(bytes, section_table, section_count, name_rva, &name_offset))
         {
             continue;
@@ -4058,9 +4010,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
     u16 section_entry_size = 0;
     u16 section_count = 0;
     bool header_valid = bytes.length >= DRIVER_ELF_SECTION_HEADER_SIZE && memcmp(bytes.pointer, "\x7f" "ELF", 4) == 0 && bytes.pointer[4] == 2 &&
-                        bytes.pointer[5] == 1 && compiler_driver_read_u16(bytes, 16, &type) && compiler_driver_read_u16(bytes, 18, &file_machine) &&
-                        compiler_driver_read_u64(bytes, 40, &section_table) && compiler_driver_read_u16(bytes, 58, &section_entry_size) &&
-                        compiler_driver_read_u16(bytes, 60, &section_count) && type == DRIVER_ELF_TYPE_SHARED && file_machine == machine &&
+                        bytes.pointer[5] == 1 && byte_slice_read_u16(bytes, 16, &type) && byte_slice_read_u16(bytes, 18, &file_machine) &&
+                        byte_slice_read_u64(bytes, 40, &section_table) && byte_slice_read_u16(bytes, 58, &section_entry_size) &&
+                        byte_slice_read_u16(bytes, 60, &section_count) && type == DRIVER_ELF_TYPE_SHARED && file_machine == machine &&
                         section_entry_size == DRIVER_ELF_SECTION_HEADER_SIZE && section_count && section_table <= bytes.length &&
                         (u64)section_count * DRIVER_ELF_SECTION_HEADER_SIZE <= bytes.length - section_table;
     u64 symbol_offset = 0;
@@ -4085,25 +4037,25 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
         u64 entry_size = 0;
         u64 strings_offset = 0;
         u64 strings_size = 0;
-        bool type_valid = compiler_driver_read_u32(bytes, section + 4, &section_type);
+        bool type_valid = byte_slice_read_u32(bytes, section + 4, &section_type);
         if (type_valid && section_type == DRIVER_ELF_SECTION_TYPE_VERSION_SYMBOLS)
         {
             version_symbols_invalid |= version_symbols_present;
             version_symbols_present = true;
         }
-        if (!type_valid || !compiler_driver_read_u64(bytes, section + 24, &offset) ||
-            !compiler_driver_read_u64(bytes, section + 32, &size) || offset > bytes.length || size > bytes.length - offset)
+        if (!type_valid || !byte_slice_read_u64(bytes, section + 24, &offset) ||
+            !byte_slice_read_u64(bytes, section + 32, &size) || offset > bytes.length || size > bytes.length - offset)
         {
             version_symbols_invalid |= type_valid && section_type == DRIVER_ELF_SECTION_TYPE_VERSION_SYMBOLS;
             continue;
         }
         if (section_type == DRIVER_ELF_SECTION_TYPE_DYNAMIC_SYMBOLS && !symbol_size)
         {
-            if (compiler_driver_read_u32(bytes, section + 40, &string_section) && compiler_driver_read_u64(bytes, section + 56, &entry_size) &&
+            if (byte_slice_read_u32(bytes, section + 40, &string_section) && byte_slice_read_u64(bytes, section + 56, &entry_size) &&
                 entry_size == DRIVER_ELF_SYMBOL_SIZE && size && !(size % DRIVER_ELF_SYMBOL_SIZE) && string_section < section_count)
             {
                 u64 strings = section_table + (u64)string_section * DRIVER_ELF_SECTION_HEADER_SIZE;
-                if (compiler_driver_read_u64(bytes, strings + 24, &strings_offset) && compiler_driver_read_u64(bytes, strings + 32, &strings_size) &&
+                if (byte_slice_read_u64(bytes, strings + 24, &strings_offset) && byte_slice_read_u64(bytes, strings + 32, &strings_size) &&
                     strings_offset <= bytes.length && strings_size <= bytes.length - strings_offset)
                 {
                     symbol_offset = offset;
@@ -4119,7 +4071,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
             version_symbol_size = size;
         }
         else if (section_type == DRIVER_ELF_SECTION_TYPE_VERSION_DEFINITIONS && !version_definition_size &&
-                 compiler_driver_read_u32(bytes, section + 44, &definition_count) && definition_count)
+                 byte_slice_read_u32(bytes, section + 44, &definition_count) && definition_count)
         {
             version_definition_offset = offset;
             version_definition_size = size;
@@ -4139,26 +4091,26 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
         u64 size = 0;
         u64 strings_offset = 0;
         u64 strings_size = 0;
-        compiler_driver_read_u32(bytes, section + 4, &section_type);
+        byte_slice_read_u32(bytes, section + 4, &section_type);
         if (section_type == 6)
         {
-            identity_valid = compiler_driver_read_u64(bytes, section + 24, &offset) &&
-                             compiler_driver_read_u64(bytes, section + 32, &size) &&
-                             compiler_driver_read_u32(bytes, section + 40, &strings_index) && strings_index < section_count &&
+            identity_valid = byte_slice_read_u64(bytes, section + 24, &offset) &&
+                             byte_slice_read_u64(bytes, section + 32, &size) &&
+                             byte_slice_read_u32(bytes, section + 40, &strings_index) && strings_index < section_count &&
                              offset <= bytes.length && size <= bytes.length - offset && size % 16 == 0;
             u64 strings = section_table + (u64)strings_index * DRIVER_ELF_SECTION_HEADER_SIZE;
-            identity_valid = identity_valid && compiler_driver_read_u64(bytes, strings + 24, &strings_offset) &&
-                             compiler_driver_read_u64(bytes, strings + 32, &strings_size) &&
+            identity_valid = identity_valid && byte_slice_read_u64(bytes, strings + 24, &strings_offset) &&
+                             byte_slice_read_u64(bytes, strings + 32, &strings_size) &&
                              strings_offset <= bytes.length && strings_size <= bytes.length - strings_offset;
             for (u64 entry = 0; identity_valid && entry < size; entry += 16)
             {
                 u64 tag = 0;
                 u64 name = 0;
-                compiler_driver_read_u64(bytes, offset + entry, &tag);
+                byte_slice_read_u64(bytes, offset + entry, &tag);
                 if (!tag) { break; }
                 if (tag == 14)
                 {
-                    compiler_driver_read_u64(bytes, offset + entry + 8, &name);
+                    byte_slice_read_u64(bytes, offset + entry + 8, &name);
                     u64 length = 0;
                     while (name < strings_size && length < strings_size - name && bytes.pointer[strings_offset + name + length])
                     {
@@ -4192,8 +4144,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
             u16 flags = 0;
             u32 auxiliary = 0;
             u32 next = 0;
-            if (!compiler_driver_read_u16(bytes, cursor + 2, &flags) || !compiler_driver_read_u16(bytes, cursor + 4, &index) ||
-                !compiler_driver_read_u32(bytes, cursor + 12, &auxiliary) || !compiler_driver_read_u32(bytes, cursor + 16, &next))
+            if (!byte_slice_read_u16(bytes, cursor + 2, &flags) || !byte_slice_read_u16(bytes, cursor + 4, &index) ||
+                !byte_slice_read_u32(bytes, cursor + 12, &auxiliary) || !byte_slice_read_u32(bytes, cursor + 16, &next))
             {
                 break;
             }
@@ -4205,7 +4157,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
             u32 name = 0;
             u64 auxiliary_offset = cursor + auxiliary;
             if (pass && !base && index < version_name_count && auxiliary >= DRIVER_ELF_VERSION_DEFINITION_SIZE &&
-                auxiliary_offset + DRIVER_ELF_VERSION_AUXILIARY_SIZE <= end && compiler_driver_read_u32(bytes, auxiliary_offset, &name) && name &&
+                auxiliary_offset + DRIVER_ELF_VERSION_AUXILIARY_SIZE <= end && byte_slice_read_u32(bytes, auxiliary_offset, &name) && name &&
                 name < string_size)
             {
                 u64 length = 0;
@@ -4245,8 +4197,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
             u16 section = 0;
             u64 value = 0;
             u64 size = 0;
-            if (!compiler_driver_read_u32(bytes, symbol, &name) || !compiler_driver_read_u16(bytes, symbol + 6, &section) ||
-                !compiler_driver_read_u64(bytes, symbol + 8, &value) || !compiler_driver_read_u64(bytes, symbol + 16, &size))
+            if (!byte_slice_read_u32(bytes, symbol, &name) || !byte_slice_read_u16(bytes, symbol + 6, &section) ||
+                !byte_slice_read_u64(bytes, symbol + 8, &value) || !byte_slice_read_u64(bytes, symbol + 16, &size))
             {
                 continue;
             }
@@ -4279,7 +4231,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteS
             u16 version = 0;
             if (versioned)
             {
-                compiler_driver_read_u16(bytes, version_symbol_offset + symbol_index * sizeof(u16), &version);
+                byte_slice_read_u16(bytes, version_symbol_offset + symbol_index * sizeof(u16), &version);
             }
             u32 version_index = version & DRIVER_ELF_VERSION_INDEX_MAX;
             library->versioned_symbols[library->versioned_symbol_count++] = (NativeDynamicVersionedSymbol){
@@ -6819,7 +6771,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_shared_is_incompatible(ByteSlice by
     u16 machine = 0;
     bool recognized = target.os == OPERATING_SYSTEM_LINUX && bytes.length >= 64 &&
                       memcmp(bytes.pointer, "\x7f" "ELF", 4) == 0 && bytes.pointer[4] == 2 && bytes.pointer[5] == 1 && bytes.pointer[6] == 1 &&
-                      compiler_driver_read_u16(bytes, 16, &type) && type == 3 && compiler_driver_read_u16(bytes, 18, &machine);
+                      byte_slice_read_u16(bytes, 16, &type) && type == 3 && byte_slice_read_u16(bytes, 18, &machine);
     u16 expected = target.cpu_arch == CPU_ARCH_AARCH64 ? 183 : 62;
     return recognized && machine != expected;
 }

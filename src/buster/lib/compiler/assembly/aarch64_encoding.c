@@ -16,6 +16,7 @@
 
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h>
+#include <buster/lib/integer.h>
 #include <buster/lib/string.h>
 #include <buster/lib/os.h>
 
@@ -2597,6 +2598,96 @@ bool a64_adrp_encode(u32 destination_register, u64 instruction_address, u64 targ
         .operand_count = 2,
     };
     return a64_mc_encode(&instruction, word);
+}
+
+bool a64_page21_instruction_valid(u32 instruction)
+{
+    return (instruction & UINT32_C(0xffffffe0)) == UINT32_C(0x90000000);
+}
+
+bool a64_pageoff12_shift(u32 instruction, u32* shift)
+{
+    bool result = false;
+    if (shift && !(instruction & (UINT32_C(0xfff) << 10)))
+    {
+        u32 base = instruction & UINT32_C(0xffc00000);
+        switch (base)
+        {
+        case UINT32_C(0x39000000):
+        case UINT32_C(0x39400000):
+        case UINT32_C(0x39800000):
+        case UINT32_C(0x39c00000):
+        case UINT32_C(0x79000000):
+        case UINT32_C(0x79400000):
+        case UINT32_C(0x79800000):
+        case UINT32_C(0x79c00000):
+        case UINT32_C(0xb9000000):
+        case UINT32_C(0xb9400000):
+        case UINT32_C(0xb9800000):
+        case UINT32_C(0xf9000000):
+        case UINT32_C(0xf9400000):
+        case UINT32_C(0xf9800000):
+        case UINT32_C(0x3d000000):
+        case UINT32_C(0x3d400000):
+        case UINT32_C(0x3d800000):
+        case UINT32_C(0x3dc00000):
+        case UINT32_C(0x7d000000):
+        case UINT32_C(0x7d400000):
+        case UINT32_C(0xbd000000):
+        case UINT32_C(0xbd400000):
+        case UINT32_C(0xfd000000):
+        case UINT32_C(0xfd400000):
+        {
+            u32 implicit_shift = instruction >> 30;
+            if (!implicit_shift && (instruction & UINT32_C(0x04800000)) == UINT32_C(0x04800000))
+            {
+                implicit_shift = 4;
+            }
+            *shift = implicit_shift;
+            result = true;
+        }
+        break;
+        // The direct PAGEOFF form used by codegen is a 64-bit, non-setting ADD
+        // with no LSL #12. Registers are intentionally unconstrained: a PAGE
+        // relocation does not imply that this instruction consumes a PAGE21's
+        // destination register.
+        case UINT32_C(0x91000000):
+            *shift = 0;
+            result = true;
+            break;
+        default:
+            break;
+        }
+    }
+
+    return result;
+}
+
+bool a64_page_relocation_apply(bool page21, u8* patch, u64 place, u64 target, s64 addend)
+{
+    bool result = false;
+    u64 address = 0;
+    if (patch && !(place & 3) && u64_add_s64_checked(target, addend, &address))
+    {
+        u32 instruction = 0;
+        memcpy(&instruction, patch, sizeof(instruction));
+        u32 shift = 0;
+        if (page21)
+        {
+            result = a64_page21_instruction_valid(instruction) && a64_adrp_encode(instruction & 31, place, address, &instruction);
+        }
+        else if (a64_pageoff12_shift(instruction, &shift) && !((address & 0xfff) & ((1u << shift) - 1)))
+        {
+            instruction |= (u32)((address & 0xfff) >> shift) << 10;
+            result = true;
+        }
+        if (result)
+        {
+            memcpy(patch, &instruction, sizeof(instruction));
+        }
+    }
+
+    return result;
 }
 
 bool a64_adr_encode(u32 destination_register, u64 instruction_address, u64 target_address, u32* word)
