@@ -1082,6 +1082,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
     BUSTER_TEST(arguments, disabled_invocation.error == COMPILER_DRIVER_ERROR_NONE && disabled_invocation.fast_passes == 0);
     String8 modes[] = {S8("fast"), S8("quality")};
     u32 native_count = BUSTER_ARRAY_LENGTH(modes);
+    // Executable control for the opt-in CSE pass (#3011). Exactly three
+    // arithmetic rows are commoned (b+a, b&a, b*a onto their commuted twins),
+    // a-b/b-a stay distinct and the repeated 5u is one constant hit. It is
+    // written at run time: every tracked file under tests/ is a frozen
+    // native-retirement census input, and basic_c_canonical_fast.c is pinned.
+    String8 cse_control = buster_test_temporary_path(arguments->arena, S8("buster-canonical-fast-cse"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(cse_control, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+        "static unsigned common(unsigned a, unsigned b)\n"
+        "{\n"
+        "    unsigned x = (a + b) * (b + a);\n"
+        "    unsigned y = (a - b) ^ (b - a);\n"
+        "    unsigned z = (a & b) | (b & a);\n"
+        "    return x + y + z + (a * b) + (b * a) + (a * 5u) + (b * 5u);\n"
+        "}\n"
+        "volatile unsigned left = 7u;\n"
+        "volatile unsigned right = 3u;\n"
+        "int main(void) { return common(left, right) != 187u; }\n"))));
     for (u32 backend = 0; backend < native_count + 3; backend += 1)
     {
         // Every subset of the adopted recipe, then the recipe plus opt-in CSE
@@ -1100,7 +1117,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
             command[count++] = S8("-nostdinc");
             command[count++] = S8("-o");
             command[count++] = path;
-            command[count++] = control ? S8("tests/basic_c_canonical_fast_cse.c") :
+            command[count++] = control ? cse_control :
                                backend < native_count ? S8("tests/basic_c_canonical_fast.c") : S8("tests/basic_c_canonical_fast_scalar.c");
             if (backend < native_count)
             {
