@@ -5536,7 +5536,8 @@ def main() -> int:
         refusal = ""
         if authorized and admission not in HARNESS_ADMISSIONS:
             authorized = False
-            notes.append(f"hosted harness admission {admission!r} is not a reviewed disposition")
+            problem = f"hosted harness admission {admission!r} is not a reviewed disposition"
+            notes.append(problem)
         elif authorized and admission == "unsupported":
             authorized = False
             refusal = (f"unsupported historical throughput harness: merge base {expected.get('base')} predates "
