@@ -1,13 +1,19 @@
 {
   "permissions": {
     "allow": [
-      "mcp__claude-code-remote__send_later",
-      "mcp__claude-code-remote__create_trigger",
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(git push:*)",
-      "Bash(python3:*)",
-      "Bash(./build.sh:*)"
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch",
+      "Agent",
+      "Skill",
+      "mcp__github",
+      "mcp__claude-code-remote"
     ]
   }
 }
