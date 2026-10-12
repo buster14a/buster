@@ -1558,6 +1558,18 @@ struct CTypeParseMachine
     CAstStatementStatistics* ast_statement_statistics;
     u32* ast_statement_bodies;
     u32 ast_statement_body_count;
+    // The declaration specifier read (c_parse_declaration_specifiers_type)
+    // reads the same tree: `ast_specifier_starts` holds the first token of
+    // every DECL_SPECIFIERS node, ascending, and `ast_specifier_nodes` the
+    // node at the same position, built once before the declarations are
+    // typed (count in `ast_specifier_count`, null without a tree), with the
+    // position of the last lookup in `ast_specifier_cursor`;
+    // `ast_specifier_statistics` the optional counts.
+    CAstSpecifierStatistics* ast_specifier_statistics;
+    u32* ast_specifier_starts;
+    u32* ast_specifier_nodes;
+    u32 ast_specifier_count;
+    u32 ast_specifier_cursor;
     CAstTypeBodyIndex* ast_bodies;
     CAstTypeBody* ast_types;
     CParseExpressionQuery* expression_queries;

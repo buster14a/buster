@@ -1071,6 +1071,86 @@ bail inside a list), with a tampered list anchor that leaves its statement to
 the loop. On the self-host unity input every body follows its plan, with
 no fallback, no bail and no refused declarator hint.
 
+## Declaration specifiers from the tree
+
+Semantic analysis types a declaration's specifier run with the type machine
+(`c_parse_scalar_type_in_scope_context`). It validates the storage classes word
+by word, scans the run for `typeof` and `_Atomic(T)`, pushes a scalar frame and
+a core frame, scans the run again for a tag and a typedef name, and only then
+builds the one row the run names. Under `-fc-ast-pilot`, three callers read the
+run from the declaration's `DECL_SPECIFIERS` node instead
+(`c_parse_declaration_specifiers_type` in `c_parse.c`):
+- block declarations (`c_parse_local_declarations`);
+- file-scope declarations (`c_parse_declaration_type`);
+- parameters (`c_parse_parameter_segment`).
+
+The tree read applies only to a **plain list**. Every child is a
+`SPECIFIER_WORD` or `TYPEDEF_NAME` leaf on its own token, one after another
+from the run's first token. The list names either primitive type words or one
+typedef name, never both. The only other words allowed beside them are
+`const`, `volatile`, `inline`, `_Noreturn` and the storage classes `typedef`,
+`extern`, `static`, `register` and thread-local. For such a list:
+- **Storage.** The machine's verdict (`c_parse_storage_classes_valid`) is
+  computed from the set of words. A repeated or conflicting class falls back,
+  so the diagnostic stays the machine's.
+- **Primitive words.** The row is the one `c_parse_primitive_type` interns. It
+  comes from the machine's own primitive scan
+  (`c_parse_primitive_type_read`) run over the list's words alone, so every
+  spelling combines as the machine combines it.
+- **Typedef name.** The row is the name's entity, looked up as
+  `c_parse_qualified_typedef_type` looks it up. When a `const` or `volatile`
+  word is in the list, it is qualified with `c_parse_add_qualified_type`, as
+  there.
+- **Declarator start.** The declarator starts one past the list's last word.
+
+Rows are appended only by the machine's own calls, in the machine's order:
+`c_parse_type_identity_prepare`, then `c_parse_intern_type` or
+`c_parse_add_qualified_type`. So the type table matches the machine's row for
+row.
+
+The lists are found through an index, built once per analysis, of the first
+token of every **word-only** `DECL_SPECIFIERS` node: a list whose children are
+`SPECIFIER_WORD` and `TYPEDEF_NAME` leaves on consecutive tokens. Only such a
+list can be read, and no other is indexed. A word-only list holds no other
+list and lies in no other word-only list, so postorder reaches these lists in
+token order. The index is therefore appended in one pass, with no sorting. A
+list out of that order, which a valid tree never has, is left out rather than
+moved. So the build reads each list's children at most once, whatever the
+input. Indexing every list and sorting as it went was quadratic in tag
+nesting: postorder closes an enclosing declaration's list after every list
+its members hold. The kind column is scanned eight nodes at a time. A lookup
+gallops forward from the previous answer, because each of analysis's passes
+types declarations in token order.
+
+Everything else goes to the machine unchanged. `CAstSpecifierFallback` names
+each case:
+- `input`: no word-only list begins at the run's first token, because the list
+  there holds a tag, `typeof`, `_Atomic(T)`, `_Alignas`, `_BitInt` or an
+  attribute, or because there is no list;
+- `specifiers`: a word outside the plain set (`restrict`, `_Atomic`,
+  `__extension__`, ...), no type at all, both a type word and a name, or a word
+  right after the list;
+- `storage`: a repeated or conflicting storage class;
+- `primitive`: words the machine's scan combines into no row, which it
+  diagnoses. The syntax pass rejects such combinations first, so only a tree
+  that classifies a word differently from the scan reaches this;
+- `typedef`: a name that is not a typedef in the run's scope, or a
+  restrict-qualified typedef under a qualifier, whose copy
+  `c_type_parse_root_finish` checks again.
+
+The machine remains the default path and the fallback for every run that is
+not read from the tree. Type names (casts, `sizeof`, compound literals),
+members, tag definitions and declarator derivations still go through the
+machine.
+
+`c_ast_test_specifiers` runs, in every layout, one unit whose block,
+file-scope and parameter runs are all read from the tree, and one shape per
+fallback reason. One `input` shape and the `primitive` shape use a tampered
+tree. A unit with tags nested a thousand deep must index its one word-only
+list, reading no more list children than the tree has nodes. The
+[corpus differential](#corpus-differential) compares the whole analysis model
+field by field.
+
 ## Statement extents in lowering
 
 Lowering asks `c_ir_controlled_body_range` (`c_gen.c`) where each controlled
@@ -1190,7 +1270,13 @@ so the two must also bind alike, field by field
 scope), the per-token use map, every scope and every entity. There are floors
 on the segments the plans bound and the uses in them: about 6,800 segments and
 25,700 uses from the fixtures, and about 34,300 and 129,400 with the frontend
-sources. No corpus body falls back. Every
+sources. No corpus body falls back. The second run also reads declaration
+specifier runs from the tree ([declaration specifiers](#declaration-specifiers-from-the-tree)),
+so the two analyses must also build the same model, field by field
+(`c_ast_corpus_model_differ`): every type row, array bound, alignment
+specifier, type alignment, member, parameter, entity and declaration type,
+in table order. There are floors on the runs read from the tree: about
+19,800 from the fixtures, and about 60,000 with the frontend sources. Every
 tree answer must match the machine's in validity, structural type, constraint,
 nonplace fact, diagnostics and table growth; a replayed answer's rows are
 taken back after the replay, and the machine must append the same rows again.
@@ -1499,7 +1585,7 @@ differential tests pass.
 |---|---|---|---|
 | `c_parse_ast_run`, `c_parser_parse_function_body`, `c_parser_parse_declaration_expression` | declaration split, declarator name, body range, static-assert ranges | `DECLARATION`, `FUNCTION_DEFINITION`, `INIT_DECLARATOR`, `STATIC_ASSERT` | Retired under `-fc-ast-pilot` by the [declaration split](#declaration-split-from-the-tree). The walker stays the default path and the per-unit fallback. |
 | `c_parse_statement_end`, `c_parse_bind_block_statements`, `c_parse_local_declarations` | statement boundaries, block declarations | `COMPOUND_STATEMENT` items | Read under `-fc-ast-pilot` by the body binder's [statement plan](#statement-plan-from-the-tree): statement boundaries, block declaration ends and `for` boundaries, plain segments bound in one pass, and each block declarator's `,`, `=` and plain initializer. The token loop stays the engine, the default path and the per-body fallback; the type machine still reads specifiers and declarators from tokens (next row), and the switch and control-statement validators keep `c_parse_statement_end`, whose calls cost about 1 M instructions on the self-host. |
-| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Not migrated. |
+| `c_type_parse_*` declarator/specifier machine | specifiers, pointer/array/function derivations | `DECL_SPECIFIERS`, `DECLARATOR_*`, `TYPE_NAME` | Partly read under `-fc-ast-pilot`: plain specifier runs of block declarations, file-scope declarations and parameters come from `DECL_SPECIFIERS` ([declaration specifiers](#declaration-specifiers-from-the-tree)). Tags, `typeof`, attributes, type names, members and every declarator derivation stay with the machine. |
 | `c_parse_direct_expression_type`, `c_type_parse_sizeof_step` | operator precedence (top-down lowest-operator rescans) | expression nodes in postorder | Partly read under `-fc-ast-pilot` (tree expression typer); not retired. |
 | `c_ir_lower_body_advance`, `c_ir_statement_end*` | first-token statement classification, controlled-body extents | statement nodes | Controlled-body extents (`c_ir_controlled_body_range`, and through it `c_ir_statement_end*` and `c_ir_statement_labels_end`) are read under `-fc-ast-pilot` from the [extent table](#statement-extents-in-lowering). The walkers stay the default path and the per-body and per-query fallback. `c_ir_lower_body_advance`'s first-token classification is not migrated. |
 | `c_ir_lower_expression_core_step`, `c_ir_has_root_*`, `c_ir_root_conditional` | shunting-yard precedence, root comma/assignment/conditional splits | expression roots | `c_ir_root_conditional` is read under `-fc-ast-pilot` ([lowering from the tree](#lowering-from-the-tree)); the rest is not migrated. The evaluator's walk is designed in [Expression lowering from the tree](#expression-lowering-from-the-tree). |
@@ -1538,6 +1624,14 @@ differential passes. The row is not retired, for three reasons:
   token;
 - `c_ir_control_substatement_position`, the switch's label scan, still reads
   tokens.
+
+Under `-fc-ast-pilot`, the third row's specifier machine no longer runs for a
+plain specifier run of a block declaration, a file-scope declaration or a
+parameter. Its consumers, the declaration typers, take the base type and the
+declarator start from `DECL_SPECIFIERS`, and the field-by-field model
+differential passes. The row is not retired. The machine still runs without
+the flag, for every run the read hands back, for type names, members and tag
+definitions, and for every pointer, array and function derivation.
 
 The [tree expression typer](#tree-expression-typer) is the first consumer of
 the fourth row's replacement. Under `-fc-ast-pilot` it answers most of semantic
@@ -2015,6 +2109,53 @@ The census also found that the switch and control-statement validators'
 `c_parse_statement_end` calls cost 1.05 M in total (7,586 calls) on that input.
 Reading their ends from the tree cannot repay its own lookup, so they stay
 with tokens; this is recorded as a negative result, not a budget.
+
+For the [declaration specifier read](#declaration-specifiers-from-the-tree),
+these budgets were declared before its measured runs. The input and flags are
+the same as for the statement plan (`-g0 -fsyntax-only`, the self-host unity
+input of the base revision). Four arms are counted with Callgrind
+(`--cache-sim=no --branch-sim=no`) on tests-off `-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is main `4e5d563f`, which the candidate branches from. The budgets:
+- **Correctness.**
+  - 0 model differences over the corpus and the frontend sources: every type
+    row, array bound, alignment specifier, type alignment, member, parameter,
+    entity and declaration type, field by field and in table order, with the
+    diagnostics;
+  - a one-off comparison of the same fields on the self-host unity input, also
+    with 0 differences;
+  - byte-identical `-c` objects (`-g0` and `-g`) across the four arms.
+- **Coverage (reported, not gated).** The runs read from the tree and the runs
+  handed back, by reason, from the `-v` counters.
+- **The read's own effect (C against B).** The whole compile costs fewer
+  instructions, with the index build charged. The machine's root specifier
+  runs (`c_parse_scalar_type_in_scope_attempt` calls) fall by exactly the runs
+  read from the tree.
+- **The default path (D against A).** The read adds one test of a null index
+  per run there, so the difference stays within ±0.05% Ir. The
+  work-equivalence criterion for the body walk does not apply to this change.
+- **Adoption of the hook as the default.** Unchanged from stage 1. Hosted
+  instruction counts show only its instruction half. Wall time, `-c` and RSS
+  acceptance remain with the Zen 5 route (#2761), and no 9700X comparison is
+  requested.
+
+The declaration specifier read's hosted census is
+[`2026-10-11T105317Z`](../../performance-audits/2026-10-11T105317Z.md), taken
+the same way and diagnostic only:
+- Every hosted budget passes. The model matches field by field over the corpus,
+  the frontend sources and the self-host unity input. The objects of all four
+  arms are identical.
+- On the self-host the read answers 79,095 runs: 13,470 primitive and 65,625
+  typedef. It hands 2,113 back, 2,091 of them `input` and 22 `specifiers`. The
+  machine's root runs fall by exactly 79,095.
+- The pilot's compile falls by 141.8 M Ir (−1.53%), with the 17.7 M index
+  charged. The index holds the 144,693 word-only lists, built in one pass.
+- The default path is +0.026%.
+- Zen 5 validation stays incomplete (#2761), so the hook stays opt-in.
 
 For the statement plan's [braced segments](#statement-plan-from-the-tree),
 these budgets were declared before their measured runs. The input, flags and

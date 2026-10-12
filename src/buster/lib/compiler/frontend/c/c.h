@@ -1540,6 +1540,60 @@ struct CAstStatementStatistics
     u32 fallback_token;
 };
 
+// Why a declaration's specifier run went to the type machine instead of being
+// read from its DECL_SPECIFIERS node (c_parse_declaration_specifiers_type,
+// GitHub #3102). The run's first token names a word-only list, one whose
+// children are word and name leaves on consecutive tokens; a reason other
+// than INPUT says what that list holds that the tree read leaves to the
+// machine.
+typedef enum CAstSpecifierFallback
+{
+    C_AST_SPECIFIER_FALLBACK_NONE,
+    // No word-only specifier list begins at the run's first token: the list
+    // there holds a tag, typeof, `_Atomic(T)`, `_Alignas`, `_BitInt` or an
+    // attribute, or there is none.
+    C_AST_SPECIFIER_FALLBACK_INPUT,
+    // The word-only list holds a word outside the plain set (restrict,
+    // `_Atomic`, nullability, auto, constexpr, `__extension__`,
+    // `__auto_type`, `__builtin_va_list`, `_Imaginary`, `__float128`), no
+    // type word or name at all, or both. A word or an attribute right after
+    // the list, which the machine's scans would read on into, counts here
+    // too; the tree puts both in the list.
+    C_AST_SPECIFIER_FALLBACK_SPECIFIERS,
+    // The storage-class words repeat or conflict, which the machine
+    // diagnoses.
+    C_AST_SPECIFIER_FALLBACK_STORAGE,
+    // The machine's primitive scan over the list's words interns no row: an
+    // invalid combination, which it diagnoses. The syntax pass rejects those
+    // first, so only a list whose words the tree classified differently
+    // from the scan reaches this.
+    C_AST_SPECIFIER_FALLBACK_PRIMITIVE,
+    // The name is not a typedef in the run's scope, or its type is
+    // restrict-qualified: the machine's other lookups and checks decide.
+    C_AST_SPECIFIER_FALLBACK_TYPEDEF,
+    C_AST_SPECIFIER_FALLBACK_COUNT,
+} CAstSpecifierFallback;
+
+// What the specifier read did over one analysis: the runs it answered from
+// the tree, by base (primitive words or a typedef name), and the runs it left
+// to the machine and why. `lists` counts the tree's specifier lists,
+// `indexed` the word-only ones the index holds, and `index_reads` the list
+// children the index build read, which is at most the tree's node count.
+typedef struct CAstSpecifierStatistics CAstSpecifierStatistics;
+struct CAstSpecifierStatistics
+{
+    u64 lists;
+    u64 indexed;
+    u64 index_reads;
+    u64 primitive_answers;
+    u64 typedef_answers;
+    u64 fallbacks;
+    u64 fallback_counts[C_AST_SPECIFIER_FALLBACK_COUNT];
+    // The last fallback: its reason, and the run's first token.
+    CAstSpecifierFallback reason;
+    u32 fallback_token;
+};
+
 // Why lowering's token walker, not the tree's extent table
 // (c_ir_statement_extents in c_gen.c, GitHub #3102), answered a controlled
 // body range query.
@@ -1618,6 +1672,9 @@ struct CParserResult
     // Optional: receives the body binder's statement-plan counts, added to
     // what it already holds. The plan runs whenever `ast` is set.
     CAstStatementStatistics* ast_statement_statistics;
+    // Optional: receives the declaration specifier read's counts, added to
+    // what it already holds. The read runs whenever `ast` is set.
+    CAstSpecifierStatistics* ast_specifier_statistics;
     u32 declaration_count;
     u32 diagnostic_count;
     u32 declaration_capacity;
@@ -2253,6 +2310,8 @@ BUSTER_F_DECL CParserResult c_parse_ast_from_tree(Arena* arena, CPreprocessResul
 BUSTER_F_DECL String8 c_parser_tree_fallback_name(CParserTreeFallback reason);
 // The CAstStatementFallback in lower case without its prefix ("none", "input", "tokens").
 BUSTER_F_DECL String8 c_ast_statement_fallback_name(CAstStatementFallback reason);
+// The CAstSpecifierFallback in lower case without its prefix ("none", "input", ...).
+BUSTER_F_DECL String8 c_ast_specifier_fallback_name(CAstSpecifierFallback reason);
 // The CAstExtentFallback in lower case without its prefix ("none", "input", "anchor", "shape").
 BUSTER_F_DECL String8 c_ast_extent_fallback_name(CAstExtentFallback reason);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);

@@ -552,6 +552,10 @@ struct CompilerDriverCAstPilotResult
     // segments and hints read from the tree, and bodies left to the token
     // walk and why. Zero when the analysis had no tree to use.
     CAstStatementStatistics statements;
+    // The declaration specifier runs read from the tree (c_parse.c): runs
+    // answered, and runs left to the type machine and why. Zero when the
+    // analysis had no tree to use.
+    CAstSpecifierStatistics specifiers;
     // The extent table lowering read controlled body ranges from
     // (c_gen.c): bodies, entries and answers, and the queries the token
     // walker answered and why. Zero when lowering had no tree to use.
