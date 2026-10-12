@@ -5271,8 +5271,9 @@ class FrontendSelectorTest(unittest.TestCase):
             self.assertTrue((root / "evidence" / "frontend_selector" / "ide_bench" / "ide-bench.json").is_file())
 
 WILD_PATH = "/usr/local/bin/wild"
-# Wild's own identity format (Args::linker_identity at wild e9a9b0cb): the positive control.
-WILD_VERSION = "Wild 0.10.0 (compatible with GNU linkers)"
+# Wild's own identity format (Args::linker_identity at wild e9a9b0cb): the positive control, in the
+# form the 9700X host's distribution Wild reports (run 38242826849).
+WILD_VERSION = "Wild 0.10.0 non-git-build (compatible with GNU linkers)"
 WILD_ROOT = "/work/wild-linker-source"
 
 
@@ -5388,6 +5389,21 @@ class WildLinkerTest(unittest.TestCase):
         # Both bounds together stay inside the unchanged 90-minute compare-pull job with its ordinary comparison.
         self.assertLessEqual(compiler_compare.WILD_LINKER_BUILD_TIMEOUT_SECONDS +
                              compiler_compare.WILD_LINKER_HARNESS_TIMEOUT_SECONDS, 40 * 60)
+
+    def test_identity_accepts_every_version_form_wild_builds(self) -> None:
+        # wild/build.rs at e9a9b0cb: release tag, merge-base hash, modified checkout, no git. The
+        # 9700X host's distribution Wild reports the last form (run 38242826849).
+        merge_base = "e9a9b0cb6fd63a23cc7b93aafc931aadd5746be6"
+        for version in ("0.10.0", merge_base, f"0.10.0 {merge_base}-modified", "0.10.0 non-git-build"):
+            with self.subTest(version=version):
+                self.assertTrue(compiler_receipt.WILD_IDENTITY.fullmatch(
+                    f"Wild {version} (compatible with GNU linkers)"))
+        for line in ("Ubuntu LLD 18.1.3 (compatible with GNU linkers)", "Wild (compatible with GNU linkers)",
+                     "Wild 0.10.0 dirty (compatible with GNU linkers)", "Wild 0.10.0 non-git-build",
+                     f"Wild {merge_base[:12]} (compatible with GNU linkers)",
+                     "Wild 0.10.0 non-git-build (compatible with GNU linkers)\nmold 2.42.1"):
+            with self.subTest(line=line):
+                self.assertIsNone(compiler_receipt.WILD_IDENTITY.fullmatch(line))
 
     def test_schedule_replays_the_harness_generator(self) -> None:
         """The seeded xorshift order and bootstrap match the C harness's random_u32 (seed 2645)."""
