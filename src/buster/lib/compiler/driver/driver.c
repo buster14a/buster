@@ -3598,6 +3598,13 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     {
         compiler_driver_append_system_includes(arena, &invocation);
     }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && after_include_count && invocation.has_gpu_target)
+    {
+        // External pipelines forward system paths as -isystem, before their
+        // own defaults. Do not silently change a late directory's semantics.
+        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation.diagnostic = S8("-idirafter is unsupported for external GPU pipelines");
+    }
     // Explicit after-directories survive -nostdinc and follow every default
     // root, including Windows INCLUDE's exact-sized replacement allocation.
     // Reuse the preprocessor's system classification and include_next indices.

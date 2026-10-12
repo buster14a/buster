@@ -481,7 +481,9 @@ directories remain available with either switch. `-idirafter DIR` and
 compiler resource headers and the default system roots, preserving the order
 of repeated `-idirafter` options. Both quoted and angle includes consult them;
 quoted includes still search the including file\'s directory first. Headers
-resolved there are excluded by `-MMD`. The registered
+resolved there are excluded by `-MMD`. External GPU pipelines refuse
+`-idirafter` explicitly because their system-path forwarding would lose its
+late search position. The registered
 `compiler_driver_test_idirafter` covers shadowed headers, sysroot defaults,
 `-nostdinc`/`-nostdlibinc`, `#include_next`, both spellings and MD/MMD classification. `-working-directory=DIR` and `-working-directory DIR`
 resolve relative input paths against `DIR` with host path rules (on POSIX only

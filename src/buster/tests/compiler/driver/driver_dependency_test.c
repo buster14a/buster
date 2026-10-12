@@ -687,6 +687,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_idirafter(UnitTestArgume
     BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_ARGUMENT);
     BUSTER_TEST(arguments, compiler_driver_test_string_contains(refused.diagnostic, S8("missing argument after -idirafter")));
 
+    String8 gpu[] = {S8("-c"), S8("-x"), S8("cuda"), S8("--target=nvptx64-nvidia-cuda"),
+                     S8("-idirafter"), S8("late"), S8("source.cu")};
+    CompilerDriverInvocation gpu_refused = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(gpu));
+    BUSTER_TEST(arguments, gpu_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_TEST(arguments, compiler_driver_test_string_contains(gpu_refused.diagnostic, S8("-idirafter")));
+
     String8 root = buster_test_temporary_path(arena, S8("buster-idirafter"), S8(""));
     String8 user = string_format_z(arena, S8("{S8}/user"), root);
     String8 system = string_format_z(arena, S8("{S8}/system"), root);
@@ -795,7 +801,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_idirafter(UnitTestArgume
     for (u32 mode = 0; mode < 2; mode += 1)
     {
         TemporalArena attempt = arena_begin_temporal(arena);
-        String8 command[] = {S8("-c"), S8("-nostdinc"), S8("-idirafter"), after[0],
+        String8 command[] = {S8("-c"), S8("-nostdinc"), string_format(arena, S8("-idirafter{S8}"), after[0]),
                              mode ? S8("-MMD") : S8("-MD"), S8("-MF"), depfile, S8("-o"), object, dependency_source};
         CompilerDriverResult compiled = compiler_driver_execute_invocation(
             arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
