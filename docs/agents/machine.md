@@ -541,7 +541,12 @@ hosts execute its independent expected-value fixture.
 - Shared FAST/QUALITY placement colors frame storage by lifetime instead of
   giving every spilled value and every stack slot its own bytes. Selector slots
   close their touched rows through a block-level liveness fixed point over
-  covering writes and upward-exposed reads. Allocator-created spill homes use
+  covering writes and upward-exposed reads. That solve
+  (`machine_fast_solve_liveness`, shared with the prepass value liveness)
+  always visits the lowest-ranked pending block in reverse postorder of the
+  reversed CFG, so a value carried through a deep loop nest reaches every inner
+  block in one pass instead of one pass per nesting level (#3771); the order
+  changes only the work, never the least fixed point. Allocator-created spill homes use
   the same closure on a direct acyclic block chain: a spill covers the previous
   contents of a home, while a reload before that spill reads the value arriving
   from a predecessor. Retroactive edge repairs at one machine point have no
