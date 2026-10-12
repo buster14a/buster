@@ -119,6 +119,17 @@ scope, so a local value shadows an outer typedef. A final declaration still
 produces void; an expired nested shadow does not change the enclosing typedef,
 and a const-qualified shadow remains unmodifiable.
 
+GNU statement-expression type queries resolve their final statement's lexical
+scope through the active function-body map, even when the query begins under
+an inner scope. Statement-expression constraint bodies run in reverse source
+order, so an enclosing tail reads its already-checked child's expression memo
+with the same range, scope and mode flags. This avoids repeatedly typing every
+inner tail and descending from a different root at every level (#3724).
+`c_test_statement_expression_work_growth` bounds tail visits and scope levels
+through depth 10,000, validates canonical IR, and covers GNU17/GNU23 and both
+frontend SSA forms. These work bounds are deterministic correctness checks;
+local elapsed times remain diagnostic pending the approved-host route.
+
 Nested GNU statement-expression body walks reuse the function's label block at
 the same source token. Allocating a second block leaves the predeclared label
 unterminated and separates ordinary goto from label-address provenance. The

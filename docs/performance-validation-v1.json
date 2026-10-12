@@ -262,6 +262,19 @@
       }
     },
     {
+      "id": "tool:link_tls_bench.py",
+      "kind": "tool",
+      "validation": "performance",
+      "measures": "#1915 fixed link-tls-v1 on an owner request line: the trusted revision's link_tls_bench.py builds frozen TLS-heavy inputs (8192 to 32768 general-dynamic sites as object, -fno-plt object, archive and PIE cells, plus a no-TLS control) with the host clang, requires byte-identical images from the matched baseline and candidate ide binaries that print the frozen output, then times fresh ide cc link processes of both, 2 warmups and 20 alternating pairs per cell on CPU 2; report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "link-tls-v1",
+        "request": "one exact fresh line, profile: link-tls-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
+      }
+    },
+    {
       "id": "tool:branch_miss_survey.py",
       "kind": "tool",
       "validation": "diagnostic",
