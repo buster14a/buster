@@ -6,8 +6,9 @@
 // Apple M1 profile, the fixed-row spellings, the GPR and scalar-integer
 // recipe encoders (a64_arm_m1_*_encode) with logical-immediate and
 // PC-relative materialization, field-level raw encode/decode
-// (a64_generated_raw_*, buster_aarch64_canonical_field), and the typed
-// decoders that recover operands from words for the differential tests.
+// (a64_generated_raw_*, buster_aarch64_canonical_field), canonical form
+// lookup by Arm row digest (buster_aarch64_canonical_form_by_digest), and the
+// typed decoders that recover operands from words for the differential tests.
 // Encoders validate operands and constraints before emitting; an
 // unencodable request returns false rather than a wrong word.
 // Test-only seams (buster_aarch64_metadata_test_*) expose the fail-closed
@@ -3039,6 +3040,33 @@ bool buster_aarch64_canonical_form(u32 form_index, BusterAarch64CanonicalFormInf
     };
     *result = local;
     return true;
+}
+
+bool buster_aarch64_canonical_form_by_digest(u64 digest, u32* form_index, BusterAarch64CanonicalFormInfo* result)
+{
+    u32 matches = 0, selected = 0;
+    BusterAarch64CanonicalFormInfo selected_info = {0};
+    for (u32 index = 0; form_index && index < BUSTER_AARCH64_CANONICAL_DECODER_FORM_COUNT; index += 1)
+    {
+        BusterAarch64CanonicalFormInfo candidate = {0};
+        if (buster_aarch64_canonical_form(index, &candidate) && candidate.arm_row_digest == digest)
+        {
+            matches += 1;
+            selected = index;
+            selected_info = candidate;
+        }
+    }
+    bool found = matches == 1;
+    if (found)
+    {
+        *form_index = selected;
+    }
+    if (found && result)
+    {
+        *result = selected_info;
+    }
+
+    return found;
 }
 
 bool buster_aarch64_canonical_field(u32 form_index, u32 field_index, BusterAarch64CanonicalFieldInfo* result)

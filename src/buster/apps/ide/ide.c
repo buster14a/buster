@@ -34,6 +34,7 @@
 #include <buster/lib/compiler/assembly/aarch64_syntax.h>
 #endif
 #include <buster/lib/compiler/assembly/aarch64_semantic_vm.h>
+#include <buster/lib/compiler/assembly/aarch64_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_complex_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_memory_semantics.h>
@@ -129,6 +130,7 @@
 #include <buster/lib/compiler/assembly/aarch64_syntax.c>
 #endif
 #include <buster/lib/compiler/assembly/aarch64_semantic_vm.c>
+#include <buster/lib/compiler/assembly/aarch64_simd_semantics.c>
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c>
 #include <buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c>
 #include <buster/lib/compiler/assembly/aarch64_memory_semantics.c>
