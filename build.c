@@ -4828,13 +4828,37 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_validate_action(Arena* a
 BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_cleanup_action(Arena* arena, void* data)
 {
     BuildArtifactFanout* fanout = (BuildArtifactFanout*)data;
-    remove_path_recursive(arena, fanout->private_bootstrap_path);
-    if (path_exists(arena, fanout->private_bootstrap_path))
+    u64 start = os_now_microseconds();
+    OsError error = os_file_delete_checked(fanout->private_bootstrap_path);
+    OsError first_error = error;
+    u32 attempts = 1;
+#if BUSTER_WINDOWS
+    // The owned snapshot is an executable file, never a tree. Just-run image
+    // cleanup already uses this bound in the compiler tests: native held and
+    // released handles recover in tens of milliseconds. Keep permanent locks
+    // and read-only files failed, without changing a self-host/job timeout.
+    enum { RETRY_MICROSECONDS = 500000, RETRY_MILLISECONDS = 10, MAX_ATTEMPTS = 51 };
+    while ((error.v == ERROR_SHARING_VIOLATION || error.v == ERROR_ACCESS_DENIED) &&
+           attempts < MAX_ATTEMPTS && os_now_microseconds() - start < RETRY_MICROSECONDS)
+    {
+        Sleep(RETRY_MILLISECONDS);
+        error = os_file_delete_checked(fanout->private_bootstrap_path);
+        attempts += 1;
+    }
+#endif
+    bool remains = path_exists(arena, fanout->private_bootstrap_path);
+    ProcessResult result = error.v || remains ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
+    if (first_error.v || remains)
+    {
+        string_print(S8("BOOTSTRAP_SNAPSHOT_CLEANUP path={S8} first_error={u32} final_error={u32} attempts={u32} elapsed_us={u64} status={S8} error={EOs}\n"),
+                     fanout->private_bootstrap_path, first_error.v, error.v, attempts, os_now_microseconds() - start,
+                     result == PROCESS_RESULT_SUCCESS ? S8("recovered") : S8("failed"), error);
+    }
+    if (result != PROCESS_RESULT_SUCCESS)
     {
         string_print(S8("error: could not remove the private self-host bootstrap snapshot\n"));
-        return PROCESS_RESULT_FAILED;
     }
-    return PROCESS_RESULT_SUCCESS;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL void self_host_compare_and_bench_add(Arena* arena, String8 stage1, String8 stage2, ProcessRun* stage1_run, ProcessRun* stage2_run
@@ -24725,6 +24749,42 @@ BUSTER_GLOBAL_LOCAL void x86_completion_census_add_existing(Arena* arena, BuildA
 #endif
 }
 
+#if BUSTER_WINDOWS && !BUSTER_SINGLE_THREADED
+typedef struct BuildBootstrapCleanupLanes BuildBootstrapCleanupLanes;
+struct BuildBootstrapCleanupLanes
+{
+    Arena* arena;
+    BuildArtifactFanout fanout;
+    OsFileDescriptor* holder;
+    OsError blocked;
+    ProcessResult cleaned;
+    bool closed;
+    bool skipped;
+};
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType build_bootstrap_cleanup_lane(void* pointer)
+{
+    BuildBootstrapCleanupLanes* state = (BuildBootstrapCleanupLanes*)pointer;
+    if (lane_count() == 2)
+    {
+        if (!lane_index()) state->blocked = os_file_delete_checked(state->fanout.private_bootstrap_path);
+        lane_sync();
+        if (!lane_index()) state->cleaned = build_artifact_fanout_cleanup_action(state->arena, &state->fanout);
+        else
+        {
+            Sleep(20);
+            state->closed = os_file_close(state->holder);
+        }
+    }
+    else
+    {
+        state->skipped = true;
+        state->closed = os_file_close(state->holder);
+        state->cleaned = build_artifact_fanout_cleanup_action(state->arena, &state->fanout);
+    }
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool include_large_snapshot)
 {
     String8 ci_arguments[] = {
@@ -25357,6 +25417,60 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
         string_print(S8("error: artifact fan-out private snapshot lifecycle cleanup test failed\n"));
         return PROCESS_RESULT_FAILED;
     }
+
+#if BUSTER_WINDOWS
+    // Real Win32 handles prove the retry set without a synthetic native error.
+    bool native_cleanup = file_write(lifecycle_copy, BUSTER_SLICE_TO_BYTE_SLICE(snapshot_content));
+    OsFileDescriptor* holder = native_cleanup ? os_file_open(lifecycle_copy, (OpenFlags){0}, (OsFileAccess){.read = 1},
+                                                            (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1}) : 0;
+    native_cleanup = native_cleanup && holder != 0;
+    if (holder)
+    {
+        OsError blocked = os_file_delete_checked(lifecycle_copy);
+        native_cleanup = native_cleanup && blocked.v == ERROR_SHARING_VIOLATION &&
+                         build_artifact_fanout_cleanup_action(arena, &lifecycle_fanout) != PROCESS_RESULT_SUCCESS && path_exists(arena, lifecycle_copy);
+        bool closed = os_file_close(holder);
+        native_cleanup = native_cleanup && closed && build_artifact_fanout_cleanup_action(arena, &lifecycle_fanout) == PROCESS_RESULT_SUCCESS;
+    }
+    bool released_cleanup = true;
+    bool release_skipped = true;
+#if !BUSTER_SINGLE_THREADED
+    released_cleanup = file_write(lifecycle_copy, BUSTER_SLICE_TO_BYTE_SLICE(snapshot_content));
+    holder = released_cleanup ? os_file_open(lifecycle_copy, (OpenFlags){0}, (OsFileAccess){.read = 1},
+                                             (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1}) : 0;
+    released_cleanup = released_cleanup && holder != 0;
+    if (holder)
+    {
+        BuildBootstrapCleanupLanes state = {.arena = arena, .fanout = lifecycle_fanout, .holder = holder};
+        lane_run(2, build_bootstrap_cleanup_lane, &state);
+        release_skipped = state.skipped;
+        released_cleanup = released_cleanup && (state.skipped || state.blocked.v == ERROR_SHARING_VIOLATION) &&
+                           state.closed && state.cleaned == PROCESS_RESULT_SUCCESS && !path_exists(arena, lifecycle_copy);
+    }
+#endif
+    bool readonly_cleanup = file_write(lifecycle_copy, BUSTER_SLICE_TO_BYTE_SLICE(snapshot_content));
+    String16 wide = string16_from_string8(arena, lifecycle_copy, true);
+    readonly_cleanup = readonly_cleanup && SetFileAttributesW(wide.pointer, FILE_ATTRIBUTE_READONLY) != 0;
+    if (readonly_cleanup)
+    {
+        OsError denied = os_file_delete_checked(lifecycle_copy);
+        readonly_cleanup = denied.v == ERROR_ACCESS_DENIED &&
+                           build_artifact_fanout_cleanup_action(arena, &lifecycle_fanout) != PROCESS_RESULT_SUCCESS && path_exists(arena, lifecycle_copy);
+        bool restored = SetFileAttributesW(wide.pointer, FILE_ATTRIBUTE_NORMAL) != 0;
+        readonly_cleanup = readonly_cleanup && restored && build_artifact_fanout_cleanup_action(arena, &lifecycle_fanout) == PROCESS_RESULT_SUCCESS;
+    }
+    BuildArtifactFanout invalid_fanout = {.private_bootstrap_path = string_format_z(arena, S8("{S8}?"), lifecycle_copy)};
+    OsError invalid = os_file_delete_checked(invalid_fanout.private_bootstrap_path);
+    bool invalid_cleanup = invalid.v == ERROR_INVALID_NAME && build_artifact_fanout_cleanup_action(arena, &invalid_fanout) != PROCESS_RESULT_SUCCESS;
+    string_print(S8("BOOTSTRAP_SNAPSHOT_NATIVE_TEST held={u32} released={S8} readonly={u32} invalid={u32}\n"),
+                 (u32)native_cleanup, release_skipped ? S8("skipped") : released_cleanup ? S8("pass") : S8("fail"),
+                 (u32)readonly_cleanup, (u32)invalid_cleanup);
+    if (!native_cleanup || !released_cleanup || !readonly_cleanup || !invalid_cleanup)
+    {
+        string_print(S8("error: artifact fan-out native snapshot cleanup controls failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+#endif
 
     bool large_snapshot_result = true;
     if (include_large_snapshot)
