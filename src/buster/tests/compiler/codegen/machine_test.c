@@ -14390,9 +14390,18 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                               split_quality.pinned_register_count));
                 // Both allocators vacate a fixed or tied register by copying its
                 // live owner to a free register, so compare every move the
-                // allocator inserts, not only memory traffic.
-                BUSTER_TEST(arguments, split_quality.reload_count + split_quality.spill_count + split_quality.copy_count <
-                                           split_fast.reload_count + split_fast.spill_count + split_fast.copy_count);
+                // allocator inserts, not only memory traffic. QUALITY accepts a
+                // pinned or split placement only when its frequency-weighted
+                // traffic is strictly lower than the scan's (asserted above
+                // through the split and pin counts), so the raw counts may tie.
+                // Since the scan reuses registers held by dead values (#3783),
+                // FAST reaches QUALITY's raw totals on this fixture.
+                BUSTER_TEST_RAW(arguments, split_quality.reload_count + split_quality.spill_count + split_quality.copy_count <=
+                                               split_fast.reload_count + split_fast.spill_count + split_fast.copy_count,
+                                string_format(arguments->arena,
+                                              S8("split_phase quality reloads {u32} spills {u32} copies {u32}, fast reloads {u32} spills {u32} copies {u32}"),
+                                              split_quality.reload_count, split_quality.spill_count, split_quality.copy_count,
+                                              split_fast.reload_count, split_fast.spill_count, split_fast.copy_count));
             }
         }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
