@@ -46,7 +46,14 @@ and the two compiler-internal probes of compiler-probes-v1) whose consumer
 validates that exact frozen profile, so a flag-pair profile cannot be added,
 or its validation dropped, without the inventory noticing.
 
-Map: discover, check_rows, check_native_row, check_profile_rows, main.
+Every covered row on the compare routes must be reachable from a receipt leg
+in compiler_receipt.INVENTORY_LEGS for that route's mode, and every row the
+mapping names must be a covered row of that route, so the published check's
+discharged rows (covered_inventory_rows) can neither silently lose a row when
+a leg or row is renamed or deleted nor discharge a row the inventory does not
+cover there.
+
+Map: discover, check_rows, check_native_row, check_profile_rows, check_leg_rows, main.
 """
 
 from __future__ import annotations
@@ -55,6 +62,9 @@ import json
 import re
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from compiler_receipt import INVENTORY_LEGS, INVENTORY_ROUTES  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 INVENTORY = ROOT / "docs" / "performance-validation-v1.json"
@@ -269,6 +279,31 @@ def check_profile_rows(data: object, receipt: str, read_consumer) -> list[str]:
     return errors
 
 
+def check_leg_rows(data: object, legs: dict, routes: dict) -> list[str]:
+    """Each covered compare-route row is reachable from a receipt leg, and each mapped row is covered there."""
+    errors: list[str] = []
+    entries = data.get("entries") if isinstance(data, dict) else None
+    rows = {entry.get("id"): entry for entry in entries if isinstance(entry, dict)} if isinstance(entries, list) else {}
+    if set(legs) != set(routes):
+        errors.append(f"receipt leg modes {sorted(legs)} are not the compare modes {sorted(routes)}")
+    for mode, route in routes.items():
+        mapped = {row for names in legs.get(mode, {}).values() for row in names}
+        for name, entry in rows.items():
+            zen5 = entry.get("zen5") if isinstance(entry.get("zen5"), dict) else {}
+            if zen5.get("route") == route and zen5.get("status") == "covered" and name not in mapped:
+                errors.append(f"{name}: covered on {route} but no {mode} receipt leg discharges it")
+        for leg, names in legs.get(mode, {}).items():
+            if not names:
+                errors.append(f"{mode} receipt leg {leg} discharges no inventory row")
+            for name in names:
+                zen5 = rows.get(name, {}).get("zen5") if isinstance(rows.get(name, {}).get("zen5"), dict) else {}
+                if name not in rows:
+                    errors.append(f"{mode} receipt leg {leg} names {name}, which is not an inventory row")
+                elif (zen5.get("route"), zen5.get("status")) != (route, "covered"):
+                    errors.append(f"{mode} receipt leg {leg} names {name}, which is not covered on {route}")
+    return errors
+
+
 def main() -> int:
     errors: list[str] = []
     try:
@@ -282,6 +317,7 @@ def main() -> int:
         errors.extend(problems)
         errors.extend(check_profile_rows(data, RECEIPT.read_text(encoding="utf-8"),
                                          lambda path: (ROOT / path).read_text(encoding="utf-8") if (ROOT / path).is_file() else ""))
+        errors.extend(check_leg_rows(data, INVENTORY_LEGS, INVENTORY_ROUTES))
     # Self-checks of the rules on synthetic inventories.
     row = {"id": "tool:x.py", "validation": "performance", "measures": "m",
            "zen5": {"route": "pull-compare", "status": "covered", "consumer": "tools/bench_direct/compiler_publish.py"}}
@@ -375,6 +411,30 @@ def main() -> int:
     ):
         inventory = {"schema": "buster-performance-validation-v1", "entries": rows}
         if (not check_profile_rows(inventory, receipt, lambda path: consumer)) != expected:
+            errors.append("self-check failed: " + label)
+    covered = [{"id": name, "validation": "performance", "measures": "m",
+                "zen5": {"route": route, "status": "covered", "consumer": "publisher.py"}}
+               for name, route in (("lab@main", "main-compare"), ("lab", "pull-compare"), ("profile", "pull-compare"))]
+    legs = {"main": {"self-host": ("lab@main",)}, "pull": {"self-host": ("lab",), "opt-in": ("profile",)}}
+    routes = {"main": "main-compare", "pull": "pull-compare"}
+    for label, rows, mapping, expected in (
+        ("every covered compare row is reachable", covered, legs, True),
+        ("a deleted leg leaves its row unreachable", covered,
+         {"main": legs["main"], "pull": {"self-host": ("lab",)}}, False),
+        ("a renamed row leaves the mapping stale",
+         [dict(row, id="profile@v2") if row["id"] == "profile" else row for row in covered], legs, False),
+        ("a deleted row leaves the mapping stale", [row for row in covered if row["id"] != "profile"],
+         {"main": legs["main"], "pull": {"self-host": ("lab",), "opt-in": ("profile",)}}, False),
+        ("a leg naming a row of the other route fails", covered,
+         {"main": {"self-host": ("lab@main", "lab")}, "pull": legs["pull"]}, False),
+        ("a leg naming a NOT VALIDATED row fails",
+         [dict(row, zen5={"route": "none", "status": "NOT VALIDATED"}) if row["id"] == "profile" else row
+          for row in covered], legs, False),
+        ("a mode without legs fails", covered, {"pull": legs["pull"]}, False),
+        ("a leg without rows fails", covered, {"main": legs["main"], "pull": dict(legs["pull"], empty=())}, False),
+    ):
+        inventory = {"schema": "buster-performance-validation-v1", "entries": rows}
+        if (not check_leg_rows(inventory, mapping, routes)) != expected:
             errors.append("self-check failed: " + label)
     for error in errors:
         print("PERFORMANCE_INVENTORY_FAIL " + error, file=sys.stderr)

@@ -682,13 +682,18 @@ class RecoveryTest(unittest.TestCase):
 
 
 class PublishTest(unittest.TestCase):
-    def publish(self, record: bytes | None, recorded: dict | None = None) -> tuple[RecoveryApi, dict, dict]:
-        """(api, started check, job outputs) after one main-mode publication of a valid receipt, or of recorded."""
+    def publish(self, record: bytes | None, document: dict | None = None,
+                mode: str = "main") -> tuple[RecoveryApi, dict, dict]:
+        """(api, started check, job outputs) after one publication of a retained receipt (default: valid main).
+
+        Pull mode stubs only the request-file freshness gate, which has its own tests.
+        """
         api = RecoveryApi()
         api.checks = []
-        started = api.add_check(HEAD, marker(request="91", attempt="1"), status="in_progress")
+        started = api.add_check(HEAD, marker(request="91", attempt="1", mode=mode), status="in_progress",
+                                name=compiler_receipt.check_name(mode))
         machine = {} if record is None else {compiler_publish.MACHINE_RECORD: record}
-        api.payload = archive({"receipt.json": json.dumps(receipt() if recorded is None else recorded),
+        api.payload = archive({"receipt.json": json.dumps(receipt() if document is None else document),
                                "lab/summary.json": json.dumps(summary()), **corpus_members(), **machine})
         listing = {"artifacts": [{"id": 8, "name": f"buster-9700x-compiler-{HEAD}-1", "expired": False,
                                   "size_in_bytes": 100, "archive_download_url": "https://api.invalid/zip",
@@ -702,6 +707,10 @@ class PublishTest(unittest.TestCase):
                       "BQ_RUN_ATTEMPT": "1", "BQ_AUTHORIZE_RESULT": "success", "BQ_AUTHORIZED_ATTEMPT": "1",
                       "BQ_COMPARE_RESULT": "success", "BQ_FIRST_PARENT": "b" * 40, "BQ_RANGE": "1",
                       "GH_TOKEN": "t", "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": os.devnull}
+            if mode == "pull":
+                values.update(BQ_MODE="pull", BQ_REF="refs/pull/7/head")
+                for key in ("BQ_FIRST_PARENT", "BQ_RANGE"):
+                    values.pop(key)
             original = api.request
             def routed(path, data=None, method=""):
                 bare = urllib.parse.urlsplit(path).path
@@ -719,10 +728,31 @@ class PublishTest(unittest.TestCase):
                     mock.patch.object(sys, "argv", PUBLISH_ARGV), \
                     mock.patch.object(api, "request", routed), \
                     mock.patch.object(compiler_publish, "Api", lambda repository, token: api), \
+                    mock.patch.object(compiler_publish, "verify_analyzer_request_freshness",
+                                      lambda *unused: "" if mode == "pull" else "not a pull request"), \
                     mock.patch("sys.stdout", new_callable=io.StringIO):
                 self.assertEqual(compiler_publish.main(), 0)
-            written = dict(line.split("=", 1) for line in output.read_text().splitlines())
+            written = dict(line.split("=", 1) for line in output.read_text().splitlines()) if output.exists() else {}
         return api, started, written
+
+    def test_malformed_scaling_status_still_completes_the_check(self) -> None:
+        # #3656 review: an unhashable scaling status must fail the check, not leave it in progress.
+        for status in ("failed", {}, []):
+            with self.subTest(status=status):
+                document = receipt()
+                document["mode"] = "pull"
+                document["identity"].update(mode="pull", ref="refs/pull/7/head")
+                document["scaling_profile"] = copy.deepcopy(compiler_receipt.SCALING_PROFILE)
+                document["scaling"] = {name: {"status": status} for name in compiler_receipt.SCALING_PROFILE["series"]}
+                pull_record = machine_bytes(job={"value": "compare-pull", "status": "available", "reason": ""})
+                api, started, unused_written = self.publish(pull_record, document, "pull")
+                self.assertEqual([row for row in api.checks if row["external_id"] == started["external_id"]], [started])
+                self.assertEqual((started["status"], started["conclusion"]), ("completed", "failure"))
+                shown = json.loads(started["output"]["text"].removeprefix("```json\n").removesuffix("\n```"))
+                self.assertEqual(shown["inventory_coverage"]["discharged"], [])
+                self.assertEqual(shown["inventory_coverage"]["route"], "pull-compare")
+                legs = {entry["leg"]: entry["status"] for entry in shown["inventory_coverage"]["legs"]}
+                self.assertEqual(legs["scaling"], "not discharged: leg failed")
 
     def test_malformed_production_profile_binaries_end_in_a_terminal_failure(self) -> None:
         """Rendering a malformed role record must not raise before the check completes (#2761)."""
@@ -758,6 +788,13 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(published["check_url"], started["html_url"])
         self.assertEqual(compiler_comment.validate_entry(published, REPO), [])
         self.assertIn(f"`{'b' * 40}` (first parent)", published["markdown"])
+        # The check names the inventory rows this validated main attempt discharged (#2761).
+        self.assertIn("`uarch_lab:compare@main`", started["output"]["summary"])
+        shown = json.loads(started["output"]["text"].removeprefix("```json\n").removesuffix("\n```"))
+        self.assertEqual(shown["inventory_coverage"]["discharged"],
+                         ["build:bench_throughput@main", "uarch_lab:compare@main"])
+        self.assertIn("| Inventory rows discharged | `build:bench_throughput@main`, `uarch_lab:compare@main` |",
+                      published["markdown"])
         self.assertIn('"cpu_vendor": "unknown (not exposed', started["output"]["text"])
 
     def test_publisher_refuses_a_missing_or_stale_machine_record(self) -> None:
