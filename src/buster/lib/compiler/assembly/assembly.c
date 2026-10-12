@@ -8842,6 +8842,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
 BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, String8* names, u32 capacity)
 {
     static TargetCpuFeature const x86_feature_bits[] = {
+        TARGET_CPU_FEATURE_X86_SSE,
         TARGET_CPU_FEATURE_X86_SSE2,
         TARGET_CPU_FEATURE_X86_AVX,
         TARGET_CPU_FEATURE_X86_AVX2,

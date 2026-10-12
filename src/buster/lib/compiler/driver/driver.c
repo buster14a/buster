@@ -746,7 +746,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_parse_feature_overrides(Arena* arena, C
 // one the chosen architecture lacks is refused by name when the target resolves.
 BUSTER_GLOBAL_LOCAL bool compiler_driver_feature_name_is_known(String8 name)
 {
-    bool known = string_equal(name, S8("sse"));
+    bool known = false;
     for (u32 arch = 0; arch < CPU_ARCH_COUNT && !known; arch += 1)
     {
         known = target_cpu_feature_from_string((CpuArch)arch, name) != TARGET_CPU_FEATURE_NONE;
@@ -1330,12 +1330,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_resolve_native_target(Arena* arena, Com
         {
             CompilerDriverFeatureOverride override = feature_overrides[override_index];
             TargetCpuFeature feature = target_cpu_feature_from_string(invocation->target.cpu_arch, override.name);
-            if (feature == TARGET_CPU_FEATURE_NONE && override.option.length && invocation->target.cpu_arch == CPU_ARCH_I386 &&
-                string_equal(override.name, S8("sse")) && !override.enable)
-            {
-                continue;
-            }
-            else if (feature == TARGET_CPU_FEATURE_X86_MMX && override.option.length &&
+            if (feature == TARGET_CPU_FEATURE_X86_MMX && override.option.length &&
                      invocation->target.cpu_arch == CPU_ARCH_X86_64)
             {
                 compiler_driver_argument_error(arena, invocation, S8("unsupported option: {S8}"), override.option);
@@ -1353,7 +1348,11 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_resolve_native_target(Arena* arena, Com
                 // The -m<feature> spellings follow GCC: the prerequisites come along
                 // with an enabled feature, and the dependents go with a disabled one.
                 // -mattr stays exact.
-                if (!override.enable && feature == TARGET_CPU_FEATURE_X86_SSE2 && invocation->target.cpu_arch == CPU_ARCH_X86_64)
+                if (!override.enable && feature == TARGET_CPU_FEATURE_X86_SSE && invocation->target.cpu_arch == CPU_ARCH_X86_64)
+                {
+                    compiler_driver_argument_error(arena, invocation, S8("unsupported option: {S8} (SSE is part of the x86-64 baseline)"), override.option);
+                }
+                else if (!override.enable && feature == TARGET_CPU_FEATURE_X86_SSE2 && invocation->target.cpu_arch == CPU_ARCH_X86_64)
                 {
                     compiler_driver_argument_error(arena, invocation, S8("unsupported option: {S8} (SSE2 is part of the x86-64 baseline)"), override.option);
                 }
@@ -3151,11 +3150,20 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.linker_arguments[invocation.linker_argument_count++] = S8("-export-dynamic");
             continue;
         }
+        if (string_equal(argument, S8("-ffreestanding")))
+        {
+            invocation.freestanding = true;
+            continue;
+        }
+        if (string_equal(argument, S8("-fno-asynchronous-unwind-tables")))
+        {
+            invocation.no_asynchronous_unwind_tables = true;
+            continue;
+        }
         bool compatible_codegen_option =
             string_equal(argument, S8("-pipe")) || string_equal(argument, S8("-pthread")) ||
             string_equal(argument, S8("-fno-pie")) || string_equal(argument, S8("-fno-builtin")) ||
-            string_equal(argument, S8("-ffreestanding")) || string_equal(argument, S8("-fomit-frame-pointer")) ||
-            string_equal(argument, S8("-fno-asynchronous-unwind-tables")) ||
+            string_equal(argument, S8("-fomit-frame-pointer")) ||
             string_equal(argument, S8("-fwrapv")) || string_equal(argument, S8("-fno-strict-overflow")) || string_equal(argument, S8("-fno-strict-aliasing")) || string_equal(argument, S8("-funsigned-char")) ||
             string_equal(argument, S8("-fsigned-char")) || string_equal(argument, S8("-fcf-protection=none")) ||
             // Buster emits no stack-protector prologue, so the disabling
@@ -3302,6 +3310,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 }
             }
         }
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.no_asynchronous_unwind_tables &&
+        invocation.target.cpu_arch != CPU_ARCH_I386)
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for this target"),
+                                       S8("-fno-asynchronous-unwind-tables"));
     }
     // No canonical object field carries common-storage intent. Reject only an
     // effective request when this invocation will emit a code-generation artifact;
@@ -7772,6 +7786,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
                                                     .trigraph_mode = invocation.trigraph_mode,
                                                     .position_independent_level = invocation.position_independent_level,
                                                     .position_independent_executable = invocation.position_independent_executable,
+                                                    .freestanding = invocation.freestanding,
                                                     .macro_operation_count = invocation.macro_operation_count,
                                                     .definition_count = invocation.definition_count,
                                                     .undefinition_count = invocation.undefinition_count,
@@ -8015,6 +8030,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .trigraph_mode = invocation.trigraph_mode,
                                                     .position_independent_level = invocation.position_independent_level,
                                                     .position_independent_executable = invocation.position_independent_executable,
+                                                    .freestanding = invocation.freestanding,
                                                     .macro_operation_count = invocation.macro_operation_count,
                                                     .definition_count = invocation.definition_count,
                                                     .undefinition_count = invocation.undefinition_count,

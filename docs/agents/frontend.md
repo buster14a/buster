@@ -156,6 +156,10 @@ operations, not every recognized identifier. Its complex, atomic and integer-tra
 reuse the exact `c_symbol_builtin_from_spelling` classification: adding a new
 spelling there requires checking its real lowering and its query regression.
 Never admit an arbitrary `__atomic_` or `__c11_atomic_` suffix by prefix.
+Ordinary library names such as `memcpy` and `strlen` are not compiler builtins:
+only explicit `__builtin_*` spellings enter builtin classification, folding or
+lowering. Consequently `-ffreestanding` only changes `__STDC_HOSTED__` and
+header forwarding; it has no ordinary-call builtinization to disable.
 
 The active target admits atomic builtins on x86-64/AArch64, and complex
 construction there and on Wasm64. Wasm64 and eBPF reject atomic IR; eBPF also

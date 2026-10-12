@@ -328,6 +328,10 @@ struct CompilerDriverInvocation
     // -working-directory: relative input paths resolve against it.
     String8 working_directory;
     bool debug_info;
+    // -ffreestanding controls __STDC_HOSTED__ in the C frontend.
+    bool freestanding;
+    // Accepted only for I386, where native artifact generation is refused.
+    bool no_asynchronous_unwind_tables;
     bool disable_direct_ssa;
     bool disable_local_promotion;
     bool disable_target_local_promotion;

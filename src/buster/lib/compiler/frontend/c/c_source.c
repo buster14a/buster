@@ -10934,7 +10934,7 @@ BUSTER_C_INTERNAL bool c_include_builtin(String8 name, String8* path_out, String
                     "#define INT_MIN (-2147483647 - 1)\n"
                     "#define INT_MAX 2147483647\n"
                     "#define UINT_MAX 4294967295U\n"
-                    "#if defined(_WIN64) || defined(__i386__)\n"
+                    "#if __SIZEOF_LONG__ == 4\n"
                     "#define LONG_MIN INT_MIN\n"
                     "#define LONG_MAX INT_MAX\n"
                     "#define ULONG_MAX UINT_MAX\n"
@@ -12124,23 +12124,53 @@ struct CTargetFeatureMacro
     String8 name;
     TargetCpuFeature feature;
     CpuArch cpu_arch;
+    bool i386_only;
 };
 
-// Exactly the features `<buster/lib/simd.h>` tests, in the GNU spelling.  The
-// list is deliberately short: every entry is a promise that the frontend and
-// the canonical backend can compile code written behind it.
+// GNU feature macros mirror the selected target even where code generation is
+// not available for that target.
 BUSTER_C_INTERNAL CTargetFeatureMacro const c_target_feature_macros[] = {
-    { S8_INITIALIZER("__MMX__"), TARGET_CPU_FEATURE_X86_MMX, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__SSE2__"), TARGET_CPU_FEATURE_X86_SSE2, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX__"), TARGET_CPU_FEATURE_X86_AVX, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX2__"), TARGET_CPU_FEATURE_X86_AVX2, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512F__"), TARGET_CPU_FEATURE_X86_AVX512F, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512BW__"), TARGET_CPU_FEATURE_X86_AVX512BW, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512VL__"), TARGET_CPU_FEATURE_X86_AVX512VL, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512DQ__"), TARGET_CPU_FEATURE_X86_AVX512DQ, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512VBMI__"), TARGET_CPU_FEATURE_X86_AVX512VBMI, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__AVX512VBMI2__"), TARGET_CPU_FEATURE_X86_AVX512VBMI2, CPU_ARCH_X86_64 },
-    { S8_INITIALIZER("__ARM_NEON"), TARGET_CPU_FEATURE_AARCH64_NEON, CPU_ARCH_AARCH64 },
+    { S8_INITIALIZER("__MMX__"), TARGET_CPU_FEATURE_X86_MMX, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSE__"), TARGET_CPU_FEATURE_X86_SSE, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSE2__"), TARGET_CPU_FEATURE_X86_SSE2, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__SSE3__"), TARGET_CPU_FEATURE_X86_SSE3, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSSE3__"), TARGET_CPU_FEATURE_X86_SSSE3, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSE4A__"), TARGET_CPU_FEATURE_X86_SSE4A, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSE4_1__"), TARGET_CPU_FEATURE_X86_SSE4_1, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__SSE4_2__"), TARGET_CPU_FEATURE_X86_SSE4_2, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX__"), TARGET_CPU_FEATURE_X86_AVX, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX2__"), TARGET_CPU_FEATURE_X86_AVX2, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512F__"), TARGET_CPU_FEATURE_X86_AVX512F, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512BW__"), TARGET_CPU_FEATURE_X86_AVX512BW, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512VL__"), TARGET_CPU_FEATURE_X86_AVX512VL, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512DQ__"), TARGET_CPU_FEATURE_X86_AVX512DQ, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512VBMI__"), TARGET_CPU_FEATURE_X86_AVX512VBMI, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512VBMI2__"), TARGET_CPU_FEATURE_X86_AVX512VBMI2, CPU_ARCH_X86_64, false },
+    { S8_INITIALIZER("__AVX512CD__"), TARGET_CPU_FEATURE_X86_AVX512CD, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512IFMA__"), TARGET_CPU_FEATURE_X86_AVX512IFMA, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512PF__"), TARGET_CPU_FEATURE_X86_AVX512PF, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512ER__"), TARGET_CPU_FEATURE_X86_AVX512ER, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512VNNI__"), TARGET_CPU_FEATURE_X86_AVX512VNNI, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512BITALG__"), TARGET_CPU_FEATURE_X86_AVX512BITALG, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512VPOPCNTDQ__"), TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX5124VNNIW__"), TARGET_CPU_FEATURE_X86_AVX5124VNNIW, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX5124FMAPS__"), TARGET_CPU_FEATURE_X86_AVX5124FMAPS, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512VP2INTERSECT__"), TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512BF16__"), TARGET_CPU_FEATURE_X86_AVX512BF16, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX512FP16__"), TARGET_CPU_FEATURE_X86_AVX512FP16, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AVX10_1__"), TARGET_CPU_FEATURE_X86_AVX10_1, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__F16C__"), TARGET_CPU_FEATURE_X86_F16C, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__FMA__"), TARGET_CPU_FEATURE_X86_FMA, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__FMA4__"), TARGET_CPU_FEATURE_X86_FMA4, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__AES__"), TARGET_CPU_FEATURE_X86_AES, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__PCLMUL__"), TARGET_CPU_FEATURE_X86_PCLMUL, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__POPCNT__"), TARGET_CPU_FEATURE_X86_POPCNT, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__LZCNT__"), TARGET_CPU_FEATURE_X86_LZCNT, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__BMI__"), TARGET_CPU_FEATURE_X86_BMI1, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__BMI2__"), TARGET_CPU_FEATURE_X86_BMI2, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__3dNOW__"), TARGET_CPU_FEATURE_X86_3DNOW, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__3dNOW_A__"), TARGET_CPU_FEATURE_X86_3DNOWA, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__ARM_NEON"), TARGET_CPU_FEATURE_AARCH64_NEON, CPU_ARCH_AARCH64, false },
 };
 
 // The preprocessor's end-of-phase boundary. Everything c_preprocess builds is
@@ -13411,9 +13441,44 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         }
         else if (options.target.cpu_model == CPU_MODEL_AMD_PENTIUM)
         {
+            C_DEFINE_TYPE_MACRO("__i586", S8("1"));
+            C_DEFINE_TYPE_MACRO("__i586__", S8("1"));
             C_DEFINE_TYPE_MACRO("__pentium", S8("1"));
             C_DEFINE_TYPE_MACRO("__pentium__", S8("1"));
             C_DEFINE_TYPE_MACRO("__tune_i586__", S8("1"));
+            C_DEFINE_TYPE_MACRO("__tune_pentium__", S8("1"));
+        }
+        else if (options.target.cpu_model == CPU_MODEL_AMD_K6 ||
+                 options.target.cpu_model == CPU_MODEL_AMD_K6_2 ||
+                 options.target.cpu_model == CPU_MODEL_AMD_K6_3)
+        {
+            C_DEFINE_TYPE_MACRO("__k6", S8("1"));
+            C_DEFINE_TYPE_MACRO("__k6__", S8("1"));
+            C_DEFINE_TYPE_MACRO("__tune_k6__", S8("1"));
+            if (options.target.cpu_model == CPU_MODEL_AMD_K6_2)
+            {
+                C_DEFINE_TYPE_MACRO("__tune_k6_2__", S8("1"));
+            }
+            else if (options.target.cpu_model == CPU_MODEL_AMD_K6_3)
+            {
+                C_DEFINE_TYPE_MACRO("__tune_k6_3__", S8("1"));
+            }
+        }
+        else if (options.target.cpu_model == CPU_MODEL_AMD_GEODE)
+        {
+            C_DEFINE_TYPE_MACRO("__tune_geode__", S8("1"));
+        }
+        else if (options.target.cpu_model == CPU_MODEL_AMD_ATHLON ||
+                 options.target.cpu_model == CPU_MODEL_AMD_ATHLON_XP)
+        {
+            C_DEFINE_TYPE_MACRO("__athlon", S8("1"));
+            C_DEFINE_TYPE_MACRO("__athlon__", S8("1"));
+            C_DEFINE_TYPE_MACRO("__tune_athlon__", S8("1"));
+            if (options.target.cpu_model == CPU_MODEL_AMD_ATHLON_XP)
+            {
+                C_DEFINE_TYPE_MACRO("__athlon_sse__", S8("1"));
+                C_DEFINE_TYPE_MACRO("__tune_athlon_sse__", S8("1"));
+            }
         }
         else if (options.target.cpu_model == CPU_MODEL_BASELINE || options.target.cpu_model == CPU_MODEL_X86_I686)
         {
@@ -13452,23 +13517,25 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     {
         c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__arm64__"), standard_replacement, 1, 0, 0, false, false);
     }
-    // The vector-extension macros the GNU family predefines from -march, so a
-    // header guarding an explicit SIMD kernel writes one condition that holds
-    // for clang, gcc, and the self-hosted stages alike.  Only the features the
-    // buster SIMD vocabulary can actually lower are published; announcing more
-    // would invite a host header down a path this frontend cannot compile.
     for (u32 feature_index = 0; feature_index < BUSTER_ARRAY_LENGTH(c_target_feature_macros); feature_index += 1)
     {
         CTargetFeatureMacro entry = c_target_feature_macros[feature_index];
-        if (cpu_arch_is_x86(entry.cpu_arch) && cpu_arch_is_x86(options.target.cpu_arch) &&
+        if ((!entry.i386_only || options.target.cpu_arch == CPU_ARCH_I386) &&
+            cpu_arch_is_x86(entry.cpu_arch) && cpu_arch_is_x86(options.target.cpu_arch) &&
             !(entry.feature == TARGET_CPU_FEATURE_X86_MMX && options.target.cpu_arch == CPU_ARCH_X86_64) &&
             target_cpu_feature_has(options.target, entry.feature))
         {
             c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, entry.name, standard_replacement, 1, 0, 0, false, false);
         }
     }
+    TargetCpuFeatures model_features = target_cpu_features_default(options.target.cpu_arch, options.target.cpu_model);
+    if (options.target.cpu_arch == CPU_ARCH_I386 &&
+        target_cpu_features_contains(model_features, TARGET_CPU_FEATURE_X86_SSE))
+    {
+        c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__FXSR__"), S8("1"));
+    }
     CToken hosted_replacement = standard_replacement[0];
-    if (options.target.os == OPERATING_SYSTEM_FREESTANDING || options.target.os == OPERATING_SYSTEM_UEFI ||
+    if (options.freestanding || options.target.os == OPERATING_SYSTEM_FREESTANDING || options.target.os == OPERATING_SYSTEM_UEFI ||
         options.target.cpu_arch == CPU_ARCH_BPFEL)
     {
         hosted_replacement.offset = C_SPELLING_ZERO;

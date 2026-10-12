@@ -752,11 +752,16 @@ bool cpu_model_supports_arch(CpuModel model, CpuArch arch)
 
 BUSTER_GLOBAL_LOCAL TargetCpuFeatures target_cpu_features_x86_default(CpuModel model, CpuArch arch)
 {
-    TargetCpuFeatures result = arch == CPU_ARCH_I386 ? target_cpu_features_empty()
-                                                      : target_cpu_features_singleton(TARGET_CPU_FEATURE_X86_SSE2);
+    bool x86_64_model = cpu_model_supports_arch(model, CPU_ARCH_X86_64) && model != CPU_MODEL_BASELINE && model != CPU_MODEL_NATIVE;
+    TargetCpuFeatures result = arch == CPU_ARCH_I386 && !x86_64_model ? target_cpu_features_empty()
+                                                                      : target_cpu_features_singleton(TARGET_CPU_FEATURE_X86_SSE2);
+    if (arch == CPU_ARCH_X86_64 || x86_64_model)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSE);
+    }
     bool amd_mmx = model >= CPU_MODEL_AMD_K6 && model <= CPU_MODEL_AMD_ATHLON_XP;
     bool intel_mmx = model >= CPU_MODEL_INTEL_CORE_2 && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS;
-    if (arch == CPU_ARCH_I386 && (amd_mmx || intel_mmx))
+    if (arch == CPU_ARCH_I386 && (amd_mmx || intel_mmx || x86_64_model))
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_MMX);
     }
@@ -1189,6 +1194,20 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatures target_cpu_features_x86_default(CpuModel m
     TargetCpuFeatures granite_rapids_d = target_cpu_features_add(granite_rapids, TARGET_CPU_FEATURE_X86_AMX_COMPLEX);
     switch (model)
     {
+    case CPU_MODEL_AMD_K6_2:
+    case CPU_MODEL_AMD_K6_3:
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_3DNOW);
+        break;
+    case CPU_MODEL_AMD_GEODE:
+    case CPU_MODEL_AMD_ATHLON:
+    case CPU_MODEL_AMD_ATHLON_XP:
+        result = target_cpu_features_union(result, target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_X86_3DNOW, TARGET_CPU_FEATURE_X86_3DNOWA}, 2));
+        if (model == CPU_MODEL_AMD_ATHLON_XP)
+        {
+            result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_SSE);
+        }
+        break;
     case CPU_MODEL_AMD_K8:
     case CPU_MODEL_AMD_K8_SSE3:
     case CPU_MODEL_AMD_AMD_FAMILY_10:
@@ -1501,7 +1520,7 @@ bool target_cpu_features_are_valid(Target target)
             return false;
         }
         TargetCpuFeature const known_feature_list[] = {
-            TARGET_CPU_FEATURE_X86_MMX, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F,
+            TARGET_CPU_FEATURE_X86_MMX, TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F,
             TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX10_1, TARGET_CPU_FEATURE_X86_AVX10_2,
             TARGET_CPU_FEATURE_X86_AVX10_512, TARGET_CPU_FEATURE_X86_APX, TARGET_CPU_FEATURE_X86_AVX512BW,
             TARGET_CPU_FEATURE_X86_SSE3, TARGET_CPU_FEATURE_X86_POPCNT, TARGET_CPU_FEATURE_X86_LZCNT,
@@ -1571,8 +1590,10 @@ bool target_cpu_features_are_valid(Target target)
         {
             return false;
         }
-        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE3) &&
-            !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2))
+        if ((target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2) &&
+             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE)) ||
+            (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE3) &&
+             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2)))
         {
             return false;
         }
@@ -1762,6 +1783,7 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureRequirement const target_x86_feature_require
     {TARGET_CPU_FEATURE_X86_XOP, TARGET_CPU_FEATURE_X86_AVX},
     {TARGET_CPU_FEATURE_X86_3DNOWA, TARGET_CPU_FEATURE_X86_3DNOW},
     {TARGET_CPU_FEATURE_X86_SSE3, TARGET_CPU_FEATURE_X86_SSE2},
+    {TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_SSE},
     {TARGET_CPU_FEATURE_X86_SSSE3, TARGET_CPU_FEATURE_X86_SSE2},
     {TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSE2},
     {TARGET_CPU_FEATURE_X86_SSE4_2, TARGET_CPU_FEATURE_X86_SSE2},
@@ -2016,6 +2038,7 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("snp"), .feature = TARGET_CPU_FEATURE_X86_SNP, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("specrestrict"), .feature = TARGET_CPU_FEATURE_AARCH64_SPECRESTRICT, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("ssbs"), .feature = TARGET_CPU_FEATURE_AARCH64_SSBS, .arch = CPU_ARCH_AARCH64},
+    {.name = S8_INITIALIZER("sse"), .feature = TARGET_CPU_FEATURE_X86_SSE, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sse2"), .feature = TARGET_CPU_FEATURE_X86_SSE2, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sse3"), .feature = TARGET_CPU_FEATURE_X86_SSE3, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("sse4.1"), .feature = TARGET_CPU_FEATURE_X86_SSE4_1, .arch = CPU_ARCH_X86_64},

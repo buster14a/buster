@@ -25626,6 +25626,80 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_target_abi_macros(UnitTestArguments* a
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_i386_feature_macros(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct CTestI386FeatureMacroCase CTestI386FeatureMacroCase;
+    struct CTestI386FeatureMacroCase
+    {
+        CpuModel model;
+        String8 source;
+    };
+    CTestI386FeatureMacroCase cases[] = {
+        {CPU_MODEL_INTEL_CORE_2,
+         S8("#if !defined(__MMX__) || !defined(__SSE__) || !defined(__SSE2__) || !defined(__SSE3__) || !defined(__SSSE3__) || !defined(__FXSR__)\n"
+            "#error incorrect core2 feature macros\n#endif\n")},
+        {CPU_MODEL_AMD_ZEN_1,
+         S8("#if !defined(__MMX__) || !defined(__SSE__) || !defined(__SSE2__) || !defined(__SSSE3__) || !defined(__POPCNT__) || !defined(__FXSR__)\n"
+            "#error incorrect znver1 feature macros\n#endif\n")},
+        {CPU_MODEL_AMD_ATHLON_XP,
+         S8("#if !defined(__MMX__) || !defined(__SSE__) || !defined(__3dNOW__) || !defined(__FXSR__)\n"
+            "#error incorrect athlon-xp feature macros\n#endif\n")},
+        {CPU_MODEL_AMD_PENTIUM,
+         S8("#if !defined(__i586__) || !defined(__tune_i586__) || !defined(__tune_pentium__) || defined(__MMX__)\n"
+            "#error incorrect pentium feature macros\n#endif\n")},
+    };
+    TargetParseResult parsed = target_parse_triple(S8("i386-unknown-linux-gnu"));
+    BUSTER_TEST(arguments, parsed.error == TARGET_PARSE_ERROR_NONE);
+    if (parsed.error == TARGET_PARSE_ERROR_NONE)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            Target target = parsed.target;
+            target.cpu_model = cases[index].model;
+            CPreprocessResult macros = c_preprocess(arguments->arena, cases[index].source,
+                                                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target),
+                                                                         .source_path = S8("i386-feature-macros.c")});
+            BUSTER_TEST(arguments, macros.diagnostic_count == 0);
+        }
+        Target target = parsed.target;
+        target.cpu_model = CPU_MODEL_INTEL_CORE_2;
+        target.cpu_features = target_cpu_features_x86_apply_with_closure(target_cpu_features_effective(target),
+                                                                          TARGET_CPU_FEATURE_X86_SSE, false);
+        target.cpu_features_explicit = true;
+        CPreprocessResult no_sse = c_preprocess(arguments->arena,
+                                                S8("#if defined(__SSE__) || defined(__SSE2__) || defined(__SSE3__) || defined(__SSSE3__) || !defined(__FXSR__)\n"
+                                                   "#error -mno-sse did not remove dependent features\n#endif\n"),
+                                                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target),
+                                                                     .source_path = S8("i386-no-sse-macros.c")});
+        BUSTER_TEST(arguments, no_sse.diagnostic_count == 0);
+
+        Target hosted_target = target_parse_triple(S8("x86_64-unknown-linux-gnu")).target;
+        CPreprocessResult hosted = c_preprocess(arguments->arena,
+                                                S8("#if __STDC_HOSTED__ != 1\n#error hosted default changed\n#endif\n"),
+                                                (CPreprocessOptions){.target = hosted_target,
+                                                                     .data_layout = target_data_layout(hosted_target),
+                                                                     .source_path = S8("hosted-default.c")});
+        CPreprocessResult freestanding = c_preprocess(arguments->arena,
+                                                      S8("#if __STDC_HOSTED__ != 0\n#error -ffreestanding not published\n#endif\n"),
+                                                      (CPreprocessOptions){.target = hosted_target,
+                                                                           .data_layout = target_data_layout(hosted_target),
+                                                                           .source_path = S8("freestanding.c"),
+                                                                           .freestanding = true});
+        BUSTER_TEST(arguments, hosted.diagnostic_count == 0 && freestanding.diagnostic_count == 0);
+
+        Target wasm32_target = target_parse_triple(S8("wasm32-wasip1")).target;
+        CPreprocessResult wasm_limits = c_preprocess(arguments->arena,
+                                                     S8("#include <limits.h>\n"
+                                                        "_Static_assert(__SIZEOF_LONG__ == 4 && LONG_MAX == 2147483647L, \"wasm32 long limits\");\n"),
+                                                     (CPreprocessOptions){.target = wasm32_target,
+                                                                          .data_layout = target_data_layout(wasm32_target),
+                                                                          .source_path = S8("wasm32-limits.c")});
+        BUSTER_TEST(arguments, wasm_limits.diagnostic_count == 0);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void c_test_gnu_common_predefined_macro_token(UnitTestArguments* arguments, UnitTestResult* outer_result,
                                                                   CPreprocessResult preprocess, String8 name, u64 index, CTokenKind kind,
                                                                   String8 spelling)
@@ -63103,6 +63177,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_tagged_member_declares_nothing);
     C_TEST_FIXTURE(arguments, c_test_tagged_member_microsoft_anonymous);
     C_TEST_FIXTURE(arguments, c_test_target_abi_macros);
+    C_TEST_FIXTURE(arguments, c_test_i386_feature_macros);
     C_TEST_FIXTURE(arguments, c_test_gnu_common_predefined_macros);
     C_TEST_FIXTURE(arguments, c_test_tgmath_runtime);
     C_TEST_FIXTURE(arguments, c_test_then_nested_conditionals);

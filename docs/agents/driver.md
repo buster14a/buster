@@ -391,7 +391,18 @@ left baseline code generation and no hint that the request was ignored.
 `-fno-strict-overflow` is accepted as `-fwrapv` (signed overflow already wraps;
 there is no `-fno-wrapv`, so `-fstrict-overflow` stays unsupported). `-w` is
 accepted and publishes no warning text or records and outranks every other
-warning option. `--version`, `-dumpversion`, `-dumpmachine` and
+warning option.
+`-ffreestanding` publishes `__STDC_HOSTED__` as zero and keeps the builtin
+`<limits.h>` from forwarding to a hosted system header. Buster does not
+implicitly builtinize or fold ordinary library calls such as `memcpy` or
+`strlen`; only explicit `__builtin_*` spellings are compiler builtins, so no
+ordinary-call suppression is needed. `-fomit-frame-pointer` grants permission
+to omit a frame pointer; it does not require one to be omitted. Default native
+objects currently contain `.eh_frame`, so `-fno-asynchronous-unwind-tables` is
+accepted only for I386, where artifact generation is refused.
+`-fcf-protection=none` is accepted because default output contains no
+`endbr32`/`endbr64` instructions and no IBT/SHSTK GNU property note.
+`--version`, `-dumpversion`, `-dumpmachine` and
 `-print-target-triple`/`-print-effective-triple` need no input and exit 0
 (`compiler_driver_query_text`):
 `-dumpversion` prints `18.0.0`, the `__clang_major__`/`__clang_minor__`/

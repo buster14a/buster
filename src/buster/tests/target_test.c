@@ -1139,6 +1139,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !cpu_model_supports_arch(CPU_MODEL_X86_I686, CPU_ARCH_X86_64));
     BUSTER_TEST(arguments, !cpu_model_supports_arch(CPU_MODEL_NATIVE, CPU_ARCH_I386));
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_I386, S8("mmx")) == TARGET_CPU_FEATURE_X86_MMX);
+    BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_I386, S8("sse")) == TARGET_CPU_FEATURE_X86_SSE);
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_I386, S8("sse2")) == TARGET_CPU_FEATURE_X86_SSE2);
     BUSTER_TEST(arguments, target_cpu_feature_from_string(CPU_ARCH_AARCH64, S8("mmx")) == TARGET_CPU_FEATURE_NONE);
     TargetCpuFeatures i386_baseline_features = target_cpu_features_default(CPU_ARCH_I386, CPU_MODEL_BASELINE);
@@ -1294,7 +1295,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         .cpu_arch = CPU_ARCH_X86_64,
         .cpu_model = CPU_MODEL_BASELINE,
         .cpu_features_explicit = true,
-        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_FMA4, TARGET_CPU_FEATURE_X86_XOP, TARGET_CPU_FEATURE_X86_LWP, TARGET_CPU_FEATURE_X86_TBM, TARGET_CPU_FEATURE_X86_3DNOW, TARGET_CPU_FEATURE_X86_3DNOWA, TARGET_CPU_FEATURE_X86_LZCNT}, 9),
+        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_FMA4, TARGET_CPU_FEATURE_X86_XOP, TARGET_CPU_FEATURE_X86_LWP, TARGET_CPU_FEATURE_X86_TBM, TARGET_CPU_FEATURE_X86_3DNOW, TARGET_CPU_FEATURE_X86_3DNOWA, TARGET_CPU_FEATURE_X86_LZCNT}, 10),
     };
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_amd_extended));
     Target invalid_amd_3dnowa_dependency = valid_amd_extended;
@@ -1479,14 +1480,18 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         .cpu_arch = CPU_ARCH_X86_64,
         .cpu_model = CPU_MODEL_BASELINE,
         .cpu_features_explicit = true,
-        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F}, 4),
+        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F}, 5),
     };
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_avx512));
+    Target invalid_sse2_without_sse = valid_avx512;
+    invalid_sse2_without_sse.cpu_features =
+        target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2}, 1);
+    BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_sse2_without_sse));
     Target valid_bit_atomic = valid_avx512;
     valid_bit_atomic.cpu_features = target_cpu_features_union(valid_bit_atomic.cpu_features, all_bit_atomic);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_bit_atomic));
     Target invalid_avx2 = valid_avx512;
-    invalid_avx2.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX2}, 2);
+    invalid_avx2.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX2}, 3);
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_avx2));
     Target invalid_avx512f_without_avx2 = valid_avx512;
     invalid_avx512f_without_avx2.cpu_features =
@@ -1496,22 +1501,23 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     invalid_sse3.cpu_features = target_cpu_features_singleton(TARGET_CPU_FEATURE_X86_SSE3);
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_sse3));
     Target valid_sse4a = valid_avx512;
-    valid_sse4a.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
+    valid_sse4a.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE,
+                                                                                          TARGET_CPU_FEATURE_X86_SSE2,
                                                                                           TARGET_CPU_FEATURE_X86_SSE3,
                                                                                           TARGET_CPU_FEATURE_X86_SSE4A},
-                                                               3);
+                                                               4);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_sse4a));
     Target invalid_sse4a = valid_sse4a;
     invalid_sse4a.cpu_features = target_cpu_features_remove(invalid_sse4a.cpu_features, TARGET_CPU_FEATURE_X86_SSE3);
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_sse4a));
     Target invalid_avx512vl = valid_avx512;
-    invalid_avx512vl.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX512VL}, 3);
+    invalid_avx512vl.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX512VL}, 4);
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_avx512vl));
     Target invalid_avx512bw = valid_avx512;
-    invalid_avx512bw.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX512BW}, 3);
+    invalid_avx512bw.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX512BW}, 4);
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_avx512bw));
     Target valid_gfni = valid_avx512;
-    valid_gfni.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_GFNI}, 2);
+    valid_gfni.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_GFNI}, 3);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_gfni));
     BUSTER_TEST(arguments, target_vector_register_size(valid_gfni) == 16);
     Target invalid_gfni_without_sse2 = valid_gfni;
@@ -1519,7 +1525,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         target_cpu_features_remove(invalid_gfni_without_sse2.cpu_features, TARGET_CPU_FEATURE_X86_SSE2);
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_gfni_without_sse2));
     Target valid_vaes = valid_avx512;
-    valid_vaes.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AES, TARGET_CPU_FEATURE_X86_VAES}, 5);
+    valid_vaes.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AES, TARGET_CPU_FEATURE_X86_VAES}, 6);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_vaes));
     BUSTER_TEST(arguments, target_vector_register_size(valid_vaes) == 32);
     Target invalid_vaes_without_aes = valid_vaes;
@@ -1530,7 +1536,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         target_cpu_features_remove(invalid_vaes_without_avx2.cpu_features, TARGET_CPU_FEATURE_X86_AVX2);
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_vaes_without_avx2));
     Target valid_vpclmul = valid_avx512;
-    valid_vpclmul.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_PCLMUL, TARGET_CPU_FEATURE_X86_VPCLMULQDQ}, 4);
+    valid_vpclmul.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_PCLMUL, TARGET_CPU_FEATURE_X86_VPCLMULQDQ}, 5);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_vpclmul));
     Target invalid_vpclmul_without_pclmul = valid_vpclmul;
     invalid_vpclmul_without_pclmul.cpu_features =
@@ -1544,7 +1550,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         .cpu_arch = CPU_ARCH_X86_64,
         .cpu_model = CPU_MODEL_BASELINE,
         .cpu_features_explicit = true,
-        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX10_1, TARGET_CPU_FEATURE_X86_AVX10_512}, 6),
+        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX10_1, TARGET_CPU_FEATURE_X86_AVX10_512}, 7),
     };
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_avx10));
     BUSTER_TEST(arguments, target_vector_register_size(valid_avx10) == 64);
@@ -1608,7 +1614,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         .cpu_arch = CPU_ARCH_X86_64,
         .cpu_model = CPU_MODEL_BASELINE,
         .cpu_features_explicit = true,
-        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX_VNNI, TARGET_CPU_FEATURE_X86_AVX_VNNI_INT8, TARGET_CPU_FEATURE_X86_AVX_VNNI_INT16, TARGET_CPU_FEATURE_X86_AVX_IFMA, TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT}, 8),
+        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX_VNNI, TARGET_CPU_FEATURE_X86_AVX_VNNI_INT8, TARGET_CPU_FEATURE_X86_AVX_VNNI_INT16, TARGET_CPU_FEATURE_X86_AVX_IFMA, TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT}, 9),
     };
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_avx_independent_features));
     Target invalid_avx_vnni_without_avx2 = valid_avx_independent_features;
@@ -1633,42 +1639,44 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         .cpu_arch = CPU_ARCH_X86_64,
         .cpu_model = CPU_MODEL_BASELINE,
         .cpu_features_explicit = true,
-        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_IBT, TARGET_CPU_FEATURE_X86_CLDEMOTE, TARGET_CPU_FEATURE_X86_PREFETCHI, TARGET_CPU_FEATURE_X86_MOVRS, TARGET_CPU_FEATURE_X86_SHSTK}, 6),
+        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_IBT, TARGET_CPU_FEATURE_X86_CLDEMOTE, TARGET_CPU_FEATURE_X86_PREFETCHI, TARGET_CPU_FEATURE_X86_MOVRS, TARGET_CPU_FEATURE_X86_SHSTK}, 7),
     };
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_metadata_features));
     Target valid_ace_feature = {
         .cpu_arch = CPU_ARCH_X86_64,
         .cpu_model = CPU_MODEL_BASELINE,
         .cpu_features_explicit = true,
-        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
-                                                                                  TARGET_CPU_FEATURE_X86_ACE_1}, 2),
+        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE,
+                                                                                  TARGET_CPU_FEATURE_X86_SSE2,
+                                                                                  TARGET_CPU_FEATURE_X86_ACE_1}, 3),
     };
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_ace_feature));
     Target valid_sha_feature = valid_avx512;
-    valid_sha_feature.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2,
-                                                                                               TARGET_CPU_FEATURE_X86_SHA}, 2);
+    valid_sha_feature.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE,
+                                                                                               TARGET_CPU_FEATURE_X86_SSE2,
+                                                                                               TARGET_CPU_FEATURE_X86_SHA}, 3);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_sha_feature));
     Target invalid_sha_without_sse2 = valid_sha_feature;
     invalid_sha_without_sse2.cpu_features = target_cpu_features_singleton(TARGET_CPU_FEATURE_X86_SHA);
     BUSTER_TEST(arguments, !target_cpu_features_are_valid(invalid_sha_without_sse2));
     Target valid_sha512_sm3_sm4 = valid_avx512;
     valid_sha512_sm3_sm4.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2,
-        TARGET_CPU_FEATURE_X86_SHA512, TARGET_CPU_FEATURE_X86_SM3, TARGET_CPU_FEATURE_X86_SM4}, 6);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2,
+        TARGET_CPU_FEATURE_X86_SHA512, TARGET_CPU_FEATURE_X86_SM3, TARGET_CPU_FEATURE_X86_SM4}, 7);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_sha512_sm3_sm4));
     Target valid_sm3_minimal = valid_sha512_sm3_sm4;
     valid_sm3_minimal.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_SM3}, 3);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_SM3}, 4);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_sm3_minimal));
     Target valid_sha512_minimal = valid_sha512_sm3_sm4;
     valid_sha512_minimal.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2,
-        TARGET_CPU_FEATURE_X86_SHA512}, 4);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2,
+        TARGET_CPU_FEATURE_X86_SHA512}, 5);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_sha512_minimal));
     Target valid_sm4_minimal = valid_sha512_sm3_sm4;
     valid_sm4_minimal.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2,
-        TARGET_CPU_FEATURE_X86_SM4}, 4);
+        TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2,
+        TARGET_CPU_FEATURE_X86_SM4}, 5);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(valid_sm4_minimal));
     Target invalid_sha512_without_avx2 = valid_sha512_minimal;
     invalid_sha512_without_avx2.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
@@ -2032,6 +2040,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     };
     TargetCpuFeatures full_features = x86_64_cpu_features_from_cpuid(full_cpuid);
     TargetCpuFeatures full_expected = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_SSE3, TARGET_CPU_FEATURE_X86_SSSE3, TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSE4_2, TARGET_CPU_FEATURE_X86_SSE4A, TARGET_CPU_FEATURE_X86_POPCNT, TARGET_CPU_FEATURE_X86_LZCNT, TARGET_CPU_FEATURE_X86_BMI1, TARGET_CPU_FEATURE_X86_BMI2, TARGET_CPU_FEATURE_X86_ADX, TARGET_CPU_FEATURE_X86_MOVBE, TARGET_CPU_FEATURE_X86_RDRAND, TARGET_CPU_FEATURE_X86_RDSEED, TARGET_CPU_FEATURE_X86_WAITPKG, TARGET_CPU_FEATURE_X86_PKU, TARGET_CPU_FEATURE_X86_PTWRITE, TARGET_CPU_FEATURE_X86_SERIALIZE, TARGET_CPU_FEATURE_X86_CLFLUSHOPT, TARGET_CPU_FEATURE_X86_CLWB, TARGET_CPU_FEATURE_X86_FSGSBASE, TARGET_CPU_FEATURE_X86_RTM, TARGET_CPU_FEATURE_X86_TSXLDTRK, TARGET_CPU_FEATURE_X86_UINTR, TARGET_CPU_FEATURE_X86_PREFETCHWT1, TARGET_CPU_FEATURE_X86_CX16, TARGET_CPU_FEATURE_X86_AES, TARGET_CPU_FEATURE_X86_PCLMUL, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_F16C, TARGET_CPU_FEATURE_X86_FMA, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512VL, TARGET_CPU_FEATURE_X86_AVX512BW, TARGET_CPU_FEATURE_X86_AVX512CD, TARGET_CPU_FEATURE_X86_AVX512DQ, TARGET_CPU_FEATURE_X86_AVX512IFMA, TARGET_CPU_FEATURE_X86_AVX512PF, TARGET_CPU_FEATURE_X86_AVX512ER, TARGET_CPU_FEATURE_X86_AVX512VBMI, TARGET_CPU_FEATURE_X86_AVX512VBMI2, TARGET_CPU_FEATURE_X86_AVX512VNNI, TARGET_CPU_FEATURE_X86_AVX512BITALG, TARGET_CPU_FEATURE_X86_AVX512VPOPCNTDQ, TARGET_CPU_FEATURE_X86_AVX5124VNNIW, TARGET_CPU_FEATURE_X86_AVX5124FMAPS, TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT, TARGET_CPU_FEATURE_X86_AVX512BF16, TARGET_CPU_FEATURE_X86_AVX512FP16, TARGET_CPU_FEATURE_X86_GFNI, TARGET_CPU_FEATURE_X86_VAES, TARGET_CPU_FEATURE_X86_VPCLMULQDQ, TARGET_CPU_FEATURE_X86_AVX10_1, TARGET_CPU_FEATURE_X86_AVX10_2, TARGET_CPU_FEATURE_X86_AVX10_512, TARGET_CPU_FEATURE_X86_AVX10_V1_AUX, TARGET_CPU_FEATURE_X86_IBT, TARGET_CPU_FEATURE_X86_CLDEMOTE, TARGET_CPU_FEATURE_X86_PREFETCHI, TARGET_CPU_FEATURE_X86_SHSTK, TARGET_CPU_FEATURE_X86_MOVRS, TARGET_CPU_FEATURE_X86_APX, TARGET_CPU_FEATURE_X86_APX_NCI_NDD_NF, TARGET_CPU_FEATURE_X86_AMX_TILE, TARGET_CPU_FEATURE_X86_AMX_INT8, TARGET_CPU_FEATURE_X86_AMX_BF16, TARGET_CPU_FEATURE_X86_AMX_FP16, TARGET_CPU_FEATURE_X86_AMX_COMPLEX, TARGET_CPU_FEATURE_X86_AMX_FP8, TARGET_CPU_FEATURE_X86_AMX_AVX512, TARGET_CPU_FEATURE_X86_AMX_MOVRS, TARGET_CPU_FEATURE_X86_AVX_VNNI, TARGET_CPU_FEATURE_X86_AVX_VNNI_INT8, TARGET_CPU_FEATURE_X86_AVX_VNNI_INT16, TARGET_CPU_FEATURE_X86_AVX_IFMA, TARGET_CPU_FEATURE_X86_AVX_NE_CONVERT, TARGET_CPU_FEATURE_X86_3DNOW, TARGET_CPU_FEATURE_X86_3DNOWA, TARGET_CPU_FEATURE_X86_FMA4, TARGET_CPU_FEATURE_X86_LWP, TARGET_CPU_FEATURE_X86_TBM, TARGET_CPU_FEATURE_X86_XOP, TARGET_CPU_FEATURE_X86_MONITOR, TARGET_CPU_FEATURE_X86_XSAVE, TARGET_CPU_FEATURE_X86_SGX, TARGET_CPU_FEATURE_X86_INVPCID, TARGET_CPU_FEATURE_X86_SMAP, TARGET_CPU_FEATURE_X86_KEYLOCKER, TARGET_CPU_FEATURE_X86_ENQCMD, TARGET_CPU_FEATURE_X86_MOVDIR64B, TARGET_CPU_FEATURE_X86_PCONFIG, TARGET_CPU_FEATURE_X86_FRED, TARGET_CPU_FEATURE_X86_LKGS, TARGET_CPU_FEATURE_X86_WRMSRNS, TARGET_CPU_FEATURE_X86_HRESET, TARGET_CPU_FEATURE_X86_MSRLIST, TARGET_CPU_FEATURE_X86_XSAVES, TARGET_CPU_FEATURE_X86_INVLPGB, TARGET_CPU_FEATURE_X86_WBNOINVD, TARGET_CPU_FEATURE_X86_SNP}, 101);
+    full_expected = target_cpu_features_add(full_expected, TARGET_CPU_FEATURE_X86_SSE);
     full_expected = target_cpu_features_add(full_expected, TARGET_CPU_FEATURE_X86_VMX);
     full_expected = target_cpu_features_add(full_expected, TARGET_CPU_FEATURE_X86_SVM);
     full_expected = target_cpu_features_add(full_expected, TARGET_CPU_FEATURE_X86_SHA);
@@ -3451,7 +3460,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
             .os = OPERATING_SYSTEM_LINUX,
             .cpu_features_explicit = true,
             .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-                TARGET_CPU_FEATURE_X86_SSE2, target_test_xsave_extensions[extension_index]}, 2),
+                TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, target_test_xsave_extensions[extension_index]}, 3),
         };
         BUSTER_TEST(arguments, !target_cpu_features_are_valid(xsave_extension_target));
         xsave_extension_target.cpu_features = target_cpu_features_add(xsave_extension_target.cpu_features, TARGET_CPU_FEATURE_X86_XSAVE);
@@ -3463,7 +3472,7 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         .os = OPERATING_SYSTEM_LINUX,
         .cpu_features_explicit = true,
         .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
-            TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_MOVDIRI, TARGET_CPU_FEATURE_X86_RDPID}, 3),
+            TARGET_CPU_FEATURE_X86_SSE, TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_MOVDIRI, TARGET_CPU_FEATURE_X86_RDPID}, 4),
     };
     BUSTER_TEST(arguments, target_cpu_features_are_valid(movdiri_rdpid_target));
 
@@ -3777,23 +3786,26 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86_clang_reference_missing_total == 0);
     BUSTER_TEST(arguments, x86_clang_reference_extra_total == 6);
     TargetCpuFeatures baseline_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_BASELINE);
+    BUSTER_TEST(arguments, target_cpu_features_contains(baseline_features, TARGET_CPU_FEATURE_X86_SSE));
     BUSTER_TEST(arguments, target_cpu_features_contains(baseline_features, TARGET_CPU_FEATURE_X86_SSE2));
     for (u32 model_index = 0; model_index < BUSTER_ARRAY_LENGTH(target_test_x86_clang_reference_models); model_index += 1)
     {
         TargetCpuFeatures model_features = target_cpu_features_default(CPU_ARCH_X86_64,
                                                                         target_test_x86_clang_reference_models[model_index].model);
+        BUSTER_TEST(arguments, target_cpu_features_contains(model_features, TARGET_CPU_FEATURE_X86_SSE) ==
+                                 target_test_x86_clang_reference_models[model_index].has_long_mode);
         BUSTER_TEST(arguments, target_cpu_features_contains(model_features, TARGET_CPU_FEATURE_X86_SSE2) ==
                                  target_test_x86_clang_reference_models[model_index].has_long_mode);
     }
 #endif
-    BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, valid_avx512), S8("avx,avx2,avx512f,sse2"));
+    BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, valid_avx512), S8("avx,avx2,avx512f,sse,sse2"));
     Target sorted_features = valid_avx10_v1_aux;
     sorted_features.cpu_features = target_cpu_features_union(sorted_features.cpu_features,
                                                               target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_AES, TARGET_CPU_FEATURE_X86_AMX_TILE, TARGET_CPU_FEATURE_X86_AMX_BF16, TARGET_CPU_FEATURE_X86_APX, TARGET_CPU_FEATURE_X86_GFNI, TARGET_CPU_FEATURE_X86_PCLMUL, TARGET_CPU_FEATURE_X86_VAES, TARGET_CPU_FEATURE_X86_VPCLMULQDQ, TARGET_CPU_FEATURE_X86_IBT, TARGET_CPU_FEATURE_X86_CLDEMOTE, TARGET_CPU_FEATURE_X86_PREFETCHI, TARGET_CPU_FEATURE_X86_SHSTK, TARGET_CPU_FEATURE_X86_SVM, TARGET_CPU_FEATURE_X86_VMX}, 14));
     BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, sorted_features),
-                       S8("aes,amx-bf16,amx-tile,apx,avx,avx10-512,avx10-v1-aux,avx10.1,avx10.2,avx2,avx512f,cldemote,gfni,ibt,pclmul,prefetchi,shstk,sse2,svm,vaes,vmx,vpclmulqdq"));
+                       S8("aes,amx-bf16,amx-tile,apx,avx,avx10-512,avx10-v1-aux,avx10.1,avx10.2,avx2,avx512f,cldemote,gfni,ibt,pclmul,prefetchi,shstk,sse,sse2,svm,vaes,vmx,vpclmulqdq"));
     BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, valid_amd_extended),
-                       S8("3dnow,3dnowa,avx,fma4,lwp,lzcnt,sse2,tbm,xop"));
+                       S8("3dnow,3dnowa,avx,fma4,lwp,lzcnt,sse,sse2,tbm,xop"));
     TargetDataLayout linux_x86_layout = target_data_layout((Target){
         .cpu_arch = CPU_ARCH_X86_64,
         .cpu_model = CPU_MODEL_BASELINE,
