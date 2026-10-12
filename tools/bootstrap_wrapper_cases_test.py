@@ -214,6 +214,7 @@ class SchedulerTests(unittest.TestCase):
         pid = descendants[0]
         if os.name == "nt":
             self.assertEqual(len(descendant_handles), 1, diagnostics)
+            self.assertTrue(children[0].job_drain and children[0].job_drain.get("complete"), diagnostics)
         else:
             try:
                 os.kill(pid, 0)

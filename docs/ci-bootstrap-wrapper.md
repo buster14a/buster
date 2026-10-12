@@ -146,11 +146,15 @@ original ten-second cleanup deadline:
 
 - `drain` terminates the job and waits on each member. The launcher is not a
   member; cleanup waits, within the same deadline, for it to exit with its
-  command before the frozen direct-child reap runs. A listed PID is waited on only after `IsProcessInJob` confirms that
-  the opened handle belongs to this job, so a reused PID naming another process
-  is never waited on or terminated.
+  command before the frozen direct-child reap runs. A listed PID is waited on
+  only after `IsProcessInJob` confirms that the opened handle belongs to this
+  job, so a reused PID naming another process is never waited on or
+  terminated.
 - It finishes only when the job's active-process count shows no live member;
-  `WAIT_OBJECT_0` alone certifies each termination. A successful termination
+  `WAIT_OBJECT_0` alone certifies each termination it observes. A terminated
+  member can leave the job's PID list before the drain lists it, so the
+  record's `waited` list is diagnostic, and the empty job is the proof. The
+  controls check retained handles directly. A successful termination
   request is insufficient: a descendant can still hold its inherited
   current-directory handle while exiting (#2985).
 - The caller accepts exactly one complete, newline-terminated record that
@@ -171,6 +175,7 @@ execution refuses to start without it. Native `fixture` modes supply silent,
 partial, repeated and late drain records for the caller controls on every
 host, and `selftest` checks on Windows that a live non-member process is
 neither admitted, waited on, nor terminated.
+
 Unix uses isolated process groups. Direct children retain the ten-second cleanup
 deadline. Workers finish before
 module state is restored; the registry releases native handles between runs.
