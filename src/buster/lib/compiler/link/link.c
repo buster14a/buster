@@ -5852,6 +5852,57 @@ BUSTER_GLOBAL_LOCAL bool link_elf_linker_argument_soname_option(String8 argument
     return string_equal(argument, S8("-soname")) || string_equal(argument, S8("--soname")) || string_equal(argument, S8("-h"));
 }
 
+BUSTER_GLOBAL_LOCAL bool link_elf_linker_argument_rpath_option(String8 argument)
+{
+    return string_equal(argument, S8("-rpath")) || string_equal(argument, S8("--rpath"));
+}
+
+BUSTER_GLOBAL_LOCAL bool link_elf_linker_argument_takes_operand(String8 argument)
+{
+    return link_elf_linker_argument_soname_option(argument) || link_elf_linker_argument_rpath_option(argument) ||
+           string_equal(argument, S8("--version-script")) || string_equal(argument, S8("-z"));
+}
+
+typedef struct LinkElfRuntimePath LinkElfRuntimePath;
+struct LinkElfRuntimePath
+{
+    String8 path;
+    u32 tag;
+};
+
+// Preserve the loader's tokens (including $ORIGIN) and path order. Dtag
+// switches select the final tag independently of where paths were supplied.
+BUSTER_GLOBAL_LOCAL LinkElfRuntimePath link_elf_runtime_path(Arena* arena, NativeExecutableLinkOptions options)
+{
+    LinkElfRuntimePath result = {.tag = 29}; // DT_RUNPATH, new dtags by default.
+    String8* parts = arena_allocate(arena, String8, (u64)options.linker_argument_count * 2);
+    u32 count = 0;
+    for (u32 index = 0; index < options.linker_argument_count; index += 1)
+    {
+        String8 argument = options.linker_arguments[index];
+        String8 path = {0};
+        if (link_elf_linker_argument_rpath_option(argument))
+        {
+            path = options.linker_arguments[++index];
+        }
+        else if (string_starts_with_sequence(argument, S8("-rpath=")) || string_starts_with_sequence(argument, S8("--rpath=")))
+        {
+            u64 prefix = argument.pointer[1] == '-' ? sizeof("--rpath=") - 1 : sizeof("-rpath=") - 1;
+            path = string_slice(argument, prefix, argument.length);
+        }
+        else if (string_equal(argument, S8("--enable-new-dtags"))) result.tag = 29;
+        else if (string_equal(argument, S8("--disable-new-dtags"))) result.tag = 15; // DT_RPATH.
+        else if (link_elf_linker_argument_takes_operand(argument)) index += 1;
+        if (path.length)
+        {
+            if (count) parts[count++] = S8(":");
+            parts[count++] = path;
+        }
+    }
+    if (count) result.path = string_join_arena(arena, (SliceString8){.pointer = parts, .length = count}, false);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 link_elf_linker_argument_soname(NativeExecutableLinkOptions options)
 {
     String8 result = {0};
@@ -5866,7 +5917,7 @@ BUSTER_GLOBAL_LOCAL String8 link_elf_linker_argument_soname(NativeExecutableLink
                 result = string_slice(argument, prefixes[prefix].length, argument.length);
             }
         }
-        if (index + 1 < options.linker_argument_count && string_equal(argument, S8("--version-script")))
+        if (index + 1 < options.linker_argument_count && link_elf_linker_argument_takes_operand(argument) && !link_elf_linker_argument_soname_option(argument))
         {
             index += 1;
         }
@@ -5883,8 +5934,7 @@ BUSTER_GLOBAL_LOCAL bool link_elf_linker_argument_present(NativeExecutableLinkOp
     bool result = false;
     for (u32 index = 0; index < options.linker_argument_count; index += 1)
     {
-        if (index + 1 < options.linker_argument_count && (link_elf_linker_argument_soname_option(options.linker_arguments[index]) ||
-             string_equal(options.linker_arguments[index], S8("--version-script"))))
+        if (index + 1 < options.linker_argument_count && link_elf_linker_argument_takes_operand(options.linker_arguments[index]))
         {
             index += 1;
             continue;
@@ -6012,7 +6062,7 @@ BUSTER_GLOBAL_LOCAL String8 link_elf_version_script_path(NativeExecutableLinkOpt
         {
             result = string_slice(argument, sizeof("--version-script=") - 1, argument.length);
         }
-        else if (link_elf_linker_argument_soname_option(argument) || string_equal(argument, S8("-z")))
+        else if (link_elf_linker_argument_takes_operand(argument))
         {
             index += 1;
         }
@@ -6584,7 +6634,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     {
         has_undefined_symbol = has_undefined_symbol || link_elf_symbol_needs_dynamic_import(exports, &object->symbols[symbol_index]);
     }
-    if (!has_undefined_symbol && !has_thread_local_data && !options.dynamic_library_count && !script->name.length)
+    LinkElfRuntimePath runtime_path = link_elf_runtime_path(arena, options);
+    if (!has_undefined_symbol && !has_thread_local_data && !options.dynamic_library_count && !script->name.length && !runtime_path.path.length)
     {
         return link_native_executable_elf64_x86_64(arena, object, options);
     }
@@ -6894,6 +6945,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 definition_size = script->name.length ? BUSTER_LINK_ELF_VERSION_DEFINITION_COUNT * LINK_ELF_VERSION_DEFINITION_SIZE : 0;
     u64 definition_name_size = script->name.length ? script->base_name.length + script->name.length + 2 : 0;
     u64 dynamic_string_size = 1 + library_name_size + imported_name_size + version_name_size + exported_name_size + definition_name_size;
+    u64 runtime_path_offset = dynamic_string_size;
+    dynamic_string_size += runtime_path.path.length ? runtime_path.path.length + 1 : 0;
     u64 dynamic_symbol_offset = align_forward(dynamic_string_offset + dynamic_string_size, 8);
     u64 dynamic_symbol_count = (u64)import_count + 1 + alias_count + export_count;
     if (dynamic_symbol_count > UINT32_MAX)
@@ -6946,7 +6999,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     // PLTREL, JMPREL, RELAENT, DT_DEBUG and the DT_NULL terminator, plus
     // DT_FLAGS and DT_FLAGS_1 (the trailing 2).
     u32 dynamic_count = needed_library_count + 12 + (dynamic_data_relocation_count ? 2 : 0) + (has_versions ? 1u : 0u) + (version_count ? 2u : 0u) + (script->name.length ? 2u : 0u) + (u32)text_relocations +
-                        (preinit_size ? 2 : 0) + 2;
+                        (preinit_size ? 2 : 0) + 2 + (runtime_path.path.length ? 1u : 0u);
     u64 dynamic_size = (u64)dynamic_count * ELF_DYNAMIC_SIZE;
     // The relocation boundary is a page boundary: the loader seals whole pages.
     if (!link_elf_virtual_align(dynamic_offset + dynamic_size, BUSTER_MAX((u32)ELF_PAGE_SIZE, object->sections[OBJECT_SECTION_DATA].alignment),
@@ -7018,6 +7071,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         memcpy(bytes + output, library.pointer, library.length);
         bytes[output + library.length] = 0;
     }
+    if (runtime_path.path.length) memcpy(bytes + dynamic_string_offset + runtime_path_offset, runtime_path.path.pointer, runtime_path.path.length);
     u64 dynamic_name_cursor = dynamic_string_offset + first_symbol_name_offset;
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
@@ -7566,6 +7620,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     {
         BUSTER_LINK_DYNAMIC(1, library_name_offsets[library_index]);
     }
+    if (runtime_path.path.length) BUSTER_LINK_DYNAMIC(runtime_path.tag, runtime_path_offset);
     BUSTER_LINK_DYNAMIC(4, image_base + hash_offset);
     BUSTER_LINK_DYNAMIC(5, image_base + dynamic_string_offset);
     BUSTER_LINK_DYNAMIC(6, image_base + dynamic_symbol_offset);
@@ -8706,8 +8761,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
     bool no_undefined = link_elf_linker_argument_present(options, no_undefined_spellings, BUSTER_ARRAY_LENGTH(no_undefined_spellings));
     for (u32 index = 0; index + 1 < options.linker_argument_count; index += 1)
     {
-        if (link_elf_linker_argument_soname_option(options.linker_arguments[index]) ||
-            string_equal(options.linker_arguments[index], S8("--version-script")))
+        if (!string_equal(options.linker_arguments[index], S8("-z")) &&
+            link_elf_linker_argument_takes_operand(options.linker_arguments[index]))
         {
             index += 1;
         }
@@ -8909,6 +8964,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
         if (script->name.length) dynamic_string_size += script->base_name.length + script->name.length + 2;
         if (dynamic_string_size > UINT32_MAX) result.error = LINK_ERROR_INVALID_INPUT;
     }
+    LinkElfRuntimePath runtime_path = link_elf_runtime_path(arena, options);
+    u64 runtime_path_offset = dynamic_string_size;
+    dynamic_string_size += runtime_path.path.length ? runtime_path.path.length + 1 : 0;
+    if (dynamic_string_size > UINT32_MAX) result.error = LINK_ERROR_INVALID_INPUT;
     // Layout.  Every offset is also the address.
     // The input checks above leave `sections` unproven on the error path.
     bool has_thread_local = result.error == LINK_ERROR_NONE && (object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ||
@@ -8966,7 +9025,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
     cursor = section_offsets[OBJECT_SECTION_INIT_ARRAY] + object->sections[OBJECT_SECTION_INIT_ARRAY].data.length;
     section_offsets[OBJECT_SECTION_FINI_ARRAY] = align_forward(cursor, 8);
     cursor = section_offsets[OBJECT_SECTION_FINI_ARRAY] + object->sections[OBJECT_SECTION_FINI_ARRAY].data.length;
-    u32 dynamic_count = needed_library_count + (soname.length ? 1u : 0u) + 5 + (image.plt_count ? 4u : 0u) + (image.dynamic_relocation_count ? 3u : 0u) +
+    u32 dynamic_count = needed_library_count + (soname.length ? 1u : 0u) + (runtime_path.path.length ? 1u : 0u) + 5 + (image.plt_count ? 4u : 0u) + (image.dynamic_relocation_count ? 3u : 0u) +
                         (object->sections[OBJECT_SECTION_INIT_ARRAY].data.length ? 2u : 0u) +
                         (object->sections[OBJECT_SECTION_FINI_ARRAY].data.length ? 2u : 0u) + (has_versions ? 1u : 0u) + (versions.version_count ? 2u : 0u) + (script->name.length ? 2u : 0u) +
                         (image.static_tls ? 1u : 0u) + (shared ? 0u : 2u) + (preinit_size ? 2u : 0u) + 1;
@@ -9025,6 +9084,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
             memcpy(bytes + dynamic_string_offset + library_name_offsets[library + 1], name.pointer, name.length);
         }
         if (soname.length) memcpy(bytes + dynamic_string_offset + soname_offset, soname.pointer, soname.length);
+        if (runtime_path.path.length) memcpy(bytes + dynamic_string_offset + runtime_path_offset, runtime_path.path.pointer, runtime_path.path.length);
         u16 loaded_section_indices[OBJECT_SECTION_COUNT];
         link_elf_loaded_section_indices(object, copies.slot_count ? writable_end - section_offsets[OBJECT_SECTION_ZERO] : 0, loaded_section_indices);
         u64 dynamic_name_cursor = dynamic_string_offset + symbol_name_offset;
@@ -9183,6 +9243,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
             BUSTER_LINK_DYNAMIC(1, library_name_offsets[library]);
         }
         if (soname.length) BUSTER_LINK_DYNAMIC(14, soname_offset);
+        if (runtime_path.path.length) BUSTER_LINK_DYNAMIC(runtime_path.tag, runtime_path_offset);
         BUSTER_LINK_DYNAMIC(4, hash_offset);
         BUSTER_LINK_DYNAMIC(5, dynamic_string_offset);
         BUSTER_LINK_DYNAMIC(6, dynamic_symbol_offset);
@@ -16143,6 +16204,21 @@ bool link_validate_linker_arguments(Target target, NativeExecutableLinkOptions o
             }
             else valid = valid && argument.length > sizeof("--version-script=") - 1;
         }
+        else if (link_elf_linker_argument_rpath_option(argument) || string_starts_with_sequence(argument, S8("-rpath=")) ||
+                 string_starts_with_sequence(argument, S8("--rpath=")))
+        {
+            valid = target.os == OPERATING_SYSTEM_LINUX && target.cpu_arch == CPU_ARCH_X86_64 && dynamic_image;
+            if (link_elf_linker_argument_rpath_option(argument))
+            {
+                valid = valid && index + 1 < options.linker_argument_count && options.linker_arguments[index + 1].length;
+                if (valid) index += 1;
+            }
+            else valid = valid && argument.pointer[argument.length - 1] != '=';
+        }
+        else if (string_equal(argument, S8("--enable-new-dtags")) || string_equal(argument, S8("--disable-new-dtags")))
+        {
+            valid = target.os == OPERATING_SYSTEM_LINUX && target.cpu_arch == CPU_ARCH_X86_64 && dynamic_image;
+        }
         else if (elf && string_equal(argument, S8("-z")))
         {
             valid = index + 1 < options.linker_argument_count && string_equal(options.linker_arguments[index + 1], S8("defs"));
@@ -16530,7 +16606,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
         {
             normalized.object = link_elf_classify_untyped_imports(arena, exports, &normalized.object);
             object = &normalized.object;
-            bool dynamic_image = script.name.length || options.dynamic_library_count || object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ||
+            bool dynamic_image = link_elf_runtime_path(temporary, options).path.length || script.name.length || options.dynamic_library_count || object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ||
                                  object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
             for (u32 index = 0; !dynamic_image && index < object->symbol_count; index += 1)
             {
