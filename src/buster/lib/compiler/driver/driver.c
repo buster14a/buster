@@ -1,7 +1,7 @@
 // The Clang-like `ide cc` driver: two public calls (driver.h) split
 // argument parsing from execution. compiler_driver_parse_arguments turns
 // argv into a CompilerDriverInvocation — dialect, target/CPU/features,
-// inputs classified as C source, objects, or archives, their ordered library
+// inputs classified as C source, objects, archives, or ELF DSOs, their ordered library
 // occurrences through compiler_driver_link_operation, and every output
 // mode — rejecting unknown languages and retired options explicitly
 // rather than guessing. compiler_driver_validate_request is the request
@@ -3792,6 +3792,7 @@ struct CompilerDriverDynamicLibraries
     // loader, and a configure script reads the successful link as the
     // library existing.  Empty when every requested library was found.
     String8 missing_request;
+    String8 missing_path;
     String8 missing_framework;
     String8 unsupported_script_path;
     String8 missing_runtime_symbol;
@@ -4374,13 +4375,42 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_native_link_report_argument(Arena* a
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_native_shared_library_input(String8 path)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_shared_library_path(String8 path)
 {
+    // A directory named x.so.N does not classify the file beneath it.
+    u64 first = 0;
+    for (u64 index = 0; index < path.length; index += 1)
+    {
+        if (compiler_driver_path_separator(path.pointer[index])) { first = index + 1; }
+    }
+    path = string_slice(path, first, path.length);
     bool result = string_ends_with_sequence(path, S8(".so"));
     for (u64 index = 0; !result && index + 4 <= path.length; index += 1)
     {
-        result = string_equal(string_slice(path, index, index + 4), S8(".so.")) && index + 4 < path.length;
+        if (string_equal(string_slice(path, index, index + 4), S8(".so.")) && index + 4 < path.length)
+        {
+            bool digit = false;
+            bool valid = true;
+            for (u64 version = index + 4; valid && version < path.length; version += 1)
+            {
+                char8 byte = path.pointer[version];
+                if (byte >= '0' && byte <= '9') { digit = true; }
+                else if (byte == '.' && digit) { digit = false; }
+                else { valid = false; }
+            }
+            result = valid && digit;
+        }
     }
+    return result;
+}
+
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_native_shared_library_input(CompilerDriverInvocation invocation, u32 input_index)
+{
+    // Explicit -x selects a source language for every suffix. Only automatic
+    // inputs may enter the DSO route, including API-built legacy invocations.
+    bool result = compiler_driver_input_language(invocation, input_index) == COMPILER_DRIVER_LANGUAGE_AUTOMATIC &&
+                  compiler_driver_native_shared_library_path(invocation.input_paths[input_index]);
     return result;
 }
 
@@ -4411,7 +4441,7 @@ String8 compiler_driver_native_link_report(Arena* arena, CompilerDriverInvocatio
             {
                 String8 input = invocation.input_paths[index];
                 if (compiler_driver_object_input(input) || compiler_driver_archive_input(input) ||
-                    compiler_driver_native_shared_library_input(input))
+                    compiler_driver_native_shared_library_input(invocation, index))
                 {
                     parts[part_count++] = compiler_driver_native_link_report_argument(arena, (String8){0}, input);
                 }
@@ -5838,7 +5868,7 @@ struct CompilerDriverElfScriptWork
 
 BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, CompilerDriverInvocation invocation, bool collect_data,
                                                              NativeDynamicLibrary* library, FileMapRead* export_map, String8* script_path,
-                                                             String8 member_directory, bool literal)
+                                                             String8 member_directory, bool literal, bool direct_path)
 {
     u16 machine = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? 183 : 62;
     String8 roots[7];
@@ -5848,11 +5878,11 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
     bool script_found = false;
     bool absolute = literal && library->name.length && library->name.pointer[0] == '/';
     u32 local_count = literal ? (member_directory.length ? 2u : 1u) : 0u;
-    u32 candidate_count = absolute ? 1u : local_count + invocation.library_path_count + root_count + (literal ? 0u : 1u);
+    u32 candidate_count = direct_path || absolute ? 1u : local_count + invocation.library_path_count + root_count + (literal ? 0u : 1u);
     for (u32 path_index = 0; !found && !script_found && path_index < candidate_count; path_index += 1)
     {
         String8 path;
-        if (absolute || (literal && path_index == local_count - 1) || (!literal && path_index == candidate_count - 1))
+        if (direct_path || absolute || (literal && path_index == local_count - 1) || (!literal && path_index == candidate_count - 1))
         {
             path = string_duplicate_arena(arena, library->name, true);
         }
@@ -5886,8 +5916,15 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
     }
 }
 
+typedef struct CompilerDriverDynamicRequest CompilerDriverDynamicRequest;
+struct CompilerDriverDynamicRequest
+{
+    String8 name;
+    bool path;
+};
+
 BUSTER_GLOBAL_LOCAL void compiler_driver_elf_requested_libraries(Arena* arena, CompilerDriverInvocation invocation, bool imports_data,
-                                                                 NativeDynamicLibrary* seeds, String8* requests, u32 seed_count,
+                                                                 NativeDynamicLibrary* seeds, CompilerDriverDynamicRequest* requests, u32 seed_count,
                                                                  CompilerDriverDynamicLibraries* result)
 {
     NativeDynamicLibrary* libraries = seeds;
@@ -5897,19 +5934,20 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_requested_libraries(Arena* arena, C
     CompilerDriverElfScriptWork* stack = 0;
     String8* members = 0;
     u32 expanded_members = 0;
-    for (u32 seed_index = 0; !result->missing_request.length && seed_index < seed_count; seed_index += 1)
+    for (u32 seed_index = 0; !result->missing_request.length && !result->missing_path.length && seed_index < seed_count; seed_index += 1)
     {
-        CompilerDriverElfScriptWork seed = {.name = seeds[seed_index].name};
+        CompilerDriverElfScriptWork seed = {.name = seeds[seed_index].name, .literal = requests[seed_index].path};
         CompilerDriverElfScriptWork* work = stack ? stack : &seed;
         work[0] = seed;
         u32 pending = 1;
-        while (pending && !result->missing_request.length)
+        while (pending && !result->missing_request.length && !result->missing_path.length)
         {
             CompilerDriverElfScriptWork item = work[--pending];
             NativeDynamicLibrary library = {.name = item.name};
             FileMapRead map = {0};
             String8 script_path = {0};
-            compiler_driver_elf_library_exports(arena, invocation, imports_data, &library, &map, &script_path, item.directory, item.literal);
+            compiler_driver_elf_library_exports(arena, invocation, imports_data, &library, &map, &script_path, item.directory, item.literal,
+                                                requests[seed_index].path && !item.depth);
             if (script_path.length)
             {
                 if (!stack)
@@ -5977,14 +6015,16 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_requested_libraries(Arena* arena, C
                 }
                 else
                 {
-                    result->missing_request = requests[seed_index];
+                    if (requests[seed_index].path) { result->missing_path = requests[seed_index].name; }
+                    else { result->missing_request = requests[seed_index].name; }
                     result->unsupported_script_path = script_path;
                 }
                 file_map_unmap(map);
             }
             else if (!library.exports_known)
             {
-                result->missing_request = requests[seed_index];
+                if (requests[seed_index].path) { result->missing_path = requests[seed_index].name; }
+                else { result->missing_request = requests[seed_index].name; }
                 // Archives, including -l:FILE.a, cannot be admitted as DSOs.
                 if (compiler_driver_archive_input(item.name)) { result->unsupported_script_path = item.script_path; }
             }
@@ -6457,7 +6497,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_compiler_runtime(Arena* arena, Comp
                 NativeDynamicLibrary* runtime = libraries->pointer + runtime_index;
                 *runtime = (NativeDynamicLibrary){.name = S8("libgcc_s.so.1")};
                 FileMapRead* export_map = libraries->export_maps + libraries->export_map_count;
-                compiler_driver_elf_library_exports(arena, invocation, imports_data, runtime, export_map, 0, (String8){0}, false);
+                compiler_driver_elf_library_exports(arena, invocation, imports_data, runtime, export_map, 0, (String8){0}, false, false);
                 libraries->export_map_count += export_map->bytes.pointer != 0;
                 provider = runtime;
                 provided = compiler_driver_elf_library_helper_provider(runtime, symbol->name);
@@ -6485,16 +6525,21 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         S8_INITIALIZER("vcruntime140.dll"),
     };
     u32 default_library_count = invocation.target.os == OPERATING_SYSTEM_WINDOWS ? BUSTER_ARRAY_LENGTH(windows_system_libraries) : 0;
-    u32 library_capacity = invocation.library_count + invocation.framework_count + default_library_count +
+    u32 shared_library_count = 0;
+    for (u32 index = 0; index < invocation.input_count; index += 1)
+    {
+        shared_library_count += compiler_driver_native_shared_library_input(invocation, index);
+    }
+    u32 library_capacity = shared_library_count + invocation.library_count + invocation.framework_count + default_library_count +
                            (invocation.target.os == OPERATING_SYSTEM_LINUX ? 1u : 0u);
     NativeDynamicLibrary* libraries =
         arena_allocate(arena, NativeDynamicLibrary, library_capacity);
-    // The `-l` spelling that produced each entry, kept beside the mapped file
-    // name so a library the search below never finds is reported as the
-    // request the caller wrote rather than as the soname it was mapped to.
+    // The caller's -l name or direct path beside each mapped file name.
+    // A failed lookup reports that request rather than the SONAME.
+    // Direct paths stay distinct until their actual ELF identity is read.
     // Entries the caller did not request -- the Windows defaults and the
     // Apple frameworks -- keep an empty request and are never reported.
-    String8* requests = arena_allocate(arena, String8, library_capacity);
+    CompilerDriverDynamicRequest* requests = arena_allocate(arena, CompilerDriverDynamicRequest, library_capacity);
     memset(requests, 0, sizeof(*requests) * library_capacity);
     u32 count = 0;
     for (u32 index = 0; index < default_library_count; index += 1)
@@ -6503,8 +6548,24 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
             .name = windows_system_libraries[index],
         };
     }
-    for (u32 index = 0; index < invocation.library_count; index += 1)
+    u64 operation_count = invocation.link_operation_count ? invocation.link_operation_count
+                                                        : (u64)invocation.input_count + invocation.library_count;
+    for (u64 operation_index = 0; operation_index < operation_count; operation_index += 1)
     {
+        CompilerDriverLinkOperation operation = compiler_driver_link_operation(&invocation, operation_index);
+        if (operation.kind == COMPILER_DRIVER_LINK_OPERATION_FILE)
+        {
+            String8 path = invocation.input_paths[operation.index];
+            if (compiler_driver_native_shared_library_input(invocation, operation.index))
+            {
+                // Read exactly the caller's path, retaining its spelling when
+                // the ELF has no SONAME. Dedupe after reading its identity.
+                requests[count] = (CompilerDriverDynamicRequest){.name = path, .path = true};
+                libraries[count++] = (NativeDynamicLibrary){.name = path};
+            }
+            continue;
+        }
+        u32 index = operation.index;
         if (static_libraries && static_libraries[index])
         {
             continue;
@@ -6591,7 +6652,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         }
         if (!duplicate)
         {
-            requests[count] = requested;
+            requests[count].name = requested;
             libraries[count++] = (NativeDynamicLibrary){
                 .name = name,
                 .mach_current_version = mach_current_version,
@@ -6664,7 +6725,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         result.export_maps = arena_allocate(arena, FileMapRead, count + 2);
         result.runtime.name = S8("libc.so.6");
         FileMapRead* export_map = result.export_maps + result.export_map_count;
-        compiler_driver_elf_library_exports(arena, invocation, imports_data, &result.runtime, export_map, 0, (String8){0}, false);
+        compiler_driver_elf_library_exports(arena, invocation, imports_data, &result.runtime, export_map, 0, (String8){0}, false, false);
         result.export_map_count += export_map->bytes.pointer != 0;
         compiler_driver_elf_requested_libraries(arena, invocation, imports_data, libraries, requests, count, &result);
         libraries = result.pointer;
@@ -7723,10 +7784,15 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
     {
         String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
         CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, 0, &linked.object);
-        if (dynamic_libraries.missing_request.length || dynamic_libraries.missing_framework.length)
+        if (dynamic_libraries.missing_request.length || dynamic_libraries.missing_path.length || dynamic_libraries.missing_framework.length)
         {
             result->error = COMPILER_DRIVER_ERROR_LINK;
-            result->diagnostic = !dynamic_libraries.missing_request.length
+            result->diagnostic = dynamic_libraries.missing_path.length
+                                    ? dynamic_libraries.unsupported_script_path.length
+                                          ? string_format(arena, S8("unsupported GNU linker script {S8} requested by shared-library input {S8}"),
+                                                          dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_path)
+                                          : string_format(arena, S8("could not read target shared library {S8}"), dynamic_libraries.missing_path)
+                                : !dynamic_libraries.missing_request.length
                                      ? string_format(arena, S8("framework not found: {S8}"), dynamic_libraries.missing_framework)
                                      : dynamic_libraries.unsupported_script_path.length
                                      ? string_format(arena, S8("unsupported GNU linker script {S8} requested by -l{S8}"),
@@ -9655,6 +9721,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_parallel_c_input(CompilerDriverInvocati
     bool native = invocation.target.cpu_arch == CPU_ARCH_X86_64 || invocation.target.cpu_arch == CPU_ARCH_AARCH64;
     return native && invocation.action == COMPILER_DRIVER_ACTION_LINK && !invocation.emit_llvm_bitcode &&
            !invocation.has_gpu_target && !compiler_driver_object_input(path) && !compiler_driver_archive_input(path) &&
+           !compiler_driver_native_shared_library_input(invocation, input_index) &&
            compiler_driver_c_input(language, path) &&
            !compiler_driver_assembly_input(language, path) && !compiler_driver_preprocessed_assembly_input(path);
 }
@@ -10035,6 +10102,17 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         // follows its existing capture-output path through the same convention.
         invocation.output_path = (String8){0};
     }
+    for (u32 index = 0; index < invocation.input_count; index += 1)
+    {
+        String8 path = invocation.input_paths[index];
+        if (compiler_driver_native_shared_library_input(invocation, index) &&
+            (!compiler_driver_native_linux_elf_link(invocation) || invocation.retain_linked_object))
+        {
+            result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
+            result.diagnostic = string_format(arena, S8("shared-library input {S8} requires a native x86-64 or AArch64 Linux ELF image link"), path);
+            goto finish;
+        }
+    }
     if (invocation.has_gpu_target)
     {
         result = compiler_driver_execute_gpu(arena, invocation, &warnings);
@@ -10144,13 +10222,14 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         CompilerDriverLanguage language = compiler_driver_input_language(invocation, input_index);
         bool object_input = compiler_driver_object_input(path);
         bool archive_input = compiler_driver_archive_input(path);
-        if ((object_input || archive_input) && invocation.action != COMPILER_DRIVER_ACTION_LINK)
+        bool shared_library_input = compiler_driver_native_shared_library_input(invocation, input_index);
+        if ((object_input || archive_input || shared_library_input) && invocation.action != COMPILER_DRIVER_ACTION_LINK)
         {
             result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
             result.diagnostic = string_format(arena, S8("prebuilt input {S8} is only valid while linking"), path);
             goto finish;
         }
-        if (!object_input && !archive_input && !compiler_driver_c_input(language, path) && !compiler_driver_assembly_input(language, path) &&
+        if (!object_input && !archive_input && !shared_library_input && !compiler_driver_c_input(language, path) && !compiler_driver_assembly_input(language, path) &&
             !compiler_driver_preprocessed_assembly_input(path))
         {
             result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
@@ -10176,7 +10255,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
 #endif
     }
     if (invocation.input_count <= 1 && !invocation.library_count &&
-        (!invocation.input_count || (!compiler_driver_object_input(invocation.input_paths[0]) && !compiler_driver_archive_input(invocation.input_paths[0]))))
+        (!invocation.input_count || (!compiler_driver_object_input(invocation.input_paths[0]) && !compiler_driver_archive_input(invocation.input_paths[0]) &&
+                                    !compiler_driver_native_shared_library_input(invocation, 0))))
     {
         CompilerDriverUnitMetrics single_metrics;
         CompilerDriverArenaWatch watch = {0};
@@ -10316,11 +10396,18 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         u32 input_index = operation.index;
         String8 input_path = invocation.input_paths[input_index];
-        if (inputs && (compiler_driver_archive_input(input_path) || compiler_driver_object_input(input_path)))
+        if (inputs && (compiler_driver_archive_input(input_path) || compiler_driver_object_input(input_path) ||
+                       compiler_driver_native_shared_library_input(invocation, input_index)))
         {
             // Prebuilt link inputs are never compiled, and a malformed one
             // still stops the link even under -fkeep-going.
             inputs[input_index].status = COMPILER_DRIVER_INPUT_STATUS_PREBUILT;
+        }
+        if (compiler_driver_native_shared_library_input(invocation, input_index))
+        {
+            // The final export scan owns the mappings through ELF publication.
+            // This operand remains a serial boundary in the ordered input walk.
+            continue;
         }
         if (compiler_driver_archive_input(input_path))
         {
@@ -10938,15 +11025,27 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     }
     String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
     CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, static_libraries, &linked.object);
-    if (dynamic_libraries.missing_request.length || dynamic_libraries.missing_framework.length)
+    if (dynamic_libraries.missing_request.length || dynamic_libraries.missing_path.length || dynamic_libraries.missing_framework.length)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic = !dynamic_libraries.missing_request.length
+        result.diagnostic = dynamic_libraries.missing_path.length
+                                    ? dynamic_libraries.unsupported_script_path.length
+                                          ? string_format(arena, S8("unsupported GNU linker script {S8} requested by shared-library input {S8}"),
+                                                          dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_path)
+                                          : string_format(arena, S8("could not read target shared library {S8}"), dynamic_libraries.missing_path)
+                                : !dynamic_libraries.missing_request.length
                                 ? string_format(arena, S8("framework not found: {S8}"), dynamic_libraries.missing_framework)
                                 : dynamic_libraries.unsupported_script_path.length
                                 ? string_format(arena, S8("unsupported GNU linker script {S8} requested by -l{S8}"),
                                                 dynamic_libraries.unsupported_script_path, dynamic_libraries.missing_request)
                                 : string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
+        for (u32 index = 0; inputs && dynamic_libraries.missing_path.length && index < invocation.input_count; index += 1)
+        {
+            if (string_equal(invocation.input_paths[index], dynamic_libraries.missing_path))
+            {
+                compiler_driver_fail_input(&result, inputs, index, COMPILER_DRIVER_ERROR_LINK, OBJECT_ERROR_NONE, result.diagnostic);
+            }
+        }
         compiler_driver_dynamic_libraries_release(&dynamic_libraries);
         goto finish;
     }
