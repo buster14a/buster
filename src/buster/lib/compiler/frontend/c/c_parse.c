@@ -645,7 +645,8 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit_identifier(CPa
     else if (!token.symbol || !preprocess.symbols)
         builtin = c_symbol_builtin_from_spelling(c_token_spelling(preprocess.spelling_base, token));
     if (builtin == C_SYMBOL_BUILTIN_GENERIC || builtin == C_SYMBOL_BUILTIN_TYPES_COMPATIBLE_P ||
-        builtin == C_SYMBOL_BUILTIN_CLASSIFY_TYPE || builtin == C_SYMBOL_BUILTIN_CHOOSE_EXPR)
+        builtin == C_SYMBOL_BUILTIN_CLASSIFY_TYPE || builtin == C_SYMBOL_BUILTIN_CHOOSE_EXPR ||
+        builtin == C_SYMBOL_BUILTIN_SOURCE_LINE)
         c_parse_position_index_append(result->arena, &index->type_identity_positions, &index->type_identity_count,
             &index->type_identity_capacity, token_index);
     if (c_parse_word_bits_token(preprocess, token) & (C_WORD_TYPEOF | C_WORD_TYPEOF_UNQUAL))
@@ -7260,6 +7261,14 @@ BUSTER_C_SHARED CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPrep
                 {
                     return c_parse_expression_scalar_type(result, C_TYPE_VOID);
                 }
+                if (builtin == C_SYMBOL_BUILTIN_SOURCE_LINE)
+                {
+                    return c_parse_expression_scalar_type(result, C_TYPE_INT);
+                }
+                if (builtin == C_SYMBOL_BUILTIN_SOURCE_FILE || builtin == C_SYMBOL_BUILTIN_SOURCE_FUNCTION)
+                {
+                    return c_semantic_source_name_type(result, preprocess.target);
+                }
                 if (builtin == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM)
                 {
                     CIntegerTransformBuiltin transform = c_semantic_integer_transform_builtin(preprocess.target, name);
@@ -9466,6 +9475,42 @@ BUSTER_C_INTERNAL bool c_parse_classify_type_builtin(CTypeParseMachine* machine,
 BUSTER_C_INTERNAL bool c_parse_choose_expr_builtin(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                    CParseResult* result, CScopeId scope, u32 start, u32 end);
 
+// The presumed line of a source-location builtin's expansion point: a macro's
+// output resolves to its invocation, and `#line` renumbers it, as for __LINE__.
+BUSTER_C_SHARED u32 c_semantic_source_line(CPreprocessResult const* preprocess, u32 token_index)
+{
+    return c_preprocess_token_location(preprocess, preprocess->tokens[token_index]).line;
+}
+
+// The presumed file name of that expansion point, which `#line` can rename.
+BUSTER_C_SHARED String8 c_semantic_source_file(CPreprocessResult const* preprocess, u32 token_index)
+{
+    u32 file = c_preprocess_token_location(preprocess, preprocess->tokens[token_index]).file;
+    return file < preprocess->file_count ? preprocess->files[file] : (String8){0};
+}
+
+// __builtin_FILE() and __builtin_FUNCTION() answer `const char *`.
+BUSTER_C_SHARED CTypeId c_semantic_source_name_type(CParseResult* result, Target target)
+{
+    return c_semantic_vendor_builtin_type(result, target, (CVendorBuiltinType){.kind = C_TYPE_CHAR, .pointer_depth = 1, .is_const = true});
+}
+
+// __builtin_LINE() takes no argument and answers an int constant, recorded
+// like a __builtin_classify_type answer so every constant and type query
+// shares that route.
+BUSTER_C_INTERNAL bool c_parse_source_line_builtin(CPreprocessResult preprocess, CParseResult* result, u32 start, u32 end)
+{
+    u32 close = c_parse_matching_delimiter_indexed(result, preprocess, start + 1);
+    u32 line = c_semantic_source_line(&preprocess, start);
+    bool valid = close < end && close == start + 2 && line <= INT32_MAX;
+    if (valid)
+    {
+        valid = c_parse_type_identity_record(result, (CTypeIdentityQuery){
+            .token_start = start, .token_end = close + 1, .result_start = UINT32_MAX, .result_end = line});
+    }
+    return valid;
+}
+
 // Children have later token starts than their parents. This reverse work walk
 // settles every nested identity before expression/type queries consume it;
 // the active guard prevents a query from recursively starting another walk.
@@ -9513,6 +9558,10 @@ BUSTER_C_INTERNAL void c_parse_type_identity_settle(CTypeParseMachine* machine, 
                 else if (string_equal(name, S8("__builtin_classify_type")))
                 {
                     c_parse_classify_type_builtin(machine, arena, preprocess, result, token_scope, index, end);
+                }
+                else if (string_equal(name, S8("__builtin_LINE")))
+                {
+                    c_parse_source_line_builtin(preprocess, result, index, end);
                 }
                 else if (string_equal(name, S8("__builtin_choose_expr")))
                 {
@@ -10670,7 +10719,8 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
             (enumerator || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_offsetof")) ||
              string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic")) ||
              string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_types_compatible_p")) ||
-             string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_classify_type"))))
+             string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_classify_type")) ||
+             string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_LINE"))))
         {
             deferred = true;
             break;
@@ -37233,6 +37283,9 @@ BUSTER_C_INTERNAL u32 c_parse_static_initializer_call(CTypeParseMachine* machine
                             CParseConstant value = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope, cursor, close + 1);
                             constant = value.valid;
                         }
+                        // The source-location builtins answer an int constant
+                        // or the address of a string literal.
+                        constant |= c_semantic_source_location_builtin(builtin) && close == cursor + 2;
                     }
                     if (!constant) bad = cursor;
                     else frame->cursor = close + 1;
@@ -40339,6 +40392,9 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
                                     maximum = libm_arity ? libm_arity : string_starts_with_sequence(name, S8("__builtin_copysign")) ? 2 : UINT32_MAX; break;
         case C_SYMBOL_BUILTIN_DEBUGTRAP:
         case C_SYMBOL_BUILTIN_SPIN_PAUSE:
+        case C_SYMBOL_BUILTIN_SOURCE_LINE:
+        case C_SYMBOL_BUILTIN_SOURCE_FILE:
+        case C_SYMBOL_BUILTIN_SOURCE_FUNCTION:
         case C_SYMBOL_BUILTIN_UNREACHABLE: maximum = 0; break;
         default: break;
         }
