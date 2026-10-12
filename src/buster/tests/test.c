@@ -1258,10 +1258,31 @@ BUSTER_GLOBAL_LOCAL u64 test_module_group_apply(TestDescriptor* descriptors, u64
 // Explicit --module selection intentionally takes audit ownership; CI must not.
 BUSTER_GLOBAL_LOCAL u64 test_module_group_module_apply(TestDescriptor* descriptors, u64 count, String8 name, bool valid)
 {
+    u64 begin = 0, end = 0;
+    bool range = string_starts_with_sequence(name, S8("range:"));
+    if (range)
+    {
+        String8 text = {name.pointer + 6, name.length - 6};
+        IntegerParsingU64 first = string8_parse_u64_decimal(text);
+        bool parsed = first.status == INTEGER_PARSING_SUCCESS && first.length && first.length < text.length &&
+                      text.pointer[first.length] == ':';
+        if (parsed)
+        {
+            text.pointer += first.length + 1;
+            text.length -= first.length + 1;
+            IntegerParsingU64 last = string8_parse_u64_decimal(text);
+            parsed = last.status == INTEGER_PARSING_SUCCESS && last.length && last.length == text.length &&
+                     first.value < last.value && last.value <= count;
+            begin = first.value;
+            end = last.value;
+        }
+        valid = valid && parsed;
+    }
     u64 result = 0;
     for (u64 index = 0; index < count; index += 1)
     {
-        descriptors[index].deselected = descriptors[index].deselected || !valid || !string_equal(descriptors[index].name, name);
+        descriptors[index].deselected = descriptors[index].deselected || !valid ||
+            !(range ? index >= begin && index < end : string_equal(descriptors[index].name, name));
         result += buster_test_descriptor_runs(descriptors[index]);
     }
     return result;
@@ -3791,6 +3812,36 @@ BUSTER_GLOBAL_LOCAL bool test_module_group_self_test(void)
         }
     }
     result = result && module_union_count == enabled_count;
+    TemporalArena range_temporary = scratch_begin(0, 0);
+    // Every adjacent inventory slice preserves original descriptor identities,
+    // disabled-audit ownership and canonical positions. Bad bounds run nothing.
+    for (u64 begin = 0; begin < TEST_ID_COUNT; begin += 1)
+    {
+        TestDescriptor range[TEST_ID_COUNT];
+        memcpy(range, test_descriptors, sizeof(range));
+        u64 end = begin + 2 < TEST_ID_COUNT ? begin + 2 : TEST_ID_COUNT;
+        String8 name = string_format(range_temporary.arena, S8("range:{u64}:{u64}"), begin, end);
+        u64 selected = test_module_group_module_apply(range, TEST_ID_COUNT, name, true);
+        u64 expected = 0;
+        for (u64 index = 0; index < TEST_ID_COUNT; index += 1)
+        {
+            bool runs = index >= begin && index < end && buster_test_descriptor_runs(test_descriptors[index]);
+            expected += runs;
+            result = result && buster_test_descriptor_runs(range[index]) == runs &&
+                range[index].table_audit == test_descriptors[index].table_audit &&
+                range[index].function == test_descriptors[index].function;
+        }
+        result = result && selected == expected;
+    }
+    String8 bad_ranges[] = {S8("range:0:0"), S8("range:2:1"), S8("range:0:999999"), S8("range:0:2x"),
+        S8("range:-1:2"), S8("range:0:18446744073709551616")};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(bad_ranges); index += 1)
+    {
+        TestDescriptor range[TEST_ID_COUNT];
+        memcpy(range, test_descriptors, sizeof(range));
+        result = result && !test_module_group_module_apply(range, TEST_ID_COUNT, bad_ranges[index], true);
+    }
+    scratch_end(range_temporary);
     TestDescriptor module_missing[TEST_ID_COUNT];
     memcpy(module_missing, test_descriptors, sizeof(module_missing));
     result = result && !test_module_group_module_apply(module_missing, TEST_ID_COUNT, S8("unknown_tests"), true);
@@ -4017,7 +4068,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
         {
             String8 name = {module_group_name.pointer + 7, module_group_name.length - 7};
             selected_module_count = test_module_group_module_apply(descriptors, TEST_ID_COUNT, name, selection_valid);
-            selection_valid = selection_valid && selected_module_count == 1;
+            selection_valid = selection_valid && (string_starts_with_sequence(name, S8("range:")) ? selected_module_count != 0 : selected_module_count == 1);
         }
         else
         {

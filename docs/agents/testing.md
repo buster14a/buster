@@ -1256,19 +1256,25 @@ The native `test_units_partitioned <ide-path>` runner uses two process slots
 when `BUSTER_TEST_JOBS >= 4`. Each slot receives half the quota, retaining
 the multi-lane OS assertions. It first queries the complete inventory, starts
 `c_frontend_tests` and `compiler_driver_tests`, then dynamically claims
-`c_ast_tests` and the remaining enabled descriptors. A module never shares
-its process with another module. Serial bootstraps and smaller quotas retain
+contiguous inventory slices between those modules. Each heavy module retains
+its own child; the other modules share at most three batch children. This
+avoids repeating compiler prewarm and process startup for every small module
+while allowing either free slot to claim the next batch. Serial bootstraps
+and smaller quotas retain
 the ordinary streaming invocation.
 
-`BUSTER_TEST_MODULE_GROUP=module:<name>` is the private CI selector. It
+`BUSTER_TEST_MODULE_GROUP=module:<name>` is the private CI selector;
+`module:range:<begin>:<end>` selects an inclusive-begin, exclusive-end slice
+of the canonical inventory. Bounds must be valid and select enabled work. It
 preserves table-audit flags and canonical indices, unlike explicit
 `--module=` selection, which intentionally takes ownership of named audits.
 Each child must supply the full independent inventory, exactly its selected
-timing row and matching successful terminal counts. The parent compares all
-inventory identities and accepts only the exact enabled union. Failed spawn,
+timing rows and matching successful terminal counts. The parent compares all
+inventory identities and accepts only the exact enabled union, rejecting
+duplicate coverage as well as missing modules. Failed spawn,
 capture, cleanup, replay, timeout or incomplete coverage fails the invocation.
 
-The persistent parent lanes claim stable module slots through an atomic index;
+The persistent parent lanes claim stable batch slots through an atomic index;
 captured output replays in canonical descriptor order after both lanes finish.
 The complete schedule shares the existing 5400-second deadline. Each process
 keeps the existing 64 MiB capture cap; retained captures share a 128 MiB cap.
@@ -1277,10 +1283,13 @@ admission stops and the run fails. No fixture deadline or test-worker quota
 increases.
 
 `CI_UNIT_SCHEDULE_PLAN_V1` binds source revision, executable SHA-256 and quota.
-The per-module `CI_UNIT_PROCESS_V1 group=module` rows retain native intervals,
-and `CI_UNIT_SCHEDULE_V1` reports aggregate coverage, captured bytes and wall
-time, including inventory and replay. These rows describe scheduled modules;
-they must not be fed to the historical two-group observer as accepted evidence.
+`CI_UNIT_PROCESS_V1 group=module` retains each heavy child's native interval;
+`group=batch module=range:<begin>:<end>` retains a shared child's interval,
+with `index` naming its first canonical descriptor. `CI_UNIT_SCHEDULE_V1`
+reports aggregate module coverage, captured bytes and wall time, including
+inventory and replay. Batch intervals must not be attributed to every module
+inside the batch or summed with overlapping child intervals. These rows
+must not be fed to the historical two-group observer as accepted evidence.
 
 `BUSTER_TEST_UNIT_SCHEDULE=pair` retains the earlier primary/rest runner;
 the existing unit-partition experiment explicitly selects it. Empty or
