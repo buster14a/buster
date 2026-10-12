@@ -5375,13 +5375,16 @@ BUSTER_C_INTERNAL void c_parse_type_identity_settle(CTypeParseMachine* machine, 
 // holds an identity site, so the test that the index lists none in
 // [start, end) is inline and the settling walk is not. Without a listed site
 // the walk's two lower bounds leave its loop no iteration, so the skipped call
-// is a no-op. A missing index, which makes the walk scan tokens, still calls it.
+// is a no-op. A missing index, which makes the walk scan tokens, still calls it,
+// and so does an unbuilt one: its empty site list proves nothing until the
+// walk builds it (#3844).
 BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_identity_prepare(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                                   CParseResult* result, CScopeId scope, u32 start, u32 end)
 {
     CTokenPositionIndex const* positions = result->position_index;
     u32 count = positions ? positions->type_identity_count : 0;
-    bool absent = positions && (!count || positions->type_identity_positions[count - 1] < start || positions->type_identity_positions[0] >= end);
+    bool absent = positions && positions->built &&
+                  (!count || positions->type_identity_positions[count - 1] < start || positions->type_identity_positions[0] >= end);
 #if BUSTER_REFERENCE_CHECKS
     BUSTER_CHECK(!absent || c_parse_position_lower_bound(positions->type_identity_positions, count, start) >=
                                 c_parse_position_lower_bound(positions->type_identity_positions, count, end));
@@ -9434,6 +9437,9 @@ BUSTER_C_INTERNAL void c_parse_type_identity_settle(CTypeParseMachine* machine, 
     if (machine && !machine->type_identity_queries_active)
     {
         machine->type_identity_queries_active = true;
+        // An unbuilt index lists no site; reading it would settle nothing
+        // for the first file-scope declaration that needs an answer (#3844).
+        c_parse_position_index_ensure(result, preprocess);
         CTokenPositionIndex* positions = result->position_index;
         u32 first = positions ? c_parse_position_lower_bound(positions->type_identity_positions, positions->type_identity_count, start) : start;
         u32 limit = positions ? c_parse_position_lower_bound(positions->type_identity_positions, positions->type_identity_count, end)
