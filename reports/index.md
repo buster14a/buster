@@ -2,13 +2,13 @@
 
 Operational Actions observations; advisory. Compiler performance acceptance and the qualified 9700X dashboard are separate.
 
-Collected at 2026-10-12T02:26:36Z. Policy hosted-ci-cohort-v1. 154 active observations, 1486 unknown hardware, 3 API/ingestion gaps, 2 incomplete runs, 70 aliases, 1059 unresolved cost intervals.
+Collected at 2026-10-12T09:48:12Z. Policy hosted-ci-cohort-v1. 153 active observations, 1493 unknown hardware, 3 API/ingestion gaps, 2 incomplete runs, 70 aliases, 1061 unresolved cost intervals.
 
-Observed hosted runner-seconds: 143752; observed unsuccessful-job runner-seconds: 5765 (57 jobs). These exclude unknown-hosting and missing intervals; they are neither billed minutes nor process CPU time. Dependency/deployment waits and required-CI critical-path attribution remain unavailable.
+Observed hosted runner-seconds: 157480; observed unsuccessful-job runner-seconds: 5976 (58 jobs). These exclude unknown-hosting and missing intervals; they are neither billed minutes nor process CPU time. Dependency/deployment waits and required-CI critical-path attribution remain unavailable.
 
-Reporting bounds: 30 observation-date shards / 32768 rows / 96 rendered series; 1818 rows outside the rendered series bound remain in exports. Raw history is retained separately from these bounded derived reports.
+Reporting bounds: 30 observation-date shards / 32768 rows / 96 rendered series; 1898 rows outside the rendered series bound remain in exports. Raw history is retained separately from these bounded derived reports.
 
-Bounded view omitted 0 older shards and 1966 older loaded rows; their raw records remain on the data branch.
+Bounded view omitted 0 older shards and 2037 older loaded rows; their raw records remain on the data branch.
 
 [JSON export](recent.jsonl) · [CSV export](recent.csv) · [Collector policy](https://github.com/buster14a/buster/blob/main/docs/ci-timing-history.md)
 
@@ -16,6 +16,11 @@ Default view: trusted main push observations only. [All events, PRs and queues](
 
 | Job / matrix | OS / actual CPU | Event / branch | Successful samples | Missing context | History |
 |---|---|---|---:|---:|---|
+| GPU Linux consumers / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | push / main | 2 | 2 | [series](series-ed2786198d9318be.md) |
+| No-code plan /  | unknown OS / unknown CPU | push / main | 0 | 3 | [series](series-4ec16058bf5d4207.md) |
+| GPU Metal consumer /  | unknown OS / unknown CPU | push / main | 0 | 4 | [series](series-5055dc4fc114973a.md) |
+| Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | push / main | 2 | 2 | [series](series-13a9d7866c9a4d48.md) |
+| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | push / main | 1 | 1 | [series](series-1ea73dab02979300.md) |
 
 ## Largest observed main time changes
 
@@ -24,4 +29,4 @@ Ordered by absolute median seconds per physical execution; candidate frequency i
 | Series | Median change s | Change % | Candidate executions | State |
 |---|---:|---:|---:|---|
 
-Last selected execution completed: 2026-10-12T02:28:00Z; collection lag unavailable. Pending runs: 12; reverse-sweep cursor 2026-10-08T17:36:47Z. The cursor measures discovery progress, not evidence of complete historical coverage.
+Last selected execution completed: 2026-10-12T09:50:28Z; collection lag unavailable. Pending runs: 19; reverse-sweep cursor 2026-10-08T17:36:47Z. The cursor measures discovery progress, not evidence of complete historical coverage.
