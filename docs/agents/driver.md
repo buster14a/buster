@@ -1360,6 +1360,25 @@ Its configured native Linux control builds a real archive with host compiler
 and archiver, links an independent host control, and runs both Buster's direct
 and sysroot-default named links.
 
+Native x86-64 and AArch64 Linux ELF image links also accept direct `.so`
+and versioned `.so.N` file operands, including the full paths returned by
+CMake's `find_library`. They retain their position among `-l` occurrences
+and form a serial translation-unit boundary. The driver reads exactly the
+supplied path; `-L` and default roots cannot substitute for a missing or
+incompatible direct input. The ordinary ELF export/version reader supplies
+imports, and `DT_NEEDED` uses `DT_SONAME` when present, otherwise the
+operand's original spelling. Repeated identities are emitted once.
+The `-v` `buster-native-ld` line includes each original file operand.
+
+Direct DSOs are refused for compile-only, preprocessing, syntax-only,
+assembly, LLVM/GPU output, foreign/non-ELF targets and the in-memory
+retained-object route. Missing, malformed and target-incompatible files
+fail the link with the supplied path and preserve existing output.
+`compiler_driver_library_path_inputs` checks both ELF targets and allocators,
+SONAME/no-SONAME identity, versioned paths, mixed `-l` order, duplicates,
+linker scripts and refusals. `compiler_driver_library_path_native` compares
+native links and execution against the configured GCC/Clang.
+
 For requested Linux shared libraries, located GNU linker scripts support
 `INPUT(...)`, `GROUP(...)` and `AS_NEEDED(...)`, including nested commands,
 commas, quoted filenames, whitespace and C block comments. Members name ELF64

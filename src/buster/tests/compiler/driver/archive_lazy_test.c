@@ -4,6 +4,8 @@
 // compiler_driver_library_order_* checks the parser's independent operation
 // oracle, real archive positions, provider identity, lane boundaries and native
 // host-linked controls through the registered lazy-archive fixture.
+// compiler_driver_library_path_inputs covers direct ELF DSOs, SONAME, mixed -l
+// order, exact-path refusals and unsupported actions/targets.
 
 BUSTER_GLOBAL_LOCAL void compiler_driver_archive_test_integer(u8* bytes, u64 value, u32 width, bool big_endian)
 {
@@ -1792,6 +1794,247 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_foreign_reserved
     return result;
 }
 
+
+// Direct DSOs share the ordered -l resolver. Literal ELF fixtures keep the
+// requested filename independent of SONAME and exercise both native CPUs.
+BUSTER_GLOBAL_LOCAL u64 compiler_driver_library_path_needed_position(ByteSlice image, String8 name)
+{
+    ByteSlice dynamic = compiler_driver_test_elf_section(image, S8(".dynamic"));
+    ByteSlice strings = compiler_driver_test_elf_section(image, S8(".dynstr"));
+    u64 result = UINT64_MAX;
+    for (u64 offset = 0; result == UINT64_MAX && offset + 16 <= dynamic.length; offset += 16)
+    {
+        u64 tag = compiler_driver_test_pe_read_u64(dynamic, offset);
+        u64 index = compiler_driver_test_pe_read_u64(dynamic, offset + 8);
+        if (tag == 1 && index < strings.length && name.length < strings.length - index &&
+            strings.pointer[index + name.length] == 0 && memcmp(strings.pointer + index, name.pointer, name.length) == 0)
+        {
+            result = offset;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_path_inputs(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("x86_64-linux"), S8("aarch64-linux")};
+    u16 machines[] = {62, 183};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 exported = S8("path_provider");
+    String8 extra_exported = S8("extra_provider");
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 root = buster_test_temporary_path(arena, S8("buster-shared-path-inputs"), S8(""));
+            if (BUSTER_REQUIRE(arguments, os_make_directory_attempt(root)))
+            {
+                String8 source = string_format_z(arena, S8("{S8}/main.c"), root);
+                String8 object = string_format_z(arena, S8("{S8}/main.o"), root);
+                String8 library = string_format_z(arena, S8("{S8}/libpath.so"), root);
+                String8 versioned = string_format_z(arena, S8("{S8}/libpath.so.7"), root);
+                String8 plain = string_format_z(arena, S8("{S8}/libplain.so"), root);
+                String8 extra = string_format_z(arena, S8("{S8}/libextra.so"), root);
+                String8 script = string_format_z(arena, S8("{S8}/libscript.so"), root);
+                String8 bad_script = string_format_z(arena, S8("{S8}/libbadscript.so"), root);
+                String8 malformed = string_format_z(arena, S8("{S8}/libmalformed.so"), root);
+                String8 alien = string_format_z(arena, S8("{S8}/libalien.so"), root);
+                String8 missing = string_format_z(arena, S8("{S8}/absent/libpath.so"), root);
+                String8 output = string_format_z(arena, S8("{S8}/linked.elf"), root);
+                String8 absolute = os_path_absolute(arena, library, false);
+                String8 absolute_versioned = os_path_absolute(arena, versioned, false);
+                ByteSlice elf = compiler_driver_test_elf_shared_library(arena, machines[target], &exported, 1);
+                ByteSlice with_soname = compiler_driver_test_elf_script_soname(arena, elf, S8("libidentity.so.9"));
+                ByteSlice extra_elf = compiler_driver_test_elf_shared_library(arena, machines[target], &extra_exported, 1);
+                bool written = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int path_provider(void); int main(void) { return path_provider() != 42; }\n"))) &&
+                               file_write(library, with_soname) && file_write(versioned, with_soname) && file_write(plain, elf) &&
+                               file_write(extra, extra_elf) &&
+                               file_write(script, BUSTER_SLICE_TO_BYTE_SLICE(S8("INPUT(libpath.so)\n"))) &&
+                               file_write(bad_script, BUSTER_SLICE_TO_BYTE_SLICE(S8("SEARCH_DIR(/tmp)\n"))) &&
+                               file_write(malformed, BUSTER_SLICE_TO_BYTE_SLICE(S8("not an ELF DSO"))) &&
+                               file_write(alien, compiler_driver_test_elf_shared_library(arena, machines[1 - target], &exported, 1));
+                if (BUSTER_REQUIRE(arguments, written))
+                {
+                    String8 compile[] = {S8("-target"), targets[target], S8("-nostdinc"), S8("-g0"), allocators[allocator],
+                                         S8("-c"), source, S8("-o"), object};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena,
+                        (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)));
+                    if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
+                    {
+                        for (u32 scenario = 0; scenario < 12; scenario += 1)
+                        {
+                            TemporalArena cell = arena_begin_temporal(arena);
+                            String8 sentinel = S8("preserve shared-library output");
+                            BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+                            String8 operand = scenario == 1 ? absolute_versioned : scenario == 2 ? plain
+                                              : scenario == 3 ? missing : scenario == 4 ? malformed : scenario == 5 ? alien
+                                              : scenario == 10 ? script : scenario == 11 ? bad_script : absolute;
+                            String8 command[18] = {S8("-target"), targets[target], S8("--sysroot"), root, S8("-L"), root,
+                                                  S8("-g0"), allocators[allocator], S8("-v"), S8("-o"), output, object};
+                            u32 count = 12;
+                            if (scenario == 7) { command[count++] = S8("-lextra"); }
+                            if (scenario == 8) { command[count++] = S8("-lpath"); }
+                            command[count++] = operand;
+                            if (scenario == 6) { command[count++] = S8("-lextra"); }
+                            if (scenario == 9) { command[count++] = S8("-lpath"); }
+                            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena,
+                                (SliceString8){.pointer = command, .length = count});
+                            invocation.keep_going = true;
+                            CompilerDriverResult linked = compiler_driver_execute_invocation(arena, invocation);
+                            bool success = scenario < 3 || (scenario >= 6 && scenario <= 10);
+                            String8 description = string_format(arena, S8("DSO path target={S8} allocator={u32} scenario={u32}: {S8}"),
+                                                                targets[target], allocator, scenario, linked.diagnostic);
+                            BUSTER_TEST_RAW(arguments, linked.error == (success ? COMPILER_DRIVER_ERROR_NONE : COMPILER_DRIVER_ERROR_LINK), description);
+                            BUSTER_TEST(arguments, string_first_sequence(linked.linker_report, operand) != BUSTER_STRING_NO_MATCH);
+                            BUSTER_TEST(arguments, linked.input_result_count == 2 && linked.inputs[0].status == COMPILER_DRIVER_INPUT_STATUS_PREBUILT &&
+                                                   linked.inputs[1].status == (success ? COMPILER_DRIVER_INPUT_STATUS_PREBUILT : COMPILER_DRIVER_INPUT_STATUS_FAILED));
+                            if (success && linked.error == COMPILER_DRIVER_ERROR_NONE)
+                            {
+                                String8 identity = scenario == 2 ? plain : S8("libidentity.so.9");
+                                BUSTER_TEST(arguments, compiler_driver_test_elf_needed_count(linked.native_link.executable, identity) == 1);
+                                BUSTER_TEST(arguments, compiler_driver_test_elf_needed_count(linked.native_link.executable, absolute) == 0);
+                                BUSTER_TEST(arguments, compiler_driver_test_elf_needed_count(linked.native_link.executable, absolute_versioned) == 0);
+                                BUSTER_TEST(arguments, compiler_driver_test_elf_needed_count(linked.native_link.executable, S8("libpath.so")) == 0);
+                                bool mixed = scenario == 6 || scenario == 7;
+                                BUSTER_TEST(arguments, compiler_driver_test_elf_needed_count(linked.native_link.executable, S8("libextra.so")) == (mixed ? 1u : 0u));
+                                if (mixed)
+                                {
+                                    u64 first = compiler_driver_library_path_needed_position(linked.native_link.executable, identity);
+                                    u64 second = compiler_driver_library_path_needed_position(linked.native_link.executable, S8("libextra.so"));
+                                    BUSTER_TEST(arguments, first != UINT64_MAX && second != UINT64_MAX && (first < second) == (scenario == 6));
+                                }
+                            }
+                            else if (!success)
+                            {
+                                String8 expected = scenario == 11
+                                    ? string_format(arena, S8("unsupported GNU linker script {S8} requested by shared-library input {S8}"), bad_script, operand)
+                                    : string_format(arena, S8("could not read target shared library {S8}"), operand);
+                                BUSTER_STRING_TEST(arguments, linked.diagnostic, expected);
+                                BUSTER_TEST(arguments, !linked.native_link.executable.length);
+                                ByteSlice preserved = file_read(arena, output, (FileReadOptions){0});
+                                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, preserved), sentinel);
+                            }
+                            scratch_end(cell);
+                        }
+                        String8 actions[] = {S8("-c"), S8("-S"), S8("-E"), S8("-fsyntax-only"), S8("-emit-llvm")};
+                        for (u32 action = 0; action < BUSTER_ARRAY_LENGTH(actions); action += 1)
+                        {
+                            TemporalArena cell = arena_begin_temporal(arena);
+                            String8 command[] = {S8("-target"), targets[target], actions[action], S8("-o"), output, absolute};
+                            CompilerDriverResult rejected = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena,
+                                (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                            BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_INVALID_INPUT);
+                            BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, S8("requires a native x86-64 or AArch64 Linux ELF image link")) != BUSTER_STRING_NO_MATCH);
+                            scratch_end(cell);
+                        }
+                        String8 foreign[] = {S8("x86_64-windows"), S8("aarch64-apple-macos"), S8("x86_64-freestanding"),
+                                             S8("wasm32-wasip1"), S8("bpfel-unknown-linux"), S8("aarch64-linux-android")};
+                        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(foreign); index += 1)
+                        {
+                            TemporalArena cell = arena_begin_temporal(arena);
+                            String8 command[] = {S8("-target"), foreign[index], S8("-o"), output, absolute};
+                            CompilerDriverResult rejected = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena,
+                                (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                            BUSTER_TEST_RAW(arguments, rejected.error == COMPILER_DRIVER_ERROR_INVALID_INPUT, rejected.diagnostic);
+                            BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, S8("requires a native x86-64 or AArch64 Linux ELF image link")) != BUSTER_STRING_NO_MATCH);
+                            scratch_end(cell);
+                        }
+                        String8 retained[] = {S8("-target"), targets[target], S8("-o"), output, absolute};
+                        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(retained));
+                        invocation.retain_linked_object = true;
+                        CompilerDriverResult rejected = compiler_driver_execute_invocation(arena, invocation);
+                        BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_INVALID_INPUT);
+                    }
+                }
+                String8 paths[] = {source, object, library, versioned, plain, extra, script, bad_script, malformed, alien, output};
+                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(paths); index += 1) { os_file_delete(paths[index]); }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINK_LIBC && BUSTER_LINUX && !BUSTER_ANDROID
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_path_native(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    bool gnu_driver = string_equal(S8(BUSTER_HOST_C_COMPILER_ID), S8("GNU")) ||
+                      string_equal(S8(BUSTER_HOST_C_COMPILER_ID), S8("Clang"));
+    if (gnu_driver)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 root = buster_test_temporary_path(arena, S8("buster-shared-path-native"), S8(""));
+        if (BUSTER_REQUIRE(arguments, os_make_directory_attempt(root)))
+        {
+            String8 provider = string_format_z(arena, S8("{S8}/provider.c"), root);
+            String8 source = string_format_z(arena, S8("{S8}/main.c"), root);
+            String8 library = string_format_z(arena, S8("{S8}/libactual.so.7"), root);
+            String8 identity = os_path_absolute(arena, string_format_z(arena, S8("{S8}/libidentity.so.9"), root), false);
+            String8 object = string_format_z(arena, S8("{S8}/main.o"), root);
+            String8 output = string_format_z(arena, S8("{S8}/buster.elf"), root);
+            String8 reference = string_format_z(arena, S8("{S8}/reference.elf"), root);
+            bool written = file_write(provider, BUSTER_SLICE_TO_BYTE_SLICE(S8("int path_provider(void) { return 42; }\n"))) &&
+                           file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int path_provider(void); int main(void) { return path_provider() != 42; }\n")));
+            if (BUSTER_REQUIRE(arguments, written))
+            {
+                String8 soname = string_format(arena, S8("-Wl,-soname,{S8}"), identity);
+                String8 options[] = {S8("-shared"), S8("-fPIC"), provider, soname, S8("-o"), library};
+                bool built = compiler_driver_library_order_host(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(options),
+                    PROCESS_RESULT_SUCCESS, (String8){0}, S8("shared-path-provider"), S8("host-DSO"));
+                if (BUSTER_REQUIRE(arguments, built))
+                {
+                    ByteSlice bytes = file_read(arena, library, (FileReadOptions){0});
+                    BUSTER_TEST(arguments, file_write(identity, bytes));
+                    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+                    for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+                    {
+                        TemporalArena cell = arena_begin_temporal(arena);
+                        String8 compile[] = {S8("-nostdinc"), S8("-g0"), allocators[allocator], S8("-c"), source, S8("-o"), object};
+                        CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena,
+                            (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)));
+                        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                        String8 link[] = {object, library, S8("-v"), S8("-o"), output};
+                        CompilerDriverResult linked = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena,
+                            (SliceString8)BUSTER_ARRAY_TO_SLICE(link)));
+                        BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+                        String8 control[] = {source, library, S8("-o"), reference};
+                        bool controlled = compiler_driver_library_order_host(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(control),
+                            PROCESS_RESULT_SUCCESS, (String8){0}, S8("shared-path-reference-link"), allocators[allocator]);
+                        BUSTER_TEST(arguments, controlled);
+                        if (controlled && linked.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            ByteSlice control_image = file_read(arena, reference, (FileReadOptions){0});
+                            BUSTER_TEST(arguments, compiler_driver_test_elf_needed_count(control_image, identity) == 1);
+                            BUSTER_TEST(arguments, compiler_driver_test_elf_needed_count(linked.native_link.executable, identity) == 1);
+                            BUSTER_TEST(arguments, compiler_driver_test_elf_needed_count(linked.native_link.executable, library) == 0);
+                            String8 buster_run[] = {output};
+                            String8 reference_run[] = {reference};
+                            BUSTER_TEST(arguments, compiler_driver_library_order_process(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_run),
+                                PROCESS_RESULT_SUCCESS, (String8){0}, S8("shared-path-Buster-execution"), allocators[allocator]));
+                            BUSTER_TEST(arguments, compiler_driver_library_order_process(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(reference_run),
+                                PROCESS_RESULT_SUCCESS, (String8){0}, S8("shared-path-reference-execution"), allocators[allocator]));
+                        }
+                        BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, output).v);
+                        BUSTER_TEST(arguments, !buster_test_executable_delete(arguments, reference).v);
+                        scratch_end(cell);
+                    }
+                }
+            }
+            String8 paths[] = {provider, source, library, identity, object};
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(paths); index += 1) { os_file_delete(paths[index]); }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_lazy(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_archive_test_default_roots(arguments);
@@ -1804,6 +2047,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_lazy(UnitTestArg
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_test_foreign_reserved_symbols);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_library_order_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_library_order_execution);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_library_path_inputs);
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINK_LIBC && BUSTER_LINUX && !BUSTER_ANDROID
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_library_path_native);
+#endif
     OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
     for (u32 format = 0; format < BUSTER_ARRAY_LENGTH(systems); format += 1)
     {
