@@ -3319,6 +3319,18 @@ C the candidate with `-fc-ast-pilot`, and D the candidate with default flags.
 - **Acceptance.** Hosted counts are diagnostic. No 9700X comparison is
   requested, so Zen 5 validation stays incomplete (#2761).
 
+The call-argument census is
+[`2026-10-12T131052Z`](../../performance-audits/2026-10-12T131052Z.md),
+diagnostic only. The candidate passes every hosted budget and ships:
+- `-fsyntax-only` falls by 27.4 M Ir on the default path (−0.254%) and by
+  30.2 M under the pilot (−0.336%). `-c` falls by the same amounts (−0.108%
+  and −0.127%).
+- 126,768 queries (141,840 under the pilot) are no longer made.
+- Objects are byte-identical across the four arms at `-g0` and `-g`.
+- The gain is small because the memo already answered most second typings.
+  The assignment site in the same validator, which pairs a checked typing
+  with the same wrapper, is left as a lead.
+
 ### Root-conditional `?` refusal without the tree
 
 For the tree-free negative test in `c_ir_root_conditional` (a per-body prefix
