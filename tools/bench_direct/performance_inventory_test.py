@@ -33,10 +33,10 @@ be `native-informative` on route `hosted-native` (maintainer decision on
 must be a macOS or Windows workflow whose named `job` runs on a literal
 GitHub-hosted `macos-*` or `windows-*` label matching its `platform`, so a
 Linux, matrix-selected or self-hosted timing job cannot use it to avoid the
-9700X rule. The workflow must run the `consumer` for that platform, and hold
-`issues: write` only in a separate job that publishes through it and is gated
-to this repository's `main`. Its `alert` must link an existing documented
-heading.
+9700X rule. The native `consumer` must report in a read-only job with
+`--annotate`, no step may continue on error, and `issues: write` belongs only
+to a separate job that publishes through the consumer and is gated to this
+repository's `main`. Its `alert` must link an existing documented heading.
 
 Each owner-requested fixed profile on the pull-compare route (PROFILE_ROWS)
 needs its own covered `<entry>@<profile>` row (`uarch_lab:compare@...`, or
@@ -66,7 +66,7 @@ HOST_CHECK = re.compile(r"\b(?:APPROVED_HOST|host_problem)\b")
 WORKFLOW = re.compile(r"bench|throughput|profile|lab\b|perf|708|^external-projects\.yml$", re.IGNORECASE)
 RECEIPT = ROOT / "tools" / "bench_direct" / "compiler_receipt.py"
 NATIVE_ROUTE, NATIVE_STATUS = "hosted-native", "native-informative"
-NATIVE_CONSUMER = "tools/bench_direct/native_timing.py"
+NATIVE_CONSUMER = "tools/bench_direct/native_timing.c"
 NATIVE_RUNNERS = {"macos": re.compile(r"macos-[0-9a-z.-]+"), "windows": re.compile(r"windows-[0-9a-z.-]+")}
 NATIVE_ALERT_GATE = ("github.repository == 'buster14a/buster'", "github.ref == 'refs/heads/main'")
 # Inventory row -> the compiler_receipt profile constant its consumer must validate.
@@ -82,7 +82,8 @@ NATIVE_WORKFLOW = """jobs:
   timing:
     runs-on: macos-26
     steps:
-      - run: python3 -B tools/bench_direct/native_timing.py macos --annotate
+      - run: clang tools/bench_direct/native_timing.c -lm -o "$RUNNER_TEMP/native-timing"
+      - run: '"$RUNNER_TEMP/native-timing" macos --annotate'
   alert:
     needs: timing
     if: ${{ needs.timing.outputs.verdict == 'regression' && github.repository == 'buster14a/buster' && github.ref == 'refs/heads/main' }}
@@ -91,7 +92,8 @@ NATIVE_WORKFLOW = """jobs:
       contents: read
       issues: write
     steps:
-      - run: python3 -B tools/bench_direct/native_timing.py macos --publish-issue
+      - run: clang tools/bench_direct/native_timing.c -lm -o "$RUNNER_TEMP/native-timing"
+      - run: '"$RUNNER_TEMP/native-timing" macos --publish-issue'
 """
 
 
@@ -168,8 +170,10 @@ def check_native_row(name: str, zen5: dict, read) -> list[str]:
     jobs = job_blocks(workflow)
     job = jobs.get(job_name, []) if isinstance(job_name, str) else []
     runs_on = [line.split(":", 1)[1].strip() for line in job if line.startswith("    runs-on:")]
-    command = f"{NATIVE_CONSUMER} {platform}"
+    command = f'"$RUNNER_TEMP/native-timing" {platform}'
     alerts = [lines for lines in jobs.values() if "      issues: write" in lines]
+    reporters = [lines for lines in jobs.values() if lines not in alerts and
+                 command in "\n".join(lines) and "--annotate" in "\n".join(lines)]
     anchor = alert.split("#", 1) if isinstance(alert, str) and alert.count("#") == 1 else ["", ""]
     if zen5.get("route") != NATIVE_ROUTE or zen5.get("status") != NATIVE_STATUS or not zen5.get("resolution"):
         errors.append(f"{name}: a native hosted row is {NATIVE_STATUS} on {NATIVE_ROUTE} with a resolution")
@@ -177,10 +181,12 @@ def check_native_row(name: str, zen5: dict, read) -> list[str]:
         errors.append(f"{name}: only an existing macOS or Windows workflow can be {NATIVE_STATUS}")
     elif not job or len(runs_on) != 1 or not NATIVE_RUNNERS[platform].fullmatch(runs_on[0]):
         errors.append(f"{name}: job {job_name!r} must run on one literal GitHub-hosted {platform} label")
-    elif zen5.get("consumer") != NATIVE_CONSUMER or not read(NATIVE_CONSUMER) or command not in workflow:
-        errors.append(f"{name}: the workflow must report through {command}")
-    elif len(alerts) != 1 or alerts[0] is job or not any(command in line for line in alerts[0]) or \
-            "--publish-issue" not in "\n".join(alerts[0]) or \
+    elif zen5.get("consumer") != NATIVE_CONSUMER or not read(NATIVE_CONSUMER) or NATIVE_CONSUMER not in workflow or \
+            not reporters or "continue-on-error" in workflow:
+        errors.append(f"{name}: a read-only job must report through {NATIVE_CONSUMER} ({command} --annotate), "
+                      "and no step may continue on error")
+    elif len(alerts) != 1 or alerts[0] is job or NATIVE_CONSUMER not in "\n".join(alerts[0]) or \
+            command not in "\n".join(alerts[0]) or "--publish-issue" not in "\n".join(alerts[0]) or \
             not all(any(line.startswith("    if:") and gate in line for line in alerts[0]) for gate in NATIVE_ALERT_GATE):
         errors.append(f"{name}: issues: write belongs only to one separate main-gated job publishing through {command}")
     elif not anchor[1] or anchor[1] not in heading_anchors(read(anchor[0])):
@@ -313,6 +319,8 @@ def main() -> int:
         ".github/workflows/writer.yml": NATIVE_WORKFLOW.replace("    runs-on: macos-26\n",
                                                                  "    runs-on: macos-26\n    permissions:\n      issues: write\n"),
         ".github/workflows/silent.yml": NATIVE_WORKFLOW.replace(" --publish-issue", ""),
+        ".github/workflows/unreported.yml": NATIVE_WORKFLOW.replace(" macos --annotate", " macos"),
+        ".github/workflows/lenient.yml": NATIVE_WORKFLOW.replace("    steps:\n", "    continue-on-error: true\n    steps:\n", 1),
         NATIVE_CONSUMER: "consumer", "docs/guide.md": "# Guide\n\n## Native hosted timing\n",
     }
     native = {"route": NATIVE_ROUTE, "status": NATIVE_STATUS, "platform": "macos", "job": "timing",
@@ -330,6 +338,8 @@ def main() -> int:
         ("an alert job not gated to main fails", native, "open-alert.yml", False),
         ("issues: write in the timing job fails", native, "writer.yml", False),
         ("an alert job that publishes nothing fails", native, "silent.yml", False),
+        ("a workflow without an annotating report fails", native, "unreported.yml", False),
+        ("a workflow that continues on error fails", native, "lenient.yml", False),
         ("an undocumented alert fails", dict(native, alert="docs/guide.md#missing"), "native.yml", False),
         ("another consumer fails", dict(native, consumer="tools/bench_direct/authorize.py"), "native.yml", False),
         ("the native status needs its route", dict(native, route="none"), "native.yml", False),

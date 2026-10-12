@@ -3,8 +3,8 @@ name: Windows paired matrix benchmark
 # Each trial runs both revisions on one VM. Ordinary PRs do not run benchmarks.
 #
 # Native Windows timing is informative only (#2761): job `report` pairs each
-# trial's baseline/candidate matrix durations, warns on a regression and never
-# fails a check for one; a failed, missing or incomplete arm still fails. Job
+# trial's baseline/candidate matrix durations with tools/bench_direct/native_timing.c,
+# warns on a regression and never fails a check for one; a failed, missing or incomplete arm still fails. Job
 # `alert` files or updates the Windows tracking issue only for a trusted main
 # dispatch. Not Zen 5 evidence; see docs/agents/benchmarking.md#native-hosted-timing.
 on:
@@ -278,6 +278,8 @@ jobs:
           mode: source
           source-directory: .
           source-repository: ${{ github.repository }}
+      - name: Compile the native timing reporter
+        run: clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/native_timing.c -lm -o "$RUNNER_TEMP/native-timing"
       - name: Read only this run's paired evidence
         env:
           GH_TOKEN: ${{ github.token }}
@@ -285,18 +287,15 @@ jobs:
         run: gh run download "$GITHUB_RUN_ID" --pattern "issue-708-pair-*-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --dir "$RUNNER_TEMP/issue-708-evidence"
       - name: Report timing (informative, never a gate)
         id: report
-        shell: bash
         env:
           DEMONSTRATE: ${{ inputs.demonstrate_regression == true && '--demonstrate' || '' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
         run: |
-          set -euo pipefail
           # Exit 2 (missing, partial or failed evidence) fails the job; a
           # regression is a warning and a summary line only.
-          python3 -B tools/bench_direct/native_timing.py windows --evidence "$RUNNER_TEMP/issue-708-evidence" \
+          "$RUNNER_TEMP/native-timing" windows --evidence "$RUNNER_TEMP/issue-708-evidence" \
             --baseline "$BASELINE_SHA" --candidate "$CANDIDATE_SHA" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
-            --trials 3 --run-url "$RUN_URL" --annotate ${DEMONSTRATE:+"$DEMONSTRATE"} \
-            --step-summary "$GITHUB_STEP_SUMMARY" --github-output "$GITHUB_OUTPUT"
+            --trials 3 --run-url "$RUN_URL" --annotate ${DEMONSTRATE:+"$DEMONSTRATE"}
 
   alert:
     # Only a trusted main dispatch reaches the write token, in its own job;
@@ -326,6 +325,8 @@ jobs:
           mode: source
           source-directory: .
           source-repository: ${{ github.repository }}
+      - name: Compile the native timing reporter
+        run: clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/native_timing.c -lm -o "$RUNNER_TEMP/native-timing"
       - name: Read only this run's paired evidence
         env:
           GH_TOKEN: ${{ github.token }}
@@ -336,6 +337,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
         run: |
-          python3 -B tools/bench_direct/native_timing.py windows --evidence "$RUNNER_TEMP/issue-708-evidence" \
+          "$RUNNER_TEMP/native-timing" windows --evidence "$RUNNER_TEMP/issue-708-evidence" \
             --baseline "$BASELINE_SHA" --candidate "$CANDIDATE_SHA" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
-            --trials 3 --publish-issue --repository "$GITHUB_REPOSITORY" --run-url "$RUN_URL" --step-summary "$GITHUB_STEP_SUMMARY"
+            --trials 3 --run-url "$RUN_URL" --publish-issue

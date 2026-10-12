@@ -759,11 +759,22 @@ The two rows in
 On macOS, `bench_throughput_ci` omits `--cpu auto`, because macOS has no CPU
 affinity API. The macOS samples are therefore unpinned.
 
-`tools/bench_direct/native_timing.py` reads each workflow's existing output.
-It reports, in its step summary, the cell (case or trial), the
+`tools/bench_direct/native_timing.c` reads each workflow's existing output. It
+is native C on the existing `ci_metrics` JSON parser and `gh` transport, and it
+is compiled in each job the way `lifecycle.c` is. A read-only `report` job on
+`ubuntu-26.04` downloads the measuring job's artifact and runs it with
+`--annotate`. For macOS this means the `macos-26` job only measures and
+uploads, and the verdict, warning and any failure appear in `report`.
+
+The report gives, in its step summary, the cell (case or trial), the
 candidate/baseline ratio, both commits and the run link. No new statistic is
 involved: the macOS ratio is the geometric mean of the two rounds' median
-paired ratios, as in the guard's `summary.md`.
+paired ratios, as in the guard's `summary.md`, computed as
+`sqrt(r0) * sqrt(r1)` so large finite ratios cannot overflow. A number that is
+not representable as a finite double (a huge integer, an overflowing exponent)
+or a derived ratio that is not finite and positive is malformed evidence. On
+Windows the results are read whether PowerShell wrote them as UTF-16LE or
+UTF-8; any non-ASCII byte is refused.
 
 | Outcome | Check | Visibility |
 |---|---|---|
@@ -807,10 +818,16 @@ ratio. The report is labelled a demonstration, and the alert job never runs.
 or Windows workflow row whose `job` runs on one literal GitHub-hosted `macos-*`
 or `windows-*` label matching its `platform`. A Linux, matrix-selected or
 self-hosted timing job cannot use the status to avoid the 9700X rule. The test
-also requires that the workflow report through `native_timing.py`, that one
-separate main-gated job publish through it, and that the row's `alert` link a
-heading in this guide. `native_timing_test.py` pins the analysis, the issue
-publisher and both workflows' report-only and alert steps.
+also requires that:
+
+- a read-only job reports through `native_timing.c` with `--annotate`;
+- no step continues on error;
+- one separate main-gated job compiles the tool and publishes through it;
+- the row's `alert` links a heading in this guide.
+
+`native_timing --self-test`, which runs in the benchmark policy check, covers
+the analysis, the malformed and extreme-number refusals, the demonstration path
+and the issue publisher against synthetic `gh` responses.
 
 ## Benchmarking a compiler change (A/B)
 

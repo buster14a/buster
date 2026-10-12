@@ -385,7 +385,7 @@
         "status": "native-informative",
         "platform": "macos",
         "job": "timing",
-        "consumer": "tools/bench_direct/native_timing.py",
+        "consumer": "tools/bench_direct/native_timing.c",
         "alert": "docs/agents/benchmarking.md#native-hosted-timing",
         "resolution": "Zen 5 measurements do not establish macOS performance and the 9700X cannot run macOS. Native macOS timing is informative only (maintainer decision on #2761, 2026-10-11): never Zen 5 evidence and never a gate; a confirmed regression warns and files or updates the macOS tracking issue from a trusted main run."
       }
@@ -437,7 +437,7 @@
         "status": "native-informative",
         "platform": "windows",
         "job": "benchmark",
-        "consumer": "tools/bench_direct/native_timing.py",
+        "consumer": "tools/bench_direct/native_timing.c",
         "alert": "docs/agents/benchmarking.md#native-hosted-timing",
         "resolution": "Windows performance is not established by Zen 5 Linux measurements and the 9700X cannot run Windows. Native Windows timing is informative only (maintainer decision on #2761, 2026-10-11): never Zen 5 evidence and never a gate; a regression warns and files or updates the Windows tracking issue from a trusted main dispatch."
       }

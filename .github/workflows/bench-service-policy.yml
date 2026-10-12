@@ -93,7 +93,8 @@ jobs:
           python3 -B tools/bench_direct/compiler_test.py
           python3 -B tools/bench_direct/compiler_visibility_test.py
           python3 -B tools/bench_direct/performance_inventory_test.py
-          python3 -B tools/bench_direct/native_timing_test.py
+          clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/native_timing.c -lm -o "$RUNNER_TEMP/native-timing"
+          "$RUNNER_TEMP/native-timing" --self-test
       - name: Replay micro-architecture lab formats
         if: ${{ steps.reuse.outputs.reused != 'true' }}
         run: python3 -B tools/uarch_lab_test.py
