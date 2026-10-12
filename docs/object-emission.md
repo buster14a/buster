@@ -216,18 +216,23 @@ and before every constructor; a static image's stub calls it first. A
 `-shared` object has no runner: each slot carries an `R_X86_64_IRELATIVE`, the
 last of its dynamic relocations, so ld.so fills it while relocating the library,
 before any initializer runs, including an executable's `DT_PREINIT_ARRAY`
-callbacks that call into the library. On AArch64 the runner
-passes hwcap 0, so a resolver that dispatches on hwcap selects its baseline
-implementation. An undefined IFUNC, or one outside code, stays refused. The
-C frontend's own `__attribute__((ifunc("resolver")))` writes the same symbol
-(an indirect `IrSymbolAlias` becomes `ObjectSymbol.indirect` at the
-resolver's address), and is refused by name for COFF and Mach-O output; see
-[linkage](agents/frontend/linkage.md).
+callbacks that call into the library. On AArch64 the runner passes glibc's
+resolver arguments, `x0 = AT_HWCAP | _IFUNC_ARG_HWCAP` and `x1` pointing at an
+`__ifunc_arg_t` (`_size` 24, `_hwcap`, `_hwcap2`) in its frame, so a resolver
+that dispatches on hwcap, function multiversioning included, sees the real CPU.
+The loader calls a preinit entry with `(argc, argv, envp)`, as the static stub
+calls its constructors, and the runner reads `AT_HWCAP` and `AT_HWCAP2` from the
+auxiliary vector past `envp`'s terminator. An undefined IFUNC, or one outside
+code, stays refused. The C frontend's own `__attribute__((ifunc("resolver")))`
+writes the same symbol (an indirect `IrSymbolAlias` becomes
+`ObjectSymbol.indirect` at the resolver's address), and is refused by name for
+COFF and Mach-O output; see [linkage](agents/frontend/linkage.md).
 `compiler_driver_elf_ifunc_tests` checks single resolution and address identity
 against the host linker for static, dynamic, `-pie` and `-shared` images, and a
 host-linked executable whose preinit callback calls a `-shared` library's IFUNC.
 It also compiles the same C with `ide cc`, at `-O0` and `-O2`, and with a
-local (`static`) ifunc, and runs each image against the host-built oracle.
+local (`static`) ifunc, and runs each image against the host-built oracle. On
+AArch64 it checks the hwcap arguments against the program's auxiliary vector.
 `.ctors`/`.dtors` and `.init`/`.fini` inputs stay refused: GNU ld 2.42 folds
 `.ctors` into `.init_array` in reverse but emits a null `.fini_array` slot for
 `.dtors`, and lld 18 runs neither, so no consistent oracle exists, and the

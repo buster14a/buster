@@ -16192,9 +16192,13 @@ bool link_validate_linker_arguments(Target target, NativeExecutableLinkOptions o
 //     dependencies' DT_INIT_ARRAY. These references are the object's last, so
 //     they are the last dynamic relocations and every other one is applied
 //     before a resolver runs.
-// The AArch64 runner passes hwcap 0 (and no __ifunc_arg_t), the convention of
-// a loader that predates hwcap arguments, so a resolver that dispatches on
-// hwcap selects its baseline implementation.
+// The AArch64 runner passes glibc's resolver arguments, so a resolver that
+// dispatches on hwcap (function multiversioning included) sees the real CPU:
+// x0 = AT_HWCAP | _IFUNC_ARG_HWCAP and x1 = &__ifunc_arg_t{_size, _hwcap,
+// _hwcap2}, built in the runner's frame. ld.so calls a DT_PREINIT_ARRAY entry
+// with (argc, argv, envp), as the static stub calls its constructors, and the
+// auxiliary vector follows envp's null terminator, so the runner scans x2 for
+// AT_HWCAP and AT_HWCAP2; a missing entry reads as 0.
 enum
 {
     LINK_IFUNC_X86_THUNK_SIZE = 8,
@@ -16202,7 +16206,32 @@ enum
     LINK_IFUNC_X86_RUNNER_FRAME = 9,
     LINK_IFUNC_AARCH64_THUNK_SIZE = 16,
     LINK_IFUNC_AARCH64_RUNNER_STEP = 20,
-    LINK_IFUNC_AARCH64_RUNNER_FRAME = 16,
+    LINK_IFUNC_AARCH64_RUNNER_PROLOGUE = 72,
+    LINK_IFUNC_AARCH64_RUNNER_FRAME = LINK_IFUNC_AARCH64_RUNNER_PROLOGUE + 8,
+};
+
+// The AArch64 runner's prologue. Its 48-byte frame holds the frame record at
+// sp, __ifunc_arg_t {_size = 24, _hwcap, _hwcap2} at sp + 16 and the x0 every
+// resolver takes, AT_HWCAP | _IFUNC_ARG_HWCAP (bit 62), at sp + 40.
+BUSTER_GLOBAL_LOCAL const u32 link_ifunc_aarch64_runner_prologue[LINK_IFUNC_AARCH64_RUNNER_PROLOGUE / sizeof(u32)] = {
+    0xa9bd7bfd, // stp x29, x30, [sp, #-48]!
+    0x910003fd, // mov x29, sp
+    0xd2800003, // mov x3, #0 (AT_HWCAP)
+    0xd2800004, // mov x4, #0 (AT_HWCAP2)
+    0xb4000142, // cbz x2, done
+    0xf8408445, // envp: ldr x5, [x2], #8
+    0xb5ffffe5, // cbnz x5, envp
+    0xa8c11845, // auxv: ldp x5, x6, [x2], #16
+    0xb40000c5, // cbz x5, done (AT_NULL)
+    0xf10040bf, // cmp x5, #16 (AT_HWCAP)
+    0x9a8300c3, // csel x3, x6, x3, eq
+    0xf10068bf, // cmp x5, #26 (AT_HWCAP2)
+    0x9a8400c4, // csel x4, x6, x4, eq
+    0x17fffffa, // b auxv
+    0xd2800305, // done: mov x5, #24
+    0xa9010fe5, // stp x5, x3, [sp, #16]
+    0xb2420063, // orr x3, x3, #(1 << 62)
+    0xa9020fe4, // stp x4, x3, [sp, #32]
 };
 
 BUSTER_GLOBAL_LOCAL bool link_elf_indirect_functions_rebind(Arena* arena, ObjectFile* object, bool shared, ObjectFile* rebound, String8* message)
@@ -16313,9 +16342,11 @@ BUSTER_GLOBAL_LOCAL bool link_elf_indirect_functions_rebind(Arena* arena, Object
         }
         else if (!shared)
         {
-            link_write_u32(code, cursor, 0xa9bf7bfd); // stp x29, x30, [sp, #-16]!
-            link_write_u32(code, cursor + 4, 0x910003fd); // mov x29, sp
-            cursor += 8;
+            for (u32 word = 0; word < BUSTER_ARRAY_LENGTH(link_ifunc_aarch64_runner_prologue); word += 1)
+            {
+                link_write_u32(code, cursor + word * sizeof(u32), link_ifunc_aarch64_runner_prologue[word]);
+            }
+            cursor += LINK_IFUNC_AARCH64_RUNNER_PROLOGUE;
         }
         u32 slot = 0;
         for (u32 index = 0; index < object->symbol_count; index += 1)
@@ -16379,8 +16410,8 @@ BUSTER_GLOBAL_LOCAL bool link_elf_indirect_functions_rebind(Arena* arena, Object
             }
             else if (!shared)
             {
-                link_write_u32(code, cursor, 0xd2800000); // mov x0, #0 (hwcap)
-                link_write_u32(code, cursor + 4, 0xd2800001); // mov x1, #0
+                link_write_u32(code, cursor, 0xf94017e0); // ldr x0, [sp, #40] (hwcap)
+                link_write_u32(code, cursor + 4, 0x910043e1); // add x1, sp, #16 (__ifunc_arg_t)
                 link_write_u32(code, cursor + 8, 0x94000000); // bl resolver
                 link_write_u32(code, cursor + 12, 0x90000010); // adrp x16, slot
                 link_write_u32(code, cursor + 16, 0xf9000200); // str x0, [x16, :lo12:slot]
@@ -16401,7 +16432,7 @@ BUSTER_GLOBAL_LOCAL bool link_elf_indirect_functions_rebind(Arena* arena, Object
         }
         else if (!shared)
         {
-            link_write_u32(code, cursor, 0xa8c17bfd); // ldp x29, x30, [sp], #16
+            link_write_u32(code, cursor, 0xa8c37bfd); // ldp x29, x30, [sp], #48
             link_write_u32(code, cursor + 4, 0xd65f03c0); // ret
         }
         rebound->symbols = symbols;

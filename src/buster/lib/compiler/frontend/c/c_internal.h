@@ -1756,6 +1756,10 @@ BUSTER_C_EXTERN String8 c_parse_scalar_conversion_message(Target target, CTypeKi
 // Whether [start, end) has the shape of a place, the constraint the machine's
 // `&` checks.
 BUSTER_C_EXTERN bool c_parse_expression_place_shape(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end);
+// Whether [start, end) is a place `++` or `--` may modify, given its type and
+// whether it is a nonplace projection: the machine's checked update rule.
+BUSTER_C_EXTERN bool c_parse_update_operand_modifiable(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CTypeId type,
+                                                       bool nonplace_projection);
 // The binding strength the machine's operator scan gives a token: 1 for the
 // comma, 2 for the assignment family, then 4 (`||`) to 13 (`*`); 0 for none.
 BUSTER_C_EXTERN u32 c_parse_expression_operator_precedence(CToken token);
