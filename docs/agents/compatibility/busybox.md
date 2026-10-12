@@ -34,9 +34,10 @@ pinned tree in bounded Git batches, without index or clean-filter authority.
 Pinned symlink targets are checked as bytes; replacing a regular source file
 with a symlink is refused. The same checks run before receipt publication.
 
-`./build.sh test_userspace --self-test-inputs` runs synthetic Git-only input
-controls on Linux without root, chroot, any external checkout or compiler
-workload. The existing hosted TCC bootstrap lane executes these controls.
+`./build.sh external_projects --self-test` includes the synthetic Git-only
+userspace input controls on Linux without root, chroot, any external checkout
+or compiler workload. The policy-owned generic command remains valid on other
+platforms and the existing hosted TCC bootstrap lane executes it.
 They cover clean and restored admission, wrong pin, ordinary and hidden tracked
 drift, ignored/untracked headers, sparse state, Git environment redirection,
 replacement refs, executable-mode changes and regular-file symlink replacement.
