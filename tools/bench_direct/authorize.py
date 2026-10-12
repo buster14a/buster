@@ -14,6 +14,10 @@ compiler comparison (an added or modified COMPARE_REQUEST, #2769, or
 SCALING_REQUEST, #424, whose scaling leg runs inside the comparison). For a
 comparison it resolves the merge base with the base branch and both trees from
 GitHub's records, so the host job and the publisher bind the same identities.
+It then admits the merge base's corpus harness (harness_admission, #3714): a
+base without THROUGHPUT_HARNESS_FLOOR is "unsupported" and never dispatched,
+unless one fresh THROUGHPUT_HISTORICAL_REQUEST_LINE selects the named
+historical recipe ("historical").
 """
 
 from __future__ import annotations
@@ -40,6 +44,10 @@ API = "https://api.github.com"
 COMPARE_REQUEST = "benchmarks/9700x/compiler-compare.request"
 # Kept equal to compiler_receipt.SCALING_REQUEST; this file imports nothing local.
 SCALING_REQUEST = "benchmarks/9700x/scaling.request"
+# Kept equal to compiler_receipt's THROUGHPUT_HARNESS_FLOOR and
+# THROUGHPUT_HISTORICAL_REQUEST_LINE (#3714); authorize_test pins the equality.
+THROUGHPUT_HARNESS_FLOOR = "293132e418cb2449b36e3b92ae38aaa487813e43"
+THROUGHPUT_HISTORICAL_REQUEST_LINE = "profile: throughput-corpus-historical-v1"
 FILE_PAGES = 30
 FILE_PAGE_SIZE = 100
 # GitHub's compare endpoint never returns more than 300 files.
@@ -195,6 +203,63 @@ def comparison(head: str, compared: object, head_commit: object) -> tuple[list[s
         if not holds:
             failures.append(name)
     return failures, ({} if failures else {"merge_base": base_sha, "merge_base_tree": base_tree, "head_tree": head_tree})
+
+
+def harness_admission(floor_compared: object, request_deltas: list[int] | None) -> tuple[str, list[str]]:
+    """The pull corpus disposition before dispatch: admitted, historical or unsupported (#3714).
+
+    floor_compared is GitHub's compare of THROUGHPUT_HARNESS_FLOOR...merge base:
+    "ahead" or "identical" means the base carries the FAST/QUALITY harness.
+    request_deltas are the historical selector's count changes at the head
+    against each parent (None when unreadable). The recipe is selected only by
+    one fresh exact line and only for a base that predates the floor; any other
+    use, and an unreadable comparison, refuses authorization.
+    """
+    failures: list[str] = []
+    status = floor_compared.get("status") if isinstance(floor_compared, dict) else None
+    requested = request_deltas is not None and bool(request_deltas) and all(delta == 1 for delta in request_deltas)
+    if request_deltas is None:
+        failures.append("historical corpus selector count against every head parent")
+    elif any(delta > 0 for delta in request_deltas) and not requested:
+        failures.append("historical corpus selector must be added exactly once relative to every head parent")
+    state = ""
+    if status in ("ahead", "identical"):
+        state = "admitted"
+        if requested:
+            failures.append("historical corpus recipe requested for a merge base that carries the harness floor")
+    elif status in ("behind", "diverged"):
+        state = "historical" if requested else "unsupported"
+    else:
+        failures.append("harness floor comparison with the merge base")
+    return ("" if failures else state), failures
+
+
+def historical_request_deltas(read, head: str, parents: list) -> list[int] | None:
+    """Exact historical selector-count deltas at head against each parent; None when any read fails.
+
+    read(revision) returns COMPARE_REQUEST's text at that revision, or None when
+    the file is absent there; it raises when the content cannot be proven.
+    """
+    deltas: list[int] | None = None
+    try:
+        texts = [read(revision) for revision in (head, *parents)]
+        counts = [(text or "").splitlines().count(THROUGHPUT_HISTORICAL_REQUEST_LINE) for text in texts]
+        if 1 <= len(parents) <= 2:
+            deltas = [counts[0] - count for count in counts[1:]]
+    except (OSError, ValueError, TypeError, UnicodeDecodeError, urllib.error.URLError):
+        deltas = None
+    return deltas
+
+
+def request_text(repository: str, revision: str, token: str) -> str | None:
+    """COMPARE_REQUEST at revision, or None when GitHub says it is absent there."""
+    text = None
+    try:
+        text = sampling_content(repository, COMPARE_REQUEST, revision, token)
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+    return text
 
 
 def verify(repository: str, run_id: int, head: str, run: object, pulls: object,
@@ -1782,6 +1847,7 @@ def main() -> int:
     failures.extend(problems)
     request_files: list[dict] = []
     compared_parents: list = []
+    parents: list = []
     sampling_requested = False
     preparation_requested = False
     utility_requested = False
@@ -1801,9 +1867,16 @@ def main() -> int:
         failures.extend(problems)
         workloads, compare = workloads and fresh_workloads, compare and fresh_compare
     extra = {"merge_base": "", "merge_base_tree": "", "head_tree": ""}
+    admission = ""
     if not failures and compare:
         compared = fetch(f"/repos/{repository}/compare/{urllib.parse.quote(base)}...{head}", token)
         problems, extra = comparison(head, compared, fetch(f"/repos/{repository}/commits/{head}", token))
+        failures.extend(problems)
+    if not failures and compare:
+        # Admit the merge base's corpus harness before any host is dispatched (#3714).
+        floor_compared = fetch(f"/repos/{repository}/compare/{THROUGHPUT_HARNESS_FLOOR}...{extra['merge_base']}", token)
+        deltas = historical_request_deltas(lambda revision: request_text(repository, revision, token), head, parents)
+        admission, problems = harness_admission(floor_compared, deltas)
         failures.extend(problems)
     if not failures and compare and sampling_patch_requested(compared_parents, UTILITY_PREFIX):
         marker = sampling_content(repository, COMPARE_REQUEST, head, token)
@@ -1846,7 +1919,8 @@ def main() -> int:
         with open(output, "a", encoding="utf-8") as stream:
             stream.write(f"attempt={attempt}\nbase={base}\npull={number}\nworkloads={str(workloads).lower()}\n"
                          f"request_head={head}\ncompare={str(compare).lower()}\nsampling_requested={str(sampling_requested).lower()}\npreparation_requested={str(preparation_requested).lower()}\nutility_requested={str(utility_requested).lower()}\nmerge_base={extra['merge_base']}\n"
-                         f"merge_base_tree={extra['merge_base_tree']}\nhead_tree={extra['head_tree']}\n")
+                         f"merge_base_tree={extra['merge_base_tree']}\nhead_tree={extra['head_tree']}\n"
+                         f"harness_admission={admission}\n")
             for key, value in transported.items():
                 stream.write(f"{key}={value}\n")
     return 1 if failures else 0

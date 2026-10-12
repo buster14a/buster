@@ -144,6 +144,8 @@ struct CompilerDriverLinkOperation
 {
     u32 index;
     CompilerDriverLinkOperationKind kind;
+    // Linux ELF driver policy for this library occurrence.
+    bool as_needed;
 };
 
 // The -W<name> groups that name a warning the driver publishes today. Other
