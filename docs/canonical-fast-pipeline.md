@@ -103,6 +103,14 @@ output check; the shared scope and every admitted body are still checked.
 Uncertified input must pass the full strict validator before any transform.
 Optional transformation never turns an accepted legacy shape into a diagnostic.
 
+Strict value validation permits unresolved struct/union layouts only for
+`PLACE` results of `GLOBAL` or `DEREFERENCE` consumed by `ADDRESS_OF`.
+These rows form addresses without reading object bytes. Every other consumer
+of an incomplete place rejects, as do incomplete values, local allocations,
+field/index results and explicit alignment claims. This rule applies equally
+with and without label metadata; opaque extern address-taking does not decline
+FAST (#3777).
+
 `IrFastStatistics.declines` retains every declining function and its first
 strict error, block and instruction, in function order. `ide cc -v` prints
 one `IR_FAST_DECLINE source=... function=... scope=function|module error=...`

@@ -2725,6 +2725,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     result.test_count += protocol.test_count;
     result.succeeded_test_count += protocol.succeeded_test_count;
     BUSTER_TEST_FIXTURE(arguments, ir_validate_equivalence_tests);
+    BUSTER_TEST_FIXTURE(arguments, ir_validate_incomplete_place_tests);
     BUSTER_TEST_FIXTURE(arguments, ir_test_va_instruction_type_storage);
 
     IrFieldAccessPiece expected_field_access[][IR_FIELD_ACCESS_PIECE_CAPACITY] = {
