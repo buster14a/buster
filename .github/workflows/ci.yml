@@ -432,9 +432,10 @@ jobs:
           retention-days: 7
 
   test:
-    # Ordinary desktop work has no full-lint ancestor. Queue work waits for
-    # the event-specific lint preflight; main still waits for exact-SHA reuse.
-    needs: [queue_lint, reuse, no_code_plan]
+    # Desktop work has no lint ancestor in any event: merge-group lint runs
+    # beside it and CI complete still requires it (#3912). Main still waits
+    # for exact-SHA reuse.
+    needs: [reuse, no_code_plan]
     env:
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
@@ -443,7 +444,7 @@ jobs:
       # captured in the event payload, so delayed and retried jobs use one value.
       # Every non-dispatch event and the default manual run stay uninstrumented.
       BUSTER_CMAKE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.cmake_profile && '1' || '0' }}
-    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name != 'merge_group' || needs.queue_lint.result == 'success')) }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true') }}
     # The first attempt of a draft pull-request run defers scarce macOS
     # runners: the lane reports itself as a named Linux no-op. Merge groups,
     # main, tags, ready pull requests and "Re-run all jobs" run it in full.

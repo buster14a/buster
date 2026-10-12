@@ -461,13 +461,14 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         self.assertNotIn("always()", artifact)
 
 
-    def test_ordinary_desktop_has_no_full_lint_ancestor(self):
+    def test_desktop_has_no_lint_ancestor_in_any_event(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         blocks = dict(re.findall(r"(?ms)^  (\w+):\n(.*?)(?=^  \w+:|\Z)",
                                  text.split("\njobs:\n", 1)[1]))
         desktop = blocks["test"].split("    steps:", 1)[0]
-        self.assertIn("needs: [queue_lint, reuse, no_code_plan]", desktop)
-        self.assertIn("github.event_name != 'merge_group' || needs.queue_lint.result == 'success'", desktop)
+        # Merge-group lint runs beside desktop; CI complete still requires it (#3912).
+        self.assertIn("needs: [reuse, no_code_plan]", desktop)
+        self.assertNotIn("queue_lint", desktop)
         self.assertNotIn("needs.lint", desktop)
         self.assertIn("needs: [reuse, no_code_plan]", blocks["native"])
         self.assertIn("needs: no_code_plan", blocks["queue_lint"])

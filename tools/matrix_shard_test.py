@@ -1774,11 +1774,9 @@ class DraftMacosDeferralTests(unittest.TestCase):
                 self.assertIn(f"    runs-on: ${{{{ {self.PREDICATE} && 'ubuntu-26.04' || matrix.runner }}}}\n", text)
                 name = re.search(r"^    name: (.+)$", text, re.M).group(1)
                 self.assertTrue(name.endswith(f"${{{{ {self.PREDICATE} && '{github_ci_time.DEFERRED_SUFFIX}' || '' }}}}"))
-                if job == "test":
-                    self.assertIn("\n    needs: [queue_lint, reuse, no_code_plan]\n", text)
-                else:
-                    # Only main-push reuse and trusted no-code planning gate these lanes.
-                    self.assertEqual(re.findall(r"^    needs: .*$", text, re.M), ["    needs: [reuse, no_code_plan]"])
+                # Only main-push reuse and trusted no-code planning gate these
+                # lanes; merge-group lint runs beside desktop (#3912).
+                self.assertEqual(re.findall(r"^    needs: .*$", text, re.M), ["    needs: [reuse, no_code_plan]"])
                 step = text.split(f"      - name: {github_ci_time.DEFERRAL_STEP}\n", 1)[1].split("\n      - name:", 1)[0]
                 self.assertIn("if: ${{ startsWith(matrix.runner, 'macos-') && runner.os != 'macOS' }}", step)
                 self.assertIn("DEFERRAL_AUTHORIZED: ${{ github.event_name == 'pull_request' && "
