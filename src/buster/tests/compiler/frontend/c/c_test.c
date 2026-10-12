@@ -2387,7 +2387,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_assignment_chain_boundaries(UnitTestAr
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_assignment_chain_work_growth(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    u32 depths[] = {256, 512, 1024};
+    // Exercise the issue's full 20,000-link workload in hosted CI too.
+    u32 depths[] = {5000, 10000, 20000};
     for (u32 shape = 0; shape < 4; shape += 1)
     {
         for (u32 form = 0; form < 2; form += 1)
