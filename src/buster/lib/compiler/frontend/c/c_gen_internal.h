@@ -116,6 +116,8 @@ BUSTER_F_DECL IrValueId c_test_ir_member_place(Arena* arena, Arena* temporary_ar
                                                String8* failure_message);
 // Fields a member lookup visited, and name indexes built, on this thread.
 BUSTER_F_DECL void c_test_ir_member_lookup_counts(u64* visits, u64* builds);
+// `for`, `while` and `switch` headers c_ir_statement_span peeled on this thread.
+BUSTER_F_DECL u64 c_test_ir_statement_header_peels(void);
 BUSTER_F_DECL bool c_test_ext80_big_shift_left(CIrExt80Big* value, u32 shift);
 BUSTER_F_DECL s32 c_test_ext80_big_compare_shifted(CIrExt80Big const* left, CIrExt80Big const* right, s32 shift);
 BUSTER_F_DECL bool c_test_ext80_big_subtract_shifted(CIrExt80Big* left, CIrExt80Big const* right, u32 shift);

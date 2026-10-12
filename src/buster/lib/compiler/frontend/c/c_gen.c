@@ -44300,8 +44300,25 @@ struct CIrStatementSpan
     u32 if_start;
     // `do` headers whose `while (...) ;` tails follow the extent above.
     u32 pending_do;
+    // Where the header peeling stopped: the statement the extent measures,
+    // or a header whose extent was already filed.
+    u32 stop;
     bool valid;
 };
+
+BUSTER_C_INTERNAL u32 c_ir_statement_end_find(CIntegerIrBuilder* builder, u32 if_start, u32 end);
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_ir_statement_header_peels;
+
+u64 c_test_ir_statement_header_peels(void)
+{
+    return c_ir_statement_header_peels;
+}
+#define C_IR_STATEMENT_HEADER_PEEL() (c_ir_statement_header_peels += 1)
+#else
+#define C_IR_STATEMENT_HEADER_PEEL() ((void)0)
+#endif
 
 BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
@@ -44359,6 +44376,18 @@ BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builde
             measured = true;
             continue;
         }
+        // A header an earlier walk peeled has its statement's extent filed
+        // (c_ir_statement_headers_file): a brace-less nest of D loops then
+        // peels each header once instead of once per enclosing loop (#3723).
+        u32 known = c_ir_statement_end_find(builder, cursor, end);
+        if (known != UINT32_MAX)
+        {
+            span.end = known;
+            span.valid = true;
+            measured = true;
+            continue;
+        }
+        C_IR_STATEMENT_HEADER_PEEL();
         u32 header_close =
             c_ir_matching_delimiter_cached(builder, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
         if (header_close == UINT32_MAX)
@@ -44368,6 +44397,7 @@ BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CIntegerIrBuilder* builde
         }
         cursor = header_close + 1;
     }
+    span.stop = cursor;
     u32 parentheses = 0;
     u32 brackets = 0;
     u32 braces = 0;
@@ -44473,6 +44503,42 @@ BUSTER_C_INTERNAL void c_ir_statement_end_file(CIntegerIrBuilder* builder, u32 i
             builder->statement_ends_cleared = true;
         }
         builder->statement_ends_plus_one[if_start - builder->body_token_start] = if_end + 1;
+    }
+}
+
+// Files the extent of every `for`, `while` or `switch` statement the span from
+// `start` peeled after its last `do`: each such statement ends where the
+// span's own extent does, `base_end`, since a `do` peeled after it would add
+// a tail. The walk retraces the span's peeling up to where it stopped.
+BUSTER_C_INTERNAL void c_ir_statement_headers_file(CIntegerIrBuilder* builder, u32 start, u32 end, CIrStatementSpan span, u32 base_end)
+{
+    CPreprocessResult preprocess = builder->preprocess;
+    u32 cursor = start;
+    u32 dos = 0;
+    bool walking = base_end != UINT32_MAX;
+    while (walking && cursor < span.stop)
+    {
+        cursor = c_ir_statement_labels_end(preprocess, cursor, end);
+        CToken token = cursor < span.stop ? preprocess.tokens[cursor] : (CToken){0};
+        if (cursor >= span.stop)
+        {
+            walking = false;
+        }
+        else if (c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_DO))
+        {
+            dos += 1;
+            cursor += 1;
+        }
+        else
+        {
+            u32 header_close = c_ir_matching_delimiter_cached(builder, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            if (dos == span.pending_do)
+            {
+                c_ir_statement_end_file(builder, cursor, base_end, end);
+            }
+            walking = header_close != UINT32_MAX;
+            cursor = header_close + 1;
+        }
     }
 }
 
@@ -44584,6 +44650,10 @@ BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CIntegerIrBuilder* builde
             }
         }
         completed = failed ? UINT32_MAX : completed;
+    }
+    if (completed != UINT32_MAX && span.stop > start)
+    {
+        c_ir_statement_headers_file(builder, start, end, span, span.if_start == UINT32_MAX ? span.end : c_ir_statement_end_find(builder, span.if_start, end));
     }
 
     return completed;

@@ -43861,6 +43861,82 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_control_lowering_scope_levels(U
     return result;
 }
 
+// The work one analysis and lowering of a brace-less nest of declared `for`
+// loops does at this depth: the scopes its entity lookups probed, the scope
+// levels its descents walked, and the loop headers its statement extents
+// peeled. UINT64_MAX when it did not lower cleanly.
+typedef struct CTestBracelessForWork CTestBracelessForWork;
+struct CTestBracelessForWork
+{
+    u64 lookup_scopes;
+    u64 scope_levels;
+    u64 header_peels;
+};
+
+BUSTER_GLOBAL_LOCAL CTestBracelessForWork c_test_braceless_for_work(u32 depth)
+{
+    CTestBracelessForWork work = {UINT64_MAX, UINT64_MAX, UINT64_MAX};
+    TemporalArena temporary = scratch_begin(0, 0);
+    // The issue's own shape: `i++` takes the increment's modifiable check.
+    String8 prefix = S8("int f(int x) { ");
+    String8 header = S8("for (int i = 0; i < x; i++) ");
+    String8 suffix = S8("x--; return x; }\n");
+    u64 capacity = prefix.length + header.length * depth + suffix.length;
+    char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length, prefix);
+    for (u32 level = 0; level < depth; level += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, header);
+    }
+    c_test_append_source(bytes, capacity, &length, suffix);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){.pointer = bytes, .length = length}, (CPreprocessOptions){0});
+    u64 lookups = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_LOOKUP_AT_SCOPES);
+    u64 levels = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS);
+    u64 peels = c_test_ir_statement_header_peels();
+    // The driver's route: the syntax tree, then analysis alone, then lowering.
+    CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+    CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+    CIRLowerResult ir = analysis.analysis_complete && !analysis.diagnostic_count
+                            ? c_lower_to_ir(temporary.arena, S8("braceless-for.c"), preprocess, analysis, target_native)
+                            : (CIRLowerResult){0};
+    if (preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && ir.diagnostic_count == 0 && ir.program)
+    {
+        work = (CTestBracelessForWork){
+            .lookup_scopes = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_LOOKUP_AT_SCOPES) - lookups,
+            .scope_levels = c_test_parse_nesting_count(C_TEST_PARSE_NESTING_SCOPE_LEVELS) - levels,
+            .header_peels = c_test_ir_statement_header_peels() - peels,
+        };
+    }
+    c_test_scratch_end(temporary);
+    return work;
+}
+
+// Every loop of `for (int i = 0; i < x; i++) for (...) ... x--;`
+// declares `i`, so each sits one scope deeper (#3723). Three paths once cost
+// the depth per loop: a lookup of a keyword that starts a statement probed
+// every enclosing scope for a name no entity carries, the modifiable check of
+// each `i++` descended from the function scope although the operand was
+// bound, and each loop's extent peeled every header nested under it. Each
+// must now grow with the depth: four times the depth costs at most five
+// times the work, where a quadratic path costs sixteen.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_braceless_for_lowering_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { SHALLOW = 500, DEEP = 2000 };
+    CTestBracelessForWork shallow = c_test_braceless_for_work(SHALLOW);
+    CTestBracelessForWork deep = c_test_braceless_for_work(DEEP);
+    BUSTER_TEST_RAW(arguments, shallow.lookup_scopes != UINT64_MAX && deep.lookup_scopes != UINT64_MAX,
+                    S8("braceless for nest did not lower cleanly"));
+    BUSTER_TEST_RAW(arguments, deep.lookup_scopes <= shallow.lookup_scopes * 5 + DEEP,
+                    string_format(arguments->arena, S8("lookup scopes shallow={u64} deep={u64}"), shallow.lookup_scopes, deep.lookup_scopes));
+    BUSTER_TEST_RAW(arguments, deep.scope_levels <= shallow.scope_levels * 5 + DEEP,
+                    string_format(arguments->arena, S8("scope levels shallow={u64} deep={u64}"), shallow.scope_levels, deep.scope_levels));
+    BUSTER_TEST_RAW(arguments, shallow.header_peels + 1 >= SHALLOW && deep.header_peels <= shallow.header_peels * 5,
+                    string_format(arguments->arena, S8("header peels shallow={u64} deep={u64}"), shallow.header_peels, deep.header_peels));
+    return result;
+}
+
 // A reference at block depth d named in the function scope once cost d
 // scope probes in the lowering-constraint passes, whose lookups come after
 // the binder has closed every block (#2809). Every third level shadows `x`
@@ -64466,6 +64542,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_runtime_compound_literal_overrides);
     C_TEST_FIXTURE(arguments, c_test_braceless_control_work_growth);
     C_TEST_FIXTURE(arguments, c_test_nested_control_lowering_scope_levels);
+    C_TEST_FIXTURE(arguments, c_test_braceless_for_lowering_work);
     C_TEST_FIXTURE(arguments, c_test_sizeof_conditional_nesting_depth);
     C_TEST_FIXTURE(arguments, c_test_sizeof_long_shallow_operand);
     C_TEST_FIXTURE(arguments, c_test_tall_expression_types);

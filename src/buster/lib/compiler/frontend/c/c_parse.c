@@ -7489,10 +7489,13 @@ BUSTER_C_SHARED bool c_parse_update_operand_modifiable(CParseResult* result, CPr
     CEntityId entity = C_ENTITY_ID_INVALID;
     if (identifier)
     {
+        // Only an unbound operand needs its scope: the descent costs the
+        // token's nesting depth, so a deep nest of `i++` paid Θ(depth²) (#3723).
         u32 use = c_parse_identifier_use_index(result, start);
-        CScopeId operand_scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, start);
-        entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
-                                                : c_parse_lookup_entity_token(result, preprocess.spelling_base, operand_scope, &preprocess.tokens[start]);
+        entity = use != C_ID_UNDERLYING_INVALID
+                     ? result->identifier_uses[use].entity
+                     : c_parse_lookup_entity_token(result, preprocess.spelling_base, c_parse_scope_for_token(result, (CScopeId){.value = 0}, start),
+                                                   &preprocess.tokens[start]);
     }
     if (valid)
     {
@@ -23847,11 +23850,39 @@ CEntityId c_parse_lookup_entity_at_token(CParseResult* result, CPreprocessResult
     return found;
 }
 
+// Does any entity, in any scope, carry this name? c_parse_scope_add_entity
+// threads every entity onto its name chain beside its scope chain, and an
+// entity matching a scope-chain lookup shares the (symbol, name) the name
+// bucket hashes, so a miss here is a miss in every scope.
+BUSTER_C_INTERNAL bool c_parse_entity_name_bound(CParseResult* result, u32 symbol, String8 name)
+{
+    bool bound = !result->name_lookup_buckets;
+    if (!bound)
+    {
+        u32 bucket = (u32)c_parse_name_hash(symbol, name) & (result->entity_lookup_bucket_count - 1);
+        for (CEntityId entity = result->name_lookup_buckets[bucket]; entity.value != C_ID_UNDERLYING_INVALID && !bound;
+             entity = result->entities[entity.value].next_by_name)
+        {
+            CEntity* candidate = &result->entities[entity.value];
+            bound = candidate->symbol == symbol && (symbol || string_equal(candidate->name, name));
+        }
+    }
+    return bound;
+}
+
+// A name no entity carries, such as a keyword starting a statement, skips the
+// scope walk: in a deep nest it would probe every enclosing scope for the
+// same miss, Θ(depth) per lookup (#3723).
 BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_at_symbol(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 symbol, String8 name,
                                                              u32 token_index)
 {
+    if (!c_parse_entity_name_bound(result, symbol, name))
+    {
+        scope = C_SCOPE_ID_INVALID;
+    }
     while (scope.value != C_ID_UNDERLYING_INVALID)
     {
+        C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_LOOKUP_AT_SCOPES, 1);
         u64 hash = c_parse_entity_lookup_hash(symbol, name, scope);
         u32 bucket = (u32)hash & (result->entity_lookup_bucket_count - 1);
         CEntityId entity = result->entity_lookup_buckets[bucket];
