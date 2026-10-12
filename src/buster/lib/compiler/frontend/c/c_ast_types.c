@@ -245,6 +245,9 @@
 //   c_ast_types_lookups_agree
 //   c_ast_types_locals_build,                    the settled name checks
 //   c_ast_types_mark_resolves_at_file,
+//   c_ast_types_group_settles,
+//   c_ast_types_lookups_hold,
+//   c_ast_types_lookups_settle,
 //   c_ast_types_lookups_settled
 //   c_ast_types_publish                          machine state after an answer
 //   c_ast_types_verify_*, c_test_*               the differential (tests builds),
@@ -2433,65 +2436,35 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_mark_resolves_at_file(CAstTypeBodyIndex* in
     return file;
 }
 
-// Settles the region's marks once, at its first query that needs it
-// (c_ast_types_mark_resolves_at_file), and then answers whether every mark in
-// the query node's subtree resolves as from the file scope, so that the
-// query's scope, if its chain reaches the file scope, needs no lookup. The
-// settlement holds while the lookup generation and the identifier use count
-// are the ones it was made under (c_parse_lookup_generation). A query over
-// one of the region's other marks, or made after the settlement stopped
-// holding, walks its subtree (c_ast_types_lookups_agree), and so does every
-// query of a region with more other marks than it records.
-BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_settled(CAstTypeBodyIndex* index, CAstTypeBody* body, CPreprocessResult const* preprocess,
-                                                     CParseResult* result, CScopeId scope, u32 node)
+// The marks of one flag word's group, from its mask of mark bytes, the low
+// byte first (every supported host is little-endian): whether the region can
+// still settle, recording each mark that does not resolve as from the file
+// scope among its others.
+BUSTER_GLOBAL_LOCAL bool c_ast_types_group_settles(CAstTypeBodyIndex* index, CAstTypeBody* body, CPreprocessResult const* preprocess, CParseResult* result,
+                                                   u32 group, u64 marks)
 {
-    u64 generation = 0;
-    bool stamped = index && index->symbols && index->rooted && c_parse_lookup_generation(result, &generation);
-    if (stamped && body->lookups == C_AST_TYPE_LOOKUPS_UNSETTLED)
+    bool file = true;
+    for (; file && marks; marks &= marks - 1)
     {
-        u32 count = body->node + 1 - body->begin;
-        if (!index->locals_built || (index->local_generation != generation && index->settled_nodes >= result->entity_count))
+        u32 relative = group + mask64_first_set(marks) / 8;
+        bool other = !c_ast_types_mark_resolves_at_file(index, body, preprocess, result, relative);
+        file = !other || body->other_count < C_AST_TYPE_LOOKUP_OTHER_LIMIT;
+        if (other && file)
         {
-            c_ast_types_locals_build(index, result, generation);
+            body->others[body->other_count] = relative;
+            body->other_count += 1;
         }
-        index->settled_nodes += count;
-        bool file = index->local_generation == generation;
-        // Eight flag bytes at a time: almost none carry the mark, and each
-        // mark in a group is found from the group's mask, the low byte first
-        // (every supported host is little-endian).
-        u64 const lookup_bytes = 0x0101010101010101ull * C_AST_TYPE_FLAG_LOOKUP;
-        for (u32 group = 0; file && group < count; group += 8)
-        {
-            u32 width = count - group < 8 ? count - group : 8;
-            u64 word = 0;
-            if (width == 8)
-            {
-                memcpy(&word, body->flags + group, 8);
-            }
-            else
-            {
-                for (u32 byte = 0; byte < width; byte += 1)
-                {
-                    word |= (u64)body->flags[group + byte] << (8 * byte);
-                }
-            }
-            for (u64 marks = word & lookup_bytes; file && marks; marks &= marks - 1)
-            {
-                u32 relative = group + mask64_first_set(marks) / 8;
-                bool other = !c_ast_types_mark_resolves_at_file(index, body, preprocess, result, relative);
-                file = !other || body->other_count < C_AST_TYPE_LOOKUP_OTHER_LIMIT;
-                if (other && file)
-                {
-                    body->others[body->other_count] = relative;
-                    body->other_count += 1;
-                }
-            }
-        }
-        body->lookups = (u8)(file ? C_AST_TYPE_LOOKUPS_FILE : C_AST_TYPE_LOOKUPS_EACH);
-        body->lookups_generation = generation;
-        body->lookups_uses = result->identifier_use_count;
     }
-    bool settled = stamped && body->lookups == C_AST_TYPE_LOOKUPS_FILE && body->lookups_generation == generation &&
+    return file;
+}
+
+// Whether the region's settlement answers a query over `node`: it holds under
+// the current lookup generation and identifier use count, no other mark lies
+// in the node's subtree, and the query's scope chain reaches the file scope.
+BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_hold(CAstTypeBodyIndex const* index, CAstTypeBody const* body, CParseResult const* result, CScopeId scope,
+                                                  u32 node, u64 generation)
+{
+    bool settled = body->lookups == C_AST_TYPE_LOOKUPS_FILE && body->lookups_generation == generation &&
                    body->lookups_uses == result->identifier_use_count;
     if (settled && body->other_count)
     {
@@ -2502,8 +2475,67 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_settled(CAstTypeBodyIndex* index, C
             settled = body->others[other] < floor || body->others[other] > last;
         }
     }
-    // The query's scope chain must reach the file scope.
     return settled && scope.value < index->rooted_count && index->rooted[scope.value];
+}
+
+// Settles the region's marks (c_ast_types_mark_resolves_at_file) under the
+// current lookup generation, then answers the query that needed it as
+// c_ast_types_lookups_hold does. Out of line: about one query in twenty
+// settles, and the scan's registers would otherwise be saved on every query.
+BUSTER_GLOBAL_LOCAL C_AST_TYPES_NOINLINE bool c_ast_types_lookups_settle(CAstTypeBodyIndex* index, CAstTypeBody* body, CPreprocessResult const* preprocess,
+                                                                         CParseResult* result, CScopeId scope, u32 node)
+{
+    u64 generation = 0;
+    c_parse_lookup_generation(result, &generation);
+    u32 count = body->node + 1 - body->begin;
+    if (!index->locals_built || (index->local_generation != generation && index->settled_nodes >= result->entity_count))
+    {
+        c_ast_types_locals_build(index, result, generation);
+    }
+    index->settled_nodes += count;
+    bool file = index->local_generation == generation;
+    // Whole flag words first: almost none carry the mark. The tail's bytes are
+    // assembled into one more word.
+    u64 const lookup_bytes = 0x0101010101010101ull * C_AST_TYPE_FLAG_LOOKUP;
+    u32 whole = count & ~7u;
+    for (u32 group = 0; file && group < whole; group += 8)
+    {
+        u64 word;
+        memcpy(&word, body->flags + group, 8);
+        file = c_ast_types_group_settles(index, body, preprocess, result, group, word & lookup_bytes);
+    }
+    if (file && whole < count)
+    {
+        u64 word = 0;
+        for (u32 byte = 0; byte < count - whole; byte += 1)
+        {
+            word |= (u64)body->flags[whole + byte] << (8 * byte);
+        }
+        file = c_ast_types_group_settles(index, body, preprocess, result, whole, word & lookup_bytes);
+    }
+    body->lookups = (u8)(file ? C_AST_TYPE_LOOKUPS_FILE : C_AST_TYPE_LOOKUPS_EACH);
+    body->lookups_generation = generation;
+    body->lookups_uses = result->identifier_use_count;
+    return c_ast_types_lookups_hold(index, body, result, scope, node, generation);
+}
+
+// Settles the region's marks once, at its first query that needs it
+// (c_ast_types_lookups_settle), and then answers whether every mark in the
+// query node's subtree resolves as from the file scope, so that the query's
+// scope, if its chain reaches the file scope, needs no lookup. The
+// settlement holds while the lookup generation and the identifier use count
+// are the ones it was made under (c_parse_lookup_generation). A query over
+// one of the region's other marks, or made after the settlement stopped
+// holding, walks its subtree (c_ast_types_lookups_agree), and so does every
+// query of a region with more other marks than it records.
+BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_settled(CAstTypeBodyIndex* index, CAstTypeBody* body, CPreprocessResult const* preprocess,
+                                                     CParseResult* result, CScopeId scope, u32 node)
+{
+    u64 generation = 0;
+    bool stamped = index && index->symbols && index->rooted && c_parse_lookup_generation(result, &generation);
+    bool settled = stamped && (body->lookups == C_AST_TYPE_LOOKUPS_UNSETTLED ? c_ast_types_lookups_settle(index, body, preprocess, result, scope, node)
+                                                                             : c_ast_types_lookups_hold(index, body, result, scope, node, generation));
+    return settled;
 }
 
 // A `.` or `->` that the member rule declines only because its aggregate is
