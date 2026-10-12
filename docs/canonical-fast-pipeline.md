@@ -208,6 +208,40 @@ inconclusive hosted result cannot enable the default. Self-hosting fixed point,
 all pass subsets, native mode matrix and non-native consumers remain correctness
 gates independently of performance acceptance.
 
+### Construction-time fold census (#3010)
+
+`BUSTER_BENCH_ALLOCATIONS` builds report under `ir_construction` in
+`-fsource-metrics` whether FAST's scalar folds could have happened when a row
+was first built. `ir_fast_fold_rule` is the only rule authority. The fold pass
+calls it, and `ir_construction_fold_census` also calls it with no replacement
+map on every row the C builder commits through `c_ir_append_instruction`:
+
+- `fold_birth_scalar_rows`: committed `CAST`, `UNARY` and `BINARY` rows probed.
+- `fold_birth_<rule>`: rows a rule already folds from the operands committed
+  before them. `fold_birth_metadata_mismatches` counts identities rejected by
+  the replacement metadata check. `fold_birth_avoidable_bytes` is logical
+  row/value/operand/source storage: an identity needs none of it, while a
+  constant still needs its row and immediate. This is not an arena-call or RSS
+  figure.
+- `fold_late_<rule>`: folds FAST actually applied. `fold_late_replaced_roots`
+  counts the folds whose operand had to be followed through the replacement map
+  (an earlier identity or a parameter sweep).
+
+The rules are `cast_identity`, `cast_constant`, `unary_constant`,
+`binary_constant`, `binary_right_identity` and `binary_left_identity`. Probes
+suppress `ir_semantics` recording, so those counters keep measuring only the
+compiler's own semantic work. Rows that SSA construction inserts behind a commit
+(`ir_block_insert_instruction_after`) are not probed, and neither is
+inlined-callee output.
+
+`fold_birth_*` and `fold_late_*` count independent populations. Birth counts
+include functions that FAST later skips or does not run (`-fno-canonical-fast`,
+budget and provenance skips) and rows that later passes delete. Late counts
+include rows that SSA insertion, promotion and inlining add after commit. No
+per-row birth classification reaches FAST, so neither a birth/late ratio nor
+late minus birth attributes or bounds the late folds that were available at
+commit; that needs a matched per-row association.
+
 ## Opt-in block-local CSE (#3011)
 
 `ir_fast_cse` is an experiment, outside every optimization level and outside
@@ -376,7 +410,16 @@ A caller keeps its optional splices only when their planned row growth,
 shifted left by `IR_INLINE_CALLER_GROWTH_SHIFT` (5), reaches its instruction
 rows; otherwise every optional site in it stays a call. The first splice
 relocates the caller's exactly sized tables and the arena keeps the old copy,
-so one tiny site in a large caller costs more memory than it saves. On the
+so one tiny site in a large caller costs more memory than it saves. The pass
+hands the complete pages of every abandoned table back to the OS
+(`ir_inline_cfg_discard_record`, `os_discard`); the range stays mapped and
+writable. It holds one open run per table kind: because the C frontend carves
+each kind out of one row stream in module order and callers are visited in that
+order, a relocated caller's range usually extends the run (freeing the page two
+neighbours share), and any other range first releases the run. The last runs
+are released after the final splice; the record takes no planning scratch.
+The verbose record reports the released bytes (#3854). The shift measurements
+below predate this release. On the
 unity self-host source with `-fcanonical-inline`, shifts 2 through 6 kept 801,
 1643, 2639, 3462 and 3739 of 3984 optional sites for +5, +11, +25, +42 and
 +52 MB of peak RSS over tiny-off (unbounded: +80 MB). Generated stage-2
@@ -417,16 +460,25 @@ alignment; that charge is an upper bound, because before a caller's first splice
 tables once to the planned final counts instead of doubling them. Relocating a
 touched caller's exactly sized frontend tables still retains the old copy in the
 arena: on the unity self-host source, tiny inlining touches 809 callers whose
-tables total 65.5 MB, which is most of its peak-RSS cost (#48). Callee payloads
+tables total 65.5 MB, which is most of its peak-RSS cost (#48). At the default
+shift, 639 table relocations abandon 34.6 MB, of which 29.3 MB lies in complete
+pages that the pass now releases; a local stage-1 tiny-on/off peak-RSS ratio
+fell from 1.049 to 1.019 (diagnostic, #3854). Callee payloads
 and clone maps remain charged per splice.
 Tiny bodies are screened before payload scans. Mandatory expansion is still
 subject to resource guards,
 including bounded planning work and retained cloning storage. Expansion checks
 strict canonical validity per function, never by a module-wide scan: each
-candidate's caller and callee once before they are read, and each spliced caller
-again after its last splice (an output failure reports the `inlining output`
-boundary). A mandatory call whose caller or callee is a legacy producer-certified
-shape that fails that check is diagnosed; an optional one stays a call. When FAST
+candidate's callee once before it is read, each mandatory candidate's caller
+likewise, an optional candidate's caller once its planned sites survive the
+caller relocation bound and before its first splice (so a large caller that
+the bound keeps as calls is never checked by this pass, #3854), and each
+spliced caller again after its last splice (an output failure reports the
+`inlining output` boundary). The strict validator does not check debug rows,
+so the planner checks a caller's debug-local scopes and scope parents once
+rather than once per site. A mandatory call whose caller or callee is a legacy producer-certified
+shape that fails that check is diagnosed; an optional one stays a call (all of
+an invalid caller's planned optional sites count as shape skips). When FAST
 is selected, a caller whose splices were all optional skips that output check:
 it is listed in `inline_unchecked_callers` and proven by the validation that
 follows anyway (the promotion output check of a checked build, else the FAST
@@ -438,7 +490,7 @@ from an uncapped tiny self-host compile under cachegrind (#48). Any other
 rewritten caller is checked at once, so the FAST input guard still checks all
 functions on a producer-certified default compile. The verbose
 `IR_INLINE` record reports candidates, accepted/mandatory calls, copied rows,
-growth, rejection categories and visits. These counts are diagnostics, not a
+growth, rejection categories, visits and released relocation bytes. These counts are diagnostics, not a
 performance result. Mandatory budget refusals additionally report the first
 resource category, requested amount and applicable limit in the source diagnostic.
 

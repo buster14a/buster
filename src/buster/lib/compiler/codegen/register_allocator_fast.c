@@ -3438,6 +3438,15 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_slot_touches(MachineFunction const* functio
     return count;
 }
 
+// A volatile-tainted slot and the fixed outgoing argument area keep storage of
+// their own whatever the rows do with them.
+BUSTER_GLOBAL_LOCAL bool machine_fast_slot_statically_fixed(MachineFunction const* function, u32 slot)
+{
+    bool volatile_slot = function->stack_slot_memory_flags && function->stack_slot_memory_flags[slot] != MACHINE_STACK_SLOT_MEMORY_NONVOLATILE;
+    bool outgoing_slot = function->outgoing_bytes && slot == function->outgoing_slot;
+    return volatile_slot || outgoing_slot;
+}
+
 // One row's proven touches. The placement census records them once and
 // `machine_fast_close_slot_ranges` replays them: they depend only on the
 // function, the row and the certified addresses, none of which changes
@@ -5299,11 +5308,21 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         memset(slot_ends, 0, (u64)slot_axis * sizeof(*slot_ends));
         memset(slot_fixed, coalesce_slots ? 0 : 1, slot_axis);
         memset(slot_groups, 0xff, (u64)slot_axis * sizeof(*slot_groups));
+        // Certification already fixes every slot whose address escapes, and
+        // the census can only widen ranges and fix more slots. When no slot is
+        // left for it to decide it would walk every row for nothing: on a
+        // `-g0` SQLite compile that is every one of the 396 coalescing
+        // functions whose frames end up sharing nothing (#1722).
+        bool census_needed = false;
+        for (u32 slot_index = 0; coalesce_slots && slot_index < function->stack_slot_count; slot_index += 1)
+        {
+            census_needed |= !(slot_addressed[slot_index] && !address_safe[slot_index]) &&
+                             !machine_fast_slot_statically_fixed(function, slot_index);
+        }
         MachineFastTouchCensus touch_census = {
-            .rows = coalesce_slots ? arena_allocate(arena, MachineFastRowTouches, function->instruction_count ? function->instruction_count : 1u)
-                                   : 0,
+            .rows = census_needed ? arena_allocate(arena, MachineFastRowTouches, function->instruction_count ? function->instruction_count : 1u) : 0,
         };
-        for (u32 row = 0; coalesce_slots && row < function->instruction_count; row += 1)
+        for (u32 row = 0; coalesce_slots && census_needed && row < function->instruction_count; row += 1)
         {
             MachineInstruction const* instruction = function->instructions + row;
             bool addresses = instruction->opcode == description->frame_address_opcode;
@@ -5352,8 +5371,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         for (u32 slot_index = 0; coalesce_slots && slot_index < function->stack_slot_count; slot_index += 1)
         {
             slot_fixed[slot_index] |= (u8)(slot_addressed[slot_index] && !address_safe[slot_index]);
-            slot_fixed[slot_index] |= (u8)(function->stack_slot_memory_flags && function->stack_slot_memory_flags[slot_index] != MACHINE_STACK_SLOT_MEMORY_NONVOLATILE);
-            slot_fixed[slot_index] |= (u8)(function->outgoing_bytes && slot_index == function->outgoing_slot);
+            slot_fixed[slot_index] |= (u8)machine_fast_slot_statically_fixed(function, slot_index);
         }
         u32 shareable_slots = 0;
         for (u32 slot = 0; coalesce_slots && slot < function->stack_slot_count; slot += 1)
