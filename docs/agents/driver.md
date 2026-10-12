@@ -192,11 +192,24 @@ and all cohort arenas are released (with `-fkeep-going`, later inputs still
 compile, see [per-input records](#per-input-records-and-continue-on-failure)).
 The one-worker and `BUSTER_SINGLE_THREADED` builds run the same unit kernel.
 
-`compiler_parallel_prewarm()` prepares both native target families, including
-all x86 per-form caches and exact plans, before the first persistent worker.
-Both are needed because a later invocation may switch architectures while
-workers are parked. Embedding callers must call it before starting their own
-gang. The lighter `compiler_prewarm()` remains the serial frontend/common-table
+Before its first multi-lane cohort, the driver prepares only the
+invocation's native family (`compiler_driver_native_family_prepare`): all
+x86 per-form caches and exact plans for x86-64, or canonical-form validity and
+semantic blobs for AArch64. Prepared families are tracked in driver state.
+Parked workers count as live threads, so a later invocation on the same thread
+that needs the other family first releases the parked gang with
+`lane_release()`, prewarms that family serially, and lets the next `lane_run`
+recreate the gang. This applies to a later cohort and to a serial compile of
+the other family while a cohort's gang is parked: the serial compile fills x86
+tables lazily under a serial check. A process that never runs a cohort keeps
+the serial lazy path. Each family switch costs one gang re-creation; skipping
+the other family removed about 9% of the measured multi-lane entry cost on an
+x86-only compile (#53).
+
+`compiler_parallel_prewarm()` still prepares both families. Embedding callers
+must call it before starting their own gang, or before calling the driver from
+more than one thread, because the driver cannot release a gang it does not
+own. The lighter `compiler_prewarm()` remains the serial frontend/common-table
 entry. The full cold prewarm is an opt-in cost, not a new serial startup floor.
 `CompilerDriverResult.compilation_workers` reports the largest active cohort
 (or one); it is not a physical-core or memory measurement.
