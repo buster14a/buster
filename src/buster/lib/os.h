@@ -490,6 +490,30 @@ BUSTER_F_DECL OsError os_file_set_permissions(OsFileDescriptor* file_descriptor,
 // false wherever it is refused or unavailable, which callers ignore. Publication uses it so the staged extent is allocated up
 // front rather than through delayed allocation (#3685).
 BUSTER_F_DECL bool os_file_preallocate(OsFileDescriptor* file_descriptor, u64 size);
+
+// Opt-in early exit, mold/wild's fork trick (#3686). os_early_exit_arm forks
+// while the process is still single-threaded: the parent blocks until the
+// child calls os_early_exit_release and then _exits with the status it was
+// sent, or, if the child dies first, with the child's own status. The child
+// returns true and carries on with the work. Arming fails (false, nothing
+// forked) on Windows, once any thread exists, or when pipe/fork fail, and
+// the caller simply continues in-process.
+//
+// The trade-offs are why it is never the default: time(1), getrusage and
+// per-process counters see only the parent; a debugger follows the parent;
+// the child's memory outlives the job slot the parent frees; and nothing that
+// fails after the release can change the exit status. Release points the
+// standard streams at /dev/null first, so later child output is discarded.
+#define OS_EARLY_EXIT_DEFERRED_LIMIT (64)
+BUSTER_F_DECL bool os_early_exit_arm(void);
+BUSTER_F_DECL bool os_early_exit_armed(void);
+// Hands a descriptor to be closed after the release, so the final close of a
+// replaced output (which frees its blocks) leaves the reported path. False,
+// and the caller keeps ownership, when not armed or past the limit.
+BUSTER_F_DECL bool os_early_exit_defer_close(OsFileDescriptor* file_descriptor);
+// Reports `exit_code` to the waiting parent, then closes deferred descriptors.
+// Does nothing when not armed.
+BUSTER_F_DECL void os_early_exit_release(u8 exit_code);
 BUSTER_F_DECL OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OsFileAccess access, OsFileCreateMode create_mode,
                                               OsFileShareFlags share_flags);
 BUSTER_F_DECL OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OsFileAccess access, OsFileCreateMode create_mode,

@@ -241,10 +241,22 @@ FilePublishResult file_publish_slices_checked(String8 path, ByteSlice const* sli
         file_publish_record(&result, os_file_close_checked(staging.file));
         if (!result.error.v && result.status != FILE_PUBLISH_INVALID_STAGING)
         {
+            // Under early exit, a reference held across the rename moves the
+            // old inode's release (freeing its blocks) out of the rename and
+            // past the reported exit (#3686). Best-effort: no hold, no change.
+            OsFileDescriptor* replaced = 0;
+            if (replaces && os_early_exit_armed())
+            {
+                replaced = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, share_flags).file;
+            }
             result.error = os_file_replace(staging.path, path);
             if (!result.error.v)
             {
                 result.status = FILE_PUBLISH_PUBLISHED;
+            }
+            if (replaced && !(result.status == FILE_PUBLISH_PUBLISHED && os_early_exit_defer_close(replaced)))
+            {
+                (void)os_file_close_checked(replaced);
             }
         }
         if (result.status != FILE_PUBLISH_PUBLISHED)

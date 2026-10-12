@@ -1788,6 +1788,58 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_diagnostic_streams(UnitT
     return result;
 }
 
+// -fearly-exit (#3686): the forked parent's status, streams and artifacts
+// match the default path's, including a replaced object and a failure.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_early_exit(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    Arena* arena = arguments->arena;
+    String8 source_path = buster_test_temporary_path(arena, S8("early-exit"), S8(".c"));
+    String8 early_path = buster_test_temporary_path(arena, S8("early-exit-armed"), S8(".o"));
+    String8 default_path = buster_test_temporary_path(arena, S8("early-exit-default"), S8(".o"));
+    String8 source = S8("int early_exit_value = 7;\nint early_exit_read(void) { return early_exit_value; }\n");
+    bool source_written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    if (BUSTER_REQUIRE(arguments, source_written))
+    {
+        String8 output = {0};
+        String8 error = {0};
+        String8 reference[] = {S8("-fno-early-exit"), S8("-c"), source_path, S8("-o"), default_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(reference), &output, &error));
+        ByteSlice expected = file_read(arena, default_path, (FileReadOptions){0});
+        // The second run replaces the first run's object while armed, so the
+        // deferred close of the replaced destination is exercised too.
+        for (u32 run = 0; run < 2; run += 1)
+        {
+            String8 compile[] = {S8("-fearly-exit"), S8("-c"), source_path, S8("-o"), early_path};
+            BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile), &output, &error));
+            BUSTER_TEST(arguments, output.length == 0 && error.length == 0);
+            ByteSlice armed = file_read(arena, early_path, (FileReadOptions){0});
+            BUSTER_TEST(arguments, expected.length != 0 && armed.length == expected.length &&
+                                       memory_compare(armed.pointer, expected.pointer, expected.length));
+        }
+        // Output written before the release reaches the caller's pipe.
+        String8 preprocess[] = {S8("-fearly-exit"), S8("-E"), source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(preprocess), &output, &error));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(output, S8("early_exit_value = 7")));
+        // A failure is reported through the parent's status and stderr, and
+        // the existing object is left as it was.
+        BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("#error early-exit-failure\n"))));
+        String8 failing[] = {S8("-fearly-exit"), S8("-c"), source_path, S8("-o"), early_path};
+        BUSTER_TEST(arguments, !compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(failing), &output, &error));
+        BUSTER_TEST(arguments, compiler_driver_test_contains(error, S8("early-exit-failure")));
+        ByteSlice kept = file_read(arena, early_path, (FileReadOptions){0});
+        BUSTER_TEST(arguments, kept.length == expected.length && memory_compare(kept.pointer, expected.pointer, expected.length));
+    }
+    if (source_written) { BUSTER_TEST(arguments, os_file_delete(source_path)); }
+    (void)os_file_delete(early_path);
+    (void)os_file_delete(default_path);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // #1574: -Werror, -Werror=<group>, -Wno-error[=<group>] and -Wno-<group>
 // over the warnings the driver publishes. GCC and Clang agree on every row
 // except the ones marked as Clang-only (everything) or slice-3b placeholders
@@ -33922,6 +33974,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_reservation_failure);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_diagnostic_streams);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_early_exit);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_warning_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_gcc_spellings);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_default_cpu_model);

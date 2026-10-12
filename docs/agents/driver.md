@@ -52,6 +52,42 @@ ms in `rename` before the change and about 2 ms after (#3685, diagnostic
 evidence). Buster does not overwrite outputs in place as mold and wild do;
 #3687 records the measured gain and the downsides.
 
+`-fearly-exit` (API field `early_exit`; off by default, and `-fno-early-exit`
+restores the default) is mold and wild's fork trick (#3686). It lives in
+`run_c_compiler` and `os_early_exit_*` in `src/buster/lib/os.c`.
+
+- **Arming.** After argument parsing, and before the first `lane_run` starts
+  the gang, `ide cc` forks. The parent only waits on a pipe. Arming is
+  skipped when any thread already exists, on Windows, and when `pipe` or
+  `fork` fails; the compile then simply runs in-process.
+- **Release.** Once every artifact and report is out, the child calls
+  `os_early_exit_release`. It points its standard streams at `/dev/null`,
+  so a build system's pipes reach EOF, and sends its status. The parent
+  `_exit`s with that status, or with the child's own status if the child
+  died before reporting.
+- **Background work.** Destroying the 32 GiB translation-unit arena, then
+  `exit_mmap`, then the release of each output that publication replaced
+  then run in the background. While armed, `file_publish_slices_checked`
+  holds a read-only reference to a replaced destination across the
+  `rename(2)` and hands it to `os_early_exit_defer_close`, so the old
+  inode's blocks are freed after the report rather than inside the rename.
+  Atomic publication is unchanged.
+
+The costs are why it stays opt-in:
+
+- `time(1)`, `getrusage(RUSAGE_CHILDREN)` and `-fmetrics-out` wrappers that
+  measure the process see only the parent (about 5 MB RSS and no CPU time).
+- A debugger follows the parent.
+- A `make -j` or cgroup budget frees the job slot while the child still
+  holds its memory.
+- A failure after the release cannot change the exit status, and any later
+  child output is discarded.
+
+Do not use it for benchmarks, profiling, debugging or memory budgeting. The
+`compiler_driver_test_early_exit` regression checks byte-identical objects
+against the default path, a replaced output, `-E` output through the caller's
+pipe, and failure propagation.
+
 Opt-in machine-readable records remain on stdout: `CODEGEN_VERIFY`,
 `CODEGEN_FALLBACK*`, `CODEGEN`, `IR_*`, `TARGET`, `GPU`, and the `-v` source
 statistics. The differential runner reads `CODEGEN_VERIFY` there and compares

@@ -402,6 +402,11 @@ struct CompilerDriverInvocation
     TimeDataType metrics_origin;
     // Where `ide cc` writes the records; the driver never writes it.
     String8 metrics_output_path;
+    // -fearly-exit (off by default; -fno-early-exit restores it): `ide cc`
+    // forks before any lane exists and reports its status once every
+    // artifact and report is out, leaving teardown to the child (#3686,
+    // os_early_exit_arm). The driver itself never reads it.
+    bool early_exit;
 };
 
 // Contiguous intervals of compiler_driver_execute_c_single, named after the
