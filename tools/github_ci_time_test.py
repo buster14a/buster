@@ -432,6 +432,7 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
                     summary = summary.replace("\nWorkflow run 38261019120 attempt 1:", "\n> Workflow run 38261019120 attempt 1:", 1)
                 elif case == "queued-heading": summary = "**9700X compiler benchmark: queued**\n\n" + summary
                 check["output"]["summary"] = summary
+                self.jobs[-1]["conclusion"] = check["conclusion"]
                 self.assertFalse(self.gate()["success"], case)
 
     def test_retained_terminal_announcement_replays_without_measurement_promotion(self):

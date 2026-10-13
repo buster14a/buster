@@ -724,7 +724,8 @@ def compiler_benchmark_terminal_announcement(check, head_sha, repository, reques
             latest = read_metadata(f"actions/runs/{run['id']}")
             if (not exact_run(latest, run['id'], 1, run['path'], run['event']) or any(
                     latest.get(key) != run.get(key) for key in
-                    ("head_sha", "head_branch", "status", "conclusion", "display_title", "repository", "head_repository"))):
+                    ("head_sha", "head_branch", "status", "conclusion", "display_title")) or
+                    latest['repository']['id'] != run['repository']['id']):
                 raise ValueError("Compiler benchmark supersession attempt changed")
         conclusion = "neutral"
     state = "not measured; superseded before execution" if superseded else "not measured"
