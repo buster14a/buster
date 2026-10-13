@@ -26403,7 +26403,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
             CLongDoubleMathCall call = long_double_calls[call_index];
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             String8 source = string_format(temporary.arena,
-                S8("void long_double_builtin_probe(long double x, long double y, long double z) { (void){S8}({S8}); }\n"),
+                S8("void long_double_builtin_probe(long double x, long double y, long double z) {{ (void){S8}({S8}); }}\n"),
                 call.name, call.arguments);
             CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target_row.target});
             CParseResult parse = c_parse(temporary.arena, preprocess);
