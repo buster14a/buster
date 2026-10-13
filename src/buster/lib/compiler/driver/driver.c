@@ -7368,7 +7368,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_publish_c_diagnostics(Arena* arena, 
 
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_object_path(Arena* arena, String8 input);
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_llvm_bitcode_path(Arena* arena, String8 input);
-BUSTER_GLOBAL_LOCAL String8 compiler_driver_target_artifact_output_path(Arena* arena, CompilerDriverInvocation invocation);
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_artifact_output_path(Arena* arena, CompilerDriverInvocation invocation);
 
 // Per-unit measurement scratch for collect_input_metrics. A null pointer is
 // the ordinary compile: every phase boundary tests it once and reads no
@@ -7794,23 +7794,10 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResolvedOutputAlias compiler_driver_resolved_o
         result.output_path = invocation.output_path;
     }
     if (!result.output_path.length && !suppress_object_write &&
-        (invocation.action == COMPILER_DRIVER_ACTION_OBJECT || invocation.action == COMPILER_DRIVER_ACTION_LINK) &&
-        (invocation.target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE ||
-         (!invocation.emit_llvm_bitcode &&
-          (compiler_driver_target_is_wasm(invocation.target) || invocation.target.cpu_arch == CPU_ARCH_BPFEL))))
+        (invocation.action == COMPILER_DRIVER_ACTION_OBJECT ||
+         (invocation.action == COMPILER_DRIVER_ACTION_LINK && !invocation.retain_linked_object && !invocation.retain_object)))
     {
-        result.output_path = compiler_driver_target_artifact_output_path(arena, invocation);
-    }
-    else if (!result.output_path.length && !suppress_object_write && invocation.action == COMPILER_DRIVER_ACTION_OBJECT)
-    {
-        result.output_path = invocation.emit_llvm_bitcode
-                                ? compiler_driver_default_llvm_bitcode_path(arena, invocation.input_paths[0])
-                                : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
-    }
-    else if (!result.output_path.length && !suppress_object_write && invocation.action == COMPILER_DRIVER_ACTION_LINK &&
-             !invocation.retain_linked_object && !invocation.retain_object)
-    {
-        result.output_path = compiler_driver_default_executable_path(invocation.target);
+        result.output_path = compiler_driver_artifact_output_path(arena, invocation);
     }
     result.input_path = compiler_driver_output_lexed_file_alias(result.output_path, preprocess_detail->lexed_files,
                                                                  preprocess_detail->lexed_file_count);
@@ -7910,7 +7897,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_llvm_bitcode(Arena* arena, Compil
         return false;
     }
     result->has_llvm_bitcode = true;
-    String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_llvm_bitcode_path(arena, invocation.input_paths[0]);
+    String8 output = compiler_driver_artifact_output_path(arena, invocation);
     if (!compiler_driver_publish(arena, invocation, output, artifact.bytes, result))
     {
         return false;
@@ -7940,26 +7927,38 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_wasm_path(Arena* arena, Stri
                                                       });
 }
 
-BUSTER_GLOBAL_LOCAL String8 compiler_driver_target_artifact_output_path(Arena* arena, CompilerDriverInvocation invocation)
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_artifact_output_path(Arena* arena, CompilerDriverInvocation invocation)
 {
     String8 output = invocation.output_path;
     if (!output.length)
     {
-        if (compiler_driver_target_is_wasm(invocation.target))
+        if (invocation.target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE)
+        {
+            output = string_format_z(arena, S8("{S8}.spv"), invocation.input_paths[0]);
+        }
+        else if (invocation.emit_llvm_bitcode)
+        {
+            output = compiler_driver_default_llvm_bitcode_path(arena, invocation.input_paths[0]);
+        }
+        else if (compiler_driver_target_is_wasm(invocation.target))
         {
             output = invocation.action == COMPILER_DRIVER_ACTION_OBJECT
                          ? compiler_driver_default_wasm_path(arena, invocation.input_paths[0])
                          : S8("a.wasm");
-        }
-        else if (invocation.target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE)
-        {
-            output = string_format_z(arena, S8("{S8}.spv"), invocation.input_paths[0]);
         }
         else if (invocation.target.cpu_arch == CPU_ARCH_BPFEL)
         {
             output = invocation.action == COMPILER_DRIVER_ACTION_OBJECT
                          ? compiler_driver_default_object_path(arena, invocation.input_paths[0])
                          : S8("a.o");
+        }
+        else if (invocation.action == COMPILER_DRIVER_ACTION_OBJECT)
+        {
+            output = compiler_driver_default_object_path(arena, invocation.input_paths[0]);
+        }
+        else
+        {
+            output = compiler_driver_default_executable_path(invocation.target);
         }
     }
     return output;
@@ -7985,7 +7984,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm(Arena* arena, CompilerDriver
     }
     result->has_wasm = true;
     result->has_wasm64 = artifact.stats.memory64;
-    String8 output = compiler_driver_target_artifact_output_path(arena, invocation);
+    String8 output = compiler_driver_artifact_output_path(arena, invocation);
     if (!compiler_driver_publish(arena, invocation, output, artifact.bytes, result))
     {
         return false;
@@ -8004,7 +8003,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_write_spirv(Arena* arena, CompilerDrive
     }
     else
     {
-        String8 output = compiler_driver_target_artifact_output_path(arena, invocation);
+        String8 output = compiler_driver_artifact_output_path(arena, invocation);
         if (compiler_driver_publish(arena, invocation, output, artifact.bytes, result))
         {
             result->has_spirv = true;
@@ -8030,7 +8029,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
         return false;
     }
     result->has_ebpf = true;
-    String8 output = compiler_driver_target_artifact_output_path(arena, invocation);
+    String8 output = compiler_driver_artifact_output_path(arena, invocation);
     if (!compiler_driver_publish(arena, invocation, output, artifact.bytes, result))
     {
         return false;
@@ -10695,17 +10694,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         if (invocation.action == COMPILER_DRIVER_ACTION_LINK && !invocation.retain_linked_object && !invocation.retain_object)
         {
-            bool target_specific_default_output =
-                invocation.target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE ||
-                (!invocation.emit_llvm_bitcode &&
-                 (compiler_driver_target_is_wasm(invocation.target) || invocation.target.cpu_arch == CPU_ARCH_BPFEL));
-            String8 output_path = invocation.output_path;
-            if (!output_path.length)
-            {
-                output_path = target_specific_default_output
-                                  ? compiler_driver_target_artifact_output_path(arena, invocation)
-                                  : compiler_driver_default_executable_path(invocation.target);
-            }
+            String8 output_path = compiler_driver_artifact_output_path(arena, invocation);
             String8 input_alias = compiler_driver_output_input_alias(invocation, output_path);
             if (input_alias.length)
             {

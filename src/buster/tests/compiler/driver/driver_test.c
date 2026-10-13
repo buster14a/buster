@@ -1150,6 +1150,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
         target_output_stem.length ? string_format_z(arena, S8("{S8}.o"), target_output_stem) : (String8){0};
     String8 extension_input = S8("a.out");
     bool extension_input_cleanup = false;
+    String8 llvm_default_output = string_format_z(arena, S8("{S8}.bc"), target_output_stem);
+    bool llvm_default_output_cleanup = false;
     String8 source = S8("int main(void) { return 0; }\n");
     String8 source_bytes = source;
     String8 target = S8("x86_64-unknown-linux-gnu");
@@ -1350,6 +1352,42 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
                 BUSTER_STRING_TEST(arguments,
                                    BYTE_SLICE_TO_STRING(8, file_read(arena, extension_input, (FileReadOptions){0})),
                                    forced_extension_source);
+
+                String8 forced_bitcode_extension_command[] = {S8("-target"), target, S8("-nostdinc"), S8("-emit-llvm"),
+                                                              S8("-x"), S8("c"), extension_input};
+                CompilerDriverResult forced_bitcode_extension_result = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(forced_bitcode_extension_command)));
+                BUSTER_TEST_RAW(arguments, forced_bitcode_extension_result.error == COMPILER_DRIVER_ERROR_TOKENIZE,
+                                forced_bitcode_extension_result.diagnostic);
+                BUSTER_TEST(arguments, string_first_sequence(forced_bitcode_extension_result.diagnostic,
+                                                            S8("output selector reached preprocessing")) != BUSTER_STRING_NO_MATCH);
+                BUSTER_STRING_TEST(arguments,
+                                   BYTE_SLICE_TO_STRING(8, file_read(arena, extension_input, (FileReadOptions){0})),
+                                   forced_extension_source);
+            }
+        }
+
+        // The bitcode default is stem.bc in the working directory. Reserve it
+        // only when absent, then stop at the resolved-input guard before emit.
+        String8 bitcode_header_bytes = S8("#define BITCODE_OUTPUT_ALIAS 1\n");
+        String8 bitcode_invalid_source = S8("int bitcode_output_alias = ;\n");
+        FileStats bitcode_output_stats = os_file_replacement_target_stats(llvm_default_output);
+        if (llvm_default_output.length && bitcode_output_stats.valid &&
+            bitcode_output_stats.kind == OS_FILE_KIND_MISSING)
+        {
+            llvm_default_output_cleanup = true;
+            if (BUSTER_REQUIRE(arguments, file_write(llvm_default_output, BUSTER_SLICE_TO_BYTE_SLICE(bitcode_header_bytes)) &&
+                                              file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(bitcode_invalid_source))))
+            {
+                String8 bitcode_command[] = {S8("-target"), target, S8("-nostdinc"), S8("-emit-llvm"), S8("-include"),
+                                             llvm_default_output, input};
+                CompilerDriverResult bitcode_refused = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(bitcode_command)));
+                BUSTER_TEST_RAW(arguments, bitcode_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT, bitcode_refused.diagnostic);
+                BUSTER_TEST(arguments, string_first_sequence(bitcode_refused.diagnostic, S8("aliases input")) != BUSTER_STRING_NO_MATCH);
+                BUSTER_STRING_TEST(arguments,
+                                   BYTE_SLICE_TO_STRING(8, file_read(arena, llvm_default_output, (FileReadOptions){0})),
+                                   bitcode_header_bytes);
             }
         }
 
@@ -1434,6 +1472,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_input_collisions(
         if (extension_cleanup_stats.valid && extension_cleanup_stats.kind != OS_FILE_KIND_MISSING)
         {
             BUSTER_TEST(arguments, os_file_delete(extension_input));
+        }
+    }
+    if (llvm_default_output_cleanup)
+    {
+        FileStats bitcode_cleanup_stats = os_file_replacement_target_stats(llvm_default_output);
+        if (bitcode_cleanup_stats.valid && bitcode_cleanup_stats.kind != OS_FILE_KIND_MISSING)
+        {
+            BUSTER_TEST(arguments, os_file_delete(llvm_default_output));
         }
     }
     FileStats forced_search_directory_stats = os_path_followed_stats(forced_search_directory);
