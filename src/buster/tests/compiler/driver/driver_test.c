@@ -767,8 +767,46 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL UnitTestResult compiler_driver_test_prepr
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_paths(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-#if !BUSTER_ANDROID && !BUSTER_IOS
     Arena* arena = arguments->arena;
+
+    String8 version_arguments[] = {S8("--version")};
+    CompilerDriverInvocation version_invocation =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(version_arguments));
+    BUSTER_TEST(arguments, version_invocation.error == COMPILER_DRIVER_ERROR_NONE && version_invocation.input_count == 0);
+    version_invocation.input_paths = 0;
+    CompilerDriverResult version_result = compiler_driver_execute_invocation(arena, version_invocation);
+    BUSTER_TEST_RAW(arguments, version_result.error == COMPILER_DRIVER_ERROR_NONE && version_result.output.length != 0,
+                    version_result.diagnostic);
+
+    CompilerDriverInvocation missing_input_paths = {
+        .target = target_parse_triple(S8("x86_64-unknown-linux-gnu")).target,
+        .language = COMPILER_DRIVER_LANGUAGE_C,
+        .action = COMPILER_DRIVER_ACTION_ASSEMBLY,
+        .c_dialect = COMPILER_DRIVER_C_DIALECT_GNU17,
+        .register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST,
+        .dependency_file = true,
+        .dependency_passthrough = true,
+        .dependency_path = S8("driver-input-shape.d"),
+        .output_path = S8("driver-input-shape.s"),
+        .input_paths = 0,
+        .input_count = 1,
+        .collect_input_metrics = true,
+    };
+    CompilerDriverResult missing_input_paths_result = compiler_driver_execute_invocation(arena, missing_input_paths);
+    BUSTER_TEST(arguments, missing_input_paths_result.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+
+    CompilerDriverInvocation no_inputs = {
+        .target = target_parse_triple(S8("x86_64-unknown-linux-gnu")).target,
+        .language = COMPILER_DRIVER_LANGUAGE_C,
+        .action = COMPILER_DRIVER_ACTION_OBJECT,
+        .c_dialect = COMPILER_DRIVER_C_DIALECT_GNU17,
+        .register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST,
+    };
+    CompilerDriverResult no_inputs_result = compiler_driver_execute_invocation(arena, no_inputs);
+    BUSTER_TEST(arguments, no_inputs_result.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, no_inputs_result.diagnostic, S8("no input files"));
+
+#if !BUSTER_ANDROID && !BUSTER_IOS
     u64 position = arena->position;
     String8 input = buster_test_temporary_path(arena, S8("output-path-contract"), S8(".c"));
     String8 output = buster_test_temporary_path(arena, S8("output-path-contract"), S8(".out"));
@@ -914,8 +952,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_output_paths(UnitTestArg
     BUSTER_TEST(arguments, os_file_delete(input));
     BUSTER_TEST(arguments, os_file_delete(output));
     arena_set_position(arena, position);
-#else
-    BUSTER_UNUSED(arguments);
 #endif
     return result;
 }

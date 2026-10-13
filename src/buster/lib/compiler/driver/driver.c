@@ -10696,6 +10696,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         invocation.diagnostic = S8("unsupported register allocator; expected fast or quality");
     }
+    // API callers can construct the invocation directly. Validate its array/count
+    // pair before metrics copy input paths or request validation reads them.
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.input_count && !invocation.input_paths)
+    {
+        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation.diagnostic = S8("missing input path storage");
+    }
     if (invocation.enable_source_cache && !invocation.source_cache)
     {
         owned_source_cache = c_source_cache_create(arena, COMPILER_DRIVER_SOURCE_CACHE_BYTE_LIMIT);
@@ -10723,6 +10730,14 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     {
         result.error = invocation.error;
         result.diagnostic = invocation.diagnostic;
+        goto finish;
+    }
+    // An inputless query is valid, but a code-generation request with no
+    // positional inputs has no source from which to select its default output.
+    if (invocation.query == COMPILER_DRIVER_QUERY_NONE && !invocation.input_count)
+    {
+        result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        result.diagnostic = S8("no input files");
         goto finish;
     }
     // An earlier cohort may have left its gang parked with only its own
