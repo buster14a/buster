@@ -4612,12 +4612,12 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 bool unresolved_identifier = false;
                 // A cast in the bound changes its value (`(char)300`, `(int)3.9`).
                 // An integer cast wraps its operand in the rewritten tokens below,
-                // so the untyped evaluator keeps the bound; a cast to any other
-                // type, or an operand the evaluator cannot read (a floating
-                // constant), sends the bound to the typed query, which rebuilds
-                // the model it names and so stays off the integer path.
+                // so the untyped evaluator keeps the bound; casts to other types,
+                // unreadable constants, and unparenthesized unary sizeof operands
+                // go to the typed query, which rebuilds the model it names and
+                // stays off the integer path.
                 bool bound_has_cast = false;
-                bool bound_cast_needs_typed = false;
+                bool bound_typed_query_needed = false;
                 // The untyped evaluator wraps a cast's operand but not the
                 // arithmetic after it. It stays exact when the bound only adds
                 // and multiplies non-negative values and the result fits 32
@@ -4714,6 +4714,23 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                                 }
                                 close = BUSTER_MIN(operand_end, bound_end);
                             }
+                        }
+                        // The token-size pass cannot size unary-literal
+                        // `sizeof` operands. The operand has no identifier
+                        // dependency; the typed query sees the full bound so
+                        // names elsewhere still receive normal resolution.
+                        bool unary_constant_sizeof_operand = false;
+                        if (bound_word_is_sizeof && !parenthesized && operand_start < bound_end && bound_end - operand_start >= 2)
+                        {
+                            CToken unary_token = preprocess.tokens[operand_start];
+                            CToken constant_token = preprocess.tokens[operand_start + 1];
+                            bool unary_operator = c_token_is_punctuator(&unary_token, C_PUNCTUATOR_PLUS) ||
+                                                  c_token_is_punctuator(&unary_token, C_PUNCTUATOR_MINUS) ||
+                                                  c_token_is_punctuator(&unary_token, C_PUNCTUATOR_EXCLAMATION) ||
+                                                  c_token_is_punctuator(&unary_token, C_PUNCTUATOR_TILDE);
+                            bool constant_literal = constant_token.kind == C_TOKEN_PREPROCESSING_NUMBER ||
+                                                    constant_token.kind == C_TOKEN_CHARACTER_LITERAL;
+                            unary_constant_sizeof_operand = unary_operator && constant_literal;
                         }
                         // A bound reads the object bound at its declaration,
                         // including block shadowing, rather than a type name at
@@ -4937,7 +4954,14 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         if (invalid_operand_width) operand_resolved = false;
                         if (!operand_resolved)
                         {
-                            unresolved_identifier = true;
+                            if (unary_constant_sizeof_operand && !invalid_operand_width)
+                            {
+                                bound_typed_query_needed = true;
+                            }
+                            else
+                            {
+                                unresolved_identifier = true;
+                            }
                             break;
                         }
                         bound_tokens[bound_token_count++] =
@@ -4976,7 +5000,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                             }
                             else
                             {
-                                bound_cast_needs_typed = true;
+                                bound_typed_query_needed = true;
                             }
                         }
                         else if (cast_bits == 64 && !cast_signed)
@@ -5079,8 +5103,8 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                                           !c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS);
                     bound_tokens[bound_token_count++] = c_space_retoken(&bound_space, preprocess.spelling_base, token);
                 }
-                bound_cast_needs_typed |= (bound_wrap_sensitive || bound_float_cast) && bound_not_monotone;
-                bound_cast_needs_typed |= bound_float_cast && bound_float_literal;
+                bound_typed_query_needed |= (bound_wrap_sensitive || bound_float_cast) && bound_not_monotone;
+                bound_typed_query_needed |= bound_float_cast && bound_float_literal;
                 while (cast_closure_count)
                 {
                     cast_closure_count -= 1;
@@ -5102,7 +5126,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                     array_provisional |= !context->machine || !context->machine->inferred_bounds_final;
                 }
                 else if (bound.is_star || unresolved_identifier || !bound.token_count ||
-                         (bound_cast_needs_typed
+                         (bound_typed_query_needed
                               ? !c_parse_layout_typed_array_bound(context, bound, &count)
                               : ((!c_integer_expression_evaluate(arena, bound_space.base, bound_tokens, bound_token_count, 65536, &evaluation, &count) ||
                                   evaluation.diagnostic_count) &&
@@ -5110,7 +5134,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 {
                     continue;
                 }
-                else if (!bound_cast_needs_typed && ((bound_wrap_sensitive && count >> 32) || (bound_float_cast && count >> 24)) &&
+                else if (!bound_typed_query_needed && ((bound_wrap_sensitive && count >> 32) || (bound_float_cast && count >> 24)) &&
                          !c_parse_layout_typed_array_bound(context, bound, &count))
                 {
                     continue;
@@ -35777,11 +35801,13 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             u32 precedence = UINT32_MAX;
             u32 conditional_depth = 0;
             bool operand = false;
+            bool size_operator_operand = false;
             for (u32 cursor = begin; cursor < limit; cursor += 1)
             {
                 CToken token = preprocess.tokens[cursor];
                 if (c_token_in_well_known_set(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
                 {
+                    size_operator_operand = false;
                     continue;
                 }
                 if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
@@ -35789,7 +35815,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 {
                     u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
                     bool cast = false;
-                    if (!operand && close < limit && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    if (!operand && !size_operator_operand && close < limit && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
                     {
                         u32 type_cursor = cursor + 1;
                         CTypeId type = c_parse_constant_type_name(machine, result, preprocess, scope, type_cursor, close, &type_cursor);
@@ -35801,6 +35827,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                     }
                     cursor = close < limit ? close : limit;
                     operand = !cast;
+                    size_operator_operand = false;
                 }
                 else if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
                 {
@@ -35811,6 +35838,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                     }
                     conditional_depth += 1;
                     operand = false;
+                    size_operator_operand = false;
                 }
                 else if (c_token_is_punctuator(&token, C_PUNCTUATOR_COLON) && conditional_depth)
                 {
@@ -35820,6 +35848,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                         colon = cursor;
                     }
                     operand = false;
+                    size_operator_operand = false;
                 }
                 else
                 {
@@ -35831,7 +35860,22 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                         split = cursor;
                         precedence = priority;
                     }
-                    operand = c_parse_expression_token_ends_operand(token);
+                    if (token.kind == C_TOKEN_IDENTIFIER &&
+                        c_token_in_well_known_set(preprocess.spelling_base, token, C_SIZEOF_ALIGNOF_WORDS))
+                    {
+                        // sizeof and _Alignof introduce a unary operand; their
+                        // following punctuation is not a binary split until
+                        // that operand has been consumed.
+                        operand = false;
+                        size_operator_operand = true;
+                    }
+                    else
+                    {
+                        operand = c_parse_expression_token_ends_operand(token);
+                        // A unary punctuation prefix such as plus or star owns its following cast group;
+                        // only a direct group after the size word is the parenthesized type form.
+                        size_operator_operand = false;
+                    }
                 }
             }
             if (split != UINT32_MAX)

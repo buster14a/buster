@@ -222,6 +222,17 @@ valid neighbors through semantic-only analysis and both canonical frontend
 forms. This enforces C11/C17 6.7.6.2p2 and 6.7.2.1p9; see
 [WG14 N1570](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf).
 
+The typed-constant precedence scan keeps `sizeof` and the alignment operators
+as unary prefixes while it finds binary splits. A parenthesized type operand
+belongs to that operator, rather than being mistaken for a cast, and GNU
+`__extension__` remains a prefix through the full unary operand. The existing
+expression-type and layout queries still validate the complete inner operand
+before folding, so an incomplete type inside nested `sizeof` remains an error.
+The registered `compiler_driver_test_local_sizeof_static_asserts` fixture checks
+nested unary, dereference, alignment, extension, parenthesized and type-name
+forms, GNU statement-expression neighbors, incomplete-inner refusal, syntax-only
+and object parity, and execution in both canonical frontend forms (#3566).
+
 The bound check uses the semantic typed constant folder. NORMAL-mode sizeof
 type operands use the complete abstract-declarator reader, so parenthesized
 pointers to arrays and functions retain their pointer size. Its explicit task
