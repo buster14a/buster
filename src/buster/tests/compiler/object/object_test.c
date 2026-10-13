@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/object/object_test.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/assembly_unit.h>
+#include <buster/lib/compiler/jit/jit.h>
 #include <buster/lib/compiler/object/object_internal.h>
 #include <buster/lib/compiler/pdb/pdb.h>
 #include <buster/lib/time.h>
@@ -296,7 +297,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf32_payloads(UnitTestArguments*
     ObjectRelocation relocation = {.kind = OBJECT_RELOCATION_ABSOLUTE32, .section = 0, .symbol = 0, .offset = 3, .addend = 123};
     ObjectFile object = {.target = target, .sections = sections, .section_count = BUSTER_ARRAY_LENGTH(sections),
                          .symbols = symbols, .symbol_count = BUSTER_ARRAY_LENGTH(symbols), .relocations = &relocation, .relocation_count = 1};
-    BUSTER_TEST(arguments, object_link_executable(&object).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    BUSTER_TEST(arguments, jit_link_object(&object, (JitOptions){0}).error == JIT_ERROR_FOREIGN_TARGET);
     ObjectArtifact contiguous = object_write(temporary.arena, &object, OBJECT_FORMAT_ELF32);
     ObjectArtifact borrowed = object_write_borrowing(temporary.arena, &object, OBJECT_FORMAT_ELF32);
     if (BUSTER_REQUIRE(arguments, contiguous.error == OBJECT_ERROR_NONE && borrowed.error == OBJECT_ERROR_NONE &&
@@ -4504,8 +4505,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_stack_contract(UnitTestArgume
             }
         }
         object.requires_executable_stack = true;
-        ObjectExecutable executable = object_link_executable(&object);
-        BUSTER_TEST(arguments, executable.error == OBJECT_ERROR_UNSUPPORTED_TARGET && !executable.address);
+        JitProgram executable = jit_link_object(&object, (JitOptions){0});
+        BUSTER_TEST(arguments, executable.error == JIT_ERROR_EXECUTABLE_STACK && !executable.allocation_base);
     }
     return result;
 }
@@ -5860,16 +5861,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_elf_ldst(UnitTestArgument
             // An unaligned symbol plus a compensating addend is valid.
             BUSTER_TEST(arguments, object_aarch64_elf_page_relocate(kinds[scale], text[1], 4, 0x2fff, 1, &patched) && patched == bases[case_index]);
         }
-        ObjectExecutable executable = object_link_executable(&object);
-        if (BUSTER_REQUIRE(arguments, executable.error == OBJECT_ERROR_NONE && executable.address))
+        // The JIT links only host objects and has no ELF page relocations, so
+        // model the image: .rodata one page after a page-aligned .text.
+        u64 text_base = os_get_page_size() * 16;
+        u64 symbol_address = text_base + os_get_page_size() + symbols[relocation.symbol].value;
+        u64 address = symbol_address + (u64)relocation.addend;
+        u32 actual = 0;
+        if (BUSTER_REQUIRE(arguments, object_aarch64_elf_page_relocate(kinds[scale], text[1], text_base + 4, symbol_address, relocation.addend, &actual)))
         {
-            u32 actual = 0;
-            memcpy(&actual, (u8*)executable.address + 4, sizeof(actual));
-            u64 address = (u64)(uintptr_t)executable.address + os_get_page_size() + symbols[relocation.symbol].value + (u64)relocation.addend;
             BUSTER_TEST(arguments, (actual & ~(UINT32_C(0xfff) << 10)) == bases[case_index]);
             BUSTER_TEST(arguments, ((u64)((actual >> 10) & 4095) << scale) == (address & 4095));
         }
-        object_release_executable(executable);
         text[1] = UINT32_C(0xb8400108);
         ObjectArtifact rejected = object_write(temporary.arena, &object, OBJECT_FORMAT_ELF64);
         BUSTER_TEST(arguments, rejected.error != OBJECT_ERROR_NONE && !rejected.bytes.length);
@@ -7204,15 +7206,20 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
                     if (type == 1 && addend == 0)
                     {
-                        ObjectExecutable executable = object_link_executable(&read);
-                        BUSTER_TEST(arguments, executable.error == OBJECT_ERROR_NONE && executable.address);
-                        if (executable.address)
+                        // The JIT admits only the host target; the relocated
+                        // code is the same on every x86-64 host.
+                        ObjectFile native = read;
+                        native.target = target_native;
+                        JitProgram executable = jit_link_object(&native, (JitOptions){0});
+                        void* entry_address = object_test_jit_text(&executable);
+                        BUSTER_TEST(arguments, executable.error == JIT_ERROR_NONE && entry_address);
+                        if (entry_address)
                         {
                             u64 (*entry)(void) = 0;
-                            memcpy(&entry, &executable.address, sizeof(entry));
+                            memcpy(&entry, &entry_address, sizeof(entry));
                             BUSTER_TEST(arguments, entry() == 42);
                         }
-                        object_release_executable(executable);
+                        jit_program_release(&executable);
                     }
 #endif
                 }
@@ -9492,14 +9499,20 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         .symbol_count = BUSTER_ARRAY_LENGTH(misaligned_link_symbols),
         .relocation_count = 1,
     };
-    ObjectExecutable misaligned_link_executable = object_link_executable(&misaligned_link_object);
-    BUSTER_TEST(arguments, misaligned_link_executable.error == OBJECT_ERROR_CAPACITY);
-    object_release_executable(misaligned_link_executable);
+    // The JIT reaches its branch alignment check only for a host object;
+    // elsewhere it refuses the foreign object before mapping anything.
+#if BUSTER_CPU_ARCH_AARCH64
+    misaligned_link_object.target = target_native;
+#endif
+    JitProgram misaligned_link_program = jit_link_object(&misaligned_link_object, (JitOptions){0});
+    BUSTER_TEST(arguments, misaligned_link_program.error == (BUSTER_CPU_ARCH_AARCH64 ? JIT_ERROR_CAPACITY : JIT_ERROR_FOREIGN_TARGET) &&
+                               !misaligned_link_program.allocation_base);
+    jit_program_release(&misaligned_link_program);
 
-    // The in-memory AArch64 linker shares the checked Mach PAGE patch rules
-    // with the JIT.  Local data is enough to exercise both fixups without
-    // requiring an AArch64 host, while TLVP remains an explicit resolver-only
-    // exclusion and must fail before exposing an executable mapping.
+    // Mach and ELF PAGE fixups share their checked patch rules. A modeled
+    // image (data one page and 0x238 bytes past page-aligned text) covers both
+    // on every host; AArch64 hosts also JIT-link the Mach pair. TLVP remains
+    // an explicit resolver-only exclusion and fails before any mapping exists.
     u32 linked_page_words[] = {UINT32_C(0x90000009), UINT32_C(0x91000129)};
     u64 linked_page_data = UINT64_C(0x1122334455667788);
     ObjectSection linked_page_sections[] = {
@@ -9559,35 +9572,54 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         {OBJECT_RELOCATION_AARCH64_MACH_PAGE21, OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12},
         {OBJECT_RELOCATION_AARCH64_ELF_PAGE21, OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12},
     };
+    u64 linked_page_text = (u64)os_get_page_size() * 16;
+    u64 linked_page_data_address = linked_page_text + os_get_page_size() + 0x238;
     for (u32 format_index = 0; format_index < BUSTER_ARRAY_LENGTH(linked_page_kinds); format_index += 1)
     {
-        linked_page_relocations[0].kind = linked_page_kinds[format_index][0];
-        linked_page_relocations[1].kind = linked_page_kinds[format_index][1];
-        ObjectExecutable linked_page_executable = object_link_executable(&linked_page_object);
-        BUSTER_TEST(arguments, linked_page_executable.error == OBJECT_ERROR_NONE && linked_page_executable.address);
-        if (linked_page_executable.error == OBJECT_ERROR_NONE && linked_page_executable.address)
+        u32 actual_linked_page21 = linked_page_words[0];
+        u32 actual_linked_pageoff12 = linked_page_words[1];
+        bool linked_page_applied = format_index
+            ? object_aarch64_elf_page_relocate(linked_page_kinds[format_index][0], linked_page_words[0], linked_page_text, linked_page_data_address, 0, &actual_linked_page21) &&
+                  object_aarch64_elf_page_relocate(linked_page_kinds[format_index][1], linked_page_words[1], linked_page_text + sizeof(u32), linked_page_data_address, 0, &actual_linked_pageoff12)
+            : a64_page_relocation_apply(true, (u8*)&actual_linked_page21, linked_page_text, linked_page_data_address, 0) &&
+                  a64_page_relocation_apply(false, (u8*)&actual_linked_pageoff12, linked_page_text + sizeof(u32), linked_page_data_address, 0);
+        BUSTER_TEST(arguments, linked_page_applied);
+        if (linked_page_applied)
         {
-            u8* linked_page_text = (u8*)linked_page_executable.address;
-            u8* linked_page_data_address = linked_page_text + os_get_page_size();
             u32 expected_linked_page21 = 0;
-            u32 actual_linked_page21 = 0;
-            u32 actual_linked_pageoff12 = 0;
-            memcpy(&actual_linked_page21, linked_page_text, sizeof(actual_linked_page21));
-            memcpy(&actual_linked_pageoff12, linked_page_text + sizeof(u32), sizeof(actual_linked_pageoff12));
-            bool linked_page21_valid = a64_adrp_encode(9, (u64)(uintptr_t)linked_page_text, (u64)(uintptr_t)linked_page_data_address, &expected_linked_page21);
+            bool linked_page21_valid = a64_adrp_encode(9, linked_page_text, linked_page_data_address, &expected_linked_page21);
             BUSTER_TEST(arguments, linked_page21_valid && actual_linked_page21 == expected_linked_page21);
-            BUSTER_TEST(arguments, actual_linked_pageoff12 == (UINT32_C(0x91000000) | (u32)((u64)(uintptr_t)linked_page_data_address & 0xfff) << 10 | (9u << 5) | 9u));
-            object_release_executable(linked_page_executable);
+            BUSTER_TEST(arguments, actual_linked_pageoff12 == (UINT32_C(0x91000000) | (u32)(linked_page_data_address & 0xfff) << 10 | (9u << 5) | 9u));
         }
     }
+    ObjectFile linked_page_native = linked_page_object;
+    linked_page_native.target = target_native;
+#if BUSTER_CPU_ARCH_AARCH64
+    JitProgram linked_page_program = jit_link_object(&linked_page_native, (JitOptions){0});
+    if (BUSTER_REQUIRE(arguments, linked_page_program.error == JIT_ERROR_NONE && linked_page_program.section_addresses[0] &&
+                                      linked_page_program.section_addresses[1]))
+    {
+        u8* linked_page_text_address = (u8*)linked_page_program.section_addresses[0];
+        u64 linked_page_data_value = (u64)(uintptr_t)linked_page_program.section_addresses[1];
+        u32 expected_linked_page21 = 0;
+        u32 actual_linked_page21 = 0;
+        u32 actual_linked_pageoff12 = 0;
+        memcpy(&actual_linked_page21, linked_page_text_address, sizeof(actual_linked_page21));
+        memcpy(&actual_linked_pageoff12, linked_page_text_address + sizeof(u32), sizeof(actual_linked_pageoff12));
+        bool linked_page21_valid = a64_adrp_encode(9, (u64)(uintptr_t)linked_page_text_address, linked_page_data_value, &expected_linked_page21);
+        BUSTER_TEST(arguments, linked_page21_valid && actual_linked_page21 == expected_linked_page21);
+        BUSTER_TEST(arguments, actual_linked_pageoff12 == (UINT32_C(0x91000000) | (u32)(linked_page_data_value & 0xfff) << 10 | (9u << 5) | 9u));
+        BUSTER_TEST(arguments, *(u64*)(uintptr_t)linked_page_data_value == linked_page_data);
+    }
+    jit_program_release(&linked_page_program);
+#endif
     ObjectRelocation linked_page_tlvp_relocation = linked_page_relocations[0];
     linked_page_tlvp_relocation.kind = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21;
-    ObjectFile linked_page_tlvp_object = linked_page_object;
-    linked_page_tlvp_object.relocations = &linked_page_tlvp_relocation;
-    linked_page_tlvp_object.relocation_count = 1;
-    ObjectExecutable linked_page_tlvp_executable = object_link_executable(&linked_page_tlvp_object);
-    BUSTER_TEST(arguments, linked_page_tlvp_executable.error == OBJECT_ERROR_UNSUPPORTED_TARGET && !linked_page_tlvp_executable.address);
-    object_release_executable(linked_page_tlvp_executable);
+    linked_page_native.relocations = &linked_page_tlvp_relocation;
+    linked_page_native.relocation_count = 1;
+    JitProgram linked_page_tlvp_program = jit_link_object(&linked_page_native, (JitOptions){0});
+    BUSTER_TEST(arguments, linked_page_tlvp_program.error == JIT_ERROR_TLS_UNSUPPORTED && !linked_page_tlvp_program.allocation_base);
+    jit_program_release(&linked_page_tlvp_program);
 
     String8 aarch64_jump_assembly = object_print_assembly(arguments->arena, &object);
     BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(aarch64_jump_assembly), S8("\tb object_callee\n")));
@@ -9607,15 +9639,18 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     symbols[1].value = 6;
     symbols[1].size = 6;
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
-    ObjectExecutable executable = object_link_executable(&object);
-    BUSTER_TEST(arguments, executable.error == OBJECT_ERROR_NONE);
-    if (executable.address)
+    ObjectFile native_object = object;
+    native_object.target = target_native;
+    JitProgram executable = jit_link_object(&native_object, (JitOptions){0});
+    void* entry_address = object_test_jit_text(&executable);
+    BUSTER_TEST(arguments, executable.error == JIT_ERROR_NONE);
+    if (entry_address)
     {
         u64 (*entry)(void) = 0;
-        memcpy(&entry, &executable.address, sizeof(entry));
+        memcpy(&entry, &entry_address, sizeof(entry));
         BUSTER_TEST(arguments, entry() == 42);
-        object_release_executable(executable);
     }
+    jit_program_release(&executable);
 #endif
 #if BUSTER_CPU_ARCH_AARCH64 && !BUSTER_SANITIZE
     sections[0].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(aarch64_text);
@@ -9629,15 +9664,18 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     symbols[0].size = 16;
     symbols[1].value = 16;
     symbols[1].size = 8;
-    ObjectExecutable executable = object_link_executable(&object);
-    BUSTER_TEST(arguments, executable.error == OBJECT_ERROR_NONE);
-    if (executable.address)
+    ObjectFile native_object = object;
+    native_object.target = target_native;
+    JitProgram executable = jit_link_object(&native_object, (JitOptions){0});
+    void* entry_address = object_test_jit_text(&executable);
+    BUSTER_TEST(arguments, executable.error == JIT_ERROR_NONE);
+    if (entry_address)
     {
         u64 (*entry)(void) = 0;
-        memcpy(&entry, &executable.address, sizeof(entry));
+        memcpy(&entry, &entry_address, sizeof(entry));
         BUSTER_TEST(arguments, entry() == 42);
-        object_release_executable(executable);
     }
+    jit_program_release(&executable);
 #else
     BUSTER_UNUSED(aarch64_text);
 #endif
@@ -10019,12 +10057,14 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
     if (windows_unwind_object_valid)
     {
-        ObjectExecutable windows_unwind_executable = object_link_executable(&windows_unwind_object);
-        BUSTER_TEST(arguments, windows_unwind_executable.error == OBJECT_ERROR_NONE);
-        if (windows_unwind_executable.address)
-        {
-            object_release_executable(windows_unwind_executable);
-        }
+        // The JIT leaves .pdata/.xdata and their image-relative relocations
+        // unmapped on every host; the code itself still links.
+        ObjectFile windows_unwind_native = windows_unwind_object;
+        windows_unwind_native.target = target_native;
+        JitProgram windows_unwind_program = jit_link_object(&windows_unwind_native, (JitOptions){0});
+        BUSTER_TEST(arguments, windows_unwind_program.error == JIT_ERROR_NONE && object_test_jit_text(&windows_unwind_program) &&
+                                   !windows_unwind_program.section_addresses[OBJECT_SECTION_WINDOWS_PDATA]);
+        jit_program_release(&windows_unwind_program);
     }
 #endif
 

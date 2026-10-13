@@ -120,6 +120,7 @@ if [[ ${1:-} == simctl && ${2:-} == launch ]]; then
     case "$FAKE_RESULT" in
         success|delayed-success|trace-only|backpressure)
             [[ ${SIMCTL_CHILD_BUSTER_IOS_LAUNCH_TRACE:-} == 1 ]]
+            [[ ${SIMCTL_CHILD_BUSTER_TEST_FIXTURE_TIMING:-} == all ]]
             if [[ $FAKE_RESULT == delayed-success ]]; then sleep 1; fi
             printf 'BUSTER_IOS_LAUNCH_V1 stage=main pid=1 monotonic_us=1 wall_us=1 process_cpu_us=1 monotonic_status=0 wall_status=0 cpu_status=0\n'
             if [[ $FAKE_RESULT == delayed-success ]]; then sleep 2; fi

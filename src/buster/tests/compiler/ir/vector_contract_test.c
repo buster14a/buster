@@ -8,6 +8,7 @@
 #include <buster/lib/compiler/ebpf/ebpf.h>
 #include <buster/lib/compiler/llvm/bitcode.h>
 #include <buster/lib/string.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 typedef struct VectorContractCase VectorContractCase;
 struct VectorContractCase
@@ -254,7 +255,7 @@ UnitTestResult vector_contract_tests(UnitTestArguments* arguments)
                 result.test_count += emitted.test_count;
                 result.succeeded_test_count += emitted.succeeded_test_count;
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;

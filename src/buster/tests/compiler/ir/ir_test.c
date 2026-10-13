@@ -3,6 +3,7 @@
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/os.h>
 #include <buster/lib/time.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL u32 ir_test_opcode_count(IrFunction* function, IrOpcode opcode)
@@ -534,7 +535,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_unary_categories_case(UnitT
             }
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -1092,7 +1093,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_switch_case(UnitTestArgumen
         targets_unchanged &= targets[index].value == original_targets[index].value;
     }
     BUSTER_TEST(arguments, keys_unchanged && targets_unchanged);
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -1164,7 +1165,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_switch_keys(UnitTestArgumen
         result.test_count += duplicate.test_count;
         result.succeeded_test_count += duplicate.succeeded_test_count;
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -1320,7 +1321,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_parameter_validation(UnitTe
                     TemporalArena dirty = scratch_begin(0, 0);
                     u8* bytes = arena_allocate(dirty.arena, u8, 4096);
                     memset(bytes, 0xa5, 4096);
-                    scratch_end(dirty);
+                    c_test_scratch_end(dirty);
 #if BUSTER_BENCH_ALLOCATIONS
                     IrConstructionCounters before = ir_construction_counters();
 #endif
@@ -1967,7 +1968,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, defaults_prepared.error == IR_VALIDATION_NONE);
             BUSTER_TEST(arguments, defaults_program->inline_options.tiny);
             BUSTER_TEST(arguments, defaults_program->inline_options.max_callee_instructions == IR_INLINE_TINY_INSTRUCTIONS);
-            BUSTER_TEST(arguments, defaults_program->inline_options.max_function_growth == IR_INLINE_FUNCTION_GROWTH);
+            BUSTER_TEST(arguments, defaults_program->inline_options.max_function_growth == 0);
             BUSTER_TEST(arguments, IR_INLINE_FUNCTION_GROWTH == 2048u);
             // The module limit stays relative so each module derives its own.
             BUSTER_TEST(arguments, defaults_program->inline_options.max_module_growth == 0);
@@ -1977,7 +1978,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, 2000000u) == 2000000u / 32u);
             BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, UINT64_MAX) == UINT32_MAX);
             BUSTER_TEST(arguments, ir_inline_module_growth_limit(100u, 2000000u) == 100u);
-            BUSTER_TEST(arguments, defaults_program->inline_options.max_call_sites == IR_INLINE_CALL_SITES);
+            BUSTER_TEST(arguments, defaults_program->inline_options.max_call_sites == 0);
             BUSTER_TEST(arguments, defaults_program->inline_options.caller_growth_shift == IR_INLINE_CALLER_GROWTH_SHIFT);
             BUSTER_TEST(arguments, defaults_module->inline_complete);
             BUSTER_TEST(arguments, defaults_module->inlining.inlined >= 1);
@@ -1986,7 +1987,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, ir_test_direct_call_count(defaults_program, defaults_caller, S8("small_leaf")) == 0);
             BUSTER_TEST(arguments, ir_validate_canonical_module(defaults_program, defaults_module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(defaults_temporary);
+        c_test_scratch_end(defaults_temporary);
     }
 
     // With FAST selected, a caller whose splices were all optional defers its
@@ -2060,7 +2061,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
                 BUSTER_TEST(arguments, deferred_module->inline_unchecked_count == 0);
             }
         }
-        scratch_end(deferred_temporary);
+        c_test_scratch_end(deferred_temporary);
     }
 
     // A tiny site in a caller much larger than its growth stays a call by
@@ -2131,7 +2132,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, !bound_caller ||
                                        ir_validate_canonical_module(bound_program, bound_module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(bound_temporary);
+        c_test_scratch_end(bound_temporary);
     }
 
     // Mandatory sites must be budgeted before optional sites, even when
@@ -2220,8 +2221,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, ir_test_direct_call_count(priority_program, optional_caller, S8("optional_leaf")) == 1);
             BUSTER_TEST(arguments, ir_validate_canonical_module(priority_program, priority_module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(priority_temporary);
-        scratch_end(required_temporary);
+        c_test_scratch_end(priority_temporary);
+        c_test_scratch_end(required_temporary);
     }
 
     // A leading acyclic mandatory feeder must not hide a later required
@@ -2369,7 +2370,214 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
                 }
             }
         }
-        scratch_end(cycle_temporary);
+        c_test_scratch_end(cycle_temporary);
+    }
+
+    // Splices preserve caller-owned computed-goto values and destinations;
+    // the callee still cannot bring computed-label provenance of its own.
+    for (u32 label_form = 0; label_form < 2; label_form += 1)
+    {
+        for (u32 label_callee = 0; label_callee < 2; label_callee += 1)
+        {
+            TemporalArena label_temporary = scratch_begin(&arguments->arena, 1);
+            Arena* label_arena = label_temporary.arena;
+            String8 label_source = label_callee ? S8(
+                "static inline __attribute__((always_inline)) int label_leaf(int value) {\n"
+                "void *targets[] = {&&first, &&second}; goto *targets[value & 1]; first: return 3; second: return 5; }\n"
+                "int label_caller(int value) { return label_leaf(value); }\n") : S8(
+                "static inline __attribute__((always_inline)) int label_leaf(int value) {\n"
+                "if (value < 0) return -value; return value * 3 + 1; }\n"
+                "int label_caller(int index) { void *targets[] = {&&first, &&second};\n"
+                "int value = label_leaf(index); goto *targets[index & 1];\n"
+                "first: value += label_leaf(4); goto done; second: value += label_leaf(5); done: return value; }\n");
+            CPreprocessResult label_tokens = c_preprocess(label_arena, label_source,
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+            CAnalysisResult label_analysis = c_parse(label_arena, label_tokens);
+            CIRLowerResult label_lowered = c_lower_to_ir_with_options(label_arena, S8("inline-caller-labels.c"),
+                label_tokens, label_analysis, target_native, (CIRLowerOptions){.disable_direct_ssa = label_form != 0});
+            BUSTER_TEST(arguments, !label_tokens.error_count && !label_analysis.diagnostic_count && !label_lowered.diagnostic_count);
+            if (BUSTER_REQUIRE(arguments, label_lowered.program && label_lowered.program->module_count == 1))
+            {
+                IrProgram* label_program = label_lowered.program;
+                IrModule* label_module = label_program->modules;
+                IrFunction* label_caller = ir_test_inline_find_function(label_module, S8("label_caller"));
+                label_program->fast_passes = 0;
+                label_program->inline_options = (IrInlineOptions){0};
+                u32 metadata_count = label_caller ? label_caller->label_metadata_count : 0;
+                IrValueId* metadata_values = arena_allocate(label_arena, IrValueId, metadata_count);
+                IrValueLabelMetadata* metadata = arena_allocate(label_arena, IrValueLabelMetadata, metadata_count);
+                if (metadata_count)
+                {
+                    memcpy(metadata_values, label_caller->label_metadata_values, sizeof(*metadata_values) * metadata_count);
+                    memcpy(metadata, label_caller->label_metadata, sizeof(*metadata) * metadata_count);
+                    for (u32 metadata_index = 0; metadata_index < metadata_count; metadata_index += 1)
+                    {
+                        u32 destination_count = metadata[metadata_index].label_block_count;
+                        metadata[metadata_index].label_blocks = arena_allocate(label_arena, IrBlockId, destination_count);
+                        if (destination_count)
+                        {
+                            memcpy(metadata[metadata_index].label_blocks, label_caller->label_metadata[metadata_index].label_blocks,
+                                sizeof(IrBlockId) * destination_count);
+                        }
+                    }
+                }
+                IrValidationResult label_prepared = ir_prepare_canonical_module(label_program, label_module, false);
+                if (label_callee)
+                {
+                    BUSTER_TEST(arguments, label_prepared.error == IR_VALIDATION_INLINE_REQUIRED);
+                    BUSTER_TEST(arguments, label_module->inlining.shape_skips != 0);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, label_prepared.error == IR_VALIDATION_NONE);
+                    BUSTER_TEST(arguments, label_module->inlining.always_inlined == 3);
+                    BUSTER_TEST(arguments, label_caller && metadata_count && label_caller->label_metadata_count == metadata_count);
+                    BUSTER_TEST(arguments, label_caller && ir_test_direct_call_count(label_program, label_caller, S8("label_leaf")) == 0);
+                    for (u32 metadata_index = 0; label_caller && metadata_index < metadata_count; metadata_index += 1)
+                    {
+                        BUSTER_TEST(arguments, label_caller->label_metadata_values[metadata_index].value == metadata_values[metadata_index].value);
+                        BUSTER_TEST(arguments, label_caller->label_metadata[metadata_index].label_block_count == metadata[metadata_index].label_block_count);
+                        for (u32 destination = 0; destination < metadata[metadata_index].label_block_count; destination += 1)
+                        {
+                            BUSTER_TEST(arguments, label_caller->label_metadata[metadata_index].label_blocks[destination].value ==
+                                metadata[metadata_index].label_blocks[destination].value);
+                        }
+                    }
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(label_program, label_module).error == IR_VALIDATION_NONE);
+                }
+            }
+            c_test_scratch_end(label_temporary);
+        }
+    }
+
+    // Required bodies can exceed both optional row caps. Explicit row limits
+    // still diagnose the same source call instead of silently retaining it.
+    for (u32 limit_case = 0; limit_case < 3; limit_case += 1)
+    {
+        TemporalArena large_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* large_arena = large_temporary.arena;
+        String8 large_head = S8("static inline __attribute__((always_inline)) int large_required(int value) {\n");
+        String8 large_statement = S8("value = value * 3 + 1;\n");
+        String8 large_tail = S8("return value; }\nint large_caller(int value) { return large_required(value); }\n");
+        u32 large_statement_count = 1200;
+        u64 large_source_size = large_head.length + large_statement_count * large_statement.length + large_tail.length;
+        char8* large_source_bytes = arena_allocate(large_arena, char8, large_source_size);
+        u64 large_cursor = large_head.length;
+        memcpy(large_source_bytes, large_head.pointer, large_head.length);
+        for (u32 statement_index = 0; statement_index < large_statement_count; statement_index += 1)
+        {
+            memcpy(large_source_bytes + large_cursor, large_statement.pointer, large_statement.length);
+            large_cursor += large_statement.length;
+        }
+        memcpy(large_source_bytes + large_cursor, large_tail.pointer, large_tail.length);
+        String8 large_source = {.pointer = large_source_bytes, .length = large_source_size};
+        if (limit_case == 0)
+        {
+            // Independent callers collectively exceed the old shared work
+            // allowance; each expansion remains below its own fixed bound.
+            String8 callers[49];
+            callers[0] = large_source;
+            for (u32 caller_index = 1; caller_index < BUSTER_ARRAY_LENGTH(callers); caller_index += 1)
+            {
+                callers[caller_index] = string_format(large_arena,
+                    S8("int large_caller_{u32}(int value) {{ return large_required(value); }}\n"), caller_index);
+            }
+            large_source = string_join_arena(large_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(callers), false);
+        }
+        CPreprocessResult large_preprocessed = c_preprocess(large_arena, large_source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult large_analysis = c_parse(large_arena, large_preprocessed);
+        CIRLowerResult large_lowered = {0};
+        if (!large_preprocessed.error_count && !large_analysis.diagnostic_count)
+        {
+            large_lowered = c_lower_to_ir(large_arena, S8("canonical-inline-large-required.c"),
+                large_preprocessed, large_analysis, target_native);
+        }
+        BUSTER_TEST(arguments, !large_preprocessed.error_count && !large_analysis.diagnostic_count && !large_lowered.diagnostic_count);
+        if (BUSTER_REQUIRE(arguments, large_lowered.program && large_lowered.program->module_count == 1))
+        {
+            IrProgram* large_program = large_lowered.program;
+            IrModule* large_module = large_program->modules;
+            large_program->fast_passes = 0;
+            large_program->inline_options = (IrInlineOptions){
+                .max_function_growth = limit_case == 1 ? IR_INLINE_FUNCTION_GROWTH : 0,
+                .max_module_growth = limit_case == 2 ? IR_INLINE_MODULE_GROWTH : 0,
+            };
+            IrFunction* large_leaf = ir_test_inline_find_function(large_module, S8("large_required"));
+            BUSTER_TEST(arguments, large_leaf && large_leaf->instruction_count > IR_INLINE_MODULE_GROWTH);
+            IrValidationResult large_prepared = ir_prepare_canonical_module(large_program, large_module, false);
+            if (limit_case == 0)
+            {
+                BUSTER_TEST(arguments, large_prepared.error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, large_module->inlining.always_inlined == 49);
+                BUSTER_TEST(arguments, large_module->inlining.growth > IR_INLINE_MODULE_GROWTH);
+                BUSTER_TEST(arguments, large_module->inlining.visits > IR_FAST_WORK_BUDGET);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(large_program, large_module).error == IR_VALIDATION_NONE);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, large_prepared.error == IR_VALIDATION_INLINE_REQUIRED);
+                BUSTER_TEST(arguments, large_module->inlining.required_budget_reason ==
+                    (limit_case == 1 ? IR_INLINE_BUDGET_FUNCTION_GROWTH : IR_INLINE_BUDGET_MODULE_GROWTH));
+                BUSTER_TEST(arguments, large_module->inlining.required_budget_limit ==
+                    (limit_case == 1 ? IR_INLINE_FUNCTION_GROWTH : IR_INLINE_MODULE_GROWTH));
+                BUSTER_TEST(arguments, large_module->inlining.required_budget_demand > large_module->inlining.required_budget_limit);
+                BUSTER_TEST(arguments, !large_module->inline_complete);
+            }
+        }
+        scratch_end(large_temporary);
+    }
+
+    // A required consumer may have more than the optional 64-site allowance.
+    // An explicit site cap remains a source-mapped refusal.
+    for (u32 site_case = 0; site_case < 2; site_case += 1)
+    {
+        TemporalArena sites_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* sites_arena = sites_temporary.arena;
+        String8 sites_head = S8(
+            "static inline __attribute__((always_inline)) int site_leaf(int value) { return value + 1; }\n"
+            "int site_caller(int value) {\n");
+        String8 sites_statement = S8("value = site_leaf(value);\n");
+        String8 sites_tail = S8("return value; }\n");
+        u64 sites_size = sites_head.length + (IR_INLINE_CALL_SITES + 1u) * sites_statement.length + sites_tail.length;
+        char8* sites_bytes = arena_allocate(sites_arena, char8, sites_size);
+        u64 sites_cursor = sites_head.length;
+        memcpy(sites_bytes, sites_head.pointer, sites_head.length);
+        for (u32 site = 0; site <= IR_INLINE_CALL_SITES; site += 1)
+        {
+            memcpy(sites_bytes + sites_cursor, sites_statement.pointer, sites_statement.length);
+            sites_cursor += sites_statement.length;
+        }
+        memcpy(sites_bytes + sites_cursor, sites_tail.pointer, sites_tail.length);
+        String8 sites_source = {.pointer = sites_bytes, .length = sites_size};
+        CPreprocessResult sites_preprocess = c_preprocess(sites_arena, sites_source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult sites_analysis = c_parse(sites_arena, sites_preprocess);
+        CIRLowerResult sites_lowered = c_lower_to_ir(sites_arena, S8("canonical-inline-required-sites.c"),
+            sites_preprocess, sites_analysis, target_native);
+        BUSTER_TEST(arguments, !sites_preprocess.error_count && !sites_analysis.diagnostic_count && !sites_lowered.diagnostic_count);
+        if (BUSTER_REQUIRE(arguments, sites_lowered.program && sites_lowered.program->module_count == 1))
+        {
+            IrProgram* sites_program = sites_lowered.program;
+            IrModule* sites_module = sites_program->modules;
+            sites_program->fast_passes = 0;
+            sites_program->inline_options = (IrInlineOptions){.max_call_sites = site_case ? IR_INLINE_CALL_SITES : 0};
+            IrValidationResult sites_prepared = ir_prepare_canonical_module(sites_program, sites_module, false);
+            if (site_case == 0)
+            {
+                BUSTER_TEST(arguments, sites_prepared.error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, sites_module->inlining.always_inlined == IR_INLINE_CALL_SITES + 1);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(sites_program, sites_module).error == IR_VALIDATION_NONE);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, sites_prepared.error == IR_VALIDATION_INLINE_REQUIRED);
+                BUSTER_TEST(arguments, sites_module->inlining.required_budget_reason == IR_INLINE_BUDGET_CALL_SITES);
+                BUSTER_TEST(arguments, sites_module->inlining.required_budget_demand == IR_INLINE_CALL_SITES + 1);
+                BUSTER_TEST(arguments, sites_module->inlining.required_budget_limit == IR_INLINE_CALL_SITES);
+            }
+        }
+        scratch_end(sites_temporary);
     }
 
     // An explicit function-growth limit on a required call reports the
@@ -2455,7 +2663,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             }
             BUSTER_TEST(arguments, ir_validate_canonical_module(refusal_program, refusal_module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(refusal_temporary);
+        c_test_scratch_end(refusal_temporary);
     }
 
     // A real caller with substantial spare capacity must still admit a
@@ -2604,7 +2812,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
                 }
             }
         }
-        scratch_end(capacity_temporary);
+        c_test_scratch_end(capacity_temporary);
     }
 
     // Optional tiny sites bound retained storage per caller, as FAST does.
@@ -2693,7 +2901,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             }
             BUSTER_TEST(arguments, ir_validate_canonical_module(spread_program, spread_module).error == IR_VALIDATION_NONE);
         }
-        scratch_end(spread_temporary);
+        c_test_scratch_end(spread_temporary);
     }
 
     return result;
@@ -2830,9 +3038,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_i386_abi(UnitTestArguments* arguments
     return result;
 }
 
+// ir_type_from_id answers only rows a table actually holds: a missing table,
+// an out-of-range id, or a row-less table with a nonzero count (#3952) is null.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_type_from_id_bounds(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    IrType rows[2] = {0};
+    IrTypeTable table = {.types = rows, .count = 2, .capacity = 2};
+    IrTypeTable rowless = {.types = 0, .count = 2, .capacity = 2};
+    BUSTER_TEST(arguments, ir_type_from_id(&table, (IrTypeId){.value = 1}) == rows + 1);
+    BUSTER_TEST(arguments, ir_type_from_id(&table, (IrTypeId){.value = 2}) == 0);
+    BUSTER_TEST(arguments, ir_type_from_id(0, (IrTypeId){.value = 0}) == 0);
+    BUSTER_TEST(arguments, ir_type_from_id(&rowless, (IrTypeId){.value = 1}) == 0);
+    return result;
+}
+
 UnitTestResult ir_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_promotion_tests(arguments);
+    BUSTER_TEST_FIXTURE(arguments, ir_test_type_from_id_bounds);
     BUSTER_TEST_FIXTURE(arguments, ir_test_canonical_inline);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_owner_index);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_sets);
@@ -3142,7 +3366,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
                     TemporalArena poison = arena_begin_temporal(scratch);
                     u8* bytes = arena_allocate(scratch, u8, BUSTER_KB(16));
                     memset(bytes, 0xa5, BUSTER_KB(16));
-                    scratch_end(poison);
+                    c_test_scratch_end(poison);
                 }
                 u64 classifications = fixture.abi_contexts[IR_ABI_CONVENTION_SYSTEMV_X86_64].classified_values;
                 IrAbiValue cached = ir_type_abi_value(&fixture, grown_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
@@ -3761,7 +3985,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, arguments->arena->position == abi_attempt.position);
         u8* discarded = arena_allocate(arguments->arena, u8, 16384);
         memset(discarded, 0xcc, 16384);
-        scratch_end(abi_attempt);
+        c_test_scratch_end(abi_attempt);
     }
     // Mutating a language layout invalidates all conventions and dependent
     // aggregate classifications through one explicit program operation.

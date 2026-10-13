@@ -35,6 +35,28 @@
 #define COMPILER_DRIVER_RESPONSE_FILE_BYTE_LIMIT BUSTER_MB(4)
 #define COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT ((u64)1 << 16)
 
+// Minimum-work gate for -fcompile-jobs translation-unit lanes (#53). Entering
+// the multi-lane path costs a fixed native-family preparation; a link whose
+// native C inputs cannot repay it keeps the one-worker path. Estimated work is
+// each eligible input's file size plus a per-input charge for the fixed cost of
+// a translation unit, in bytes. Calibration pending: the gate is disabled until
+// the 9700X scaling-v1 size series measures both values
+// (docs/agents/driver.md, "Opt-in native translation-unit lanes").
+#define COMPILER_DRIVER_LANE_MIN_WORK_BYTES ((u64)0)
+#define COMPILER_DRIVER_LANE_INPUT_WORK_BYTES ((u64)0)
+
+// What the minimum-work gate decided for one invocation. NONE: lanes were not
+// requested or cannot apply (one worker, fewer than two eligible inputs, an
+// embedding gang or a source cache). LANES: lanes were permitted. SERIAL: the
+// population was too small, so the one-worker path ran.
+typedef enum CompilerDriverLaneGate
+{
+    COMPILER_DRIVER_LANE_GATE_NONE,
+    COMPILER_DRIVER_LANE_GATE_LANES,
+    COMPILER_DRIVER_LANE_GATE_SERIAL,
+    COMPILER_DRIVER_LANE_GATE_COUNT,
+} CompilerDriverLaneGate;
+
 typedef enum CompilerDriverError
 {
     COMPILER_DRIVER_ERROR_NONE,
@@ -339,6 +361,8 @@ struct CompilerDriverInvocation
     // Accepted only for I386, where native artifact generation is refused.
     bool no_asynchronous_unwind_tables;
     bool disable_direct_ssa;
+    // -fcanonical-intern-constants: CIRLowerOptions.intern_block_constants.
+    bool intern_block_constants;
     bool disable_local_promotion;
     bool disable_target_local_promotion;
     // -fpinned-debug-locals / -fno-pinned-debug-locals override the default.
@@ -587,6 +611,7 @@ struct CompilerDriverResult
     IrFastStatistics fast;
     IrInlineStatistics inlining;
     CIRDirectSsaStatistics direct_ssa;
+    CIRConstantInternStatistics constant_interning;
     CTypeLayoutStatistics type_layout;
     CompilerDriverCAstPilotResult c_ast;
     String8 diagnostic;
@@ -641,6 +666,7 @@ struct CompilerDriverResult
     // Maximum lanes actually participating in a native C input batch, or
     // one on serial/unsupported paths. This is not a physical-core count.
     u32 compilation_workers;
+    CompilerDriverLaneGate lane_gate;
     bool has_object;
     bool has_wasm;
     bool has_wasm64;
@@ -654,10 +680,13 @@ struct CompilerDriverResult
 // native emission also prepares its target's metadata on demand.
 BUSTER_F_DECL void compiler_prewarm(void);
 // Before an embedding caller launches a gang that may compile native C,
-// prepare both native families, including all x86 forms/inline assembly.
-// Idle persistent workers are still live threads; preparing a new target
-// after the first gang starts is too late. The opt-in multi-TU driver calls
-// this before creating its first gang; ordinary serial compilation does not.
+// prepare both native families' serially built tables. The x86 per-form
+// caches, exact plans and machine-encoder tables are not among them: lanes
+// fill the entries they reach, under once-claims. Idle persistent workers are
+// still live threads; preparing a new target after the first gang starts is
+// too late. The opt-in multi-TU driver does not call this: it prepares only
+// its cohort's family and releases its own parked gang (lane_release) before
+// preparing another. Ordinary serial compilation does neither.
 BUSTER_F_DECL void compiler_parallel_prewarm(void);
 // When true, an absent -march keeps the host CPU (the test runners set it);
 // when false, the default is the portable baseline like Clang and GCC (#1557).

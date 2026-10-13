@@ -41,13 +41,13 @@
     },
     {
       "source": "src/buster/lib/compiler/ir/ir.c",
-      "bytes": 350833,
-      "sha256": "e77b9998d54c609963820a4cf156ea51fbbe31c242c75d098893425377b02b42"
+      "bytes": 350860,
+      "sha256": "7e3297e6a35799ff697803a49b5dc35323070112298244206eb4187b80556f45"
     },
     {
       "source": "src/buster/lib/compiler/ir/ir.h",
-      "bytes": 69256,
-      "sha256": "fb91966b1056126da75af5d385f8a14c6f9d204dbaee6ef1bedbd0eef11a3e8f"
+      "bytes": 71768,
+      "sha256": "20ef20a356d888c2a2bb21214c7fdb388d1fca83681913c0d0968964fbfca7ed"
     },
     {
       "source": "src/buster/lib/compiler/ir/ir_cfg.c",
@@ -56,13 +56,13 @@
     },
     {
       "source": "src/buster/lib/compiler/ir/ir_construction.h",
-      "bytes": 9481,
-      "sha256": "7f54f649a1114cd8da6b11a13a722b2ea7e342851b49ecce72305277bc162367"
+      "bytes": 15681,
+      "sha256": "e7752fd74bac9533e347dba3ad5b5a9e412a4d292495cb6bdc8db6da6ff517a8"
     },
     {
       "source": "src/buster/lib/compiler/ir/ir_fast.c",
-      "bytes": 50218,
-      "sha256": "22edad5a42f0b1b56d5c31208b51ef15ac9069a0e724c57a42302605b7996dce"
+      "bytes": 85227,
+      "sha256": "24587a94bff4219c97092f0f308a418cbae5f23f7cb9ce9e76ae933ce78e2533"
     },
     {
       "source": "src/buster/lib/compiler/ir/ir_internal.h",
@@ -121,23 +121,23 @@
     },
     {
       "source": "src/buster/lib/integer.c",
-      "bytes": 1801,
-      "sha256": "16b26cf23e2e9d20b29cbdcd01901af1a3788aa67378f0bae9440d694e4a105d"
+      "bytes": 2665,
+      "sha256": "9093be70ecdb5717b6ae62b2e1473f005276c1ec7305e20411abce8fe92a1d43"
     },
     {
       "source": "src/buster/lib/integer.h",
-      "bytes": 1547,
-      "sha256": "47b824ed5b2840c8ed12e010fc25fdf6d47e1778f5f9fafd7731f69beadba593"
+      "bytes": 2124,
+      "sha256": "bba04c80c636fe13750fcbf079e7da5c2cd534d7c4aaef4c89b4fe81bcd6ffa4"
     },
     {
       "source": "src/buster/lib/os.c",
-      "bytes": 323216,
-      "sha256": "e5919aaa7a94356cd05bca3d2244d39ca4d46f0457a531c3aa8cdcaa29e7d358"
+      "bytes": 334846,
+      "sha256": "f72c97f0fb0ae40b561a9c2e74a63f2d496aa5e7b4e70ece73c364e00af9db92"
     },
     {
       "source": "src/buster/lib/os.h",
-      "bytes": 40004,
-      "sha256": "cf7c1ef41ca5ff7173238895551d5a2411bdf68d2453fa330fe12e9270f25c82"
+      "bytes": 44749,
+      "sha256": "4c5b3ed574c44430842f5eeaac92ebfc38cd2df8b5986c3e15eea133988f42ef"
     },
     {
       "source": "src/buster/lib/os_internal.h",

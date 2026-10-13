@@ -3,8 +3,14 @@
 // Admission bytes are authenticated by the existing trusted GitHub adapter;
 // this controller replays them, binds the runtime and claims before any fetch.
 // No process success activates snapshot preparation or qualifies statistics.
+// compiler_preparation_controller_worker and compiler_preparation_controller_qualify_fixture
+// share the qualify argv from compiler_preparation_controller_qualify_arguments.
 #ifndef BUSTER_COMPILER_PREPARATION_CONTROLLER_INCLUDED
 #define BUSTER_COMPILER_PREPARATION_CONTROLLER_INCLUDED
+
+// Matches the per-stream stderr capture limit of compiler_sampling_controller_phase.
+#define BUSTER_PREPARATION_STDERR_CAPTURE_LIMIT (1ull << 20)
+#define BUSTER_PREPARATION_FAILURE_TAIL_BYTES 512u
 
 typedef struct CompilerPreparationControllerOptions CompilerPreparationControllerOptions;
 struct CompilerPreparationControllerOptions
@@ -446,6 +452,63 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_phase(CompilerSamplingC
     return compiler_sampling_controller_phase(controller, name, arguments, cap_us);
 }
 
+// Diagnostics only (#3960): one bounded job-log line per failed phase row, so a
+// failed attempt names its phase without an artifact download. The row fields
+// are the controller.tsv columns; not_run rows after the failure are omitted.
+// The stderr tail is printable ASCII only and never changes the attempt state.
+BUSTER_GLOBAL_LOCAL String8 compiler_preparation_controller_failure_report(CompilerSamplingController* controller)
+{
+    Arena* arena = controller->arena;
+    SliceString8 rows = string8_list_to_slice(arena, controller->phases);
+    String8List lines = {0};
+    for (u64 row_index = 1; row_index < rows.length; row_index += 1)
+    {
+        String8 row = rows.pointer[row_index];
+        String8 fields[8] = {0};
+        u64 count = 0, begin = 0;
+        for (u64 i = 0; i <= row.length && count < BUSTER_ARRAY_LENGTH(fields); i += 1)
+        {
+            if (i == row.length || row.pointer[i] == '\t' || row.pointer[i] == '\n')
+            {
+                fields[count] = string_slice(row, begin, i);
+                count += 1;
+                begin = i + 1;
+            }
+        }
+        if (count == BUSTER_ARRAY_LENGTH(fields) && string_equal(fields[7], S8("failed")))
+        {
+            String8 stderr_path = path_join(arena, controller->evidence,
+                string_format(arena, S8("controller-{S8}-{S8}.stderr.log"), fields[0], fields[1]));
+            String8 error = compiler_sampling_controller_read(arena, stderr_path, BUSTER_PREPARATION_STDERR_CAPTURE_LIMIT);
+            u64 start = error.length > BUSTER_PREPARATION_FAILURE_TAIL_BYTES ? error.length - BUSTER_PREPARATION_FAILURE_TAIL_BYTES : 0;
+            String8 tail = string_duplicate_arena(arena, string_slice(error, start, error.length), false);
+            for (u64 i = 0; i < tail.length; i += 1)
+            {
+                char8 c = tail.pointer[i];
+                tail.pointer[i] = c == '\n' || c == '\r' || c == '\t' ? ' ' : c < 32 || c > 126 || c == '"' ? '?' : c;
+            }
+            string8_list_push(arena, &lines, string_format(arena,
+                S8("COMPILER_PREPARATION_FAILED_PHASE stage={S8} phase={S8} wall_us={S8} exit_status={S8} timed_out={S8} "
+                   "cleanup_failed={S8} cancelled={S8} stderr_bytes={u64} stderr_tail=\"{S8}\"\n"),
+                fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], error.length, tail));
+        }
+    }
+    return string_join_arena(arena, string8_list_to_slice(arena, lines), false);
+}
+
+// The production emission; the hosted failed-phase fixture uses this same path.
+BUSTER_GLOBAL_LOCAL String8 compiler_preparation_controller_emit_failure(CompilerSamplingController* controller)
+{
+    String8 report = compiler_preparation_controller_failure_report(controller);
+    string_print(S8("{S8}"), report);
+    return report;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_preparation_controller_check(bool attempted, bool passed)
+{
+    return !attempted ? S8("not_run") : passed ? S8("pass") : S8("fail");
+}
+
 BUSTER_GLOBAL_LOCAL String8 compiler_preparation_controller_tree(CompilerSamplingController* controller,
     String8 revision, String8 name)
 {
@@ -456,6 +519,20 @@ BUSTER_GLOBAL_LOCAL String8 compiler_preparation_controller_tree(CompilerSamplin
     String8 result = complete ? production_profile_trim(controller->last_output) : (String8){0};
     controller->success = controller->success && compiler_sampling_hex(result, 40);
     return result;
+}
+
+// The single qualify argv shared by the worker and its hosted control. PYTHON
+// is the plan's verified absolute interpreter path.
+BUSTER_GLOBAL_LOCAL SliceString8 compiler_preparation_controller_qualify_arguments(Arena* arena,
+    CompilerPreparationControllerResolved resolved)
+{
+    String8 qualify[] = {resolved.driver, S8("compiler_closure"), S8("qualify"),
+        resolved.admitted.plan.source_root, resolved.admitted.plan.output_root,
+        resolved.admitted.plan.baseline_revision, resolved.admitted.plan.baseline_tree,
+        resolved.admitted.plan.candidate_revision, resolved.admitted.plan.candidate_tree, resolved.lab, resolved.python};
+    String8* pointer = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(qualify));
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(qualify); i += 1) pointer[i] = qualify[i];
+    return (SliceString8){.pointer = pointer, .length = BUSTER_ARRAY_LENGTH(qualify)};
 }
 
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_worker(Arena* arena,
@@ -474,12 +551,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_worker(Arena* 
         string8_list_push(arena, &controller.phases, S8("stage\tphase\twall_us\texit_status\ttimed_out\tcleanup_failed\tcancelled\tstate\n"));
         CompilerSamplingSignalScope signals = {0};
         bool deferred = compiler_sampling_signals_begin(&signals);
-        controller.success = controller.success && deferred && compiler_preparation_controller_host_receipt(arena, resolved);
+        bool host_attempted = controller.success && deferred;
+        bool host = host_attempted && compiler_preparation_controller_host_receipt(arena, resolved);
+        controller.success = host;
         String8 trusted_pin[] = {S8("-C"), resolved.options.trusted_root, S8("rev-parse"), S8("HEAD")};
-        compiler_preparation_controller_phase(&controller, S8("trusted-harness-pin"),
+        bool pin_ran = compiler_preparation_controller_phase(&controller, S8("trusted-harness-pin"),
             compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(trusted_pin)), 120000000ull);
-        controller.success = controller.success &&
-            string_equal(production_profile_trim(controller.last_output), resolved.admitted.trusted_revision);
+        bool pin = string_equal(production_profile_trim(controller.last_output), resolved.admitted.trusted_revision);
+        controller.success = controller.success && pin;
         String8 clone[] = {S8("clone"), S8("--no-checkout"), S8("--no-tags"),
             S8("https://github.com/buster14a/buster.git"), resolved.admitted.plan.source_root};
         compiler_preparation_controller_phase(&controller, S8("clone-preparation-source"),
@@ -490,31 +569,32 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_worker(Arena* 
             compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fetch)), 120000000ull);
         String8 base_tree = compiler_preparation_controller_tree(&controller, resolved.admitted.plan.baseline_revision, S8("baseline-tree"));
         String8 head_tree = compiler_preparation_controller_tree(&controller, resolved.admitted.plan.candidate_revision, S8("candidate-tree"));
-        controller.success = controller.success && string_equal(base_tree, resolved.admitted.plan.baseline_tree) &&
+        bool trees_attempted = base_tree.length && head_tree.length;
+        bool trees = string_equal(base_tree, resolved.admitted.plan.baseline_tree) &&
             string_equal(head_tree, resolved.admitted.plan.candidate_tree);
+        controller.success = controller.success && trees;
         String8 checkout[] = {S8("-C"), resolved.admitted.plan.source_root, S8("checkout"), S8("--detach"),
             resolved.admitted.plan.candidate_revision};
         compiler_preparation_controller_phase(&controller, S8("candidate-checkout"),
             compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(checkout)), 120000000ull);
+        bool tools_before_attempted = controller.success;
         bool tools_before = controller.success && compiler_preparation_controller_tools(arena, resolved);
         controller.success = controller.success && tools_before;
-        String8 qualify[] = {resolved.driver, S8("compiler_closure"), S8("qualify"),
-            resolved.admitted.plan.source_root, resolved.admitted.plan.output_root,
-            resolved.admitted.plan.baseline_revision, resolved.admitted.plan.baseline_tree,
-            resolved.admitted.plan.candidate_revision, resolved.admitted.plan.candidate_tree, resolved.lab, resolved.python};
         compiler_preparation_controller_phase(&controller, S8("legacy-snapshot-five-long-controls"),
-            (SliceString8)BUSTER_ARRAY_TO_SLICE(qualify), BUSTER_PREPARATION_WORKER_SECONDS * 1000000ull);
+            compiler_preparation_controller_qualify_arguments(arena, resolved), BUSTER_PREPARATION_WORKER_SECONDS * 1000000ull);
         bool tools_after = compiler_preparation_controller_tools(arena, resolved);
         controller.success = controller.success && tools_after;
         // Export partial proof only after the owned manager lease and all adopted
         // descendants are quiet. Unknown cleanup retains the persistent output.
+        bool export_attempted = !controller.cleanup_failed;
         bool exported = !controller.cleanup_failed &&
             generate_path_kind(arena, resolved.admitted.plan.output_root) != GENERATE_PATH_MISSING &&
             compiler_preparation_controller_export(arena, resolved);
         controller.success = controller.success && exported;
         bool restored = deferred && compiler_sampling_signals_end(&signals);
-        controller.success = controller.success && restored && !compiler_sampling_controller_cancelled() &&
-            os_now_microseconds() <= controller.deadline;
+        bool cancelled = compiler_sampling_controller_cancelled();
+        bool within_deadline = os_now_microseconds() <= controller.deadline;
+        controller.success = controller.success && restored && !cancelled && within_deadline;
         String8 terminal = string_format(arena,
             S8("schema\tbuster-compiler-preparation-controller-v1\nphase\tqualify\npacket\t0\nplan_sha256\t{S8}\n"
                "process_state\t{S8}\nqualification_state\tunvalidated\ndefault_activated\tfalse\n"
@@ -544,6 +624,28 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_worker(Arena* 
             file_write(path_join(arena, resolved.claim, S8("preparation.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(failed));
         }
         result = controller.success && recorded && within_after_publication ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+        if (result != PROCESS_RESULT_SUCCESS)
+        {
+            // Diagnostics only: the attempt stays failed, retained and unqualified.
+            compiler_preparation_controller_emit_failure(&controller);
+            string_print(S8("COMPILER_PREPARATION_FAILED_CHECKS resolved={S8} signals_deferred={S8} host_receipt={S8} "
+                "trusted_pin={S8} source_trees={S8} tools_before={S8} tools_after={S8} cleanup_proven={S8} exported={S8} "
+                "signals_restored={S8} not_cancelled={S8} within_deadline={S8} recorded={S8} within_after_publication={S8}\n"),
+                compiler_preparation_controller_check(true, resolved.valid),
+                compiler_preparation_controller_check(true, deferred),
+                compiler_preparation_controller_check(host_attempted, host),
+                compiler_preparation_controller_check(pin_ran, pin),
+                compiler_preparation_controller_check(trees_attempted, trees),
+                compiler_preparation_controller_check(tools_before_attempted, tools_before),
+                compiler_preparation_controller_check(true, tools_after),
+                compiler_preparation_controller_check(true, !controller.cleanup_failed),
+                compiler_preparation_controller_check(export_attempted, exported),
+                compiler_preparation_controller_check(deferred, restored),
+                compiler_preparation_controller_check(true, !cancelled),
+                compiler_preparation_controller_check(true, within_deadline),
+                compiler_preparation_controller_check(true, recorded),
+                compiler_preparation_controller_check(recorded, within_after_publication));
+        }
     }
     else string_print(S8("error: preparation private worker claim already consumed or publication failed; retained attempt cannot retry\n"));
 #else
@@ -648,6 +750,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_owned(Arena* a
     }
     result = complete && within && recorded && publication_recorded && within_after_publication ?
         PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    if (result != PROCESS_RESULT_SUCCESS)
+    {
+        // Diagnostics only (#3960); the worker line above names its failed phase.
+        string_print(S8("COMPILER_PREPARATION_OWNER_FAILED claimed={u64} launched={u64} worker_result={u64} "
+            "worker_status={u64} timed_out={u64} cleanup_proven={u64} cancelled={u64} signals_restored={u64} "
+            "within_reservation={u64} recorded={u64} published={u64} within_after_publication={u64}\n"),
+            (u64)claimed, (u64)(spawn.handle != 0), (u64)wait.result, (u64)wait.platform_status, (u64)wait.timed_out,
+            (u64)cleanup, (u64)cancelled, (u64)restored, (u64)within, (u64)recorded, (u64)publication_recorded,
+            (u64)within_after_publication);
+    }
 #else
     BUSTER_UNUSED(arena); BUSTER_UNUSED(resolved); BUSTER_UNUSED(arguments); BUSTER_UNUSED(started);
 #endif
@@ -716,6 +828,67 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_worker_once_fixture(Are
 }
 #endif
 
+#if BUSTER_LINUX && !BUSTER_ANDROID
+// #3966: run the worker's exact qualify argv through the real driver. qualify
+// creates its output root only after its precondition gate admits every path,
+// so the root distinguishes admission from refusal; off the 9700X the later
+// host check fails the phase either way and no measurement starts.
+BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_qualify_fixture(Arena* arena, String8 directory)
+{
+    String8 root = os_path_absolute(arena, directory, true);
+    String8 trusted = path_join(arena, root, S8("qualify-trusted"));
+    String8 tools = path_join(arena, trusted, S8("tools"));
+    String8 source = path_join(arena, root, S8("qualify-source"));
+    String8 python = os_path_absolute(arena, executable_resolve_in_path(arena, S8("python3")), true);
+    String8 link = path_join(arena, root, S8("qualify-python-link"));
+    String8 lab = path_join(arena, tools, S8("uarch_lab.py"));
+    String8 driver = program_state->input.arguments.length ?
+        os_path_absolute(arena, program_state->input.arguments.pointer[0], true) : (String8){0};
+    String8 made[] = {trusted, tools, source};
+    bool result = root.length && python.length && driver.length;
+    for (u64 i = 0; result && i < BUSTER_ARRAY_LENGTH(made); i += 1)
+    {
+        OsDirectoryCreateResult directory_result = os_make_directory_exclusive(made[i]);
+        result = directory_result.created && !directory_result.error.v;
+    }
+    result = result && file_write(lab, BUSTER_SLICE_TO_BYTE_SLICE(S8("# qualify fixture lab\n"))) &&
+        symlink((char*)python.pointer, (char*)link.pointer) == 0;
+    // The controller's absolute interpreter and a bare name are admitted; a
+    // non-canonical link, a missing absolute path and a relative path are not.
+    String8 pythons[] = {python, S8("python3"), link, path_join(arena, root, S8("missing-python")), S8("./python3")};
+    bool admitted[] = {true, true, false, false, false};
+    for (u64 i = 0; result && i < BUSTER_ARRAY_LENGTH(pythons); i += 1)
+    {
+        String8 evidence = path_join(arena, root, string_format(arena, S8("qualify-evidence-{u64}"), i));
+        OsDirectoryCreateResult evidence_result = os_make_directory_exclusive(evidence);
+        CompilerPreparationControllerResolved resolved = {0};
+        resolved.driver = driver;
+        resolved.lab = lab;
+        resolved.python = pythons[i];
+        resolved.admitted.plan.source_root = source;
+        resolved.admitted.plan.output_root = path_join(arena, root, string_format(arena, S8("qualify-output-{u64}"), i));
+        resolved.admitted.plan.baseline_revision = S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        resolved.admitted.plan.baseline_tree = S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        resolved.admitted.plan.candidate_revision = S8("cccccccccccccccccccccccccccccccccccccccc");
+        resolved.admitted.plan.candidate_tree = S8("dddddddddddddddddddddddddddddddddddddddd");
+        CompilerSamplingController phase = {.arena = arena, .evidence = evidence,
+            .started = os_now_microseconds(), .deadline = os_now_microseconds() + 120000000ull, .success = true};
+        string8_list_push(arena, &phase.phases, S8("stage\tphase\twall_us\texit_status\ttimed_out\tcleanup_failed\tcancelled\tstate\n"));
+        result = evidence_result.created && !evidence_result.error.v;
+        bool phase_complete = result && compiler_preparation_controller_phase(&phase, S8("legacy-snapshot-five-long-controls"),
+            compiler_preparation_controller_qualify_arguments(arena, resolved), 60000000ull);
+        bool receipt = generate_path_kind(arena,
+            path_join(arena, resolved.admitted.plan.output_root, S8("qualification.json"))) != GENERATE_PATH_MISSING;
+        bool output = generate_path_kind(arena, resolved.admitted.plan.output_root) != GENERATE_PATH_MISSING;
+        result = result && !phase.cleanup_failed && output == admitted[i] && receipt == admitted[i] &&
+            (admitted[i] || !phase_complete);
+        if (!result) string_print(S8("error: qualify fixture python case {u64} ({S8}) admitted={u64} expected={u64}\n"),
+            i, pythons[i], (u64)output, (u64)admitted[i]);
+    }
+    return result;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_self_test(Arena* arena)
 {
     String8 exact[] = {S8("--execute-preparation"), S8("--trusted-root"), S8("/trusted"),
@@ -753,12 +926,17 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_self_test(Arena* arena)
         String8 okay[] = {S8("/bin/sh"), S8("-c"), S8("printf preparation-phase")};
         bool first = compiler_preparation_controller_phase(&phase, S8("preparation-fixture"),
             (SliceString8)BUSTER_ARRAY_TO_SLICE(okay), 2000000ull);
-        String8 failing[] = {S8("/bin/sh"), S8("-c"), S8("exit 7")};
+        String8 failing[] = {S8("/bin/sh"), S8("-c"), S8("printf 'fixture \"refusal\"\\n' >&2; exit 7")};
         bool failed = !compiler_preparation_controller_phase(&phase, S8("failed-preparation-fixture"),
             (SliceString8)BUSTER_ARRAY_TO_SLICE(failing), 2000000ull);
         bool stopped = !compiler_preparation_controller_phase(&phase, S8("no-next-preparation"),
             (SliceString8)BUSTER_ARRAY_TO_SLICE(okay), 2000000ull);
-        result = result && first && failed && stopped && !phase.success && !phase.cleanup_failed;
+        String8 report = compiler_preparation_controller_failure_report(&phase);
+        bool named = string_starts_with_sequence(report,
+                S8("COMPILER_PREPARATION_FAILED_PHASE stage=2 phase=failed-preparation-fixture ")) &&
+            string_ends_with_sequence(report, S8(" stderr_bytes=18 stderr_tail=\"fixture ?refusal? \"\n")) &&
+            string_first_code_unit(report, '\n') == report.length - 1;
+        result = result && first && failed && stopped && named && !phase.success && !phase.cleanup_failed;
         CompilerPreparationControllerResolved claim_fixture = {0};
         claim_fixture.options.evidence = path_join(arena, directory, S8("claimed-evidence"));
         claim_fixture.claim = path_join(arena, directory, S8("persistent-claim"));
@@ -821,12 +999,53 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_self_test(Arena* arena)
         files = 0; bytes = 0;
         bool rejected = raw && !compiler_preparation_controller_copy_directory(arena, source,
             path_join(arena, directory, S8("reject-export")), 0, &files, &bytes);
-        result = result && once && worker_once && exported && products_excluded && rejected && os_directory_delete(directory);
+        bool absolute_python = compiler_preparation_controller_qualify_fixture(arena, directory);
+        result = result && once && worker_once && exported && products_excluded && rejected && absolute_python &&
+            os_directory_delete(directory);
         string_print(S8("COMPILER_PREPARATION_CONTROLLER_SELF_TEST claim_once={u64} worker_once_serial_concurrent={u64} full_raw_export={u64} "
-            "empty_log={u64} executable_excluded={u64} unexpected_raw_rejected={u64} no_next_phase={u64}\n"),
-            (u64)once, (u64)worker_once, (u64)exported, (u64)exported, (u64)products_excluded, (u64)rejected, (u64)stopped);
+            "empty_log={u64} executable_excluded={u64} unexpected_raw_rejected={u64} no_next_phase={u64} failed_phase_named={u64} "
+            "absolute_python_qualify={u64}\n"),
+            (u64)once, (u64)worker_once, (u64)exported, (u64)exported, (u64)products_excluded, (u64)rejected, (u64)stopped, (u64)named,
+            (u64)absolute_python);
     }
 #endif
+    return result;
+}
+
+// Hosted receipt (#3960): real owned phases fail a named fixture phase in the
+// new evidence directory and emit the production job-log line. The publisher
+// test then replays this exact evidence into the research check's problems.
+BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_failed_phase_fixture(Arena* arena, String8 evidence)
+{
+    bool result = false;
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    OsDirectoryCreateResult made = os_make_directory_exclusive(evidence);
+    if (made.created && !made.error.v)
+    {
+        CompilerSamplingController phase = {.arena = arena, .evidence = evidence,
+            .started = os_now_microseconds(), .deadline = os_now_microseconds() + 5000000ull, .success = true};
+        string8_list_push(arena, &phase.phases, S8("stage\tphase\twall_us\texit_status\ttimed_out\tcleanup_failed\tcancelled\tstate\n"));
+        String8 okay[] = {S8("/bin/sh"), S8("-c"), S8("printf preparation-phase")};
+        String8 failing[] = {S8("/bin/sh"), S8("-c"), S8("printf 'fixture \"refusal\"\\n' >&2; exit 7")};
+        bool first = compiler_preparation_controller_phase(&phase, S8("preparation-fixture"),
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(okay), 2000000ull);
+        bool failed = !compiler_preparation_controller_phase(&phase, S8("failed-preparation-fixture"),
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(failing), 2000000ull);
+        bool stopped = !compiler_preparation_controller_phase(&phase, S8("no-next-preparation"),
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(okay), 2000000ull);
+        String8 terminal = S8("schema\tbuster-compiler-preparation-controller-v1\nphase\tqualify\npacket\t0\n"
+            "process_state\tfailed\nqualification_state\tunvalidated\ndefault_activated\tfalse\ncleanup_proven\ttrue\n");
+        bool recorded = file_write(path_join(arena, evidence, S8("preparation.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(terminal));
+        String8 report = compiler_preparation_controller_emit_failure(&phase);
+        result = first && failed && stopped && recorded && !phase.success && !phase.cleanup_failed &&
+            string_starts_with_sequence(report, S8("COMPILER_PREPARATION_FAILED_PHASE stage=2 phase=failed-preparation-fixture ")) &&
+            string_first_code_unit(report, '\n') == report.length - 1;
+    }
+#else
+    BUSTER_UNUSED(arena); BUSTER_UNUSED(evidence);
+#endif
+    string_print(S8("COMPILER_PREPARATION_FAILED_PHASE_FIXTURE status={S8} qualification_state=unvalidated\n"),
+        result ? S8("pass") : S8("fail"));
     return result;
 }
 
@@ -835,7 +1054,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_qualification_main(Arena*
     u64 started = os_now_microseconds();
     CompilerPreparationControllerOptions options = compiler_preparation_controller_parse(arguments);
     ProcessResult result = PROCESS_RESULT_FAILED;
-    if (options.valid && options.self_test)
+    if (arguments.length == 2 && string_equal(arguments.pointer[0], S8("--self-test-preparation-failed-phase")))
+        result = compiler_preparation_controller_failed_phase_fixture(arena, arguments.pointer[1]) ?
+            PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    else if (options.valid && options.self_test)
         result = compiler_preparation_controller_self_test(arena) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
     else if (options.valid)
     {

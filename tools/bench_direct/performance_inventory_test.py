@@ -86,15 +86,18 @@ NATIVE_ALERT_GATE = ("github.repository == 'buster14a/buster'", "github.ref == '
 PROFILE_ROWS = {
     "uarch_lab:compare@canonical-inline-self-host": "INLINE_ACCEPTANCE_PROFILE",
     "uarch_lab:compare@ast-pilot-acceptance": "AST_PILOT_ACCEPTANCE_PROFILE",
+    "uarch_lab:compare@constant-reuse-acceptance": "CONSTANT_REUSE_ACCEPTANCE_PROFILE",
     "build:bench_throughput@throughput-real-source": "THROUGHPUT_REAL_SOURCE_PROFILE",
     "build:production_profile": "PRODUCTION_PROFILE_PROFILE",
     "tool:fast_ra_scaling.c": "COMPILER_PROBES_PROFILE",
     "tool:machine_line_mark_scaling.c": "COMPILER_PROBES_PROFILE",
     "tool:benchmark_frontend_scaling.py": "FRONTEND_SELECTOR_PROFILE",
+    "tool:benchmark_frontend_scaling.py@frontend-nesting": "FRONTEND_NESTING_PROFILE",
     "tool:selection_benchmark.py": "FRONTEND_SELECTOR_PROFILE",
     "ide:bench": "FRONTEND_SELECTOR_PROFILE",
     "tool:wild_linker_bench.c": "WILD_LINKER_PROFILE",
     "tool:link_tls_bench.py": "LINK_TLS_PROFILE",
+    "uarch_lab:compare@self-host-inline-compare": "SELFHOST_INLINE_PROFILE",
 }
 
 

@@ -341,6 +341,18 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   budget. The hosted Linux/macOS controls run in a separate five-minute lane,
   preserving the full lifecycle lane's ten-minute cap and artifact-retention
   headroom. No test selection, acceptance marker or process owner changes.
+  The launcher forwards `BUSTER_TEST_FIXTURE_TIMING=all` into each simulator
+  payload (#3585). Completed scopes retain `TEST_FIXTURE_TIMING_V1` and the
+  existing driver operation counters in the per-label console artifact.
+  Timed iOS module scopes also emit two module-named `BUSTER_IOS_LAUNCH_V1`
+  observations: entry before the starting scope clock, exit after the ending
+  clock and before cleanup/reporting. Pair observations by module name and
+  order; missing exits leave partial intervals. Query status must be zero for
+  usable clocks. Process CPU includes every app thread; concurrent modules
+  overlap, so neither CPU nor nested fixture intervals may be summed as
+  independent costs. The existing module wall-time series remains authoritative
+  for comparisons. These diagnostic clocks do not select tests or extend the
+  launch deadline.
   Set `BUSTER_MOBILE_TEST_EVIDENCE_DIR` for the launch-trace monitor to retain
   each case's output, complete console file, lifecycle receipts, registered
   child identities and case/collector timing before its private directory is
@@ -625,6 +637,18 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   build is not run. `bash android/runtime_order_test.sh` (run by
   `android/run_tests_test.sh`) covers the script with fake tools; the frozen
   shared mobile suite keeps the check disabled.
+  The required job also enables AArch64 package coverage. `android/test_ci.sh`
+  then hands both ABIs to the same driver's `android_packages` command, which
+  runs the x86-64 and arm64-v8a `--package-only` batches concurrently and
+  replays their output in ABI order (#3912; see the
+  [ABI policy](../android-ci-abi-policy.md)). The x86-64 batch leaves the
+  runtime APKs in `build/android-ci-x86_64/<config>/buster.apk`. A driver
+  failure or a missing APK is reported as
+  `ANDROID_BATCH_RESULT phase=build config=none`, and both configurations then
+  report `not-run`. `test_android_aarch64_packages` in
+  `android/run_tests_test.sh` checks that hand-off with a fake driver. The
+  job's bootstrap step runs `android_packages --self-test`, which covers the
+  concurrency, environment, failure and capture limits.
   Android CI selects a 240-second Debug / 60-second Release whole-suite monitor
   watchdog; the standalone `android/run_tests.sh` default remains 180 seconds.
   These are independent of adb command/install/boot deadlines. #3258 measured

@@ -1,13 +1,22 @@
 {
   "permissions": {
     "allow": [
-      "mcp__claude-code-remote__send_later",
-      "mcp__claude-code-remote__create_trigger",
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(git push:*)",
-      "Bash(python3:*)",
-      "Bash(./build.sh:*)"
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch",
+      "Agent",
+      "Skill",
+      "mcp__github",
+      "mcp__claude-code-remote",
+      "Bash(gh api -X PUT repos/buster14a/buster/pulls/*/ccr/auto_merge -f merge_method=merge)",
+      "Bash(git push origin HEAD:*)",
+      "Bash(git -C * push origin HEAD:*)"
     ]
   }
 }

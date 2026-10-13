@@ -520,7 +520,27 @@ struct IrInstruction
     bool volatile_access;
     // An IrSimdOperation, narrowed like the rest of the enum tail.
     u8 simd_operation;
+#if BUSTER_BENCH_ALLOCATIONS
+    // Diagnostic-only #3010 birth tag (IR_FAST_BIRTH_* in ir_fast.c), held in
+    // the row's one padding byte so the 64-byte layout is unchanged. Whole-row
+    // copies (compaction, promotion, CFG publication, inlining) carry it;
+    // every row initializer leaves it zero.
+    u8 fold_birth;
+#endif
 };
+
+#if BUSTER_BENCH_ALLOCATIONS
+// IrInstruction.fold_birth: the low three bits are the IrFastFoldRule the
+// commit probe found (NONE when none), PROBED marks a row the C builder
+// committed, CASCADE a rule that needed earlier birth folds, CLONE a copy the
+// inliner made (the callee's verdict is kept), and LATE_FOLDED, cleared on
+// each FAST entry, a row that FAST's fold pass folded in the current run.
+#define IR_FAST_BIRTH_RULE_MASK 0x07u
+#define IR_FAST_BIRTH_LATE_FOLDED 0x10u
+#define IR_FAST_BIRTH_CLONE 0x20u
+#define IR_FAST_BIRTH_CASCADE 0x40u
+#define IR_FAST_BIRTH_PROBED 0x80u
+#endif
 
 BUSTER_CT_CHECK(IR_SIMD_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK((u32)IR_OPCODE_COUNT <= UINT8_MAX);
@@ -539,11 +559,13 @@ BUSTER_CT_CHECK((u32)IR_ATOMIC_OPERATION_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK((u32)IR_OPCODE_COUNT < 63);
 // Record the opcodes queried by canonical consumers. LOCAL lets the shared
 // promotion oracle skip its discovery scan for frontend-built SSA functions;
-// the atomic/assembly bits retain the existing rare-operation fast paths.
+// CALL lets the inliner's required-call scan skip call-free functions; the
+// atomic/assembly bits retain the existing rare-operation fast paths.
 // An opcode absent from this list must never be queried: add it here in the
 // same change that adds the query. Unknown summaries remain conservative.
 #define IR_OPCODE_SUMMARY_TRACKED                                                                                                      \
-    (IR_OPCODE_BIT(IR_OPCODE_LOCAL) | IR_OPCODE_BIT(IR_OPCODE_STACK_ALLOCATE) | IR_OPCODE_BIT(IR_OPCODE_STACK_RESTORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD) |          \
+    (IR_OPCODE_BIT(IR_OPCODE_LOCAL) | IR_OPCODE_BIT(IR_OPCODE_CALL) | IR_OPCODE_BIT(IR_OPCODE_STACK_ALLOCATE) |                    \
+     IR_OPCODE_BIT(IR_OPCODE_STACK_RESTORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD) |                                                   \
      IR_OPCODE_BIT(IR_OPCODE_ATOMIC_STORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_READ_MODIFY_WRITE) |                                       \
      IR_OPCODE_BIT(IR_OPCODE_ATOMIC_COMPARE_EXCHANGE) | IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY) |                                    \
      IR_OPCODE_BIT(IR_OPCODE_LABEL_ADDRESS) | IR_OPCODE_BIT(IR_OPCODE_INDIRECT_BRANCH))
@@ -934,7 +956,9 @@ struct IrFastStatistics
 };
 
 // Direct-call expansion is independent of register allocation and FAST cleanup.
-// Zero option limits select these defaults; limits count canonical rows/sites.
+// Zero row/site limits select these optional defaults; required calls instead use
+// the work/storage guards. Explicit row limits cap both kinds of expansion.
+// Other zero option limits select defaults; limits count canonical rows/sites.
 // A zero module limit is relative to the module: the larger of
 // IR_INLINE_MODULE_GROWTH and the module's lowered canonical instruction rows
 // shifted right by IR_INLINE_MODULE_GROWTH_SHIFT (1/32 growth). A fixed
@@ -1536,6 +1560,22 @@ BUSTER_F_DECL bool ir_semantic_suppress(bool suppressed);
 // ir_construction.fold_birth_*: whether the row just committed as `id` would
 // already fold under ir_fast_fold's rules. Changes nothing.
 BUSTER_F_DECL void ir_construction_fold_census(IrProgram* program, IrFunction* function, IrInstructionId id);
+// The end-of-body half (ir_construction.fold_net_*, fold_form_*, fold_size_*):
+// a function's committed rows before SSA finish. `uses` counts every reader of
+// each value and `marks` holds per-value census state. Both are zeroed per
+// begin, from a thread-local arena the allocation observer does not see.
+typedef struct IrFoldCensus IrFoldCensus;
+struct IrFoldCensus
+{
+    u32* uses;
+    u8* marks;
+    u32 value_count;
+};
+BUSTER_F_DECL IrFoldCensus ir_construction_fold_census_begin(IrFunction* function);
+// A frontend-held read of `value` outside the rows: a pending SSA store or
+// read replacement. Counts as a use and attributes the value to a store.
+BUSTER_F_DECL void ir_construction_fold_census_hold(IrFoldCensus* census, IrValueId value);
+BUSTER_F_DECL void ir_construction_fold_census_end(IrProgram* program, IrFunction* function, IrFoldCensus* census);
 // One top-level evaluation of source range [start, end) of the token array at
 // `base`; a range any evaluator saw before counts as repeated work.
 BUSTER_F_DECL void ir_semantic_census_range(IrSemanticEvaluator evaluator, void const* base, u32 start, u32 end);

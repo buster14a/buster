@@ -228,6 +228,8 @@ covers this behavior.
 ./build.sh build -t test_all        # build and run the full test suite
 ./build.sh build --config Release -t test_all
 ./build.sh generate --sanitize && ./build.sh build -t test_all   # sanitized run
+./build.sh generate --tsan --build-directory build/tsan    # ThreadSanitizer tree
+./build.sh build --build-directory build/tsan --config Release -t test_tsan
 ./build.sh test_all_combinations    # the full local matrix CI runs
 ```
 
@@ -243,11 +245,16 @@ its separate compiler-rt lookup and fallback policy.
 function must never inherit that: #1376 found 156 of them running at -O0 when
 the region was a `#pragma clang attribute` that also marked declarations. The
 audit replays the database row for `ide.c` through the Clang frontend only
-(LLVM IR, no optimization or code generation; about ten seconds) and fails
+(LLVM IR, no optimization or code generation; 20-26 s on hosted runners) and fails
 when a function defined outside `src/buster/tests/` carries `optnone`. The
 `optnone_audit` CMake target runs it on the same canonical unsanitized
 optimized Clang tree as `clang_analyze`, in the same superbuild step (the
-direct matrix schedules the command beside `clang_analyze` too). A production
+direct matrix schedules the command beside `clang_analyze` too). Neither
+target takes the console pool: `matrix_superbuild_analyze_jobs` passes
+`--parallel 2` to that step on hosts with at least three logical CPUs and
+`MATRIX_SUPERBUILD_ANALYZE_OVERLAP_MEMORY` (12 GiB), so the audit runs while
+the analyzer's longest shard leaves a worker idle; smaller hosts, including
+the 7 GiB macOS runners, keep `--parallel 1` (#3912). A production
 header that defines functions must be included before the test region, as
 `simd.h` is.
 
@@ -330,7 +337,7 @@ toolchain cross-links from any host — x86-64 and AArch64, each as ELF, PE and
 Mach-O, 12 legs. Where `test_self_host` is deep on one mode and one target,
 this matrix is wide: each leg links a small self-checking fixture corpus
 (`basic_c_call_abi`, `basic_c_x86_64_i128_stack_abi`, `basic_c_float_abi`,
-`basic_c_vector_register_pressure`, `basic_c_machine_alias`,
+`basic_c_vector_register_pressure`, `basic_c_wide_vector_joins`, `basic_c_machine_alias`,
 `basic_c_fast_ra_cfg`) at the default CPU model and then takes
 the strongest verification avenue the host offers — native execution when
 host and target agree, `qemu-aarch64` for AArch64 ELF, `wine` for x86-64 PE,
@@ -417,16 +424,17 @@ remaining compiles (up to about twice the CPU count in nominal workers) in
 exchange for no idle CPUs during a long sanitized test tail. Before #2657 this
 applied to the grouped hosted checks shards (sanitized Debug and Release
 tests); since #2657 every hosted desktop shard has at most one test tree, so
-serialization remains only for multi-test-tree local selections. Sanitized
-Clang CI trees and Windows AArch64 Release run `test_all` through the existing
+serialization remains only for multi-test-tree local selections. Every Clang CI
+tree, sanitized or not, runs `test_all` through the existing
 isolated-process runner (`BUSTER_TEST_PROCESS_PARTITIONS`), which splits a
 four-worker quota into two two-worker processes and runs the ordinary invocation
 below four. The `primary` group owns `c_frontend_tests` on every partitioned
 tree except Windows AArch64, where it owns `compiler_driver_tests`; `rest`
 owns every other enabled module.
 The parent independently checks both complete inventories and their exact
-disjoint union. Windows AArch64 has no artifact-fanout consumer; supported
-canonical producers retain their standard configure arguments.
+disjoint union. The option only selects `test_all`'s unit launcher and changes no
+compile or link input, so it is the one argument a canonical artifact-fanout
+producer may add to its standard configure arguments (#3912).
 See [Windows critical-path attribution](../windows-ci-critical-path.md). Larger hosts retain the weighted
 allocator: split trees share at least two logical CPUs per admission slot while
 unity trees use one job. Clang tests then run concurrently in the same bounded
@@ -536,7 +544,7 @@ tree out with `BUSTER_TEST_TABLE_AUDITS=0`, and **the default is on**, so a
 bare `ide test`, a single-tree build, or any runner that does not set the
 variable keeps full coverage. Never mark a module whose result depends on
 generated code, the host, or the sanitizer.
-Flag scope matters: `--sanitize`, `--fuzz`, `--lto`, `--ci`, `--time-trace`,
+Flag scope matters: `--sanitize`, `--tsan`, `--fuzz`, `--lto`, `--ci`, `--time-trace`,
 `--instrument`, `--cc <clang|gcc|zig|cl>` are accepted **only by
 `generate`** for public workflows; `build` rejects them with an explicit
 diagnostic. The internal `self_host_from_existing` worker is the narrow
@@ -555,6 +563,22 @@ replaced by the generated command. This fixed precedence prevents
 into a diagnostic-only run. Invoke a built binary directly, outside the
 `test_all`/`test_ide` targets, for exploratory recovery behavior; that run is
 not a correctness result.
+
+`generate --tsan` (`BUSTER_THREAD_SANITIZE`, #3949) builds a separate
+ThreadSanitizer tree for lane-parallel code. ThreadSanitizer cannot share a
+process with ASan, so the driver and CMake both reject it with `--sanitize`,
+and with MSVC, Zig or a Windows target. Every executable and `buster_compiler`
+compile and link with `-fsanitize=thread`; Clang keeps line tables only.
+`BUSTER_SANITIZE` stays 0, so ASan-specific code paths are unchanged, and the
+tree is never an artifact fan-out producer. Its generated test commands set
+`TSAN_OPTIONS=halt_on_error=1:exitcode=66:second_deadlock_stack=1` (plus the
+matching `llvm-symbolizer`), replacing any value from the shell, and spawned
+`cc` children inherit it. The `test_tsan` target is the gate: it runs
+`os_tests` and `compiler_driver_tests` (lane gangs, once-claims, the lane
+first-fill and unit-batch fixtures, and multi-TU `-fcompile-jobs` links) from
+the Release tree; the full `test_all` is not its contract. A race fails the
+process, or the `cc` child a fixture spawned, with status 66. See
+[parallelism.md](parallelism.md#threadsanitizer-gate) for what it covers.
 
 Generated test commands also set `BUSTER_SANITIZER_POLICY_MODE=fatal` or
 `unsupported`. The registered test treats missing fatal sanitizer options as a

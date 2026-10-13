@@ -192,14 +192,69 @@ and all cohort arenas are released (with `-fkeep-going`, later inputs still
 compile, see [per-input records](#per-input-records-and-continue-on-failure)).
 The one-worker and `BUSTER_SINGLE_THREADED` builds run the same unit kernel.
 
-`compiler_parallel_prewarm()` prepares both native target families, including
-all x86 per-form caches and exact plans, before the first persistent worker.
-Both are needed because a later invocation may switch architectures while
-workers are parked. Embedding callers must call it before starting their own
-gang. The lighter `compiler_prewarm()` remains the serial frontend/common-table
-entry. The full cold prewarm is an opt-in cost, not a new serial startup floor.
+Before its first multi-lane cohort, the driver prepares only the
+invocation's native family (`compiler_driver_native_family_prepare`). For
+x86-64 that is the serial compile's own prewarm plus the forwarding and NOP
+recipes (`buster_x86_metadata_prewarm_for_lanes`): the per-form metadata
+caches, exact plans, TLS/GOT recipe groups, expansion shapes, dense tables,
+variable-memory cells and template rows are filled by the lanes that reach
+them, under once-claims (see the [parallelism guide](parallelism.md)), so a
+gang prepares the forms it emits instead of all 11,013 (#53). For AArch64 it
+is canonical-form validity and the semantic blobs. Prepared families are
+tracked in driver state.
+Parked workers count as live threads, so a later invocation on the same thread
+that needs a family not yet prepared first releases the parked gang with
+`lane_release()`, prewarms that family serially, and lets the next `lane_run`
+recreate the gang. This applies to a later cohort and to a serial compile of
+that family while a cohort's gang is parked. Only a transition to a family not
+yet prepared releases the gang; once both are prepared, alternating targets
+reuses the parked gang.
+A process that never runs a cohort keeps the serial lazy path. The end-to-end
+effect awaits the 9700X `scaling-v1` rows.
+
+`compiler_parallel_prewarm()` still prepares both families. Embedding callers
+must call it before starting their own gang, or before calling the driver from
+more than one thread, because the driver cannot release a gang it does not
+own. The lighter `compiler_prewarm()` remains the serial frontend/common-table
+entry. The AArch64 prewarm is an opt-in cost, not a new serial startup floor.
 `CompilerDriverResult.compilation_workers` reports the largest active cohort
 (or one); it is not a physical-core or memory measurement.
+
+**Minimum-work gate.** Entering the multi-lane path costs a fixed preparation
+of the cohort's native family per invocation. Before that preparation was
+narrowed to one family it was about 14 ms on the 9700X, which made small
+populations slower than serial (#53). Before dispatch,
+`compiler_driver_unit_worker_limit` therefore estimates the work of every
+eligible native C input of the invocation:
+
+- each input adds `COMPILER_DRIVER_LANE_INPUT_WORK_BYTES`, a fixed charge per
+  translation unit, plus its file size from `os_path_followed_stats`;
+- inputs are stat'ed only until the sum reaches
+  `COMPILER_DRIVER_LANE_MIN_WORK_BYTES`, so a large population costs a few
+  stats. A missing or unreadable input adds no bytes and still fails in input
+  order.
+
+A population below the minimum keeps exactly the `-fcompile-jobs=1` path: no
+prewarm, no gang and the same output. `CompilerDriverResult.lane_gate` records
+the decision:
+
+| Value | Meaning |
+|---|---|
+| `none` | Lanes cannot apply: one worker after clamping, fewer than two eligible inputs, an embedding gang or a source cache. |
+| `lanes` | Lanes were permitted; `compilation_workers` still reports the cohorts that actually ran. |
+| `serial` | The population was below the minimum; `compilation_workers` is 1. |
+
+Both constants are named in `driver.h` and must come from 9700X measurement:
+the scaling-v1 `size-nN` series (equal TUs, 2–64 inputs at 1, 2 and 7 cores),
+fitted together with `tiny` for the per-input charge. They are zero, which
+disables the gate, until that calibration lands. The estimate reads file bytes
+only, so a small file that includes large headers is underestimated: that
+costs a possible gain, never a loss against serial. Any change to the
+prewarm or lane entry cost (#3584 and the other prewarm reductions on #53)
+moves the right threshold, so re-derive both constants from a fresh
+`scaling.request`. `compiler_driver_test_set_lane_work` (`driver_internal.h`)
+overrides both for tests; `compiler_driver_test_unit_lane_gate` covers each
+bound.
 
 This is a bounded feature, **not an accepted throughput improvement**. The
 default stays one pending paired representative measurements. A large input
@@ -343,7 +398,7 @@ empty). Messages and function names are cut at
 paths and diagnostic codes are written whole. Version 1:
 
 ```text
-CC_METRICS version schema=buster-cc-metrics inputs records ok rejected failed not_run prebuilt error exit_status action target allocator compile_jobs compilation_workers intervals keep_going function_sizes wall_ns peak_rss_bytes
+CC_METRICS version schema=buster-cc-metrics inputs records ok rejected failed not_run prebuilt error exit_status action target allocator compile_jobs compilation_workers intervals keep_going function_sizes wall_ns peak_rss_bytes lane_gate
 CC_METRICS_INPUT version index status error errors warnings measured start_ns end_ns total_ns read_ns preprocess_ns parse_ns analysis_ns ir_ns codegen_ns object_ns emit_ns arena_peak_bytes arena_retained_bytes source_bytes preprocessed_tokens object_file_bytes text_bytes rodata_bytes data_bytes bss_bytes tdata_bytes tbss_bytes initializer_bytes unwind_bytes debug_bytes codegen_functions instructions values code_bytes stack_frame_bytes max_stack_frame_bytes fallback_functions fallback_records function_records function_records_omitted diagnostic_records diagnostic_digest diagnostic_line diagnostic_column path_hex diagnostic_code_hex diagnostic_path_hex message_bytes message_truncated message_hex
 CC_METRICS_FUNCTION version input ordinal code_bytes name_bytes name_truncated name_hex
 ```
@@ -351,7 +406,9 @@ CC_METRICS_FUNCTION version input ordinal code_bytes name_bytes name_truncated n
 The header comes first, then each input followed by its functions. Between
 identical runs only the `*_ns` fields, `peak_rss_bytes` and possibly
 `arena_peak_bytes` (granule-boundary padding) vary, plus
-`compile_jobs`/`compilation_workers`/`intervals` across worker counts.
+`compile_jobs`/`compilation_workers`/`intervals`/`lane_gate` across worker
+counts. `lane_gate` (`none`, `lanes` or `serial`; see the minimum-work gate
+above) was appended after `peak_rss_bytes`.
 `peak_rss_bytes` is the process high water (`os_get_peak_resident_memory_size`:
 `ru_maxrss` on Linux and Apple, the peak working set on Windows, 0 when
 unavailable). Process start-up before argument parsing and teardown after the
@@ -585,6 +642,10 @@ The block-local CSE experiment (#3011) is selected only by
 `-fcanonical-fast-cse-strategy=window|table` picks the census's linear or
 hash-table arm (default `table`; the last one given wins). See
 [opt-in block-local CSE](../canonical-fast-pipeline.md#opt-in-block-local-cse-3011).
+`-fcanonical-intern-constants` / `-fno-canonical-intern-constants` turn on and
+off the construction-time constant interning arm in C lowering (off by
+default, last one wins, independent of `-O` and FAST controls); see
+[opt-in construction-time constant interning](../canonical-fast-pipeline.md#opt-in-construction-time-constant-interning-3011).
 
 Canonical inlining is separate from register allocation. Tiny direct-call
 inlining is opt-in at every optimization level: `-fcanonical-inline` enables
@@ -600,11 +661,13 @@ inlining is disabled; an impossible requirement produces a source-mapped
 `-fcanonical-inline-module-growth=N`,
 `-fcanonical-inline-call-sites=N`, and
 `-fcanonical-inline-caller-growth-shift=N`. These flags set budgets but do not enable
-tiny inlining; zero is rejected and zero-valued API options normalize to the
-named defaults. Budgets cap callee instruction count, added instructions per
+tiny inlining; zero is rejected on the command line. Zero-valued API row/site limits
+select the optional defaults while required expansion uses independent per-caller
+work/storage guards (including one relocation of existing caller data); other zero API fields normalize to the named defaults.
+Explicit budgets cap callee instruction count, added instructions per
 caller, added instructions per module, and accepted call sites, respectively;
 the shift sets the caller relocation bound described below.
-Without an explicit module limit, the module budget is relative: the larger of
+Without an explicit module limit, the optional module budget is relative: the larger of
 4096 rows and 1/32 of the module's lowered canonical instruction rows
 (`ir_inline_module_growth_limit`). A caller keeps optional splices only when
 their growth is at least 1/32 of its rows (`IR_INLINE_CALLER_GROWTH_SHIFT`);
