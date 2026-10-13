@@ -14,6 +14,8 @@
 #define HK_CHILD_SLOTS 32768u
 #define HK_DEADLINE_MS 120000u
 #define HK_TRACE_LIMIT CM_BYTES
+#define HK_SID_PREVIEW_CAP 64u
+#define HK_CHILD_PREVIEW_CAP 24u
 
 typedef struct HkLocation HkLocation;
 struct HkLocation
@@ -21,7 +23,7 @@ struct HkLocation
     size_t offset;
     unsigned line, event;
     int set, offset_known;
-    char event_type[24], sid[64], child_id[24];
+    char event_type[24], sid[HK_SID_PREVIEW_CAP], child_id[HK_CHILD_PREVIEW_CAP];
 };
 
 typedef struct HkSession HkSession;
@@ -39,6 +41,13 @@ struct HkChild
     HkLocation start_event;
 };
 
+typedef struct HkIdArena HkIdArena;
+struct HkIdArena
+{
+    char *bytes;
+    size_t used, capacity;
+};
+
 typedef struct HkReport HkReport;
 struct HkReport
 {
@@ -51,7 +60,7 @@ struct HkReport
     unsigned failure_line, failure_event;
     int failure_offset_known, parser_valid, complete, io_error_number;
     char failure_phase[24], failure_reason[40];
-    char failure_event_type[24], failure_sid[64], failure_child_id[24];
+    char failure_event_type[24], failure_sid[HK_SID_PREVIEW_CAP], failure_child_id[HK_CHILD_PREVIEW_CAP];
     HkLocation first_automatic, first_detached;
 };
 
@@ -345,11 +354,24 @@ BUSTER_GLOBAL_LOCAL int hk_auto_argv(const CmJson *json, unsigned node,
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL const char *hk_id_arena_copy(HkIdArena *arena,
+    const char *value)
+{
+    size_t length = value ? strlen(value) : 0;
+    if (!length || !arena || !arena->bytes || arena->used > arena->capacity ||
+        length >= arena->capacity - arena->used) return NULL;
+    char *copy = arena->bytes + arena->used;
+    memcpy(copy, value, length + 1);
+    arena->used += length + 1;
+    return copy;
+}
+
 BUSTER_GLOBAL_LOCAL int hk_session_slot(HkSession *sessions, const char *sid,
-    int create, unsigned *used)
+    int create, unsigned *used, HkIdArena *identifiers, int *storage_failed)
 {
     int result = -1;
     unsigned start = (unsigned)(cm_hash(sid) & (HK_SESSION_SLOTS - 1));
+    *storage_failed = 0;
     for (unsigned i = 0; i < HK_SESSION_SLOTS && result < 0; ++i)
     {
         unsigned slot = (start + i) & (HK_SESSION_SLOTS - 1);
@@ -357,9 +379,17 @@ BUSTER_GLOBAL_LOCAL int hk_session_slot(HkSession *sessions, const char *sid,
         {
             if (create)
             {
-                sessions[slot].sid = sid;
-                ++*used;
-                result = (int)slot;
+                sessions[slot].sid = hk_id_arena_copy(identifiers, sid);
+                if (!sessions[slot].sid)
+                {
+                    *storage_failed = 1;
+                    return result;
+                }
+                else
+                {
+                    ++*used;
+                    result = (int)slot;
+                }
             }
             else i = HK_SESSION_SLOTS;
         }
@@ -369,11 +399,12 @@ BUSTER_GLOBAL_LOCAL int hk_session_slot(HkSession *sessions, const char *sid,
 }
 
 BUSTER_GLOBAL_LOCAL int hk_child_slot(HkChild *children, unsigned session,
-    const char *id, int create)
+    const char *id, int create, HkIdArena *identifiers, int *storage_failed)
 {
     uint64_t hash = cm_hash(id) ^ ((uint64_t)session * UINT64_C(11400714819323198485));
     unsigned start = (unsigned)(hash & (HK_CHILD_SLOTS - 1));
     int result = -1;
+    *storage_failed = 0;
     for (unsigned i = 0; i < HK_CHILD_SLOTS && result < 0; ++i)
     {
         unsigned slot = (start + i) & (HK_CHILD_SLOTS - 1);
@@ -381,9 +412,17 @@ BUSTER_GLOBAL_LOCAL int hk_child_slot(HkChild *children, unsigned session,
         {
             if (create)
             {
-                children[slot].id = id;
-                children[slot].session = session;
-                result = (int)slot;
+                children[slot].id = hk_id_arena_copy(identifiers, id);
+                if (!children[slot].id)
+                {
+                    *storage_failed = 1;
+                    return result;
+                }
+                else
+                {
+                    children[slot].session = session;
+                    result = (int)slot;
+                }
             }
             else i = HK_CHILD_SLOTS;
         }
@@ -393,15 +432,154 @@ BUSTER_GLOBAL_LOCAL int hk_child_slot(HkChild *children, unsigned session,
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL int hk_process_trace_event(const CmJson *json,
+    unsigned event, size_t source_offset, unsigned line, unsigned event_index,
+    HkSession *sessions, HkChild *children, HkReport *report,
+    unsigned *session_count, HkIdArena *identifiers)
+{
+    unsigned event_field = cm_member(json, event, "event");
+    unsigned sid_field = cm_member(json, event, "sid");
+    const char *name = cm_get(json, event, "event");
+    const char *sid = cm_get(json, event, "sid");
+    const char *child_id = "";
+    unsigned child_field = cm_member(json, event, "child_id");
+    uint64_t child_number = 0;
+    int sid_is_string = sid_field && json->tokens[sid_field].kind == 's';
+    int child_id_valid = child_field && json->tokens[child_field].kind == 'v' &&
+        cm_unsigned(cm_value(json, child_field), &child_number);
+    if (child_id_valid)
+    {
+        child_id = cm_value(json, child_field);
+    }
+    HkLocation event_location = {0};
+    hk_location_set(&event_location, source_offset, line, event_index,
+        hk_event_label(name), sid_is_string ? sid : "", child_id_valid ? child_id : "");
+    report->events_seen = event_index;
+    int slot = -1, storage_failed = 0;
+    int valid = json->tokens[event].kind == 'o' && event_field && sid_field &&
+        json->tokens[event_field].kind == 's' && sid_is_string && sid[0] != 0;
+    if (!valid) hk_report_failure(report, "event", "event_shape", &event_location);
+    if (valid)
+    {
+        slot = hk_session_slot(sessions, sid, 1, session_count,
+            identifiers, &storage_failed);
+        report->sessions = *session_count;
+        valid = slot >= 0;
+        if (!valid) hk_report_failure(report, "session",
+            storage_failed ? "identifier_storage_failed" : "session_capacity",
+            &event_location);
+    }
+    if (valid)
+    {
+        HkSession *session = &sessions[(unsigned)slot];
+        valid = session->atexit == 0;
+        if (!valid) hk_report_failure(report, "event", "after_atexit", &event_location);
+        if (valid)
+        {
+            ++report->events;
+            if (cm_equal(name, "version"))
+            {
+                unsigned exe = cm_member(json, event, "exe");
+                int sequence_ok = session->version == 0 && session->start == 0;
+                valid = sequence_ok && exe && json->tokens[exe].kind == 's' &&
+                    cm_get(json, event, "exe")[0] != 0;
+                if (valid) ++session->version;
+                else hk_report_failure(report, "event",
+                    sequence_ok ? "version_shape" : "version_sequence", &event_location);
+            }
+            else if (cm_equal(name, "start"))
+            {
+                unsigned argv = cm_member(json, event, "argv");
+                int sequence_ok = session->version == 1 && session->start == 0;
+                valid = sequence_ok && hk_auto_argv(json, argv, report, &event_location);
+                if (valid) ++session->start;
+                else hk_report_failure(report, "event",
+                    sequence_ok ? "invalid_argv" : "start_sequence", &event_location);
+            }
+            else if (cm_equal(name, "exit"))
+            {
+                valid = session->start == 1 && session->exit == 0;
+                if (valid) ++session->exit;
+                else hk_report_failure(report, "event", "exit_sequence", &event_location);
+            }
+            else if (cm_equal(name, "atexit"))
+            {
+                valid = session->exit == 1 && session->atexit == 0;
+                if (valid) ++session->atexit;
+                else hk_report_failure(report, "event", "atexit_sequence", &event_location);
+            }
+            else if (cm_equal(name, "child_start"))
+            {
+                int order_ok = session->start == 1 && session->exit == 0;
+                unsigned auto_before = report->automatic;
+                valid = order_ok && child_id_valid &&
+                    hk_auto_argv(json, cm_member(json, event, "argv"),
+                        report, &event_location);
+                if (!valid)
+                {
+                    const char *reason = !order_ok ? "child_start_sequence" :
+                        !child_id_valid ? "child_id_invalid" : "invalid_argv";
+                    hk_report_failure(report, "event", reason, &event_location);
+                }
+                if (valid && report->automatic > auto_before) ++report->automatic_children;
+                if (valid)
+                {
+                    const char *id = cm_value(json, child_field);
+                    int child_slot = hk_child_slot(children, (unsigned)slot,
+                        id, 1, identifiers, &storage_failed);
+                    valid = child_slot >= 0 && !children[(unsigned)child_slot].started;
+                    if (valid)
+                    {
+                        children[(unsigned)child_slot].started = 1;
+                        children[(unsigned)child_slot].start_event = event_location;
+                        ++report->child_starts;
+                    }
+                    else hk_report_failure(report, "child",
+                        child_slot < 0 ? (storage_failed ? "identifier_storage_failed" :
+                            "child_capacity") : "duplicate_child_start",
+                        &event_location);
+                }
+            }
+            else if (cm_equal(name, "child_exit"))
+            {
+                int order_ok = session->start == 1 && session->exit == 0;
+                valid = order_ok && child_id_valid;
+                if (!valid) hk_report_failure(report, "event",
+                    order_ok ? "child_id_invalid" : "child_exit_sequence", &event_location);
+                if (valid)
+                {
+                    int child_slot = hk_child_slot(children, (unsigned)slot,
+                        cm_value(json, child_field), 0, identifiers, &storage_failed);
+                    valid = child_slot >= 0 && children[(unsigned)child_slot].started &&
+                        !children[(unsigned)child_slot].exited;
+                    if (valid)
+                    {
+                        children[(unsigned)child_slot].exited = 1;
+                        ++report->child_exits;
+                    }
+                    else hk_report_failure(report, "child",
+                        child_slot < 0 ? "child_exit_unmatched" :
+                            children[(unsigned)child_slot].exited ?
+                            "duplicate_child_exit" : "child_exit_before_start",
+                        &event_location);
+                }
+            }
+        }
+    }
+    return valid;
+}
+
+// Parse every bounded LF-delimited record with reusable JSON scratch. Session and
+// child identifiers live in a separate trace-sized arena through lifecycle proof.
 BUSTER_GLOBAL_LOCAL int hk_parse_trace_data(const char *bytes, size_t length,
     HkReport *out)
 {
-    char *array = NULL;
     HkSession *sessions = NULL;
     HkChild *children = NULL;
+    HkIdArena identifiers = {0};
     CmJson json = {0};
     HkReport report = {0};
-    size_t used = 0, line_start = 0, source_offset = 0;
+    size_t line_start = 0;
     unsigned session_count = 0, event_index = 0, source_line = 1;
     int valid = bytes != NULL && length > 0 && length <= HK_TRACE_LIMIT;
     report.trace_bytes = length;
@@ -424,212 +602,78 @@ BUSTER_GLOBAL_LOCAL int hk_parse_trace_data(const char *bytes, size_t length,
     valid = valid && bytes[length - 1] == '\n';
     if (valid)
     {
-        array = malloc(HK_TRACE_LIMIT + 1u);
         sessions = calloc(HK_SESSION_SLOTS, sizeof(*sessions));
         children = calloc(HK_CHILD_SLOTS, sizeof(*children));
-        valid = array && sessions && children;
+        identifiers.capacity = length + 1;
+        identifiers.bytes = malloc(identifiers.capacity);
+        valid = sessions && children && identifiers.bytes;
         if (!valid) hk_report_failure(&report, "memory", "allocation_failed", NULL);
     }
-    if (valid)
+    while (valid && line_start < length)
     {
-        array[used++] = '[';
-        for (size_t i = 0; valid && i < length; ++i)
-        {
-            if (bytes[i] == '\0' || bytes[i] == '\r')
-            {
-                HkLocation location = {0};
-                hk_location_set(&location, i, source_line, 0, "", "", "");
-                hk_report_failure(&report, "record", "forbidden_byte", &location);
-                valid = 0;
-            }
-            else if (bytes[i] == '\n')
-            {
-                if (i <= line_start)
-                {
-                    HkLocation location = {0};
-                    hk_location_set(&location, i, source_line, 0, "", "", "");
-                    hk_report_failure(&report, "record", "empty_line", &location);
-                    valid = 0;
-                }
-                else if (used + 2 >= HK_TRACE_LIMIT)
-                {
-                    HkLocation location = {0};
-                    hk_location_set(&location, i, source_line, 0, "", "", "");
-                    hk_report_failure(&report, "record", "array_limit", &location);
-                    valid = 0;
-                }
-                else
-                {
-                    if (i + 1 < length) array[used++] = ',';
-                    line_start = i + 1;
-                    ++source_line;
-                }
-            }
-            else if (used + 2 >= HK_TRACE_LIMIT)
-            {
-                HkLocation location = {0};
-                hk_location_set(&location, i, source_line, 0, "", "", "");
-                hk_report_failure(&report, "record", "array_limit", &location);
-                valid = 0;
-            }
-            else array[used++] = bytes[i];
-        }
-        if (valid && line_start != length)
+        size_t line_end = line_start;
+        while (line_end < length && bytes[line_end] != '\n' &&
+            bytes[line_end] != '\0' && bytes[line_end] != '\r') ++line_end;
+        if (line_end < length && (bytes[line_end] == '\0' || bytes[line_end] == '\r'))
         {
             HkLocation location = {0};
-            hk_location_set(&location, length, source_line, 0, "end_of_trace", "", "");
+            hk_location_set(&location, line_end, source_line, event_index + 1,
+                "record", "", "");
+            hk_report_failure(&report, "record", "forbidden_byte", &location);
+            valid = 0;
+        }
+        else if (line_end >= length)
+        {
+            HkLocation location = {0};
+            hk_location_set(&location, length, source_line, event_index + 1,
+                "end_of_trace", "", "");
             hk_report_failure(&report, "record", "incomplete_record", &location);
             valid = 0;
         }
-        if (valid) array[used++] = ']';
-    }
-    if (valid)
-    {
-        json = cm_json_parse(array, used);
-        report.json_tokens = json.count;
-        report.json_arena_bytes = json.used;
-        valid = json.valid && json.tokens[1].kind == 'a';
-        if (!valid)
+        else if (line_end == line_start)
         {
-            // The shared JSON parser exposes no byte offset; keep bounded counts, never dump trace data.
-            if (!json.valid) hk_report_failure(&report, "json", "parse_failed", NULL);
-            else hk_report_failure(&report, "json", "root_not_array", NULL);
+            HkLocation location = {0};
+            hk_location_set(&location, line_start, source_line, event_index + 1,
+                "record", "", "");
+            hk_report_failure(&report, "record", "empty_line", &location);
+            valid = 0;
         }
-    }
-    if (valid)
-    {
-        for (unsigned event = json.tokens[1].child; valid && event;
-             event = json.tokens[event].next)
+        else
         {
-            size_t event_offset = source_offset;
-            while (source_offset < length && bytes[source_offset] != '\n') ++source_offset;
-            if (source_offset < length) ++source_offset;
-            ++event_index;
-            unsigned event_field = cm_member(&json, event, "event");
-            unsigned sid_field = cm_member(&json, event, "sid");
-            const char *name = cm_get(&json, event, "event");
-            const char *sid = cm_get(&json, event, "sid");
-            const char *child_id = "";
-            unsigned child_field = cm_member(&json, event, "child_id");
-            uint64_t child_number = 0;
-            int child_id_valid = child_field && json.tokens[child_field].kind == 'v' &&
-                cm_unsigned(cm_value(&json, child_field), &child_number);
-            if (child_id_valid) child_id = cm_value(&json, child_field);
-            HkLocation event_location = {0};
-            hk_location_set(&event_location, event_offset, event_index, event_index,
-                hk_event_label(name), sid_field && json.tokens[sid_field].kind == 's' ? sid : "",
-                child_id);
-            report.events_seen = event_index;
-            int slot = -1;
-            valid = json.tokens[event].kind == 'o' && event_field && sid_field &&
-                json.tokens[event_field].kind == 's' && json.tokens[sid_field].kind == 's' &&
-                sid[0] != 0;
-            if (!valid) hk_report_failure(&report, "event", "event_shape", &event_location);
-            if (valid)
+            size_t record_length = line_end - line_start;
+            unsigned token_limit = (unsigned)record_length + 2u;
+            if (token_limit > CM_TOKENS) token_limit = CM_TOKENS;
+            cm_json_parse_reuse(&json, bytes + line_start,
+                record_length, token_limit);
+            HkLocation location = {0};
+            hk_location_set(&location, line_start, source_line, event_index + 1,
+                "json_record", "", "");
+            if (json.count > report.json_tokens) report.json_tokens = json.count;
+            if (json.used > report.json_arena_bytes) report.json_arena_bytes = json.used;
+            valid = json.valid && json.count > 0 && json.tokens[1].kind == 'o';
+            if (!valid)
             {
-                slot = hk_session_slot(sessions, sid, 1, &session_count);
-                report.sessions = session_count;
-                valid = slot >= 0;
-                if (!valid) hk_report_failure(&report, "session", "session_capacity", &event_location);
+                if (!json.valid) hk_report_failure(&report, "json", "parse_failed", &location);
+                else hk_report_failure(&report, "json", "root_not_object", &location);
             }
             if (valid)
             {
-                HkSession *session = &sessions[(unsigned)slot];
-                valid = session->atexit == 0;
-                if (!valid) hk_report_failure(&report, "event", "after_atexit", &event_location);
-                if (valid)
-                {
-                    ++report.events;
-                    if (cm_equal(name, "version"))
-                    {
-                        unsigned exe = cm_member(&json, event, "exe");
-                        int sequence_ok = session->version == 0 && session->start == 0;
-                        valid = sequence_ok && exe && json.tokens[exe].kind == 's' &&
-                            cm_get(&json, event, "exe")[0] != 0;
-                        if (valid) ++session->version;
-                        else hk_report_failure(&report, "event",
-                            sequence_ok ? "version_shape" : "version_sequence", &event_location);
-                    }
-                    else if (cm_equal(name, "start"))
-                    {
-                        unsigned argv = cm_member(&json, event, "argv");
-                        int sequence_ok = session->version == 1 && session->start == 0;
-                        valid = sequence_ok && hk_auto_argv(&json, argv, &report, &event_location);
-                        if (valid) ++session->start;
-                        else hk_report_failure(&report, "event",
-                            sequence_ok ? "invalid_argv" : "start_sequence", &event_location);
-                    }
-                    else if (cm_equal(name, "exit"))
-                    {
-                        valid = session->start == 1 && session->exit == 0;
-                        if (valid) ++session->exit;
-                        else hk_report_failure(&report, "event", "exit_sequence", &event_location);
-                    }
-                    else if (cm_equal(name, "atexit"))
-                    {
-                        valid = session->exit == 1 && session->atexit == 0;
-                        if (valid) ++session->atexit;
-                        else hk_report_failure(&report, "event", "atexit_sequence", &event_location);
-                    }
-                    else if (cm_equal(name, "child_start"))
-                    {
-                        int order_ok = session->start == 1 && session->exit == 0;
-                        unsigned auto_before = report.automatic;
-                        valid = order_ok && child_id_valid &&
-                            hk_auto_argv(&json, cm_member(&json, event, "argv"),
-                                &report, &event_location);
-                        if (!valid)
-                        {
-                            const char *reason = !order_ok ? "child_start_sequence" :
-                                !child_id_valid ? "child_id_invalid" : "invalid_argv";
-                            hk_report_failure(&report, "event", reason, &event_location);
-                        }
-                        if (valid && report.automatic > auto_before) ++report.automatic_children;
-                        if (valid)
-                        {
-                            unsigned id_field = cm_member(&json, event, "child_id");
-                            const char *id = cm_value(&json, id_field);
-                            int child_slot = hk_child_slot(children, (unsigned)slot, id, 1);
-                            valid = child_slot >= 0 && !children[(unsigned)child_slot].started;
-                            if (valid)
-                            {
-                                children[(unsigned)child_slot].started = 1;
-                                children[(unsigned)child_slot].start_event = event_location;
-                                ++report.child_starts;
-                            }
-                            else hk_report_failure(&report, "child",
-                                child_slot < 0 ? "child_capacity" : "duplicate_child_start",
-                                &event_location);
-                        }
-                    }
-                    else if (cm_equal(name, "child_exit"))
-                    {
-                        unsigned field = cm_member(&json, event, "child_id");
-                        int order_ok = session->start == 1 && session->exit == 0;
-                        valid = order_ok && child_id_valid;
-                        if (!valid) hk_report_failure(&report, "event",
-                            order_ok ? "child_id_invalid" : "child_exit_sequence", &event_location);
-                        if (valid)
-                        {
-                            int child_slot = hk_child_slot(children, (unsigned)slot,
-                                cm_value(&json, field), 0);
-                            valid = child_slot >= 0 && children[(unsigned)child_slot].started &&
-                                !children[(unsigned)child_slot].exited;
-                            if (valid)
-                            {
-                                children[(unsigned)child_slot].exited = 1;
-                                ++report.child_exits;
-                            }
-                            else hk_report_failure(&report, "child",
-                                child_slot < 0 ? "child_exit_unmatched" :
-                                    children[(unsigned)child_slot].exited ?
-                                    "duplicate_child_exit" : "child_exit_before_start",
-                                &event_location);
-                        }
-                    }
-                }
+                ++event_index;
+                valid = hk_process_trace_event(&json, 1, line_start, source_line,
+                    event_index, sessions, children, &report, &session_count,
+                    &identifiers);
             }
+            line_start = line_end + 1;
+            ++source_line;
         }
+    }
+    if (valid && line_start != length)
+    {
+        HkLocation location = {0};
+        hk_location_set(&location, line_start, source_line, event_index + 1,
+            "end_of_trace", "", "");
+        hk_report_failure(&report, "record", "unconsumed_bytes", &location);
+        valid = 0;
     }
     if (valid)
     {
@@ -638,7 +682,7 @@ BUSTER_GLOBAL_LOCAL int hk_parse_trace_data(const char *bytes, size_t length,
         if (!valid)
         {
             HkLocation location = {0};
-            hk_location_set(&location, length, event_index + 1, event_index + 1,
+            hk_location_set(&location, length, source_line, event_index + 1,
                 "end_of_trace", "", "");
             hk_report_failure(&report, "lifecycle", "no_sessions", &location);
         }
@@ -651,7 +695,7 @@ BUSTER_GLOBAL_LOCAL int hk_parse_trace_data(const char *bytes, size_t length,
                 if (!complete)
                 {
                     HkLocation location = {0};
-                    hk_location_set(&location, length, event_index + 1, event_index + 1,
+                    hk_location_set(&location, length, source_line, event_index + 1,
                         "end_of_trace", sessions[i].sid, "");
                     hk_report_failure(&report, "lifecycle", "incomplete_session", &location);
                 }
@@ -663,9 +707,8 @@ BUSTER_GLOBAL_LOCAL int hk_parse_trace_data(const char *bytes, size_t length,
             if (children[i].id)
             {
                 int complete = children[i].started == 1 && children[i].exited == 1;
-                if (!complete)
-                    hk_report_failure(&report, "lifecycle", "incomplete_child",
-                        &children[i].start_event);
+                if (!complete) hk_report_failure(&report, "lifecycle", "incomplete_child",
+                    &children[i].start_event);
                 valid = valid && complete;
             }
         }
@@ -699,9 +742,9 @@ BUSTER_GLOBAL_LOCAL int hk_parse_trace_data(const char *bytes, size_t length,
     report.complete = valid;
     if (out) *out = report;
     cm_json_free(&json);
+    free(identifiers.bytes);
     free(children);
     free(sessions);
-    free(array);
     return valid;
 }
 
@@ -768,6 +811,48 @@ BUSTER_GLOBAL_LOCAL int hk_parse_trace_file(const char *path, HkReport *report)
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL int hk_append_trace_record(char *buffer,
+    size_t capacity, size_t *used, const char *format, const char *prefix,
+    unsigned session)
+{
+    int written = snprintf(buffer + *used, capacity - *used, format, prefix, session);
+    if (written < 0 || (size_t)written >= capacity - *used) return 0;
+    *used += (size_t)written;
+    return 1;
+}
+
+BUSTER_GLOBAL_LOCAL int hk_large_trace_control(void)
+{
+    enum { HK_FIXTURE_SESSIONS = 5000u, HK_TOKENS_PER_SESSION = 30u };
+    char *bytes = malloc(HK_TRACE_LIMIT);
+    const char *sid_prefix =
+        "team/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/";
+    size_t length = 0;
+    HkReport report = {0};
+    int valid = bytes != NULL;
+    for (unsigned session = 0; valid && session < HK_FIXTURE_SESSIONS; ++session)
+    {
+        valid = hk_append_trace_record(bytes, HK_TRACE_LIMIT, &length,
+            "{\"event\":\"version\",\"sid\":\"%s%u\",\"exe\":\"git\"}\n", sid_prefix, session);
+        valid = valid && hk_append_trace_record(bytes, HK_TRACE_LIMIT, &length,
+            "{\"event\":\"start\",\"sid\":\"%s%u\",\"argv\":[\"git\",\"version\"]}\n", sid_prefix, session);
+        valid = valid && hk_append_trace_record(bytes, HK_TRACE_LIMIT, &length,
+            "{\"event\":\"exit\",\"sid\":\"%s%u\",\"code\":0}\n", sid_prefix, session);
+        valid = valid && hk_append_trace_record(bytes, HK_TRACE_LIMIT, &length,
+            "{\"event\":\"atexit\",\"sid\":\"%s%u\",\"code\":0}\n", sid_prefix, session);
+    }
+    valid = valid && (uint64_t)HK_FIXTURE_SESSIONS * HK_TOKENS_PER_SESSION > CM_TOKENS;
+    valid = valid && hk_parse_trace_data(bytes, length, &report);
+    valid = valid && report.complete && report.parser_valid &&
+        report.trace_bytes == length && report.sessions == HK_FIXTURE_SESSIONS &&
+        report.sessions_complete == HK_FIXTURE_SESSIONS &&
+        report.events == HK_FIXTURE_SESSIONS * 4u &&
+        report.events_seen == HK_FIXTURE_SESSIONS * 4u &&
+        report.json_tokens < CM_TOKENS;
+    free(bytes);
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL int hk_trace_parser_controls(void)
 {
     const char *complete =
@@ -785,6 +870,25 @@ BUSTER_GLOBAL_LOCAL int hk_trace_parser_controls(void)
         "{\"event\":\"child_start\",\"sid\":\"s3\",\"child_id\":1,\"argv\":[\"git\",\"maintenance\",\"run\",\"--auto\"]}\n"
         "{\"event\":\"exit\",\"sid\":\"s3\",\"code\":0}\n"
         "{\"event\":\"atexit\",\"sid\":\"s3\",\"code\":0}\n";
+    const char *complete_child =
+        "{\"event\":\"version\",\"sid\":\"s7\",\"exe\":\"git\"}\n"
+        "{\"event\":\"start\",\"sid\":\"s7\",\"argv\":[\"git\",\"commit\"]}\n"
+        "{\"event\":\"child_start\",\"sid\":\"s7\",\"child_id\":7,\"argv\":[\"git\",\"status\"]}\n"
+        "{\"event\":\"child_exit\",\"sid\":\"s7\",\"child_id\":7}\n"
+        "{\"event\":\"exit\",\"sid\":\"s7\",\"code\":0}\n"
+        "{\"event\":\"atexit\",\"sid\":\"s7\",\"code\":0}\n";
+    const char *unmatched_child_exit =
+        "{\"event\":\"version\",\"sid\":\"s8\",\"exe\":\"git\"}\n"
+        "{\"event\":\"start\",\"sid\":\"s8\",\"argv\":[\"git\",\"commit\"]}\n"
+        "{\"event\":\"child_exit\",\"sid\":\"s8\",\"child_id\":8}\n"
+        "{\"event\":\"exit\",\"sid\":\"s8\",\"code\":0}\n"
+        "{\"event\":\"atexit\",\"sid\":\"s8\",\"code\":0}\n";
+    const char *malformed_middle =
+        "{\"event\":\"version\",\"sid\":\"s9\",\"exe\":\"git\"}\n"
+        "{\"event\":\n"
+        "{\"event\":\"start\",\"sid\":\"s9\",\"argv\":[\"git\",\"version\"]}\n"
+        "{\"event\":\"exit\",\"sid\":\"s9\",\"code\":0}\n"
+        "{\"event\":\"atexit\",\"sid\":\"s9\",\"code\":0}\n";
     const char *wrong_argv_type =
         "{\"event\":\"version\",\"sid\":\"s4\",\"exe\":\"git\"}\n"
         "{\"event\":\"start\",\"sid\":\"s4\",\"argv\":[\"git\",7,\"version\"]}\n"
@@ -827,11 +931,33 @@ BUSTER_GLOBAL_LOCAL int hk_trace_parser_controls(void)
         cm_equal(report.failure_sid, "s4");
     valid = valid && !hk_parse_trace_data(empty_argv, strlen(empty_argv), &report);
     valid = valid && !hk_parse_trace_data(empty_argv0, strlen(empty_argv0), &report);
+    valid = valid && hk_parse_trace_data(complete_child, strlen(complete_child), &report) &&
+        report.child_starts == 1 && report.child_exits == 1 &&
+        report.children_complete == 1 && report.children_incomplete == 0;
+    valid = valid && !hk_parse_trace_data(unmatched_child_exit,
+        strlen(unmatched_child_exit), &report);
+    valid = valid && cm_equal(report.failure_phase, "child") &&
+        cm_equal(report.failure_reason, "child_exit_unmatched") &&
+        report.failure_line == 3 && report.failure_event == 3 &&
+        cm_equal(report.failure_sid, "s8") &&
+        cm_equal(report.failure_child_id, "8");
     valid = valid && !hk_parse_trace_data(complete, strlen(complete) - 1, &report);
+    valid = valid && cm_equal(report.failure_phase, "input") &&
+        cm_equal(report.failure_reason, "missing_final_newline") &&
+        report.failure_offset_known && report.failure_offset == strlen(complete) - 1 &&
+        report.failure_line == 4;
     valid = valid && !hk_parse_trace_data(malformed, strlen(malformed), &report);
     valid = valid && cm_equal(report.failure_phase, "json") &&
         cm_equal(report.failure_reason, "parse_failed") &&
-        !report.failure_offset_known && report.json_tokens > 0;
+        report.failure_offset_known && report.failure_offset == 0 &&
+        report.failure_line == 1 && report.failure_event == 1 && report.json_tokens > 0;
+    valid = valid && !hk_parse_trace_data(malformed_middle, strlen(malformed_middle), &report);
+    valid = valid && cm_equal(report.failure_phase, "json") &&
+        cm_equal(report.failure_reason, "parse_failed") &&
+        report.failure_offset_known &&
+        report.failure_offset == strlen("{\"event\":\"version\",\"sid\":\"s9\",\"exe\":\"git\"}\n") &&
+        report.failure_line == 2;
+    valid = valid && hk_large_trace_control();
     return valid;
 }
 
@@ -959,7 +1085,7 @@ BUSTER_GLOBAL_LOCAL void hk_print_protected_diagnostic(int run_attempted,
         report->parser_valid ? "complete" : "failed";
     const char *proof_state = !proof_checked ? "not_run" : proof_valid ? "pass" : "fail";
     fprintf(stderr,
-        "Protected diagnostics: run=%s runner_ok=%d spawned=%d reaped=%d timeout=%d exit=%d signal=%d group_gone=%d run_errno=%d; scratch=%s entries_at_least=%u errno=%d close_errno=%d; trace=%s proof=%s bytes=%zu tokens=%u/%u arena_bytes=%u events=%u/%u sessions=%u complete=%u incomplete=%u children=%u complete=%u incomplete=%u starts=%u exits=%u automatic=%u automatic_children=%u detached=%u; first=%s/%s line=%u offset=",
+        "Protected diagnostics: run=%s runner_ok=%d spawned=%d reaped=%d timeout=%d exit=%d signal=%d group_gone=%d run_errno=%d; scratch=%s entries_at_least=%u errno=%d close_errno=%d; trace=%s proof=%s bytes=%zu record_tokens_peak=%u/%u record_arena_bytes=%u events=%u/%u sessions=%u complete=%u incomplete=%u children=%u complete=%u incomplete=%u starts=%u exits=%u automatic=%u automatic_children=%u detached=%u; first=%s/%s line=%u offset=",
         !run_attempted ? "not_run" : runner_valid && !run->timed_out && run->code == 0 ? "passed" : "failed",
         runner_valid, run->spawned, run->reaped, run->timed_out, run->code,
         run->signal_number, run->group_gone, run->error_number, scratch_state,

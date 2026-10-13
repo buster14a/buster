@@ -28,7 +28,7 @@
 typedef struct CmToken CmToken;
 struct CmToken { char *text; unsigned child, next; char kind; };
 typedef struct CmJson CmJson;
-struct CmJson { CmToken *tokens; char *arena; unsigned count, used, capacity; int valid; };
+struct CmJson { CmToken *tokens; char *arena; unsigned count, used, capacity; int valid; unsigned token_capacity; };
 typedef struct CmFrame CmFrame;
 struct CmFrame { unsigned node, tail; int state; };
 BUSTER_GLOBAL_LOCAL int cm_equal(const char *a, const char *b)
@@ -164,18 +164,40 @@ BUSTER_GLOBAL_LOCAL void cm_json_free(CmJson *j)
 {
     free(j->tokens); free(j->arena); memset(j, 0, sizeof(*j));
 }
-BUSTER_GLOBAL_LOCAL CmJson cm_json_parse(const char *input, size_t n)
+// Reuse caller-owned scratch; token_limit never exceeds the shared global cap.
+BUSTER_GLOBAL_LOCAL int cm_json_parse_reuse(CmJson *j,
+    const char *input, size_t n, unsigned token_limit)
 {
-    CmJson j = {0};
-    j.capacity = n <= CM_BYTES ? (unsigned)n + 8 : 0;
-    j.arena = j.capacity ? malloc(j.capacity) : NULL;
-    j.tokens = j.capacity ? calloc(CM_TOKENS, sizeof(*j.tokens)) : NULL;
-    j.valid = j.arena && j.tokens && n > 0 && n <= CM_BYTES;
+    if (!j) return 0;
+    j->count = 0;
+    j->used = 0;
+    j->valid = 0;
+    unsigned bounded_tokens = token_limit <= CM_TOKENS ? token_limit : 0;
+    unsigned arena_required = n <= CM_BYTES ? (unsigned)n + 8u : 0;
+    if (arena_required > j->capacity)
+    {
+        char *arena = realloc(j->arena, arena_required);
+        if (!arena) return 0;
+        j->arena = arena;
+        j->capacity = arena_required;
+    }
+    if (bounded_tokens > j->token_capacity)
+    {
+        CmToken *tokens = realloc(j->tokens,
+            (size_t)bounded_tokens * sizeof(*j->tokens));
+        if (!tokens) return 0;
+        j->tokens = tokens;
+        j->token_capacity = bounded_tokens;
+    }
+    j->valid = j->arena && j->tokens && n > 0 && n <= CM_BYTES &&
+        bounded_tokens > 1;
+    if (!j->valid) return 0;
+    memset(j->tokens, 0, (size_t)bounded_tokens * sizeof(*j->tokens));
     CmFrame stack[CM_DEPTH];
     unsigned depth = 0;
     size_t p = 0;
     int root_done = 0;
-    while (j.valid && p < n)
+    while (j->valid && p < n)
     {
         while (p < n && (input[p] == ' ' || input[p] == '\n' || input[p] == '\r' || input[p] == '\t')) ++p;
         if (p < n)
@@ -184,34 +206,34 @@ BUSTER_GLOBAL_LOCAL CmJson cm_json_parse(const char *input, size_t n)
             if (f && (f->state == 1 || f->state == 3))
             {
                 char expected = f->state == 1 ? ':' : ',';
-                char close = j.tokens[f->node].kind == 'o' ? '}' : ']';
+                char close = j->tokens[f->node].kind == 'o' ? '}' : ']';
                 if (f->state == 3 && input[p] == close) { ++p; --depth; root_done = depth == 0; }
-                else { j.valid = input[p++] == expected; f->state = expected == ':' ? 2 : 4; }
+                else { j->valid = input[p++] == expected; f->state = expected == ':' ? 2 : 4; }
             }
-            else if (f && input[p] == (j.tokens[f->node].kind == 'o' ? '}' : ']'))
+            else if (f && input[p] == (j->tokens[f->node].kind == 'o' ? '}' : ']'))
             {
-                j.valid = f->state == 0; ++p; --depth; root_done = depth == 0;
+                j->valid = f->state == 0; ++p; --depth; root_done = depth == 0;
             }
             else
             {
-                j.valid = !root_done && j.count + 1 < CM_TOKENS;
-                unsigned node = ++j.count;
-                if (j.valid)
+                j->valid = !root_done && j->count + 1 < bounded_tokens;
+                unsigned node = ++j->count;
+                if (j->valid)
                 {
-                    CmToken *t = &j.tokens[node];
-                    int key = f && j.tokens[f->node].kind == 'o' && (f->state == 0 || f->state == 4);
+                    CmToken *t = &j->tokens[node];
+                    int key = f && j->tokens[f->node].kind == 'o' && (f->state == 0 || f->state == 4);
                     if (f)
                     {
-                        if (f->tail) j.tokens[f->tail].next = node;
-                        else j.tokens[f->node].child = node;
+                        if (f->tail) j->tokens[f->tail].next = node;
+                        else j->tokens[f->node].child = node;
                         f->tail = node; f->state = key ? 1 : 3;
                     }
                     char c = input[p];
-                    if (c == '"') { t->kind = 's'; t->text = cm_string(&j, input, n, &p); }
+                    if (c == '"') { t->kind = 's'; t->text = cm_string(j, input, n, &p); }
                     else if ((c == '{' || c == '[') && !key)
                     {
-                        t->kind = c == '{' ? 'o' : 'a'; ++p; j.valid = depth < CM_DEPTH;
-                        if (j.valid) stack[depth++] = (CmFrame){node, 0, 0};
+                        t->kind = c == '{' ? 'o' : 'a'; ++p; j->valid = depth < CM_DEPTH;
+                        if (j->valid) stack[depth++] = (CmFrame){node, 0, 0};
                     }
                     else if (!key)
                     {
@@ -219,11 +241,11 @@ BUSTER_GLOBAL_LOCAL CmJson cm_json_parse(const char *input, size_t n)
                         while (p < n && input[p] != ',' && input[p] != '}' && input[p] != ']' &&
                                input[p] != ' ' && input[p] != '\n' && input[p] != '\r' && input[p] != '\t') ++p;
                         size_t length = p - start;
-                        j.valid = length && j.used + length + 1 <= j.capacity;
-                        if (j.valid)
+                        j->valid = length && j->used + length + 1 <= j->capacity;
+                        if (j->valid)
                         {
-                            t->text = j.arena + j.used; memcpy(t->text, input + start, length);
-                            j.used += (unsigned)length; j.arena[j.used++] = 0; t->kind = 'v';
+                            t->text = j->arena + j->used; memcpy(t->text, input + start, length);
+                            j->used += (unsigned)length; j->arena[j->used++] = 0; t->kind = 'v';
                             if (!cm_equal(t->text, "null") && !cm_equal(t->text, "true") && !cm_equal(t->text, "false"))
                             {
                                 size_t q = 0;
@@ -231,50 +253,61 @@ BUSTER_GLOBAL_LOCAL CmJson cm_json_parse(const char *input, size_t n)
                                 if (t->text[q] == '0') ++q;
                                 else
                                 {
-                                    j.valid = t->text[q] >= '1' && t->text[q] <= '9';
+                                    j->valid = t->text[q] >= '1' && t->text[q] <= '9';
                                     while (t->text[q] >= '0' && t->text[q] <= '9') ++q;
                                 }
                                 if (t->text[q] == '.')
                                 {
-                                    ++q; j.valid &= t->text[q] >= '0' && t->text[q] <= '9';
+                                    ++q; j->valid &= t->text[q] >= '0' && t->text[q] <= '9';
                                     while (t->text[q] >= '0' && t->text[q] <= '9') ++q;
                                 }
                                 if (t->text[q] == 'e' || t->text[q] == 'E')
                                 {
                                     ++q; if (t->text[q] == '+' || t->text[q] == '-') ++q;
-                                    j.valid &= t->text[q] >= '0' && t->text[q] <= '9';
+                                    j->valid &= t->text[q] >= '0' && t->text[q] <= '9';
                                     while (t->text[q] >= '0' && t->text[q] <= '9') ++q;
                                 }
-                                j.valid &= t->text[q] == 0;
+                                j->valid &= t->text[q] == 0;
                             }
                         }
                     }
-                    else j.valid = 0;
+                    else j->valid = 0;
                     if (!depth) root_done = 1;
                 }
             }
         }
     }
-    j.valid &= root_done && !depth;
-    for (unsigned i = 1; j.valid && i <= j.count; ++i)
+    j->valid &= root_done && !depth;
+    for (unsigned i = 1; j->valid && i <= j->count; ++i)
     {
-        if (j.tokens[i].kind == 'o')
+        if (j->tokens[i].kind == 'o')
         {
             unsigned keys = 0;
-            for (unsigned a = j.tokens[i].child; j.valid && a; )
+            for (unsigned a = j->tokens[i].child; j->valid && a; )
             {
-                unsigned value = j.tokens[a].next;
-                j.valid = j.tokens[a].kind == 's' && value && ++keys <= 256;
-                for (unsigned b = value ? j.tokens[value].next : 0; j.valid && b; )
+                unsigned value = j->tokens[a].next;
+                j->valid = j->tokens[a].kind == 's' && value && ++keys <= 256;
+                for (unsigned b = value ? j->tokens[value].next : 0; j->valid && b; )
                 {
-                    j.valid = !cm_equal(j.tokens[a].text, j.tokens[b].text);
-                    unsigned v = j.tokens[b].next; b = v ? j.tokens[v].next : 0;
+                    j->valid = !cm_equal(j->tokens[a].text, j->tokens[b].text);
+                    unsigned v = j->tokens[b].next; b = v ? j->tokens[v].next : 0;
                 }
-                a = value ? j.tokens[value].next : 0;
+                a = value ? j->tokens[value].next : 0;
             }
         }
     }
+    return j->valid;
+}
+BUSTER_GLOBAL_LOCAL CmJson cm_json_parse_limited(const char *input, size_t n,
+    unsigned token_limit)
+{
+    CmJson j = {0};
+    cm_json_parse_reuse(&j, input, n, token_limit);
     return j;
+}
+BUSTER_GLOBAL_LOCAL CmJson cm_json_parse(const char *input, size_t n)
+{
+    return cm_json_parse_limited(input, n, CM_TOKENS);
 }
 BUSTER_GLOBAL_LOCAL unsigned cm_member(const CmJson *j, unsigned object, const char *key)
 {
