@@ -68,17 +68,54 @@ static int owner_valid(const char* text)
     return valid;
 }
 
+// Allow only the exact no-input first-party FFmpeg harness self-test command
+// in both existing lint blocks; every checkout/full-build route remains banned.
+static int ffmpeg_self_test_routes_valid(const char* text)
+{
+    const char* command = "\"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test";
+    const char* token = "test_ffmpeg";
+    const char* cursor = text;
+    unsigned routes = 0;
+    int valid = 1;
+    while ((cursor = strstr(cursor, token)) != NULL)
+    {
+        const char* begin = cursor;
+        const char* end = cursor;
+        while (begin > text && begin[-1] != '\n')
+        {
+            begin -= 1;
+        }
+        while (*end && *end != '\n')
+        {
+            end += 1;
+        }
+        if (end > begin && end[-1] == '\r')
+        {
+            end -= 1;
+        }
+        while (begin < end && (*begin == ' ' || *begin == '\t'))
+        {
+            begin += 1;
+        }
+        size_t command_length = strlen(command);
+        valid = valid && (size_t)(end - begin) == command_length && !memcmp(begin, command, command_length);
+        routes += 1;
+        cursor += strlen(token);
+    }
+    return valid && (routes == 0 || routes == 2);
+}
+
 static int other_valid(const char* text)
 {
     static const char* commands[] = {
         " test_cjson ", " test_zlib ", " test_stb ", " test_lua ", " test_quickjs ", " test_sqlite ",
         " test_yyjson ", " test_lz4 ", " test_sbase ", " test_doom ", " test_musl ", " test_cpython ",
-        " test_ffmpeg ", " test_curl ", " test_openssl ", " test_qemu ", " test_linux ", " test_sdl3 ",
+        " test_curl ", " test_openssl ", " test_qemu ", " test_linux ", " test_sdl3 ",
         " test_userspace ", " test_postgresql ", " test_mupdf ",
         " test_raddebugger --config", "git-qualification-cc\" --run", "git_qualification --run",
         "uses: ./.github/workflows/external-projects.yml", "uses: ./.github/workflows/throughput-real-source.yml",
     };
-    int valid = 1;
+    int valid = ffmpeg_self_test_routes_valid(text);
     for (unsigned i = 0; i < sizeof(commands) / sizeof(commands[0]); i += 1)
     {
         valid = valid && !strstr(text, commands[i]);
@@ -90,6 +127,41 @@ static int other_valid(const char* text)
         valid = valid && length > 0 && (size_t)length < sizeof(command) && !strstr(text, command);
     }
     return valid;
+}
+
+static int ffmpeg_self_test_route_controls(void)
+{
+    const char* valid =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
+    const char* wrong_driver =
+        "      \"$RUNNER_TEMP/other-driver\" test_ffmpeg --harness-self-test\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
+    const char* extra_argument =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test /tmp/checkout\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
+    const char* portable =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --portable /tmp/checkout /tmp/results /tmp/ide\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
+    const char* optimized =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --optimized /tmp/checkout /tmp/results /tmp/ide /usr/bin/nasm\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
+    const char* checkout_self_test =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --self-test /tmp/checkout\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
+    const char* chained =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test; \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --optimized\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
+    const char* mixed =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --portable /tmp/checkout /tmp/results /tmp/ide\n";
+    const char* duplicate_full_route =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --optimized /tmp/checkout /tmp/results /tmp/ide /usr/bin/nasm\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --optimized /tmp/checkout /tmp/results /tmp/ide /usr/bin/nasm\n";
+    int passed = other_valid(valid) && !other_valid(wrong_driver) && !other_valid(extra_argument) &&
+                 !other_valid(portable) && !other_valid(optimized) && !other_valid(checkout_self_test) &&
+                 !other_valid(chained) && !other_valid(mixed) && !other_valid(duplicate_full_route);
+    return passed;
 }
 
 static char* read_text(const char* path)
@@ -166,7 +238,8 @@ static int self_test(const char* text)
         other_valid("run: build external_projects --self-test\n") &&
         !other_valid("uses: ./.github/workflows/external-projects.yml\n") &&
         !other_valid("run: build test_cjson external/cjson\n") &&
-        !other_valid("run: build external_projects cjson\n");
+        !other_valid("run: build external_projects cjson\n") &&
+        ffmpeg_self_test_route_controls();
     return passed;
 }
 

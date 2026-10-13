@@ -31,7 +31,9 @@
 // tree (CIRLowerOptions.syntax_tree, GitHub #3102), and
 // c_ir_root_conditional answers from its conditional nodes through
 // c_ir_tree_conditionals_build / c_ir_tree_root_conditional; every other
-// question still reads tokens. No node id reaches the IR. The prepared control
+// question still reads tokens. The caller may also pass the facts semantic
+// analysis retained per node (CIRLowerOptions.syntax_facts, GitHub #4062);
+// no lowering consumer reads them yet. No node id reaches the IR. The prepared control
 // expressions of a function are answered by token-indexed tables, not scans of
 // their list: c_ir_prepared_control_expression_find, _contains and
 // _contains_range, kept current by _begin, _end and _rollback (a typeof
@@ -35519,9 +35521,12 @@ BUSTER_GLOBAL_LOCAL CIrSizeofStep c_ir_sizeof_operand_type_classify(CIntegerIrBu
         {
             return C_IR_SIZEOF_STEP_FAIL;
         }
-        if (named && cast_type.value != IR_ID_UNDERLYING_INVALID)
+        bool compound_literal = close + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACE);
+        // An inferred-bound array has no standalone mapped type yet. Its
+        // initializer completes that type through the compound query below.
+        if ((named && cast_type.value != IR_ID_UNDERLYING_INVALID) || compound_literal)
         {
-            if (close + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACE))
+            if (compound_literal)
             {
                 u32 initializer_close = c_ir_matching_delimiter_cached(builder, close + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
                 if (initializer_close >= end)
@@ -39109,7 +39114,10 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder
         frame->as.condition_leaf.place = place;
         frame->as.condition_leaf.type = builder->function->values[place.value].canonical_type;
         frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_LEAF_ASSIGNMENT;
-        if (!c_ir_lower_expression_core_frame_push(builder, frame->as.condition_leaf.start, frame->as.condition_leaf.end))
+        if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+            .kind = C_IR_LOWER_FRAME_EXPRESSION,
+            .as.expression = {.start = frame->as.condition_leaf.start, .end = frame->as.condition_leaf.end},
+        }))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
         }
@@ -41846,6 +41854,10 @@ BUSTER_C_INTERNAL bool c_ir_statement_expression_tail(CIntegerIrBuilder* builder
             tail_is_expression = true;
             statement_start = index + 1;
         }
+    }
+    while (tail_start < tail_end && c_token_is_well_known(builder->preprocess.spelling_base, builder->preprocess.tokens[tail_start], C_SYMBOL_WELL_KNOWN_EXTENSION))
+    {
+        tail_start += 1;
     }
     bool result = tail_is_expression && tail_start < tail_end && statement_start >= close;
     if (result)
@@ -47234,6 +47246,14 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
 
 BUSTER_C_SHARED String8 c_semantic_asm_clobber_name(Target target, String8 clobber)
 {
+    // GCC and Clang accept one optional leading '%' on an x86 register clobber
+    // ("%rax" is "rax"); "memory" is not a register and keeps its bare spelling.
+    if (cpu_arch_is_x86(target.cpu_arch) && clobber.length > 1 && clobber.pointer[0] == '%')
+    {
+        String8 bare = string_slice(clobber, 1, clobber.length);
+        // Callers normalize an already-normalized name, so a second '%' must stay refused.
+        if (bare.pointer[0] != '%' && !string_equal(bare, S8("memory"))) clobber = bare;
+    }
     // GNU x86 register number zero denotes AX, independently of operand ties.
     String8 result = cpu_arch_is_x86(target.cpu_arch) && string_equal(clobber, S8("0"))
                          ? target.cpu_arch == CPU_ARCH_X86_64 ? S8("rax") : S8("eax")
@@ -49469,13 +49489,39 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         found = position;
                     }
                 }
-                index = found < task.end ? found : task.end - 1;
+                u32 entry = found;
+                for (u32 statement = index; found < task.end && statement < found;)
+                {
+                    u32 content_start = 0;
+                    u32 content_end = 0;
+                    u32 after = 0;
+                    if (!c_ir_controlled_body_range(builder->temporary_arena, builder, statement, task.end, &content_start, &content_end, &after) ||
+                        after <= statement)
+                    {
+                        break;
+                    }
+                    if (after > found)
+                    {
+                        // A jump can enter a nested control body. Lower its
+                        // enclosing statement from a disconnected block so
+                        // its continuation still owns else/loop destinations.
+                        entry = statement;
+                        builder->current_block = c_ir_block_create(builder);
+                        break;
+                    }
+                    statement = after;
+                }
+                index = entry < task.end ? entry : task.end - 1;
                 if (index + 1 >= task.end)
                 {
                     break;
                 }
             }
             while (index < task.end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_RIGHT_BRACE))
+            {
+                index += 1;
+            }
+            while (index < task.end && c_token_is_well_known(builder->preprocess.spelling_base, builder->preprocess.tokens[index], C_SYMBOL_WELL_KNOWN_EXTENSION))
             {
                 index += 1;
             }
@@ -59173,6 +59219,16 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
     CIrConstantValue source = *source_input;
     IrType* target = ir_type_from_id(&builder->program->types, target_type);
     IrType* source_type = ir_type_from_id(&builder->program->types, source.type);
+    // The cast's operand undergoes array-to-pointer conversion even when
+    // its destination is an integer. Preserve the existing S+A carrier and
+    // pointer-width checks instead of trying to load an aggregate constant.
+    if (target && c_ir_constant_type_is_integer(target) && source.kind == C_IR_CONSTANT_LVALUE && source_type && source_type->kind == IR_TYPE_ARRAY)
+    {
+        source.type = c_ir_add_pointer_type(builder->program, builder->pointer_types, source_type->element_type);
+        source.kind = C_IR_CONSTANT_POINTER;
+        target = ir_type_from_id(&builder->program->types, target_type);
+        source_type = ir_type_from_id(&builder->program->types, source.type);
+    }
     bool success = false;
     if (target)
     {
@@ -62284,9 +62340,18 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer_impl(CIntegerIrBuilder* builder, 
             global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
             return true;
         }
-        if (c_initializer_has_top_level_comma(preprocess.tokens, start, end))
+        bool too_many_scalar_braces =
+            !builder->function && !aggregate_type && start < end &&
+            c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE) &&
+            c_token_is_punctuator(&preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
+            c_ir_matching_delimiter(preprocess, start, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 1;
+        if (c_initializer_has_top_level_comma(preprocess.tokens, start, end) || too_many_scalar_braces)
         {
-            builder->failure_message = S8("invalid initializer separator");
+            builder->failure_message = too_many_scalar_braces ? S8("too many braces around scalar initializer") : S8("invalid initializer separator");
+            if (too_many_scalar_braces)
+            {
+                builder->failure_token_index = start;
+            }
             return false;
         }
     }

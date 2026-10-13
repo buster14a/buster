@@ -13299,11 +13299,15 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     }
     bool windows_target = options.target.os == OPERATING_SYSTEM_WINDOWS;
     bool short_wchar_target = target_uses_16_bit_wchar(options.target);
+    // -fshort-wchar narrows only wchar_t; wint_t keeps the ABI's own width.
+    Target wint_abi_target = options.target;
+    wint_abi_target.short_wchar = false;
+    bool short_wint_target = target_uses_16_bit_wchar(wint_abi_target);
     String8 signed_pointer_type = i386_target ? S8("int") : layout.long_integer.size == layout.pointer.size ? S8("long") : S8("long long");
     String8 unsigned_pointer_type = i386_target ? S8("unsigned int")
                                  : layout.unsigned_long_integer.size == layout.pointer.size ? S8("unsigned long") : S8("unsigned long long");
     bool unsigned_wchar_target = target_uses_unsigned_wchar(options.target);
-    bool unsigned_wint_target = !short_wchar_target && !apple_target && !wasm_target;
+    bool unsigned_wint_target = !short_wint_target && !apple_target && !wasm_target;
     // Equal widths do not select the platform's typedef identity. Darwin
     // uses long long for int64_t but long for intmax_t; Wasm uses long long
     // for both, including its LP64 target. Literal constructors must agree.
@@ -13449,12 +13453,16 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     C_DEFINE_TYPE_MACRO("__UINT32_TYPE__", S8("unsigned int"));
     C_DEFINE_TYPE_MACRO("__INT64_TYPE__", i386_target ? S8("long long int") : signed_64_type);
     C_DEFINE_TYPE_MACRO("__UINT64_TYPE__", i386_target ? S8("unsigned long long int") : unsigned_64_type);
-    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", i386_target ? S8("long int") : short_wchar_target ? S8("unsigned short") : unsigned_wchar_target ? S8("unsigned int") : S8("int"));
-    C_DEFINE_TYPE_MACRO("__WINT_TYPE__", short_wchar_target ? S8("unsigned short") : unsigned_wint_target ? S8("unsigned int") : S8("int"));
+    C_DEFINE_TYPE_MACRO("__WCHAR_TYPE__", short_wchar_target ? S8("unsigned short") : i386_target ? S8("long int") : unsigned_wchar_target ? S8("unsigned int") : S8("int"));
+    C_DEFINE_TYPE_MACRO("__WINT_TYPE__", short_wint_target ? S8("unsigned short") : unsigned_wint_target ? S8("unsigned int") : S8("int"));
+    if (unsigned_wchar_target)
+    {
+        C_DEFINE_TYPE_MACRO("__WCHAR_UNSIGNED__", S8("1"));
+    }
     C_DEFINE_TYPE_MACRO("__SIZEOF_WCHAR_T__", short_wchar_target ? S8("2") : S8("4"));
-    C_DEFINE_TYPE_MACRO("__SIZEOF_WINT_T__", short_wchar_target ? S8("2") : S8("4"));
+    C_DEFINE_TYPE_MACRO("__SIZEOF_WINT_T__", short_wint_target ? S8("2") : S8("4"));
     C_DEFINE_TYPE_MACRO("__WCHAR_MAX__", short_wchar_target ? S8("65535") : unsigned_wchar_target ? S8("4294967295U") : S8("2147483647"));
-    C_DEFINE_TYPE_MACRO("__WINT_MAX__", short_wchar_target ? S8("65535") : unsigned_wint_target ? S8("4294967295U") : S8("2147483647"));
+    C_DEFINE_TYPE_MACRO("__WINT_MAX__", short_wint_target ? S8("65535") : unsigned_wint_target ? S8("4294967295U") : S8("2147483647"));
     C_DEFINE_TYPE_MACRO("__CHAR8_TYPE__", S8("unsigned char"));
     C_DEFINE_TYPE_MACRO("__CHAR16_TYPE__", S8("unsigned short"));
     C_DEFINE_TYPE_MACRO("__CHAR32_TYPE__", S8("unsigned int"));
@@ -13650,7 +13658,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     C_DEFINE_TYPE_MACRO("__SIZEOF_VA_LIST__", string_format(arena, S8("{u32}"), layout.va_list.size));
     C_DEFINE_TYPE_MACRO("__LONG_DOUBLE_WIDTH__", string_format(arena, S8("{u32}"), layout.long_double_type.bit_width));
     C_DEFINE_TYPE_MACRO("__WCHAR_WIDTH__", short_wchar_target ? S8("16") : S8("32"));
-    C_DEFINE_TYPE_MACRO("__WINT_WIDTH__", short_wchar_target ? S8("16") : S8("32"));
+    C_DEFINE_TYPE_MACRO("__WINT_WIDTH__", short_wint_target ? S8("16") : S8("32"));
     C_DEFINE_TYPE_MACRO("__ORDER_LITTLE_ENDIAN__", S8("1234"));
     C_DEFINE_TYPE_MACRO("__ORDER_BIG_ENDIAN__", S8("4321"));
     C_DEFINE_TYPE_MACRO("__BYTE_ORDER__", layout.endianness == TARGET_ENDIAN_LITTLE ? S8("__ORDER_LITTLE_ENDIAN__") : S8("__ORDER_BIG_ENDIAN__"));

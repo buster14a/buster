@@ -1024,6 +1024,12 @@ struct IrInlineStatistics
     u64 visits;
     // Bytes of relocated caller tables handed back to the OS (os_discard).
     u64 released_bytes;
+    // Spliced callers proven by ir_validate_canonical_splice, and those whose
+    // splice proof refused so the full validator decided instead.
+    u64 splice_proofs;
+    u64 splice_fallbacks;
+    // Functions whose inliner proof the FAST input guard reused.
+    u64 reused_proofs;
     IrInlineBudgetReason required_budget_reason;
     u64 required_budget_demand;
     u64 required_budget_limit;
@@ -1073,11 +1079,12 @@ struct IrModule
     IrLocalPromotionStatistics local_promotion;
     bool inline_complete;
     IrInlineStatistics inlining;
-    // Callers whose splices were all optional and whose strict output check
-    // ir_inline_module deferred to preparation's next module-wide scan. Cleared
-    // once that scan proves them; see ir_prepare_canonical_module.
-    u32* inline_unchecked_callers;
-    u32 inline_unchecked_count;
+    // One byte per function, nonzero when ir_inline_module proved it strictly
+    // valid in its current state (as a callee, a caller or a splice output).
+    // The FAST input guard reuses the proof instead of validating again;
+    // promotion clears the byte of a function it rewrites, and preparation
+    // drops the table before returning. See ir_prepare_canonical_module.
+    u8* inline_proven;
     bool fast_complete;
     IrFastStatistics fast;
 };

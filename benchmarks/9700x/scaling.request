@@ -14,3 +14,5 @@
 # request: issue #53 lane-gate calibration, gate disabled (MIN_WORK=0), size series
 # request: issue #53 lane-gate calibration re-run on main 50135638 with the one-family prewarm (#3910); gate disabled
 # request: issue #53 lane-gate calibration on main 10e44760 with lane-safe on-demand x86 fills merged; gate disabled, size series
+# request: issue #53 lane-gate worker-cap validation (MIN_WORK=0, INPUT_WORK=513, WORK_PER_WORKER=16 KiB; tiny@7 expected capped at 4)
+# request: issue #53 lane-gate worker-floor refit validation (WORK_PER_WORKER=32 KiB; tiny@7 and @13 expected capped at 2)
