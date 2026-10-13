@@ -1,6 +1,6 @@
 // Included by ir_test.c: structural coverage is separate from the executable
 // fixture so unchanged runtime behavior cannot conceal missing promotion.
-BUSTER_GLOBAL_LOCAL CIRLowerResult ir_promotion_lower(Arena* arena, String8 source, Target target)
+BUSTER_GLOBAL_LOCAL CIRLowerResult ir_promotion_lower_with_options(Arena* arena, String8 source, Target target, CIRLowerOptions options)
 {
     CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
     CAnalysisResult analysis = c_parse(arena, preprocess);
@@ -8,10 +8,15 @@ BUSTER_GLOBAL_LOCAL CIRLowerResult ir_promotion_lower(Arena* arena, String8 sour
     if (!preprocess.error_count && !analysis.diagnostic_count)
     {
         // Keep this pass's reference tests independent of direct frontend SSA.
-        result = c_lower_to_ir_with_options(arena, S8("local-promotion.c"), preprocess, analysis, target,
-                                           (CIRLowerOptions){.disable_direct_ssa = true});
+        options.disable_direct_ssa = true;
+        result = c_lower_to_ir_with_options(arena, S8("local-promotion.c"), preprocess, analysis, target, options);
     }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL CIRLowerResult ir_promotion_lower(Arena* arena, String8 source, Target target)
+{
+    return ir_promotion_lower_with_options(arena, source, target, (CIRLowerOptions){0});
 }
 
 // A stale input certificate is deliberately supplied after a safely backed

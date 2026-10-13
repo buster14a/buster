@@ -897,8 +897,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
     {
         TemporalArena census_temporary = arena_begin_temporal(arguments->arena);
         IrConstructionCounters before = ir_construction_counters();
-        CIRLowerResult form_lowered = ir_promotion_lower(arguments->arena,
-                                                         S8("unsigned test(unsigned input){return input+1;} _Bool truth(void){return 0;}"), target_native);
+        // Each literal must keep its own row: interning would share truth's two equal zeros.
+        CIRLowerResult form_lowered = ir_promotion_lower_with_options(arguments->arena,
+            S8("unsigned test(unsigned input){return input+1;} _Bool truth(void){return 0;}"), target_native,
+            (CIRLowerOptions){.disable_block_constant_interning = true});
         IrConstructionCounters lowering = ir_construction_counters();
 #define IR_FOLD_CENSUS_DELTA(later, earlier, counter) ((later).values[IR_CONSTRUCTION_##counter] - (earlier).values[IR_CONSTRUCTION_##counter])
         if (BUSTER_REQUIRE(arguments, form_lowered.program && !form_lowered.diagnostic_count))
