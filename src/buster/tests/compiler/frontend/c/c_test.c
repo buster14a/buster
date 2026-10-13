@@ -16381,6 +16381,38 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_abstract_pointer_array_sizeof(UnitTest
         "}\n"));
 }
 
+// A cast to a pointer-to-array type, `(T (*)[N])`, takes the whole postfix
+// expression after it as its operand, as a cast to a plain pointer does:
+// `(const float (*)[2]) Q[1]` converts `Q[1]`, not `Q` (#4048, FFmpeg
+// aacps.c:498). Covers one and two subscripts, a typedef base, an unspecified
+// bound and a pointer-to-array of pointers.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_pointer_to_array_postfix_operand(UnitTestArguments* arguments)
+{
+    return c_test_run_exit_zero_program(arguments, S8("cast-pointer-to-array-postfix-operand"), S8(
+        "typedef float F;\n"
+        "static const float Q[2][3][2] = {{{0, 1}, {2, 3}, {4, 5}}, {{6, 7}, {8, 9}, {10, 11}}};\n"
+        "static const float W[2][2][3][2] = {{{{0, 1}, {2, 3}, {4, 5}}, {{6, 7}, {8, 9}, {10, 11}}}, {{{12, 13}, {14, 15}, {16, 17}}, {{18, 19}, {20, 21}, {22, 23}}}};\n"
+        "static float X = 5.0f;\n"
+        "static float* P[2][3] = {{0, 0, 0}, {0, &X, 0}};\n"
+        "static float read_row(const float (*rows)[2], int row, int column) { return rows[row][column]; }\n"
+        "int main(void)\n"
+        "{\n"
+        "    int i = 1;\n"
+        "    int k = 1;\n"
+        "    int failures = 0;\n"
+        "    const float* flat = (const float*)Q[1];\n"
+        "    const float (*rows)[2] = (const float (*)[2])Q[1];\n"
+        "    failures |= !(flat[0] == 6.0f && rows[2][1] == 11.0f);\n"
+        "    failures |= (read_row((const float (*)[2])W[i][k], 2, 1) != 23.0f) << 1;\n"
+        "    failures |= (read_row((const F (*)[2])W[i][k], 1, 0) != 20.0f) << 2;\n"
+        "    const float (*open_rows)[] = (const float (*)[])Q[i];\n"
+        "    failures |= (((const float*)open_rows)[3] != 9.0f) << 3;\n"
+        "    float* (*pointers)[3] = (float* (*)[3])P[1];\n"
+        "    failures |= (*pointers[0][1] != 5.0f) << 4;\n"
+        "    return failures;\n"
+        "}\n"));
+}
+
 // GNU `__label__ a, b;` declares labels scoped to the enclosing block, so a
 // macro that declares one can be used twice in a function and an inner
 // declaration shadows an outer label of the same name (#2845).
@@ -66577,6 +66609,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     // its sorted position, not after the newest one, so independent
     // additions land at different anchors; see docs/agents/testing.md.
     C_TEST_FIXTURE(arguments, c_test_abstract_pointer_array_sizeof);
+    C_TEST_FIXTURE(arguments, c_test_cast_pointer_to_array_postfix_operand);
     C_TEST_FIXTURE(arguments, c_test_aggregate_array_element_initializers);
     C_TEST_FIXTURE(arguments, c_test_aggregate_constant_bytes);
     C_TEST_FIXTURE(arguments, c_test_aggregate_corrections);
