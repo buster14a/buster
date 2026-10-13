@@ -6942,7 +6942,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_x86_shape_pins(UnitTestArguments* a
     UnitTestResult result = {0};
     u32 query_count = 0;
     BUSTER_TEST(arguments, link_x86_shape_pins_test(&query_count) == 0);
-    BUSTER_TEST(arguments, query_count == 11 + 16 * 12);
+    BUSTER_TEST(arguments, query_count == 15 + 16 * 16);
     return result;
 }
 

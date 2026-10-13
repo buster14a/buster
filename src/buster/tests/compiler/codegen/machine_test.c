@@ -1372,7 +1372,7 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audi
         {S8_INITIALIZER("src/buster/lib/compiler/assembly/assembly.c"), S8_INITIALIZER("assembly_instructions_emit")},
         {S8_INITIALIZER("src/buster/lib/compiler/assembly/x86_64_metadata.c"), S8_INITIALIZER("x86_64_encode_register_operation")},
         {S8_INITIALIZER("src/buster/lib/compiler/jit/jit.c"), S8_INITIALIZER("jit_emit_thunks")},
-        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_x86_emit")},
+        {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_x86_emit_shape")},
         {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_x86_build_elf_entry_stub")},
         {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_x86_build_pe_entry_stub")},
         {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_native_executable_elf64_x86_64")},
@@ -12116,10 +12116,32 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, metadata_shape_cache.registered_queries == 344);
     BUSTER_TEST(arguments, metadata_shape_cache.resolved_rows == metadata_shape_cache.prepared_rows);
     BUSTER_TEST(arguments, metadata_shape_cache.pending_rows == 0);
-    // PUSH, POP, MOV r64, XOR r32, LEAVE and RET pin their selector form
-    // (#1125); the complete resolution above found each pin to agree with
-    // the selector, or the cache would not be valid.
-    BUSTER_TEST(arguments, metadata_shape_cache.pinned_queries == 6);
+    // Every registration pins its shape's selector form (#1125); the
+    // complete resolution above found each pin to agree with the selector, or
+    // the cache would not be valid.  A stale table fails here with the rows
+    // the selector asks for, in table order.
+    BUSTER_TEST(arguments, metadata_shape_cache.pinned_queries == metadata_shape_cache.registered_queries);
+    u32 stale_pins = 0;
+    for (u32 row = 0; row < metadata_shape_cache.prepared_rows; row += 1)
+    {
+        MachineX64MetadataShapePinRow pin;
+        stale_pins += !machine_x86_64_metadata_shape_pin_row(row, &pin) || !pin.current;
+    }
+    if (stale_pins)
+    {
+        String8 rows = S8("");
+        for (u32 row = 0; row < metadata_shape_cache.prepared_rows; row += 1)
+        {
+            MachineX64MetadataShapePinRow pin;
+            (void)machine_x86_64_metadata_shape_pin_row(row, &pin);
+            rows = string_format(arguments->arena,
+                                 S8("{S8}\n    {{0x{u32:x,width=[0,8],no_prefix}u, {u32}u, UINT64_C(0x{u64:x,width=[0,16],no_prefix})}}, // {S8}"),
+                                 rows, pin.signature, pin.form_id, pin.stable_hash, pin.mnemonic);
+        }
+        BUSTER_TEST_RAW(arguments, stale_pins == 0,
+                        string_format(arguments->arena, S8("{u32} stale rows in machine_x64_metadata_shape_pins; the selector asks for:{S8}\n"),
+                                      stale_pins, rows));
+    }
 
     // Canonical metadata authorities and neutral patch helpers are separate
     // records.  The source audit below validates their shape and ownership;

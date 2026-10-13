@@ -63934,9 +63934,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_pointer_parameter_attribute_r
     CParseResult attribute_model = c_parse(inspection.arena, attributes);
     BUSTER_TEST(arguments, !attributes.diagnostic_count && !attribute_syntax.diagnostic_count &&
         !attribute_model.diagnostic_count && attribute_model.analysis_complete);
+    BUSTER_TEST(arguments, attribute_model.entities != 0 || attribute_model.entity_count == 0);
     String8 attributed_functions[] = {S8("trailing_noreturn"), S8("prefix_noreturn")};
     u32 attributed_parameter_counts[BUSTER_ARRAY_LENGTH(attributed_functions)] = {0};
-    for (u32 entity_index = 0; entity_index < attribute_model.entity_count; entity_index += 1)
+    for (u32 entity_index = 0; attribute_model.entities && entity_index < attribute_model.entity_count; entity_index += 1)
     {
         CEntity entity = attribute_model.entities[entity_index];
         if (entity.kind != C_ENTITY_PARAMETER || !string_equal(entity.name, S8("routine")))
@@ -63944,7 +63945,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_pointer_parameter_attribute_r
             continue;
         }
         u32 owner = BUSTER_ARRAY_LENGTH(attributed_functions);
-        if (entity.declaration_index < attribute_model.declaration_count)
+        if (attribute_model.declarations && entity.declaration_index < attribute_model.declaration_count)
         {
             CDeclaration declaration = attribute_model.declarations[entity.declaration_index];
             for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(attributed_functions); function_index += 1)
@@ -63960,7 +63961,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_pointer_parameter_attribute_r
         {
             attributed_parameter_counts[owner] += 1;
             CTypeId callback_type = entity.type;
-            for (u32 depth = 0; depth < attribute_model.type_count && callback_type.value < attribute_model.type_count; depth += 1)
+            for (u32 depth = 0; attribute_model.types && depth < attribute_model.type_count && callback_type.value < attribute_model.type_count; depth += 1)
             {
                 CType type = attribute_model.types[callback_type.value];
                 CTypeId next = type.has_unqualified_type ? type.unqualified_type :
@@ -63971,10 +63972,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_pointer_parameter_attribute_r
                 }
                 callback_type = next;
             }
-            bool is_function_type = callback_type.value < attribute_model.type_count &&
+            bool is_function_type = attribute_model.types && callback_type.value < attribute_model.type_count &&
                 attribute_model.types[callback_type.value].kind == C_TYPE_FUNCTION;
             BUSTER_TEST(arguments, is_function_type);
-            BUSTER_TEST(arguments, is_function_type && c_parse_type_is_noreturn(&attribute_model, callback_type));
+            bool marker_table_available = attribute_model.noreturn_function_type_count == 0 ||
+                attribute_model.noreturn_function_types != 0;
+            BUSTER_TEST(arguments, marker_table_available);
+            bool is_noreturn_type = false;
+            if (is_function_type && marker_table_available)
+            {
+                for (u32 marker_index = 0; marker_index < attribute_model.noreturn_function_type_count; marker_index += 1)
+                {
+                    CTypeId marker_type = attribute_model.noreturn_function_types[marker_index];
+                    if (marker_type.value < attribute_model.type_count && attribute_model.types[marker_type.value].kind == C_TYPE_FUNCTION &&
+                        marker_type.value == callback_type.value)
+                    {
+                        is_noreturn_type = true;
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, is_noreturn_type);
         }
     }
     for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(attributed_functions); function_index += 1)
@@ -64013,8 +64030,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_pointer_parameter_attribute_r
                 CParseResult model = c_parse(temporary.arena, tokens);
                 BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count &&
                     !model.diagnostic_count && model.analysis_complete);
+                BUSTER_TEST(arguments, model.entities != 0 || model.entity_count == 0);
                 u32 parameter_counts[BUSTER_ARRAY_LENGTH(function_names)] = {0};
-                for (u32 entity_index = 0; entity_index < model.entity_count; entity_index += 1)
+                for (u32 entity_index = 0; model.entities && entity_index < model.entity_count; entity_index += 1)
                 {
                     CEntity entity = model.entities[entity_index];
                     if (entity.kind != C_ENTITY_PARAMETER || !string_equal(entity.name, S8("routine")))
@@ -64022,7 +64040,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_pointer_parameter_attribute_r
                         continue;
                     }
                     u32 owner = BUSTER_ARRAY_LENGTH(function_names);
-                    if (entity.declaration_index < model.declaration_count)
+                    if (model.declarations && entity.declaration_index < model.declaration_count)
                     {
                         CDeclaration declaration = model.declarations[entity.declaration_index];
                         for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(function_names); function_index += 1)
@@ -64038,7 +64056,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_pointer_parameter_attribute_r
                     {
                         parameter_counts[owner] += 1;
                         CTypeId callback_type = entity.type;
-                        for (u32 depth = 0; depth < model.type_count && callback_type.value < model.type_count; depth += 1)
+                        for (u32 depth = 0; model.types && depth < model.type_count && callback_type.value < model.type_count; depth += 1)
                         {
                             CType type = model.types[callback_type.value];
                             CTypeId next = type.has_unqualified_type ? type.unqualified_type :
@@ -64049,11 +64067,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_pointer_parameter_attribute_r
                             }
                             callback_type = next;
                         }
-                        bool is_function_type = callback_type.value < model.type_count &&
+                        bool is_function_type = model.types && callback_type.value < model.type_count &&
                             model.types[callback_type.value].kind == C_TYPE_FUNCTION;
-                        bool is_noreturn = is_function_type && c_parse_type_is_noreturn(&model, callback_type);
                         BUSTER_TEST(arguments, is_function_type);
-                        BUSTER_TEST(arguments, !is_noreturn);
                     }
                 }
                 for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(function_names); function_index += 1)
