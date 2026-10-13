@@ -43097,7 +43097,7 @@ BUSTER_C_INTERNAL bool c_parse_type_is_complete_object(CParseResult* result, CTy
             if (current->array_bound < result->array_bound_count)
             {
                 CArrayBound bound = result->array_bounds[current->array_bound];
-                walking = bound.token_count || bound.has_inferred_count || bound.is_star;
+                walking = (bound.token_count || bound.has_inferred_count || bound.is_star) && !bound.has_invalid_element_type;
                 if (walking)
                 {
                     type = current->element_type;
@@ -43109,16 +43109,54 @@ BUSTER_C_INTERNAL bool c_parse_type_is_complete_object(CParseResult* result, CTy
                 walking = false;
             }
         }
+        else if (current->kind == C_TYPE_STRUCT || current->kind == C_TYPE_UNION || current->kind == C_TYPE_ENUM)
+        {
+            complete = current->is_complete;
+            walking = false;
+        }
         else
         {
-            complete = current->kind != C_TYPE_INVALID && current->kind != C_TYPE_VOID &&
-                       current->kind != C_TYPE_FUNCTION && current->kind != C_TYPE_COUNT && current->is_complete;
-            walking = false;
+            switch (current->kind)
+            {
+                case C_TYPE_BOOL:
+                case C_TYPE_CHAR:
+                case C_TYPE_SIGNED_CHAR:
+                case C_TYPE_UNSIGNED_CHAR:
+                case C_TYPE_SHORT:
+                case C_TYPE_UNSIGNED_SHORT:
+                case C_TYPE_INT:
+                case C_TYPE_UNSIGNED_INT:
+                case C_TYPE_LONG:
+                case C_TYPE_UNSIGNED_LONG:
+                case C_TYPE_LONG_LONG:
+                case C_TYPE_UNSIGNED_LONG_LONG:
+                case C_TYPE_INT128:
+                case C_TYPE_UNSIGNED_INT128:
+                case C_TYPE_FLOAT16:
+                case C_TYPE_BFLOAT16:
+                case C_TYPE_FLOAT:
+                case C_TYPE_DOUBLE:
+                case C_TYPE_LONG_DOUBLE:
+                case C_TYPE_FLOAT16_COMPLEX:
+                case C_TYPE_FLOAT_COMPLEX:
+                case C_TYPE_DOUBLE_COMPLEX:
+                case C_TYPE_LONG_DOUBLE_COMPLEX:
+                case C_TYPE_VA_LIST:
+                case C_TYPE_NULLPTR:
+                case C_TYPE_POINTER:
+                case C_TYPE_VECTOR:
+                case C_TYPE_FP16_STORAGE:
+                    complete = true;
+                    walking = false;
+                    break;
+                default:
+                    walking = false;
+                    break;
+            }
         }
     }
     return complete;
 }
-
 // Resolve tentative definitions only after every ordinary source expression
 // has been checked. An external incomplete array is completed on a fresh
 // per-object declarator copy; the typedef and declaration-point type stay open.
@@ -44040,6 +44078,17 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         {
             declares_static |= c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_STATIC);
             declares_extern |= c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_EXTERN);
+        }
+        bool incomplete_internal_tentative =
+            kind == C_DECLARATION_OBJECT && declares_static && !declaration->is_definition &&
+            !c_parse_declaration_declares_no_storage(preprocess, declaration) &&
+            c_parse_type_is_incomplete_object(&result, declaration->type);
+        if (incomplete_internal_tentative)
+        {
+            String8 message = c_parse_message(
+                arena, S8("tentative definition of '{S8}' has incomplete type with internal linkage"), declaration->name);
+            c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location),
+                               C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, message);
         }
 #if BUSTER_REFERENCE_CHECKS
         BUSTER_CHECK(declaration_name_token >= token_count ||
