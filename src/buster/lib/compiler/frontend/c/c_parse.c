@@ -459,8 +459,9 @@ struct CParseValidationCapacities
 // `volatile` and `inline` in their plain and GNU spellings, and the `goto`
 // that marks the label-bearing form.
 #define C_PARSE_ASM_QUALIFIER_KEYWORDS                                                                                  \
-    (C_SYMBOL_WELL_KNOWN_BIT(VOLATILE) | C_SYMBOL_WELL_KNOWN_BIT(VOLATILE_GNU_ALT) | C_SYMBOL_WELL_KNOWN_BIT(INLINE) | \
-     C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU_ALT) | C_SYMBOL_WELL_KNOWN_BIT(GOTO))
+    (C_SYMBOL_WELL_KNOWN_BIT(VOLATILE) | C_SYMBOL_WELL_KNOWN_BIT(VOLATILE_GNU) | C_SYMBOL_WELL_KNOWN_BIT(VOLATILE_GNU_ALT) | \
+     C_SYMBOL_WELL_KNOWN_BIT(INLINE) | C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU) | C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU_ALT) | \
+     C_SYMBOL_WELL_KNOWN_BIT(GOTO))
 
 // Preprocessing canonicalizes C23 `thread_local` to `_Thread_local`.
 // A remaining `thread_local` spelling is an ordinary pre-C23 identifier.
@@ -27684,8 +27685,8 @@ BUSTER_C_SHARED bool c_parse_asm_goto_qualifier(CPreprocessResult preprocess, u3
         {
             return true;
         }
-        if (!string_equal(spelling, S8("volatile")) && !string_equal(spelling, S8("__volatile__")) && !string_equal(spelling, S8("inline")) &&
-            !string_equal(spelling, S8("__inline__")))
+        if (!string_equal(spelling, S8("volatile")) && !string_equal(spelling, S8("__volatile")) && !string_equal(spelling, S8("__volatile__")) &&
+            !string_equal(spelling, S8("inline")) && !string_equal(spelling, S8("__inline")) && !string_equal(spelling, S8("__inline__")))
         {
             break;
         }

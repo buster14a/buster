@@ -48757,6 +48757,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_volatile_ir(UnitTestAr
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_qualifier_spellings_named_operands(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult preprocess = {0};
+    CParseResult parse = {0};
+    // GNU accepts volatile, inline and goto in any order and in all three
+    // spellings of the first two (#4053). Named operands must stay operand
+    // names (not undeclared identifiers) for every ordering.
+    CIRLowerResult lowered = c_test_lower_source(
+        temporary.arena,
+        S8(
+           "int q0(int x) { int r; asm __inline volatile(\"mov %[in], %[out]\" : [out] \"=r\" (r) : [in] \"r\" (x)); return r; }\n"
+           "int q1(int x) { int r; asm volatile __inline(\"mov %[in], %[out]\" : [out] \"=r\" (r) : [in] \"r\" (x)); return r; }\n"
+           "int q2(int x) { int r; asm __inline(\"mov %[in], %[out]\" : [out] \"=r\" (r) : [in] \"r\" (x)); return r; }\n"
+           "int q3(int x) { int r; asm __inline__ __volatile(\"mov %[in], %[out]\" : [out] \"=r\" (r) : [in] \"r\" (x)); return r; }\n"
+           "int q4(int x) { int r; __asm__ __inline__ volatile(\"mov %[in], %[out]\" : [out] \"=r\" (r) : [in] \"r\" (x)); return r; }\n"
+           "int q5(int x) { int r; asm inline volatile(\"mov %[in], %[out]\" : [out] \"=r\" (r) : [in] \"r\" (x)); return r; }\n"
+           "int q6(int x) { int r; asm __volatile inline(\"mov %[in], %[out]\" : [out] \"=r\" (r) : [in] \"r\" (x)); return r; }\n"
+           "int q7(int x) { int r; asm __volatile__ __inline(\"mov %[in], %[out]\" : [out] \"=r\" (r) : [in] \"r\" (x)); return r; }\n"
+           "int q8(int x) { int r; asm volatile inline goto(\"mov %[in], %[out]\" : [out] \"=r\" (r) : [in] \"r\" (x) : : tgt); return r; tgt: return -1; }\n"
+           "int q9(int x) { int r; asm goto __inline __volatile(\"mov %[in], %[out]\" : [out] \"=r\" (r) : [in] \"r\" (x) : : tgt); return r; tgt: return -1; }\n"
+           "int q10(int x) { int r; __asm__ __inline__ goto __volatile__(\"mov %[in], %[out]\" : [out] \"=r\" (r) : [in] \"r\" (x) : : tgt); return r; tgt: return -1; }\n"
+           "int q11(int x) { int r; asm inline goto(\"mov %[in], %[out]\" : [out] \"=r\" (r) : [in] \"r\" (x) : : tgt); return r; tgt: return -1; }\n"),
+        S8("inline-assembly-qualifier-spellings.c"), target_native, &preprocess, &parse);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+    if (lowered.program)
+    {
+        IrModule* module = &lowered.program->modules[0];
+        String8 names[] = {S8("q0"), S8("q1"), S8("q2"), S8("q3"), S8("q4"), S8("q5"), S8("q6"), S8("q7"), S8("q8"), S8("q9"), S8("q10"), S8("q11")};
+        bool expected_volatile[] = {true, true, false, true, true, true, true, true, true, true, true, false};
+        bool expected_goto[] = {false, false, false, false, false, false, false, false, true, true, true, true};
+        for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(names); function_index += 1)
+        {
+            IrFunction* function = c_test_find_ir_function(module, names[function_index]);
+            IrInstruction* assembly = 0;
+            u32 assembly_count = 0;
+            for (u32 instruction_index = 0; function && instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = function->instructions + instruction_index;
+                if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                {
+                    assembly = instruction;
+                    assembly_count += 1;
+                }
+            }
+            BUSTER_TEST(arguments, function != 0);
+            BUSTER_TEST(arguments, assembly_count == 1);
+            BUSTER_TEST(arguments, assembly && assembly->volatile_access == expected_volatile[function_index]);
+            BUSTER_TEST(arguments, assembly && (assembly->target_count != 0) == expected_goto[function_index]);
+        }
+        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -66352,6 +66412,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_inline_assembly_constraint_unions);
     C_TEST_FIXTURE(arguments, c_test_inline_assembly_cpuid_register_views);
     C_TEST_FIXTURE(arguments, c_test_inline_assembly_volatile_ir);
+    C_TEST_FIXTURE(arguments, c_test_inline_assembly_qualifier_spellings_named_operands);
     C_TEST_FIXTURE(arguments, c_test_inline_attribute_retention);
     C_TEST_FIXTURE(arguments, c_test_integer_conversion_rank);
     C_TEST_FIXTURE(arguments, c_test_integer_literal_policy);
