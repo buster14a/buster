@@ -1020,7 +1020,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* are
         result = compiler_closure_utility_main(arena, arguments);
     }
     else if (arguments.length && (string_equal(arguments.pointer[0], S8("--execute-preparation")) ||
-        string_equal(arguments.pointer[0], S8("--self-test-preparation-controller"))))
+        string_equal(arguments.pointer[0], S8("--self-test-preparation-controller")) ||
+        string_equal(arguments.pointer[0], S8("--self-test-preparation-failed-phase"))))
     {
         result = compiler_preparation_qualification_main(arena, arguments);
     }
