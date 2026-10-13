@@ -715,6 +715,19 @@ BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_token_is_punctuator(cons
     return token->punctuator == punctuator;
 }
 
+// The `?:` nesting after `token` for a scan that is outside every delimiter:
+// a `?` opens a conditional and its matching `:` closes it.  The middle
+// operand is a full expression (C11 6.5.15), so a `,` while this is nonzero
+// is a comma operator, never a declarator or argument separator
+// (`int e = x ? g(), 1 : 0;` declares one object, #4003).  A GNU `?:` opens
+// and closes at once, and a `:` with nothing open (a bit-field width) is
+// ignored.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE u32 c_token_conditional_depth_step(const CToken* token, u32 conditional_depth)
+{
+    return conditional_depth + c_token_is_punctuator(token, C_PUNCTUATOR_QUESTION) -
+           (conditional_depth && c_token_is_punctuator(token, C_PUNCTUATOR_COLON));
+}
+
 // Punctuator sets the frontend asks about repeatedly (see c_punctuator_in_set
 // in c.h). The parenthesis pair is what the two backward scans that look for
 // a control-statement head classify on; the statement-boundary set is the
