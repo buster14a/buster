@@ -57177,11 +57177,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_nested_loop_parameters(Unit
 // The work for `{int i=x;do ` D times, `x--;`, then D closers
 // `while(--i>0);}`: `scope_levels` takes the scope levels semantic analysis
 // descends and `ssa_steps` the direct SSA read walk's steps in lowering, each
-// UINT64_MAX when its stage did not finish cleanly.
-BUSTER_GLOBAL_LOCAL void c_test_nested_do_while_work(u32 depth, u64* ssa_steps, u64* scope_levels)
+// UINT64_MAX when its stage did not finish cleanly; `exit_blocks` counts
+// blocks indexed by the optional loop-exit shortcut.
+BUSTER_GLOBAL_LOCAL void c_test_nested_do_while_work(u32 depth, u64* ssa_steps, u64* scope_levels, u64* exit_blocks)
 {
     *ssa_steps = UINT64_MAX;
     *scope_levels = UINT64_MAX;
+    *exit_blocks = UINT64_MAX;
     TemporalArena temporary = scratch_begin(0, 0);
     u64 capacity = (u64)depth * 32 + 256;
     char8* bytes = arena_allocate(temporary.arena, char8, capacity);
@@ -57207,11 +57209,13 @@ BUSTER_GLOBAL_LOCAL void c_test_nested_do_while_work(u32 depth, u64* ssa_steps, 
     }
     CParseResult parse = c_parse(temporary.arena, tokens);
     u64 steps_before = c_test_ir_ssa_forward_steps();
+    u64 exit_blocks_before = c_test_ir_ssa_loop_exit_blocks();
     CIRLowerResult direct = c_lower_to_ir(temporary.arena, S8("nested-do-while.c"), tokens, parse, target_native);
     if (!tokens.diagnostic_count && !parse.diagnostic_count && !direct.diagnostic_count && direct.program &&
         ir_validate_canonical_module(direct.program, direct.program->modules).error == IR_VALIDATION_NONE)
     {
         *ssa_steps = c_test_ir_ssa_forward_steps() - steps_before;
+        *exit_blocks = c_test_ir_ssa_loop_exit_blocks() - exit_blocks_before;
     }
     c_test_scratch_end(temporary);
 }
@@ -57229,10 +57233,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_nested_do_while_work(UnitTe
     enum { SHALLOW = 250, DEEP = 1000 };
     u64 shallow_steps;
     u64 shallow_levels;
+    u64 shallow_exit_blocks;
     u64 deep_steps;
     u64 deep_levels;
-    c_test_nested_do_while_work(SHALLOW, &shallow_steps, &shallow_levels);
-    c_test_nested_do_while_work(DEEP, &deep_steps, &deep_levels);
+    u64 deep_exit_blocks;
+    u64 ordinary_steps;
+    u64 ordinary_levels;
+    u64 ordinary_exit_blocks;
+    c_test_nested_do_while_work(4, &ordinary_steps, &ordinary_levels, &ordinary_exit_blocks);
+    c_test_nested_do_while_work(SHALLOW, &shallow_steps, &shallow_levels, &shallow_exit_blocks);
+    c_test_nested_do_while_work(DEEP, &deep_steps, &deep_levels, &deep_exit_blocks);
+    BUSTER_TEST(arguments, ordinary_steps != UINT64_MAX && ordinary_levels != UINT64_MAX && ordinary_exit_blocks == 0);
+    BUSTER_TEST(arguments, shallow_exit_blocks >= SHALLOW && deep_exit_blocks >= DEEP && deep_exit_blocks <= shallow_exit_blocks * 5);
+    BUSTER_TEST(arguments, c_test_ir_ssa_loop_exits_refusal());
     BUSTER_TEST_RAW(arguments, shallow_steps != UINT64_MAX && deep_steps != UINT64_MAX && shallow_steps >= SHALLOW &&
                                    deep_steps <= shallow_steps * 5 && deep_steps <= (u64)DEEP * 16,
                     string_format(arguments->arena, S8("SSA read-walk steps shallow={u64} deep={u64}"), shallow_steps, deep_steps));
