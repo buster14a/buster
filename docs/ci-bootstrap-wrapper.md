@@ -203,6 +203,9 @@ unexpected code, it prints `WINDOWS_PROCESS_TREE_TEST_CONTEXT` and
 snapshot retains the root PID, cancel-observed time, runtime and cleanup
 deadlines, cleanup and publication timestamps, clock validity, and the first
 failed publication operation with its immediate Win32 error when available.
+It also timestamps the end of each publication stage (destination attributes,
+create, write, flush, close and rename; zero when not reached), so a late
+publication shows which operation consumed the allowance (#3816).
 The status line includes the recorded JSON, or an explicit missing marker.
 Diagnostic clock sampling uses a copy of the owner's state; the production
 status schema, return-code rules and cleanup allowance are unchanged.

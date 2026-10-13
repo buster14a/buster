@@ -61,6 +61,9 @@ Map (searchable symbols):
         render_inventory_coverage                          inventory rows each validated leg discharged (#2761)
     FRONTEND_SELECTOR_PROFILE, validate_frontend_selector, selection_medians,
         frontend_selector_digest                           frontend and selector probes (#2761)
+    frontend_scaling_population, frontend_scaling_problems,
+        frontend_scaling_digest                            shared benchmark_frontend_scaling.py checks
+    FRONTEND_NESTING_PROFILE, validate_frontend_nesting    deep-nesting families (#2676)
     WILD_LINKER_PROFILE, validate_wild_linker, wild_linker_population,
         wild_linker_digest                                 host Wild against its comparator (#2761)
     LINK_TLS_PROFILE, validate_link_tls, link_tls_digest   whole-link TLS companion cells (#1915)
@@ -589,6 +592,39 @@ FRONTEND_SELECTOR_PROFILE = {
         "source": "tests/basic_c_operations.c", "iterations": 30, "pairs": 20,
         "pairing": "fresh process per run; pair p runs baseline first when p is even, candidate first when odd",
         "correctness": "every run exits 0 with exactly one BENCH_C_FRONTEND line for the same source and bytes",
+    },
+    "decision": "report-only: medians are reported and never gate",
+    "report_only": True,
+}
+# Issue #2676: the Zen 5 route for deep-nesting claims. One fresh exact line in
+# ANALYZER_REQUEST_PATH selects it on the pull-compare route. After the corpus
+# leg, the base revision's tools/benchmark_frontend_scaling.py --suite nesting
+# runs on the matched baseline/candidate binaries: one function per family whose
+# control statements nest 2,000, 8,000 and 32,000 levels deep, so each step is
+# four times the last and a term growing with the square of the depth shows as
+# a sixteenfold step. Families, depths, populations and the pinned CPU are
+# frozen here; changing any value needs a new name. It is report-only, but the
+# tool's own check (byte-identical -c objects) must hold.
+FRONTEND_NESTING_REQUEST_LINE = "profile: frontend-nesting-v1"
+FRONTEND_NESTING_FAMILIES = ("braced-while", "braced-for", "braced-if", "braced-switch", "braceless-while",
+                             "braceless-for", "braceless-do", "braceless-switch", "declaration", "label", "goto")
+FRONTEND_NESTING_DEPTHS = (2000, 8000, 32000)
+# benchmark_frontend_scaling.py --suite nesting: (kind, counts, modes) in run order.
+FRONTEND_NESTING_CASES = (
+    ("small", (1,), ("syntax", "object")),
+    *((family, FRONTEND_NESTING_DEPTHS, ("syntax", "object")) for family in FRONTEND_NESTING_FAMILIES),
+)
+FRONTEND_NESTING_PROFILE = {
+    "name": "frontend-nesting-v1",
+    "harness": "tools/benchmark_frontend_scaling.py at the base revision",
+    "cpu": 2,
+    "frontend_scaling": {
+        "workload": "--suite nesting: per family one function whose control statements nest each depth deep; "
+                    "-fsyntax-only and -c cells, fresh process per sample",
+        "arguments": ["--suite", "nesting", "--warmups", "1", "--repetitions", "11", "--cpu", "2"],
+        "suite": "nesting", "warmups": 1, "repetitions": 11,
+        "families": list(FRONTEND_NESTING_FAMILIES), "depths": list(FRONTEND_NESTING_DEPTHS),
+        "correctness": "byte-identical -c objects from both binaries; unchanged sources and binaries",
     },
     "decision": "report-only: medians are reported and never gate",
     "report_only": True,
@@ -1305,9 +1341,9 @@ def validate_compiler_probes(status: object, summary: object, base: str, head: s
     return problems
 
 
-def frontend_scaling_population() -> list[tuple[str, int, str]]:
-    """(kind, count, mode) of every FRONTEND_SELECTOR_PROFILE frontend-scaling record, in run order."""
-    return [(kind, count, mode) for kind, counts, modes in FRONTEND_SCALING_CASES for count in counts for mode in modes]
+def frontend_scaling_population(cases: tuple = FRONTEND_SCALING_CASES) -> list[tuple[str, int, str]]:
+    """(kind, count, mode) of every frontend-scaling record of `cases`, in run order; FRONTEND_SELECTOR_PROFILE's by default."""
+    return [(kind, count, mode) for kind, counts, modes in cases for count in counts for mode in modes]
 
 
 def ide_bench_fields(line: object) -> dict | None:
@@ -1357,6 +1393,50 @@ def selection_medians(samples: object, allocators: list) -> dict | None:
                                   for allocator in allocators}} if usable else None
 
 
+def frontend_scaling_problems(scaling: dict, cpu: int, population: list, scaling_status: object, provenance: object,
+                              results: object, hashes: dict) -> list[str]:
+    """Reasons a benchmark_frontend_scaling.py run is not exactly `scaling`'s suite and `population` on `hashes`.
+
+    scaling is a profile's frontend_scaling section, scaling_status the tool's exit and provenance/results
+    its provenance.json and results.json; every cell needs its full samples and object cells their hash.
+    """
+    problems: list[str] = []
+    label = "frontend scaling"
+    if type(scaling_status) is not int or scaling_status != 0:
+        problems.append(f"{label} exited {scaling_status!r}, not 0")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    for key, wanted in (("suite", scaling["suite"]), ("warmups", scaling["warmups"]),
+                        ("repetitions", scaling["repetitions"]), ("cpu", cpu), ("affinity", [cpu]), ("complete", True),
+                        ("binary_sha256", hashes)):
+        if type(provenance.get(key)) is not type(wanted) or provenance.get(key) != wanted:
+            problems.append(f"{label} provenance {key} {provenance.get(key)!r} is not {wanted!r}")
+    if not (isinstance(provenance.get("cpu_model"), str) and APPROVED_HOST.search(provenance["cpu_model"])):
+        problems.append(f"{label} observed CPU {provenance.get('cpu_model')!r} is not the approved Zen 5 host "
+                        "(AMD Ryzen 7 9700X)")
+    records = results if isinstance(results, list) else []
+    # A boolean count equals 1 in Python, so the type is part of the cell's identity.
+    observed = [(row.get("kind"), row.get("count") if type(row.get("count")) is int else None, row.get("mode"))
+                if isinstance(row, dict) else None for row in records]
+    if observed != population:
+        problems.append(f"{label} records are not exactly the {len(population)} profile cells")
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        name = f"{row.get('kind')}-{row.get('count')}/{row.get('mode')}"
+        compilers = row.get("compilers") if isinstance(row.get("compilers"), dict) else {}
+        if sorted(compilers) != ["baseline", "candidate"] or not all(
+                isinstance(item, dict) and _samples(item.get("wall_seconds"), scaling["repetitions"], True) and
+                _samples(item.get("cpu_seconds"), scaling["repetitions"], False) for item in compilers.values()):
+            problems.append(f"{label} cell {name} does not have {scaling['repetitions']} complete samples per binary")
+        elif any(item.get(f"{metric}_median") != _median(item[f"{metric}_seconds"])
+                 for item in compilers.values() for metric in ("wall", "cpu")):
+            problems.append(f"{label} cell {name} reports medians its samples do not give")
+        if row.get("mode") == "object" and not (isinstance(row.get("object_sha256"), str) and
+                                                SHA256.fullmatch(row["object_sha256"])):
+            problems.append(f"{label} cell {name} has no identical-object hash")
+    return problems
+
+
 def validate_frontend_selector(scaling_status: object, provenance: object, results: object, selection_status: object,
                                report: object, bench: object, binaries: object) -> list[str]:
     """Reasons the evidence is not one complete FRONTEND_SELECTOR_PROFILE run on these binaries and host.
@@ -1373,39 +1453,8 @@ def validate_frontend_selector(scaling_status: object, provenance: object, resul
     problems: list[str] = []
     if not all(isinstance(value, str) and SHA256.fullmatch(value) for value in hashes.values()):
         problems.append("frontend-selector measured binaries are not both recorded")
-    # Frontend scaling.
-    label = "frontend scaling"
-    scaling = profile["frontend_scaling"]
-    if type(scaling_status) is not int or scaling_status != 0:
-        problems.append(f"{label} exited {scaling_status!r}, not 0")
-    provenance = provenance if isinstance(provenance, dict) else {}
-    for key, wanted in (("suite", scaling["suite"]), ("warmups", scaling["warmups"]),
-                        ("repetitions", scaling["repetitions"]), ("cpu", cpu), ("affinity", [cpu]), ("complete", True),
-                        ("binary_sha256", hashes)):
-        if type(provenance.get(key)) is not type(wanted) or provenance.get(key) != wanted:
-            problems.append(f"{label} provenance {key} {provenance.get(key)!r} is not {wanted!r}")
-    if not (isinstance(provenance.get("cpu_model"), str) and APPROVED_HOST.search(provenance["cpu_model"])):
-        problems.append(f"{label} observed CPU {provenance.get('cpu_model')!r} is not the approved Zen 5 host "
-                        "(AMD Ryzen 7 9700X)")
-    records = results if isinstance(results, list) else []
-    population = [(row.get("kind"), row.get("count"), row.get("mode")) if isinstance(row, dict) else None for row in records]
-    if population != frontend_scaling_population():
-        problems.append(f"{label} records are not exactly the {len(frontend_scaling_population())} profile cells")
-    for row in records:
-        if not isinstance(row, dict):
-            continue
-        name = f"{row.get('kind')}-{row.get('count')}/{row.get('mode')}"
-        compilers = row.get("compilers") if isinstance(row.get("compilers"), dict) else {}
-        if sorted(compilers) != ["baseline", "candidate"] or not all(
-                isinstance(item, dict) and _samples(item.get("wall_seconds"), scaling["repetitions"], True) and
-                _samples(item.get("cpu_seconds"), scaling["repetitions"], False) for item in compilers.values()):
-            problems.append(f"{label} cell {name} does not have {scaling['repetitions']} complete samples per binary")
-        elif any(item.get(f"{metric}_median") != _median(item[f"{metric}_seconds"])
-                 for item in compilers.values() for metric in ("wall", "cpu")):
-            problems.append(f"{label} cell {name} reports medians its samples do not give")
-        if row.get("mode") == "object" and not (isinstance(row.get("object_sha256"), str) and
-                                                SHA256.fullmatch(row["object_sha256"])):
-            problems.append(f"{label} cell {name} has no identical-object hash")
+    problems.extend(frontend_scaling_problems(profile["frontend_scaling"], cpu, frontend_scaling_population(),
+                                              scaling_status, provenance, results, hashes))
     # Selection.
     label = "selection benchmark"
     selection = profile["selection"]
@@ -1485,14 +1534,7 @@ def validate_frontend_selector(scaling_status: object, provenance: object, resul
 def frontend_selector_digest(results: object, report: object, bench: object) -> list[dict]:
     """The report's view: baseline/candidate medians re-derived from the raw samples of every cell, never
     taken from a tool's own summary fields."""
-    digest = []
-    for row in results if isinstance(results, list) else []:
-        compilers = row.get("compilers") if isinstance(row, dict) and isinstance(row.get("compilers"), dict) else {}
-        values = [_median(compilers[role].get("wall_seconds")) if isinstance(compilers.get(role), dict) else None
-                  for role in ("baseline", "candidate")]
-        if isinstance(row, dict):
-            digest.append({"name": f"frontend {row.get('kind')}-{row.get('count')}/{row.get('mode')}",
-                           "unit": "s", "values": values})
+    digest = frontend_scaling_digest(results)
     for row in report.get("workloads", []) if isinstance(report, dict) and isinstance(report.get("workloads"), list) else []:
         samples = row.get("samples") if isinstance(row, dict) and isinstance(row.get("samples"), dict) else {}
         name = Path(str(row.get("path"))).name if isinstance(row, dict) else "NA"
@@ -1513,6 +1555,38 @@ def frontend_selector_digest(results: object, report: object, bench: object) -> 
         digest.append({"name": "ide bench", "unit": "ns",
                        "values": [statistics.median(medians[role]) if medians[role] else None
                                   for role in ("baseline", "candidate")]})
+    return digest
+
+
+def validate_frontend_nesting(scaling_status: object, provenance: object, results: object, binaries: object) -> list[str]:
+    """Reasons the evidence is not one complete FRONTEND_NESTING_PROFILE run on these binaries and host.
+
+    scaling_status is the tool's exit, provenance/results its provenance.json and results.json and
+    binaries the measured baseline/candidate records.
+    """
+    profile = FRONTEND_NESTING_PROFILE
+    binaries = binaries if isinstance(binaries, dict) else {}
+    hashes = {role: (binaries.get(role) or {}).get("sha256") if isinstance(binaries.get(role), dict) else None
+              for role in ("baseline", "candidate")}
+    problems: list[str] = []
+    if not all(isinstance(value, str) and SHA256.fullmatch(value) for value in hashes.values()):
+        problems.append("frontend-nesting measured binaries are not both recorded")
+    problems.extend(frontend_scaling_problems(profile["frontend_scaling"], profile["cpu"],
+                                              frontend_scaling_population(FRONTEND_NESTING_CASES), scaling_status,
+                                              provenance, results, hashes))
+    return problems
+
+
+def frontend_scaling_digest(results: object) -> list[dict]:
+    """Baseline/candidate wall medians of every frontend-scaling cell, re-derived from its raw samples."""
+    digest = []
+    for row in results if isinstance(results, list) else []:
+        compilers = row.get("compilers") if isinstance(row, dict) and isinstance(row.get("compilers"), dict) else {}
+        values = [_median(compilers[role].get("wall_seconds")) if isinstance(compilers.get(role), dict) else None
+                  for role in ("baseline", "candidate")]
+        if isinstance(row, dict):
+            digest.append({"name": f"frontend {row.get('kind')}-{row.get('count')}/{row.get('mode')}",
+                           "unit": "s", "values": values})
     return digest
 
 
@@ -4715,6 +4789,7 @@ INVENTORY_LEGS = {
         "production-profile": ("build:production_profile",),
         "compiler-probes": ("tool:fast_ra_scaling.c", "tool:machine_line_mark_scaling.c"),
         "frontend-selector": ("tool:benchmark_frontend_scaling.py", "tool:selection_benchmark.py", "ide:bench"),
+        "frontend-nesting": ("tool:benchmark_frontend_scaling.py@frontend-nesting",),
         "wild-linker": ("tool:wild_linker_bench.c",),
         "link-tls": ("tool:link_tls_bench.py",),
         "self-host-inline": ("uarch_lab:compare@self-host-inline-compare",),
@@ -4726,6 +4801,7 @@ INVENTORY_OPT_IN_RECORDS = {"inline": "inline_acceptance", "ast-pilot": "ast_pil
                             "constant-reuse": "constant_reuse_acceptance",
                             "real-source": "throughput_real_source", "production-profile": "production_profile",
                             "compiler-probes": "compiler_probes", "frontend-selector": "frontend_selector",
+                            "frontend-nesting": "frontend_nesting",
                             "wild-linker": "wild_linker", "link-tls": "link_tls",
                             "self-host-inline": "selfhost_inline"}
 
@@ -5092,6 +5168,22 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
         for key, value in exits.items():
             if value not in (None, 0):
                 lines.append(f"Frontend-selector {key} exit: {value}.")
+    nesting = receipt.get("frontend_nesting") if isinstance(receipt, dict) else None
+    if isinstance(nesting, dict) and nesting.get("requested"):
+        profile = FRONTEND_NESTING_PROFILE["frontend_scaling"]
+        lines += ["", f"Deep-nesting families ({FRONTEND_NESTING_PROFILE['name']}): {nesting.get('status', 'NA')} "
+                  f"(benchmark_frontend_scaling.py --suite nesting on both binaries, depths "
+                  f"{', '.join(str(depth) for depth in profile['depths'])}; wall medians; report-only).", "",
+                  "| Cell | Base | Head | Head / base |", "| --- | ---: | ---: | ---: |"]
+        for row in nesting.get("cells") if isinstance(nesting.get("cells"), list) else []:
+            values = row.get("values") if isinstance(row, dict) and isinstance(row.get("values"), list) else []
+            ok = len(values) == 2 and all(_finite_positive(value) for value in values)
+            lines.append("| %s | %s | %s | %s |" % (
+                row.get("name") if isinstance(row, dict) else "NA",
+                "%.1f ms" % (values[0] * 1000.0) if ok else "NA", "%.1f ms" % (values[1] * 1000.0) if ok else "NA",
+                "%.4f" % (values[1] / values[0]) if ok else "NA"))
+        if nesting.get("exit") not in (None, 0):
+            lines.append(f"Frontend-nesting exit: {nesting.get('exit')}.")
     linker = receipt.get("wild_linker") if isinstance(receipt, dict) else None
     if isinstance(linker, dict) and linker.get("requested"):
         linkers = linker.get("linkers") if isinstance(linker.get("linkers"), dict) else {}

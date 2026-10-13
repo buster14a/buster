@@ -92,6 +92,7 @@ PROFILE_ROWS = {
     "tool:fast_ra_scaling.c": "COMPILER_PROBES_PROFILE",
     "tool:machine_line_mark_scaling.c": "COMPILER_PROBES_PROFILE",
     "tool:benchmark_frontend_scaling.py": "FRONTEND_SELECTOR_PROFILE",
+    "tool:benchmark_frontend_scaling.py@frontend-nesting": "FRONTEND_NESTING_PROFILE",
     "tool:selection_benchmark.py": "FRONTEND_SELECTOR_PROFILE",
     "ide:bench": "FRONTEND_SELECTOR_PROFILE",
     "tool:wild_linker_bench.c": "WILD_LINKER_PROFILE",

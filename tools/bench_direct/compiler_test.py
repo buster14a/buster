@@ -3730,7 +3730,7 @@ class HarnessTest(unittest.TestCase):
         # Each fresh opt-in selector beside the historical one would still run the base's own harness.
         for line in (compiler_receipt.WILD_LINKER_REQUEST_LINE, compiler_receipt.THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
                      compiler_receipt.PRODUCTION_PROFILE_REQUEST_LINE, compiler_receipt.COMPILER_PROBES_REQUEST_LINE,
-                     compiler_receipt.FRONTEND_SELECTOR_REQUEST_LINE,
+                     compiler_receipt.FRONTEND_SELECTOR_REQUEST_LINE, compiler_receipt.FRONTEND_NESTING_REQUEST_LINE,
                      compiler_receipt.AST_PILOT_ACCEPTANCE_REQUEST_LINE):
             with self.subTest(line=line):
                 fixture_git(self.repo, "checkout", "-q", "main")
@@ -6418,6 +6418,309 @@ class FrontendSelectorTest(unittest.TestCase):
             self.assertTrue(any("frontend scaling exited 2" in error for error in record["errors"]), record["errors"])
             self.assertTrue(any("ide bench run 0" in error for error in record["errors"]), record["errors"])
             self.assertTrue((root / "evidence" / "frontend_selector" / "ide_bench" / "ide-bench.json").is_file())
+
+def frontend_nesting_evidence() -> tuple[dict, dict]:
+    """A complete synthetic frontend-nesting-v1 record and its exported bundle on BINARIES."""
+    profile = compiler_receipt.FRONTEND_NESTING_PROFILE
+    scaling = profile["frontend_scaling"]
+    hashes = {"baseline": A256, "candidate": B256}
+    provenance = {"binary_sha256": dict(hashes), "suite": "nesting", "warmups": scaling["warmups"],
+                  "repetitions": scaling["repetitions"], "cpu": profile["cpu"], "affinity": [profile["cpu"]],
+                  "cpu_model": ZEN5, "complete": True}
+    results = []
+    for kind, count, mode in compiler_receipt.frontend_scaling_population(compiler_receipt.FRONTEND_NESTING_CASES):
+        row = {"kind": kind, "count": count, "mode": mode, "source_bytes": 10, "source_sha256": "5" * 64,
+               "compilers": {role: {"command": [role], "wall_seconds": [0.01] * scaling["repetitions"],
+                                    "cpu_seconds": [0.0] * scaling["repetitions"], "wall_median": 0.01, "cpu_median": 0.0}
+                             for role in hashes}}
+        if mode == "object":
+            row["object_sha256"] = "6" * 64
+        results.append(row)
+    bundle = {"provenance": provenance, "results": results}
+    record = {"requested": True, "request_line": compiler_receipt.FRONTEND_NESTING_REQUEST_LINE,
+              "profile": copy.deepcopy(profile), "status": "complete", "errors": [], "exit": 0,
+              "cells": compiler_receipt.frontend_scaling_digest(results)}
+    return record, bundle
+
+
+class FrontendNestingTest(unittest.TestCase):
+    """#2676: the fixed frontend-nesting-v1 deep-nesting families on the pull-compare route."""
+
+    def validate(self, bundle: dict, status: object = 0, binaries: dict = BINARIES) -> list[str]:
+        return compiler_receipt.validate_frontend_nesting(status, bundle["provenance"], bundle["results"], binaries)
+
+    def pull(self, record: dict) -> dict:
+        value = receipt()
+        value["mode"] = "pull"
+        value["identity"].update(mode="pull")
+        value["frontend_nesting"] = record
+        return value
+
+    def test_profile_is_frozen_report_only_and_matches_the_tool(self) -> None:
+        profile = compiler_receipt.FRONTEND_NESTING_PROFILE
+        self.assertEqual(profile["name"], "frontend-nesting-v1")
+        self.assertEqual(compiler_receipt.FRONTEND_NESTING_REQUEST_LINE, "profile: " + profile["name"])
+        self.assertIs(profile["report_only"], True)
+        arguments = profile["frontend_scaling"]["arguments"]
+        self.assertEqual(arguments[arguments.index("--cpu") + 1], str(profile["cpu"]))
+        self.assertEqual(arguments[arguments.index("--suite") + 1], profile["frontend_scaling"]["suite"])
+        self.assertEqual(len(compiler_receipt.frontend_scaling_population(compiler_receipt.FRONTEND_NESTING_CASES)), 68)
+        # The frozen families and depths are the tool's, so a renamed family cannot silently drop a cell.
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        try:
+            import benchmark_frontend_scaling as tool
+        finally:
+            sys.path.pop(0)
+        self.assertEqual([name for name, unused_open, unused_close in tool.NESTING_FAMILIES],
+                         list(compiler_receipt.FRONTEND_NESTING_FAMILIES))
+        self.assertEqual(tool.NESTING_DEPTHS, compiler_receipt.FRONTEND_NESTING_DEPTHS)
+        # Each depth four times the last: a quadratic term is a sixteenfold step.
+        depths = compiler_receipt.FRONTEND_NESTING_DEPTHS
+        self.assertTrue(all(later == 4 * earlier for earlier, later in zip(depths, depths[1:])))
+        # Its bound plus the ordinary comparison stays inside the unchanged 90-minute compare-pull job.
+        self.assertLessEqual(compiler_compare.FRONTEND_NESTING_TIMEOUT_SECONDS, 75 * 60)
+
+    def test_generated_sources_nest_to_their_depth(self) -> None:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        try:
+            import benchmark_frontend_scaling as tool
+        finally:
+            sys.path.pop(0)
+        for family in compiler_receipt.FRONTEND_NESTING_FAMILIES:
+            with self.subTest(family=family):
+                source = tool.nesting_source(family, 3)
+                self.assertTrue(source.startswith("int f(int x) {\n") and source.endswith("return x; }\n"))
+                self.assertEqual(source.count("{"), source.count("}"))
+                self.assertEqual(source.count("("), source.count(")"))
+                self.assertEqual(source.count("x -= 1;"), 1)
+        self.assertEqual(tool.nesting_source("goto", 2),
+                         "int f(int x) {\nfor (; x > 0;) { if (x == 0) goto L0; L0: ;\n"
+                         "for (; x > 1;) { if (x == 1) goto L1; L1: ;\nx -= 1;\n}\n}\nreturn x; }\n")
+        self.assertEqual(tool.nesting_source("braceless-do", 2),
+                         "int f(int x) {\ndo\ndo\nx -= 1;\nwhile (x > 0);\nwhile (x > 0);\nreturn x; }\n")
+
+    def test_population_matches_the_frontend_scaling_tool(self) -> None:
+        """The real tool, on stand-in compilers, emits exactly the frozen population and a complete provenance."""
+        root_dir = Path(__file__).resolve().parents[2]
+        profile = compiler_receipt.FRONTEND_NESTING_PROFILE
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            compilers = {}
+            for role in ("baseline", "candidate"):
+                compilers[role] = root / role
+                compilers[role].write_text("#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = -o ]; then "
+                                           "printf object > \"$2\"; fi; shift; done\n", encoding="utf-8")
+                compilers[role].chmod(0o755)
+            arguments = list(profile["frontend_scaling"]["arguments"])
+            del arguments[arguments.index("--cpu"):arguments.index("--cpu") + 2]
+            arguments[arguments.index("--repetitions") + 1] = "1"
+            subprocess.run([sys.executable, "-B", str(root_dir / "tools/benchmark_frontend_scaling.py"),
+                            "--baseline", str(compilers["baseline"]), "--candidate", str(compilers["candidate"]),
+                            "--out", str(root / "out"), *arguments], check=True, capture_output=True)
+            provenance = json.loads((root / "out/provenance.json").read_text(encoding="utf-8"))
+            results = json.loads((root / "out/results.json").read_text(encoding="utf-8"))
+        self.assertIs(provenance["complete"], True)
+        self.assertEqual([(row["kind"], row["count"], row["mode"]) for row in results],
+                         compiler_receipt.frontend_scaling_population(compiler_receipt.FRONTEND_NESTING_CASES))
+        self.assertEqual(provenance["suite"], "nesting")
+
+    def test_complete_evidence_validates_and_every_gap_fails(self) -> None:
+        unused_record, bundle = frontend_nesting_evidence()
+        self.assertEqual(self.validate(bundle), [])
+        def change(key: str, mutate) -> dict:
+            changed = copy.deepcopy(bundle)
+            mutate(changed[key])
+            return changed
+        cases = {
+            "failed run": (bundle, {"status": 1}),
+            "cancelled run": (bundle, {"status": None}),
+            "stale baseline": (bundle, {"binaries": {"baseline": {"sha256": "3" * 64}, "candidate": {"sha256": B256}}}),
+            "no binaries": (bundle, {"binaries": {}}),
+            "missing provenance": (dict(bundle, provenance=None), {}),
+            "incomplete provenance": (change("provenance", lambda value: value.update(complete=False)), {}),
+            "selector suite": (change("provenance", lambda value: value.update(suite="all")), {}),
+            "fewer repetitions": (change("provenance", lambda value: value.update(repetitions=3)), {}),
+            "unpinned": (change("provenance", lambda value: value.update(affinity=[0, 1, 2, 3])), {}),
+            "not on Zen 5": (change("provenance", lambda value: value.update(cpu_model="Intel Xeon")), {}),
+            "other binary": (change("provenance", lambda value: value["binary_sha256"].update(candidate=A256)), {}),
+            "missing results": (dict(bundle, results=None), {}),
+            "partial results": (change("results", lambda value: value.pop()), {}),
+            "reordered results": (change("results", lambda value: value.reverse()), {}),
+            "selector population": (dict(bundle, results=frontend_selector_evidence()[1]["results"]), {}),
+            "short samples": (change("results", lambda value: value[3]["compilers"]["candidate"]["wall_seconds"].pop()), {}),
+            "zero wall": (change("results", lambda value: value[0]["compilers"]["baseline"]["wall_seconds"].__setitem__(0, 0)), {}),
+            "object without hash": (change("results", lambda value: value[1].pop("object_sha256")), {}),
+            "stated median": (change("results", lambda value: value[2]["compilers"]["candidate"].update(wall_median=5.0)), {}),
+        }
+        for name, (changed, options) in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(self.validate(changed, **options), name)
+
+    def test_any_wrongly_typed_field_fails_closed_without_raising(self) -> None:
+        unused_record, bundle = frontend_nesting_evidence()
+        replacements = (None, [], {}, "x", -1, 1.5, True, 10 ** 309, float("nan"), float("inf"))
+        for key, path in (("provenance", ("cpu",)), ("provenance", ("binary_sha256",)), ("results", (0, "count")),
+                          ("results", (0, "compilers")), ("results", (1, "object_sha256")),
+                          ("results", (2, "compilers", "baseline", "wall_seconds"))):
+            for replacement in replacements:
+                changed = copy.deepcopy(bundle)
+                holder = changed[key]
+                for step in path[:-1]:
+                    holder = holder[step]
+                holder[path[-1]] = replacement
+                with self.subTest(key=key, path=path, replacement=repr(replacement)):
+                    compiler_receipt.frontend_scaling_digest(changed["results"])
+                    self.assertTrue(self.validate(changed))
+
+    def test_decision_needs_pull_mode_and_the_complete_bundle(self) -> None:
+        record, bundle = frontend_nesting_evidence()
+        pull = self.pull(record)
+        values = {"expected": dict(EXPECTED, mode="pull"), "authorized": True, "compare_result": "success",
+                  "receipt": pull, "summary": summary(), "policy_value": "",
+                  "throughput": dict(corpus(), frontend_nesting_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        stale = copy.deepcopy(record)
+        stale["cells"][0]["values"] = [1.0, 0.1]
+        widened = copy.deepcopy(record)
+        widened["profile"]["frontend_scaling"]["depths"] = [1000, 4000, 16000]
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "partial bundle": {"throughput": dict(corpus(), frontend_nesting_bundle={"results": bundle["results"]})},
+            "failed run": {"receipt": dict(pull, frontend_nesting=dict(record, status="failed", exit=1))},
+            "cancelled run": {"receipt": dict(pull, frontend_nesting=dict(record, status="pending", exit=None))},
+            "stale cells": {"receipt": dict(pull, frontend_nesting=stale)},
+            "changed profile": {"receipt": dict(pull, frontend_nesting=widened)},
+            "not a request": {"receipt": dict(pull, frontend_nesting=dict(record, requested=False))},
+            "other selector": {"receipt": dict(pull, frontend_nesting=dict(
+                record, request_line="profile: frontend-nesting-v2"))},
+            "with frontend-selector probes": {"receipt": dict(pull, frontend_selector=frontend_selector_evidence()[0]),
+                                              "throughput": dict(corpus(), frontend_nesting_bundle=bundle,
+                                                                 frontend_selector_bundle=frontend_selector_evidence()[1])},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("Deep-nesting families (frontend-nesting-v1): complete", report)
+        self.assertIn("| frontend goto-32000/object | 10.0 ms | 10.0 ms | 1.0000 |", report)
+
+    def test_read_evidence_requires_every_bundle_member(self) -> None:
+        record, bundle = frontend_nesting_evidence()
+        files = compiler_publish.FRONTEND_NESTING_BUNDLE_FILES
+        complete = {"receipt.json": json.dumps(self.pull(record)), "lab/summary.json": json.dumps(summary()),
+                    "throughput/summary.json": json.dumps(corpus()["summary"]),
+                    "throughput/metadata.json": json.dumps(corpus()["metadata"]),
+                    **{path: json.dumps(bundle[key]) for key, path in files.items()}}
+        got = compiler_publish.read_evidence(FakeApi(archive(complete)), "92", "buster-9700x-compiler-x-1")
+        self.assertEqual((got[2], got[4]["frontend_nesting_bundle"]), ("", bundle))
+        self.assertEqual(compiler_publish.decide(dict(EXPECTED, mode="pull"), True, "success", got[0], got[1], "",
+                                                 got[4])[0], "success")
+        for key, path in files.items():
+            for name, members in (("missing", {member: value for member, value in complete.items() if member != path}),
+                                  ("malformed", dict(complete, **{path: "{not json"})),
+                                  ("duplicate key", dict(complete, **{path: '{"a": 1, "a": 2}'}))):
+                with self.subTest(member=key, case=name):
+                    got = compiler_publish.read_evidence(FakeApi(archive(members)), "92", "buster-9700x-compiler-x-1")
+                    self.assertIn(path, got[2])
+                    self.assertIsNone(got[4]["frontend_nesting_bundle"])
+
+    def test_inventory_coverage_names_the_nesting_row(self) -> None:
+        rows = ["tool:benchmark_frontend_scaling.py@frontend-nesting"]
+        self.assertEqual(list(compiler_receipt.INVENTORY_LEGS["pull"]["frontend-nesting"]), rows)
+        pull = self.pull(frontend_nesting_evidence()[0])
+        def leg(receipt_value: dict, conclusion: str) -> dict:
+            coverage = compiler_receipt.covered_inventory_rows(receipt_value, conclusion, "pull")
+            return next(entry for entry in coverage["legs"] if entry["leg"] == "frontend-nesting")
+        self.assertEqual(leg(pull, "success")["status"], "discharged")
+        self.assertTrue(set(rows) <= set(compiler_receipt.covered_inventory_rows(pull, "success", "pull")["discharged"]))
+        failed = dict(pull, frontend_nesting=dict(pull["frontend_nesting"], status="failed"))
+        self.assertEqual(leg(failed, "failure")["status"], "not discharged: leg failed")
+        plain = dict(pull)
+        plain.pop("frontend_nesting")
+        self.assertEqual(leg(plain, "success")["status"], "not discharged: not requested")
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            fixture_git(repo, "init", "-q")
+            fixture_git(repo, "config", "user.name", "Frontend Nesting Test")
+            fixture_git(repo, "config", "user.email", "frontend-nesting@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            fixture_git(repo, "add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            fixture_git(repo, "commit", "-qm", "seed")
+            line = compiler_receipt.FRONTEND_NESTING_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (compiler_receipt.FRONTEND_SELECTOR_REQUEST_LINE + "\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                fixture_git(repo, "commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.frontend_nesting_request_selection(
+                        repo, fixture_git(repo, "rev-parse", "HEAD")), expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            fixture_git(repo, "commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.frontend_nesting_request_selection(
+                repo, fixture_git(repo, "rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.FRONTEND_NESTING_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = self.pull(frontend_nesting_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("frontend_nesting")
+        self.assertIn("no frontend-nesting record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+        self.assertEqual(verify(Api(1, 0), expected, dict(plain, state="superseded"), {}), "")
+
+    def test_compare_leg_records_tool_failures_and_missing_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("work", "evidence", "bin", "candidate"):
+                (root / name).mkdir()
+            for name, content in (("ide-base", b"base"), ("ide-cand", b"cand")):
+                (root / "bin" / name).write_bytes(content)
+            receipt_value = {"timings": {}, "binaries": BINARIES,
+                             "frontend_nesting": {"requested": True, "status": "pending"}}
+            with mock.patch.object(compiler_compare, "run", side_effect=lambda argv, cwd, log, timeout: 2) as run:
+                compiler_compare.measure_frontend_nesting(root / "candidate", root / "bin", root / "work",
+                                                          root / "evidence", receipt_value)
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0][2], "tools/benchmark_frontend_scaling.py")
+            self.assertEqual(commands[0][-len(compiler_receipt.FRONTEND_NESTING_PROFILE["frontend_scaling"]["arguments"]):],
+                             compiler_receipt.FRONTEND_NESTING_PROFILE["frontend_scaling"]["arguments"])
+            record = receipt_value["frontend_nesting"]
+            self.assertEqual((record["status"], record["exit"]), ("failed", 2))
+            self.assertTrue(any("frontend scaling exited 2" in error for error in record["errors"]), record["errors"])
+            self.assertTrue(any("produced no output" in error for error in record["errors"]), record["errors"])
+            self.assertEqual(record["cells"], [])
+
 
 WILD_PATH = "/usr/local/bin/wild"
 # Wild's own identity format (Args::linker_identity at wild e9a9b0cb): the positive control, in the
