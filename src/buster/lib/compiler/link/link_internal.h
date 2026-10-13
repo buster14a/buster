@@ -80,8 +80,8 @@ BUSTER_F_DECL NativeExecutableLinkResult link_elf_test_executable(Arena* arena, 
 // if the result and scratch buffers ever alias.
 BUSTER_F_DECL bool link_elf_eh_frame_sort_test(Arena* arena, u64 const* addresses, u32 count, u32 round_count, u32* order, u32* pass_counts);
 BUSTER_F_DECL NativeExecutableLinkResult link_elf_test_section_table_append(Arena* arena, ByteSlice image, ObjectFile* object);
-// Runs the generic selector over every pinned x86-64 stub and PLT shape and
-// returns how many queries chose another form or other bytes than the pinned
-// emission; query_count receives how many it ran.
+// Runs the generic selector over every pinned x86-64 stub, thunk and PLT
+// shape and returns how many queries chose another form or other bytes than
+// the pinned emission; query_count receives how many it ran.
 BUSTER_F_DECL u32 link_x86_shape_pins_test(u32* query_count);
 #endif
