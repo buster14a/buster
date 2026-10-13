@@ -44,13 +44,14 @@
 // 115115906751, main 10e44760 with the one-family prewarm and lane-safe x86
 // fills): two equal TUs already gain 1.20x, so the serial minimum is 0; serial
 // time is ~5.6 ms + 0.067 us/byte + 0.035 ms/input, so the per-input charge is
-// 513 bytes; tiny TUs lose at 10.8 KB/worker (0.93x, 7 workers) and gain at
-// 18.9 KB/worker (1.11x, 4 workers), so the floor is 16 KiB. Re-derive all
-// three whenever the lane entry cost changes
+// 513 bytes; tiny TUs lose at 10.8 KB/worker (0.93x, 7 workers) and gain most
+// at 37.8 KB/worker (2 workers: 1.15x there, 1.09x in the validation run
+// 115276385855, ahead of 4 workers' 1.11x and 1.04x), so the floor is 32 KiB.
+// Re-derive all three whenever the lane entry cost changes
 // (docs/agents/driver.md, "Opt-in native translation-unit lanes").
 #define COMPILER_DRIVER_LANE_MIN_WORK_BYTES ((u64)0)
 #define COMPILER_DRIVER_LANE_INPUT_WORK_BYTES ((u64)513)
-#define COMPILER_DRIVER_LANE_WORK_PER_WORKER_BYTES ((u64)16 * 1024)
+#define COMPILER_DRIVER_LANE_WORK_PER_WORKER_BYTES ((u64)32 * 1024)
 
 // What the lane gate decided for one invocation. NONE: lanes were not
 // requested or cannot apply (one worker, fewer than two eligible inputs, an

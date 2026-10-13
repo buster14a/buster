@@ -255,10 +255,13 @@ the lane-safe on-demand x86 fills):
 - **Per-input charge 513 bytes.** Serial wall time over the `size-n2`…`n64`
   series is about 5.6 ms + 0.067 µs per byte; `tiny`'s 112 one-function TUs
   then imply about 0.035 ms per input.
-- **Per-worker floor 16 KiB.** `tiny` (about 76 KB of estimated work) loses at
-  7 workers (10.8 KB per worker, 0.93×) and gains at 4 (18.9 KB per worker,
-  1.11×). Every `equal`, `count` and `size` row keeps more than 16 KiB per
-  worker and is unaffected.
+- **Per-worker floor 32 KiB.** `tiny` (about 76 KB of estimated work) loses at
+  7 workers (10.8 KB per worker, 0.93×). It gains most at 2 workers (37.8 KB
+  per worker: 1.15× and, in the validation run 115276385855, 1.09×), ahead of
+  4 workers (1.11× and 1.04×), so the floor caps it at 2. A 16 KiB floor
+  (4 workers) brought `tiny` at 7 workers to 0.99× and at 13 SMT workers to
+  1.01× in that run. Every `equal`, `count` and `size` row keeps more than
+  48 KB per worker and is unaffected.
 
 The estimate reads file bytes only, so a small file that includes large
 headers is underestimated: that costs a possible gain, never a loss against
