@@ -911,6 +911,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
 '''
 
 
+def ninja_statements(path):
+    """Map every output of every Ninja build statement to that statement's text.
+
+    CMake writes native separators in Ninja paths (backslashes on Windows), so
+    outputs are compared with forward slashes on every host.
+    """
+    statements = {}
+    for statement in path.read_text().split("\nbuild ")[1:]:
+        for output in statement.split(":", 1)[0].replace("\\", "/").split():
+            statements[output] = statement
+    return statements
+
+
 class ResourceWitnessTests(unittest.TestCase):
     def test_supported_platforms_and_unavailable_statuses(self):
         for platform in ("windows", "linux", "macos"):
@@ -1103,11 +1116,12 @@ class NativeObserverTests(unittest.TestCase):
                 def query(target):
                     output = subprocess.check_output([ninja, "-C", str(graph), "-t", "query", target], cwd=ROOT, text=True, timeout=30)
                     return {line.strip() for line in output.splitlines()}
-                statements = {}
-                for statement in (graph / "build.ninja").read_text().split("\nbuild ")[1:]:
-                    statements[statement.split(":", 1)[0].strip()] = statement
+                statements = ninja_statements(graph / "build.ninja")
                 def edge(target):
-                    return next(text for name, text in statements.items() if name.endswith(f"CMakeFiles/{target}.util") or name.endswith(f"CMakeFiles/{target}"))
+                    names = (f"CMakeFiles/{target}", f"CMakeFiles/{target}.util")
+                    found = [statements[name] for name in names if name in statements]
+                    self.assertTrue(found, f"no custom-command edge for {target}: {sorted(statements)[:40]}")
+                    return found[0]
                 self.assertEqual("buster_test_0" in query("buster_self_host"), admitted)
                 self.assertIn("buster_compile_0", query("buster_self_host"))
                 self.assertIn("pool = buster_matrix_cpu", edge("buster_self_host"))
