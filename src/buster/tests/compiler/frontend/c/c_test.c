@@ -65573,6 +65573,87 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_identity_authority(UnitTestArgume
     return result;
 }
 
+// #3473: constants must keep their values when the cast probe uses the
+// ordinary group gate/memo. File initializers have no body memo slot; local
+// statics and constant-predicate queries exercise the in-body path too.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_group_cast_probe(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 expression;
+        u64 expected;
+    } cases[] = {
+        {S8("(17 + 25)"), 42},
+        {S8("((17 + 25))"), 42},
+        {S8("(-(-42))"), 42},
+        {S8("(sizeof(int))"), 4},
+        {S8("(sizeof(\"abc\"))"), 4},
+        {S8("(int)(3.75)"), 3},
+        {S8("(unsigned char)259"), 3},
+        {S8("(Narrow)259"), 3},
+        {S8("((Narrow)(259))"), 3},
+        {S8("(__typeof__((Narrow)0))259"), 3},
+        {S8("(sizeof(Narrow)) + ((Narrow)259)"), 4},
+        {S8("(1 ? (Narrow)259 : (sizeof(int)))"), 3},
+    };
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 source = string_format(temporary.arena,
+                S8("typedef unsigned char Narrow; unsigned int value = {S8};\n"
+                   "int query(void) {{ static unsigned int local = {S8}; "
+                   "return __builtin_constant_p({S8}) + value + local; }}\n"),
+                cases[index].expression, cases[index].expression, cases[index].expression);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("constant-group-cast.c"), tokens, parsed, target_native,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, module->global_count == 2);
+                for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+                {
+                    IrGlobal* global = module->globals + global_index;
+                    BUSTER_TEST_RAW(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER &&
+                        global->initializer_bits == cases[index].expected && !global->initializer_is_negative, cases[index].expression);
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = S8("typedef unsigned char Narrow;\n"
+            "int query(void) { typedef unsigned short Local; static unsigned int local = ((Local)65539); "
+            "{ int Narrow = 7; static unsigned int shadow = (sizeof(Narrow)); return local + shadow + Narrow; } }\n");
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("constant-group-scope.c"), tokens, parsed, target_native,
+            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program))
+        {
+            IrModule* module = lowered.program->modules;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+            u32 local_count = 0, shadow_count = 0;
+            for (u32 index = 0; index < module->global_count; index += 1)
+            {
+                IrGlobal* global = module->globals + index;
+                BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && !global->initializer_is_negative);
+                local_count += global->initializer_bits == 3;
+                shadow_count += global->initializer_bits == 4;
+            }
+            BUSTER_TEST(arguments, module->global_count == 2 && local_count == 1 && shadow_count == 1);
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // A file-scope typedef whose typeof operand is a _Generic selection names an
 // ordinary complete type, so sizeof of it is an integer constant in every
 // constant context (C11 6.6p6). The typedef is the file's first declaration,
@@ -66221,6 +66302,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
     C_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
     C_TEST_FIXTURE(arguments, c_test_constant_expression_syntax);
+    C_TEST_FIXTURE(arguments, c_test_constant_group_cast_probe);
     C_TEST_FIXTURE(arguments, c_test_constant_scalar_truth);
     C_TEST_FIXTURE(arguments, c_test_constexpr_integer_range);
     C_TEST_FIXTURE(arguments, c_test_constexpr_integer_types);

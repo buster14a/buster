@@ -6480,6 +6480,10 @@ BUSTER_C_INTERNAL bool c_ir_group_may_be_type_name(CIntegerIrBuilder* builder, u
         {
             result = first.punctuator == C_PUNCTUATOR_LEFT_BRACKET;
         }
+        else if (c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_SIZEOF))
+        {
+            result = false;
+        }
         else if (first.symbol && !c_parse_type_name_start_word_token(builder->preprocess, first))
         {
             CEntityId entity = c_ir_identifier_entity(builder, open + 1);
@@ -61450,7 +61454,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 IrTypeId cast_type = IR_TYPE_ID_INVALID;
                 if (close < end)
                 {
-                    c_ir_query_type_name(builder, index + 1, close, true, &cast_type);
+                    c_ir_query_group_type_name(builder, index, close, &cast_type);
                     if (builder->queries->has_request)
                     {
                         return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);

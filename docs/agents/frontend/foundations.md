@@ -41,6 +41,21 @@ receipt, with optimization/sanitizer flags; elapsed time is not a test gate.
 Executable controls cover narrowing, mixed compound operators, comma
 and conditional operands, aggregate/pointer values and single evaluation.
 
+## Constant-expression cast probes
+
+The constant evaluator uses `c_ir_query_group_type_name` for parenthesized
+cast probes, sharing the expression walk's first-token gate and per-opener
+memo. Literal-, number- and expression-led groups avoid a type-name request;
+`sizeof` is a keyword and is rejected by the gate before scope lookup.
+Real type names still use the existing query and suspension path. The memo
+continues to exclude scope-sensitive `typeof` groups and lone unbound
+identifiers, and groups outside a function body have no memo slot.
+
+`c_test_constant_group_cast_probe` fixes initializer values for nested groups,
+parenthesized `sizeof`, built-in and typedef casts, `typeof`, local typedefs
+and object shadowing in both canonical frontend forms. It covers file and
+local static initializers as well as in-body constant queries.
+
 ## Logical constant eligibility
 
 `c_ir_constant_apply_binary` preserves unknownness for the necessarily evaluated

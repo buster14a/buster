@@ -1,0 +1,9 @@
+==> Checking work/glibc.pkg.tar.zst.sig... (detached)
+gpg: Signature made Sun Sep 27 18:50:09 2026 CEST
+gpg:                using EDDSA key 05C7775A9E8B977407FE08E69D4C5AA15426DA0A
+gpg: Note: trustdb not writable
+gpg: Good signature from "Frederik Schwan <frederik@tty42.de>" [unknown]
+gpg:                 aka "Frederik Schwan <frederik.schwan@mailbox.org>" [unknown]
+gpg:                 aka "Frederik Schwan <frederik@schw4n.de>" [unknown]
+gpg:                 aka "Frederik Schwan <frederik@schwan.it>" [unknown]
+gpg:                 aka "Frederik Schwan <freswa@archlinux.org>" [full]
