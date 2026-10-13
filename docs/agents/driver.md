@@ -2415,11 +2415,13 @@ A promoted warning is published with error severity and the option that
 promoted it (`... [-Werror=cpp]`, `[-Werror=extra-tokens]`,
 `[-Werror=gnu-designator]`, `[-Werror=pointer-sign]` or
 `[-Werror=overflow]`; a warning without a group gets `[-Werror]`). The unit
-fails with the tokenizer error (or the analysis error for semantic warnings),
-so `-c`, `-S`, `-E`, `-fsyntax-only`, a link
-and a batch of several inputs all return failure and write no output; the
-failed-unit rules above decide which later results are discarded. Its record
-in `CompilerDriverResult.diagnostics` and the per-input `error_count` are those
+fails with the tokenizer error (or the analysis error for semantic warnings).
+Preprocessing warning promotion can also fail `-E`; semantic warning
+promotion fails actions that reach C analysis (`-fsyntax-only`, `-c`, `-S`,
+links and batches). Since `-E` stops after preprocessing, it cannot observe
+semantic warnings. Failed invocations write no output, and the failed-unit
+rules above decide which later results are discarded. Its record in
+`CompilerDriverResult.diagnostics` and the per-input `error_count` are those
 of an error. Promotion subtracts it from the counter for its producer
 (`tokenizer_warning_count` or `analysis_warning_count`). A warning dropped by
 `-w` or `-Wno-<group>` remains included in that counter, as it did for `-w`
