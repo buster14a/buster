@@ -45790,11 +45790,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_semantic_handoff(UnitTestArgume
 // corpus and now have strict-walk leaves of their own; it checks sizeof
 // results and conditional values at run time against what GCC and Clang
 // answer, including storage-only __fp16 operands whose unevaluated size comes
-// from C layout. The body-type source also checks pointer/array declarators,
-// pointer alignment and larger call/initializer/cast contexts in syntax-only
-// and object modes with both frontend forms (GitHub #3900, #3918). The final
-// part requires a diagnostic for evaluated __fp16 values, which have no IR
-// type.
+// from C layout. The body-type source also checks pointer/array and grouped
+// pointer-to-array declarators, pointer alignment, and larger call/initializer/
+// cast contexts in syntax-only and object modes with both frontend forms
+// (GitHub #3900, #3918). Malformed, undeclared, negative and non-integer bounds
+// must fail in both modes. The final part requires a diagnostic for evaluated
+// __fp16 values, which have no IR type.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -45808,6 +45809,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestAr
         "static unsigned long consume_size(unsigned long value) { return value; }\n"
         "static unsigned long half_pointer_size(void) { return sizeof(__fp16*); }\n"
         "static unsigned long half_array_size(void) { return sizeof(__fp16[5]); }\n"
+        "static unsigned long half_grouped_pointer_array_size(void) { return sizeof(__fp16 (*)[5]); }\n"
         "static unsigned long half_pointer_alignment(void) { return _Alignof(__fp16*); }\n"
         "static unsigned long half_qualified_pointer_array_size(void) { return sizeof(__fp16 * const[3]); }\n"
         "static unsigned long half_qualified_pointer_array_alignment(void) { return _Alignof(__fp16 * const[3]); }\n"
@@ -45842,7 +45844,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestAr
         "    if (sizeof(__builtin_bit_cast(__fp16, bits)) != 2 || sizeof(const __fp16) != 2 || sizeof(v4h[2]) != 16) return 14;\n"
         "    if (_Alignof(__fp16) != 2 || _Alignof(v4h) != 8 || __alignof__(__builtin_bit_cast(__fp16, bits)) != 2) return 15;\n"
         "    if (__builtin_convertvector((v4f){(float)sizeof(v4h), 0, 0, 0}, v4f)[0] != 8) return 16;\n"
-        "    if (half_pointer_size() != sizeof(void*) || half_array_size() != 10 || half_pointer_alignment() != _Alignof(void*)) return 17;\n"
+        "    if (half_pointer_size() != sizeof(void*) || half_array_size() != 10 || half_grouped_pointer_array_size() != sizeof(void*) || half_pointer_alignment() != _Alignof(void*)) return 17;\n"
         "    if (half_qualified_pointer_array_size() != 3 * sizeof(void*) || half_qualified_pointer_array_alignment() != _Alignof(void*) || half_qualified_matrix_size() != 20) return 18;\n"
         "    if (half_size_call() != 2 || half_size_initializer() != 2 || half_size_cast() != sizeof(int) + 2) return 19;\n"
         "    return w[3] != 8 || e != 6 ? 12 : 0;\n"
@@ -45852,6 +45854,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestAr
         "static unsigned long g(unsigned long value) { return value; }\n"
         "unsigned long body_pointer_size(void) { return sizeof(__fp16*); }\n"
         "unsigned long body_array_size(void) { return sizeof(__fp16[5]); }\n"
+        "unsigned long body_grouped_pointer_array_size(void) { return sizeof(__fp16 (*)[5]); }\n"
         "unsigned long body_pointer_alignment(void) { return _Alignof(__fp16*); }\n"
         "unsigned long body_qualified_pointer_array_size(void) { return sizeof(__fp16 * const[3]); }\n"
         "unsigned long body_qualified_pointer_array_alignment(void) { return _Alignof(__fp16 * const[3]); }\n"
@@ -45873,10 +45876,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestAr
                 command[command_count++] = S8("-nostdinc");
                 command[command_count++] = S8("-std=gnu17");
                 command[command_count++] = form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa");
-                command[command_count++] = S8("-fverify-codegen");
                 if (mode)
                 {
                     command[command_count++] = S8("-c");
+                    command[command_count++] = S8("-fverify-codegen");
                     command[command_count++] = S8("-o");
                     command[command_count++] = object;
                 }
@@ -45893,6 +45896,57 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_untyped_operand_diagnostics(UnitTestAr
                     string_format(temporary.arena, S8("storage-half body types form={u32} mode={u32}: {S8}"),
                         form, mode, compiled.diagnostic));
                 scratch_end(temporary);
+            }
+        }
+    }
+    String8 invalid_body_bounds[] = {
+        S8("int malformed_bound(void) { return sizeof(__fp16[1 +]); }\n"),
+        S8("int undeclared_bound(void) { return sizeof(__fp16[missing]); }\n"),
+        S8("int negative_grouped_bound(void) { return sizeof(__fp16 (*)[-1]); }\n"),
+        S8("int noninteger_grouped_bound(void) { return sizeof(__fp16 (*)[1.5]); }\n"),
+    };
+    String8 invalid_bound_fragments[] = {S8("expected"), S8("missing"), S8("negative"), S8("integer")};
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_body_bounds); invalid_index += 1)
+    {
+        String8 invalid_path = buster_test_temporary_path(arguments->arena, S8("storage-half-invalid-bound"), S8(".c"));
+        if (BUSTER_REQUIRE(arguments, file_write(invalid_path, BUSTER_SLICE_TO_BYTE_SLICE(invalid_body_bounds[invalid_index]))))
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                for (u32 mode = 0; mode < 2; mode += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("storage-half-invalid-bound"), S8(".o"));
+                    String8 command[12];
+                    u32 command_count = 0;
+                    command[command_count++] = S8("-nostdinc");
+                    command[command_count++] = S8("-std=gnu17");
+                    command[command_count++] = form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa");
+                    if (mode)
+                    {
+                        command[command_count++] = S8("-c");
+                        command[command_count++] = S8("-fverify-codegen");
+                        command[command_count++] = S8("-o");
+                        command[command_count++] = object;
+                    }
+                    else
+                    {
+                        command[command_count++] = S8("-fsyntax-only");
+                    }
+                    command[command_count++] = invalid_path;
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                        temporary.arena, (SliceString8){.pointer = command, .length = command_count});
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("storage-half invalid bound {u32} form={u32} mode={u32} was accepted"),
+                            invalid_index, form, mode));
+                    BUSTER_TEST_RAW(arguments,
+                        string_first_sequence(compiled.diagnostic, invalid_bound_fragments[invalid_index]) != BUSTER_STRING_NO_MATCH,
+                        string_format(temporary.arena, S8("storage-half invalid bound {u32} form={u32} mode={u32}: {S8}"),
+                            invalid_index, form, mode, compiled.diagnostic));
+                    scratch_end(temporary);
+                }
             }
         }
     }

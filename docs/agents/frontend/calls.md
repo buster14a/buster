@@ -165,8 +165,9 @@ in both frontend forms.
   `c_test_untyped_operand_diagnostics` runs the leaves and sizes natively,
   checks pointer, array, qualified and grouped pointer-to-array declarators,
   call, initializer and cast contexts through syntax-only and object modes in
-  both frontend forms, and rejects malformed/undeclared bounds as well as
-  malformed type names (GitHub #3900, #3918). Function abstract
+  both frontend forms, and rejects malformed/undeclared bounds, negative
+  grouped bounds and non-integer grouped bounds, as well as malformed type
+  names (GitHub #3900, #3918). Function abstract
   declarators remain outside this exception: target Clang behavior for a
   storage-only `__fp16` function return type has not been verified.
 - **The parser's expression typer gives builtins the same results.**

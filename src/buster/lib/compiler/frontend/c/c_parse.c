@@ -9919,7 +9919,7 @@ BUSTER_C_SHARED bool c_semantic_storage_half_operand_layout(Arena* scratch, CPre
             valid = type.value < result->type_count && result->types[type.value].kind == C_TYPE_POINTER;
             if (valid)
             {
-                TargetTypeLayout pointer = c_preprocess_detail(&preprocess)->data_layout.pointer;
+                TargetTypeLayout pointer = c_preprocess_detail(preprocess)->data_layout.pointer;
                 *size_out = pointer.size;
                 *alignment_out = pointer.alignment;
                 layout_ready = true;
@@ -38213,8 +38213,8 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
             {
                 // The token-only recognizer admits a grouped pointer-to-array
                 // whose bound cannot start a nested type query. Check its
-                // expression grammar here without typing the full type name
-                // while the body binder is still validating operands.
+                // expression grammar here without typing a nested query from
+                // the binder; this pass runs after binding has closed scopes.
                 u32 half_token = operand_start;
                 while (half_token < close &&
                        !(preprocess.tokens[half_token].kind == C_TOKEN_IDENTIFIER &&
@@ -38242,6 +38242,54 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
                         if (message.length)
                         {
                             diagnostic = (CParseInitializerDiagnostic){.message = message, .token = error_token};
+                        }
+                    }
+                    bound_open = bound_close + 1;
+                }
+                CTypeId grouped_type = C_TYPE_ID_INVALID;
+                if (!diagnostic.message.length)
+                {
+                    grouped_type = c_parse_identity_type_name(machine, result, preprocess,
+                        c_parse_scope_for_token(result, scope, index), operand_start, close);
+                    bool pointer_type = grouped_type.value < result->type_count &&
+                                        result->types[grouped_type.value].kind == C_TYPE_POINTER;
+                    if (!pointer_type)
+                    {
+                        diagnostic = (CParseInitializerDiagnostic){.message = S8("invalid sizeof type operand"), .token = index};
+                    }
+                }
+                // Materialize the abstract type after binding so its bounds
+                // enter the ordinary late syntax/value passes. A pointer's
+                // layout does not inspect the pointed-to array bound itself.
+                for (u32 bound_open = pointer_close + 1; !diagnostic.message.length && bound_open < close;)
+                {
+                    u32 bound_close = c_parse_matching_delimiter_indexed(result, preprocess, bound_open);
+                    if (bound_close >= close) break;
+                    bool star_bound = bound_open + 2 == bound_close &&
+                        c_token_is_punctuator(&preprocess.tokens[bound_open + 1], C_PUNCTUATOR_STAR);
+                    if (!star_bound && bound_open + 1 < bound_close)
+                    {
+                        CTypeId bound_type = C_TYPE_ID_INVALID;
+                        CScopeId bound_scope = c_parse_scope_for_token(result, scope, bound_open + 1);
+                        u64 query_mark = machine->scratch_arena->position;
+                        bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result,
+                            bound_scope, bound_open + 1, bound_close, &bound_type);
+                        arena_set_position(machine->scratch_arena, query_mark);
+                        bool integer_type = typed && bound_type.value < result->type_count;
+                        if (integer_type)
+                        {
+                            CType bound_type_record = result->types[bound_type.value];
+                            if (bound_type_record.has_unqualified_type &&
+                                bound_type_record.unqualified_type.value < result->type_count)
+                            {
+                                bound_type_record = result->types[bound_type_record.unqualified_type.value];
+                            }
+                            integer_type = c_type_kind_is_integer(bound_type_record.kind);
+                        }
+                        if (!integer_type)
+                        {
+                            diagnostic = (CParseInitializerDiagnostic){
+                                .message = S8("array bound must have integer type"), .token = bound_open + 1};
                         }
                     }
                     bound_open = bound_close + 1;
