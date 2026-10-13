@@ -64,7 +64,8 @@ Anything else fails closed.
 
 Map: validate_inline_bundle, validate_ast_pilot_bundle and validate_constant_reuse_bundle (opt-in flag pairs),
 validate_real_source_bundle, validate_production_profile_bundle,
-validate_compiler_probes_bundle, validate_frontend_selector_bundle and
+validate_compiler_probes_bundle, validate_frontend_selector_bundle,
+validate_frontend_nesting_bundle (#2676 deep nesting) and
 validate_wild_linker_bundle (#2761 opt-in legs), validate_link_tls_bundle (#1915),
 validate_selfhost_inline_bundle (#58),
 decide (pure decision), verify_evidence_bundle and evidence_bundle_problems
@@ -116,6 +117,8 @@ from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE,
                               validate_compiler_probes,
                               FRONTEND_SELECTOR_PROFILE, FRONTEND_SELECTOR_REQUEST_LINE, frontend_selector_digest,
                               validate_frontend_selector,
+                              FRONTEND_NESTING_PROFILE, FRONTEND_NESTING_REQUEST_LINE, frontend_scaling_digest,
+                              validate_frontend_nesting,
                               WILD_LINKER_PROFILE, WILD_LINKER_REQUEST_LINE, validate_wild_linker, wild_linker_bundle_files,
                               LINK_TLS_PROFILE, LINK_TLS_REQUEST_LINE, link_tls_digest, validate_link_tls,
                               SELFHOST_INLINE_PROFILE, SELFHOST_INLINE_REQUEST_LINE, selfhost_inline_digest,
@@ -430,6 +433,33 @@ def validate_frontend_selector_bundle(record: object, bundle: object, binaries: 
     return problems
 
 
+FRONTEND_NESTING_BUNDLE_FILES = {
+    "provenance": "frontend_nesting/provenance.json",
+    "results": "frontend_nesting/results.json",
+}
+
+
+def validate_frontend_nesting_bundle(record: object, bundle: object, binaries: object) -> list[str]:
+    """Re-derive the requested #2676 deep-nesting families from their exported records."""
+    if record is None:
+        return []
+    if not isinstance(record, dict) or record.get("requested") is not True:
+        return ["receipt frontend-nesting record is present but not a request"]
+    problems: list[str] = []
+    if record.get("status") != "complete" or record.get("exit") != 0:
+        problems.append("receipt frontend-nesting run did not complete successfully")
+    if record.get("request_line") != FRONTEND_NESTING_REQUEST_LINE:
+        problems.append("receipt frontend-nesting request selector is not the exact supported line")
+    if record.get("profile") != FRONTEND_NESTING_PROFILE:
+        problems.append("receipt frontend-nesting profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(FRONTEND_NESTING_BUNDLE_FILES):
+        return [*problems, "requested frontend-nesting evidence bundle is incomplete"]
+    problems.extend(validate_frontend_nesting(record.get("exit"), bundle["provenance"], bundle["results"], binaries))
+    if record.get("cells") != frontend_scaling_digest(bundle["results"]):
+        problems.append("receipt frontend-nesting cells do not match the exported evidence")
+    return problems
+
+
 WILD_LINKER_BUNDLE_FILES = {key: f"wild_linker/{name}" for key, name in wild_linker_bundle_files().items()}
 
 
@@ -619,6 +649,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.append(f"{selected_profile['name']} cannot be combined with the link-tls leg")
                 if receipt.get("selfhost_inline") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with the self-host inline leg")
+                if receipt.get("frontend_nesting") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with the frontend-nesting leg")
                 reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
                 reasons.extend(validate_analyzer_bundle(receipt,
                                                         analyzer_bundle.get("summary") if isinstance(analyzer_bundle, dict) else None,
@@ -762,6 +794,18 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.extend(validate_selfhost_inline_bundle(receipt["selfhost_inline"],
                                                                    corpus.get("selfhost_inline_bundle"),
                                                                    receipt.get("binaries")))
+                if receipt.get("frontend_nesting") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("the frontend-nesting leg is valid only in pull mode")
+                    if any(receipt.get(key) is not None for key in
+                           ("throughput_real_source", "ast_pilot_acceptance", "production_profile", "compiler_probes",
+                            "frontend_selector", "wild_linker", "link_tls", "selfhost_inline",
+                            "constant_reuse_acceptance")):
+                        reasons.append("the frontend-nesting leg cannot be combined with another opt-in leg")
+                    reasons.extend(validate_frontend_nesting_bundle(receipt["frontend_nesting"],
+                                                                    corpus.get("frontend_nesting_bundle"),
+                                                                    receipt.get("binaries")))
             if compare_result != "success":
                 reasons.append(f"compare job result is {compare_result!r}, not success")
             if problem:
@@ -1194,7 +1238,7 @@ def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
             "ast_pilot_acceptance" in receipt or "constant_reuse_acceptance" in receipt or \
             "throughput_real_source" in receipt or "production_profile" in receipt or \
             "compiler_probes" in receipt or "frontend_selector" in receipt or "wild_linker" in receipt or \
-            "link_tls" in receipt or "selfhost_inline" in receipt:
+            "link_tls" in receipt or "selfhost_inline" in receipt or "frontend_nesting" in receipt:
         raise ValueError("owned ordinary Main evidence changed the complete original corpus recipe")
     identity = receipt.get("identity")
     if not isinstance(identity, dict) or identity.get("trusted_revision") != route["main_measurement_revision"]:
@@ -1581,6 +1625,23 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         break
                 throughput["frontend_selector_bundle"] = (bundle if not problem and
                                                           len(bundle) == len(FRONTEND_SELECTOR_BUNDLE_FILES) else None)
+            if isinstance(receipt, dict) and receipt.get("frontend_nesting") is not None and not problem:
+                bundle = {}
+                for key, member in FRONTEND_NESTING_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required frontend-nesting evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed"
+                        break
+                throughput["frontend_nesting_bundle"] = (bundle if not problem and
+                                                         len(bundle) == len(FRONTEND_NESTING_BUNDLE_FILES) else None)
             if isinstance(receipt, dict) and receipt.get("wild_linker") is not None and not problem:
                 bundle = {}
                 for key, member in WILD_LINKER_BUNDLE_FILES.items():
@@ -1702,6 +1763,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     head_linker_count = head_lines.count(WILD_LINKER_REQUEST_LINE)
     head_link_tls_count = head_lines.count(LINK_TLS_REQUEST_LINE)
     head_selfhost_count = head_lines.count(SELFHOST_INLINE_REQUEST_LINE)
+    head_nesting_count = head_lines.count(FRONTEND_NESTING_REQUEST_LINE)
     parent_analyzer_deltas = {line: [] for line in ANALYZER_REQUEST_LINES}
     parent_inline_counts = []
     ast_deltas = []
@@ -1713,6 +1775,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     selector_deltas = []
     link_tls_deltas = []
     selfhost_deltas = []
+    nesting_deltas = []
     for parent in parent_shas:
         parent_bytes, problem = _github_file(api, parent)
         if problem:
@@ -1733,6 +1796,7 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
         linker_deltas.append(head_linker_count - parent_lines.count(WILD_LINKER_REQUEST_LINE))
         link_tls_deltas.append(head_link_tls_count - parent_lines.count(LINK_TLS_REQUEST_LINE))
         selfhost_deltas.append(head_selfhost_count - parent_lines.count(SELFHOST_INLINE_REQUEST_LINE))
+        nesting_deltas.append(head_nesting_count - parent_lines.count(FRONTEND_NESTING_REQUEST_LINE))
     ast_record = receipt.get("ast_pilot_acceptance")
     if ast_record is not None and not all(delta == 1 for delta in ast_deltas):
         return ("the exact ast-pilot selector was not freshly added once at this head relative to every parent; "
@@ -1787,6 +1851,12 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
                 "parent; append one selector line for each explicit self-host inline request")
     if selfhost_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in selfhost_deltas):
         return "a fresh self-host inline selector has no self-host inline record in the receipt"
+    nesting_record = receipt.get("frontend_nesting")
+    if nesting_record is not None and not all(delta == 1 for delta in nesting_deltas):
+        return ("the exact frontend-nesting selector was not freshly added once at this head relative to every "
+                "parent; append one selector line for each explicit frontend-nesting request")
+    if nesting_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in nesting_deltas):
+        return "a fresh frontend-nesting selector has no frontend-nesting record in the receipt"
     if analyzer_profile:
         selected_deltas = parent_analyzer_deltas[request_line]
         other_deltas = [delta for line, values in parent_analyzer_deltas.items() if line != request_line

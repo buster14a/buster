@@ -27920,17 +27920,59 @@ BUSTER_C_INTERNAL void c_parse_statement_ends_finish(CParseStatementEnds* memo, 
     }
 }
 
+// The ':' ending the `case` label whose keyword is at `start`, or UINT32_MAX when no such colon
+// precedes a `;`, a brace or an unbalanced closer. The constant may be a conditional expression,
+// so a ':' answering an open '?' at the label's own depth belongs to it, the pairing
+// c_ir_label_colon_at applies when lowering peels the same label.
+BUSTER_C_INTERNAL u32 c_parse_statement_case_colon(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    u32 result = UINT32_MAX;
+    u32 nested = 0;
+    u32 questions = 0;
+    bool scanning = true;
+    for (u32 index = start + 1; scanning && index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        C_PARSE_NESTING_COUNT(C_TEST_PARSE_NESTING_STATEMENT_END_TOKENS, 1);
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            nested += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+        {
+            scanning = nested != 0;
+            nested -= nested != 0;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) ||
+                 c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            scanning = false;
+        }
+        else if (!nested && c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+        {
+            questions += 1;
+        }
+        else if (!nested && c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+        {
+            result = questions ? result : index;
+            scanning = questions != 0;
+            questions -= questions != 0;
+        }
+    }
+    return result;
+}
+
 // One past the last token of the single statement beginning at `start`, or UINT32_MAX when that
 // statement is not closed inside [start, end).
 //
 // The rule is the grammar's and not "the next semicolon at depth zero": a statement ends at its
 // terminating `;` at delimiter depth zero, or past the `}` closing a compound statement, except
 // that the constructs owning a substatement hold it open past that point. `if (c)`, `while (c)`,
-// `for (...)`, `switch (c)` and `label:` prefix one more statement; `if` additionally admits a
-// trailing `else` statement and `do` a trailing `while (c);`. Those two trailing forms are pushed
-// onto `suffix` and discharged innermost-first, so `for (int i = 0; ...) if (a) b; else c;` spans
-// the whole if-else rather than stopping at the `;` after `b`, and `do x; while (c);` covers its
-// own terminator. `suffix_capacity` must be at least the token count of the range, since every
+// `for (...)`, `switch (c)`, `label:` and `case c:` prefix one more statement; `if` additionally
+// admits a trailing `else` statement and `do` a trailing `while (c);`. Those two trailing forms are
+// pushed onto `suffix` and discharged innermost-first, so `for (int i = 0; ...) if (a) b; else c;`
+// spans the whole if-else rather than stopping at the `;` after `b`, and `do x; while (c);` covers
+// its own terminator. `suffix_capacity` must be at least the token count of the range, since every
 // obligation is introduced by a token of its own.
 //
 // Declarations, `_Generic`, statement expressions and every other construct that can hold a `;`
@@ -28002,6 +28044,15 @@ BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 co
             else if (cursor + 1 < end && c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_COLON))
             {
                 cursor += 2;
+            }
+            else if (c_token_is_well_known(preprocess.spelling_base, cursor_token, C_SYMBOL_WELL_KNOWN_CASE))
+            {
+                // `case c:` labels the statement after it like `name:` does, so a braceless
+                // `switch (x) case 0: switch (x) case 0: ...` nest is peeled, and memoized, level
+                // by level instead of read to its final `;` from every level (#2676).
+                u32 colon = c_parse_statement_case_colon(preprocess, cursor, end);
+                prefix = colon != UINT32_MAX;
+                cursor = prefix ? colon + 1 : cursor;
             }
             else
             {
