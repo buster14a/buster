@@ -3,8 +3,15 @@
 // NUL-delimited raw Git changes. Git runs through the existing bounded OS
 // capture API. The allowlist is executable policy: changing it selects full
 // validation until the previously trusted reader has admitted that change.
+// ci_no_code_main_push applies the same allowlist to the automatic MAIN
+// compiler benchmark exemption (#3923); its contract is
+// docs/compiler-main-unchanged-skip.md.
 #define CI_NO_CODE_SCHEMA "buster-ci-no-code-v1"
+#define CI_NO_CODE_MAIN_SCHEMA "buster-ci-main-unchanged-v1"
 #define CI_NO_CODE_GIT_TIMEOUT_US (60ull * 1000000)
+// First-parent commits searched for the measured reference; it covers the
+// 100-commit chain authorize_compiler.py reads, and anything deeper measures.
+#define CI_NO_CODE_MAIN_DEPTH 128
 
 typedef struct CiNoCodeDiff CiNoCodeDiff;
 struct CiNoCodeDiff
@@ -187,6 +194,80 @@ BUSTER_GLOBAL_LOCAL bool ci_no_code_self_test(Arena* arena)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool ci_no_code_output(String8 output)
+{
+    String8 output_path = os_get_environment_variable(S8("GITHUB_OUTPUT"));
+    bool result = true;
+    if (output_path.length)
+    {
+        FILE* file = fopen((const char*)output_path.pointer, "ab");
+        result = file && fwrite(output.pointer, 1, (size_t)output.length, file) == output.length;
+        if (file)
+        {
+            result = fclose(file) == 0 && result;
+        }
+    }
+    return result;
+}
+
+// Whether base occurs within CI_NO_CODE_MAIN_DEPTH commits of head's
+// first-parent chain, excluding head itself. A failed or truncated listing
+// never finds it.
+BUSTER_GLOBAL_LOCAL bool ci_no_code_first_parent(Arena* arena, String8 repo, String8 base, String8 head)
+{
+    String8 listing = {0};
+    String8 depth = string_format(arena, S8("--max-count={u64}"), (u64)CI_NO_CODE_MAIN_DEPTH + 1);
+    String8 arguments[] = {S8("rev-list"), S8("--first-parent"), depth, head, S8("--")};
+    bool listed = ci_no_code_git(arena, repo, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), &listing);
+    bool result = false;
+    u64 cursor = 0;
+    u64 line = 0;
+    while (listed && !result && cursor + 41 <= listing.length)
+    {
+        String8 commit = string_slice(listing, cursor, cursor + 40);
+        listed = ci_no_code_sha(commit) && listing.pointer[cursor + 40] == '\n';
+        result = listed && line > 0 && string_equal(commit, base);
+        cursor += 41;
+        line += 1;
+    }
+    return result;
+}
+
+// The automatic MAIN benchmark exemption (#3923). base is the nearest validly
+// measured first-parent ancestor chosen from GitHub's records, head the pushed
+// commit and policy the trusted main revision executing this decision, whose
+// harness would otherwise measure head. Unchanged requires base on head's
+// first-parent chain, head an ancestor of (or equal to) policy, and both the
+// measured subject (base..head) and the measurement policy (head..policy) to
+// be prose-only. The classifier and its allowlist are outside the allowlist,
+// so a change to either can never authorize its own exemption.
+BUSTER_GLOBAL_LOCAL ProcessResult ci_no_code_main_push(Arena* arena, String8 repo, String8 base, String8 head, String8 policy)
+{
+    String8 reason = S8("invalid-source-identity-or-ancestry");
+    bool unchanged = false;
+    String8 policy_args[] = {S8("merge-base"), S8("--is-ancestor"), head, policy};
+    String8 ignored = {0};
+    bool identities = !string_equal(base, head) && ci_no_code_first_parent(arena, repo, base, head) &&
+        ci_no_code_git(arena, repo, (SliceString8)BUSTER_ARRAY_TO_SLICE(policy_args), &ignored);
+    CiNoCodeDiff subject = {0};
+    CiNoCodeDiff policy_change = {0};
+    if (identities)
+    {
+        subject = ci_no_code_compare(arena, repo, base, head);
+        policy_change = ci_no_code_compare(arena, repo, head, policy);
+        bool complete = subject.valid && policy_change.valid;
+        unchanged = complete && subject.prose_only && policy_change.prose_only;
+        reason = !complete ? S8("incomplete-diff") : unchanged ? S8("reviewed-prose-only") :
+            subject.prose_only ? S8("measurement-policy-drift") : S8("execution-affecting-or-unknown-input");
+    }
+    string_print(S8("{{\"schema\":\"" CI_NO_CODE_MAIN_SCHEMA "\",\"event\":\"main_push\",\"unchanged\":{S8},"
+        "\"base\":\"{S8}\",\"head\":\"{S8}\",\"policy\":\"{S8}\","
+        "\"subject_changes\":{u64},\"policy_changes\":{u64},\"reason\":\"{S8}\"}\n"),
+        unchanged ? S8("true") : S8("false"), base, head, policy, subject.changes, policy_change.changes, reason);
+    String8 output = string_format(arena, S8("unchanged={S8}\n"), unchanged ? S8("true") : S8("false"));
+    return ci_no_code_output(output) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult ci_no_code_main(Arena* arena, SliceString8 arguments)
 {
     String8 repo = S8(".");
@@ -264,26 +345,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult ci_no_code_main(Arena* arena, SliceString8 arg
             "\"changes\":{u64},\"reason\":\"{S8}\"}\n"),
             no_code ? S8("no-code") : S8("full"), no_code ? S8("true") : S8("false"),
             base, head, tested, policy, integrated.changes, reason);
-        String8 output_path = os_get_environment_variable(S8("GITHUB_OUTPUT"));
-        if (output_path.length)
-        {
-            String8 output = string_format(arena, S8("no_code={S8}\n"), no_code ? S8("true") : S8("false"));
-            FILE* file = fopen((const char*)output_path.pointer, "ab");
-            bool written = file && fwrite(output.pointer, 1, (size_t)output.length, file) == output.length;
-            if (file)
-            {
-                written = fclose(file) == 0 && written;
-            }
-            result = written ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-        }
-        else
-        {
-            result = PROCESS_RESULT_SUCCESS;
-        }
+        String8 output = string_format(arena, S8("no_code={S8}\n"), no_code ? S8("true") : S8("false"));
+        result = ci_no_code_output(output) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    }
+    else if (valid && repo.length && ci_no_code_sha(base) && ci_no_code_sha(head) &&
+        ci_no_code_sha(policy) && string_equal(tested, head) && string_equal(event, S8("main_push")))
+    {
+        result = ci_no_code_main_push(arena, repo, base, head, policy);
     }
     else
     {
-        string_print(S8("error: ci_no_code requires --repo PATH --base SHA --head SHA --tested SHA --policy SHA --event pull_request|merge_group\n"));
+        string_print(S8("error: ci_no_code requires --repo PATH --base SHA --head SHA --tested SHA --policy SHA --event pull_request|merge_group|main_push (main_push: --tested equals --head)\n"));
     }
     return result;
 }

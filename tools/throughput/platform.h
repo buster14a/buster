@@ -354,6 +354,25 @@ typedef struct TpProcessTestObservation
 static TpProcessTestObservation tp_process_test_observation;
 #endif
 
+#ifdef __linux__
+static void tp_process_diagnostics(TpProcess* result, struct rusage const* usage)
+{
+    long const diagnostics[TP_DIAGNOSTICS] = {
+        [TP_MINOR_FAULTS] = usage->ru_minflt,
+        [TP_MAJOR_FAULTS] = usage->ru_majflt,
+        [TP_VOLUNTARY_SWITCHES] = usage->ru_nvcsw,
+        [TP_INVOLUNTARY_SWITCHES] = usage->ru_nivcsw};
+    for (unsigned i = 0; i < TP_DIAGNOSTICS; ++i)
+    {
+        if (diagnostics[i] >= 0)
+        {
+            result->diagnostics[i] = (uint64_t)diagnostics[i];
+            result->diagnostics_available |= 1u << i;
+        }
+    }
+}
+#endif
+
 static TpProcess tp_process_internal(char* const* args, char const* directory, char const* log_path,
                             unsigned timeout_seconds, TpCpuSet const* cpus, int counters, TpDescriptorLaunch const* descriptor)
 {
@@ -611,19 +630,7 @@ static TpProcess tp_process_internal(char* const* args, char const* directory, c
             result.user_seconds = (double)usage.ru_utime.tv_sec + (double)usage.ru_utime.tv_usec * 1e-6;
             result.system_seconds = (double)usage.ru_stime.tv_sec + (double)usage.ru_stime.tv_usec * 1e-6;
 #ifdef __linux__
-            long const diagnostics[TP_DIAGNOSTICS] = {
-                [TP_MINOR_FAULTS] = usage.ru_minflt,
-                [TP_MAJOR_FAULTS] = usage.ru_majflt,
-                [TP_VOLUNTARY_SWITCHES] = usage.ru_nvcsw,
-                [TP_INVOLUNTARY_SWITCHES] = usage.ru_nivcsw};
-            for (unsigned i = 0; i < TP_DIAGNOSTICS; ++i)
-            {
-                if (diagnostics[i] >= 0)
-                {
-                    result.diagnostics[i] = (uint64_t)diagnostics[i];
-                    result.diagnostics_available |= 1u << i;
-                }
-            }
+            tp_process_diagnostics(&result, &usage);
 #endif
 #ifdef __APPLE__
             result.peak_rss_bytes = (double)usage.ru_maxrss;
