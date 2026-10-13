@@ -53365,7 +53365,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_qualified_parameter_values(UnitTestArg
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_volatile_recursive_records(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    ByteSlice input = file_read(arguments->arena, S8("tests/basic_c_volatile_recursive_record.c"), (FileReadOptions){0});
+    ByteSlice input = file_read(arguments->arena, S8("src/buster/tests/compiler/frontend/c/fixtures/volatile_recursive_record.c"), (FileReadOptions){0});
     String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
     BUSTER_TEST(arguments, input.length != 0);
     Target targets[] = {
