@@ -48420,6 +48420,44 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_volatile_ir(UnitTestAr
         }
         BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
     }
+    // Bare asm is reserved in GNU dialects, while ISO dialects retain an
+    // ordinary identifier. GNU aliases keep their existing acceptance.
+    CPreprocessDialect asm_dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17,
+        C_PREPROCESS_DIALECT_C23, C_PREPROCESS_DIALECT_GNU23};
+    String8 asm_sources[] = {
+        S8("void dialect_asm(void) { asm volatile(\"pause\" ::: \"memory\"); }\n"),
+        S8("void dialect_asm(void) { __asm__ volatile(\"pause\" ::: \"memory\"); }\n"),
+        S8("int dialect_identifier(void) { int asm = 7; return asm; }\n"),
+    };
+    for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(asm_dialects); dialect_index += 1)
+    {
+        for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(asm_sources); fixture_index += 1)
+        {
+            bool gnu = dialect_index == 1 || dialect_index == 3;
+            if (fixture_index == 2 && gnu) continue;
+            TemporalArena dialect_temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult dialect_tokens = c_preprocess(dialect_temporary.arena, asm_sources[fixture_index],
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                    .dialect = asm_dialects[dialect_index]});
+            CAnalysisResult dialect_parse = c_parse(dialect_temporary.arena, dialect_tokens);
+            bool accepted = fixture_index != 0 || gnu;
+            BUSTER_TEST(arguments, !dialect_tokens.diagnostic_count);
+            BUSTER_TEST(arguments, (dialect_parse.diagnostic_count == 0) == accepted);
+            for (u32 form = 0; accepted && form < 2; form += 1)
+            {
+                CIRLowerResult dialect_lowered = c_lower_to_ir_with_options(dialect_temporary.arena,
+                    S8("asm-dialect.c"), dialect_tokens, dialect_parse, target_native,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST(arguments, !dialect_lowered.diagnostic_count && dialect_lowered.program);
+                if (dialect_lowered.program)
+                {
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(dialect_lowered.program,
+                        dialect_lowered.program->modules).error == IR_VALIDATION_NONE);
+                }
+            }
+            c_test_scratch_end(dialect_temporary);
+        }
+    }
     c_test_scratch_end(temporary);
     return result;
 }

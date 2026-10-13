@@ -227,7 +227,8 @@ BUSTER_C_INTERNAL bool c_declaration_keyword_for_dialect(String8 spelling, CPrep
            (c_preprocess_dialect_is_c23(dialect) &&
              (string_equal(spelling, S8("true")) || string_equal(spelling, S8("false")) || string_equal(spelling, S8("nullptr")) ||
               string_equal(spelling, S8("alignof")) || string_equal(spelling, S8("constexpr")) || string_equal(spelling, S8("typeof_unqual")))) ||
-           ((c_preprocess_dialect_is_gnu(dialect) || c_preprocess_dialect_is_c23(dialect)) && string_equal(spelling, S8("typeof")));
+           ((c_preprocess_dialect_is_gnu(dialect) || c_preprocess_dialect_is_c23(dialect)) && string_equal(spelling, S8("typeof"))) ||
+           (c_preprocess_dialect_is_gnu(dialect) && string_equal(spelling, S8("asm")));
 }
 
 // Spelling predicates the parser's scan loops ask per token, per scan, cached
@@ -243,6 +244,7 @@ enum
     C_TOKEN_CLASS_TYPEOF = 1 << 3,
     C_TOKEN_CLASS_VECTOR_SIZE = 1 << 4,
     C_TOKEN_CLASS_ALIGNAS = 1 << 5,
+    C_TOKEN_CLASS_GNU_ASM = 1 << 6,
 };
 
 // Specifier-word facts stored per predefined symbol id in
@@ -322,7 +324,8 @@ BUSTER_C_INTERNAL bool c_declaration_keyword_for_dialect_token(CPreprocessResult
         result = (token_class & C_TOKEN_CLASS_DECLARATION_KEYWORD) != 0 ||
                  (c_preprocess_dialect_is_c23(preprocess.dialect) && (token_class & C_TOKEN_CLASS_C23_EXTRA_KEYWORD) != 0) ||
                  ((c_preprocess_dialect_is_gnu(preprocess.dialect) || c_preprocess_dialect_is_c23(preprocess.dialect)) &&
-                  (token_class & C_TOKEN_CLASS_TYPEOF) != 0);
+                  (token_class & C_TOKEN_CLASS_TYPEOF) != 0) ||
+                 (c_preprocess_dialect_is_gnu(preprocess.dialect) && (token_class & C_TOKEN_CLASS_GNU_ASM) != 0);
     }
     else
     {
@@ -347,6 +350,7 @@ BUSTER_C_SHARED u8 c_parse_token_class_compute(String8 spelling)
     {
         token_class |= C_TOKEN_CLASS_TYPEOF;
     }
+    if (string_equal(spelling, S8("asm"))) token_class |= C_TOKEN_CLASS_GNU_ASM;
     if (c_parse_vector_size_word(spelling))
     {
         token_class |= C_TOKEN_CLASS_VECTOR_SIZE;
@@ -1277,8 +1281,9 @@ BUSTER_C_INTERNAL bool c_parse_declaration_keyword_at(CParseResult* result, CPre
     {
         return true;
     }
-    return (c_preprocess_dialect_is_gnu(preprocess.dialect) || c_preprocess_dialect_is_c23(preprocess.dialect)) &&
-           (token_class & C_TOKEN_CLASS_TYPEOF);
+    return ((c_preprocess_dialect_is_gnu(preprocess.dialect) || c_preprocess_dialect_is_c23(preprocess.dialect)) &&
+            (token_class & C_TOKEN_CLASS_TYPEOF)) ||
+           (c_preprocess_dialect_is_gnu(preprocess.dialect) && (token_class & C_TOKEN_CLASS_GNU_ASM));
 }
 
 BUSTER_C_SHARED void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message)
