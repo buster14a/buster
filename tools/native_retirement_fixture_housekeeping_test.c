@@ -896,6 +896,7 @@ BUSTER_GLOBAL_LOCAL int hk_directory_empty(const char *path,
         report.error_number = errno;
         valid = 0;
     }
+    errno = 0;
     while (valid && (entry = readdir(directory)) != NULL)
     {
         if (cm_equal(entry->d_name, ".") || cm_equal(entry->d_name, "..")) continue;
@@ -958,7 +959,7 @@ BUSTER_GLOBAL_LOCAL void hk_print_protected_diagnostic(int run_attempted,
         report->parser_valid ? "complete" : "failed";
     const char *proof_state = !proof_checked ? "not_run" : proof_valid ? "pass" : "fail";
     fprintf(stderr,
-        "Protected diagnostics: run=%s runner_ok=%d spawned=%d reaped=%d timeout=%d exit=%d signal=%d group_gone=%d run_errno=%d; scratch=%s entries_at_least=%u errno=%d close_errno=%d; trace=%s proof=%s bytes=%zu tokens=%u/%u arena_bytes=%u events=%u/%u sessions=%u complete=%u incomplete=%u children=%u complete=%u incomplete=%u starts=%u exits=%u automatic=%u automatic_children=%u detached=%u; first=%s/%s line=%u offset="
+        "Protected diagnostics: run=%s runner_ok=%d spawned=%d reaped=%d timeout=%d exit=%d signal=%d group_gone=%d run_errno=%d; scratch=%s entries_at_least=%u errno=%d close_errno=%d; trace=%s proof=%s bytes=%zu tokens=%u/%u arena_bytes=%u events=%u/%u sessions=%u complete=%u incomplete=%u children=%u complete=%u incomplete=%u starts=%u exits=%u automatic=%u automatic_children=%u detached=%u; first=%s/%s line=%u offset=",
         !run_attempted ? "not_run" : runner_valid && !run->timed_out && run->code == 0 ? "passed" : "failed",
         runner_valid, run->spawned, run->reaped, run->timed_out, run->code,
         run->signal_number, run->group_gone, run->error_number, scratch_state,
