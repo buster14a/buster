@@ -88,35 +88,71 @@ def _main(api) -> str:
 
 
 def _native_inventory(api, mode: str, workflow: str, number: int,
-                      selected: str, *, deadline: float | None = None):
+                      selected: str, *, deadline: float | None = None, budget=None):
     """Transport-only compatibility adapter; native C owns query and verdict."""
     executable = Path(__file__).with_name("main_push_inventory")
     deadline = deadline if deadline is not None else time.monotonic() + 60
-    evidence = {"phase": mode + "-discovery", "requests": 0, "pages": 0,
+    evidence = {"phase": ("predecessor" if mode == "predecessors" else "successor") + "-discovery", "requests": 0, "pages": 0,
                 "inventory_complete": False}
+    budget = budget if budget is not None else {"requests": 0, "retained": [], "rejections": [], "calls": 0}
+    budget.setdefault("started_at", time.monotonic())
+    budget.setdefault("pages", 0)
+    evidence["requests"] = budget["requests"]
+    evidence["pages"] = budget["pages"]
+    budget["calls"] += 1
+    evidence["call"] = budget["calls"]
     child = None
     previous = getattr(api, "deadline", None)
     try:
         child = subprocess.Popen(
-            [os.fspath(executable), mode, workflow, str(number), selected],
+            [os.fspath(executable), mode, workflow, str(number), selected, str(budget["requests"])],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
         )
+        child.stdin.write(json.dumps({"retained": budget["retained"] if mode == "predecessors" else []},
+                                    separators=(",", ":")) + "\n")
+        child.stdin.flush()
         while True:
             message = json.loads(child.stdout.readline())
+            if "observation" in message:
+                observation = dict(message["observation"], call=budget["calls"])
+                budget["rejections"].append(observation)
+                print("main-push discovery: " + json.dumps(observation, sort_keys=True), file=sys.stderr)
+                delay = message["backoff_seconds"]
+                if time.monotonic() + delay >= deadline and delay:
+                    raise MaintenanceError("discovery deadline reached during native recovery")
+                if delay:
+                    time.sleep(delay)
+                continue
             if "request" not in message:
+                if time.monotonic() >= deadline:
+                    raise MaintenanceError("discovery deadline reached")
                 evidence.update(message)
+                evidence["helper_pages"] = message["pages"]
+                evidence["pages"] = budget["pages"]
+                budget["inventory_complete"] = message.get("inventory_complete") is True
+                evidence["rejections"] = list(budget["rejections"])
+                evidence["calls"] = budget["calls"]
+                evidence["elapsed_seconds"] = time.monotonic() - budget["started_at"]
+                evidence["deadline_remaining_seconds"] = max(0, deadline - time.monotonic())
+                budget["evidence"] = {key: value for key, value in evidence.items() if key not in ("result", "retained")}
+                if mode == "predecessors":
+                    budget["retained"] = message["retained"]
                 status = child.wait(timeout=5)
                 if status != 0 or message.get("inventory_complete") is not True:
                     raise MaintenanceError(message.get("error", "native discovery failed"))
                 return message["result"]
-            evidence["requests"] += 1
-            evidence["pages"] += int("page" in message["query"])
+            budget["requests"] += 1
+            evidence["requests"] = budget["requests"]
+            budget["pages"] += int("page" in message["query"])
+            evidence["pages"] = budget["pages"]
             evidence["last_query"] = {"path": message["request"], **message["query"]}
             if time.monotonic() >= deadline:
                 raise MaintenanceError("discovery deadline reached")
             if hasattr(api, "deadline"):
                 api.deadline = min(previous, deadline) if previous is not None else deadline
             response = api.request(message["request"], **message["query"])
+            if time.monotonic() >= deadline:
+                raise MaintenanceError("discovery deadline reached after API read")
             child.stdin.write(json.dumps(response, separators=(",", ":")) + "\n")
             child.stdin.flush()
     except (MaintenanceError, OSError, ValueError, TypeError,
@@ -124,6 +160,7 @@ def _native_inventory(api, mode: str, workflow: str, number: int,
             retirement.AdmissionError) as error:
         failure = MaintenanceError(str(error) if isinstance(error, MaintenanceError)
                                    else "discovery transport/adapter failure: " + type(error).__name__)
+        evidence["rejections"] = list(budget["rejections"])
         failure.discovery = evidence
         raise failure from None
     finally:
@@ -137,23 +174,24 @@ def _native_inventory(api, mode: str, workflow: str, number: int,
             child.stdout.close()
 
 
-def _predecessors(api, workflow: str, number: int, target: str, *, deadline=None) -> list[dict]:
+def _predecessors(api, workflow: str, number: int, target: str, *, deadline=None, budget=None) -> list[dict]:
     return _native_inventory(api, "predecessors", workflow,
-                             _positive(number, "current run number"), target, deadline=deadline)
+                             _positive(number, "current run number"), target, deadline=deadline, budget=budget)
 
 
 def wait_predecessors(api, workflow: str, number: int, target: str,
                       seconds: float, *, poll: float = POLL_SECONDS,
                       clear_reads: int = 2, sleep=time.sleep,
-                      clock=time.monotonic) -> list[dict]:
+                      clock=time.monotonic, budget=None) -> list[dict]:
     if seconds < 0 or poll < 0 or clear_reads <= 0:
         raise MaintenanceError("invalid predecessor wait policy")
     deadline = clock() + seconds
+    budget = budget if budget is not None else {"requests": 0, "retained": [], "rejections": [], "calls": 0}
     observed = {}
     clear = 0
     while True:
         blocked = _predecessors(api, workflow, number, target,
-                                deadline=deadline if seconds > 0 else None)
+                                deadline=deadline if seconds > 0 else None, budget=budget)
         observed.update((row["id"], row) for row in blocked)
         clear = clear + 1 if not blocked else 0
         if clear >= clear_reads:
@@ -165,20 +203,21 @@ def wait_predecessors(api, workflow: str, number: int, target: str,
         sleep(min(poll, remaining))
 
 
-def _successor(api, workflow: str, number: int, head: str, *, deadline=None) -> dict | None:
+def _successor(api, workflow: str, number: int, head: str, *, deadline=None, budget=None) -> dict | None:
     return _native_inventory(api, "successor", workflow,
                              _positive(number, "current run number"),
-                             _sha(head, "successor head"), deadline=deadline)
+                             _sha(head, "successor head"), deadline=deadline, budget=budget)
 
 
 def wait_successor(api, workflow: str, number: int, head: str,
                    seconds: float, *, poll: float = POLL_SECONDS,
-                   sleep=time.sleep, clock=time.monotonic) -> dict:
+                   sleep=time.sleep, clock=time.monotonic, budget=None) -> dict:
     deadline = clock() + seconds
+    budget = budget if budget is not None else {"requests": 0, "retained": [], "rejections": [], "calls": 0}
     while True:
         result = _successor(api, workflow, _positive(number, "current run number"),
                             _sha(head, "successor head"),
-                            deadline=deadline if seconds > 0 else None)
+                            deadline=deadline if seconds > 0 else None, budget=budget)
         if result is not None:
             return result
         remaining = deadline - clock()
@@ -243,6 +282,7 @@ def _ordered(api, workflow: str, number: int, target: str, seconds: float,
     phase = "predecessor-discovery"
     attempted = False
     waited = []
+    budget = {"requests": 0, "retained": [], "rejections": [], "calls": 0}
 
     def invoke(head):
         nonlocal phase, attempted
@@ -253,10 +293,10 @@ def _ordered(api, workflow: str, number: int, target: str, seconds: float,
         nonlocal phase
         phase = "successor-discovery"
         return wait_successor(api, workflow, number, head,
-                              min(seconds, SUCCESSOR_WAIT_SECONDS))
+                              min(seconds, SUCCESSOR_WAIT_SECONDS), budget=budget)
 
     try:
-        waited = wait_predecessors(api, workflow, number, target, seconds)
+        waited = wait_predecessors(api, workflow, number, target, seconds, budget=budget)
         phase = "main-reconciliation"
         status, report, result = reconcile(event_main, lambda: _main(api), invoke, successor)
     except (MaintenanceError, preflight.PreflightError, retirement.AdmissionError,
@@ -272,6 +312,9 @@ def _ordered(api, workflow: str, number: int, target: str, seconds: float,
         }
         if hasattr(error, "discovery"):
             report["discovery"] = error.discovery
+    report.setdefault("discovery", budget.get("evidence", {
+        "requests": budget["requests"], "calls": budget["calls"],
+        "rejections": budget["rejections"], "inventory_complete": budget.get("inventory_complete", False)}))
     report["run_id"] = os.environ.get("GITHUB_RUN_ID")
     report["run_attempt"] = os.environ.get("GITHUB_RUN_ATTEMPT")
     report["ordering"] = {
@@ -309,6 +352,13 @@ def _record(root: Path, summary: Path | None, report: dict, action: str) -> None
     (root / "main-push-maintenance.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    discovery = report.get("discovery", {})
+    details = json.dumps({"error": report.get("error"), "discovery": {
+        key: discovery.get(key) for key in ("inventory_complete", "requests", "pages", "calls", "call",
+                                            "attempts", "request_limit", "attempt_limit", "recovery_stop", "elapsed_seconds",
+                                            "deadline_remaining_seconds", "helper_pages", "last_query", "rejections")
+    }}, sort_keys=True)
+    print("main-push maintenance: " + details, file=sys.stderr)
     if summary is not None:
         summary.parent.mkdir(parents=True, exist_ok=True)
         with summary.open("a", encoding="utf-8") as output:
@@ -319,6 +369,7 @@ def _record(root: Path, summary: Path | None, report: dict, action: str) -> None
                 f"- Current main: `{report['current_main']}`\n"
                 f"- Result: **{report['status']}**\n"
                 f"- Failing phase: `{report.get('failing_phase', 'none')}`\n"
+                f"\n```json\n{details}\n```\n"
             )
 
 
