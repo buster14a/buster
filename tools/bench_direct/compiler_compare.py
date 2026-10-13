@@ -34,7 +34,10 @@ run's Release compiler against its PGO+LTO compiler on the corpus. A fresh exact
 FRONTEND_SELECTOR_REQUEST_LINE adds the frontend and selector probes (#2761):
 the base revision's benchmark_frontend_scaling.py and selection_benchmark.py
 run on the same two binaries, then `ide bench` runs in alternating fresh
-processes of both.
+processes of both. A fresh exact FRONTEND_NESTING_REQUEST_LINE adds the
+deep-nesting leg (#2676): the base revision's benchmark_frontend_scaling.py
+--suite nesting times the same two binaries on control statements nested to
+growing depths.
 A fresh exact COMPILER_PROBES_REQUEST_LINE adds the compiler-probes leg (#2761): the
 trusted native compiler_probes.c harness builds the FAST register-allocation and
 scheduler line-mark probes against both revisions in isolated clones and times
@@ -62,8 +65,9 @@ The receipt records identities, the profile, toolchain versions, binary hashes
 and timings, and is written even when a step fails. The candidate's build runs
 as the runner account before measurement, so the receipt is evidence produced
 under the direct path's owner-only trust boundary, not a sealed result.
-With --request-attempt, an ordinary (not owned, analyzer or snapshot) attempt
-also exports the v1 raw inventory as required (#2918), writes
+With --request-attempt, an ordinary (not owned, MAIN-owned or analyzer) attempt,
+legacy-rebuild or pull snapshot-v1 (whose closure records and owned phases join
+the snapshot inventory), also exports the v1 raw inventory as required (#2918), writes
 evidence-omissions.json and, once measured, seals the retained bundle last with
 the trusted `./build.sh compiler_evidence seal`; the receipt's evidence_bundle
 names that seal, and a refused seal fails the attempt.
@@ -80,6 +84,7 @@ real_source_request_selection and measure_real_source (#2761 real-source leg),
 production_profile_request_selection and measure_production_profile (#2761 PGO/LTO leg),
 compiler_probes_request_selection and measure_compiler_probes (#2761 probe leg),
 frontend_selector_request_selection and measure_frontend_selector (#2761 probes),
+frontend_nesting_request_selection and measure_frontend_nesting (#2676 deep nesting),
 wild_linker_request_selection, host_linker and measure_wild_linker (#2761 linker leg),
 link_tls_request_selection and measure_link_tls (#1915 TLS link leg),
 selfhost_inline_request_selection, build_selfhost_inline_stage1 and measure_selfhost_inline (#58), main. Validity rules live in compiler_receipt.classify.
@@ -119,6 +124,8 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               compiler_probes_digest, validate_compiler_probes,
                               FRONTEND_SELECTOR_PROFILE, FRONTEND_SELECTOR_REQUEST_LINE, FRONTEND_SELECTOR_SCHEMA,
                               frontend_selector_digest, validate_frontend_selector,
+                              FRONTEND_NESTING_PROFILE, FRONTEND_NESTING_REQUEST_LINE, frontend_scaling_digest,
+                              validate_frontend_nesting,
                               WILD_LINKER_PROFILE, WILD_LINKER_REQUEST_LINE, WILD_LINKER_SCHEMA, WILD_LINKER_COMPARATORS,
                               wild_linker_bundle_files, wild_linker_digest, validate_wild_linker, WILD_IDENTITY,
                               WILD_LINKER_LINKERS,
@@ -136,9 +143,9 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               render, scaling_digest, throughput_digest, validate_inline_acceptance,
                               analyzer_bootstrap_provenance, analyzer_profile_summary)
 from compiler_receipt import observed_cpu_model as cpu_model
-from compiler_receipt import (EVIDENCE_INVENTORY, EVIDENCE_OMISSIONS, EVIDENCE_OMISSIONS_SCHEMA,
+from compiler_receipt import (EVIDENCE_OMISSIONS, EVIDENCE_OMISSIONS_SCHEMA,
                               EVIDENCE_OMISSION_REASONS, EVIDENCE_OMISSION_EXAMPLES, EVIDENCE_SEAL,
-                              evidence_lab_required, evidence_corpus_required, evidence_identity)
+                              evidence_lab_required, evidence_corpus_required, evidence_identity, evidence_inventory)
 import throughput_real_source
 from selfhost_inline_compare import validate_compare_documents as validate_selfhost_inline_documents
 
@@ -168,6 +175,10 @@ COMPILER_PROBES_TIMEOUT_SECONDS = 20 * 60
 FRONTEND_SCALING_TIMEOUT_SECONDS = 20 * 60
 SELECTION_TIMEOUT_SECONDS = 10 * 60
 IDE_BENCH_TIMEOUT_SECONDS = 30
+# Measured: the whole frontend-nesting leg (68 cells, one warmup and eleven
+# repetitions of each binary) took 190 s on a hosted 4-vCPU 2.1 GHz Xeon and
+# exported 196 KB; this bound keeps it inside the unchanged compare-pull budget.
+FRONTEND_NESTING_TIMEOUT_SECONDS = 20 * 60
 # Measured on a hosted 4-vCPU 2.3 GHz Xeon: the head's three input builds (two
 # generations, Release unity, Debug and Release separate, and the harness compile)
 # took 281 s together and the link-only harness 24 s (GNU ld as comparator, 3.4 MB
@@ -1328,6 +1339,18 @@ def frontend_selector_request_selection(candidate: Path, head: str) -> tuple[boo
     return True, ""
 
 
+def frontend_nesting_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #2676's deep-nesting leg only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, FRONTEND_NESTING_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the frontend-nesting selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the frontend-nesting selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
 def wild_linker_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
     """Select #2761's Wild linker leg only when its exact line is added once against every head parent."""
     deltas = request_selector_parent_deltas(candidate, head, WILD_LINKER_REQUEST_LINE)
@@ -1821,9 +1844,10 @@ def seal_evidence(receipt: dict, evidence: Path, work: Path, request_attempt: st
             problem = f"evidence seal unreadable after sealing: {error}"
     if not problem and not all(seal.get(key, "").isdigit() for key in ("manifest_bytes", "members", "payload_bytes")):
         problem = "evidence seal is malformed after sealing"
-    bundle = {"inventory": EVIDENCE_INVENTORY, "state": "failed", "reason": problem}
+    inventory = evidence_inventory(receipt)
+    bundle = {"inventory": inventory, "state": "failed", "reason": problem}
     if not problem:
-        bundle = {"inventory": EVIDENCE_INVENTORY, "state": "sealed", "manifest_sha256": seal.get("manifest_sha256", ""),
+        bundle = {"inventory": inventory, "state": "sealed", "manifest_sha256": seal.get("manifest_sha256", ""),
                   "manifest_bytes": int(seal["manifest_bytes"]), "members": int(seal["members"]),
                   "payload_bytes": int(seal["payload_bytes"]), "omissions": len(EVIDENCE_OMISSION_LEDGER)}
     receipt["evidence_bundle"] = bundle
@@ -2153,6 +2177,37 @@ def measure_frontend_selector(candidate: Path, bins: Path, work: Path, evidence:
                                              receipt["binaries"]))
     record["cells"] = frontend_selector_digest(documents["results"], documents["report"], documents["bench"])
     record["exits"] = {"frontend_scaling": scaling_status, "selection": selection_status}
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
+def measure_frontend_nesting(candidate: Path, bins: Path, work: Path, evidence: Path, receipt: dict) -> None:
+    """Run #2676's deep-nesting families from the base checkout on both binaries and record them."""
+    record = receipt["frontend_nesting"]
+    profile = FRONTEND_NESTING_PROFILE
+    exported = evidence / "frontend_nesting"
+    output = work / "frontend-nesting"
+    errors: list[str] = []
+    measured = time.monotonic()
+    status = run([sys.executable, "-B", "tools/benchmark_frontend_scaling.py", "--baseline", str(bins / "ide-base"),
+                  "--candidate", str(bins / "ide-cand"), "--out", str(output), *profile["frontend_scaling"]["arguments"]],
+                 candidate, evidence / "frontend-nesting.log", FRONTEND_NESTING_TIMEOUT_SECONDS)
+    receipt["timings"]["frontend_nesting_seconds"] = round(time.monotonic() - measured, 3)
+    documents = {"provenance.json": None, "results.json": None}
+    if output.is_dir():
+        problems, record["evidence_omissions"] = export_tree(output, exported, evidence, FRONTEND_SCALING_IGNORE,
+                                                             FRONTEND_SCALING_REQUIRED)
+        errors.extend(problems)
+        for name in documents:
+            documents[name], problem = read_exported_json(exported / name)
+            if problem:
+                errors.append(f"exported evidence frontend_nesting/{name} unreadable: {problem}")
+    else:
+        errors.append("frontend-nesting produced no output")
+    errors.extend(validate_frontend_nesting(status, documents["provenance.json"], documents["results.json"],
+                                            receipt["binaries"]))
+    record["cells"] = frontend_scaling_digest(documents["results.json"])
+    record["exit"] = status
     record["errors"] = errors
     record["status"] = "complete" if not errors else "failed"
 
@@ -2550,12 +2605,25 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         receipt["selfhost_inline"] = {"requested": True, "request_line": SELFHOST_INLINE_REQUEST_LINE,
                                       "profile": SELFHOST_INLINE_PROFILE, "status": "pending"}
         # One opt-in leg per attempt keeps a report from being shared between two profiles; the
-        # scaling leg also runs before this one and would share its budget.
+        # scaling leg also runs before this one and would share its budget. The #48 inline leg is
+        # not an opt-in here: inline_acceptance_requested selects it whenever its line is anywhere in
+        # the request file, which it has been on main since #48, so it runs beside this leg.
         if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
-                linker_requested or link_tls_requested or inline_requested or reuse_requested or \
+                linker_requested or link_tls_requested or reuse_requested or \
                 scaling_requested(candidate, arguments.base, arguments.head):
             reasons.append("self-host-inline-compare-v1 cannot be combined with another opt-in leg, the scaling "
                            "leg included")
+    nesting_requested = arguments.mode == "pull" and getattr(arguments, "frontend_nesting_requested", False)
+    problem = getattr(arguments, "frontend_nesting_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if nesting_requested:
+        receipt["frontend_nesting"] = {"requested": True, "request_line": FRONTEND_NESTING_REQUEST_LINE,
+                                       "profile": FRONTEND_NESTING_PROFILE, "status": "pending"}
+        # One opt-in leg per attempt keeps a report from being shared between two profiles.
+        if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
+                linker_requested or link_tls_requested or selfhost_requested or reuse_requested:
+            reasons.append("frontend-nesting-v1 cannot be combined with another opt-in leg")
     # #3714: the named historical recipe swaps only the corpus harness; every other opt-in leg would
     # still run the base's own pre-floor harness, so none may join it. Its pinned worktree is prepared
     # before any build.
@@ -2563,7 +2631,7 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     if receipt.get("throughput_profile") == THROUGHPUT_HISTORICAL_PROFILE:
         others = (real_requested or ast_requested or production_requested or probes_requested or selector_requested
                   or inline_requested or linker_requested or link_tls_requested or reuse_requested
-                  or selfhost_requested
+                  or selfhost_requested or nesting_requested
                   or (arguments.mode == "pull" and scaling_requested(candidate, arguments.base,
                                                                                            arguments.head)))
         if snapshot_closure:
@@ -2713,6 +2781,9 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         if selfhost_requested:
             mark(receipt, evidence, "selfhost-inline")
             measure_selfhost_inline(arguments, candidate, work, evidence, receipt)
+        if nesting_requested:
+            mark(receipt, evidence, "frontend-nesting")
+            measure_frontend_nesting(candidate, bins, work, evidence, receipt)
         mark(receipt, evidence, "validate")
         raw_closure = {}
         if snapshot_closure:
@@ -2842,6 +2913,14 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             reasons.append("the self-host inline leg was requested but did not reach its measurement phase")
         if record["status"] != "complete":
             receipt["state"] = "failed"
+    if nesting_requested:
+        record = receipt["frontend_nesting"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("the frontend-nesting leg was requested but did not reach its measurement phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
 
 
 
@@ -2879,6 +2958,8 @@ def main(argv: list[str] | None = None) -> int:
         compiler_probes_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.frontend_selector_requested, arguments.frontend_selector_request_problem = (
         frontend_selector_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.frontend_nesting_requested, arguments.frontend_nesting_request_problem = (
+        frontend_nesting_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.wild_linker_requested, arguments.wild_linker_request_problem = (
         wild_linker_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.link_tls_requested, arguments.link_tls_request_problem = (
@@ -2890,9 +2971,10 @@ def main(argv: list[str] | None = None) -> int:
     main_owned = getattr(arguments, "main_owned_phases", False)
     selected_profile = named_main_profile(arguments.main_profile) if main_owned else PROFILE
     early_owned = utility or main_owned or (arguments.mode == "main" and arguments.closure_policy == "snapshot-v1")
-    # Contract v1 (#2918) seals the ordinary lab and corpus: not owned, analyzer or snapshot routes.
+    # Contract v1 (#2918) seals the ordinary lab and corpus, on the legacy-rebuild and the pull
+    # snapshot-v1 route alike (#3211); the owned, MAIN-owned and analyzer routes keep their own contracts.
     arguments.evidence_seal = getattr(arguments, "request_attempt", None) is not None and not early_owned and \
-        not analyzer_requested and arguments.closure_policy == "legacy-rebuild"
+        not analyzer_requested and arguments.closure_policy in ("legacy-rebuild", "snapshot-v1")
     EVIDENCE_OMISSION_LEDGER.clear()
     EVIDENCE_DEFERRED_OPTIONAL.clear()
     EVIDENCE_DEFER_ALL = arguments.evidence_seal

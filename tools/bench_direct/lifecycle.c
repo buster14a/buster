@@ -4,6 +4,7 @@
 // lc_bind joins trusted executor title -> exact request attempt -> owned check.
 // lc_research_identity joins an admitted research marker without starting work.
 // lc_url_bound validates the persisted URL and exact native summary binding.
+// lc_pending_superseded authenticates GitHub pending replacement without host work.
 // lc_finish only closes missing terminal results; it never validates or reports
 // measurement success, downloads artifacts, starts work or changes a runner.
 // Native Actions job metadata, printed by lc_observe, owns live state and costs.
@@ -36,7 +37,7 @@ typedef struct LcIdentity LcIdentity;
 struct LcIdentity
 {
     uint64_t executor, attempt, request, request_attempt;
-    int pull, request_only, research;
+    int pull, request_only, research, pending_probe, superseded;
     char head[41], trusted[41], outcome[32], marker[192], details[256];
 };
 typedef struct LcResult LcResult;
@@ -136,6 +137,9 @@ BUSTER_GLOBAL_LOCAL int lc_bind(CmTransport *t, uint64_t run, uint64_t attempt, 
                     cm_number(&request, triggering, "id") == UINT64_C(39247043) &&
                     cm_equal(cm_get(&request, triggering, "login"), "davidgmbb");
             }
+            id->pending_probe = valid && !id->pull && id->attempt == 1 && id->request_attempt == 1 &&
+                cm_equal(id->outcome, "cancelled") && cm_equal(cm_get(&request, 1, "conclusion"), "success") &&
+                cm_time(cm_get(&executor, 1, "created_at")) >= 0;
             if (valid && !cm_equal(cm_get(&request, 1, "conclusion"), "success"))
                 cm_copy(id->outcome, sizeof(id->outcome), cm_get(&request, 1, "conclusion"));
             cm_json_free(&request);
@@ -264,9 +268,13 @@ BUSTER_GLOBAL_LOCAL int lc_url_bound(const CmJson *j, const LcIdentity *id)
     }
     return result;
 }
+#include "lifecycle_supersession.h"
+
 BUSTER_GLOBAL_LOCAL const char *lc_conclusion(const LcIdentity *id)
 {
-    const char *result = cm_equal(id->outcome, "cancelled") ? "cancelled" :
+    const char *result = id->superseded && id->attempt == 1 && id->request_attempt == 1 &&
+        cm_equal(id->outcome, "cancelled") && !id->pull && !id->research && !id->request_only ? "neutral" :
+        cm_equal(id->outcome, "cancelled") ? "cancelled" :
         (!id->research && cm_equal(id->outcome, "skipped")) ? "skipped" : "failure";
     return result;
 }
@@ -286,12 +294,13 @@ BUSTER_GLOBAL_LOCAL char *lc_body(const LcIdentity *id, const char *prior, int c
         fputs("\"status\":\"completed\",\"conclusion\":", file); cm_quote(file, lc_conclusion(id));
         fputs(",\"details_url\":", file); cm_quote(file, id->details);
         fputs(",\"output\":{\"title\":", file);
-        cm_quote(file, id->research ? lc_research_title(id) : "Not measured: terminal lifecycle reconciliation");
+        cm_quote(file, id->research ? lc_research_title(id) : id->superseded ?
+            "Not measured: superseded before execution" : "Not measured: terminal lifecycle reconciliation");
         fputs(",\"summary\":", file);
         FILE *text = tmpfile();
         if (text)
         {
-            if (prior && prior[0]) fprintf(text, "%.*s\n\n", 40000, prior);
+
             char executor_identity[128];
             if (id->request_only) cm_copy(executor_identity, sizeof(executor_identity), "unavailable (request ended before benchmark assignment)");
             else snprintf(executor_identity, sizeof(executor_identity), "run %" PRIu64 " attempt %" PRIu64, id->executor, id->attempt);
@@ -304,13 +313,60 @@ BUSTER_GLOBAL_LOCAL char *lc_body(const LcIdentity *id, const char *prior, int c
                     ", trusted harness `%s`, marker `%s`. Native Actions owns execution state: %s",
                     lc_research_title(id), id->executor, id->attempt, id->outcome, id->head, id->request, id->request_attempt,
                     id->trusted, id->marker, id->details);
-            else fprintf(text, "**%s: not measured.** The exact %s run finished with conclusion `%s` without a validated terminal measurement check. "
+            else fprintf(text, "**%s: %s.** The exact %s run finished with conclusion `%s` without a validated terminal measurement check. "
                 "This recovery closes bookkeeping only; it does not validate evidence or claim a successful measurement. "
                 "Repository `" CM_REPO "`, candidate `%s`, request %" PRIu64 " attempt %" PRIu64
                 ". Executor identity %s. Trusted harness `%s`. "
-                "Baseline remains as recorded above; if setup never ran it is unavailable. Native Actions owns execution state: %s",
-                lc_check_name(id), id->request_only ? "request" : "benchmark", id->outcome, id->head,
+                "Baseline provenance is retained below when known; otherwise it is unavailable. Native Actions owns execution state: %s",
+                lc_check_name(id), id->superseded ? "not measured; superseded before execution" : "not measured",
+                id->request_only ? "request" : "benchmark", id->outcome, id->head,
                 id->request, id->request_attempt, executor_identity, id->trusted[0] ? id->trusted : "unavailable", id->details);
+            if (id->superseded)
+                fprintf(text, "\n\nGitHub's native workflow annotation states: '%s'. "
+                    "The complete exact-attempt job inventory contains zero jobs and the pinned workflow keeps only the newest pending main comparison. "
+                    "The native executor remains cancelled; no successor measurement or coverage is claimed. "
+                    "Supersession evidence: https://github.com/" CM_REPO "/actions/runs/%" PRIu64 "/attempts/1",
+                    LC_PENDING_MESSAGE, id->executor);
+            else if (!id->research && cm_equal(id->outcome, "cancelled"))
+                fputs("\n\nCancellation cause is not established as pre-execution supersession; the native cancellation classification is preserved.", text);
+            fprintf(text, "\n\n%s\nCandidate %s.\n" LC_REQUEST "%" PRIu64 " attempt %" PRIu64
+                ": https://github.com/" CM_REPO "/actions/runs/%" PRIu64 "/attempts/%" PRIu64 "\n",
+                id->research ? lc_research_protocol(id) : LC_NATIVE, id->head, id->request, id->request_attempt, id->request, id->request_attempt);
+            if (!id->request_only)
+                fprintf(text, LC_EXECUTOR "%" PRIu64 " attempt %" PRIu64 ": %s\n", id->executor, id->attempt, id->details);
+            if (prior && prior[0])
+            {
+                // Retain baseline provenance, then quote old waiting prose as history.
+                const char *line = prior;
+                int baseline = 0;
+                while (line && *line && !baseline)
+                {
+                    const char *next = strchr(line, '\n');
+                    size_t width = next ? (size_t)(next - line) : strlen(line);
+                    char sha[41] = {0};
+                    if (width >= 51 && memcmp(line, "Baseline `", 10) == 0)
+                    {
+                        memcpy(sha, line + 10, 40);
+                        if (cm_sha(sha) && line[50] == '`')
+                        { fprintf(text, "%.*s\n", (int)(width > 2048 ? 2048 : width), line); baseline = 1; }
+                    }
+                    line = next ? next + 1 : NULL;
+                }
+                if (!baseline) fputs("Baseline: unavailable.\n", text);
+                fputs("\nPrior report (historical; not current execution state):\n\n", text);
+                line = prior;
+                size_t remaining = 40000;
+                while (line && *line && remaining)
+                {
+                    const char *next = strchr(line, '\n');
+                    size_t width = next ? (size_t)(next - line) : strlen(line);
+                    if (width > remaining) width = remaining;
+                    fprintf(text, "> %.*s\n", (int)width, line); remaining -= width;
+                    if (remaining) --remaining;
+                    line = next ? next + 1 : NULL;
+                }
+            }
+            else fputs("Baseline: unavailable.\n", text);
             char *summary = cm_memory(text); fclose(text);
             if (summary) { cm_quote(file, summary); fputs("}}", file); result = cm_memory(file); free(summary); }
         }
@@ -396,7 +452,9 @@ BUSTER_GLOBAL_LOCAL int lc_finish(CmTransport *t, const LcIdentity *id, LcResult
                     else if (valid && !bound) ++result->foreign;
                     else if (valid)
                     {
-                        char *body = lc_body(&owned, cm_get(&fresh, cm_member(&fresh, 1, "output"), "summary"), 0);
+                        const char *prior = cm_get(&fresh, cm_member(&fresh, 1, "output"), "summary");
+                        owned.superseded = lc_pending_superseded(t, &owned, prior);
+                        char *body = lc_body(&owned, prior, 0);
                         CmJson written = cm_api_json(t, path, "PATCH", body, NULL);
                         valid = body && lc_owned(&written, 1, &owned) && cm_number(&written, 1, "id") == check &&
                             cm_equal(cm_get(&written, 1, "status"), "completed");

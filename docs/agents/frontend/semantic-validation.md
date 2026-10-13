@@ -155,6 +155,17 @@ separate array-only duration check still permits a static pointer to a VLA while
 rejecting a VLA object with static duration. Function prototype parameter types
 retain their existing rules; the VM walk stops at function types.
 
+Array declarators record function and incomplete element types at construction,
+including typedef, parameter and abstract declarators. Aggregate definition
+extents distinguish a completed nested definition from the enclosing record or
+a tag completed later. The bound-constraint walk reports each invalid source
+bracket once before canonical lowering; later tag completion cannot erase the
+refusal. Incomplete outer bounds, flexible members, GNU zero-length arrays,
+VLAs and pointers to incomplete types retain their separate rules.
+`c_test_array_element_constraints` covers rejected and accepted neighbors on
+three target layouts, four dialects and both canonical frontend forms; the
+driver equivalence fixture pins syntax-only/object parity (#3744).
+
 Constant negative array bounds are rejected at the original bound expression
 by `c_parse_validate_array_bound_values`, after expression/type-name validation
 has populated the bound table. A temporary source-token bitset also admits

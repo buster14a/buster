@@ -1,0 +1,110 @@
+[
+  {
+    "pair": 0,
+    "side": "baseline",
+    "sha256": "c5e6c08089a374ccea1a605bcd42e4e26a10b88de6d0935f77d1bc1d77016e13",
+    "instructions:u": 26955518170,
+    "cycles:u": 10366860929,
+    "branches:u": 4868165708,
+    "branch-misses:u": 83858695
+  },
+  {
+    "pair": 0,
+    "side": "candidate",
+    "sha256": "c5e6c08089a374ccea1a605bcd42e4e26a10b88de6d0935f77d1bc1d77016e13",
+    "instructions:u": 26926016242,
+    "cycles:u": 10449737868,
+    "branches:u": 4863575091,
+    "branch-misses:u": 83364632
+  },
+  {
+    "pair": 1,
+    "side": "candidate",
+    "sha256": "c5e6c08089a374ccea1a605bcd42e4e26a10b88de6d0935f77d1bc1d77016e13",
+    "instructions:u": 26926015845,
+    "cycles:u": 10401849523,
+    "branches:u": 4863574564,
+    "branch-misses:u": 83523447
+  },
+  {
+    "pair": 1,
+    "side": "baseline",
+    "sha256": "c5e6c08089a374ccea1a605bcd42e4e26a10b88de6d0935f77d1bc1d77016e13",
+    "instructions:u": 26955519758,
+    "cycles:u": 10440772326,
+    "branches:u": 4868167167,
+    "branch-misses:u": 84060525
+  },
+  {
+    "pair": 2,
+    "side": "baseline",
+    "sha256": "c5e6c08089a374ccea1a605bcd42e4e26a10b88de6d0935f77d1bc1d77016e13",
+    "instructions:u": 26955518668,
+    "cycles:u": 10524135117,
+    "branches:u": 4868166030,
+    "branch-misses:u": 84697512
+  },
+  {
+    "pair": 2,
+    "side": "candidate",
+    "sha256": "c5e6c08089a374ccea1a605bcd42e4e26a10b88de6d0935f77d1bc1d77016e13",
+    "instructions:u": 26926072250,
+    "cycles:u": 11042816087,
+    "branches:u": 4863583717,
+    "branch-misses:u": 83517906
+  },
+  {
+    "pair": 3,
+    "side": "candidate",
+    "sha256": "c5e6c08089a374ccea1a605bcd42e4e26a10b88de6d0935f77d1bc1d77016e13",
+    "instructions:u": 26926071159,
+    "cycles:u": 11232391205,
+    "branches:u": 4863582551,
+    "branch-misses:u": 83439758
+  },
+  {
+    "pair": 3,
+    "side": "baseline",
+    "sha256": "c5e6c08089a374ccea1a605bcd42e4e26a10b88de6d0935f77d1bc1d77016e13",
+    "instructions:u": 26955518321,
+    "cycles:u": 10390872038,
+    "branches:u": 4868165726,
+    "branch-misses:u": 83910442
+  },
+  {
+    "pair": 4,
+    "side": "baseline",
+    "sha256": "c5e6c08089a374ccea1a605bcd42e4e26a10b88de6d0935f77d1bc1d77016e13",
+    "instructions:u": 26955518255,
+    "cycles:u": 10278879245,
+    "branches:u": 4868165687,
+    "branch-misses:u": 83982133
+  },
+  {
+    "pair": 4,
+    "side": "candidate",
+    "sha256": "c5e6c08089a374ccea1a605bcd42e4e26a10b88de6d0935f77d1bc1d77016e13",
+    "instructions:u": 26926070375,
+    "cycles:u": 10299801149,
+    "branches:u": 4863581885,
+    "branch-misses:u": 83178648
+  },
+  {
+    "pair": 5,
+    "side": "candidate",
+    "sha256": "c5e6c08089a374ccea1a605bcd42e4e26a10b88de6d0935f77d1bc1d77016e13",
+    "instructions:u": 26926070432,
+    "cycles:u": 10326902058,
+    "branches:u": 4863581928,
+    "branch-misses:u": 83653565
+  },
+  {
+    "pair": 5,
+    "side": "baseline",
+    "sha256": "c5e6c08089a374ccea1a605bcd42e4e26a10b88de6d0935f77d1bc1d77016e13",
+    "instructions:u": 26955544209,
+    "cycles:u": 10389708273,
+    "branches:u": 4868174050,
+    "branch-misses:u": 83970395
+  }
+]

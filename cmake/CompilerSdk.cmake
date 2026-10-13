@@ -119,6 +119,8 @@ if (BUSTER_COMPILER_SDK)
     endif()
     if (BUSTER_SANITIZE)
         target_compile_options(buster_compiler PRIVATE -fsanitize=address,undefined,bounds -fno-sanitize-recover=all)
+    elseif (BUSTER_THREAD_SANITIZE)
+        target_compile_options(buster_compiler PRIVATE -fsanitize=thread)
     endif()
     buster_apply_module_options(buster_compiler ${BUSTER_SDK_MODULE_NAMES})
 

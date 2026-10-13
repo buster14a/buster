@@ -1,0 +1,45 @@
+{
+  "baseline_commit": "2af78d9b16f9dd88339e74237272da182418083d",
+  "candidate_code_commit": "566078b3ccc347a6d0f931b65f7f0cc951dc79b4",
+  "frozen_source_commit": "3c3a372b70d1e0598a25e46d899d8557536f8cef",
+  "frozen_source_tree": "aa278773eda2072142b500656f9ce88f2a8938f0",
+  "candidate_binary_sha256": "4bf031af6b780d5a99db6f109b6e15b4569e8e29acd5b05c80804c79714875ca",
+  "baseline_binary_sha256": "eba1dabc4ea0e9a9ca33dd6dd48c4ab678c9490b6451aa9cfed5105aee733bef",
+  "initial_candidate_binary_sha256": "f4011dd6adcd4db0ed22a391c170ed046d9f46f94bbc9cb3e30a5066557a95f3",
+  "checkout": "/home/david/Documents/Codex/2026-10-13/sol-5/work/buster",
+  "generate": [
+    "./build.sh",
+    "generate",
+    "-DBUSTER_NATIVE_TARGET=x86-64-v3"
+  ],
+  "build": [
+    "./build.sh",
+    "build",
+    "--config",
+    "Release",
+    "-t",
+    "ide"
+  ],
+  "compile": [
+    "cc",
+    "-march=native",
+    "-I../4029-frozen/src",
+    "-I../4029-frozen/generated",
+    "-DBUSTER_UNITY_BUILD=1",
+    "-DBUSTER_INCLUDE_TESTS=0",
+    "-g",
+    "-c",
+    "../4029-frozen/src/buster/apps/ide/ide.c",
+    "-o",
+    "../4029-evidence/repeat.o"
+  ],
+  "events": [
+    "instructions:u",
+    "cycles:u",
+    "branches:u",
+    "branch-misses:u"
+  ],
+  "pairs": 6,
+  "order": "AB BA AB BA AB BA",
+  "note": "Final binary follows the comment/prototype cleanup and restored original 16*depth regression bound. Initial gdb records observe identical production logic. No Zen 5 claim."
+}

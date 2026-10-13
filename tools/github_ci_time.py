@@ -138,6 +138,13 @@ COMPILER_BENCHMARK_DISPLAY_STEPS = (
     COMPILER_BENCHMARK_LEGACY_RUNNING_DISPLAY_STEP,
 )
 COMPILER_BENCHMARK_WORKFLOW = ".github/workflows/9700x-direct-bench.yml"
+COMPILER_BENCHMARK_LIFECYCLE_WORKFLOW = ".github/workflows/9700x-lifecycle.yml"
+COMPILER_BENCHMARK_LIFECYCLE_STEPS = (
+    "Check out the trusted lifecycle controller",
+    "Compile the trusted native controller",
+    "Reconcile terminal checks and record separate Actions costs",
+    "Retain bounded lifecycle observations",
+)
 BENCHMARK_MAINTAINER = {"login": "davidgmbb", "id": 39247043}
 GITHUB_ACTIONS_APP_ID = 15368
 RUN_FIELDS = ("id", "head_sha", "head_branch", "event", "path", "status", "conclusion",
@@ -659,6 +666,173 @@ def reconciled_job_candidates(jobs):
             job["name"] in (RECONCILED_CHECK_MARKERS.keys() | COMPILER_BENCHMARK_CHECKS.keys())]
 
 
+def compiler_benchmark_current_summary(summary):
+    """Quoted waiting history cannot supply current execution identities (#3885)."""
+    if not isinstance(summary, str):
+        raise ValueError("Compiler benchmark summary is invalid")
+    parts = summary.split("\n\nPrior report (historical; not current execution state):\n\n")
+    if len(parts) > 2 or (len(parts) == 2 and
+                         (not parts[1] or any(not line.startswith("> ") for line in parts[1].splitlines()))):
+        raise ValueError("Compiler benchmark historical report is invalid")
+    return parts[0]
+
+
+def compiler_benchmark_terminal_announcement(check, head_sha, repository, request, bench_attempt,
+                                             summary, read_metadata, exact_run):
+    """Authenticate recovered display bookkeeping, never measurement evidence.
+
+    The existing lifecycle artifact name binds the executor attempt to its
+    trusted controller. One bounded metadata page avoids a history scan; exact
+    run/job/step identities and the write interval prove which pass closed the
+    check. Missing, expired, ambiguous or incomplete evidence remains a refusal.
+    """
+    base_url = "https://github.com/" + repository + "/"
+    output = check.get("output")
+    current = compiler_benchmark_current_summary(summary)
+    matches = re.findall(r"Executor identity run ([1-9][0-9]*) attempt ([1-9][0-9]*)\. "
+                         r"Trusted harness `([0-9a-f]{40})`\.", current)
+    superseded = isinstance(output, dict) and output.get("title") == "Not measured: superseded before execution"
+    if (check.get("status") != "completed" or check.get("conclusion") not in ("cancelled", "skipped", "failure", "neutral") or
+            not isinstance(output, dict) or output.get("title") not in (
+                "Not measured: terminal lifecycle reconciliation", "Not measured: superseded before execution") or
+            current.splitlines().count("Lifecycle protocol: terminal-native-v1.") != 1 or len(matches) != 1 or
+            request.get("status") != "completed"):
+        raise ValueError("Compiler benchmark terminal announcement is invalid")
+    executor_id, executor_attempt = map(int, matches[0][:2])
+    executor_path = f"actions/runs/{executor_id}/attempts/{executor_attempt}"
+    executor = read_metadata(executor_path)
+    if (executor_attempt != bench_attempt or
+            not exact_run(executor, executor_id, executor_attempt, COMPILER_BENCHMARK_WORKFLOW, "workflow_run") or
+            executor.get("head_branch") != "main" or executor.get("status") != "completed" or
+            executor["repository"]["id"] != request["repository"]["id"] or
+            executor.get("head_sha") != matches[0][2] or
+            executor.get("display_title") != f"9700X request {request['id']}.{request['run_attempt']} head {head_sha}"):
+        raise ValueError("Compiler benchmark recovered executor identity is unproved")
+    outcome = (executor.get("conclusion") if request.get("conclusion") == "success" else request.get("conclusion"))
+    if outcome not in ("success", "failure", "cancelled", "skipped", "timed_out", "neutral", "action_required", "stale"):
+        raise ValueError("Compiler benchmark recovered executor outcome is invalid")
+    conclusion = outcome if outcome in ("cancelled", "skipped") else "failure"
+    terminal_first = current.startswith(f"**{check['name']}: not measured")
+    if superseded:
+        if (not terminal_first or request.get("conclusion") != "success" or request['run_attempt'] != 1 or
+                executor_attempt != 1 or executor.get("conclusion") != "cancelled"):
+            raise ValueError("Compiler benchmark supersession identity is invalid")
+        jobs = read_metadata(executor_path + "/jobs?per_page=100")
+        if not isinstance(jobs, dict) or type(jobs.get("total_count")) is not int or jobs['total_count'] != 0 or jobs.get("jobs") != []:
+            raise ValueError("Compiler benchmark supersession has recorded or unavailable jobs")
+        for run in (request, executor):
+            latest = read_metadata(f"actions/runs/{run['id']}")
+            if (not exact_run(latest, run['id'], 1, run['path'], run['event']) or any(
+                    latest.get(key) != run.get(key) for key in
+                    ("head_sha", "head_branch", "status", "conclusion", "display_title")) or
+                    latest['repository']['id'] != run['repository']['id']):
+                raise ValueError("Compiler benchmark supersession attempt changed")
+        conclusion = "neutral"
+    state = "not measured; superseded before execution" if superseded else "not measured"
+    baseline = ("Baseline provenance is retained below when known; otherwise it is unavailable. " if terminal_first else
+                "Baseline remains as recorded above; if setup never ran it is unavailable. ")
+    terminal = (f"**{check['name']}: {state}.** The exact benchmark run finished with conclusion `{outcome}` "
+                "without a validated terminal measurement check. This recovery closes bookkeeping only; "
+                "it does not validate evidence or claim a successful measurement. "
+                f"Repository `{repository}`, candidate `{head_sha}`, request {request['id']} attempt {request['run_attempt']}. "
+                f"Executor identity run {executor_id} attempt {executor_attempt}. Trusted harness `{executor['head_sha']}`. "
+                + baseline + "Native Actions owns execution state: "
+                + base_url + executor_path)
+    if terminal_first:
+        reason = ""
+        if superseded:
+            reason = ("GitHub's native workflow annotation states: 'Canceling since a higher priority waiting request for "
+                      "buster-9700x-direct-bench-main-compare exists'. The complete exact-attempt job inventory contains zero jobs "
+                      "and the pinned workflow keeps only the newest pending main comparison. The native executor remains cancelled; "
+                      "no successor measurement or coverage is claimed. Supersession evidence: " + base_url + executor_path)
+        elif outcome == "cancelled":
+            reason = ("Cancellation cause is not established as pre-execution supersession; "
+                      "the native cancellation classification is preserved.")
+        recorded_baseline = current.splitlines()[-1]
+        if (recorded_baseline != "Baseline: unavailable." and
+                (len(recorded_baseline) > 2048 or not re.fullmatch(r"Baseline `[0-9a-f]{40}`[^\n]*", recorded_baseline))):
+            raise ValueError("Compiler benchmark recovered baseline is invalid")
+        canonical = (f"Lifecycle protocol: terminal-native-v1.\nCandidate {head_sha}.\n"
+                     f"Request run {request['id']} attempt {request['run_attempt']}: "
+                     f"{base_url}actions/runs/{request['id']}/attempts/{request['run_attempt']}\n"
+                     f"Workflow run {executor_id} attempt {executor_attempt}: {base_url}{executor_path}\n"
+                     + recorded_baseline + "\n")
+        rendered = terminal + "\n\n" + (reason + "\n\n" if reason else "") + canonical
+        # The producer inserts a blank line before history; without history
+        # its canonical block retains the final newline.
+        matches_report = current == (rendered.rstrip("\n") if current != summary else rendered)
+    else:
+        matches_report = current == summary and summary.endswith(terminal) and summary.count(terminal) == 1
+    details = check.get("details_url")
+    if (check.get("conclusion") != conclusion or not matches_report or details not in (
+            base_url + "runs/" + str(check['id']), base_url + executor_path,
+            base_url + "actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run")):
+        raise ValueError("Compiler benchmark recovered terminal summary disagrees")
+    if not isinstance(check.get("completed_at"), str):
+        raise ValueError("Compiler benchmark recovered completion time is missing")
+    completed = timestamp(check["completed_at"])
+    if completed is None:
+        raise ValueError("Compiler benchmark recovered completion time is missing")
+    artifact_name = f"9700x-lifecycle-{executor_id}-{executor_attempt}"
+    batch = read_metadata(f"actions/artifacts?name={artifact_name}&per_page=100")
+    artifacts = batch.get("artifacts") if isinstance(batch, dict) else None
+    if (not isinstance(artifacts, list) or type(batch.get("total_count")) is not int or
+            not 0 < batch['total_count'] <= 100 or len(artifacts) != batch['total_count'] or
+            not all(isinstance(row, dict) and row.get("name") == artifact_name and
+                    isinstance(row.get("created_at"), str) for row in artifacts)):
+        raise ValueError("Compiler benchmark lifecycle artifact snapshot is incomplete")
+    artifact_ids = [row.get("id") for row in artifacts]
+    if not all(type(identity) is int and identity > 0 for identity in artifact_ids) or len(set(artifact_ids)) != len(artifact_ids):
+        raise ValueError("Compiler benchmark lifecycle artifact IDs are invalid or duplicated")
+    # Later replay passes may retain the same attempt name. Only an upload
+    # within the existing five-minute controller job can prove this write.
+    relevant = [row for row in artifacts if timestamp(row.get("created_at")) is not None and
+                completed <= timestamp(row['created_at']) <= completed + timedelta(minutes=5)]
+    if len(relevant) != 1:
+        raise ValueError("Compiler benchmark lifecycle artifact is missing or ambiguous")
+    artifact = relevant[0]
+    origin = artifact.get("workflow_run")
+    if (artifact.get("expired") is not False or type(artifact.get("size_in_bytes")) is not int or
+            artifact['size_in_bytes'] <= 0 or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(artifact.get("digest", ""))) or
+            not isinstance(origin, dict) or type(origin.get("id")) is not int or origin['id'] <= 0 or
+            origin.get("repository_id") != request['repository']['id'] or
+            origin.get("head_repository_id") != request['repository']['id'] or origin.get("head_branch") != "main"):
+        raise ValueError("Compiler benchmark lifecycle artifact origin is unproved")
+    controller = read_metadata(f"actions/runs/{origin['id']}")
+    controller_attempt = controller.get("run_attempt") if isinstance(controller, dict) else None
+    if (type(controller_attempt) is not int or controller_attempt <= 0 or
+            not exact_run(controller, origin['id'], controller_attempt, COMPILER_BENCHMARK_LIFECYCLE_WORKFLOW, "workflow_run") or
+            controller.get("head_branch") != "main" or controller.get("head_sha") != origin.get("head_sha") or
+            controller["repository"]["id"] != request["repository"]["id"] or
+            controller.get("status") != "completed" or controller.get("conclusion") != "success"):
+        raise ValueError("Compiler benchmark lifecycle controller identity is unproved")
+    batch = read_metadata(f"actions/runs/{origin['id']}/attempts/{controller_attempt}/jobs?per_page=100")
+    rows = batch.get("jobs") if isinstance(batch, dict) else None
+    if (not isinstance(rows, list) or type(batch.get("total_count")) is not int or
+            batch["total_count"] != 1 or len(rows) != 1 or not isinstance(rows[0], dict)):
+        raise ValueError("Compiler benchmark lifecycle controller job is missing or duplicated")
+    writer = rows[0]
+    if (type(writer.get("id")) is not int or writer['id'] <= 0 or
+            writer.get("name") != "Reconcile the exact completed benchmark attempt" or
+            type(writer.get("run_id")) is not int or writer["run_id"] != controller['id'] or
+            type(writer.get("run_attempt")) is not int or writer["run_attempt"] != controller_attempt or
+            writer.get("head_sha") != controller['head_sha'] or writer.get("status") != "completed" or
+            writer.get("conclusion") != "success" or not isinstance(writer.get("steps"), list)):
+        raise ValueError("Compiler benchmark lifecycle writer identity is unproved")
+    steps = []
+    for name in COMPILER_BENCHMARK_LIFECYCLE_STEPS:
+        matched = [step for step in writer['steps'] if isinstance(step, dict) and step.get("name") == name]
+        if len(matched) != 1 or matched[0].get("status") != "completed" or matched[0].get("conclusion") != "success":
+            raise ValueError("Compiler benchmark lifecycle writer execution is unproved")
+        steps.append(matched[0])
+    if not all(isinstance(steps[2].get(key), str) for key in ("started_at", "completed_at")):
+        raise ValueError("Compiler benchmark lifecycle writer completion interval is missing")
+    started, finished = timestamp(steps[2]["started_at"]), timestamp(steps[2]["completed_at"])
+    if started is None or finished is None or not started <= completed <= finished:
+        raise ValueError("Compiler benchmark lifecycle writer completion interval is unproved")
+    return {"executor": executor, "controller": controller, "writer": writer, "artifact": artifact}
+
+
 def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
     """Prove display metadata, never a measurement or a workload conclusion.
 
@@ -709,12 +883,15 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
                                   details if isinstance(details, str) else "")
     output = check.get("output")
     summary = output.get("summary", "") if isinstance(output, dict) else ""
+    recovered_output = (check.get("status") == "completed" and isinstance(output, dict) and output.get("title") in (
+        "Not measured: terminal lifecycle reconciliation", "Not measured: superseded before execution"))
+    display_summary = compiler_benchmark_current_summary(summary) if recovered_output else summary
     links = re.findall(r"\[Workflow run, attempt " + str(bench_attempt) + r"\]\(" + re.escape(base_url) +
                        r"actions/runs/([1-9][0-9]*)/attempts/" + str(bench_attempt) + r"\)",
-                       summary if isinstance(summary, str) else "")
+                       display_summary if isinstance(display_summary, str) else "")
     display_links = re.findall(r"(?m)^Workflow run ([1-9][0-9]*) attempt " + str(bench_attempt) + r": " +
                                re.escape(base_url) + r"actions/runs/([1-9][0-9]*)/attempts/" + str(bench_attempt) + r"$",
-                               summary if isinstance(summary, str) else "")
+                               display_summary if isinstance(display_summary, str) else "")
     if any(label != target for label, target in display_links):
         raise ValueError("Compiler benchmark display link identities disagree")
     links.extend(target for _, target in display_links)
@@ -724,9 +901,16 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
     announced_output = (isinstance(summary, str) and summary.count(workflow_url) == 1 and
                         summary.splitlines().count(request_line) == 1)
     announce = details == workflow_url or (default_url and announced_output)
-    if announce:
-        if event != "push" or bench_attempt != 1 or check.get("status") != "queued" or links:
+    terminal_provenance = None
+    if announce or recovered_output:
+        if (event != "push" or bench_attempt != 1 or check.get("status") not in ("queued", "completed") or
+                (not recovered_output and links)):
             raise ValueError("Compiler benchmark announcement identity is invalid")
+        if check.get("status") == "completed":
+            terminal_provenance = compiler_benchmark_terminal_announcement(
+                check, head_sha, repository, request, bench_attempt, summary, read_metadata, exact_run)
+            if links and links != [str(terminal_provenance['executor']['id'])]:
+                raise ValueError("Compiler benchmark recovered publisher links disagree")
         publisher, publisher_path = request, request_path
         writer_specs = [("Show the queued compiler benchmark check", "Check out the trusted check writer",
                          ("Create the queued check",))]
@@ -787,7 +971,8 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
                 proved.append(writer)
     if not proved:
         raise ValueError("Compiler benchmark trusted writer execution is unproved")
-    return {"request": request, "publisher": publisher, "writers": proved}
+    return {"request": request, "publisher": publisher, "writers": proved,
+            **({"terminal_recovery": terminal_provenance} if terminal_provenance is not None else {})}
 
 
 def separate_reconciled_jobs(jobs, run_id, run_attempt, head_sha, checks, *, repository=None, read_metadata=None):

@@ -559,11 +559,13 @@ BUSTER_CT_CHECK((u32)IR_ATOMIC_OPERATION_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK((u32)IR_OPCODE_COUNT < 63);
 // Record the opcodes queried by canonical consumers. LOCAL lets the shared
 // promotion oracle skip its discovery scan for frontend-built SSA functions;
-// the atomic/assembly bits retain the existing rare-operation fast paths.
+// CALL lets the inliner's required-call scan skip call-free functions; the
+// atomic/assembly bits retain the existing rare-operation fast paths.
 // An opcode absent from this list must never be queried: add it here in the
 // same change that adds the query. Unknown summaries remain conservative.
 #define IR_OPCODE_SUMMARY_TRACKED                                                                                                      \
-    (IR_OPCODE_BIT(IR_OPCODE_LOCAL) | IR_OPCODE_BIT(IR_OPCODE_STACK_ALLOCATE) | IR_OPCODE_BIT(IR_OPCODE_STACK_RESTORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD) |          \
+    (IR_OPCODE_BIT(IR_OPCODE_LOCAL) | IR_OPCODE_BIT(IR_OPCODE_CALL) | IR_OPCODE_BIT(IR_OPCODE_STACK_ALLOCATE) |                    \
+     IR_OPCODE_BIT(IR_OPCODE_STACK_RESTORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD) |                                                   \
      IR_OPCODE_BIT(IR_OPCODE_ATOMIC_STORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_READ_MODIFY_WRITE) |                                       \
      IR_OPCODE_BIT(IR_OPCODE_ATOMIC_COMPARE_EXCHANGE) | IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY) |                                    \
      IR_OPCODE_BIT(IR_OPCODE_LABEL_ADDRESS) | IR_OPCODE_BIT(IR_OPCODE_INDIRECT_BRANCH))
@@ -954,7 +956,9 @@ struct IrFastStatistics
 };
 
 // Direct-call expansion is independent of register allocation and FAST cleanup.
-// Zero option limits select these defaults; limits count canonical rows/sites.
+// Zero row/site limits select these optional defaults; required calls instead use
+// the work/storage guards. Explicit row limits cap both kinds of expansion.
+// Other zero option limits select defaults; limits count canonical rows/sites.
 // A zero module limit is relative to the module: the larger of
 // IR_INLINE_MODULE_GROWTH and the module's lowered canonical instruction rows
 // shifted right by IR_INLINE_MODULE_GROWTH_SHIFT (1/32 growth). A fixed
@@ -1404,6 +1408,15 @@ BUSTER_F_DECL bool ir_local_promotion_call_barrier(IrProgram* program, IrInstruc
 // floating exceptions and unknown/exact effects remain observable.
 BUSTER_F_DECL bool ir_instruction_is_pure(IrProgram* program, IrFunction* function, IrInstruction const* row);
 BUSTER_F_DECL String8 ir_fast_pass_name(IrFastPass pass);
+// Construction-time fold experiment (#3010, -fcanonical-construction-fold):
+// the immediate ir_fast_fold would write for `candidate`, a CAST or BINARY row
+// a builder has described but not committed, whose operands are committed
+// values. A non-null `right_bits` is the constant the second operand would
+// hold once its own rows were built; that operand then supplies only its type.
+// True only for a constant rule (ir_fast_fold_rule); an identity, an
+// unfoldable row or one with no single-limb integer result is left as is.
+BUSTER_F_DECL bool ir_fast_fold_candidate(IrProgram* program, IrFunction* function, IrInstruction const* candidate, u64 const* right_bits,
+                                          u64* bits);
 BUSTER_F_DECL IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool input_certified);
 
 // Fixed-width two's-complement integer semantics (ir_integer.c): the one

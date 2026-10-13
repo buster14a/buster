@@ -1,0 +1,9 @@
+test_explicit_losses_and_local_absence (__main__.TraceControls.test_explicit_losses_and_local_absence) ... ok
+test_same_point_order_does_not_see_future_repair (__main__.TraceControls.test_same_point_order_does_not_see_future_repair) ... ok
+test_selected_attempt_and_predicate_alias (__main__.TraceControls.test_selected_attempt_and_predicate_alias) ... ok
+test_split_store_and_bad_reload_reconciliation (__main__.TraceControls.test_split_store_and_bad_reload_reconciliation) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.001s
+
+OK

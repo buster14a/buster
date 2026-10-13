@@ -284,12 +284,17 @@ it a minute later. Every Windows step enters the shell through
 options keep each step's own scope, so the MSVC reference differential still
 skips the LLVM prepend and the clang probe. Each of that test's seven helper
 probes is still its own `powershell.exe` step process with its own files, but
-they launch together from `setUpClass`: one Windows PowerShell start takes
-about 23 s on the hosted AArch64 runner, and serial starts pushed the shared
-workflow-tools step past its five-minute budget
-([#2021](https://github.com/buster14a/buster/issues/2021)). That step now
+they launch together from `setUpClass`. Serial probes once pushed the shared
+workflow-tools step past its five-minute budget on hosted AArch64
+([#2021](https://github.com/buster14a/buster/issues/2021)); that step now
 runs its suites in concurrent lanes; see
 [bootstrap wrapper CI](ci-bootstrap-wrapper.md#required-gate-and-budgets).
+The cost was not process startup. Each probe's first cmdlet from an unloaded
+module made Windows PowerShell 5.1 analyze every module on `PSModulePath`,
+about 23 s of CPU on that runner. Each Windows PowerShell step, and the probe
+fixture, therefore imports `Microsoft.PowerShell.Management` and
+`Microsoft.PowerShell.Utility` by name first
+([#3979](ci-bootstrap-wrapper.md#windows-powershell-command-discovery-3979)).
 
 The native driver selects `gcc-15` for the macOS GCC row and verifies its
 preprocessor identity before configuration. `BUSTER_GCC` can select a different
@@ -670,7 +675,11 @@ retention/recovery, statistical policy and outstanding live acceptance.
 ## No-code classification and staged admission (#3107)
 
 The native build driver exposes `ci_no_code --repo PATH --base SHA --head SHA
---tested SHA --policy SHA --event pull_request|merge_group`. Its deterministic
+--tested SHA --policy SHA --event pull_request|merge_group|main_push`. The
+`main_push` event is the automatic MAIN compiler benchmark exemption, with its
+own `buster-ci-main-unchanged-v1` record and contract in
+[compiler-main-unchanged-skip.md](compiler-main-unchanged-skip.md) (#3923);
+it does not change PR, merge-group or main-push CI policy. Its deterministic
 `buster-ci-no-code-v1` record distinguishes `no-code` from `full`; it is a
 classification decision, never execution or coverage evidence. The PR head,
 event base, actual tested merge and independently trusted policy are separate

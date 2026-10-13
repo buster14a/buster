@@ -170,6 +170,15 @@ in both frontend forms.
   rejected in both `-fsyntax-only` and `-c` (GitHub #2531).
   `c_test_builtin_result_types` checks every form through semantic-only
   analysis and both lowering forms on three target layouts.
+- **Array operands decay before `->` member lookup.** The strict lowering
+  operand walk selects the element of either a pointer or an array before
+  resolving the member. This also applies to arrays reached through a postfix
+  chain; a bare array keeps its array type for `sizeof`. Missing members,
+  non-aggregate elements, multidimensional arrays and `.` on an array remain
+  invalid. `c_test_array_arrow_conditional_types` covers both conditional arms,
+  wide values, narrow promotions, qualified and union elements, nested array
+  members and single evaluation on six target layouts and both frontend forms,
+  with native execution in both allocators (GitHub #3915).
 - **Every conditional converts to its own common type before its consumer.**
   The selection worklist types immediate children in postorder, retaining only
   the type at each question token. Flattened control flow shares a result place

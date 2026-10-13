@@ -96,6 +96,11 @@
     compare-exchange per first fill. `BUSTER_SINGLE_THREADED` compiles the
     atomics to plain accesses.
 
+  The prologue, epilogue and zero-idiom shapes pin the form key the selector
+  picks, so their first lookup prepares that key without a selector search;
+  `machine_x86_64_exact_prewarm_all()` re-checks each pin against the
+  selector and refuses the shape cache on a disagreement (#1125).
+
   The TLS and GOT relocation recipes fill one group at a time under a fill
   claim that returns to idle after each fill, and publish their prepared and
   valid masks with release stores. Machine opcode rows do the same: preparing
@@ -172,3 +177,23 @@ reused one.
 Lane startup allocates worker records and handle storage before acquiring the
 startup gate. Allocation failures may enter the fatal diagnostic path, so the
 gate protects thread publication and cancellation without enclosing allocation.
+
+## ThreadSanitizer gate
+
+Byte-identical self-host output and ASan/UBSan do not see a publication bug
+such as a plain read of a byte another lane accesses atomically; #53's lane
+first fills found one only under a ThreadSanitizer build. The
+[`generate --tsan`](build.md#build) tree and its `test_tsan` target are the
+gate for this class: run them after changing a once-claim, a lane kernel, a
+shared counter, or anything a `-fcompile-jobs` cohort reaches.
+
+`test_tsan` runs `os_tests` (gang construction, barriers, broadcasts and
+once-claim nesting) and `compiler_driver_tests`, whose fixtures spawn `cc`
+children that link several translation units at several `-fcompile-jobs`
+widths: `compiler_driver_test_lane_first_fills` reaches the cold x86 caches
+from every lane at once, and `compiler_driver_test_unit_batches` covers
+failed cohorts and ordered publication. Children inherit the fatal
+`TSAN_OPTIONS`, so a race in one fails its fixture instead of only printing
+a report. Test-only instrumentation that lanes reach must be thread-local or
+atomic, like the work-ledger counters and `c_ir_label_find_probe_total`
+(#3948). Do not add suppressions to make the gate pass.
