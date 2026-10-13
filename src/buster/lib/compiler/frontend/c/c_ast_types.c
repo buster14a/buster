@@ -2960,7 +2960,8 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_rows_equal(CType const* x, CType const* y)
 
 BUSTER_GLOBAL_LOCAL bool c_ast_types_alignments_equal(CTypeAlignment const* x, CTypeAlignment const* y)
 {
-    return x->type_index == y->type_index && x->alignment_start == y->alignment_start && x->alignment_count == y->alignment_count;
+    return x->type_index == y->type_index && x->source_type_index == y->source_type_index && x->alignment_start == y->alignment_start &&
+           x->alignment_count == y->alignment_count;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ast_types_bounds_equal(CArrayBound const* x, CArrayBound const* y)

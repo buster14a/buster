@@ -95,7 +95,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_narrow_call_results(UnitTest
                     BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;

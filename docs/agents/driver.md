@@ -710,8 +710,9 @@ disable frontend SSA as well. Verbose compilation reports `IR_FRONTEND_SSA`
 counters beside `IR_LOCAL_PROMOTION`; see the
 [frontend ownership contract](frontend/foundations.md#direct-local-ssa-github-34).
 
-`-fc-ast-pilot[=implicit|hybrid|explicit]` (default off; the bare flag is
-`implicit`) builds the [implicit postorder syntax
+`-fc-ast-pilot[=implicit|hybrid|explicit]` (default `implicit` since the
+[owner decision of 2026-10-13](https://github.com/buster14a/buster/issues/3102#issuecomment-6146782845);
+the bare flag is `implicit`) builds the [implicit postorder syntax
 tree](frontend/ast.md#driver-pilot-hook) of each C input after a successful
 `c_preprocess`, inside the parse phase, so its time lands in `parse_ns`. The
 unit's declaration records then come from the tree
@@ -724,19 +725,25 @@ binder follows each function body's
 [statement plan](frontend/ast.md#statement-plan-from-the-tree), and lowering
 answers its root-conditional splits from it
 ([lowering from the tree](frontend/ast.md#lowering-from-the-tree)); no other
-stage reads it. Only under the flag does analysis share the primitive and
+stage reads it. Only with the tree does analysis share the primitive and
 pointer type rows those queries mint
 ([interned rows](frontend/ast.md#interned-rows)). With the flag the object
-and every diagnostic are byte-identical, and a tree the builder rejects fails
-the unit with the parse error class and a located diagnostic published like
-`c_parse_ast`'s. It does nothing for `-E`, assembly inputs or the other
+and every diagnostic are byte-identical to the tree-free path's. A builder that
+cannot reserve its storage fails the unit with the parse error class; a unit
+whose tree the builder rejects on syntax compiles without a tree, so it reports what
+`-fno-c-ast-pilot` reports; `-v` counts it in a `C_AST_REJECTED` row. It does nothing for `-E`, assembly inputs or the other
 languages. Any other layout value is an argument error
 (`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints
 `C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT`, `C_AST_STATEMENTS`,
 `C_AST_LOWER` and `C_AST_FACTS` rows, among others, beside `C_TYPE_LAYOUT`.
-Except under `-fsyntax-only`, the flag also retains semantic analysis's
+Except under `-fsyntax-only`, the tree also retains semantic analysis's
 per-node facts for lowering
-([retained facts](frontend/ast.md#retained-facts)).
+([retained facts](frontend/ast.md#retained-facts)). `-fno-c-ast-pilot` selects
+the tree-free path: analysis and lowering answer every question from tokens,
+as they did before the switch, and no facts are retained. It is the reference
+arm for differentials and bisection, and
+[#4058](https://github.com/buster14a/buster/issues/4058) removes it once
+lowering reads only the tree. The last of the two flags wins.
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
 nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`
@@ -2254,7 +2261,36 @@ switches, runtime paths, and other `-z` modes are refused.
 `-Wp,` and `-Wa,` are never warning options. Only the exact
 `-Wp,-MD,PATH` and `-Wp,-MMD,PATH` dependency spellings described below are
 supported; other pass-through requests, including macro/include operations,
-are refused. Direct `-D`, `-U`, and `-I` remain available.
+are refused. The one accepted `-Wa,` value is `--noexecstack` (alone or as a
+comma-separated list of it): every Linux and Android ELF object already ends
+in an empty non-allocated `.note.GNU-stack` marking a non-executable stack
+unless an assembly input requests `"x"`, so the option changes nothing, for
+`-c`, `-S` and `-E` alike. Any other `-Wa,` value, including `--execstack`,
+an empty item and `-Wa,` alone, is refused with `unsupported pass-through
+option`.
+
+## C90 dialects, `-P` and `-Qunused-arguments`
+
+`-std=c89`, `-std=c90`, `-std=iso9899:1990` and `-ansi` select a strict ISO C90
+preprocessing dialect (`C_PREPROCESS_DIALECT_C89`), separate from the existing
+`-std=gnu89`/`-std=gnu90`. Like the other strict dialects it defines
+`__STRICT_ANSI__`, leaves out the GNU `linux`/`unix` macros and the GNU
+keywords (`typeof`, `asm`), and replaces trigraphs by default. Like `gnu89` it
+leaves `__STDC_VERSION__` undefined and defines `__GNUC_GNU_INLINE__`, with
+GNU inline semantics for `inline`. `-ansi` is exactly `-std=c90`; the last of
+`-ansi` and `-std=` wins. `-std=iso9899:199409` and `-std=c88` stay refused.
+
+The dialect is a preprocessing and keyword switch only. The frontend has no
+C90 language-rule switches, so `//` comments, mixed declarations and
+statements, and compound literals and other C99 constructs that GCC and Clang
+diagnose or reject under `-std=c90 -pedantic` are accepted. What the dialect
+supplies is the predefined-macro and header-selection behavior real C90
+projects (SDL's tests, parson) depend on, not a conformance check.
+
+`-P` (suppress linemarkers) and `-Qunused-arguments` (suppress Clang's
+unused-argument warning) are accepted for every action. The `-E` serializer
+never writes linemarkers, so `-P` already holds, and no unused-argument
+warning exists to suppress. Direct `-D`, `-U`, and `-I` remain available.
 Standalone `-M`, `-MM`, and `-MG` remain unsupported.
 
 ## Macro filename prefix maps
@@ -2577,6 +2613,8 @@ allocators; `codegen_test_machine_scratch_plan` checks the plan, the
 replacement and its restoration. Backend time, not memory, is the next limit
 for such functions: 128,000 and 256,000 `sink += x + i;` statements in one
 function take about 10 s and 42 s.
+
+Windows ARM64 stores function length in 18 bits of four-byte instructions. Larger functions therefore use aligned `.pdata`/`.xdata` fragments strictly shorter than 1 MiB; epilogs remain whole, their scopes are relative to each fragment, and continuation records carry the parent's unwind state through `end_c`. A registered large C fixture exercises compilation, linking, and execution across those fragment boundaries on native Windows ARM64.
 
 ## ELF TLS companion lookup
 

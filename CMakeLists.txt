@@ -1175,6 +1175,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/target_test.c
     src/buster/tests/truetype_test.c
     src/buster/tests/image_test.c
+    src/buster/tests/disk_builder_test.c
     src/buster/tests/compiler/metamorphic/metamorphic_test.c
     src/buster/tests/compiler/frontend/c/c_test.c
     src/buster/tests/compiler/frontend/c/c_ast_test.c
@@ -1225,6 +1226,9 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/driver/driver_test.c
     src/buster/tests/compiler/driver/object_path_test.c
 )
+if (BUSTER_INCLUDE_TESTS)
+    list(APPEND BUSTER_TEST_SOURCES src/buster/apps/disk_builder_verification.c)
+endif()
 set(BUSTER_TEST_HEADERS
     src/buster/tests/test.h
     src/buster/tests/byte_writer_test.h
@@ -1241,6 +1245,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/target_test.h
     src/buster/tests/truetype_test.h
     src/buster/tests/image_test.h
+    src/buster/tests/disk_builder_test.h
     src/buster/tests/x86_64_test.h
     src/buster/tests/compiler/metamorphic/metamorphic_test.h
     src/buster/tests/compiler/codegen/ebpf_test_vm.h

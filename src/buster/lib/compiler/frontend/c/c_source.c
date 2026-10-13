@@ -1498,7 +1498,8 @@ BUSTER_GLOBAL_LOCAL u8* c_source_trim_row_pair(Arena* arena, u8* first, u64 firs
 // the supported earlier strict C modes require their phase-one replacement.
 BUSTER_C_INTERNAL bool c_translate_trigraphs_enabled(CPreprocessDialect dialect)
 {
-    return dialect == C_PREPROCESS_DIALECT_C99 || dialect == C_PREPROCESS_DIALECT_C11 || dialect == C_PREPROCESS_DIALECT_C17;
+    return dialect == C_PREPROCESS_DIALECT_C89 || dialect == C_PREPROCESS_DIALECT_C99 || dialect == C_PREPROCESS_DIALECT_C11 ||
+           dialect == C_PREPROCESS_DIALECT_C17;
 }
 
 BUSTER_C_INTERNAL char8 c_translate_trigraph_character(char8 third)
@@ -5810,6 +5811,8 @@ struct CMacroExpansionStorage
 {
     Arena* argument_arena;
     Arena* expansion_arena;
+    // Stop retrying after a resource failure until this storage is destroyed.
+    bool failed;
 };
 
 typedef struct CMacroExpansionMark CMacroExpansionMark;
@@ -6544,21 +6547,47 @@ BUSTER_C_INTERNAL void c_preprocess_output_push(Arena* arena, CPreprocessTokenNo
 #define C_MACRO_EXPANSION_STORAGE_RESERVED_SIZE BUSTER_GB(8)
 
 // Both arenas are created together and only when an invocation first needs
-// them, so a unit that never expands a function-like macro reserves nothing.
-BUSTER_C_INTERNAL void c_macro_expansion_storage_ensure(CMacroExpansionStorage* storage)
+// transient storage. A failed reservation is reported once for this storage
+// owner; subsequent expansions stop without retrying the large reservation.
+BUSTER_C_INTERNAL bool c_macro_expansion_storage_ensure(CMacroExpansionStorage* storage, Arena* arena,
+                                                        CSourceLocation location, CPreprocessResult* result)
 {
-    if (!storage->expansion_arena)
+    bool success = !storage->failed;
+    if (success && !storage->expansion_arena)
     {
-        storage->argument_arena = arena_create((ArenaCreation){
+        Arena* argument_arena = c_frontend_arena_create((ArenaCreation){
             .reserved_size = C_MACRO_EXPANSION_STORAGE_RESERVED_SIZE,
             .flags = {.pool_reuse = 1},
-        });
-        storage->expansion_arena = arena_create((ArenaCreation){
-            .reserved_size = C_MACRO_EXPANSION_STORAGE_RESERVED_SIZE,
-            .flags = {.pool_reuse = 1},
-        });
-        BUSTER_CHECK(storage->argument_arena && storage->expansion_arena);
+        }, C_FRONTEND_RESERVATION_PREPROCESS);
+        Arena* expansion_arena = argument_arena ? c_frontend_arena_create((ArenaCreation){
+                                                       .reserved_size = C_MACRO_EXPANSION_STORAGE_RESERVED_SIZE,
+                                                       .flags = {.pool_reuse = 1},
+                                                   }, C_FRONTEND_RESERVATION_PREPROCESS)
+                                                : 0;
+        success = argument_arena && expansion_arena;
+        if (success)
+        {
+            storage->argument_arena = argument_arena;
+            storage->expansion_arena = expansion_arena;
+        }
+        else
+        {
+            storage->failed = true;
+            if (argument_arena)
+            {
+                arena_destroy(argument_arena, 1);
+            }
+            if (expansion_arena)
+            {
+                arena_destroy(expansion_arena, 1);
+            }
+            String8 failed_storage = argument_arena ? S8("expansion") : S8("argument");
+            c_preprocess_diagnostic_push(arena, result, location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                         string_format(arena, S8("could not reserve {u64} bytes for C macro {S8} arena"),
+                                                       C_MACRO_EXPANSION_STORAGE_RESERVED_SIZE, failed_storage));
+        }
     }
+    return success;
 }
 
 // Releases the arenas and, in a test build, records the largest peak of live
@@ -6578,8 +6607,8 @@ BUSTER_C_INTERNAL void c_macro_expansion_storage_destroy(CMacroExpansionStorage*
 #endif
         arena_destroy(storage->expansion_arena, 1);
         arena_destroy(storage->argument_arena, 1);
-        *storage = (CMacroExpansionStorage){0};
     }
+    *storage = (CMacroExpansionStorage){0};
 }
 
 BUSTER_C_INTERNAL CMacroExpansionMark c_macro_expansion_mark(CMacroExpansionStorage const* storage)
@@ -6906,6 +6935,22 @@ BUSTER_C_INTERNAL u32 c_preprocess_builtin_line(CMacro* first);
 BUSTER_C_INTERNAL u32 c_preprocess_builtin_include_level(CMacro* first);
 BUSTER_C_INTERNAL CSourceLocation c_preprocess_recover_location(struct CPreprocessSourceFrame* frame, u32 file, CToken token);
 
+// The last byte-prefix match wins; callers substitute it once without remapping.
+BUSTER_C_SHARED u32 c_macro_prefix_map_index(String8 path, CMacroPrefixMap const* mappings, u32 mapping_count)
+{
+    u32 result = UINT32_MAX;
+    for (u32 remaining = mapping_count; remaining; remaining -= 1)
+    {
+        u32 mapping_index = remaining - 1;
+        if (string_starts_with_sequence(path, mappings[mapping_index].old_prefix))
+        {
+            result = mapping_index;
+            break;
+        }
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* first, u8 builtin, u32 stamp, u32 line)
 {
     CPpToken result = {0};
@@ -6963,25 +7008,23 @@ BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* 
         }
         if (!first->builtin_in_directive)
         {
-            for (u32 remaining = first->builtin_prefix_map_count; remaining; remaining -= 1)
+            u32 mapping_index =
+                c_macro_prefix_map_index(path, first->builtin_prefix_maps, first->builtin_prefix_map_count);
+            if (mapping_index < first->builtin_prefix_map_count)
             {
-                CMacroPrefixMap mapping = first->builtin_prefix_maps[remaining - 1];
-                if (string_starts_with_sequence(path, mapping.old_prefix))
+                CMacroPrefixMap mapping = first->builtin_prefix_maps[mapping_index];
+                String8 suffix = string_slice(path, mapping.old_prefix.length, path.length);
+                u64 length = mapping.new_prefix.length + suffix.length;
+                char8* mapped = c_space_allocate(space, length);
+                if (mapping.new_prefix.length)
                 {
-                    String8 suffix = string_slice(path, mapping.old_prefix.length, path.length);
-                    u64 length = mapping.new_prefix.length + suffix.length;
-                    char8* mapped = c_space_allocate(space, length);
-                    if (mapping.new_prefix.length)
-                    {
-                        memcpy(mapped, mapping.new_prefix.pointer, mapping.new_prefix.length);
-                    }
-                    if (suffix.length)
-                    {
-                        memcpy(mapped + mapping.new_prefix.length, suffix.pointer, suffix.length);
-                    }
-                    path = (String8){.pointer = mapped, .length = length};
-                    break;
+                    memcpy(mapped, mapping.new_prefix.pointer, mapping.new_prefix.length);
                 }
+                if (suffix.length)
+                {
+                    memcpy(mapped + mapping.new_prefix.length, suffix.pointer, suffix.length);
+                }
+                path = (String8){.pointer = mapped, .length = length};
             }
         }
         u64 capacity = path.length * 4 + 3;
@@ -7880,12 +7923,19 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CMacroExpansionStorage*
                     bool scoped = definition->function_like || definition->builtin || definition->has_paste || definition->has_stringify || definition->has_va_opt;
                     bool deferred = false;
                     CMacroExpansionMark mark = {0};
-                    if (scoped)
+                    bool storage_ready = !scoped ||
+                                         c_macro_expansion_storage_ensure(storage, arena, c_pp_stamp_location(stamps, token.stamp), result);
+                    if (storage_ready && scoped)
                     {
-                        c_macro_expansion_storage_ensure(storage);
                         mark = c_macro_expansion_mark(storage);
                     }
-                    if (macro->definition.function_like)
+                    if (!storage_ready)
+                    {
+                        scoped = false;
+                        ok = false;
+                        done = true;
+                    }
+                    if (storage_ready && macro->definition.function_like)
                     {
                         invoked = c_macro_invocation_arguments(arena, storage, space->base, symbols, first_macro, &tasks, context->task_base, macro, c_pp_stamp_location(stamps, token.stamp), &arguments,
                                                                &argument_count, result);
@@ -7902,7 +7952,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CMacroExpansionStorage*
                             invoked = false;
                         }
                     }
-                    if (invoked)
+                    if (storage_ready && invoked)
                     {
                         expansion_count += 1;
                         result->detail->preprocessed.expansions += 1;
@@ -12050,6 +12100,7 @@ BUSTER_C_INTERNAL String8 c_preprocess_standard_version(CPreprocessDialect diale
     case C_PREPROCESS_DIALECT_C23:
         return S8("202311L");
     case C_PREPROCESS_DIALECT_GNU89:
+    case C_PREPROCESS_DIALECT_C89:
     case C_PREPROCESS_DIALECT_COUNT:
         return (String8){0};
     }
@@ -12593,7 +12644,7 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrSourceRegion) == 80);
 // fields still follow the explicit rehoming rules below.
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSymbolTable) == 72);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CDiagnostic) == 48);
-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 648 + 32 * BUSTER_INCLUDE_TESTS);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 664 + 32 * BUSTER_INCLUDE_TESTS);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceFileMetrics) == 32);
 BUSTER_CT_CHECK(sizeof(CPragmaState) == 8);
 
@@ -12818,7 +12869,14 @@ u64 c_test_preprocess_references_range(CPreprocessResult const* result, void con
     {
         count += c_test_pointer_in_range(result->detail->lexed_files, start, end) +
                  c_test_pointer_in_range(result->detail->dependencies, start, end) +
-                 c_test_pointer_in_range(result->detail->output_spacing, start, end);
+                 c_test_pointer_in_range(result->detail->output_spacing, start, end) +
+                 c_test_pointer_in_range(result->detail->macro_prefix_maps, start, end);
+        for (u32 index = 0; index < result->detail->macro_prefix_map_count; index += 1)
+        {
+            CMacroPrefixMap const* mapping = &result->detail->macro_prefix_maps[index];
+            count += c_test_pointer_in_range(mapping->old_prefix.pointer, start, end) +
+                     c_test_pointer_in_range(mapping->new_prefix.pointer, start, end);
+        }
         for (u32 index = 0; index < result->detail->lexed_file_count; index += 1)
         {
             count += c_test_pointer_in_range(result->detail->lexed_files[index].path.pointer, start, end);
@@ -12979,6 +13037,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     };
     if (!result_arena)
     {
+        // No caller arena means no token stream that can be parsed or lowered.
         return result;
     }
     // The detail block outlives this call in the caller's arena: the result is
@@ -12991,6 +13050,21 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     *result.detail = (CPreprocessDetail){
         .data_layout = options.data_layout,
     };
+    if (options.macro_prefix_map_count)
+    {
+        // Parsing runs after preprocessing returns, so keep an owned option
+        // copy with the result detail for __builtin_FILE().
+        result.detail->macro_prefix_maps = arena_allocate(result_arena, CMacroPrefixMap, options.macro_prefix_map_count);
+        result.detail->macro_prefix_map_count = options.macro_prefix_map_count;
+        for (u32 map_index = 0; map_index < options.macro_prefix_map_count; map_index += 1)
+        {
+            CMacroPrefixMap mapping = options.macro_prefix_maps[map_index];
+            result.detail->macro_prefix_maps[map_index] = (CMacroPrefixMap){
+                .old_prefix = string_duplicate_arena(result_arena, mapping.old_prefix, false),
+                .new_prefix = string_duplicate_arena(result_arena, mapping.new_prefix, false),
+            };
+        }
+    }
     // The spelling space lives in its own commit-on-demand arena so its
     // offsets stay contiguous under one base without stealing reserve from
     // the caller's arena; the result carries the arena so a caller that
@@ -13355,7 +13429,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     }
     C_DEFINE_TYPE_MACRO("__STDC_UTF_16__", S8("1"));
     C_DEFINE_TYPE_MACRO("__STDC_UTF_32__", S8("1"));
-    if (options.dialect == C_PREPROCESS_DIALECT_GNU89)
+    if (options.dialect == C_PREPROCESS_DIALECT_GNU89 || options.dialect == C_PREPROCESS_DIALECT_C89)
     {
         C_DEFINE_TYPE_MACRO("__GNUC_GNU_INLINE__", S8("1"));
     }
@@ -15040,12 +15114,17 @@ BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestUnitEntry* c_test_unit_registr
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_registry_count;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_test_unit_serial;
 
-BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Arena* shapes, Arena* owner, u64 owner_position)
+void c_test_unit_registry_prewarm(void)
 {
     if (!c_test_unit_registry_arena)
     {
         c_test_unit_registry_arena = arena_create((ArenaCreation){.reserved_size = C_TEST_UNIT_REGISTRY_RESERVED_SIZE, .flags = {.no_pool = 1}});
     }
+}
+
+BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Arena* shapes, Arena* owner, u64 owner_position)
+{
+    c_test_unit_registry_prewarm();
     if (c_test_unit_registry_arena)
     {
         CTestUnitEntry* entry = arena_allocate(c_test_unit_registry_arena, CTestUnitEntry, 1);

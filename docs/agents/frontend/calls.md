@@ -580,6 +580,16 @@ groups such as `int ((T))` carry that classification down the explicit type
 machine. Pointer-led named groups, `int T`, `const T T`, member names and
 ordinary block-scope shadowing keep their existing rules.
 
+GNU attributes may also follow a complete function-pointer parameter
+declarator, after its callback function suffix. The trailing form
+`void f(void (*routine)(void) __attribute__((noreturn)))` keeps `routine`
+visible in the body and retains the marker on the callback function type. The
+prefix spelling remains supported. `c_test_function_pointer_parameter_attribute_runtime`
+parses both placements, checks parameter visibility and the callback
+function-type marker, then separately compiles and runs returning `unused`
+controls through Buster and Clang. It leaves the separate outer-function
+callback-effect rule to #4087.
+
 A typedef remains a type in the function body. Checked expression leaf queries
 reject its use as a value, including within parentheses or operator operands;
 casts and type operands keep their type-name binding. The statement-expression
@@ -684,7 +694,11 @@ inline definition, which supplies no external definition. Calls and address
 expressions share the external function identity; a referenced body must not
 become a second strong definition. A compatible extern or non-inline
 declaration in the same unit supplies the external definition. Static inline
-and GNU inline semantics retain their separate rules.
+and GNU inline semantics retain their separate rules. Under GNU inline semantics
+(`-std=gnu89` or `gnu_inline`), an `extern inline` definition is inline-only only
+for an externally linked entity. When a visible earlier `static` declaration
+gives the entity internal linkage, the `extern inline` body is its internal
+definition; a referenced body is lowered and an unused body remains omitted.
 
 The registered c_test_c99_inline_linkage checks symbol linkage, definition
 status and canonical function state in both frontend forms across six native
@@ -693,7 +707,10 @@ non-inline prototype and both GNU attribute directions. Its two-unit program
 checks the literal result 14, distinct private static helpers and equal
 function pointers. All four native allocator modes compile the units together
 and separately; Linux x86-64 also links the Buster objects with GCC and Clang
-and runs independent host-built versions of the same source recipe.
+and runs independent host-built versions of the same source recipe. Its
+neighboring `c_test_static_declaration_inline_definition` checks the prior
+static-prototype case under GNU89 and `gnu_inline`, including a referenced
+internal definition and an unused body.
 
 The existing per-entity declaration scan decides whether a body supplies an
 external definition. A referenced C99 inline-only body retains a canonical
@@ -701,7 +718,7 @@ external declaration and emits no body; calls and addresses bind to the
 external definition from another unit. Pre-created function symbols take the
 same definition decision, preserving real alias definitions; GNU inline-only
 bodies do not mark those symbols defined. Unused bodies retain their existing
-dropped state. No inline optimizer, dependency walk or GNU policy is added.
+dropped state. No inline optimizer or body dependency walk is added.
 
 Needed Windows `__inline`/`__forceinline` bodies retain callable definitions
 and their shared function identity. The Windows predefines preserve `__inline`
@@ -876,3 +893,16 @@ also supports unevaluated `sizeof` queries without evaluating the size operand.
 `c_test_conditional_alloca` covers both operand orders with `char *` and
 `void *`, both frontend forms, canonical validation, FAST/QUALITY execution,
 selected-arm effects and rejected pointer/floating controls.
+
+## Declaration attribute ownership
+
+A marker on a function's callback parameter belongs to that parameter's
+function type, not to the function accepting it. Declaration marker queries
+first retain their usual negative fast path, then exclude the outer parameter
+list only when a found marker lies there. Shared and trailing outer markers
+remain visible, including true noreturn declarations.
+
+`c_test_noreturn_callback_scope` checks typedef, inline pointer and grouped-name
+setters on x86-64/AArch64 in both frontend forms, preserving reachable calls
+and returns alongside true prefix/trailing noreturn controls. The native
+fixture executes all three setters under both allocators.
