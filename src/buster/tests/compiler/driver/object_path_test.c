@@ -1856,14 +1856,31 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_modifier_rejection(String8 source, 
 // GOT type relaxation can be lost when the printer has to use a raw data
 // directive. The family may differ, but every field and symbol property stays
 // exact in the comparison below.
-BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_assembly_relocation_objects_match(Arena* arena, String8 expected_path, String8 actual_path)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_assembly_relocation_objects_match(Arena* arena, String8 expected_path, String8 actual_path,
+                                                                                       String8* mismatch_description)
 {
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
     ObjectFile expected = object_read(arena, file_read(arena, expected_path, (FileReadOptions){0}), target);
     ObjectFile actual = object_read(arena, file_read(arena, actual_path, (FileReadOptions){0}), target);
+    String8 mismatch = string_format(arena, S8("object reader errors expected={u32} actual={u32}"),
+                                     (u32)expected.error, (u32)actual.error);
     bool valid = expected.error == OBJECT_ERROR_NONE && actual.error == OBJECT_ERROR_NONE &&
                  expected.section_count == actual.section_count && expected.symbol_count == actual.symbol_count &&
                  expected.relocation_count == actual.relocation_count;
+    if (expected.error == OBJECT_ERROR_NONE && actual.error == OBJECT_ERROR_NONE)
+    {
+        if (expected.section_count == actual.section_count && expected.symbol_count == actual.symbol_count &&
+            expected.relocation_count == actual.relocation_count)
+        {
+            mismatch = S8("object metadata matches");
+        }
+        else
+        {
+            mismatch = string_format(arena, S8("counts sections={u32}/{u32} symbols={u32}/{u32} relocations={u32}/{u32}"),
+                                     expected.section_count, actual.section_count, expected.symbol_count, actual.symbol_count,
+                                     expected.relocation_count, actual.relocation_count);
+        }
+    }
     for (u32 index = 0; index < expected.section_count && valid; index += 1)
     {
         ObjectSection left = expected.sections[index];
@@ -1879,6 +1896,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_assembly_relocation_objects_match(A
         if (match == UINT32_MAX)
         {
             valid = false;
+            mismatch = string_format(arena, S8("section {S8} is absent"), left.name);
         }
         else
         {
@@ -1886,6 +1904,12 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_assembly_relocation_objects_match(A
             valid = left.kind == right.kind && left.alignment == right.alignment && left.virtual_size == right.virtual_size &&
                     left.data.length == right.data.length &&
                     (!left.data.length || memcmp(left.data.pointer, right.data.pointer, left.data.length) == 0);
+            if (!valid)
+            {
+                mismatch = string_format(arena, S8("section {S8}: kind={u32}/{u32} align={u64}/{u64} vsize={u64}/{u64} bytes={u64}/{u64}"),
+                                         left.name, (u32)left.kind, (u32)right.kind, left.alignment, right.alignment,
+                                         left.virtual_size, right.virtual_size, left.data.length, right.data.length);
+            }
         }
     }
     for (u32 index = 0; index < expected.symbol_count && valid; index += 1)
@@ -1903,17 +1927,29 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_assembly_relocation_objects_match(A
         if (match == UINT32_MAX)
         {
             valid = false;
+            mismatch = string_format(arena, S8("symbol {S8} is absent"), left.name);
         }
         else
         {
             ObjectSymbol right = actual.symbols[match];
+            String8 left_section = compiler_driver_elf_symbol_section_name(expected, left);
+            String8 right_section = compiler_driver_elf_symbol_section_name(actual, right);
             valid = left.value == right.value && left.size == right.size &&
-                    string_equal(compiler_driver_elf_symbol_section_name(expected, left),
-                                 compiler_driver_elf_symbol_section_name(actual, right)) &&
+                    string_equal(left_section, right_section) &&
                     left.kind == right.kind && left.global == right.global && left.weak == right.weak &&
                     left.hidden == right.hidden && left.thread_local_state == right.thread_local_state &&
                     left.untyped == right.untyped && left.undefined_untyped == right.undefined_untyped &&
                     left.indirect == right.indirect;
+            if (!valid)
+            {
+                mismatch = string_format(arena, S8("symbol {S8}: value={u64}/{u64} size={u64}/{u64} section={S8}/{S8} kind={u32}/{u32} global={u32}/{u32} weak={u32}/{u32} hidden={u32}/{u32} tls={u32}/{u32} untyped={u32}/{u32} undefined_untyped={u32}/{u32} indirect={u32}/{u32}"),
+                                         left.name, left.value, right.value, left.size, right.size, left_section, right_section,
+                                         (u32)left.kind, (u32)right.kind, (u32)left.global, (u32)right.global,
+                                         (u32)left.weak, (u32)right.weak, (u32)left.hidden, (u32)right.hidden,
+                                         (u32)left.thread_local_state, (u32)right.thread_local_state, (u32)left.untyped,
+                                         (u32)right.untyped, (u32)left.undefined_untyped, (u32)right.undefined_untyped,
+                                         (u32)left.indirect, (u32)right.indirect);
+            }
         }
     }
     bool* matched_relocations = arena_allocate_zeroed(arena, bool, actual.relocation_count ? actual.relocation_count : 1);
@@ -1938,7 +1974,13 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_assembly_relocation_objects_match(A
             }
         }
         valid = found;
+        if (!found)
+        {
+            mismatch = string_format(arena, S8("relocation {S8}+{u64} symbol={S8} addend_bits={u32} kind={u32} is absent"),
+                                     left_section, left.offset, left_symbol, (u32)left.addend, (u32)left.kind);
+        }
     }
+    *mismatch_description = mismatch;
     return valid;
 }
 
@@ -2031,7 +2073,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_x86_elf_modifier_roundtrip(Un
             BUSTER_TEST(arguments, direct_ready && listing_ready && buster_ready && host_ready && provider_ready);
             if (direct_ready && buster_ready)
             {
-                BUSTER_TEST(arguments, compiler_driver_elf_assembly_relocation_objects_match(arena, direct_object, buster_object));
+                String8 relocation_mismatch = {0};
+                bool relocation_objects_match = compiler_driver_elf_assembly_relocation_objects_match(
+                    arena, direct_object, buster_object, &relocation_mismatch);
+                BUSTER_TEST_RAW(arguments, relocation_objects_match,
+                                string_format(arena, S8("direct vs reassembled object mismatch: {S8}"), relocation_mismatch));
                 ObjectFile direct = object_read(arena, file_read(arena, direct_object, (FileReadOptions){0}), target);
                 ObjectFile buster = object_read(arena, file_read(arena, buster_object, (FileReadOptions){0}), target);
                 BUSTER_TEST(arguments, direct.error == OBJECT_ERROR_NONE &&
@@ -2081,13 +2127,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_x86_elf_modifier_roundtrip(Un
             String8 modifier_buster = string_format_z(arena, S8("{S8}/integer-buster.o"), root);
             String8 modifier_host = string_format_z(arena, S8("{S8}/integer-host.o"), root);
             String8 modifier_text = S8("extern __thread int assembly_modifier_tls;\n"
-                "__asm__(\".pushsection .data\\n"
+                "__asm__(\".section .data\\n"
                 ".long assembly_modifier_tls@TLSGD - ., assembly_modifier_tls@TLSLD - .\\n"
                 ".long assembly_modifier_tls@GOTTPOFF - .\\n"
                 ".long assembly_modifier_tls@TPOFF\\n"
                 ".long assembly_modifier_tls@DTPOFF\\n"
                 ".quad assembly_modifier_tls@DTPOFF\\n"
-                ".popsection\\n\");\n"
+                ".text\\n\");\n"
                 "int assembly_modifier_anchor(void) { return 0; }\n");
             BUSTER_TEST(arguments, file_write(modifier_source, BUSTER_SLICE_TO_BYTE_SLICE(modifier_text)));
             String8 modifier_direct_args[] = {S8("-g0"), S8("-fPIC"), S8("-c"), modifier_source, S8("-o"), modifier_direct};
@@ -2108,7 +2154,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_x86_elf_modifier_roundtrip(Un
             BUSTER_TEST(arguments, modifier_direct_ready && modifier_listing_ready && modifier_buster_ready && modifier_host_ready);
             if (modifier_direct_ready && modifier_buster_ready)
             {
-                BUSTER_TEST(arguments, compiler_driver_elf_assembly_relocation_objects_match(arena, modifier_direct, modifier_buster));
+                String8 modifier_mismatch = {0};
+                bool modifier_objects_match = compiler_driver_elf_assembly_relocation_objects_match(
+                    arena, modifier_direct, modifier_buster, &modifier_mismatch);
+                BUSTER_TEST_RAW(arguments, modifier_objects_match,
+                                string_format(arena, S8("direct vs reassembled modifier object mismatch: {S8}"), modifier_mismatch));
                 ObjectFile direct = object_read(arena, file_read(arena, modifier_direct, (FileReadOptions){0}), target);
                 BUSTER_TEST(arguments, direct.error == OBJECT_ERROR_NONE &&
                                       compiler_driver_elf_object_has_relocation(direct, OBJECT_RELOCATION_X86_64_TLSGD) &&
@@ -2179,10 +2229,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_x86_elf_modifier_roundtrip(Un
                 AssemblyUnitResult prefixed_got = assembly_unit_encode(
                     arena, prefixed_got_sources[index],
                     (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
-                BUSTER_TEST(arguments, prefixed_got.diagnostic_count &&
+                bool prefix_refused = prefixed_got.diagnostic_count &&
                                       prefixed_got.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
                                       string_equal(prefixed_got.diagnostics[0].message,
-                                                   S8("unsupported symbol modifier '@GOTPCREL' for this instruction field")));
+                                                   S8("unsupported symbol modifier '@GOTPCREL' for this instruction field"));
+                u32 prefix_diagnostic_kind = prefixed_got.diagnostic_count ? (u32)prefixed_got.diagnostics[0].kind : UINT32_MAX;
+                String8 prefix_diagnostic_message = prefixed_got.diagnostic_count ? prefixed_got.diagnostics[0].message : S8("<none>");
+                BUSTER_TEST_RAW(arguments, prefix_refused,
+                                string_format(arena, S8("GOTPCREL prefix case {u32}: diagnostics={u32} kind={u32} message={S8}"),
+                                              index, prefixed_got.diagnostic_count, prefix_diagnostic_kind,
+                                              prefix_diagnostic_message));
             }
 
             String8 raw_got_source = string_format_z(arena, S8("{S8}/generic-got.s"), root);
@@ -2238,7 +2294,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_x86_elf_modifier_roundtrip(Un
 
             String8 replay_source = string_format_z(arena, S8("{S8}/modifier-replay.s"), root);
             String8 replay_object = string_format_z(arena, S8("{S8}/modifier-replay.o"), root);
-            String8 replay_text = S8(".extern replay_got\n"
+            String8 replay_text = S8(".intel_syntax noprefix\n"
+                                     ".extern replay_got\n"
                                      ".extern replay_tls\n"
                                      ".type replay_tls,@tls_object\n"
                                      ".text\n"
